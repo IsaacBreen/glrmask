@@ -4,7 +4,7 @@ use crate::import::ast::GrammarExpr;
 
 use super::ast::{AdditionalProperties, ObjectSchema, PropertySchema, Schema};
 use super::error::{ImportResult, SchemaImportError};
-use super::lower::{choice, lit, r, seq, Lowerer, ITEM_SEPARATOR, JSON_VALUE_RULE};
+use super::lower::{choice, lit, r, seq, Lowerer, JSON_VALUE_RULE};
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_object(&mut self, schema: &ObjectSchema) -> ImportResult<GrammarExpr> {
@@ -57,7 +57,7 @@ impl<'a> Lowerer<'a> {
         } else {
             GrammarExpr::SeparatedSequence {
                 items,
-                separator: Box::new(lit(ITEM_SEPARATOR)),
+                separator: Box::new(self.item_separator_expr()),
                 allow_empty: true,
             }
         };

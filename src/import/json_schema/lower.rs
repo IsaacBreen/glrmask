@@ -15,13 +15,12 @@ pub(crate) const JSON_OBJECT_RULE: &str = "json_object";
 pub(crate) const JSON_ARRAY_RULE: &str = "json_array";
 pub(crate) const JSON_STRING_RULE: &str = "JSON_STRING";
 pub(crate) const JSON_STRING_CHAR_RULE: &str = "JSON_STRING_CHAR";
+pub(crate) const JSON_ITEM_SEPARATOR_RULE: &str = "JSON_ITEM_SEPARATOR";
+pub(crate) const JSON_KEY_SEPARATOR_RULE: &str = "JSON_KEY_SEPARATOR";
 pub(crate) const JSON_INTEGER_RULE: &str = "JSON_INTEGER";
 pub(crate) const JSON_NUMBER_RULE: &str = "JSON_NUMBER";
 pub(crate) const JSON_BOOL_RULE: &str = "JSON_BOOL";
 pub(crate) const JSON_NULL_RULE: &str = "JSON_NULL";
-
-pub(crate) const ITEM_SEPARATOR: &str = ", ";
-pub(crate) const KEY_VALUE_SEPARATOR: &str = ": ";
 
 pub(crate) fn lower_document(
     document: &SchemaDocument,
@@ -69,13 +68,22 @@ impl<'a> Lowerer<'a> {
     }
 
     fn install_json_builtins(&mut self) {
+        let string_char = self.json_string_char_regex();
         self.add_terminal_rule(
             JSON_STRING_CHAR_RULE,
-            GrammarExpr::RawRegex(r#"[^\x00-\x1f\x7f"\\]|\\["\\bfnrt]"#.to_string()),
+            GrammarExpr::RawRegex(string_char.clone()),
         );
         self.add_terminal_rule(
             JSON_STRING_RULE,
-            GrammarExpr::RawRegex(r#""([^\x00-\x1f\x7f"\\]|\\["\\bfnrt])*""#.to_string()),
+            GrammarExpr::RawRegex(format!(r#""(?:{string_char})*""#)),
+        );
+        self.add_terminal_rule(
+            JSON_ITEM_SEPARATOR_RULE,
+            GrammarExpr::RawRegex(self.separator_regex(",")),
+        );
+        self.add_terminal_rule(
+            JSON_KEY_SEPARATOR_RULE,
+            GrammarExpr::RawRegex(self.separator_regex(":")),
         );
         self.add_terminal_rule(
             JSON_INTEGER_RULE,
@@ -91,7 +99,7 @@ impl<'a> Lowerer<'a> {
         );
         self.add_terminal_rule(JSON_NULL_RULE, lit("null"));
 
-        let array_item_tail = seq(vec![lit(ITEM_SEPARATOR), r(JSON_VALUE_RULE)]);
+        let array_item_tail = seq(vec![r(JSON_ITEM_SEPARATOR_RULE), r(JSON_VALUE_RULE)]);
         self.add_nonterminal_rule(
             JSON_ARRAY_RULE,
             seq(vec![
@@ -104,8 +112,8 @@ impl<'a> Lowerer<'a> {
             ]),
         );
 
-        let object_entry = seq(vec![r(JSON_STRING_RULE), lit(KEY_VALUE_SEPARATOR), r(JSON_VALUE_RULE)]);
-        let object_tail = seq(vec![lit(ITEM_SEPARATOR), object_entry.clone()]);
+        let object_entry = seq(vec![r(JSON_STRING_RULE), r(JSON_KEY_SEPARATOR_RULE), r(JSON_VALUE_RULE)]);
+        let object_tail = seq(vec![r(JSON_ITEM_SEPARATOR_RULE), object_entry.clone()]);
         self.add_nonterminal_rule(
             JSON_OBJECT_RULE,
             seq(vec![
@@ -129,6 +137,66 @@ impl<'a> Lowerer<'a> {
                 r(JSON_OBJECT_RULE),
             ]),
         );
+    }
+
+    pub(crate) fn item_separator_expr(&self) -> GrammarExpr {
+        r(JSON_ITEM_SEPARATOR_RULE)
+    }
+
+    pub(crate) fn key_separator_expr(&self) -> GrammarExpr {
+        r(JSON_KEY_SEPARATOR_RULE)
+    }
+
+    fn separator_regex(&self, separator: &str) -> String {
+        let whitespace = self.whitespace_regex();
+        if whitespace.is_empty() {
+            format!("(?:{separator})")
+        } else {
+            format!("(?:{whitespace})(?:{separator})(?:{whitespace})")
+        }
+    }
+
+    fn whitespace_regex(&self) -> &'static str {
+        r#"[ \t\n\r]*"#
+    }
+
+    fn json_string_char_regex(&self) -> String {
+        let mut escape_parts = Vec::new();
+        let mut simple = String::new();
+        for ch in "nrbtf\\\"u".chars() {
+            if ch == 'u' {
+                continue;
+            }
+            if !simple.contains(ch) {
+                simple.push(ch);
+            }
+        }
+        if !simple.is_empty() {
+            escape_parts.push(format!("[{}]", Self::escape_class_chars(&simple)));
+        }
+        if "nrbtf\\\"u".contains('u') {
+            escape_parts.push(r#"u[0-9A-Fa-f]{4}"#.to_string());
+        }
+
+        if escape_parts.is_empty() {
+            r#"[^\x00-\x1f\x7f"\\]"#.to_string()
+        } else {
+            format!(r#"[^\x00-\x1f\x7f"\\]|\\(?:{})"#, escape_parts.join("|"))
+        }
+    }
+
+    fn escape_class_chars(text: &str) -> String {
+        let mut escaped = String::new();
+        for ch in text.chars() {
+            match ch {
+                '\\' => escaped.push_str(r#"\\"#),
+                '-' => escaped.push_str(r#"\-"#),
+                '^' => escaped.push_str(r#"\^"#),
+                ']' => escaped.push_str(r#"\]"#),
+                _ => escaped.push(ch),
+            }
+        }
+        escaped
     }
 
     pub(crate) fn lower_schema(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {
@@ -158,6 +226,14 @@ impl<'a> Lowerer<'a> {
         let expr = self.lower_schema(target)?;
         self.add_nonterminal_rule(&rule_name, expr);
         Ok(r(&rule_name))
+    }
+
+    pub(crate) fn resolve_ref_target(&self, pointer: &str) -> ImportResult<&'a Schema> {
+        let normalized = normalize_local_ref(pointer)?;
+        self.definition_by_pointer
+            .get(&normalized)
+            .copied()
+            .ok_or_else(|| SchemaImportError::new(format!("unsupported or unresolved local $ref {pointer:?}")))
     }
 
     fn lower_assertions(

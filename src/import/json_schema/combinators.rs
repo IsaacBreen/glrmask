@@ -4,26 +4,26 @@ use super::ast::{
     AdditionalProperties, ObjectSchema, Schema, SchemaAssertions, SchemaKind,
     SchemaType,
 };
-use super::error::{ImportResult, SchemaImportError};
+use super::error::ImportResult;
 use super::lower::{choice, r, Lowerer, JSON_VALUE_RULE};
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_any_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
-        reject_sibling_assertions("anyOf", assertions)?;
+        let siblings = sibling_assertion_schema(assertions);
         let alternatives = assertions
             .any_of
             .iter()
-            .map(|branch| self.lower_schema(branch))
+            .map(|branch| self.lower_schema(&branch_with_siblings(branch.clone(), siblings.clone())))
             .collect::<ImportResult<Vec<_>>>()?;
         Ok(choice(alternatives))
     }
 
     pub(crate) fn lower_one_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
-        reject_sibling_assertions("oneOf", assertions)?;
+        let siblings = sibling_assertion_schema(assertions);
         let alternatives = assertions
             .one_of
             .iter()
-            .map(|branch| self.lower_schema(branch))
+            .map(|branch| self.lower_schema(&branch_with_siblings(branch.clone(), siblings.clone())))
             .collect::<ImportResult<Vec<_>>>()?;
         Ok(choice(alternatives))
     }
@@ -34,6 +34,7 @@ impl<'a> Lowerer<'a> {
         if siblings.has_value_assertions_without_combinators() {
             branches.push(Schema::assertions("<allOf-siblings>", siblings));
         }
+        branches = self.inline_all_of_refs(&branches)?;
 
         if branches.is_empty() {
             return Ok(r(JSON_VALUE_RULE));
@@ -55,16 +56,32 @@ impl<'a> Lowerer<'a> {
             intersect: Box::new(right),
         }))
     }
+
+    fn inline_all_of_refs(&self, branches: &[Schema]) -> ImportResult<Vec<Schema>> {
+        branches
+            .iter()
+            .map(|branch| match &branch.kind {
+                SchemaKind::Ref(pointer) => self.resolve_ref_target(pointer).map(Clone::clone),
+                _ => Ok(branch.clone()),
+            })
+            .collect()
+    }
 }
 
-fn reject_sibling_assertions(name: &str, assertions: &SchemaAssertions) -> ImportResult<()> {
-    if assertions.has_value_assertions_without_combinators() {
-        Err(SchemaImportError::new(format!(
-            "{name} with sibling assertions is unsupported by the simple importer"
-        )))
+fn sibling_assertion_schema(assertions: &SchemaAssertions) -> Option<Schema> {
+    let siblings = assertions.clone_without_combinators();
+    if siblings.is_empty() {
+        None
     } else {
-        Ok(())
+        Some(Schema::assertions("<combinator-siblings>", siblings))
     }
+}
+
+fn branch_with_siblings(branch: Schema, siblings: Option<Schema>) -> Schema {
+    let Some(siblings) = siblings else {
+        return branch;
+    };
+    all_of_schema(branch, siblings)
 }
 
 fn try_merge_all_of_objects(branches: &[Schema]) -> Option<ObjectSchema> {

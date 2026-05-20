@@ -3,6 +3,7 @@ mod ast;
 mod combinators;
 mod config;
 mod error;
+mod formats;
 mod load;
 mod lower;
 mod number;

@@ -90,6 +90,45 @@ fn arrays_use_item_schema_and_min_max_items() {
 }
 
 #[test]
+fn prefix_items_lower_with_no_tail() {
+    let schema = json!({
+        "type": "array",
+        "prefixItems": [
+            {"const": "a"},
+            {"const": "b"}
+        ],
+        "items": false,
+        "minItems": 1,
+        "maxItems": 2
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("\\\"a\\\""), "{glrm}");
+    assert!(glrm.contains("\\\"b\\\""), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn legacy_tuple_items_use_additional_items_tail() {
+    let schema = json!({
+        "type": "array",
+        "items": [
+            {"const": "head"}
+        ],
+        "additionalItems": {"type": "integer"},
+        "minItems": 1,
+        "maxItems": 3
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("\\\"head\\\""), "{glrm}");
+    assert!(glrm.contains("JSON_INTEGER") || glrm.contains("JSON_NUMBER"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn string_length_and_pattern_lower_as_intersection() {
     let schema = json!({
         "type": "string",
@@ -102,6 +141,30 @@ fn string_length_and_pattern_lower_as_intersection() {
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("& /[A-Za-z]+/"), "{glrm}");
     lower(&grammar).unwrap();
+}
+
+#[test]
+fn string_format_lowers_as_regex_intersection() {
+    let schema = json!({
+        "type": "string",
+        "format": "uuid"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("[0-9A-Fa-f]{8}"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn unknown_format_errors() {
+    let schema = json!({
+        "type": "string",
+        "format": "made-up"
+    });
+
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("Unknown format"), "{error}");
 }
 
 #[test]
@@ -153,6 +216,20 @@ fn anyof_lowers_to_choice() {
 }
 
 #[test]
+fn anyof_allows_sibling_assertions() {
+    let schema = json!({
+        "anyOf": [
+            {"type": "string", "pattern": "^a+$"},
+            {"type": "string", "pattern": "^b+$"}
+        ],
+        "minLength": 2
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn oneof_lowers_as_documented_union() {
     let schema = json!({
         "oneOf": [
@@ -163,6 +240,20 @@ fn oneof_lowers_as_documented_union() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     assert!(matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+}
+
+#[test]
+fn oneof_allows_sibling_assertions() {
+    let schema = json!({
+        "oneOf": [
+            {"type": "string", "pattern": "^left+$"},
+            {"type": "string", "pattern": "^right+$"}
+        ],
+        "minLength": 4
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
 }
 
 #[test]
@@ -187,5 +278,21 @@ fn allof_merges_plain_object_branches() {
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("\\\"a\\\""), "{glrm}");
     assert!(glrm.contains("\\\"b\\\""), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn ref_with_sibling_assertions_is_intersected() {
+    let schema = json!({
+        "$defs": {
+            "base": {"type": "string"}
+        },
+        "$ref": "#/$defs/base",
+        "minLength": 2
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("&"), "{glrm}");
     lower(&grammar).unwrap();
 }

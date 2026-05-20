@@ -3,8 +3,9 @@ use std::collections::BTreeSet;
 use crate::import::ast::GrammarExpr;
 
 use super::ast::StringSchema;
-use super::error::ImportResult;
-use super::lower::{choice, lit, lit_bytes, never, r, seq, Lowerer, JSON_STRING_CHAR_RULE, JSON_STRING_RULE, KEY_VALUE_SEPARATOR};
+use super::error::{ImportResult, SchemaImportError};
+use super::formats::lookup_string_format;
+use super::lower::{choice, lit, lit_bytes, never, r, seq, Lowerer, JSON_STRING_CHAR_RULE, JSON_STRING_RULE};
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_string(&mut self, schema: &StringSchema) -> ImportResult<GrammarExpr> {
@@ -12,7 +13,11 @@ impl<'a> Lowerer<'a> {
             return Ok(never());
         }
 
-        if schema.min_length == 0 && schema.max_length.is_none() && schema.pattern.is_none() {
+        if schema.min_length == 0
+            && schema.max_length.is_none()
+            && schema.pattern.is_none()
+            && schema.format.is_none()
+        {
             return Ok(r(JSON_STRING_RULE));
         }
 
@@ -22,6 +27,16 @@ impl<'a> Lowerer<'a> {
                 expr: Box::new(body),
                 intersect: Box::new(GrammarExpr::RawRegex(string_pattern_as_body_regex(pattern))),
             };
+        }
+        if let Some(format) = &schema.format {
+            if let Some(regex) = lookup_string_format(format) {
+                body = GrammarExpr::Intersect {
+                    expr: Box::new(body),
+                    intersect: Box::new(GrammarExpr::RawRegex(regex.to_string())),
+                };
+            } else {
+                return Err(SchemaImportError::new(format!("Unknown format: {format}")));
+            }
         }
 
         Ok(seq(vec![lit("\""), body, lit("\"")]))
@@ -34,7 +49,7 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn lower_literal_key_colon(&mut self, key: &str) -> GrammarExpr {
         let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
-        lit_bytes(format!("{encoded}{KEY_VALUE_SEPARATOR}").into_bytes())
+        seq(vec![lit_bytes(encoded.into_bytes()), self.key_separator_expr()])
     }
 
     pub(crate) fn lower_pattern_key_colon(&mut self, pattern: &str) -> ImportResult<GrammarExpr> {
@@ -44,7 +59,7 @@ impl<'a> Lowerer<'a> {
             pattern: Some(pattern.to_string()),
             format: None,
         })?;
-        Ok(seq(vec![key, lit(KEY_VALUE_SEPARATOR)]))
+        Ok(seq(vec![key, self.key_separator_expr()]))
     }
 
     pub(crate) fn lower_additional_key_colon(&mut self, fixed_keys: &BTreeSet<String>) -> GrammarExpr {
@@ -63,7 +78,7 @@ impl<'a> Lowerer<'a> {
                 exclude: Box::new(choice(excluded)),
             }
         };
-        seq(vec![key, lit(KEY_VALUE_SEPARATOR)])
+        seq(vec![key, self.key_separator_expr()])
     }
 
     fn string_body_for_length(&self, min: usize, max: Option<usize>) -> GrammarExpr {

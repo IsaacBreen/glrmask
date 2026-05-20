@@ -53,6 +53,19 @@ pub(crate) struct SchemaAssertions {
 }
 
 impl SchemaAssertions {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.types.is_none()
+            && self.const_value.is_none()
+            && self.enum_values.is_none()
+            && self.object.is_none()
+            && self.array.is_none()
+            && self.string.is_none()
+            && self.number.is_none()
+            && self.any_of.is_empty()
+            && self.one_of.is_empty()
+            && self.all_of.is_empty()
+    }
+
     pub(crate) fn has_value_assertions_without_combinators(&self) -> bool {
         self.types.is_some()
             || self.const_value.is_some()

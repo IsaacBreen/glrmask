@@ -16,7 +16,11 @@ pub(crate) fn load_document(root: &Value) -> ImportResult<SchemaDocument> {
     })
 }
 
-fn collect_definitions(value: &Value, location: &str, out: &mut Vec<SchemaDefinition>) -> ImportResult<()> {
+fn collect_definitions(
+    value: &Value,
+    location: &str,
+    out: &mut Vec<SchemaDefinition>,
+) -> ImportResult<()> {
     let Some(object) = value.as_object() else {
         return Ok(());
     };
@@ -57,9 +61,26 @@ fn load_object_schema(object: &Map<String, Value>, location: &str) -> ImportResu
     validate_supported_keys(object, location)?;
 
     if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-        return Ok(Schema { location: location.to_string(), kind: SchemaKind::Ref(reference.to_string()) });
+        let siblings = load_assertions(object, location)?;
+        if siblings.is_empty() {
+            return Ok(Schema { location: location.to_string(), kind: SchemaKind::Ref(reference.to_string()) });
+        }
+        return Ok(Schema::assertions(
+            location,
+            SchemaAssertions {
+                all_of: vec![
+                    Schema { location: location.to_string(), kind: SchemaKind::Ref(reference.to_string()) },
+                    Schema::assertions(format!("{location}/<ref-siblings>"), siblings),
+                ],
+                ..SchemaAssertions::default()
+            },
+        ));
     }
 
+    Ok(Schema::assertions(location, load_assertions(object, location)?))
+}
+
+fn load_assertions(object: &Map<String, Value>, location: &str) -> ImportResult<SchemaAssertions> {
     let mut assertions = SchemaAssertions::default();
     assertions.types = load_types(object, location)?;
     assertions.const_value = object.get("const").cloned();
@@ -81,7 +102,7 @@ fn load_object_schema(object: &Map<String, Value>, location: &str) -> ImportResu
         assertions.number = Some(load_number_keywords(object, location)?);
     }
 
-    Ok(Schema::assertions(location, assertions))
+    Ok(assertions)
 }
 
 fn validate_supported_keys(object: &Map<String, Value>, location: &str) -> ImportResult<()> {
@@ -113,7 +134,6 @@ fn is_supported_key(key: &str) -> bool {
             | "deprecated"
             | "readOnly"
             | "writeOnly"
-            | "x-guidance"
             | "type"
             | "const"
             | "enum"
@@ -125,6 +145,7 @@ fn is_supported_key(key: &str) -> bool {
             | "patternProperties"
             | "additionalProperties"
             | "items"
+            | "additionalItems"
             | "prefixItems"
             | "minItems"
             | "maxItems"
@@ -187,7 +208,11 @@ fn load_enum_values(object: &Map<String, Value>, location: &str) -> ImportResult
     Ok(Some(values.clone()))
 }
 
-fn load_schema_array(object: &Map<String, Value>, key: &str, location: &str) -> ImportResult<Vec<Schema>> {
+fn load_schema_array(
+    object: &Map<String, Value>,
+    key: &str,
+    location: &str,
+) -> ImportResult<Vec<Schema>> {
     let Some(value) = object.get(key) else {
         return Ok(Vec::new());
     };
@@ -234,7 +259,10 @@ fn type_mentions(types: Option<&[SchemaType]>, wanted: SchemaType) -> bool {
     types.is_some_and(|types| types.contains(&wanted))
 }
 
-fn load_object_keywords(object: &Map<String, Value>, location: &str) -> ImportResult<ObjectSchema> {
+fn load_object_keywords(
+    object: &Map<String, Value>,
+    location: &str,
+) -> ImportResult<ObjectSchema> {
     let mut schema = ObjectSchema::default();
 
     if let Some(properties) = object.get("properties") {
@@ -289,19 +317,56 @@ fn load_object_keywords(object: &Map<String, Value>, location: &str) -> ImportRe
     Ok(schema)
 }
 
-fn load_array_keywords(object: &Map<String, Value>, location: &str) -> ImportResult<ArraySchema> {
+fn load_array_keywords(
+    object: &Map<String, Value>,
+    location: &str,
+) -> ImportResult<ArraySchema> {
     let mut schema = ArraySchema::default();
+    let mut tuple_items_loaded = false;
 
     if let Some(items) = object.get("items") {
-        schema.items = Box::new(load_schema_at(items, &format!("{location}/items"))?);
+        match items {
+            Value::Array(values) => {
+                tuple_items_loaded = true;
+                for (index, item) in values.iter().enumerate() {
+                    schema.prefix_items.push(load_schema_at(item, &format!("{location}/items/{index}"))?);
+                }
+            }
+            _ => {
+                schema.items = Box::new(load_schema_at(items, &format!("{location}/items"))?);
+            }
+        }
     }
 
     if let Some(prefix_items) = object.get("prefixItems") {
+        if tuple_items_loaded {
+            return Err(SchemaImportError::at(
+                location,
+                "cannot use tuple-form items together with prefixItems",
+            ));
+        }
         let Some(prefix_items) = prefix_items.as_array() else {
             return Err(SchemaImportError::at(location, "prefixItems must be an array"));
         };
+        if !tuple_items_loaded {
+            schema.prefix_items.clear();
+        }
         for (index, item) in prefix_items.iter().enumerate() {
             schema.prefix_items.push(load_schema_at(item, &format!("{location}/prefixItems/{index}"))?);
+        }
+    }
+
+    if let Some(additional_items) = object.get("additionalItems") {
+        if schema.prefix_items.is_empty() {
+            return Err(SchemaImportError::at(
+                location,
+                "additionalItems is only supported with prefixItems or tuple-form items",
+            ));
+        } else {
+            schema.items = Box::new(load_schema_at(
+                additional_items,
+                &format!("{location}/additionalItems"),
+            )?);
         }
     }
 
