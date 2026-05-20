@@ -48,24 +48,16 @@ impl<'a> Lowerer<'a> {
 
         match &normalized.additional_properties {
             AdditionalProperties::AllowAny => {
-                let mut pattern_key_exclusions = Vec::new();
-                for pattern in &pattern_keys {
-                    pattern_key_exclusions.push(self.lower_pattern_key_colon_terminal(pattern)?);
-                }
                 tail_pairs.push(seq(vec![
-                    self.lower_additional_key_colon(&fixed_names, &pattern_key_exclusions),
+                    self.lower_additional_key_colon(&fixed_names, &pattern_keys)?,
                     r(JSON_VALUE_RULE),
                 ]));
             }
             AdditionalProperties::Deny => {}
             AdditionalProperties::Schema(value_schema) => {
-                let mut pattern_key_exclusions = Vec::new();
-                for pattern in &pattern_keys {
-                    pattern_key_exclusions.push(self.lower_pattern_key_colon_terminal(pattern)?);
-                }
                 let value = self.lower_schema(value_schema)?;
                 tail_pairs.push(seq(vec![
-                    self.lower_additional_key_colon(&fixed_names, &pattern_key_exclusions),
+                    self.lower_additional_key_colon(&fixed_names, &pattern_keys)?,
                     value,
                 ]));
             }

@@ -662,6 +662,73 @@ fn json_schema_additional_property_pattern_addback_does_not_reaccept_declared_ke
 }
 
 #[test]
+fn json_schema_additional_property_literal_addback_restores_globally_excluded_key() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "object",
+            "properties": {
+                "a": {
+                    "type": "object",
+                    "properties": {"known": {"type": "string"}},
+                    "additionalProperties": false
+                },
+                "b": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer"}
+                }
+            },
+            "required": ["b"],
+            "additionalProperties": false
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#"{"b": {"known": 1}}"#);
+}
+
+#[test]
+fn json_schema_additional_property_pattern_addback_restores_globally_excluded_pattern() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "object",
+            "properties": {
+                "a": {
+                    "type": "object",
+                    "patternProperties": {"^x": {"type": "integer"}},
+                    "additionalProperties": false
+                },
+                "b": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"}
+                }
+            },
+            "required": ["b"],
+            "additionalProperties": false
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#"{"b": {"x1": "ok"}}"#);
+
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#"{"b": {"x1": 1}}"#).is_err());
+}
+
+#[test]
+fn json_schema_additional_property_required_only_key_does_not_fall_back_through_ap() {
+    let constraint = byte_schema(
+        r#"{
+            "type":"object",
+            "required":["id"],
+            "additionalProperties":{"type":"string"}
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#"{"id": "ok"}"#);
+
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#"{"id": 1}"#).is_err());
+}
+
+#[test]
 fn json_schema_const_quote_reencodes_literal() {
     let constraint = byte_schema(r#"{"const":"\""}"#);
     assert_accepts_bytes(&constraint, br#""\"""#);

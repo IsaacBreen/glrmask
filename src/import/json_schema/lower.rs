@@ -21,6 +21,7 @@ pub(crate) const JSON_INTEGER_RULE: &str = "JSON_INTEGER";
 pub(crate) const JSON_NUMBER_RULE: &str = "JSON_NUMBER";
 pub(crate) const JSON_BOOL_RULE: &str = "JSON_BOOL";
 pub(crate) const JSON_NULL_RULE: &str = "JSON_NULL";
+pub(crate) const JSON_ADDITIONAL_KEY_COLON_SHARED_RULE: &str = "JSON_ADDITIONAL_KEY_COLON_SHARED";
 
 pub(crate) fn lower_document(
     document: &SchemaDocument,
@@ -34,6 +35,10 @@ pub(crate) struct Lowerer<'a> {
     pub(crate) document: &'a SchemaDocument,
     pub(crate) config: JsonSchemaConfig,
     pub(crate) rules: Vec<NamedRule>,
+    pub(crate) shared_ap_literal_keys: BTreeSet<String>,
+    pub(crate) shared_ap_patterns: Vec<String>,
+    pub(crate) shared_ap_base_rule: Option<String>,
+    pub(crate) shared_ap_pattern_rules: BTreeMap<String, String>,
     definition_rules: BTreeMap<String, String>,
     definition_by_pointer: BTreeMap<String, &'a Schema>,
     used_rule_names: BTreeSet<String>,
@@ -42,6 +47,7 @@ pub(crate) struct Lowerer<'a> {
 
 impl<'a> Lowerer<'a> {
     fn new(document: &'a SchemaDocument, config: JsonSchemaConfig) -> Self {
+        let (shared_ap_literal_keys, shared_ap_patterns) = collect_shared_ap_exclusion_plan(document);
         let mut definition_by_pointer = BTreeMap::new();
         for definition in &document.definitions {
             definition_by_pointer.insert(definition.pointer.clone(), &definition.schema);
@@ -52,6 +58,10 @@ impl<'a> Lowerer<'a> {
             document,
             config,
             rules: Vec::new(),
+            shared_ap_literal_keys,
+            shared_ap_patterns,
+            shared_ap_base_rule: None,
+            shared_ap_pattern_rules: BTreeMap::new(),
             definition_rules: BTreeMap::new(),
             definition_by_pointer,
             used_rule_names: BTreeSet::new(),
@@ -338,6 +348,62 @@ impl<'a> Lowerer<'a> {
                 return candidate;
             }
         }
+    }
+}
+
+fn collect_shared_ap_exclusion_plan(document: &SchemaDocument) -> (BTreeSet<String>, Vec<String>) {
+    let mut literal_keys = BTreeSet::new();
+    let mut patterns = BTreeSet::new();
+
+    collect_shared_ap_exclusions_from_schema(&document.root, &mut literal_keys, &mut patterns);
+    for definition in &document.definitions {
+        collect_shared_ap_exclusions_from_schema(&definition.schema, &mut literal_keys, &mut patterns);
+    }
+
+    (literal_keys, patterns.into_iter().collect())
+}
+
+fn collect_shared_ap_exclusions_from_schema(
+    schema: &Schema,
+    literal_keys: &mut BTreeSet<String>,
+    patterns: &mut BTreeSet<String>,
+) {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return;
+    };
+
+    if let Some(object) = &assertions.object {
+        for required_name in &object.required {
+            literal_keys.insert(required_name.clone());
+        }
+        for property in &object.properties {
+            literal_keys.insert(property.name.clone());
+            collect_shared_ap_exclusions_from_schema(&property.schema, literal_keys, patterns);
+        }
+        for pattern_property in &object.pattern_properties {
+            patterns.insert(pattern_property.pattern.clone());
+            collect_shared_ap_exclusions_from_schema(&pattern_property.schema, literal_keys, patterns);
+        }
+        if let super::ast::AdditionalProperties::Schema(schema) = &object.additional_properties {
+            collect_shared_ap_exclusions_from_schema(schema, literal_keys, patterns);
+        }
+    }
+
+    if let Some(array) = &assertions.array {
+        collect_shared_ap_exclusions_from_schema(&array.items, literal_keys, patterns);
+        for item in &array.prefix_items {
+            collect_shared_ap_exclusions_from_schema(item, literal_keys, patterns);
+        }
+    }
+
+    for branch in &assertions.any_of {
+        collect_shared_ap_exclusions_from_schema(branch, literal_keys, patterns);
+    }
+    for branch in &assertions.one_of {
+        collect_shared_ap_exclusions_from_schema(branch, literal_keys, patterns);
+    }
+    for branch in &assertions.all_of {
+        collect_shared_ap_exclusions_from_schema(branch, literal_keys, patterns);
     }
 }
 

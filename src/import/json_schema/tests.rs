@@ -92,9 +92,37 @@ fn open_object_has_repeat_tail_and_excludes_fixed_keys() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(contains_exclude(start_expr(&grammar)));
+    assert!(grammar.rules.iter().any(|rule| rule.name == "JSON_ADDITIONAL_KEY_COLON_SHARED"));
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("+?"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn shared_additional_key_colon_terminal_is_emitted_once() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "a": {
+                "type": "object",
+                "properties": {"known": {"type": "string"}},
+                "additionalProperties": false
+            },
+            "b": {
+                "type": "object",
+                "additionalProperties": {"type": "integer"}
+            }
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let count = grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.name == "JSON_ADDITIONAL_KEY_COLON_SHARED")
+        .count();
+    assert_eq!(count, 1);
     lower(&grammar).unwrap();
 }
 

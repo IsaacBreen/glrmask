@@ -7,7 +7,10 @@ use crate::import::ast::GrammarExpr;
 use super::ast::StringSchema;
 use super::error::{ImportResult, SchemaImportError};
 use super::formats::lookup_string_format;
-use super::lower::{choice, lit, lit_bytes, never, r, seq, Lowerer, JSON_STRING_CHAR_RULE, JSON_STRING_RULE};
+use super::lower::{
+    choice, lit, lit_bytes, never, r, seq, Lowerer,
+    JSON_ADDITIONAL_KEY_COLON_SHARED_RULE, JSON_STRING_CHAR_RULE, JSON_STRING_RULE,
+};
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_string(&mut self, schema: &StringSchema) -> ImportResult<GrammarExpr> {
@@ -80,32 +83,53 @@ impl<'a> Lowerer<'a> {
         &mut self,
         pattern: &str,
     ) -> ImportResult<GrammarExpr> {
+        if let Some(rule_name) = self.shared_ap_pattern_rules.get(pattern) {
+            return Ok(r(rule_name));
+        }
         let key_colon = GrammarExpr::RawRegex(pattern_key_colon_regex(pattern));
         let name = self.fresh_rule_name("json_pattern_key_colon");
         self.add_terminal_rule(&name, key_colon);
+        self.shared_ap_pattern_rules.insert(pattern.to_string(), name.clone());
         Ok(r(&name))
     }
 
     pub(crate) fn lower_additional_key_colon(
         &mut self,
         fixed_keys: &BTreeSet<String>,
-        pattern_key_exclusions: &[GrammarExpr],
-    ) -> GrammarExpr {
-        let mut excluded = fixed_keys
-            .iter()
-            .map(|key| self.lower_literal_key_colon(key))
-            .collect::<Vec<_>>();
-        excluded.extend(pattern_key_exclusions.iter().cloned());
+        local_patterns: &[String],
+    ) -> ImportResult<GrammarExpr> {
+        let mut alternatives = vec![self.shared_additional_key_colon_base()?];
 
-        let key_colon = seq(vec![r(JSON_STRING_RULE), self.key_separator_expr()]);
-        if excluded.is_empty() {
-            key_colon
-        } else {
-            GrammarExpr::Exclude {
-                expr: Box::new(key_colon),
-                exclude: Box::new(choice(excluded)),
+        for key in self.shared_ap_literal_keys.clone() {
+            if fixed_keys.contains(&key) {
+                continue;
             }
+            if local_patterns
+                .iter()
+                .any(|pattern| property_name_matches_pattern(pattern, &key).unwrap_or(false))
+            {
+                continue;
+            }
+            alternatives.push(self.lower_literal_key_colon(&key));
         }
+
+        let local_pattern_terminals = local_patterns
+            .iter()
+            .map(|pattern| self.lower_pattern_key_colon_terminal(pattern))
+            .collect::<ImportResult<Vec<_>>>()?;
+
+        for pattern in self.shared_ap_patterns.clone() {
+            if local_patterns.iter().any(|local| local == &pattern) {
+                continue;
+            }
+            alternatives.push(self.lower_pattern_key_colon_addback(
+                &pattern,
+                fixed_keys,
+                &local_pattern_terminals,
+            )?);
+        }
+
+        Ok(choice(alternatives))
     }
 
     fn exclude_literal_key_colon_exprs(
@@ -125,6 +149,59 @@ impl<'a> Lowerer<'a> {
             expr: Box::new(key_colon),
             exclude: Box::new(choice(excluded)),
         }
+    }
+
+    fn shared_additional_key_colon_base(&mut self) -> ImportResult<GrammarExpr> {
+        if let Some(rule_name) = &self.shared_ap_base_rule {
+            return Ok(r(rule_name));
+        }
+
+        let literal_keys = self.shared_ap_literal_keys.iter().cloned().collect::<Vec<_>>();
+        let mut excluded = literal_keys
+            .iter()
+            .map(|key| self.lower_literal_key_colon(key))
+            .collect::<Vec<_>>();
+        for pattern in self.shared_ap_patterns.clone() {
+            excluded.push(self.lower_pattern_key_colon_terminal(&pattern)?);
+        }
+
+        self.add_terminal_rule(
+            JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
+            GrammarExpr::Exclude {
+                expr: Box::new(seq(vec![r(JSON_STRING_RULE), self.key_separator_expr()])),
+                exclude: Box::new(choice(excluded)),
+            },
+        );
+        self.shared_ap_base_rule = Some(JSON_ADDITIONAL_KEY_COLON_SHARED_RULE.to_string());
+        Ok(r(JSON_ADDITIONAL_KEY_COLON_SHARED_RULE))
+    }
+
+    fn lower_pattern_key_colon_addback(
+        &mut self,
+        pattern: &str,
+        fixed_keys: &BTreeSet<String>,
+        local_pattern_terminals: &[GrammarExpr],
+    ) -> ImportResult<GrammarExpr> {
+        let mut excluded = fixed_keys
+            .iter()
+            .map(|key| self.lower_literal_key_colon(key))
+            .collect::<Vec<_>>();
+        excluded.extend(local_pattern_terminals.iter().cloned());
+
+        if excluded.is_empty() {
+            return self.lower_pattern_key_colon_terminal(pattern);
+        }
+
+        let base_terminal = self.lower_pattern_key_colon_terminal(pattern)?;
+        let name = self.fresh_rule_name("json_pattern_key_colon_addback");
+        self.add_terminal_rule(
+            &name,
+            GrammarExpr::Exclude {
+                expr: Box::new(base_terminal),
+                exclude: Box::new(choice(excluded)),
+            },
+        );
+        Ok(r(&name))
     }
 
     fn string_body_for_length(&self, min: usize, max: Option<usize>) -> GrammarExpr {
