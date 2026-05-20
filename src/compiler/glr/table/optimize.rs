@@ -1,4 +1,6 @@
 use super::*;
+use rustc_hash::FxHasher;
+use std::hash::{Hash, Hasher};
 
 const DISABLE_STACK_SHIFT_PREDECESSOR_CANONICALIZATION_ENV: &str =
     "GLRMASK_DISABLE_STACK_SHIFT_PREDECESSOR_CANONICALIZATION";
@@ -14,12 +16,6 @@ fn env_flag_enabled(name: &str, default: bool) -> bool {
             !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
         })
         .unwrap_or(default)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct TableRowKey {
-    action: Vec<(TerminalID, Action)>,
-    goto: Vec<(NonterminalID, (u32, bool))>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -90,16 +86,25 @@ impl GLRTable {
     /// can reveal new equivalences.
     pub(super) fn merge_identical_rows(&mut self) {
         loop {
-            let mut sig_to_rep: FxHashMap<TableRowKey, u32> = FxHashMap::default();
+            let mut sig_to_reps: FxHashMap<u64, Vec<u32>> = FxHashMap::default();
             let mut remap: Vec<u32> = (0..self.num_states).collect();
             let mut changed = false;
 
             for state in 0..self.num_states as usize {
-                let row_key = row_key(&self.action[state], &self.goto[state]);
-                let rep = *sig_to_rep.entry(row_key).or_insert(state as u32);
-                if rep != state as u32 {
+                let fingerprint = row_fingerprint(&self.action[state], &self.goto[state]);
+                let reps = sig_to_reps.entry(fingerprint).or_default();
+                if let Some(&rep) = reps.iter().find(|&&rep| {
+                    rows_equal(
+                        &self.action[state],
+                        &self.goto[state],
+                        &self.action[rep as usize],
+                        &self.goto[rep as usize],
+                    )
+                }) {
                     remap[state] = rep;
                     changed = true;
+                } else {
+                    reps.push(state as u32);
                 }
             }
 
@@ -763,26 +768,42 @@ impl GLRTable {
     }
 }
 
-fn row_key(
-    action_row: &ActionRow,
-    goto_row: &GotoRow,
-) -> TableRowKey {
-    let mut action = action_row
-        .iter()
-        .map(|(terminal, action)| (terminal, action.clone()))
-        .collect::<Vec<_>>();
+fn row_fingerprint(action_row: &ActionRow, goto_row: &GotoRow) -> u64 {
+    let mut hasher = FxHasher::default();
+
+    let mut action = action_row.iter().collect::<Vec<_>>();
     action.sort_unstable_by_key(|(terminal, _)| *terminal);
-
-    let mut goto = goto_row
-        .iter()
-        .map(|(&nonterminal, &target)| (nonterminal, target))
-        .collect::<Vec<_>>();
-    goto.sort_unstable_by_key(|(nonterminal, _)| *nonterminal);
-
-    TableRowKey {
-        action,
-        goto,
+    action.len().hash(&mut hasher);
+    for (terminal, action) in action {
+        terminal.hash(&mut hasher);
+        action.hash(&mut hasher);
     }
+
+    let mut goto = goto_row.iter().collect::<Vec<_>>();
+    goto.sort_unstable_by_key(|(nonterminal, _)| **nonterminal);
+    goto.len().hash(&mut hasher);
+    for (nonterminal, target) in goto {
+        nonterminal.hash(&mut hasher);
+        target.hash(&mut hasher);
+    }
+
+    hasher.finish()
+}
+
+fn rows_equal(
+    action_a: &ActionRow,
+    goto_a: &GotoRow,
+    action_b: &ActionRow,
+    goto_b: &GotoRow,
+) -> bool {
+    action_a.len() == action_b.len()
+        && goto_a.len() == goto_b.len()
+        && action_a
+            .iter()
+            .all(|(terminal, action)| action_b.get(&terminal) == Some(action))
+        && goto_a
+            .iter()
+            .all(|(&nonterminal, target)| goto_b.get(&nonterminal) == Some(target))
 }
 
 fn push_reachable_state(state: u32, reachable: &mut [bool], stack: &mut Vec<u32>) {
@@ -1924,9 +1945,9 @@ fn try_inline_unit_reductions_for_cell(
         predecessors,
         state,
         tid,
-          action,
-            stack_effect_memo,
-      ) {
+        action,
+        stack_effect_memo,
+    ) {
         return Ok(Some(CellUpdate::Set(action)));
     }
 

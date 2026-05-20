@@ -13,10 +13,18 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
 
     let pre_merge_states = table.num_states;
     let t2 = std::time::Instant::now();
+    let merge1_started_at = std::time::Instant::now();
     table.merge_identical_rows();
+    let merge_identical1_ms = merge1_started_at.elapsed().as_secs_f64() * 1000.0;
+    let collapse_started_at = std::time::Instant::now();
     table.collapse_sr_unit_reductions_with_compatible_gotos();
+    let unit_collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
+    let prune_started_at = std::time::Instant::now();
     table.prune_unreachable_states();
+    let prune_ms = prune_started_at.elapsed().as_secs_f64() * 1000.0;
+    let merge2_started_at = std::time::Instant::now();
     table.merge_identical_rows();
+    let merge_identical2_ms = merge2_started_at.elapsed().as_secs_f64() * 1000.0;
     let merge_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
     let t3 = std::time::Instant::now();
@@ -25,7 +33,18 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     // on large schemas than it saves in later phases.
     table.canonicalize_stack_shift_predecessors();
     let recog_ms = t3.elapsed().as_secs_f64() * 1000.0;
-    let _ = (lr1_ms, ielr_ms, pre_merge_states, merge_ms, recog_ms, item_sets);
+    let _ = (
+        lr1_ms,
+        ielr_ms,
+        pre_merge_states,
+        merge_ms,
+        merge_identical1_ms,
+        unit_collapse_ms,
+        prune_ms,
+        merge_identical2_ms,
+        recog_ms,
+        item_sets,
+    );
 
     if default_action_rows_enabled() {
         table.compress_default_action_rows();
@@ -35,13 +54,17 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
     {
         eprintln!(
-            "[glrmask/profile][glr_table] lr1_item_sets_ms={:.3} ielr_ms={:.3} pre_merge_states={} post_merge_states={} unit_collapse={} merge_ms={:.3} stack_shift_canon_ms={:.3}",
+            "[glrmask/profile][glr_table] lr1_item_sets_ms={:.3} ielr_ms={:.3} pre_merge_states={} post_merge_states={} unit_collapse={} merge_ms={:.3} merge_identical1_ms={:.3} unit_collapse_ms={:.3} prune_ms={:.3} merge_identical2_ms={:.3} stack_shift_canon_ms={:.3}",
             lr1_ms,
             ielr_ms,
             pre_merge_states,
             table.num_states,
             true,
             merge_ms,
+            merge_identical1_ms,
+            unit_collapse_ms,
+            prune_ms,
+            merge_identical2_ms,
             recog_ms,
         );
     }

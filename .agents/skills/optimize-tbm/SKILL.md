@@ -23,6 +23,15 @@ preserve its semantic effect and optimize its implementation, data structures,
 sharing, memoization, or downstream representation. Disabling or narrowing it
 requires explicit human approval and broader tradeoff evidence.
 
+Recognizer-only principle: glrmask's parser/table/runtime optimizations need to
+preserve mask/commit recognition behavior, not parse-tree or parse-structure
+shape. When optimizing TBM or build/runtime interactions, aggressively look for
+unused parse-structural distinctions that can be represented symbolically,
+quotiented, shared, or discarded without changing which token sequences are
+accepted or rejected. Do not retain extra parser states, delayed continuations,
+goto distinctions, or action structure merely because they preserve an unused
+parse shape.
+
 Requirements:
 - `commit` max: below `10us`; `10us` is the hard ceiling.
 - `mask` max: below `20us`.
