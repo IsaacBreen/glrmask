@@ -1976,6 +1976,41 @@ fn json_literal_string_merge_config() -> JsonStringMergeConfig {
     }
 }
 
+fn json_key_merge_config(is_pattern: bool) -> JsonStringMergeConfig {
+    let default = JsonStringMergeConfig {
+        merge_open: false,
+        merge_close: true,
+    };
+
+    let base = JsonStringMergeConfig {
+        merge_open: env_flag_optional("GLRMASK_JSON_KEY_MERGE_OPEN")
+            .unwrap_or(default.merge_open),
+        merge_close: env_flag_optional("GLRMASK_JSON_KEY_MERGE_CLOSE")
+            .unwrap_or(default.merge_close),
+    };
+
+    if !is_pattern {
+        return base;
+    }
+
+    JsonStringMergeConfig {
+        merge_open: env_flag_optional("GLRMASK_JSON_PATTERN_KEY_MERGE_OPEN")
+            .unwrap_or(base.merge_open),
+        merge_close: env_flag_optional("GLRMASK_JSON_PATTERN_KEY_MERGE_CLOSE")
+            .unwrap_or(base.merge_close),
+    }
+}
+
+fn json_literal_key_merge_config() -> JsonStringMergeConfig {
+    let base = json_key_merge_config(false);
+    JsonStringMergeConfig {
+        merge_open: env_flag_optional("GLRMASK_JSON_LITERAL_KEY_MERGE_OPEN")
+            .unwrap_or(base.merge_open),
+        merge_close: env_flag_optional("GLRMASK_JSON_LITERAL_KEY_MERGE_CLOSE")
+            .unwrap_or(base.merge_close),
+    }
+}
+
 fn json_uri_merge_config() -> JsonStringMergeConfig {
     let base = json_string_merge_config(true);
     JsonStringMergeConfig {
@@ -2063,17 +2098,12 @@ fn string_value_body_regex(inner: &str, is_pattern: bool) -> String {
 /// Build the regex pattern for the body terminal of a JSON object **key-colon**
 /// (`"key"`).
 ///
-/// Key terminals intentionally fuse both quotes into the body.  Splitting the
-/// opening quote makes commits like `, "` branch across every possible key.
 fn key_colon_body_regex(inner: &str) -> String {
-    quoted_body_regex(
-        inner,
-        JsonStringMergeConfig {
-            merge_open: true,
-            merge_close: true,
-        },
-        true,
-    )
+    quoted_body_regex(inner, json_key_merge_config(false), true)
+}
+
+fn pattern_key_colon_body_regex(inner: &str) -> String {
+    quoted_body_regex(inner, json_key_merge_config(true), true)
 }
 
 fn quoted_body_regex(
@@ -2095,7 +2125,23 @@ fn quoted_body_regex(
 /// Build literal bytes for the body terminal of a JSON object **key-colon**.
 /// The trailing colon-space remains outside the terminal body.
 fn key_colon_literal_body_bytes(text: &str) -> Vec<u8> {
-    json_string_literal_bytes(text)
+    key_colon_literal_body_bytes_with_merge_config(text, json_literal_key_merge_config())
+}
+
+fn key_colon_literal_body_bytes_with_merge_config(
+    text: &str,
+    merge_config: JsonStringMergeConfig,
+) -> Vec<u8> {
+    let full = json_string_literal_bytes(text);
+    let mut start = 0;
+    let mut end = full.len();
+    if !merge_config.merge_open {
+        start += 1;
+    }
+    if !merge_config.merge_close {
+        end -= 1;
+    }
+    full[start..end].to_vec()
 }
 
 /// Build the colon-space suffix expression for keys.
@@ -2121,10 +2167,24 @@ fn wrap_string_value_terminal(body: GrammarExpr, merge_config: JsonStringMergeCo
 
 /// Wrap a body terminal expression as a JSON object **key-colon**.
 ///
-/// Adds colon-space after the body terminal.  The body terminal already includes
-/// both quotes so key entry does not fan out on a standalone opening quote.
 fn wrap_key_colon_terminal(body: GrammarExpr) -> GrammarExpr {
-    sequence_or_single(vec![body, key_colon_suffix_expr()])
+    wrap_key_colon_terminal_with_merge_config(body, json_key_merge_config(false))
+}
+
+fn wrap_key_colon_terminal_with_merge_config(
+    body: GrammarExpr,
+    merge_config: JsonStringMergeConfig,
+) -> GrammarExpr {
+    let mut parts = Vec::new();
+    if !merge_config.merge_open {
+        parts.push(literal_expr(b"\""));
+    }
+    parts.push(body);
+    if !merge_config.merge_close {
+        parts.push(literal_expr(b"\""));
+    }
+    parts.push(key_colon_suffix_expr());
+    sequence_or_single(parts)
 }
 
 // ---------------------------------------------------------------------------
@@ -2134,7 +2194,11 @@ fn wrap_key_colon_terminal(body: GrammarExpr) -> GrammarExpr {
 /// Wrap a body regex as a JSON key-colon expression.
 /// Shorthand for `wrap_key_colon_terminal(regex_expr(key_colon_body_regex(inner)))`.
 fn wrap_key_colon_regex(inner_regex: &str) -> GrammarExpr {
-    wrap_key_colon_terminal(regex_expr(key_colon_body_regex(inner_regex)))
+    let merge_config = json_key_merge_config(false);
+    wrap_key_colon_terminal_with_merge_config(
+        regex_expr(quoted_body_regex(inner_regex, merge_config, true)),
+        merge_config,
+    )
 }
 
 fn parsed_regex_expr(pattern: &str, utf8: bool) -> GrammarExpr {
@@ -2933,8 +2997,31 @@ fn append_literal_preserving_group_ops(expr: GrammarExpr, literal: GrammarExpr) 
 }
 
 fn wrap_key_colon_expr_parts(body: GrammarExpr) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
-    let terminal_body = sequence_or_single(vec![literal_expr(b"\""), body, literal_expr(b"\"")]);
-    let wrap = move |term: GrammarExpr| -> GrammarExpr { wrap_key_colon_terminal(term) };
+    wrap_key_colon_expr_parts_with_merge_config(body, json_key_merge_config(false))
+}
+
+fn wrap_pattern_key_colon_expr_parts(
+    body: GrammarExpr,
+) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
+    wrap_key_colon_expr_parts_with_merge_config(body, json_key_merge_config(true))
+}
+
+fn wrap_key_colon_expr_parts_with_merge_config(
+    body: GrammarExpr,
+    merge_config: JsonStringMergeConfig,
+) -> (GrammarExpr, Box<dyn FnOnce(GrammarExpr) -> GrammarExpr>) {
+    let mut parts = Vec::new();
+    if merge_config.merge_open {
+        parts.push(literal_expr(b"\""));
+    }
+    parts.push(body);
+    if merge_config.merge_close {
+        parts.push(literal_expr(b"\""));
+    }
+    let terminal_body = sequence_or_single(parts);
+    let wrap = move |term: GrammarExpr| -> GrammarExpr {
+        wrap_key_colon_terminal_with_merge_config(term, merge_config)
+    };
     (terminal_body, Box::new(wrap))
 }
 
@@ -6958,7 +7045,7 @@ impl<'a> SchemaCtx<'a> {
                 pattern,
                 &format!("{upper_base_name}_PP{pattern_idx}_KEY_BODY"),
             );
-            let (terminal_body, wrap) = wrap_key_colon_expr_parts(body);
+            let (terminal_body, wrap) = wrap_pattern_key_colon_expr_parts(body);
             let term_ref = self.extract_terminal_rule(
                 terminal_body,
                 &format!("{upper_base_name}_PP{pattern_idx}_KEY"),
@@ -9721,8 +9808,12 @@ impl<'a> SchemaCtx<'a> {
     }
 
     fn json_key_colon_literal(&self, text: &str) -> GrammarExpr {
-        let body = literal_expr(&key_colon_literal_body_bytes(text));
-        wrap_key_colon_terminal(body)
+        let merge_config = json_literal_key_merge_config();
+        let body = literal_expr(&key_colon_literal_body_bytes_with_merge_config(
+            text,
+            merge_config,
+        ));
+        wrap_key_colon_terminal_with_merge_config(body, merge_config)
     }
 
     fn fused_json_key_colon_literal(&self, text: &str) -> GrammarExpr {
@@ -10235,7 +10326,7 @@ impl<'a> SchemaCtx<'a> {
 
     fn build_pattern_key_colon_expr(&mut self, pattern: &str, prefix: &str) -> GrammarExpr {
         let body = self.pattern_key_colon_body_expr(pattern, &format!("{prefix}_BODY"));
-        let (terminal_body, wrap) = wrap_key_colon_expr_parts(body);
+        let (terminal_body, wrap) = wrap_pattern_key_colon_expr_parts(body);
         let term = self.extract_terminal_rule(terminal_body, prefix);
         wrap(term)
     }
@@ -10722,7 +10813,7 @@ impl<'a> SchemaCtx<'a> {
 
         let prefix = format!("AP_SHARED_PATTERN_KEY_{}", self.shared_additional_key_plan.pattern_body_cache.len());
         let body = self.pattern_key_colon_body_expr(pattern, &format!("{prefix}_BODY"));
-        let (terminal_body, _) = wrap_key_colon_expr_parts(body);
+        let (terminal_body, _) = wrap_pattern_key_colon_expr_parts(body);
         let expr = self.extract_terminal_rule(terminal_body, &prefix);
         self.shared_additional_key_plan
             .pattern_body_cache
@@ -12040,7 +12131,7 @@ impl<'a> SchemaCtx<'a> {
         if !pattern_properties.is_empty() {
             for (pattern_idx, (pattern, pattern_schema)) in pattern_properties.iter().enumerate() {
                 let body = self.pattern_key_colon_body_expr(pattern, &format!("{}_PP{}_KEY_BODY", upper_base_name, pattern_idx));
-                let (terminal_body, wrap) = wrap_key_colon_expr_parts(body);
+                let (terminal_body, wrap) = wrap_pattern_key_colon_expr_parts(body);
                 let raw_term_ref = self.extract_terminal_rule(
                     terminal_body,
                     &format!("{}_PP{}_KEY", upper_base_name, pattern_idx),
@@ -12130,6 +12221,8 @@ impl<'a> SchemaCtx<'a> {
             ap_kv_rule = Some(GrammarExpr::Ref(kv_rule));
         }
 
+        let factored_free_pairs = pp_kv_rules.clone();
+
         let pattern_list_expr = if pp_kv_rules.is_empty() {
             None
         } else {
@@ -12152,7 +12245,46 @@ impl<'a> SchemaCtx<'a> {
             }
         });
 
-
+        if ordered.len() >= 3 {
+            let factored_additional_pairs = ap_kv_rule.iter().cloned().collect::<Vec<_>>();
+            let factored_has_free =
+                !factored_free_pairs.is_empty() || !factored_additional_pairs.is_empty();
+            let (factored_free_c, factored_free_nc) = if factored_has_free {
+                let mut free_alts = factored_free_pairs.clone();
+                free_alts.extend(factored_additional_pairs.iter().cloned());
+                let free_alt_rule = self.insert_shared_rule(
+                    format!("{base_name}_factored_free_alt"),
+                    choice_or_single(free_alts),
+                );
+                let free_tail_rule = self.insert_shared_rule(
+                    format!("{base_name}_factored_free_tail"),
+                    GrammarExpr::Repeat(Box::new(sequence_or_single(vec![
+                        self.json_item_separator_expr(),
+                        GrammarExpr::Ref(free_alt_rule.clone()),
+                    ]))),
+                );
+                let free_nonempty_rule = self.insert_shared_rule(
+                    format!("{base_name}_factored_free_nonempty"),
+                    sequence_or_single(vec![
+                        GrammarExpr::Ref(free_alt_rule),
+                        GrammarExpr::Ref(free_tail_rule.clone()),
+                    ]),
+                );
+                (free_tail_rule, free_nonempty_rule)
+            } else {
+                (String::new(), String::new())
+            };
+            if let Some(expr) = self.try_build_factored_ordered_object(
+                &ordered,
+                &factored_free_c,
+                &factored_free_nc,
+                &factored_free_pairs,
+                &factored_additional_pairs,
+                &factored_free_c,
+            )? {
+                return Ok(expr);
+            }
+        }
 
         if !ordered.is_empty()
             && ordered.iter().all(|(_, _, required)| *required)
@@ -12306,7 +12438,8 @@ impl<'a> SchemaCtx<'a> {
     ) -> Result<GrammarExpr, GlrMaskError> {
         let pattern = Self::property_name_pattern(property_names)?;
         let matched_key_colon_body = self.pattern_key_colon_body_expr(pattern, "PP_KEY_COLON_BODY");
-        let (matched_terminal_body, wrap) = wrap_key_colon_expr_parts(matched_key_colon_body.clone());
+        let (matched_terminal_body, wrap) =
+            wrap_pattern_key_colon_expr_parts(matched_key_colon_body.clone());
         let matched_key_colon_full = wrap(self.extract_terminal_rule(matched_terminal_body.clone(), "PP_KEY_COLON"));
         let matched_pair = sequence_or_single(vec![
             matched_key_colon_full,
@@ -12651,41 +12784,44 @@ fn repeat_expr(item: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr
 
 #[cfg(test)]
 mod tests {
-    use super::json_schema_uri_mode;
-    use super::json_literal_string_merge_config;
-      use super::common_outer_anchor_pattern;
-      use super::decoded_regex_search_expr;
-      use super::extract_fixed_ascii_class_concat_pattern;
-      use super::extract_fixed_ascii_class_search_pattern;
-      use super::json_string_char_lexer_expr;
-    use super::lexer_repeat;
-    use super::decoded_regex_matches_search;
+    use super::common_outer_anchor_pattern;
     use super::decoded_regex_fullmatch_expr;
-    use super::try_fixed_ascii_class_bounded_search_dfa;
+    use super::decoded_regex_matches_search;
+    use super::decoded_regex_search_expr;
+    use super::extract_fixed_ascii_class_concat_pattern;
+    use super::extract_fixed_ascii_class_search_pattern;
     use super::integer_multiple_expr;
-    use super::json_uri_merge_config;
+    use super::json_key_merge_config;
+    use super::json_literal_key_merge_config;
+    use super::json_literal_string_merge_config;
+    use super::json_schema_uri_mode;
+    use super::json_string_char_lexer_expr;
     use super::json_string_merge_config;
+    use super::json_uri_merge_config;
+    use super::key_colon_body_regex;
+    use super::lexer_repeat;
     use super::literal_alternation_search_literals;
-    use super::per_object_ap_keys_enabled_for_plan;
     use super::pattern_all_branches_anchored;
+    use super::per_object_ap_keys_enabled_for_plan;
     use super::promote_literal_choices_enabled;
+    use super::schema_to_named_grammar;
+    use super::string_value_body_regex;
+    use super::strip_branch_outer_anchors;
+    use super::try_fixed_ascii_class_bounded_search_dfa;
+    use super::uri_quote_merge_warning_needed;
+    use super::wrap_string_value_expr_parts;
     use super::JsonSchemaUriMode;
     use super::SchemaCtx;
     use super::SharedAdditionalKeyPlan;
-    use super::schema_to_named_grammar;
-    use super::strip_branch_outer_anchors;
-    use super::string_value_body_regex;
-    use super::uri_quote_merge_warning_needed;
-    use super::wrap_string_value_expr_parts;
-    use crate::automata::lexer::compile::build_regex;
-    use crate::automata::lexer::ast::Expr as LexerExpr;
     use crate::automata::lexer::ast::dfa as lexer_dfa_expr;
+    use crate::automata::lexer::ast::Expr as LexerExpr;
+    use crate::automata::lexer::compile::build_regex;
     use crate::automata::lexer::regex::parse_regex;
+    use crate::dump_json_schema_grammar_glrm;
     use crate::grammar::ast::lower;
-    use crate::GlrMaskError;
     use crate::grammar::ast::GrammarExpr;
     use crate::grammar::glrm::to_glrm;
-    use crate::dump_json_schema_grammar_glrm;
+    use crate::GlrMaskError;
     use serde_json::{json, Value};
     use std::{env, ffi::OsString, sync::Mutex};
 
@@ -13140,7 +13276,7 @@ mod tests {
     }
 
     #[test]
-    fn anyof_object_expr_nfa_fixed_keys_use_fused_key_colon_symbols() {
+    fn anyof_object_expr_nfa_fixed_keys_preserve_key_quote_defaults() {
         let schema = json!({
             "anyOf": [
                 {
@@ -13163,11 +13299,11 @@ mod tests {
         let glrm = dump_glrm(schema);
         assert!(glrm.contains("fa obj_anyof_fa_0_body"), "{glrm}");
         assert!(
-            glrm.contains("-- \"\\\"thumbnail\\\"\" \": \" -->"),
+            glrm.contains("-- \"\\\"\" \"thumbnail\\\"\" \": \" -->"),
             "{glrm}"
         );
         assert!(
-            !glrm.contains("-- \"\\\"\" \"thumbnail\\\"\" \": \" -->"),
+            !glrm.contains("-- \"\\\"thumbnail\\\"\" \": \" -->"),
             "{glrm}"
         );
     }
@@ -13201,7 +13337,7 @@ mod tests {
         assert!(glrm.contains("t AP_SHARED_KEY ::="), "{glrm}");
         assert!(
             glrm.contains("-- AP_SHARED_KEY -->")
-                && glrm.contains("-- AP_SHARED_LITERAL_KEY_SET - (\"\\\"name\\\"\") -->"),
+                && glrm.contains("-- AP_SHARED_LITERAL_KEY_SET - (\"name\\\"\") -->"),
             "{glrm}"
         );
         assert!(!glrm.contains("obj_anyof_fa_0_ap_key_v1"), "{glrm}");
@@ -13511,10 +13647,10 @@ mod tests {
 
         let glrm = dump_glrm(schema);
         assert!(glrm.contains("t AP_SHARED_KEY ::= "), "{glrm}");
-        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_0 ::= \"\\\"a\\\"\""), "{glrm}");
-        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_1 ::= \"\\\"b\\\"\""), "{glrm}");
-        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_2 ::= \"\\\"left\\\"\""), "{glrm}");
-        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_3 ::= \"\\\"right\\\"\""), "{glrm}");
+        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_0 ::= \"a\\\"\""), "{glrm}");
+        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_1 ::= \"b\\\"\""), "{glrm}");
+        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_2 ::= \"left\\\"\""), "{glrm}");
+        assert!(glrm.contains("AP_SHARED_LITERAL_KEY_3 ::= \"right\\\"\""), "{glrm}");
     }
 
     #[test]
@@ -13579,7 +13715,7 @@ mod tests {
         assert!(glrm.contains("AP_SHARED_PATTERN_KEY_0"), "{glrm}");
         assert!(glrm.contains(" - AP_SHARED_PATTERN_KEY_0"), "{glrm}");
         assert!(
-            glrm.contains("AP_SHARED_LITERAL_KEY_SET - (\"\\\"a\\\"\" | \"\\\"b\\\"\")"),
+            glrm.contains("AP_SHARED_LITERAL_KEY_SET - (\"a\\\"\" | \"b\\\"\")"),
             "{glrm}"
         );
         assert!(
@@ -13900,6 +14036,26 @@ mod tests {
     }
 
     #[test]
+    fn json_key_merge_defaults_preserve_old_split_open_and_merged_close() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _key_open = EnvVarGuard::unset("GLRMASK_JSON_KEY_MERGE_OPEN");
+        let _key_close = EnvVarGuard::unset("GLRMASK_JSON_KEY_MERGE_CLOSE");
+        let _literal_key_open = EnvVarGuard::unset("GLRMASK_JSON_LITERAL_KEY_MERGE_OPEN");
+        let _literal_key_close = EnvVarGuard::unset("GLRMASK_JSON_LITERAL_KEY_MERGE_CLOSE");
+        let _pattern_key_open = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_KEY_MERGE_OPEN");
+        let _pattern_key_close = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_KEY_MERGE_CLOSE");
+
+        let default_cfg = json_key_merge_config(false);
+        let literal_cfg = json_literal_key_merge_config();
+        let pattern_cfg = json_key_merge_config(true);
+        assert_eq!(default_cfg.merge_open, false);
+        assert_eq!(default_cfg.merge_close, true);
+        assert_eq!(literal_cfg, default_cfg);
+        assert_eq!(pattern_cfg, default_cfg);
+        assert_eq!(key_colon_body_regex("a+"), "(?:a+)\"");
+    }
+
+    #[test]
     fn bounded_non_pattern_split_keeps_open_quote_separate_by_default() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _chunk = EnvVarGuard::set("GLRMASK_STRING_REPEAT_CHUNK", "4");
@@ -14141,6 +14297,39 @@ mod tests {
         let _pattern_open = EnvVarGuard::set("GLRMASK_JSON_PATTERN_STRING_MERGE_OPEN", "0");
         let _pattern_close = EnvVarGuard::set("GLRMASK_JSON_PATTERN_STRING_MERGE_CLOSE", "1");
         let pattern_override_cfg = json_string_merge_config(true);
+        assert_eq!(pattern_override_cfg.merge_open, false);
+        assert_eq!(pattern_override_cfg.merge_close, true);
+    }
+
+    #[test]
+    fn key_merge_env_layers_resolve_pattern_and_literal_independently() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _key_open = EnvVarGuard::unset("GLRMASK_JSON_KEY_MERGE_OPEN");
+        let _key_close = EnvVarGuard::unset("GLRMASK_JSON_KEY_MERGE_CLOSE");
+        let _literal_key_open = EnvVarGuard::unset("GLRMASK_JSON_LITERAL_KEY_MERGE_OPEN");
+        let _literal_key_close = EnvVarGuard::unset("GLRMASK_JSON_LITERAL_KEY_MERGE_CLOSE");
+        let _pattern_key_open = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_KEY_MERGE_OPEN");
+        let _pattern_key_close = EnvVarGuard::unset("GLRMASK_JSON_PATTERN_KEY_MERGE_CLOSE");
+
+        let _key_open = EnvVarGuard::set("GLRMASK_JSON_KEY_MERGE_OPEN", "1");
+        let _key_close = EnvVarGuard::set("GLRMASK_JSON_KEY_MERGE_CLOSE", "0");
+        let _literal_key_open = EnvVarGuard::set("GLRMASK_JSON_LITERAL_KEY_MERGE_OPEN", "0");
+        let _literal_key_close = EnvVarGuard::set("GLRMASK_JSON_LITERAL_KEY_MERGE_CLOSE", "1");
+
+        let generic_cfg = json_key_merge_config(false);
+        let literal_cfg = json_literal_key_merge_config();
+        let pattern_cfg = json_key_merge_config(true);
+
+        assert_eq!(generic_cfg.merge_open, true);
+        assert_eq!(generic_cfg.merge_close, false);
+        assert_eq!(literal_cfg.merge_open, false);
+        assert_eq!(literal_cfg.merge_close, true);
+        assert_eq!(pattern_cfg.merge_open, true);
+        assert_eq!(pattern_cfg.merge_close, false);
+
+        let _pattern_key_open = EnvVarGuard::set("GLRMASK_JSON_PATTERN_KEY_MERGE_OPEN", "0");
+        let _pattern_key_close = EnvVarGuard::set("GLRMASK_JSON_PATTERN_KEY_MERGE_CLOSE", "1");
+        let pattern_override_cfg = json_key_merge_config(true);
         assert_eq!(pattern_override_cfg.merge_open, false);
         assert_eq!(pattern_override_cfg.merge_close, true);
     }
