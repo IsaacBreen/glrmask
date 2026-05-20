@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::time::Instant;
 
 use crate::automata::regex::Expr;
 use crate::automata::lexer::regex::parse_regex;
@@ -16,6 +17,32 @@ fn env_var_enabled(key: &str, default: bool) -> bool {
             !matches!(n.as_str(), "" | "0" | "false" | "no" | "off")
         })
         .unwrap_or(default)
+}
+
+fn compile_profile_enabled() -> bool {
+    std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+}
+
+fn elapsed_ms(started_at: Instant) -> f64 {
+    started_at.elapsed().as_secs_f64() * 1000.0
+}
+
+fn emit_grammar_transform_profile(
+    stage: &str,
+    elapsed_ms: f64,
+    rules_before: usize,
+    rules_after: usize,
+    extra: &str,
+) {
+    eprintln!(
+        "[glrmask-profile] grammar_transform stage={} ms={:.3} rules_before={} rules_after={}{}",
+        stage,
+        elapsed_ms,
+        rules_before,
+        rules_after,
+        extra,
+    );
 }
 
 // ── Nullable terminal expansion ─────────────────────────────────────────────
@@ -636,9 +663,21 @@ fn collect_protected_nonterminals(grammar: &GrammarDef) -> BTreeSet<NonterminalI
 /// Run only the grammar transforms without building the tokenizer.
 /// The caller is responsible for calling `build_tokenizer` on the result.
 pub(crate) fn prepare_grammar_transforms_only(grammar: GrammarDef) -> GrammarDef {
+    let profiling = compile_profile_enabled();
+    let nullable_rules_before = grammar.rules.len();
+    let nullable_started_at = profiling.then(Instant::now);
     let nullable_terminals = nullable_terminals_for_grammar(&grammar);
+    if let Some(started_at) = nullable_started_at {
+        emit_grammar_transform_profile(
+            "nullable_terminals_for_grammar",
+            elapsed_ms(started_at),
+            nullable_rules_before,
+            nullable_rules_before,
+            &format!(" nullable_terminals={}", nullable_terminals.len()),
+        );
+    }
     let mut normalized = grammar;
-    prepare_grammar_transforms_impl(&mut normalized, &nullable_terminals);
+    prepare_grammar_transforms_impl(&mut normalized, &nullable_terminals, profiling);
     std::mem::take(&mut normalized)
 }
 
@@ -646,17 +685,75 @@ pub(crate) fn prepare_grammar_transforms_only(grammar: GrammarDef) -> GrammarDef
 fn prepare_grammar_transforms_impl(
     normalized: &mut GrammarDef,
     nullable_terminals: &BTreeSet<TerminalID>,
+    profiling: bool,
 ) {
+    let expand_rules_before = normalized.rules.len();
+    let expand_started_at = profiling.then(Instant::now);
     expand_nullable_terminals(&mut normalized.rules, nullable_terminals);
+    if let Some(started_at) = expand_started_at {
+        emit_grammar_transform_profile(
+            "expand_nullable_terminals",
+            elapsed_ms(started_at),
+            expand_rules_before,
+            normalized.rules.len(),
+            &format!(" nullable_terminals={}", nullable_terminals.len()),
+        );
+    }
 
+    let normalize_rules_before = normalized.rules.len();
+    let normalize_started_at = profiling.then(Instant::now);
     normalize_grammar(&mut normalized.rules, normalized.start);
+    if let Some(started_at) = normalize_started_at {
+        emit_grammar_transform_profile(
+            "normalize_grammar",
+            elapsed_ms(started_at),
+            normalize_rules_before,
+            normalized.rules.len(),
+            "",
+        );
+    }
 
+    let protected_rules_before = normalized.rules.len();
+    let protected_started_at = profiling.then(Instant::now);
     let protected_nonterminals = collect_protected_nonterminals(normalized);
-    inline_single_use_nonterminals(&mut normalized.rules, &protected_nonterminals);
+    if let Some(started_at) = protected_started_at {
+        emit_grammar_transform_profile(
+            "collect_protected_nonterminals",
+            elapsed_ms(started_at),
+            protected_rules_before,
+            normalized.rules.len(),
+            &format!(" protected_nonterminals={}", protected_nonterminals.len()),
+        );
+    }
 
+    let inline_rules_before = normalized.rules.len();
+    let inline_started_at = profiling.then(Instant::now);
+    inline_single_use_nonterminals(&mut normalized.rules, &protected_nonterminals);
+    if let Some(started_at) = inline_started_at {
+        emit_grammar_transform_profile(
+            "inline_single_use_nonterminals",
+            elapsed_ms(started_at),
+            inline_rules_before,
+            normalized.rules.len(),
+            " pass=pre_bound",
+        );
+    }
+
+    let mut merge_iteration = 0usize;
     loop {
+        merge_iteration += 1;
         let prev_len = normalized.rules.len();
+        let merge_started_at = profiling.then(Instant::now);
         normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
+        if let Some(started_at) = merge_started_at {
+            emit_grammar_transform_profile(
+                "merge_identical_nonterminals",
+                elapsed_ms(started_at),
+                prev_len,
+                normalized.rules.len(),
+                &format!(" pass=pre_bound iteration={merge_iteration}"),
+            );
+        }
         if normalized.rules.len() == prev_len {
             break;
         }
@@ -666,23 +763,69 @@ fn prepare_grammar_transforms_impl(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(MAX_RUNTIME_REDUCTION_LEN);
-    bound_runtime_reduction_length(normalized, max_reduction_len);
 
+    let bound_rules_before = normalized.rules.len();
+    let bound_started_at = profiling.then(Instant::now);
+    bound_runtime_reduction_length(normalized, max_reduction_len);
+    if let Some(started_at) = bound_started_at {
+        emit_grammar_transform_profile(
+            "bound_runtime_reduction_length",
+            elapsed_ms(started_at),
+            bound_rules_before,
+            normalized.rules.len(),
+            &format!(" max_reduction_len={max_reduction_len}"),
+        );
+    }
+
+    let post_inline_rules_before = normalized.rules.len();
+    let post_inline_started_at = profiling.then(Instant::now);
     inline_post_bound_single_use_nonterminals(
         &mut normalized.rules,
         &protected_nonterminals,
         max_reduction_len,
     );
+    if let Some(started_at) = post_inline_started_at {
+        emit_grammar_transform_profile(
+            "inline_post_bound_single_use_nonterminals",
+            elapsed_ms(started_at),
+            post_inline_rules_before,
+            normalized.rules.len(),
+            &format!(" max_reduction_len={max_reduction_len}"),
+        );
+    }
 
+    let mut final_merge_iteration = 0usize;
     loop {
+        final_merge_iteration += 1;
         let prev_len = normalized.rules.len();
+        let merge_started_at = profiling.then(Instant::now);
         normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
+        if let Some(started_at) = merge_started_at {
+            emit_grammar_transform_profile(
+                "merge_identical_nonterminals",
+                elapsed_ms(started_at),
+                prev_len,
+                normalized.rules.len(),
+                &format!(" pass=post_bound iteration={final_merge_iteration}"),
+            );
+        }
         if normalized.rules.len() == prev_len {
             break;
         }
     }
 
+    let compact_rules_before = normalized.rules.len();
+    let compact_started_at = profiling.then(Instant::now);
     compact_unused_terminals(normalized);
+    if let Some(started_at) = compact_started_at {
+        emit_grammar_transform_profile(
+            "compact_unused_terminals",
+            elapsed_ms(started_at),
+            compact_rules_before,
+            normalized.rules.len(),
+            "",
+        );
+    }
 }
 
 #[cfg(test)]
