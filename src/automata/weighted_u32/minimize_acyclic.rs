@@ -5,6 +5,7 @@
 //! compatibility constraints, and reconstructs the minimized automaton from the
 //! merged buckets.
 use std::sync::Arc;
+use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
@@ -15,6 +16,11 @@ use crate::ds::weight::Weight;
 type Label = i32;
 
 const UNMAPPED: u32 = u32::MAX;
+
+fn weighted_dwa_minimize_profile_enabled() -> bool {
+    std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+}
 
 fn mapped_target(old_to_new: &[u32], target: u32) -> Option<u32> {
     let mapped = old_to_new.get(target as usize).copied().unwrap_or(UNMAPPED);
@@ -1116,15 +1122,35 @@ fn build_and_color_hybrid(
     old_to_new: &[u32],
     productive_transitions: &[Vec<ProductiveTransition>],
 ) -> Vec<usize> {
+    let profile_enabled = weighted_dwa_minimize_profile_enabled();
+    let total_started_at = Instant::now();
+
     // Step 1: Partition refinement to get fine-grained classes.
+    let partition_refine_started_at = Instant::now();
     let class_coloring = partition_refine_coloring_raw(candidates, dwa, old_to_new);
+    let partition_refine_ms = partition_refine_started_at.elapsed().as_secs_f64() * 1000.0;
     let num_classes = class_coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
     if num_classes <= 1 {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][weighted_dwa_minimize_hybrid] candidates={} classes={} groups={} partition_refine_ms={:.3} class_union_ms={:.3} class_profiles_ms={:.3} greedy_merge_ms={:.3} map_ms={:.3} total_ms={:.3}",
+                candidates.len(),
+                num_classes,
+                num_classes,
+                partition_refine_ms,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         return class_coloring;
     }
 
     // Step 2: Pick one representative state per class and compute the union
     // of needed sets for each class.
+    let class_union_started_at = Instant::now();
     let mut class_rep_state: Vec<usize> = vec![usize::MAX; num_classes];
     let mut class_needed_union: Vec<Weight> = Vec::with_capacity(num_classes);
     class_needed_union.resize_with(num_classes, Weight::empty);
@@ -1135,11 +1161,14 @@ fn build_and_color_hybrid(
         }
         class_needed_union[class] = class_needed_union[class].union(&needed[state_id]);
     }
+    let class_union_ms = class_union_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let class_profiles_started_at = Instant::now();
     let class_profiles: Vec<ClassProfile> = class_rep_state
         .iter()
         .map(|&rep| build_class_profile(rep, old_to_new, productive_transitions, dwa))
         .collect();
+    let class_profiles_ms = class_profiles_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // Step 3: Greedy merge of classes, handling both disjoint and overlapping
     // needed sets. Instead of building an O(K²) incompatibility graph, we check
@@ -1157,6 +1186,7 @@ fn build_and_color_hybrid(
         member_classes: Vec<usize>,
     }
 
+    let greedy_merge_started_at = Instant::now();
     let mut groups: Vec<OverlapMergeGroup> = Vec::new();
 
     for class in 0..num_classes {
@@ -1226,7 +1256,10 @@ fn build_and_color_hybrid(
         }
     }
 
-    // Step 4: Map each candidate through class → merged color.
+    let greedy_merge_ms = greedy_merge_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    // Step 4: Map each candidate through class -> merged color.
+    let map_started_at = Instant::now();
     let mut class_to_group = vec![0usize; num_classes];
     for (gid, g) in groups.iter().enumerate() {
         for &c in &g.member_classes {
@@ -1237,6 +1270,23 @@ fn build_and_color_hybrid(
     let mut coloring = vec![0usize; nc];
     for (idx, &class) in class_coloring.iter().enumerate() {
         coloring[idx] = class_to_group[class];
+    }
+
+    let map_ms = map_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][weighted_dwa_minimize_hybrid] candidates={} classes={} groups={} partition_refine_ms={:.3} class_union_ms={:.3} class_profiles_ms={:.3} greedy_merge_ms={:.3} map_ms={:.3} total_ms={:.3}",
+            candidates.len(),
+            num_classes,
+            groups.len(),
+            partition_refine_ms,
+            class_union_ms,
+            class_profiles_ms,
+            greedy_merge_ms,
+            map_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
     }
 
     coloring
@@ -1341,9 +1391,12 @@ fn try_all_compatible_height_0_coloring(
     // After push_weights, all leaf states (h=0, no transitions) are always
     // mutually compatible.  Proof:
     //
-    //   For leaves: needed[u] = reachable[u] = final_weight[u].
-    //   So final_on_needed = final_weight, and witness_domain = witness_final
-    //   (both grow by the same final_weight each iteration).
+    //   For leaves, needed[u] = final_weight[u] because there are no outgoing
+    //   transitions.
+    //
+    //   As we merge leaf states into one witness group, witness_domain and
+    //   witness_final stay equal: both are the union of the same member final
+    //   weights, so they grow in lockstep as each new leaf is added.
     //
     //   The compatibility check compares:
     //     witness_final ∩ overlap  vs  candidate_final ∩ overlap
@@ -1509,9 +1562,16 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
         return dwa.clone();
     }
 
+    let profile_enabled = weighted_dwa_minimize_profile_enabled();
+    let total_started_at = Instant::now();
+    let input_states = dwa.num_states();
+    let input_transitions = dwa.num_transitions();
+
     // Clone and push weights
+    let push_started_at = Instant::now();
     let mut pushed = dwa.clone();
     let (_, topo_from_push, reachable_from_push) = push_weights(&mut pushed);
+    let push_ms = push_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // Reuse topo order from push_weights (graph structure unchanged by push).
     let topo = match topo_from_push {
@@ -1529,15 +1589,24 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
     if needed[start_state].is_empty() {
         return canonical_dead_dwa();
     }
+    let productive_transitions_started_at = Instant::now();
     let productive_transitions = compute_productive_transitions(&pushed, &needed);
+    let productive_transitions_ms =
+        productive_transitions_started_at.elapsed().as_secs_f64() * 1000.0;
+    let heights_started_at = Instant::now();
     let heights = compute_heights(&pushed, &topo);
+    let heights_ms = heights_started_at.elapsed().as_secs_f64() * 1000.0;
     let max_height = heights.iter().max().copied().unwrap_or(0);
 
     let n = pushed.states().len();
 
+    let reachable_from_start_started_at = Instant::now();
     let reachable_from_start = compute_reachable_from_start(&pushed, start_state);
+    let reachable_from_start_ms =
+        reachable_from_start_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // Group states by height (only reachable states with non-empty needed sets)
+    let group_by_height_started_at = Instant::now();
     let mut states_by_height: Vec<Vec<usize>> = vec![vec![]; max_height + 1];
     for (id, &h) in heights.iter().enumerate() {
         if !reachable_from_start[id] {
@@ -1548,46 +1617,74 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
         }
         states_by_height[h].push(id);
     }
+    let group_by_height_ms = group_by_height_started_at.elapsed().as_secs_f64() * 1000.0;
+    let active_states = states_by_height.iter().map(Vec::len).sum::<usize>();
+    let max_bucket_size = states_by_height.iter().map(Vec::len).max().unwrap_or(0);
 
     // Bottom-up: color and merge
     let mut old_to_new = vec![UNMAPPED; n];
     let mut new_states: Vec<MergedStateBuilder> = Vec::new();
+    let mut color_ms_total = 0.0;
+    let mut merge_ms_total = 0.0;
 
     for h in 0..=max_height {
         let candidates = &states_by_height[h];
         if candidates.is_empty() {
             continue;
         }
-        if h == 0 && try_all_compatible_height_0_coloring(candidates, &pushed, &needed).is_some() {
-            let base_new_id = new_states.len() as u32;
-            let num_colors = 1usize;
+        let height_started_at = Instant::now();
+        let mut height_color_ms = 0.0;
+        let mut fast_height0 = false;
 
-            for &candidate in candidates {
-                old_to_new[candidate] = base_new_id;
-            }
+        if h == 0 {
+            let color_started_at = Instant::now();
+            let all_compatible = try_all_compatible_height_0_coloring(candidates, &pushed, &needed).is_some();
+            height_color_ms = color_started_at.elapsed().as_secs_f64() * 1000.0;
+            if all_compatible {
+                fast_height0 = true;
+                let merge_started_at = Instant::now();
+                let base_new_id = new_states.len() as u32;
+                let num_colors = 1usize;
 
-            new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
+                for &candidate in candidates {
+                    old_to_new[candidate] = base_new_id;
+                }
 
-            let builders = &mut new_states[base_new_id as usize..];
-            for &candidate in candidates {
-                merge_state_into_builder(
-                    candidate,
-                    0,
-                    &pushed,
-                    &old_to_new,
-                    builders,
-                );
+                new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
+
+                let builders = &mut new_states[base_new_id as usize..];
+                for &candidate in candidates {
+                    merge_state_into_builder(
+                        candidate,
+                        0,
+                        &pushed,
+                        &old_to_new,
+                        builders,
+                    );
+                }
+                for builder in builders.iter_mut() {
+                    builder.finalize_for_reuse();
+                }
+                let height_merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+                color_ms_total += height_color_ms;
+                merge_ms_total += height_merge_ms;
+                if profile_enabled {
+                    eprintln!(
+                        "[glrmask/profile][weighted_dwa_minimize_height] height={} candidates={} colors={} fast_height0={} color_ms={:.3} merge_ms={:.3} total_ms={:.3}",
+                        h,
+                        candidates.len(),
+                        num_colors,
+                        fast_height0,
+                        height_color_ms,
+                        height_merge_ms,
+                        height_started_at.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                continue;
             }
-            for builder in builders.iter_mut() {
-                builder.finalize_for_reuse();
-            }
-            continue;
         }
 
-        // Hybrid coloring: partition refinement to reduce candidates into
-        // equivalence classes, then graph coloring among class representatives.
-        // This is O(n log n + k²) where k ≤ n, always at least as fast as
-        // direct O(n²) graph coloring.
+        let color_started_at = Instant::now();
         let coloring = build_and_color_hybrid(
             &pushed,
             candidates,
@@ -1595,7 +1692,9 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
             &old_to_new,
             &productive_transitions,
         );
+        height_color_ms += color_started_at.elapsed().as_secs_f64() * 1000.0;
 
+        let merge_started_at = Instant::now();
         let base_new_id = new_states.len() as u32;
         let num_colors = coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
 
@@ -1621,9 +1720,51 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
         for builder in builders.iter_mut() {
             builder.finalize_for_reuse();
         }
+        let height_merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+        color_ms_total += height_color_ms;
+        merge_ms_total += height_merge_ms;
+
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][weighted_dwa_minimize_height] height={} candidates={} colors={} fast_height0={} color_ms={:.3} merge_ms={:.3} total_ms={:.3}",
+                h,
+                candidates.len(),
+                num_colors,
+                fast_height0,
+                height_color_ms,
+                height_merge_ms,
+                height_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
     }
 
-    reconstruct_dwa(start_state, &old_to_new, new_states)
+    let reconstruct_started_at = Instant::now();
+    let minimized = reconstruct_dwa(start_state, &old_to_new, new_states);
+    let reconstruct_ms = reconstruct_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][weighted_dwa_minimize] input_states={} input_transitions={} push_ms={:.3} productive_transitions_ms={:.3} heights_ms={:.3} reachable_from_start_ms={:.3} group_by_height_ms={:.3} color_ms_total={:.3} merge_ms_total={:.3} reconstruct_ms={:.3} max_height={} active_states={} max_bucket_size={} output_states={} output_transitions={} total_ms={:.3}",
+            input_states,
+            input_transitions,
+            push_ms,
+            productive_transitions_ms,
+            heights_ms,
+            reachable_from_start_ms,
+            group_by_height_ms,
+            color_ms_total,
+            merge_ms_total,
+            reconstruct_ms,
+            max_height,
+            active_states,
+            max_bucket_size,
+            minimized.num_states(),
+            minimized.num_transitions(),
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    minimized
 }
 
 #[cfg(test)]
