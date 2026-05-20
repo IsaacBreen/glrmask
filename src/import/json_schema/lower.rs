@@ -155,42 +155,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn json_string_char_regex(&self) -> String {
-        let mut escape_parts = Vec::new();
-        let mut simple = String::new();
-        for ch in "nrbtf\\\"u".chars() {
-            if ch == 'u' {
-                continue;
-            }
-            if !simple.contains(ch) {
-                simple.push(ch);
-            }
-        }
-        if !simple.is_empty() {
-            escape_parts.push(format!("[{}]", Self::escape_class_chars(&simple)));
-        }
-        if "nrbtf\\\"u".contains('u') {
-            escape_parts.push(r#"u[0-9A-Fa-f]{4}"#.to_string());
-        }
-
-        if escape_parts.is_empty() {
-            r#"[^\x00-\x1f\x7f"\\]"#.to_string()
-        } else {
-            format!(r#"[^\x00-\x1f\x7f"\\]|\\(?:{})"#, escape_parts.join("|"))
-        }
-    }
-
-    fn escape_class_chars(text: &str) -> String {
-        let mut escaped = String::new();
-        for ch in text.chars() {
-            match ch {
-                '\\' => escaped.push_str(r#"\\"#),
-                '-' => escaped.push_str(r#"\-"#),
-                '^' => escaped.push_str(r#"\^"#),
-                ']' => escaped.push_str(r#"\]"#),
-                _ => escaped.push(ch),
-            }
-        }
-        escaped
+        r#"[^\x00-\x1f\x7f"\\]|\\["\\bfnrt]"#.to_string()
     }
 
     pub(crate) fn lower_schema(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {
@@ -352,6 +317,16 @@ impl<'a> Lowerer<'a> {
             expr,
             is_terminal: true,
             is_internal: false,
+        });
+    }
+
+    pub(crate) fn add_internal_terminal_rule(&mut self, name: &str, expr: GrammarExpr) {
+        self.used_rule_names.insert(name.to_string());
+        self.rules.push(NamedRule {
+            name: name.to_string(),
+            expr,
+            is_terminal: true,
+            is_internal: true,
         });
     }
 
