@@ -53,6 +53,26 @@ fn string_rejects_partial_unicode_escape_token_like_llguidance_native() {
 }
 
 #[test]
+fn string_mask_allows_bare_unicode_escape_prefix_token_but_rejects_partial_hex_token() {
+    let schema = r#"{"type": "string"}"#;
+    let bare_unicode_prefix = br#"\u"#;
+    let partial_hex_escape = br#"\uC"#;
+    let newline_escape = br#"\n"#;
+    let constraint = Constraint::from_json_schema(
+        schema,
+        &vocab(&[bare_unicode_prefix, partial_hex_escape, newline_escape]),
+    )
+    .unwrap();
+
+    let mut token_state = constraint.start();
+    token_state.commit_bytes(b"\"").unwrap();
+    let mask = token_state.mask();
+    assert!(token_allowed(&mask, 0));
+    assert!(!token_allowed(&mask, 1));
+    assert!(token_allowed(&mask, 2));
+}
+
+#[test]
 fn unrestricted_object_key_rejects_partial_unicode_escape_token_like_llguidance_native() {
     let schema = r#"{"type": "object", "additionalProperties": true}"#;
     let prefix = br#"{""#;

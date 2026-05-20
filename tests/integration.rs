@@ -300,6 +300,40 @@ fn json_schema_email_format_accepts_basic_email() {
 }
 
 #[test]
+fn json_schema_date_format_accepts_valid_date() {
+    let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
+    assert_accepts_bytes(&constraint, br#""2021-01-15""#);
+}
+
+#[test]
+fn json_schema_date_format_rejects_zero_month() {
+    let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#""2021-00-15""#).is_err());
+}
+
+#[test]
+fn json_schema_date_format_rejects_thirteenth_month() {
+    let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#""2021-13-15""#).is_err());
+}
+
+#[test]
+fn json_schema_date_format_rejects_zero_day() {
+    let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#""2021-12-00""#).is_err());
+}
+
+#[test]
+fn json_schema_date_format_rejects_day_thirty_two() {
+    let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#""2021-12-32""#).is_err());
+}
+
+#[test]
 fn json_schema_email_format_rejects_empty_string() {
     let constraint = byte_schema(r#"{"type":"string","format":"email"}"#);
     let mut state = constraint.start();

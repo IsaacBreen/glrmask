@@ -370,6 +370,10 @@ fn set_dense_bit(words: &mut [u64], token_id: u32) {
 }
 
 fn finalize_constraint(mut constraint: Constraint) -> Constraint {
+    constraint.json_u_prefix_token_id = constraint
+        .token_bytes
+        .iter()
+        .find_map(|(&token_id, bytes)| (bytes.as_slice() == b"\\u").then_some(token_id));
     constraint.rebuild_runtime_caches();
     constraint
 }
@@ -745,6 +749,7 @@ fn compile_prepared_with_profile(
             original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),
             internal_token_to_tokens: internal_ids.vocab_tokens.internal_to_originals_vecs(),
             eos_token_id: vocab.eos_token_id,
+            json_u_prefix_token_id: None,
             token_bytes,
             internal_token_bytes,
             token_bytes_dense: Vec::new(),
