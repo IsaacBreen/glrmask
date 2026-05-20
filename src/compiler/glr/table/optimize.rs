@@ -49,21 +49,9 @@ struct StackEffectVisitKey {
     frame: StackEffectFrame,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct DelayedStackShiftKey {
-    origin_state: u32,
-    effects: Vec<GuardedStackShift>,
-}
-
 #[derive(Clone)]
 struct StackEffectResult {
     effects: Vec<GuardedStackShift>,
-    origin_dependent: bool,
-}
-
-#[derive(Clone, Copy)]
-struct DelayedStackShiftState {
-    state: u32,
     origin_dependent: bool,
 }
 
@@ -238,13 +226,6 @@ impl GLRTable {
         let mut subset_to_state: FxHashMap<Vec<u32>, u32> = (0..self.num_states)
             .map(|state| (vec![state], state))
             .collect();
-        let mut delayed_stack_shift_states: FxHashMap<TableRowKey, u32> = FxHashMap::default();
-        let mut origin_independent_delayed_stack_shift_effect_states: FxHashMap<
-            Vec<GuardedStackShift>,
-            Option<u32>,
-        > = FxHashMap::default();
-        let mut delayed_stack_shift_effect_states: FxHashMap<DelayedStackShiftKey, Option<u32>> =
-            FxHashMap::default();
         let mut failed_subsets: FxHashSet<Vec<u32>> = FxHashSet::default();
         let mut dirty_original_states: BTreeSet<u32> = BTreeSet::new();
 
@@ -285,9 +266,6 @@ impl GLRTable {
                         tid,
                         &action,
                         &mut constituent_sets,
-                        &mut delayed_stack_shift_states,
-                        &mut origin_independent_delayed_stack_shift_effect_states,
-                        &mut delayed_stack_shift_effect_states,
                         &mut stack_effect_memo,
                         &mut subset_to_state,
                         &mut failed_subsets,
@@ -1648,25 +1626,12 @@ fn stack_effect_action(table: &GLRTable, mut effects: Vec<GuardedStackShift>) ->
     Some(Action::GuardedStackShifts(effects))
 }
 
-fn effects_can_be_delayed(effects: &[GuardedStackShift]) -> bool {
-    effects.len() > 1
-        && effects.iter().all(|effect| effect.pop > 0 && !effect.pushes.is_empty())
-        && effects.iter().any(|effect| effect.guards.is_empty())
-}
-
 fn try_inline_action_to_stack_shifts(
-    table: &mut GLRTable,
+    table: &GLRTable,
     predecessors: &[BTreeSet<u32>],
     state: u32,
     tid: TerminalID,
     action: &Action,
-    constituent_sets: &mut Vec<BTreeSet<u32>>,
-    delayed_stack_shift_states: &mut FxHashMap<TableRowKey, u32>,
-    origin_independent_delayed_stack_shift_effect_states: &mut FxHashMap<
-        Vec<GuardedStackShift>,
-        Option<u32>,
-    >,
-    delayed_stack_shift_effect_states: &mut FxHashMap<DelayedStackShiftKey, Option<u32>>,
     stack_effect_memo: &mut FxHashMap<StackEffectKey, Option<StackEffectResult>>,
 ) -> Option<Action> {
     let Action::Split {
@@ -1699,25 +1664,6 @@ fn try_inline_action_to_stack_shifts(
     .effects;
     if effects.is_empty() {
         return None;
-    }
-    if effects_can_be_delayed(&effects) {
-        if effects.iter().any(|effect| effect.pop == 0) {
-            return None;
-        }
-        if let Some(delay_state) = try_create_delayed_stack_shift_state(
-            table,
-            predecessors,
-            state,
-            &effects,
-            constituent_sets,
-            delayed_stack_shift_states,
-            origin_independent_delayed_stack_shift_effect_states,
-            delayed_stack_shift_effect_states,
-            stack_effect_memo,
-            0,
-        ) {
-            return Some(Action::Shift(delay_state.state, true));
-        }
     }
     stack_effect_action(table, effects)
 }
@@ -1962,160 +1908,6 @@ mod tests {
     }
 }
 
-fn try_create_delayed_stack_shift_state(
-    table: &mut GLRTable,
-    predecessors: &[BTreeSet<u32>],
-    origin_state: u32,
-    effects: &[GuardedStackShift],
-    constituent_sets: &mut Vec<BTreeSet<u32>>,
-    delayed_stack_shift_states: &mut FxHashMap<TableRowKey, u32>,
-    origin_independent_delayed_stack_shift_effect_states: &mut FxHashMap<
-        Vec<GuardedStackShift>,
-        Option<u32>,
-    >,
-    delayed_stack_shift_effect_states: &mut FxHashMap<DelayedStackShiftKey, Option<u32>>,
-    stack_effect_memo: &mut FxHashMap<StackEffectKey, Option<StackEffectResult>>,
-    depth: u32,
-) -> Option<DelayedStackShiftState> {
-    if depth >= 8 || effects.len() <= 1 || effects.iter().any(|effect| effect.pop == 0 || effect.pushes.is_empty()) {
-        return None;
-    }
-
-    let mut normalized_effects = effects.to_vec();
-    normalize_guarded_effects(&mut normalized_effects);
-    if normalized_effects.len() <= 1
-        || normalized_effects
-            .iter()
-            .any(|effect| effect.pop == 0 || effect.pushes.is_empty())
-    {
-        return None;
-    }
-    if let Some(cached) = origin_independent_delayed_stack_shift_effect_states.get(&normalized_effects) {
-        return cached.map(|state| DelayedStackShiftState {
-            state,
-            origin_dependent: false,
-        });
-    }
-    let effect_key = DelayedStackShiftKey {
-        origin_state,
-        effects: normalized_effects,
-    };
-    // This cache is per stable collapse iteration. A delayed-state row is a pure
-    // expansion of its normalized guarded effects plus the origin/predecessor
-    // context, so identical requests can reuse the already materialized state.
-    if let Some(cached) = delayed_stack_shift_effect_states.get(&effect_key) {
-        return cached.map(|state| DelayedStackShiftState {
-            state,
-            origin_dependent: true,
-        });
-    }
-    let effects = effect_key.effects.as_slice();
-
-    let mut terminals = Vec::new();
-    for effect in effects {
-        let top = *effect.pushes.last()?;
-        for terminal in table.action.get(top as usize)?.keys() {
-            terminals.push(terminal);
-        }
-    }
-    terminals.sort_unstable();
-    terminals.dedup();
-
-    let mut row = ActionRow::default();
-    let mut origin_dependent = false;
-    for terminal in terminals {
-        let mut composed = Vec::new();
-        for effect in effects {
-            let top = *effect.pushes.last()?;
-            let Some(action) = table.action[top as usize].get(&terminal).cloned() else {
-                continue;
-            };
-            let effect_result = stack_effects_for_action(
-                table,
-                predecessors,
-                origin_state,
-                terminal,
-                top,
-                &action,
-                StackEffectFrame {
-                    pop: effect.pop,
-                    pushes: effect.pushes.clone(),
-                    guards: effect.guards.clone(),
-                },
-                &mut FxHashSet::default(),
-                stack_effect_memo,
-            )?;
-            origin_dependent |= effect_result.origin_dependent;
-            composed.extend(effect_result.effects);
-        }
-        normalize_guarded_effects(&mut composed);
-        let action = if effects_can_be_delayed(&composed) {
-            if let Some(next_state) = try_create_delayed_stack_shift_state(
-                table,
-                predecessors,
-                origin_state,
-                &composed,
-                constituent_sets,
-                delayed_stack_shift_states,
-                origin_independent_delayed_stack_shift_effect_states,
-                delayed_stack_shift_effect_states,
-                stack_effect_memo,
-                depth + 1,
-            ) {
-                origin_dependent |= next_state.origin_dependent;
-                Action::Shift(next_state.state, true)
-            } else {
-                stack_effect_action(table, composed)?
-            }
-        } else {
-            stack_effect_action(table, composed)?
-        };
-        row.insert(terminal, action);
-    }
-
-    if row.is_empty() {
-        if origin_dependent {
-            delayed_stack_shift_effect_states.insert(effect_key, None);
-        } else {
-            origin_independent_delayed_stack_shift_effect_states.insert(effect_key.effects, None);
-        }
-        return None;
-    }
-
-    let empty_goto = GotoRow::default();
-    let key = row_key(&row, &empty_goto);
-    // Delayed stack-shift states always have empty goto rows, so identical
-    // rows are equivalent to the later identical-row merge and can be reused.
-    if let Some(&state) = delayed_stack_shift_states.get(&key) {
-        if origin_dependent {
-            delayed_stack_shift_effect_states.insert(effect_key, Some(state));
-        } else {
-            origin_independent_delayed_stack_shift_effect_states
-                .insert(effect_key.effects, Some(state));
-        }
-        return Some(DelayedStackShiftState {
-            state,
-            origin_dependent,
-        });
-    }
-
-    let state = table.num_states;
-    table.num_states += 1;
-    table.action.push(row);
-    table.goto.push(GotoRow::default());
-    constituent_sets.push(BTreeSet::from([state]));
-    delayed_stack_shift_states.insert(key, state);
-    if origin_dependent {
-        delayed_stack_shift_effect_states.insert(effect_key, Some(state));
-    } else {
-        origin_independent_delayed_stack_shift_effect_states.insert(effect_key.effects, Some(state));
-    }
-    Some(DelayedStackShiftState {
-        state,
-        origin_dependent,
-    })
-}
-
 fn try_inline_unit_reductions_for_cell(
     table: &mut GLRTable,
     predecessors: &[BTreeSet<u32>],
@@ -2123,12 +1915,6 @@ fn try_inline_unit_reductions_for_cell(
     tid: TerminalID,
     action: &Action,
     constituent_sets: &mut Vec<BTreeSet<u32>>,
-    delayed_stack_shift_states: &mut FxHashMap<TableRowKey, u32>,
-    origin_independent_delayed_stack_shift_effect_states: &mut FxHashMap<
-        Vec<GuardedStackShift>,
-        Option<u32>,
-    >,
-    delayed_stack_shift_effect_states: &mut FxHashMap<DelayedStackShiftKey, Option<u32>>,
     stack_effect_memo: &mut FxHashMap<StackEffectKey, Option<StackEffectResult>>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
@@ -2139,10 +1925,6 @@ fn try_inline_unit_reductions_for_cell(
         state,
         tid,
           action,
-            constituent_sets,
-            delayed_stack_shift_states,
-            origin_independent_delayed_stack_shift_effect_states,
-            delayed_stack_shift_effect_states,
             stack_effect_memo,
       ) {
         return Ok(Some(CellUpdate::Set(action)));
