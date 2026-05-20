@@ -45,6 +45,8 @@ pub(crate) struct TerminalDwaPhaseProfile {
     pub(crate) id_map_ms: f64,
     pub(crate) terminal_dwa_ms: f64,
     pub(crate) compact_ms: f64,
+    pub(crate) split_terminal_dwa_total_ms: f64,
+    pub(crate) global_merge_ms: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +65,8 @@ impl TerminalDwaPhaseProfile {
         self.id_map_ms += other.id_map_ms;
         self.terminal_dwa_ms += other.terminal_dwa_ms;
         self.compact_ms += other.compact_ms;
+        self.split_terminal_dwa_total_ms += other.split_terminal_dwa_total_ms;
+        self.global_merge_ms += other.global_merge_ms;
     }
 }
 

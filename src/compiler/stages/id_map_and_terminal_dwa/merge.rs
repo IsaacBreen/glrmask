@@ -113,10 +113,16 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         return input;
     }
 
+    let total_started_at = Instant::now();
+
+    let build_unified_global_id_map_started_at = Instant::now();
     let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
     let (global_id_map, direct_local_to_global_token_maps) =
         build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
+    let build_unified_global_id_map_ms =
+        build_unified_global_id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let remap_and_union_started_at = Instant::now();
     let mut global_nwa = NWA::new(
         global_id_map.num_tsids(),
         global_id_map.max_internal_token_id(),
@@ -144,14 +150,28 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         global_body = global_nwa.union_in_place(&nwa, &global_body);
     }
     global_nwa.set_start_states(global_body.start_states);
+    let remap_and_union_ms = remap_and_union_started_at.elapsed().as_secs_f64() * 1000.0;
+    let nwa_states_before_determinize = global_nwa.num_states();
+    let nwa_transitions_before_determinize = global_nwa.num_transitions();
 
+    let determinize_started_at = Instant::now();
     let det = determinize(&global_nwa)
         .expect("merge terminal NWA determinization failed");
+    let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
+    let det_states = det.num_states();
+    let det_transitions = det.num_transitions();
 
-    let dwa = if minimize_merged_terminal_dwa_enabled() {
+    let minimize_enabled = minimize_merged_terminal_dwa_enabled();
+    let minimize_started_at = Instant::now();
+    let dwa = if minimize_enabled {
         minimize(&det)
     } else {
         det.clone()
+    };
+    let minimize_ms = if minimize_enabled {
+        minimize_started_at.elapsed().as_secs_f64() * 1000.0
+    } else {
+        0.0
     };
     let mut mapped_dwa = MappedArtifact::new(dwa, global_id_map);
     let profiling = compile_profile_enabled();
@@ -174,6 +194,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     };
     let after_compact_stats = profiling.then(|| mapped_dwa.artifact().stats());
     let after_compact_range_counts = profiling.then(|| mapped_dwa.interned_range_counts());
+    let total_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
     let (dwa, id_map) = mapped_dwa.into_parts();
 
     if profiling {
@@ -184,6 +205,24 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         let after_compact_stats = after_compact_stats.unwrap();
         let after_compact_range_counts = after_compact_range_counts.unwrap();
         let profile_stats = compact_report.and_then(|report| report.profile_stats);
+        eprintln!(
+            "[glrmask/profile][terminal_dwa_global_merge] inputs={} build_unified_global_id_map_ms={:.3} remap_and_union_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} compact_ms={:.3} total_ms={:.3} nwa_states_before_determinize={} nwa_transitions_before_determinize={} det_states={} det_transitions={} dwa_states_before_compact={} dwa_transitions_before_compact={} dwa_states_after_compact={} dwa_transitions_after_compact={}",
+            inputs.len(),
+            build_unified_global_id_map_ms,
+            remap_and_union_ms,
+            determinize_ms,
+            minimize_ms,
+            compact_ms,
+            total_ms,
+            nwa_states_before_determinize,
+            nwa_transitions_before_determinize,
+            det_states,
+            det_transitions,
+            before_compact_stats.states,
+            before_compact_stats.transitions,
+            after_compact_stats.states,
+            after_compact_stats.transitions,
+        );
         eprintln!(
             "[glrmask/profile][merged_terminal_dwa] minimize_enabled={} compact_enabled={} states_before_compact={} transitions_before_compact={} interned_ranges_before_compact={} token_ranges_before_compact={} states_after_compact={} transitions_after_compact={} interned_ranges_after_compact={} token_ranges_after_compact={} tsids_before_compact={} tsids_after_compact={} tokens_before_compact={} tokens_after_compact={} compact_ms={:.3}",
             minimize_merged_terminal_dwa_enabled(),
@@ -209,6 +248,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         dwa,
         profile: TerminalDwaPhaseProfile {
             compact_ms,
+            global_merge_ms: total_ms,
             ..TerminalDwaPhaseProfile::default()
         },
     }

@@ -512,8 +512,9 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     let num_tokenizer_states = tokenizer.num_states() as usize;
     let max_token_id = vocab.max_token_id();
 
+    let did_global_merge = pairs.len() > 1;
     let merge_started_at = Instant::now();
-    let (merged, global_merge_profile) = if pairs.len() == 1 {
+    let (merged, global_merge_profile) = if !did_global_merge {
         // Single partition — already compacted by partition merge. Skip redundant global compact.
         (
             pairs.into_iter().next().unwrap(),
@@ -528,6 +529,9 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
     profile.add_assign(dominant_partition_profile);
     profile.add_assign(global_merge_profile);
+    profile.global_merge_ms = if did_global_merge { merge_ms } else { 0.0 };
+    let split_terminal_dwa_total_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
+    profile.split_terminal_dwa_total_ms = split_terminal_dwa_total_ms;
 
     if compile_profile_enabled() {
         let partition_detail: String = sub_vocabs
@@ -545,15 +549,16 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             .collect::<Vec<_>>()
             .join(" ");
         eprintln!(
-            "[glrmask/profile][split_terminal_dwa] partition_vocab_ms={:.3} {} global_merge_ms={:.3} accounted_id_map_ms={:.3} accounted_terminal_dwa_ms={:.3} accounted_compact_ms={:.3} accounted_total_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][split_terminal_dwa] partition_vocab_ms={:.3} {} global_merge_ms={:.3} split_terminal_dwa_total_ms={:.3} accounted_id_map_ms={:.3} accounted_terminal_dwa_ms={:.3} accounted_compact_ms={:.3} accounted_total_ms={:.3} total_ms={:.3}",
             partition_vocab_ms,
             partition_detail,
             merge_ms,
+            split_terminal_dwa_total_ms,
             profile.id_map_ms,
             profile.terminal_dwa_ms,
             profile.compact_ms,
             profile.total_ms(),
-            total_started_at.elapsed().as_secs_f64() * 1000.0,
+            split_terminal_dwa_total_ms,
         );
     }
 

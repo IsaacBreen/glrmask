@@ -541,6 +541,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
             id_map_ms,
             terminal_dwa_ms: terminal_build_ms,
             compact_ms,
+            ..TerminalDwaPhaseProfile::default()
         },
     })
 }

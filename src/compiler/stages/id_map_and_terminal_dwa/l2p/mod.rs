@@ -779,6 +779,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 + determinize_ms
                 + minimize_ms,
             compact_ms: 0.0,
+            ..TerminalDwaPhaseProfile::default()
         },
     })
 }
