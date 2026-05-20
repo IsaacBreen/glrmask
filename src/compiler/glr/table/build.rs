@@ -15,6 +15,7 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     let t2 = std::time::Instant::now();
     table.merge_identical_rows();
     table.collapse_sr_unit_reductions_with_compatible_gotos();
+    table.prune_unreachable_states();
     table.merge_identical_rows();
     let merge_ms = t2.elapsed().as_secs_f64() * 1000.0;
 

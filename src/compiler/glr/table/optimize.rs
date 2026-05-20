@@ -23,18 +23,35 @@ struct TableRowKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum StackEffectActionKey {
+    Shift(u32, bool),
+    StackShifts(Vec<StackShift>),
+    GuardedStackShifts(Vec<GuardedStackShift>),
+    Reduce(NonterminalID, u32),
+    Split,
+    Accept,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct StackEffectKey {
     origin_state: u32,
     state: u32,
     tid: TerminalID,
-    action: Action,
+    action: StackEffectActionKey,
+    frame: StackEffectFrame,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StackEffectVisitKey {
+    state: u32,
+    tid: TerminalID,
+    action_tag: u8,
     frame: StackEffectFrame,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct DelayedStackShiftKey {
     origin_state: u32,
-    depth: u32,
     effects: Vec<GuardedStackShift>,
 }
 
@@ -133,6 +150,66 @@ impl GLRTable {
                 .collect();
             self.num_states = kept.len() as u32;
         }
+    }
+
+    pub(super) fn prune_unreachable_states(&mut self) {
+        if self.num_states == 0 {
+            return;
+        }
+
+        let mut reachable = vec![false; self.num_states as usize];
+        let mut stack = vec![0u32];
+        reachable[0] = true;
+
+        while let Some(state) = stack.pop() {
+            for action in self.action[state as usize].values() {
+                push_action_targets(action, &mut reachable, &mut stack);
+            }
+            for &(target, _) in self.goto[state as usize].values() {
+                push_reachable_state(target, &mut reachable, &mut stack);
+            }
+        }
+
+        if reachable.iter().all(|&is_reachable| is_reachable) {
+            return;
+        }
+
+        let mut mapping = vec![0u32; self.num_states as usize];
+        let mut kept = Vec::new();
+        for (state, &is_reachable) in reachable.iter().enumerate() {
+            if is_reachable {
+                mapping[state] = kept.len() as u32;
+                kept.push(state as u32);
+            }
+        }
+
+        self.action = kept
+            .iter()
+            .map(|&state| {
+                self.action[state as usize]
+                    .iter()
+                    .map(|(terminal, action)| (terminal, remap_action_targets(action, &mapping)))
+                    .collect()
+            })
+            .collect();
+        self.goto = kept
+            .iter()
+            .map(|&state| {
+                self.goto[state as usize]
+                    .iter()
+                    .map(|(&nonterminal, &(target, replace))| {
+                        (nonterminal, (mapping[target as usize], replace))
+                    })
+                    .collect()
+            })
+            .collect();
+        self.forwarded_shifts = self.forwarded_shifts
+            .iter()
+            .filter_map(|&(state, terminal)| {
+                reachable[state as usize].then_some((mapping[state as usize], terminal))
+            })
+            .collect();
+        self.num_states = kept.len() as u32;
     }
 
     /// Collapse unit reductions by inlining their destination actions.
@@ -713,6 +790,47 @@ fn row_key(
     }
 }
 
+fn push_reachable_state(state: u32, reachable: &mut [bool], stack: &mut Vec<u32>) {
+    let Some(slot) = reachable.get_mut(state as usize) else {
+        return;
+    };
+    if !*slot {
+        *slot = true;
+        stack.push(state);
+    }
+}
+
+fn push_action_targets(action: &Action, reachable: &mut [bool], stack: &mut Vec<u32>) {
+    match action {
+        Action::Shift(target, _) => push_reachable_state(*target, reachable, stack),
+        Action::StackShifts(shifts) => {
+            for shift in shifts {
+                for &state in &shift.pushes {
+                    push_reachable_state(state, reachable, stack);
+                }
+            }
+        }
+        Action::GuardedStackShifts(shifts) => {
+            for shift in shifts {
+                for guard in &shift.guards {
+                    for &state in &guard.states {
+                        push_reachable_state(state, reachable, stack);
+                    }
+                }
+                for &state in &shift.pushes {
+                    push_reachable_state(state, reachable, stack);
+                }
+            }
+        }
+        Action::Reduce(_, _) | Action::Accept => {}
+        Action::Split { shift, .. } => {
+            if let Some((target, _)) = shift {
+                push_reachable_state(*target, reachable, stack);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CellUpdate {
     Set(Action),
@@ -1204,6 +1322,30 @@ fn frame_to_guarded_shift(frame: StackEffectFrame) -> GuardedStackShift {
     }
 }
 
+fn stack_effect_action_key(action: &Action) -> StackEffectActionKey {
+    match action {
+        Action::Shift(target, replace) => StackEffectActionKey::Shift(*target, *replace),
+        Action::StackShifts(shifts) => StackEffectActionKey::StackShifts(shifts.clone()),
+        Action::GuardedStackShifts(shifts) => {
+            StackEffectActionKey::GuardedStackShifts(shifts.clone())
+        }
+        Action::Reduce(nt, len) => StackEffectActionKey::Reduce(*nt, *len),
+        Action::Split { .. } => StackEffectActionKey::Split,
+        Action::Accept => StackEffectActionKey::Accept,
+    }
+}
+
+fn stack_effect_action_tag(action: &Action) -> u8 {
+    match action {
+        Action::Shift(..) => 0,
+        Action::StackShifts(_) => 1,
+        Action::GuardedStackShifts(_) => 2,
+        Action::Reduce(..) => 3,
+        Action::Split { .. } => 4,
+        Action::Accept => 5,
+    }
+}
+
 fn apply_reduce_to_frame(
     table: &GLRTable,
     predecessors: &[BTreeSet<u32>],
@@ -1304,29 +1446,26 @@ fn stack_effects_for_action(
     state: u32,
     action: &Action,
     frame: StackEffectFrame,
-    visiting: &mut BTreeSet<(u32, TerminalID, u8, u32, Vec<u32>, Vec<StackShiftGuard>)>,
+    visiting: &mut FxHashSet<StackEffectVisitKey>,
     memo: &mut FxHashMap<StackEffectKey, Option<Vec<GuardedStackShift>>>,
 ) -> Option<Vec<GuardedStackShift>> {
     let memo_key = StackEffectKey {
         origin_state,
         state,
         tid,
-        action: action.clone(),
+        action: stack_effect_action_key(action),
         frame: frame.clone(),
     };
     if let Some(cached) = memo.get(&memo_key) {
         return cached.clone();
     }
 
-    let action_tag = match action {
-        Action::Shift(..) => 0,
-        Action::StackShifts(_) => 1,
-        Action::GuardedStackShifts(_) => 2,
-        Action::Reduce(..) => 3,
-        Action::Split { .. } => 4,
-        Action::Accept => 5,
+    let key = StackEffectVisitKey {
+        state,
+        tid,
+        action_tag: stack_effect_action_tag(action),
+        frame: frame.clone(),
     };
-    let key = (state, tid, action_tag, frame.pop, frame.pushes.clone(), frame.guards.clone());
     if !visiting.insert(key.clone()) {
         return None;
     }
@@ -1504,7 +1643,7 @@ fn try_inline_action_to_stack_shifts(
             pushes: Vec::new(),
             guards: Vec::new(),
         },
-        &mut BTreeSet::new(),
+        &mut FxHashSet::default(),
         stack_effect_memo,
     )?;
     if effects.is_empty() {
@@ -1797,7 +1936,6 @@ fn try_create_delayed_stack_shift_state(
     }
     let effect_key = DelayedStackShiftKey {
         origin_state,
-        depth,
         effects: normalized_effects,
     };
     // This cache is per stable collapse iteration. A delayed-state row is a pure
@@ -1808,13 +1946,15 @@ fn try_create_delayed_stack_shift_state(
     }
     let effects = effect_key.effects.as_slice();
 
-    let mut terminals = BTreeSet::new();
+    let mut terminals = Vec::new();
     for effect in effects {
         let top = *effect.pushes.last()?;
         for terminal in table.action.get(top as usize)?.keys() {
-            terminals.insert(terminal);
+            terminals.push(terminal);
         }
     }
+    terminals.sort_unstable();
+    terminals.dedup();
 
     let mut row = ActionRow::default();
     for terminal in terminals {
@@ -1836,7 +1976,7 @@ fn try_create_delayed_stack_shift_state(
                     pushes: effect.pushes.clone(),
                     guards: effect.guards.clone(),
                 },
-                &mut BTreeSet::new(),
+                &mut FxHashSet::default(),
                 stack_effect_memo,
             )?);
         }
@@ -1880,12 +2020,12 @@ fn try_create_delayed_stack_shift_state(
     let state = table.num_states;
     table.num_states += 1;
     table.action.push(row);
-      table.goto.push(GotoRow::default());
-      constituent_sets.push(BTreeSet::from([state]));
-      delayed_stack_shift_states.insert(key, state);
-      delayed_stack_shift_effect_states.insert(effect_key, Some(state));
-      Some(state)
-  }
+    table.goto.push(GotoRow::default());
+    constituent_sets.push(BTreeSet::from([state]));
+    delayed_stack_shift_states.insert(key, state);
+    delayed_stack_shift_effect_states.insert(effect_key, Some(state));
+    Some(state)
+}
 
 fn try_inline_unit_reductions_for_cell(
     table: &mut GLRTable,
