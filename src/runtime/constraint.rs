@@ -472,6 +472,7 @@ impl Constraint {
         let derived_piece_started_at = profile.then(std::time::Instant::now);
         self.all_tokens_buf_mask = self.compute_all_tokens_buf_mask();
         let all_tokens_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        self.json_escape_prefix_buf_mask = self.compute_json_escape_prefix_buf_mask();
         let derived_piece_started_at = profile.then(std::time::Instant::now);
         self.heavy_token_dense_masks = self.compute_heavy_token_dense_masks();
         let heavy_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -677,6 +678,26 @@ impl Constraint {
             }
         }
         combined.into_boxed_slice()
+    }
+
+    pub(crate) fn token_starts_json_escape_prefix(bytes: &[u8]) -> bool {
+        bytes.len() >= 2
+            && bytes[0] == b'\\'
+            && matches!(bytes[1], b'"' | b'\\' | b'b' | b'f' | b'n' | b'r' | b't')
+    }
+
+    fn compute_json_escape_prefix_buf_mask(&self) -> Box<[u32]> {
+        let mut mask = vec![0u32; self.mask_len()];
+        for (&token_id, bytes) in self.token_bytes.iter() {
+            if Self::token_starts_json_escape_prefix(bytes) {
+                let word = token_id as usize / 32;
+                let bit = token_id as usize % 32;
+                if let Some(slot) = mask.get_mut(word) {
+                    *slot |= 1u32 << bit;
+                }
+            }
+        }
+        mask.into_boxed_slice()
     }
 
     fn compute_word_group_prefix_buf_masks(&self) -> Vec<Box<[u32]>> {
@@ -2314,4 +2335,20 @@ impl Constraint {
         }
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Constraint;
+
+    #[test]
+    fn json_escape_prefix_predicate_matches_supported_short_escapes() {
+        for bytes in [b"\\\"".as_slice(), b"\\\\".as_slice(), b"\\b".as_slice(), b"\\f".as_slice(), b"\\n".as_slice(), b"\\r".as_slice(), b"\\t".as_slice()] {
+            assert!(Constraint::token_starts_json_escape_prefix(bytes));
+        }
+
+        for bytes in [b"\\u".as_slice(), b"\\x".as_slice(), b"\\".as_slice(), b"abc".as_slice(), b"".as_slice()] {
+            assert!(!Constraint::token_starts_json_escape_prefix(bytes));
+        }
+    }
 }

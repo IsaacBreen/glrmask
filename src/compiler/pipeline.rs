@@ -756,6 +756,7 @@ fn compile_prepared_with_profile(
             internal_token_to_tokens: internal_ids.vocab_tokens.internal_to_originals_vecs(),
             eos_token_id: vocab.eos_token_id,
             json_u_prefix_token_id: None,
+            json_escape_prefix_buf_mask: Box::new([]),
             token_bytes,
             internal_token_bytes,
             token_bytes_dense: Vec::new(),

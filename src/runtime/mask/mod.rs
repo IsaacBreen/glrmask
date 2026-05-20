@@ -533,23 +533,12 @@ impl<'a> ConstraintState<'a> {
             return;
         }
 
-        let mut saw_json_escape_prefix = false;
-        for_each_set_token_bit(buf, |candidate_id| {
-            if saw_json_escape_prefix {
-                return;
-            }
-            let Some(bytes) = self.constraint.token_bytes.get(&candidate_id) else {
-                return;
-            };
-            if bytes.len() < 2 || bytes[0] != b'\\' {
-                return;
-            }
-            if matches!(bytes[1], b'"' | b'\\' | b'b' | b'f' | b'n' | b'r' | b't') {
-                saw_json_escape_prefix = true;
-            }
-        });
+        let has_json_escape_prefix = buf
+            .iter()
+            .zip(self.constraint.json_escape_prefix_buf_mask.iter())
+            .any(|(mask_word, escape_word)| (*mask_word & *escape_word) != 0);
 
-        if saw_json_escape_prefix {
+        if has_json_escape_prefix {
             set_token_bit(buf, token_id);
         }
     }
