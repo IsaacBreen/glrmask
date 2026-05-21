@@ -1655,15 +1655,16 @@ fn try_inline_action_to_stack_shifts(
     action: &Action,
     stack_effect_memo: &mut FxHashMap<StackEffectKey, Option<StackEffectResult>>,
 ) -> Option<Action> {
-    let Action::Split {
-        reduces,
-        accept: false,
-        ..
-    } = action
-    else {
-        return None;
+    let has_reductions = match action {
+        Action::Reduce(..) => true,
+        Action::Split {
+            reduces,
+            accept: false,
+            ..
+        } => !reduces.is_empty(),
+        _ => false,
     };
-    if reduces.is_empty() {
+    if !has_reductions {
         return None;
     }
 

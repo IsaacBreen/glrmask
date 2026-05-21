@@ -265,21 +265,35 @@ impl<'a> Lowerer<'a> {
     ) -> ImportResult<GrammarExpr> {
         let mut builder = ExprNfaBuilder::new();
         let mut states = vec![[0u32; 2]; items.len() + 1];
+        let mut separator_states = vec![0u32; items.len() + 1];
         states[0][0] = builder.start_state();
         states[0][1] = builder.add_state();
+        separator_states[0] = builder.add_state();
         for state_pair in states.iter_mut().skip(1) {
             state_pair[0] = builder.add_state();
             state_pair[1] = builder.add_state();
         }
+        for separator_state in separator_states.iter_mut().skip(1) {
+            *separator_state = builder.add_state();
+        }
 
         for (index, item) in items.iter().enumerate() {
-            let separator_pair = seq(vec![self.item_separator_expr(), item.pair.clone()]);
             if !item.required {
                 builder.add_epsilon(states[index][0], states[index + 1][0]);
                 builder.add_epsilon(states[index][1], states[index + 1][1]);
+                builder.add_epsilon(separator_states[index], separator_states[index + 1]);
             }
             builder.add_transition(states[index][0], item.pair.clone(), states[index + 1][1]);
-            builder.add_transition(states[index][1], separator_pair, states[index + 1][1]);
+            builder.add_transition(
+                states[index][1],
+                self.item_separator_expr(),
+                separator_states[index],
+            );
+            builder.add_transition(
+                separator_states[index],
+                item.pair.clone(),
+                states[index + 1][1],
+            );
         }
 
         builder.set_accepting(states[items.len()][0]);

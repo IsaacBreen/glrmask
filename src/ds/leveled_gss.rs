@@ -1648,6 +1648,45 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
             inner: new_interface(new_lower(children, false), self.acc),
         })
     }
+
+    pub fn into_gss_after_popping_and_pushing_single_branches<'a, I>(
+        mut self,
+        n: usize,
+        targets: I,
+    ) -> Option<LeveledGSS<T, A>>
+    where
+        I: IntoIterator<Item = &'a T>,
+        T: 'a,
+    {
+        self.flush_pending();
+        if self.pop(n) != 0 {
+            return None;
+        }
+
+        let base = if self.values.is_empty() {
+            self.next
+        } else {
+            new_segment(self.values, self.next)
+        };
+        let base_depth = base.max_depth();
+
+        let mut children: Children<T, Lower<T>> = CompactMap::new();
+        for target in targets {
+            if children.get(target).is_none() {
+                children.insert(target.clone(), CompactOrdMap::unit(base_depth, base.clone()));
+            }
+        }
+
+        if children.is_empty() {
+            return Some(LeveledGSS {
+                inner: new_interface(base, self.acc),
+            });
+        }
+
+        Some(LeveledGSS {
+            inner: new_interface(new_lower(children, false), self.acc),
+        })
+    }
 }
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> PartialEq for LeveledGSS<T, A> {
@@ -1996,6 +2035,19 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     {
         self.try_virtual_stack()?
             .into_gss_after_popping_and_pushing_branches(pop, pushes)
+    }
+
+    pub fn apply_shared_pop_push_single_branches<'a, I>(
+        &self,
+        pop: usize,
+        targets: I,
+    ) -> Option<Self>
+    where
+        I: IntoIterator<Item = &'a T>,
+        T: 'a,
+    {
+        self.try_virtual_stack()?
+            .into_gss_after_popping_and_pushing_single_branches(pop, targets)
     }
 
     pub fn apply_guarded_stack_effects_to_single_concrete_path<'a, I, G>(
@@ -4309,6 +4361,23 @@ mod tests {
             .unwrap();
         let actual = gss
             .apply_shared_pop_push_branches(2, pushes.iter().map(|push| push.as_slice()))
+            .unwrap();
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.to_stacks(), expected.to_stacks());
+    }
+
+    #[test]
+    fn apply_shared_pop_push_single_branches_deduplicates_targets() {
+        let gss = LeveledGSS::from_single_stack(vec![10_u32, 20, 30, 40], TestAcc(1));
+        let targets = [60_u32, 70, 60];
+
+        let expected = LeveledGSS::from_stacks(&[
+            (vec![10_u32, 20, 60], TestAcc(1)),
+            (vec![10_u32, 20, 70], TestAcc(1)),
+        ]);
+        let actual = gss
+            .apply_shared_pop_push_single_branches(2, targets.iter())
             .unwrap();
 
         assert_eq!(actual, expected);

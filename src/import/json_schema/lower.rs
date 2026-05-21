@@ -23,6 +23,10 @@ pub(crate) const JSON_NUMBER_RULE: &str = "JSON_NUMBER";
 pub(crate) const JSON_BOOL_RULE: &str = "JSON_BOOL";
 pub(crate) const JSON_NULL_RULE: &str = "JSON_NULL";
 pub(crate) const JSON_ADDITIONAL_KEY_COLON_SHARED_RULE: &str = "JSON_ADDITIONAL_KEY_COLON_SHARED";
+pub(crate) const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE: &str =
+    "JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED";
+pub(crate) const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE: &str =
+    "json_additional_excluded_key_colon_shared";
 
 pub(crate) fn lower_document(
     document: &SchemaDocument,
@@ -42,6 +46,7 @@ pub(crate) struct Lowerer<'a> {
     pub(crate) shared_ap_literal_keys: BTreeSet<String>,
     pub(crate) shared_ap_patterns: Vec<String>,
     pub(crate) shared_ap_base_rule: Option<String>,
+    pub(crate) shared_ap_excluded_rule: Option<String>,
     pub(crate) shared_ap_pattern_rules: BTreeMap<String, String>,
     pub(crate) shared_pattern_overlap_literal_rules: BTreeMap<String, String>,
     pub(crate) shared_pattern_appearance_rules: BTreeMap<(String, Vec<String>), String>,
@@ -70,6 +75,7 @@ impl<'a> Lowerer<'a> {
             shared_ap_literal_keys,
             shared_ap_patterns,
             shared_ap_base_rule: None,
+            shared_ap_excluded_rule: None,
             shared_ap_pattern_rules: BTreeMap::new(),
             shared_pattern_overlap_literal_rules: BTreeMap::new(),
             shared_pattern_appearance_rules: BTreeMap::new(),

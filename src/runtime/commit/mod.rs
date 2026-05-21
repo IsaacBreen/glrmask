@@ -503,6 +503,17 @@ fn apply_single_top_action_fast(
         }
         Action::StackShifts(shifts) => {
             if let Some(first) = shifts.first()
+                && shifts
+                    .iter()
+                    .all(|shift| shift.pop == first.pop && shift.pushes.len() == 1)
+                && let Some(shifted) = gss.apply_shared_pop_push_single_branches(
+                    first.pop as usize,
+                    shifts.iter().map(|shift| &shift.pushes[0]),
+                )
+            {
+                return Some(shifted);
+            }
+            if let Some(first) = shifts.first()
                 && !first.pushes.is_empty()
                 && shifts
                     .iter()
@@ -1117,7 +1128,12 @@ fn commit_bytes_direct_linear_fast_path(
 
     while offset < bytes.len() {
         let choose_start = profile.as_ref().map(|_| std::time::Instant::now());
-        let step = choose_direct_linear_step(constraint, &gss, &bytes[offset..], tokenizer_state)?;
+        let Some(step) = choose_direct_linear_step(constraint, &gss, &bytes[offset..], tokenizer_state) else {
+            if offset > 0 && profile.is_none() {
+                return Some(LinearFastPathResult::Continue { gss, offset });
+            }
+            return None;
+        };
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), choose_start) {
             profile.linear_fast_path_match_scan_ns += start.elapsed().as_nanos() as u64;
             profile.linear_fast_path_steps += 1;
@@ -2306,22 +2322,28 @@ fn commit_bytes_impl(
     if state.len() == 1 {
         let (&tokenizer_state, parser_gss) = state.iter().next().unwrap();
         if parser_gss.single_exclusive_top_value().is_some() {
-            if let Some(LinearFastPathResult::Complete(result)) =
-                commit_bytes_direct_linear_fast_path(
-                    constraint,
-                    parser_gss.clone(),
-                    bytes,
-                    tokenizer_state,
-                    None,
-                )
-            {
+            if let Some(result) = commit_bytes_direct_linear_fast_path(
+                constraint,
+                parser_gss.clone(),
+                bytes,
+                tokenizer_state,
+                None,
+            ) {
                 match result {
-                    Ok(final_gss) => {
+                    LinearFastPathResult::Complete(result) => match result {
+                        Ok(final_gss) => {
+                            state.clear();
+                            state.insert(constraint.tokenizer.initial_state(), final_gss);
+                            return Ok(());
+                        }
+                        Err(err) => return Err(err),
+                    },
+                    LinearFastPathResult::Continue { gss, offset } => {
                         state.clear();
-                        state.insert(constraint.tokenizer.initial_state(), final_gss);
-                        return Ok(());
+                        state.insert(constraint.tokenizer.initial_state(), gss);
+                        return commit_bytes_impl(constraint, state, &bytes[offset..], bufs);
                     }
-                    Err(err) => return Err(err),
+                    LinearFastPathResult::Restart => {}
                 }
             }
         }
