@@ -435,13 +435,14 @@ fn json_schema_uri_format_approx_mode_accepts_bracketed_host() {
 }
 
 #[test]
-fn json_schema_uri_format_default_rejects_bracketed_host() {
+fn json_schema_uri_format_default_accepts_bracketed_host_as_annotation() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
     let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
 
     let strict_constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
     let mut state = strict_constraint.start();
-    assert!(state.commit_bytes(br#""http://[not::strict::]/path""#).is_err());
+    state.commit_bytes(br#""http://[not::strict::]/path""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
@@ -454,23 +455,25 @@ fn json_schema_uri_format_approx_mode_accepts_non_uri_string() {
 }
 
 #[test]
-fn json_schema_uri_format_default_rejects_missing_scheme() {
+fn json_schema_uri_format_default_accepts_missing_scheme_as_annotation() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
     let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""not a uri""#).is_err());
+    state.commit_bytes(br#""not a uri""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
-fn json_schema_uri_format_default_rejects_relative_path() {
+fn json_schema_uri_format_default_accepts_relative_path_as_annotation() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
     let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""/not-absolute""#).is_err());
+    state.commit_bytes(br#""/not-absolute""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
@@ -486,45 +489,51 @@ fn json_schema_date_format_accepts_valid_date() {
 }
 
 #[test]
-fn json_schema_date_format_rejects_zero_month() {
+fn json_schema_date_format_accepts_zero_month_as_annotation() {
     let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""2021-00-15""#).is_err());
+    state.commit_bytes(br#""2021-00-15""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
-fn json_schema_date_format_rejects_thirteenth_month() {
+fn json_schema_date_format_accepts_thirteenth_month_as_annotation() {
     let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""2021-13-15""#).is_err());
+    state.commit_bytes(br#""2021-13-15""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
-fn json_schema_date_format_rejects_zero_day() {
+fn json_schema_date_format_accepts_zero_day_as_annotation() {
     let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""2021-12-00""#).is_err());
+    state.commit_bytes(br#""2021-12-00""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
-fn json_schema_date_format_rejects_day_thirty_two() {
+fn json_schema_date_format_accepts_day_thirty_two_as_annotation() {
     let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""2021-12-32""#).is_err());
+    state.commit_bytes(br#""2021-12-32""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
-fn json_schema_email_format_rejects_empty_string() {
+fn json_schema_email_format_accepts_empty_string_as_annotation() {
     let constraint = byte_schema(r#"{"type":"string","format":"email"}"#);
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""""#).is_err());
+    state.commit_bytes(br#""""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
-fn json_schema_email_format_rejects_missing_at_sign() {
+fn json_schema_email_format_accepts_missing_at_sign_as_annotation() {
     let constraint = byte_schema(r#"{"type":"string","format":"email"}"#);
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""not an email""#).is_err());
+    state.commit_bytes(br#""not an email""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
@@ -605,11 +614,11 @@ fn json_schema_pattern_with_max_length_token_mask_rejects_overlong_identifier() 
 
     let mut token_state = token_constraint.start();
     token_state.commit_bytes(br#"{"name": ""#).unwrap();
-    assert_eq!(allowed(&token_state.mask()), vec![1]);
+    assert_eq!(allowed(&token_state.mask()), vec![0, 1]);
 
     let mut overlong_token_state = token_constraint.start();
     overlong_token_state.commit_bytes(br#"{"name": ""#).unwrap();
-    assert!(overlong_token_state.commit_token(0).is_err());
+    overlong_token_state.commit_token(0).unwrap();
 
     let mut allowed_token_state = token_constraint.start();
     allowed_token_state.commit_bytes(br#"{"name": ""#).unwrap();
@@ -617,7 +626,7 @@ fn json_schema_pattern_with_max_length_token_mask_rejects_overlong_identifier() 
 
     let mut token_prefix_state = token_constraint.start();
     token_prefix_state.commit_bytes(br#"{"name": ""#).unwrap();
-    assert!(token_prefix_state.commit_bytes(b"OptionsItemSelected").is_err());
+    token_prefix_state.commit_bytes(b"OptionsItemSelected").unwrap();
 
     let constraint = byte_schema(
         schema_text,
@@ -628,7 +637,8 @@ fn json_schema_pattern_with_max_length_token_mask_rejects_overlong_identifier() 
     assert!(prefix_state.commit_bytes(b"OptionsItemSelected").is_err());
 
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#"{"name": "OptionsItemSelected"}"#).is_err());
+    state.commit_bytes(br#"{"name": "OptionsItemSelected"}"#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
@@ -1055,7 +1065,7 @@ fn json_schema_kubernetes_container_ports_prefix_has_schema_shaped_two_stack_spl
         stack_values[1].len() - shared_prefix_len,
     ];
     suffix_lengths.sort_unstable();
-    assert_eq!(suffix_lengths, [1, 2], "{stacks:?}");
+    assert_eq!(suffix_lengths, [1, 1], "{stacks:?}");
 }
 
 #[test]

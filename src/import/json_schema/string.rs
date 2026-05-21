@@ -1,19 +1,71 @@
 use std::collections::BTreeSet;
 
 use regex::Regex;
+use regex_syntax::hir::{Class, Hir, HirKind, Literal, Look, Repetition};
+use regex_syntax::Parser;
 
 use crate::import::ast::GrammarExpr;
 
 use super::ast::StringSchema;
 use super::error::{ImportResult, SchemaImportError};
-use super::formats::lookup_string_format;
 use super::lower::{
-    choice, lit, lit_bytes, never, r, seq, Lowerer,
-    JSON_ADDITIONAL_KEY_COLON_SHARED_RULE, JSON_STRING_CHAR_RULE, JSON_STRING_RULE,
+    choice, lit, lit_bytes, never, r, seq, Lowerer, JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
+    JSON_STRING_CHAR_RULE, JSON_STRING_RULE,
 };
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_string(&mut self, schema: &StringSchema) -> ImportResult<GrammarExpr> {
+        let should_terminalize_length = schema.max_length.is_none_or(|max_length| {
+            !self.should_split_bounded_string(schema.min_length, max_length)
+        });
+        if schema.pattern.is_some()
+            || ((schema.min_length != 0 || schema.max_length.is_some()) && should_terminalize_length)
+        {
+            let expr = self.lower_constrained_string_terminal_expr(schema)?;
+            let name = self.fresh_rule_name("json_string_constrained");
+            self.add_terminal_rule(&name, expr);
+            return Ok(r(&name));
+        }
+        self.lower_string_expr(schema)
+    }
+
+    fn lower_constrained_string_terminal_expr(
+        &mut self,
+        schema: &StringSchema,
+    ) -> ImportResult<GrammarExpr> {
+        let base_schema = StringSchema {
+            min_length: if schema.pattern.is_some() { 0 } else { schema.min_length },
+            max_length: if schema.pattern.is_some() {
+                None
+            } else {
+                schema.max_length
+            },
+            pattern: None,
+            format: None,
+        };
+        let mut expr = self.lower_string_expr(&base_schema)?;
+        let mut constraints = Vec::new();
+
+        if let Some(pattern) = &schema.pattern {
+            constraints.push(quoted_string_body_regex(&string_pattern_as_body_regex(pattern)?));
+        }
+
+        for (index, constraint) in constraints.into_iter().enumerate() {
+            if index > 0 {
+                let name = self.fresh_rule_name("json_string_constrained_part");
+                self.add_terminal_rule(&name, expr);
+                expr = r(&name);
+            }
+            expr = GrammarExpr::Intersect {
+                expr: Box::new(expr),
+                intersect: Box::new(GrammarExpr::RawRegex(constraint)),
+            };
+        }
+
+        Ok(expr)
+    }
+
+    fn lower_string_expr(&mut self, schema: &StringSchema) -> ImportResult<GrammarExpr> {
         if schema.max_length.is_some_and(|max| max < schema.min_length) {
             return Ok(never());
         }
@@ -21,36 +73,18 @@ impl<'a> Lowerer<'a> {
         if schema.min_length == 0
             && schema.max_length.is_none()
             && schema.pattern.is_none()
-            && schema.format.is_none()
         {
             return Ok(r(JSON_STRING_RULE));
         }
 
         if schema.pattern.is_none()
-            && schema.format.is_none()
             && let Some(max_length) = schema.max_length
             && self.should_split_bounded_string(schema.min_length, max_length)
         {
             return Ok(self.lower_split_bounded_string(schema.min_length, max_length));
         }
 
-        let mut body = self.string_body_for_length(schema.min_length, schema.max_length);
-        if let Some(pattern) = &schema.pattern {
-            body = GrammarExpr::Intersect {
-                expr: Box::new(body),
-                intersect: Box::new(GrammarExpr::RawRegex(string_pattern_as_body_regex(pattern))),
-            };
-        }
-        if let Some(format) = &schema.format {
-            if let Some(regex) = lookup_string_format(format) {
-                body = GrammarExpr::Intersect {
-                    expr: Box::new(body),
-                    intersect: Box::new(GrammarExpr::RawRegex(regex.to_string())),
-                };
-            } else {
-                return Err(SchemaImportError::new(format!("Unknown format: {format}")));
-            }
-        }
+        let body = self.string_body_for_length(schema.min_length, schema.max_length);
 
         Ok(seq(vec![lit("\""), body, lit("\"")]))
     }
@@ -187,7 +221,11 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn lower_literal_key_colon(&mut self, key: &str) -> GrammarExpr {
         let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
-        seq(vec![lit_bytes(encoded.into_bytes()), self.key_separator_expr()])
+        lit_bytes(format!("{encoded}: ").into_bytes())
+    }
+
+    fn lower_pattern_key_colon_expr(&mut self, pattern: &str) -> ImportResult<GrammarExpr> {
+        Ok(GrammarExpr::RawRegex(pattern_key_colon_regex(pattern)?))
     }
 
     pub(crate) fn lower_pattern_key_colon_terminal(
@@ -197,11 +235,11 @@ impl<'a> Lowerer<'a> {
         if let Some(rule_name) = self.shared_ap_pattern_rules.get(pattern) {
             return Ok(r(rule_name));
         }
-        let key_colon = GrammarExpr::RawRegex(pattern_key_colon_regex(pattern));
         let global_overlaps = self.pattern_overlapping_literal_keys(pattern)?;
         let expr = if global_overlaps.is_empty() {
-            key_colon
+            self.lower_pattern_key_colon_expr(pattern)?
         } else {
+            let key_colon = GrammarExpr::RawRegex(pattern_key_colon_regex(pattern)?);
             let excluded = global_overlaps
                 .iter()
                 .map(|key| self.lower_literal_key_colon(key))
@@ -343,7 +381,7 @@ impl<'a> Lowerer<'a> {
             .map(|key| self.lower_literal_key_colon(key))
             .collect::<Vec<_>>();
         for pattern in self.shared_ap_patterns.clone() {
-            excluded.push(GrammarExpr::RawRegex(pattern_key_colon_regex(&pattern)));
+            excluded.push(GrammarExpr::RawRegex(pattern_key_colon_regex(&pattern)?));
         }
 
         self.add_terminal_rule(
@@ -432,52 +470,280 @@ impl<'a> Lowerer<'a> {
     }
 }
 
-fn string_pattern_as_body_regex(pattern: &str) -> String {
-    if let Some(stripped) = strip_simple_anchors(pattern) {
-        rewrite_simple_json_string_body_pattern(stripped)
-    } else if let Some(stripped) = pattern.strip_prefix('^') {
-        format!("(?:{stripped}).*")
-    } else if let Some(stripped) = pattern.strip_suffix('$') {
-        format!(".*(?:{stripped})")
-    } else {
-        format!(".*({pattern}).*")
-    }
+fn string_pattern_as_body_regex(pattern: &str) -> ImportResult<String> {
+    let hir = Parser::new()
+        .parse(pattern)
+        .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")))?;
+    let (hir, anchored_start, anchored_end) = strip_outer_anchors(hir);
+    let lowered = lower_decoded_regex_hir_to_json_body_regex(&hir)?;
+    let string_char = json_string_body_char_regex();
+    Ok(match (anchored_start, anchored_end) {
+        (true, true) => lowered,
+        (true, false) => format!("(?:{lowered})(?:{string_char})*"),
+        (false, true) => format!("(?:{string_char})*(?:{lowered})"),
+        (false, false) => format!("(?:{string_char})*(?:{lowered})(?:{string_char})*"),
+    })
 }
 
-fn pattern_key_colon_regex(pattern: &str) -> String {
-    let string_char = r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\bfnrt])"#;
-    let body = if let Some(stripped) = strip_simple_anchors(pattern) {
-        if stripped == ".*" {
-            format!("(?:{string_char})*")
-        } else {
-            rewrite_simple_json_string_body_pattern(stripped)
-        }
-    } else if let Some(stripped) = pattern.strip_prefix('^') {
-        format!("(?:{stripped})(?:{string_char})*")
-    } else if let Some(stripped) = pattern.strip_suffix('$') {
-        format!("(?:{string_char})*(?:{stripped})")
-    } else {
-        format!("(?:{string_char})*(?:{pattern})(?:{string_char})*")
+fn quoted_string_body_regex(body_regex: &str) -> String {
+    format!(r#""(?:{body_regex})""#)
+}
+
+fn pattern_key_colon_regex(pattern: &str) -> ImportResult<String> {
+    let body = string_pattern_as_body_regex(pattern)?;
+    Ok(format!(r#""{body}"(?:: )"#))
+}
+
+fn strip_outer_anchors(hir: Hir) -> (Hir, bool, bool) {
+    let mut parts = match hir.kind() {
+        HirKind::Concat(parts) => parts.clone(),
+        HirKind::Look(look) if is_start_look(*look) => return (Hir::empty(), true, false),
+        HirKind::Look(look) if is_end_look(*look) => return (Hir::empty(), false, true),
+        _ => return (hir, false, false),
     };
-    format!(r#""{body}"(?:: )"#)
-}
 
-fn strip_simple_anchors(pattern: &str) -> Option<&str> {
-    let without_start = pattern.strip_prefix('^')?;
-    without_start.strip_suffix('$')
-}
-
-fn rewrite_simple_json_string_body_pattern(pattern: &str) -> String {
-    match pattern {
-        "\"" => r#"\\\""#.to_string(),
-        _ => pattern.to_string(),
+    let anchored_start = parts
+        .first()
+        .is_some_and(|part| matches!(part.kind(), HirKind::Look(look) if is_start_look(*look)));
+    if anchored_start {
+        parts.remove(0);
     }
+    let anchored_end = parts
+        .last()
+        .is_some_and(|part| matches!(part.kind(), HirKind::Look(look) if is_end_look(*look)));
+    if anchored_end {
+        parts.pop();
+    }
+    (Hir::concat(parts), anchored_start, anchored_end)
+}
+
+fn is_start_look(look: Look) -> bool {
+    matches!(look, Look::Start | Look::StartLF | Look::StartCRLF)
+}
+
+fn is_end_look(look: Look) -> bool {
+    matches!(look, Look::End | Look::EndLF | Look::EndCRLF)
+}
+
+fn lower_decoded_regex_hir_to_json_body_regex(hir: &Hir) -> ImportResult<String> {
+    Ok(match hir.kind() {
+        HirKind::Empty => String::new(),
+        HirKind::Literal(Literal(bytes)) => {
+            let literal = std::str::from_utf8(bytes).map_err(|error| {
+                SchemaImportError::new(format!(
+                    "string pattern literal is not valid UTF-8 after parsing: {error}"
+                ))
+            })?;
+            literal
+                .chars()
+                .map(json_body_char_regex_for_decoded_char)
+                .collect::<Vec<_>>()
+                .join("")
+        }
+        HirKind::Class(class) => lower_decoded_class_to_json_body_regex(class),
+        HirKind::Look(look) if is_start_look(*look) || is_end_look(*look) => String::new(),
+        HirKind::Look(look) => {
+            return Err(SchemaImportError::new(format!(
+                "unsupported zero-width assertion in string pattern: {look:?}"
+            )));
+        }
+        HirKind::Repetition(repetition) => lower_decoded_repetition_to_json_body_regex(repetition)?,
+        HirKind::Capture(capture) => lower_decoded_regex_hir_to_json_body_regex(&capture.sub)?,
+        HirKind::Concat(parts) => parts
+            .iter()
+            .map(lower_decoded_regex_hir_to_json_body_regex)
+            .collect::<ImportResult<Vec<_>>>()?
+            .join(""),
+        HirKind::Alternation(parts) => {
+            let alternatives = parts
+                .iter()
+                .map(lower_decoded_regex_hir_to_json_body_regex)
+                .collect::<ImportResult<Vec<_>>>()?;
+            format!("(?:{})", alternatives.join("|"))
+        }
+    })
+}
+
+fn lower_decoded_repetition_to_json_body_regex(repetition: &Repetition) -> ImportResult<String> {
+    let sub = lower_decoded_regex_hir_to_json_body_regex(&repetition.sub)?;
+    let atom = format!("(?:{sub})");
+    Ok(match (repetition.min, repetition.max) {
+        (0, None) => format!("{atom}*"),
+        (1, None) => format!("{atom}+"),
+        (0, Some(1)) => format!("{atom}?"),
+        (min, Some(max)) if min == max => format!("{atom}{{{min}}}"),
+        (min, Some(max)) => format!("{atom}{{{min},{max}}}"),
+        (min, None) => format!("{atom}{{{min},}}"),
+    })
+}
+
+fn lower_decoded_class_to_json_body_regex(class: &Class) -> String {
+    if is_unicode_decimal_digit_class(class) {
+        return "[0-9]".to_string();
+    }
+
+    let mut raw_ranges = Vec::new();
+    match class {
+        Class::Unicode(class) => {
+            for range in class.ranges() {
+                if is_non_ascii_decimal_digit_range(range.start(), range.end()) {
+                    continue;
+                }
+                push_safe_raw_char_ranges(range.start(), range.end(), &mut raw_ranges);
+            }
+        }
+        Class::Bytes(class) => {
+            for range in class.ranges() {
+                let start = char::from(range.start());
+                let end = char::from(range.end());
+                push_safe_raw_char_ranges(start, end, &mut raw_ranges);
+            }
+        }
+    }
+
+    let mut alternatives = Vec::new();
+    if !raw_ranges.is_empty() {
+        alternatives.push(format!("[{}]", raw_ranges.join("")));
+    }
+    for ch in ['"', '\\', '\n', '\r', '\t', '\u{08}', '\u{0c}'] {
+        if decoded_class_contains(class, ch) {
+            alternatives.push(json_body_char_regex_for_decoded_char(ch));
+        }
+    }
+
+    match alternatives.len() {
+        0 => r"[^\s\S]".to_string(),
+        1 => alternatives.remove(0),
+        _ => format!("(?:{})", alternatives.join("|")),
+    }
+}
+
+fn is_non_ascii_decimal_digit_range(start: char, end: char) -> bool {
+    start != '0'
+        && start.is_numeric()
+        && end.is_numeric()
+}
+
+fn is_unicode_decimal_digit_class(class: &Class) -> bool {
+    let Class::Unicode(class) = class else {
+        return false;
+    };
+    let ranges = class.ranges();
+    if ranges.len() < 10 {
+        return false;
+    }
+    let Some(first) = ranges.first() else {
+        return false;
+    };
+    if first.start() != '0' || first.end() != '9' {
+        return false;
+    }
+    ranges.iter().all(|range| {
+        let start = u32::from(range.start());
+        let end = u32::from(range.end());
+        end >= start
+            && end - start == 9
+            && range.start().is_numeric()
+            && range.end().is_numeric()
+    })
+}
+
+fn push_safe_raw_char_ranges(start: char, end: char, output: &mut Vec<String>) {
+    let mut range_start = None;
+    let mut previous = None;
+    for codepoint in u32::from(start)..=u32::from(end) {
+        let Some(ch) = char::from_u32(codepoint) else {
+            continue;
+        };
+        if !is_safe_raw_json_string_char(ch) {
+            if let (Some(first), Some(last)) = (range_start.take(), previous.take()) {
+                output.push(regex_char_class_range(first, last));
+            }
+            continue;
+        }
+        if range_start.is_none() {
+            range_start = Some(ch);
+        }
+        previous = Some(ch);
+    }
+    if let (Some(first), Some(last)) = (range_start, previous) {
+        output.push(regex_char_class_range(first, last));
+    }
+}
+
+fn decoded_class_contains(class: &Class, ch: char) -> bool {
+    match class {
+        Class::Unicode(class) => class
+            .ranges()
+            .iter()
+            .any(|range| range.start() <= ch && ch <= range.end()),
+        Class::Bytes(class) => ch.is_ascii()
+            && class
+                .ranges()
+                .iter()
+                .any(|range| range.start() <= ch as u8 && ch as u8 <= range.end()),
+    }
+}
+
+fn regex_char_class_range(start: char, end: char) -> String {
+    let start = escape_regex_class_char(start);
+    let end = escape_regex_class_char(end);
+    if start == end {
+        start
+    } else {
+        format!("{start}-{end}")
+    }
+}
+
+fn escape_regex_class_char(ch: char) -> String {
+    match ch {
+        '\\' => r"\\".to_string(),
+        '-' => r"\-".to_string(),
+        ']' => r"\]".to_string(),
+        '^' => r"\^".to_string(),
+        _ => regex::escape(&ch.to_string()),
+    }
+}
+
+fn json_body_char_regex_for_decoded_char(ch: char) -> String {
+    let decoded = ch.to_string();
+    let encoded = serde_json::to_string(&decoded).unwrap_or_else(|_| "\"\"".to_string());
+    let body = encoded
+        .strip_prefix('"')
+        .and_then(|text| text.strip_suffix('"'))
+        .unwrap_or("");
+    regex::escape(body)
+}
+
+fn json_string_body_char_regex() -> &'static str {
+    r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\bfnrt])"#
+}
+
+fn is_safe_raw_json_string_char(ch: char) -> bool {
+    !matches!(ch, '"' | '\\' | '\u{00}'..='\u{1f}' | '\u{7f}')
 }
 
 pub(crate) fn property_name_matches_pattern(pattern: &str, property_name: &str) -> ImportResult<bool> {
     let encoded = serde_json::to_string(property_name).unwrap_or_else(|_| "\"\"".to_string());
     let body = encoded.strip_prefix('"').and_then(|text| text.strip_suffix('"')).unwrap_or("");
-    let regex = Regex::new(&format!(r#"^(?:{})$"#, string_pattern_as_body_regex(pattern)))
+    let body_regex = string_pattern_as_body_regex(pattern)?;
+    let regex = Regex::new(&format!(r#"^(?:{})$"#, body_regex))
         .map_err(|error| SchemaImportError::new(format!("invalid patternProperties regex {pattern:?}: {error}")))?;
     Ok(regex.is_match(body))
+}
+
+pub(crate) fn string_value_satisfies_schema(
+    value: &serde_json::Value,
+    schema: &StringSchema,
+) -> ImportResult<bool> {
+    let Some(text) = value.as_str() else {
+        return Ok(true);
+    };
+    if let Some(pattern) = &schema.pattern {
+        return Regex::new(pattern)
+            .map(|regex| regex.is_match(text))
+            .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")));
+    }
+    let length = text.chars().count();
+    Ok(length >= schema.min_length && schema.max_length.is_none_or(|max| length <= max))
 }

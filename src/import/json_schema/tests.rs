@@ -1,6 +1,7 @@
 use serde_json::json;
 
 use super::schema_to_named_grammar;
+use super::string::property_name_matches_pattern;
 use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar};
 use crate::grammar::glrm::to_glrm;
 
@@ -97,6 +98,61 @@ fn contains_exclude(expr: &GrammarExpr) -> bool {
     }
 }
 
+fn contains_intersect(expr: &GrammarExpr) -> bool {
+    match expr {
+        GrammarExpr::Intersect { .. } => true,
+        GrammarExpr::Grouped(inner)
+        | GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner) => contains_intersect(inner),
+        GrammarExpr::RepeatRange { expr, .. } => contains_intersect(expr),
+        GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => items.iter().any(contains_intersect),
+        GrammarExpr::SeparatedSequence { items, separator, .. } => {
+            items.iter().any(|(item, _)| contains_intersect(item)) || contains_intersect(separator)
+        }
+        GrammarExpr::Exclude { expr, exclude } => contains_intersect(expr) || contains_intersect(exclude),
+        GrammarExpr::Ref(_)
+        | GrammarExpr::Epsilon
+        | GrammarExpr::Literal(_)
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte
+        | GrammarExpr::ExprNFA(_) => false,
+    }
+}
+
+fn contains_ref_named(expr: &GrammarExpr, name: &str) -> bool {
+    match expr {
+        GrammarExpr::Ref(rule_name) => rule_name == name,
+        GrammarExpr::Grouped(inner)
+        | GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner) => contains_ref_named(inner, name),
+        GrammarExpr::RepeatRange { expr, .. } => contains_ref_named(expr, name),
+        GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
+            items.iter().any(|item| contains_ref_named(item, name))
+        }
+        GrammarExpr::SeparatedSequence { items, separator, .. } => {
+            items.iter().any(|(item, _)| contains_ref_named(item, name))
+                || contains_ref_named(separator, name)
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            contains_ref_named(expr, name) || contains_ref_named(exclude, name)
+        }
+        GrammarExpr::Intersect { expr, intersect } => {
+            contains_ref_named(expr, name) || contains_ref_named(intersect, name)
+        }
+        GrammarExpr::Epsilon
+        | GrammarExpr::Literal(_)
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte
+        | GrammarExpr::ExprNFA(_) => false,
+    }
+}
+
 #[test]
 fn closed_object_lowers_to_expr_nfa_body() {
     let schema = json!({
@@ -168,12 +224,37 @@ fn shared_additional_key_colon_terminal_is_emitted_once() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
     let count = grammar
         .rules
         .iter()
         .filter(|rule| rule.name == "JSON_ADDITIONAL_KEY_COLON_SHARED")
         .count();
     assert_eq!(count, 1);
+    assert!(glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn additional_properties_factoring_uses_shared_key_colon_terminal() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "outer": {
+                "type": "object",
+                "properties": {
+                    "comments": {"type": "string"},
+                    "contexts": {"type": "string"}
+                },
+                "additionalProperties": {"type": "string"}
+            }
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -232,7 +313,7 @@ fn legacy_tuple_items_use_additional_items_tail() {
 }
 
 #[test]
-fn string_length_and_pattern_lower_as_intersection() {
+fn string_pattern_lowers_as_terminal_pattern() {
     let schema = json!({
         "type": "string",
         "minLength": 2,
@@ -242,12 +323,22 @@ fn string_length_and_pattern_lower_as_intersection() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("& /[A-Za-z]+/"), "{glrm}");
+    assert!(glrm.contains("& /\"(?:(?:[A-Za-z])+)\"/"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
 #[test]
-fn string_format_lowers_as_regex_intersection() {
+fn decoded_string_patterns_are_matched_against_json_string_bodies() {
+    assert!(property_name_matches_pattern(r#"^/[^/]+$"#, "/abc").unwrap());
+    assert!(!property_name_matches_pattern(r#"^/[^/]+$"#, "/abc/def").unwrap());
+    assert!(property_name_matches_pattern("^\"$",
+        "\""
+    ).unwrap());
+    assert!(!property_name_matches_pattern("^\"$", "x").unwrap());
+}
+
+#[test]
+fn string_format_is_ignored_as_annotation() {
     let schema = json!({
         "type": "string",
         "format": "uuid"
@@ -255,7 +346,92 @@ fn string_format_lowers_as_regex_intersection() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("[0-9A-Fa-f]{8}"), "{glrm}");
+    assert!(!glrm.contains("[0-9A-Fa-f]{8}"), "{glrm}");
+    assert!(glrm.contains("JSON_STRING"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn string_pattern_takes_precedence_over_format() {
+    let schema = json!({
+        "type": "string",
+        "format": "uuid",
+        "pattern": "^abc$"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("& /\"(?:abc)\"/"), "{glrm}");
+    assert!(!glrm.contains("[0-9A-Fa-f]{8}"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn object_nonterminals_reference_terminalized_key_and_string_patterns() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "last_modification": {"type": "string", "maxLength": 32, "format": "date-time"},
+            "strings": {
+                "type": "object",
+                "patternProperties": {"^/": {"type": "string"}},
+                "additionalProperties": {"type": "string"}
+            }
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    for rule in grammar.rules.iter().filter(|rule| !rule.is_terminal) {
+        assert!(
+            !contains_intersect(&rule.expr),
+            "nonterminal {} contains intersect: {:?}",
+            rule.name,
+            rule.expr
+        );
+        assert!(
+            !contains_ref_named(&rule.expr, "JSON_STRING_CHAR"),
+            "nonterminal {} contains JSON_STRING_CHAR: {:?}",
+            rule.name,
+            rule.expr
+        );
+    }
+    assert!(
+        grammar
+            .rules
+            .iter()
+            .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
+    );
+    assert!(
+        grammar
+            .rules
+            .iter()
+            .any(|rule| rule.is_terminal && rule.name.starts_with("json_pattern_key_colon"))
+    );
+
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("\\\"last_modification\\\": "), "{glrm}");
+    assert!(!glrm.contains("\\\"last_modification\\\" JSON_KEY_SEPARATOR"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn overlapping_literal_and_pattern_keys_still_lower_with_shared_factoring() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "x-name": {"type": "string"}
+        },
+        "patternProperties": {
+            "^x-": {"type": "string"}
+        },
+        "additionalProperties": {"type": "string"}
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"), "{glrm}");
+    assert!(glrm.contains("\\\"x-name\\\": "), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -296,14 +472,14 @@ fn legacy_id_metadata_is_accepted() {
 }
 
 #[test]
-fn unknown_format_errors() {
+fn unknown_format_is_ignored_as_annotation() {
     let schema = json!({
         "type": "string",
         "format": "made-up"
     });
 
-    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
-    assert!(error.contains("Unknown format"), "{error}");
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
 }
 
 #[test]

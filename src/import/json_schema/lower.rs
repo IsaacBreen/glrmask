@@ -9,6 +9,7 @@ use super::ast::{
 };
 use super::config::JsonSchemaConfig;
 use super::error::{ImportResult, SchemaImportError};
+use super::string::string_value_satisfies_schema;
 
 pub(crate) const JSON_VALUE_RULE: &str = "json_value";
 pub(crate) const JSON_OBJECT_RULE: &str = "json_object";
@@ -234,7 +235,15 @@ impl<'a> Lowerer<'a> {
             return Ok(self.lower_json_literal(value));
         }
         if let Some(values) = &assertions.enum_values {
-            return Ok(choice(values.iter().map(|value| self.lower_json_literal(value)).collect()));
+            let values = if let Some(string_schema) = &assertions.string {
+                values
+                    .iter()
+                    .filter(|value| string_value_satisfies_schema(value, string_schema).unwrap_or(false))
+                    .collect::<Vec<_>>()
+            } else {
+                values.iter().collect::<Vec<_>>()
+            };
+            return Ok(choice(values.into_iter().map(|value| self.lower_json_literal(value)).collect()));
         }
 
         let selected_types = self.selected_types(schema, assertions)?;

@@ -1001,7 +1001,7 @@ mod tests {
         });
 
         let glrm = dump_json_schema_grammar_glrm(&schema.to_string()).unwrap();
-        assert!(glrm.contains("JSON_STRING - \"\\\"a\\\"\" - \"\\\"b\\\"\""), "{glrm}");
+        assert!(glrm.contains("JSON_STRING JSON_KEY_SEPARATOR - \"\\\"a\\\": \" - \"\\\"b\\\": \""), "{glrm}");
         assert!(!glrm.contains("__exact_sub_AP_SHARED_LITERAL_KEY_SET_result"), "{glrm}");
     }
 
@@ -1037,7 +1037,7 @@ mod tests {
         });
 
         let glrm = dump_json_schema_grammar_glrm(&schema.to_string()).unwrap();
-        assert!(glrm.contains("JSON_STRING - \"\\\"a\\\"\" - \"\\\"b\\\"\""), "{glrm}");
+        assert!(glrm.contains("JSON_STRING JSON_KEY_SEPARATOR - \"\\\"a\\\": \" - \"\\\"b\\\": \""), "{glrm}");
         assert!(!glrm.contains("__exact_sub_AP_SHARED_LITERAL_KEY_SET_result"), "{glrm}");
     }
 }

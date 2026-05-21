@@ -316,6 +316,7 @@ dependencies = [
  "range-set-blaze",
  "rayon",
  "regex",
+ "regex-syntax",
  "rustc-hash",
  "serde",
  "serde_json",
