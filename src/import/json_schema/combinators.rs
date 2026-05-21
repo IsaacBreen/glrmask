@@ -449,7 +449,7 @@ fn branch_with_siblings(branch: Schema, siblings: Option<Schema>) -> Schema {
     all_of_schema(branch, siblings)
 }
 
-fn try_merge_all_of_objects(branches: &[Schema]) -> Option<ObjectSchema> {
+pub(crate) fn try_merge_all_of_objects(branches: &[Schema]) -> Option<ObjectSchema> {
     let mut objects = branches.iter().map(plain_object_schema).collect::<Option<Vec<_>>>()?;
     let mut merged = objects.remove(0).clone();
     for object in objects {

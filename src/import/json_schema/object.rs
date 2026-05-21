@@ -7,7 +7,7 @@ use super::ast::{
     AdditionalProperties, ObjectSchema, PatternPropertySchema,
     PropertySchema, Schema, SchemaAssertions, SchemaKind, SchemaType,
 };
-use super::combinators::all_of_schema;
+use super::combinators::{all_of_schema, try_merge_all_of_objects};
 use super::error::{ImportResult, SchemaImportError};
 use super::lower::{
     choice, lit, r, seq, Lowerer, JSON_ARRAY_RULE, JSON_BOOL_RULE,
@@ -359,7 +359,6 @@ impl<'a> Lowerer<'a> {
             || assertions.number.is_some()
             || !assertions.any_of.is_empty()
             || !assertions.one_of.is_empty()
-            || !assertions.all_of.is_empty()
         {
             return Ok(None);
         }
@@ -370,9 +369,26 @@ impl<'a> Lowerer<'a> {
         }
         let include_untyped_non_object_alts = assertions.types.is_none();
 
-        let object = match &assertions.object {
-            Some(object) => object,
-            None => return Ok(None),
+        let merged_object;
+        let object = if !assertions.all_of.is_empty() {
+            if assertions.object.as_ref().is_some_and(|object| {
+                !object.properties.is_empty()
+                    || !object.required.is_empty()
+                    || !object.pattern_properties.is_empty()
+                    || !matches!(object.additional_properties, AdditionalProperties::AllowAny)
+            }) {
+                return Ok(None);
+            }
+            merged_object = match try_merge_all_of_objects(&assertions.all_of) {
+                Some(object) => object,
+                None => return Ok(None),
+            };
+            &merged_object
+        } else {
+            match &assertions.object {
+                Some(object) => object,
+                None => return Ok(None),
+            }
         };
         if !matches!(object.additional_properties, AdditionalProperties::Deny)
             || !object.pattern_properties.is_empty()

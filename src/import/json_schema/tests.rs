@@ -789,6 +789,45 @@ fn anyof_untyped_closed_object_variants_keep_non_object_alternatives() {
 }
 
 #[test]
+fn anyof_untyped_closed_object_variants_with_sibling_required_use_exact_variant_nfa() {
+    let schema = json!({
+        "required": ["image"],
+        "anyOf": [
+            {
+                "properties": {
+                    "image": {"type": "string"},
+                    "context": {"type": "string"}
+                },
+                "additionalProperties": false
+            },
+            {
+                "properties": {
+                    "image": {"type": "string"},
+                    "docker": {"type": "string"}
+                },
+                "additionalProperties": false
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    let start = start_expr(&grammar);
+    let GrammarExpr::Choice(alternatives) = start else {
+        panic!("expected start choice, got {start:?}");
+    };
+    assert_eq!(alternatives.len(), 6, "{start:?}");
+    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
+    assert!(glrm.contains("json_anyof_object_body"), "{glrm}");
+    assert!(glrm.contains("json_array"), "{glrm}");
+    assert!(glrm.contains("JSON_STRING"), "{glrm}");
+    assert!(glrm.contains("JSON_NUMBER"), "{glrm}");
+    assert!(glrm.contains("JSON_BOOL"), "{glrm}");
+    assert!(glrm.contains("JSON_NULL"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn anyof_explicit_object_variants_do_not_add_non_object_alternatives() {
     let schema = json!({
         "anyOf": [
