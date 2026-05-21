@@ -855,6 +855,60 @@ fn anyof_explicit_object_variants_do_not_add_non_object_alternatives() {
 }
 
 #[test]
+fn untyped_plain_object_assertions_keep_non_object_alternatives() {
+    let schema = json!({
+        "properties": {
+            "name": {"type": "string"}
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    let start = start_expr(&grammar);
+    let GrammarExpr::Choice(alternatives) = start else {
+        panic!("expected start choice, got {start:?}");
+    };
+    assert_eq!(alternatives.len(), 6, "{start:?}");
+    assert!(glrm.contains("json_closed_object_body"), "{glrm}");
+    assert!(glrm.contains("json_array"), "{glrm}");
+    assert!(glrm.contains("JSON_STRING"), "{glrm}");
+    assert!(glrm.contains("JSON_NUMBER"), "{glrm}");
+    assert!(glrm.contains("JSON_BOOL"), "{glrm}");
+    assert!(glrm.contains("JSON_NULL"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn explicit_plain_object_assertions_remain_object_only() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"}
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn untyped_object_and_array_assertions_do_not_take_plain_object_fallback() {
+    let schema = json!({
+        "properties": {
+            "name": {"type": "string"}
+        },
+        "items": {
+            "type": "string"
+        }
+    });
+
+    assert!(schema_to_named_grammar(&schema).is_err());
+}
+
+#[test]
 fn anyof_required_property_factoring_falls_back_for_unknown_required_name() {
     let schema = json!({
         "type": "object",

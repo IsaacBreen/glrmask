@@ -252,6 +252,22 @@ impl<'a> Lowerer<'a> {
             return Ok(choice(values.into_iter().map(|value| self.lower_json_literal(value)).collect()));
         }
 
+        if assertions.types.is_none()
+            && assertions.object.is_some()
+            && assertions.array.is_none()
+            && assertions.string.is_none()
+            && assertions.number.is_none()
+        {
+            return Ok(choice(vec![
+                self.lower_object(assertions.object.as_ref().unwrap())?,
+                r(JSON_ARRAY_RULE),
+                r(JSON_STRING_RULE),
+                r(JSON_NUMBER_RULE),
+                r(JSON_BOOL_RULE),
+                r(JSON_NULL_RULE),
+            ]));
+        }
+
         let selected_types = self.selected_types(schema, assertions)?;
         if selected_types.is_empty() {
             return Ok(r(JSON_VALUE_RULE));
