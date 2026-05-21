@@ -222,8 +222,20 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(crate) fn lower_literal_key_colon(&mut self, key: &str) -> GrammarExpr {
+        self.lower_literal_key_colon_with_prefix(b"", key)
+    }
+
+    pub(crate) fn lower_literal_key_colon_with_prefix(
+        &mut self,
+        prefix: &[u8],
+        key: &str,
+    ) -> GrammarExpr {
         let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
-        lit_bytes(format!("{encoded}: ").into_bytes())
+        let mut bytes = Vec::with_capacity(prefix.len() + encoded.len() + 2);
+        bytes.extend_from_slice(prefix);
+        bytes.extend_from_slice(encoded.as_bytes());
+        bytes.extend_from_slice(b": ");
+        lit_bytes(bytes)
     }
 
     fn lower_pattern_key_colon_expr(&mut self, pattern: &str) -> ImportResult<GrammarExpr> {

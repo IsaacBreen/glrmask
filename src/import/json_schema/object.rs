@@ -17,6 +17,7 @@ use super::string::property_name_matches_pattern;
 
 struct ObjectItem {
     pair: GrammarExpr,
+    separator_pair: GrammarExpr,
     required: bool,
     satisfies_any_group: bool,
     exclusive_group: bool,
@@ -145,17 +146,30 @@ impl<'a> Lowerer<'a> {
             .iter()
             .map(|property| {
                 let required = normalized.required.contains(&property.name);
-                self.lower_property_pair(property, &normalized.pattern_properties)
-                    .map(|pair| ObjectItem {
-                        pair,
-                        required,
-                        satisfies_any_group: any_required_names
-                            .is_some_and(|names| names.contains(&property.name)),
-                        exclusive_group: exclusive_group
-                            .is_some_and(|(names, _)| names.contains(&property.name)),
-                    })
+                self.lower_property_item(
+                    property,
+                    &normalized.pattern_properties,
+                    required,
+                    any_required_names
+                        .is_some_and(|names| names.contains(&property.name)),
+                    exclusive_group
+                        .is_some_and(|(names, _)| names.contains(&property.name)),
+                )
             })
             .collect::<ImportResult<Vec<_>>>()?;
+
+        // Keep the large-open ordered-prefix special case narrowly scoped so
+        // fixed-key continuations stay deterministic for that hotspot without
+        // changing ordinary fixed-object ExprNFA paths.
+        let use_large_optional_open_object_prefix_chain = normalized.pattern_properties.is_empty()
+            && normalized.required.is_empty()
+            && any_required_names.is_none()
+            && exclusive_group.is_none()
+            && matches!(
+                normalized.additional_properties,
+                AdditionalProperties::AllowAny | AdditionalProperties::Schema(_)
+            )
+            && normalized.properties.len() >= 16;
 
         if normalized.pattern_properties.is_empty() && !normalized.properties.is_empty() {
             let tail_pair = match &normalized.additional_properties {
@@ -172,6 +186,11 @@ impl<'a> Lowerer<'a> {
                     ]))
                 }
             };
+            if use_large_optional_open_object_prefix_chain {
+                if let Some(tail_pair_expr) = tail_pair {
+                    return self.lower_large_optional_open_object_fused_prefix_chain(&items, tail_pair_expr);
+                }
+            }
             return self.lower_fixed_object_body_exprnfa(
                 &items,
                 tail_pair,
@@ -218,8 +237,10 @@ impl<'a> Lowerer<'a> {
         }
 
         if !tail_pairs.is_empty() {
+            let pair = GrammarExpr::RepeatOne(Box::new(choice(tail_pairs)));
             items.push(ObjectItem {
-                pair: GrammarExpr::RepeatOne(Box::new(choice(tail_pairs))),
+                separator_pair: seq(vec![self.item_separator_expr(), pair.clone()]),
+                pair,
                 required: false,
                 satisfies_any_group: false,
                 exclusive_group: false,
@@ -579,12 +600,70 @@ impl<'a> Lowerer<'a> {
         Ok(seq(vec![lit("{"), r(&rule_name), lit("}")]))
     }
 
-    fn lower_property_pair(
+    fn lower_large_optional_open_object_fused_prefix_chain(
+        &mut self,
+        items: &[ObjectItem],
+        tail_pair_expr: GrammarExpr,
+    ) -> ImportResult<GrammarExpr> {
+        let mut prefix_rule_names: Vec<String> = Vec::with_capacity(items.len());
+        for end_exclusive in 1..=items.len() {
+            let mut alternatives = Vec::new();
+            for start in 0..end_exclusive {
+                if items[start..end_exclusive - 1].iter().any(|item| item.required) {
+                    continue;
+                }
+                if start == 0 {
+                    alternatives.push(items[end_exclusive - 1].pair.clone());
+                } else {
+                    alternatives.push(seq(vec![
+                        r(&prefix_rule_names[start - 1]),
+                        items[end_exclusive - 1].separator_pair.clone(),
+                    ]));
+                }
+            }
+            let rule_name = self.fresh_rule_name("json_open_object_prefix");
+            self.add_nonterminal_rule(&rule_name, choice(alternatives));
+            prefix_rule_names.push(rule_name);
+        }
+
+        let free_nonempty_rule = self.fresh_rule_name("json_open_object_free_nonempty");
+        self.add_nonterminal_rule(
+            &free_nonempty_rule,
+            seq(vec![
+                tail_pair_expr.clone(),
+                GrammarExpr::Repeat(Box::new(seq(vec![
+                    self.item_separator_expr(),
+                    tail_pair_expr,
+                ]))),
+            ]),
+        );
+
+        let mut body_alternatives = vec![GrammarExpr::Epsilon, r(&free_nonempty_rule)];
+        for (index, prefix_rule_name) in prefix_rule_names.iter().enumerate() {
+            if items[index + 1..].iter().any(|item| item.required) {
+                continue;
+            }
+            body_alternatives.push(r(prefix_rule_name));
+            body_alternatives.push(seq(vec![
+                r(prefix_rule_name),
+                self.item_separator_expr(),
+                r(&free_nonempty_rule),
+            ]));
+        }
+
+        Ok(seq(vec![lit("{"), choice(body_alternatives), lit("}")]))
+    }
+
+    fn lower_property_item(
         &mut self,
         property: &PropertySchema,
         pattern_properties: &[PatternPropertySchema],
-    ) -> ImportResult<GrammarExpr> {
+        required: bool,
+        satisfies_any_group: bool,
+        exclusive_group: bool,
+    ) -> ImportResult<ObjectItem> {
         let key = self.lower_literal_key_colon(&property.name);
+        let separator_key = self.lower_literal_key_colon_with_prefix(b", ", &property.name);
         let mut effective_schema = property.schema.clone();
         for pattern_property in pattern_properties {
             if property_matches_pattern(&pattern_property.pattern, &property.name)? {
@@ -593,7 +672,13 @@ impl<'a> Lowerer<'a> {
             }
         }
         let value = self.lower_schema(&effective_schema)?;
-        Ok(seq(vec![key, value]))
+        Ok(ObjectItem {
+            pair: seq(vec![key, value.clone()]),
+            separator_pair: seq(vec![separator_key, value]),
+            required,
+            satisfies_any_group,
+            exclusive_group,
+        })
     }
 
     fn object_with_required_synthetic_properties(
