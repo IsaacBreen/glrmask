@@ -14,17 +14,27 @@ impl<'a> Lowerer<'a> {
         if let Some((object, any_required_names)) = try_factor_required_property_any_of(assertions) {
             return self.lower_object_requiring_any_property(&object, &any_required_names);
         }
+
+        let siblings = sibling_assertion_schema(assertions);
+        let branches = assertions
+            .any_of
+            .iter()
+            .cloned()
+            .map(|branch| branch_with_siblings(branch, siblings.clone()))
+            .collect::<Vec<_>>();
+        if let Some(expr) = self.try_lower_closed_object_any_of_variants(&branches)? {
+            return Ok(expr);
+        }
+
         if let Some((object, exclusive_names, require_one)) =
             try_factor_closed_object_variant_any_of(assertions)
         {
             return self.lower_object_with_exclusive_properties(&object, &exclusive_names, require_one);
         }
 
-        let siblings = sibling_assertion_schema(assertions);
-        let alternatives = assertions
-            .any_of
+        let alternatives = branches
             .iter()
-            .map(|branch| self.lower_schema(&branch_with_siblings(branch.clone(), siblings.clone())))
+            .map(|branch| self.lower_schema(branch))
             .collect::<ImportResult<Vec<_>>>()?;
         Ok(choice(alternatives))
     }

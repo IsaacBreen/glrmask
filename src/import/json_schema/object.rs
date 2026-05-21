@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::grammar::expr_nfa::ExprNfaBuilder;
 use crate::import::ast::GrammarExpr;
@@ -9,7 +9,10 @@ use super::ast::{
 };
 use super::combinators::all_of_schema;
 use super::error::{ImportResult, SchemaImportError};
-use super::lower::{choice, lit, r, seq, Lowerer, JSON_VALUE_RULE};
+use super::lower::{
+    choice, lit, r, seq, Lowerer, JSON_ARRAY_RULE, JSON_BOOL_RULE,
+    JSON_NULL_RULE, JSON_NUMBER_RULE, JSON_STRING_RULE, JSON_VALUE_RULE,
+};
 use super::string::property_name_matches_pattern;
 
 struct ObjectItem {
@@ -17,6 +20,64 @@ struct ObjectItem {
     required: bool,
     satisfies_any_group: bool,
     exclusive_group: bool,
+}
+
+const ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES: usize = 4096;
+
+struct AnyOfFixedObjectItem {
+    key: String,
+    value_expr: GrammarExpr,
+    required: bool,
+}
+
+struct AnyOfFixedObjectVariant {
+    items: Vec<AnyOfFixedObjectItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct AnyOfFixedObjectState {
+    variant_idx: u16,
+    cursor: u16,
+    has_content: bool,
+}
+
+impl AnyOfFixedObjectVariant {
+    fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    fn advance_cursor(&self, cursor: usize, key: &str) -> Option<usize> {
+        let idx = self.items[cursor..]
+            .iter()
+            .position(|item| item.key == key)
+            .map(|offset| cursor + offset)?;
+        if self.items[cursor..idx].iter().any(|item| item.required) {
+            return None;
+        }
+        Some(idx + 1)
+    }
+
+    fn close_allowed(&self, cursor: usize) -> bool {
+        !self.items[cursor..].iter().any(|item| item.required)
+    }
+
+    fn legal_next_keys(&self, cursor: usize) -> Vec<&str> {
+        let mut keys = Vec::new();
+        for item in &self.items[cursor..] {
+            keys.push(item.key.as_str());
+            if item.required {
+                break;
+            }
+        }
+        keys
+    }
+
+    fn value_expr_for_key(&self, key: &str) -> Option<GrammarExpr> {
+        self.items
+            .iter()
+            .find(|item| item.key == key)
+            .map(|item| item.value_expr.clone())
+    }
 }
 
 impl<'a> Lowerer<'a> {
@@ -39,6 +100,32 @@ impl<'a> Lowerer<'a> {
         require_one: bool,
     ) -> ImportResult<GrammarExpr> {
         self.lower_object_internal(schema, None, Some((exclusive_names, require_one)))
+    }
+
+    pub(crate) fn try_lower_closed_object_any_of_variants(
+        &mut self,
+        branches: &[Schema],
+    ) -> ImportResult<Option<GrammarExpr>> {
+        if branches.len() < 2 {
+            return Ok(None);
+        }
+
+        let mut variants = Vec::with_capacity(branches.len());
+        let mut include_untyped_non_object_alts = false;
+        for branch in branches {
+            let Some((variant, branch_requires_untyped_non_object_alts)) =
+                self.collect_closed_any_of_object_variant(branch)?
+            else {
+                return Ok(None);
+            };
+            include_untyped_non_object_alts |= branch_requires_untyped_non_object_alts;
+            variants.push(variant);
+        }
+
+        self.lower_closed_any_of_object_variants_expr_nfa(
+            &variants,
+            include_untyped_non_object_alts,
+        )
     }
 
     fn lower_object_internal(
@@ -256,6 +343,174 @@ impl<'a> Lowerer<'a> {
         self.add_nonterminal_rule(&rule_name, body);
 
         Ok(seq(vec![lit("{"), r(&rule_name), lit("}")]))
+    }
+
+    fn collect_closed_any_of_object_variant(
+        &mut self,
+        branch: &Schema,
+    ) -> ImportResult<Option<(AnyOfFixedObjectVariant, bool)>> {
+        let SchemaKind::Assertions(assertions) = &branch.kind else {
+            return Ok(None);
+        };
+        if assertions.const_value.is_some()
+            || assertions.enum_values.is_some()
+            || assertions.array.is_some()
+            || assertions.string.is_some()
+            || assertions.number.is_some()
+            || !assertions.any_of.is_empty()
+            || !assertions.one_of.is_empty()
+            || !assertions.all_of.is_empty()
+        {
+            return Ok(None);
+        }
+        if let Some(types) = &assertions.types {
+            if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+                return Ok(None);
+            }
+        }
+        let include_untyped_non_object_alts = assertions.types.is_none();
+
+        let object = match &assertions.object {
+            Some(object) => object,
+            None => return Ok(None),
+        };
+        if !matches!(object.additional_properties, AdditionalProperties::Deny)
+            || !object.pattern_properties.is_empty()
+        {
+            return Ok(None);
+        }
+        if object
+            .required
+            .iter()
+            .any(|required_name| !object.properties.iter().any(|property| property.name == *required_name))
+        {
+            return Ok(None);
+        }
+
+        let mut items = Vec::with_capacity(object.properties.len());
+        for property in &object.properties {
+            items.push(AnyOfFixedObjectItem {
+                key: property.name.clone(),
+                value_expr: self.lower_schema(&property.schema)?,
+                required: object.required.contains(&property.name),
+            });
+        }
+
+        Ok(Some((
+            AnyOfFixedObjectVariant { items },
+            include_untyped_non_object_alts,
+        )))
+    }
+
+    fn add_expr_nfa_symbol_path(
+        builder: &mut ExprNfaBuilder,
+        from: u32,
+        symbols: Vec<GrammarExpr>,
+        to: u32,
+    ) {
+        if symbols.is_empty() {
+            builder.add_epsilon(from, to);
+            return;
+        }
+
+        let mut current = from;
+        let last = symbols.len() - 1;
+        for (index, symbol) in symbols.into_iter().enumerate() {
+            let next = if index == last { to } else { builder.add_state() };
+            builder.add_transition(current, symbol, next);
+            current = next;
+        }
+    }
+
+    fn lower_closed_any_of_object_variants_expr_nfa(
+        &mut self,
+        variants: &[AnyOfFixedObjectVariant],
+        include_untyped_non_object_alts: bool,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        if variants.is_empty() {
+            return Ok(None);
+        }
+
+        let mut builder = ExprNfaBuilder::new();
+        let accept = builder.add_state();
+        builder.set_accepting(accept);
+
+        let mut state_ids = BTreeMap::<AnyOfFixedObjectState, u32>::new();
+        let mut queue = VecDeque::<AnyOfFixedObjectState>::new();
+        for (variant_idx, _) in variants.iter().enumerate() {
+            let state = AnyOfFixedObjectState {
+                variant_idx: variant_idx as u16,
+                cursor: 0,
+                has_content: false,
+            };
+            let state_id = builder.add_state();
+            builder.add_epsilon(builder.start_state(), state_id);
+            state_ids.insert(state, state_id);
+            queue.push_back(state);
+        }
+
+        while let Some(state) = queue.pop_front() {
+            if state_ids.len() > ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES {
+                return Ok(None);
+            }
+
+            let state_id = state_ids[&state];
+            let variant = &variants[state.variant_idx as usize];
+            let cursor = state.cursor as usize;
+
+            if variant.close_allowed(cursor) {
+                builder.add_epsilon(state_id, accept);
+            }
+
+            for key in variant.legal_next_keys(cursor) {
+                let Some(next_cursor) = variant.advance_cursor(cursor, key) else {
+                    continue;
+                };
+                let Some(value_expr) = variant.value_expr_for_key(key) else {
+                    continue;
+                };
+
+                let next_state = AnyOfFixedObjectState {
+                    variant_idx: state.variant_idx,
+                    cursor: next_cursor as u16,
+                    has_content: true,
+                };
+                let next_state_id = if let Some(&existing) = state_ids.get(&next_state) {
+                    existing
+                } else {
+                    let id = builder.add_state();
+                    state_ids.insert(next_state, id);
+                    queue.push_back(next_state);
+                    id
+                };
+
+                let mut symbols = Vec::new();
+                if state.has_content {
+                    symbols.push(self.item_separator_expr());
+                }
+                symbols.push(self.lower_literal_key_colon(key));
+                symbols.push(value_expr);
+                Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, next_state_id);
+            }
+        }
+
+        let rule_name = self.fresh_rule_name("json_anyof_object_body");
+        let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
+        self.add_nonterminal_rule(&rule_name, body);
+
+        let object_expr = seq(vec![lit("{"), r(&rule_name), lit("}")]);
+        if include_untyped_non_object_alts {
+            return Ok(Some(choice(vec![
+                object_expr,
+                r(JSON_ARRAY_RULE),
+                r(JSON_STRING_RULE),
+                r(JSON_NUMBER_RULE),
+                r(JSON_BOOL_RULE),
+                r(JSON_NULL_RULE),
+            ])));
+        }
+
+        Ok(Some(object_expr))
     }
 
     fn lower_fixed_object_body_exprnfa_without_group(

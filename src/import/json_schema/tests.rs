@@ -635,7 +635,7 @@ fn anyof_closed_object_variants_factor_into_single_expr_nfa_body() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     assert!(!matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
-    assert_eq!(count_rules_with_prefix(&grammar, "json_closed_object_body"), 1);
+    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
     assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
     lower(&grammar).unwrap();
 }
@@ -685,7 +685,8 @@ fn anyof_closed_object_variant_factoring_falls_back_for_two_variant_properties()
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    assert!(!matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
     lower(&grammar).unwrap();
 }
 
@@ -713,7 +714,104 @@ fn anyof_closed_object_variant_factoring_falls_back_for_mismatched_common_schema
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    assert!(!matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn anyof_closed_object_variants_with_shared_required_prefix_use_exact_variant_nfa() {
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"},
+                    "b": {"type": "boolean"}
+                },
+                "required": ["a"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"},
+                    "c": {"type": "integer"}
+                },
+                "required": ["a", "c"],
+                "additionalProperties": false
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(!matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
+    assert!(glrm.contains("json_anyof_object_body"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn anyof_untyped_closed_object_variants_keep_non_object_alternatives() {
+    let schema = json!({
+        "anyOf": [
+            {
+                "properties": {
+                    "a": {"type": "string"}
+                },
+                "additionalProperties": false
+            },
+            {
+                "properties": {
+                    "b": {"type": "boolean"}
+                },
+                "additionalProperties": false
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    let start = start_expr(&grammar);
+    let GrammarExpr::Choice(alternatives) = start else {
+        panic!("expected start choice, got {start:?}");
+    };
+    assert_eq!(alternatives.len(), 6, "{start:?}");
+    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
+    assert!(glrm.contains("json_anyof_object_body"), "{glrm}");
+    assert!(glrm.contains("json_array"), "{glrm}");
+    assert!(glrm.contains("JSON_STRING"), "{glrm}");
+    assert!(glrm.contains("JSON_NUMBER"), "{glrm}");
+    assert!(glrm.contains("JSON_BOOL"), "{glrm}");
+    assert!(glrm.contains("JSON_NULL"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn anyof_explicit_object_variants_do_not_add_non_object_alternatives() {
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"}
+                },
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "b": {"type": "boolean"}
+                },
+                "additionalProperties": false
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
     lower(&grammar).unwrap();
 }
 
