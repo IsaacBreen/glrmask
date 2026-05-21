@@ -11,7 +11,7 @@ Find the first layer where `mask()`, `commit_token`, and `commit_bytes` diverge.
 
 ## Workflow
 
-1. Establish the oracle on the same prefix/token. Treat `commit_bytes` as the byte-level parser oracle until proven otherwise.
+1. Establish the local oracle on the same prefix/token. Treat `commit_bytes` as the byte-level parser oracle until proven otherwise, and treat external/ground-truth checker disagreements as comparison signals rather than final proof. Ask whether the discrepancy indicates a major glrmask problem, a regression from prior expected behavior, an accepted framework difference, or a limitation/bug in the checker.
 2. Before proposing any grammar, importer, or lowering change, classify the failure:
    - If `commit_bytes(token_bytes)` accepts but `mask()` or `commit_token(token_id)` rejects, the matched language is already correct. The bug is in mask/token construction, parser-DWA, terminal-DWA/id-map, possible-matches, runtime mask expansion, or token remapping. Do not "fix" it by changing grammar shape, terminal grouping, factoring, chunking, or lowering.
    - If `commit_bytes(token_bytes)` rejects and the token should be legal, then investigate source/importer/grammar semantics. Only then is a grammar or importer edit a candidate fix.
