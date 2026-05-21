@@ -16,11 +16,12 @@ struct ObjectItem {
     pair: GrammarExpr,
     required: bool,
     satisfies_any_group: bool,
+    exclusive_group: bool,
 }
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_object(&mut self, schema: &ObjectSchema) -> ImportResult<GrammarExpr> {
-        self.lower_object_internal(schema, None)
+        self.lower_object_internal(schema, None, None)
     }
 
     pub(crate) fn lower_object_requiring_any_property(
@@ -28,13 +29,23 @@ impl<'a> Lowerer<'a> {
         schema: &ObjectSchema,
         any_required_names: &BTreeSet<String>,
     ) -> ImportResult<GrammarExpr> {
-        self.lower_object_internal(schema, Some(any_required_names))
+        self.lower_object_internal(schema, Some(any_required_names), None)
+    }
+
+    pub(crate) fn lower_object_with_exclusive_properties(
+        &mut self,
+        schema: &ObjectSchema,
+        exclusive_names: &BTreeSet<String>,
+        require_one: bool,
+    ) -> ImportResult<GrammarExpr> {
+        self.lower_object_internal(schema, None, Some((exclusive_names, require_one)))
     }
 
     fn lower_object_internal(
         &mut self,
         schema: &ObjectSchema,
         any_required_names: Option<&BTreeSet<String>>,
+        exclusive_group: Option<(&BTreeSet<String>, bool)>,
     ) -> ImportResult<GrammarExpr> {
         let normalized = self.object_with_required_synthetic_properties(schema)?;
         let fixed_names = normalized
@@ -53,6 +64,8 @@ impl<'a> Lowerer<'a> {
                         required,
                         satisfies_any_group: any_required_names
                             .is_some_and(|names| names.contains(&property.name)),
+                        exclusive_group: exclusive_group
+                            .is_some_and(|(names, _)| names.contains(&property.name)),
                     })
             })
             .collect::<ImportResult<Vec<_>>>()?;
@@ -72,10 +85,15 @@ impl<'a> Lowerer<'a> {
                     ]))
                 }
             };
-            return self.lower_fixed_object_body_exprnfa(&items, tail_pair);
+            return self.lower_fixed_object_body_exprnfa(
+                &items,
+                tail_pair,
+                any_required_names.is_some(),
+                exclusive_group.is_some_and(|(_, require_one)| require_one),
+            );
         }
 
-        if any_required_names.is_some() {
+        if any_required_names.is_some() || exclusive_group.is_some() {
             return Err(SchemaImportError::new(
                 "grouped anyOf object factoring requires fixed object properties without patternProperties"
                     .to_string(),
@@ -121,6 +139,7 @@ impl<'a> Lowerer<'a> {
                 pair: GrammarExpr::RepeatOne(Box::new(choice(tail_pairs))),
                 required: false,
                 satisfies_any_group: false,
+                exclusive_group: false,
             });
         }
 
@@ -141,64 +160,99 @@ impl<'a> Lowerer<'a> {
         &mut self,
         items: &[ObjectItem],
         tail_pair: Option<GrammarExpr>,
+        any_group_required: bool,
+        exclusive_require_one: bool,
     ) -> ImportResult<GrammarExpr> {
-        if items.iter().all(|item| !item.satisfies_any_group) {
+        if items.iter().all(|item| !item.satisfies_any_group && !item.exclusive_group) {
             return self.lower_fixed_object_body_exprnfa_without_group(items, tail_pair);
         }
 
         let mut builder = ExprNfaBuilder::new();
-        let mut states = vec![[[0u32; 2]; 2]; items.len() + 1];
+        let mut states = vec![[[[0u32; 2]; 2]; 2]; items.len() + 1];
         for state_set in &mut states {
             for separator_seen in 0..=1 {
-                for group_seen in 0..=1 {
-                    state_set[separator_seen][group_seen] = builder.add_state();
+                for any_group_seen in 0..=1 {
+                    for exclusive_seen in 0..=1 {
+                        state_set[separator_seen][any_group_seen][exclusive_seen] = builder.add_state();
+                    }
                 }
             }
         }
-        states[0][0][0] = builder.start_state();
+        states[0][0][0][0] = builder.start_state();
 
         for (index, item) in items.iter().enumerate() {
             let separator_pair = seq(vec![self.item_separator_expr(), item.pair.clone()]);
             for separator_seen in 0..=1 {
-                for group_seen in 0..=1 {
-                    if !item.required {
-                        builder.add_epsilon(
-                            states[index][separator_seen][group_seen],
-                            states[index + 1][separator_seen][group_seen],
+                for any_group_seen in 0..=1 {
+                    for exclusive_seen in 0..=1 {
+                        if !item.required {
+                            builder.add_epsilon(
+                                states[index][separator_seen][any_group_seen][exclusive_seen],
+                                states[index + 1][separator_seen][any_group_seen][exclusive_seen],
+                            );
+                        }
+                        if item.exclusive_group && exclusive_seen == 1 {
+                            continue;
+                        }
+                        let next_any_group_seen =
+                            usize::from(any_group_seen == 1 || item.satisfies_any_group);
+                        let next_exclusive_seen =
+                            usize::from(exclusive_seen == 1 || item.exclusive_group);
+                        let transition_expr = if separator_seen == 0 {
+                            item.pair.clone()
+                        } else {
+                            separator_pair.clone()
+                        };
+                        builder.add_transition(
+                            states[index][separator_seen][any_group_seen][exclusive_seen],
+                            transition_expr,
+                            states[index + 1][1][next_any_group_seen][next_exclusive_seen],
                         );
                     }
-                    let next_group_seen = usize::from(group_seen == 1 || item.satisfies_any_group);
-                    let transition_expr = if separator_seen == 0 {
-                        item.pair.clone()
-                    } else {
-                        separator_pair.clone()
-                    };
-                    builder.add_transition(
-                        states[index][separator_seen][group_seen],
-                        transition_expr,
-                        states[index + 1][1][next_group_seen],
-                    );
                 }
             }
         }
 
-        builder.set_accepting(states[items.len()][0][1]);
-        builder.set_accepting(states[items.len()][1][1]);
+        for separator_seen in 0..=1 {
+            for any_group_seen in 0..=1 {
+                if any_group_required && any_group_seen == 0 {
+                    continue;
+                }
+                for exclusive_seen in 0..=1 {
+                    if exclusive_require_one && exclusive_seen == 0 {
+                        continue;
+                    }
+                    builder.set_accepting(states[items.len()][separator_seen][any_group_seen][exclusive_seen]);
+                }
+            }
+        }
 
         if let Some(tail_pair_expr) = tail_pair {
-            let tail_state = builder.add_state();
-            builder.set_accepting(tail_state);
-            builder.add_transition(states[items.len()][0][1], tail_pair_expr.clone(), tail_state);
-            builder.add_transition(
-                states[items.len()][1][1],
-                seq(vec![self.item_separator_expr(), tail_pair_expr.clone()]),
-                tail_state,
-            );
-            builder.add_transition(
-                tail_state,
-                seq(vec![self.item_separator_expr(), tail_pair_expr]),
-                tail_state,
-            );
+            for any_group_seen in 0..=1 {
+                for exclusive_seen in 0..=1 {
+                    let tail_state = builder.add_state();
+                    if (!any_group_required || any_group_seen == 1)
+                        && (!exclusive_require_one || exclusive_seen == 1)
+                    {
+                        builder.set_accepting(tail_state);
+                    }
+                    builder.add_transition(
+                        states[items.len()][0][any_group_seen][exclusive_seen],
+                        tail_pair_expr.clone(),
+                        tail_state,
+                    );
+                    builder.add_transition(
+                        states[items.len()][1][any_group_seen][exclusive_seen],
+                        seq(vec![self.item_separator_expr(), tail_pair_expr.clone()]),
+                        tail_state,
+                    );
+                    builder.add_transition(
+                        tail_state,
+                        seq(vec![self.item_separator_expr(), tail_pair_expr.clone()]),
+                        tail_state,
+                    );
+                }
+            }
         }
 
         let rule_name = self.fresh_rule_name("json_closed_object_body");

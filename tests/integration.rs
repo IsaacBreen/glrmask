@@ -287,6 +287,47 @@ fn json_schema_anyof_required_property_factoring_preserves_acceptance() {
 }
 
 #[test]
+fn json_schema_anyof_closed_object_variants_preserve_acceptance() {
+    let constraint = byte_schema(
+        r#"{
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "boolean"}
+                    },
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "boolean"},
+                        "x": {"type": "boolean"}
+                    },
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "boolean"},
+                        "y": {"type": "boolean"}
+                    },
+                    "additionalProperties": false
+                }
+            ]
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#"{}"#);
+    assert_accepts_bytes(&constraint, br#"{"a": true}"#);
+    assert_accepts_bytes(&constraint, br#"{"x": true}"#);
+    assert_accepts_bytes(&constraint, br#"{"a": true, "x": false}"#);
+    assert_accepts_bytes(&constraint, br#"{"y": true}"#);
+    assert_rejects_bytes(&constraint, br#"{"x": true, "y": false}"#);
+    assert_rejects_bytes(&constraint, br#"{"z": true}"#);
+}
+
+#[test]
 fn json_schema_open_object_all_optional_fixed_props_accepts_tail_only_after_prefix() {
     let constraint = byte_schema(
         r#"{
