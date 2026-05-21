@@ -369,6 +369,50 @@ fn string_pattern_lowers_as_terminal_pattern() {
 }
 
 #[test]
+fn medium_bounded_string_lowers_to_terminal_constrained_rule() {
+    let schema = json!({
+        "type": "string",
+        "maxLength": 1024
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(
+        grammar
+            .rules
+            .iter()
+            .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
+        "{:?}",
+        grammar.rules
+    );
+
+    let glrm = to_glrm(&grammar);
+    assert!(!glrm.contains("json_string_char_exact_50"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn very_large_bounded_string_still_uses_split_chunk_rules() {
+    let schema = json!({
+        "type": "string",
+        "maxLength": 32767
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(
+        !grammar
+            .rules
+            .iter()
+            .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
+        "{:?}",
+        grammar.rules
+    );
+
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("json_string_char_exact_50"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn decoded_string_patterns_are_matched_against_json_string_bodies() {
     assert!(property_name_matches_pattern(r#"^/[^/]+$"#, "/abc").unwrap());
     assert!(!property_name_matches_pattern(r#"^/[^/]+$"#, "/abc/def").unwrap());

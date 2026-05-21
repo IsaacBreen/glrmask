@@ -92,6 +92,9 @@ impl<'a> Lowerer<'a> {
     }
 
     fn should_split_bounded_string(&self, min: usize, max: usize) -> bool {
+        if max <= self.config.terminalize_bounded_string_max {
+            return false;
+        }
         let chunk = self.config.repeat_chunk_size.max(1);
         min > chunk || max > chunk
     }
