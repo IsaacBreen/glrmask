@@ -190,28 +190,6 @@ impl<'a> Lowerer<'a> {
         seq(vec![lit_bytes(encoded.into_bytes()), self.key_separator_expr()])
     }
 
-    pub(crate) fn lower_pattern_key_colon(&mut self, pattern: &str) -> ImportResult<GrammarExpr> {
-        let key = self.lower_string(&StringSchema {
-            min_length: 0,
-            max_length: None,
-            pattern: Some(pattern.to_string()),
-            format: None,
-        })?;
-        Ok(seq(vec![key, self.key_separator_expr()]))
-    }
-
-    pub(crate) fn lower_pattern_key_colon_excluding(
-        &mut self,
-        pattern: &str,
-        fixed_keys: &BTreeSet<String>,
-    ) -> ImportResult<GrammarExpr> {
-        let key_colon = GrammarExpr::RawRegex(pattern_key_colon_regex(pattern));
-        let filtered = self.exclude_literal_key_colon_exprs(key_colon, fixed_keys);
-        let name = self.fresh_rule_name("json_pattern_key_colon_filtered");
-        self.add_terminal_rule(&name, filtered);
-        Ok(r(&name))
-    }
-
     pub(crate) fn lower_pattern_key_colon_terminal(
         &mut self,
         pattern: &str,
@@ -220,9 +198,103 @@ impl<'a> Lowerer<'a> {
             return Ok(r(rule_name));
         }
         let key_colon = GrammarExpr::RawRegex(pattern_key_colon_regex(pattern));
+        let global_overlaps = self.pattern_overlapping_literal_keys(pattern)?;
+        let expr = if global_overlaps.is_empty() {
+            key_colon
+        } else {
+            let excluded = global_overlaps
+                .iter()
+                .map(|key| self.lower_literal_key_colon(key))
+                .collect::<Vec<_>>();
+            GrammarExpr::Exclude {
+                expr: Box::new(key_colon),
+                exclude: Box::new(choice(excluded)),
+            }
+        };
         let name = self.fresh_rule_name("json_pattern_key_colon");
-        self.add_terminal_rule(&name, key_colon);
+        self.add_terminal_rule(&name, expr);
         self.shared_ap_pattern_rules.insert(pattern.to_string(), name.clone());
+        Ok(r(&name))
+    }
+
+    fn pattern_overlapping_literal_keys(&self, pattern: &str) -> ImportResult<Vec<String>> {
+        let mut overlaps = Vec::new();
+        for key in &self.shared_ap_literal_keys {
+            if property_name_matches_pattern(pattern, key)? {
+                overlaps.push(key.clone());
+            }
+        }
+        Ok(overlaps)
+    }
+
+    fn pattern_local_overlapping_literal_keys(
+        &self,
+        pattern: &str,
+        fixed_keys: &BTreeSet<String>,
+    ) -> ImportResult<Vec<String>> {
+        let mut overlaps = Vec::new();
+        for key in fixed_keys {
+            if property_name_matches_pattern(pattern, key)? {
+                overlaps.push(key.clone());
+            }
+        }
+        Ok(overlaps)
+    }
+
+    fn shared_pattern_overlap_literal_rule(&mut self, pattern: &str) -> ImportResult<Option<GrammarExpr>> {
+        let overlap_keys = self.pattern_overlapping_literal_keys(pattern)?;
+        if overlap_keys.is_empty() {
+            return Ok(None);
+        }
+        if let Some(rule_name) = self.shared_pattern_overlap_literal_rules.get(pattern) {
+            return Ok(Some(r(rule_name)));
+        }
+
+        let name = self.fresh_rule_name("json_pattern_key_colon_overlap_literals");
+        let expr = choice(
+            overlap_keys
+                .iter()
+                .map(|key| self.lower_literal_key_colon(key))
+                .collect::<Vec<_>>(),
+        );
+        self.add_nonterminal_rule(&name, expr);
+        self.shared_pattern_overlap_literal_rules
+            .insert(pattern.to_string(), name.clone());
+        Ok(Some(r(&name)))
+    }
+
+    pub(crate) fn lower_pattern_key_colon_appearance(
+        &mut self,
+        pattern: &str,
+        fixed_keys: &BTreeSet<String>,
+    ) -> ImportResult<GrammarExpr> {
+        let global_overlaps = self.pattern_overlapping_literal_keys(pattern)?;
+        let local_overlaps = self.pattern_local_overlapping_literal_keys(pattern, fixed_keys)?;
+        let cache_key = (pattern.to_string(), local_overlaps.clone());
+        if let Some(rule_name) = self.shared_pattern_appearance_rules.get(&cache_key) {
+            return Ok(r(rule_name));
+        }
+
+        let mut alternatives = vec![self.lower_pattern_key_colon_terminal(pattern)?];
+        if let Some(overlap_container) = self.shared_pattern_overlap_literal_rule(pattern)? {
+            if local_overlaps.is_empty() {
+                alternatives.push(overlap_container);
+            } else {
+                let local_overlap_set = local_overlaps.iter().cloned().collect::<BTreeSet<_>>();
+                let remaining = global_overlaps
+                    .iter()
+                    .filter(|key| !local_overlap_set.contains(*key))
+                    .map(|key| self.lower_literal_key_colon(key))
+                    .collect::<Vec<_>>();
+                if !remaining.is_empty() {
+                    alternatives.push(choice(remaining));
+                }
+            }
+        }
+
+        let name = self.fresh_rule_name("json_pattern_key_colon_appearance");
+        self.add_nonterminal_rule(&name, choice(alternatives));
+        self.shared_pattern_appearance_rules.insert(cache_key, name.clone());
         Ok(r(&name))
     }
 
@@ -237,51 +309,27 @@ impl<'a> Lowerer<'a> {
             if fixed_keys.contains(&key) {
                 continue;
             }
-            if local_patterns
-                .iter()
-                .any(|pattern| property_name_matches_pattern(pattern, &key).unwrap_or(false))
-            {
+            let mut covered_by_local_pattern = false;
+            for pattern in local_patterns {
+                if property_name_matches_pattern(pattern, &key)? {
+                    covered_by_local_pattern = true;
+                    break;
+                }
+            }
+            if covered_by_local_pattern {
                 continue;
             }
             alternatives.push(self.lower_literal_key_colon(&key));
         }
 
-        let local_pattern_terminals = local_patterns
-            .iter()
-            .map(|pattern| self.lower_pattern_key_colon_terminal(pattern))
-            .collect::<ImportResult<Vec<_>>>()?;
-
         for pattern in self.shared_ap_patterns.clone() {
             if local_patterns.iter().any(|local| local == &pattern) {
                 continue;
             }
-            alternatives.push(self.lower_pattern_key_colon_addback(
-                &pattern,
-                fixed_keys,
-                &local_pattern_terminals,
-            )?);
+            alternatives.push(self.lower_pattern_key_colon_addback(&pattern, fixed_keys, local_patterns)?);
         }
 
         Ok(choice(alternatives))
-    }
-
-    fn exclude_literal_key_colon_exprs(
-        &mut self,
-        key_colon: GrammarExpr,
-        fixed_keys: &BTreeSet<String>,
-    ) -> GrammarExpr {
-        if fixed_keys.is_empty() {
-            return key_colon;
-        }
-
-        let excluded = fixed_keys
-            .iter()
-            .map(|key| self.lower_literal_key_colon(key))
-            .collect::<Vec<_>>();
-        GrammarExpr::Exclude {
-            expr: Box::new(key_colon),
-            exclude: Box::new(choice(excluded)),
-        }
     }
 
     fn shared_additional_key_colon_base(&mut self) -> ImportResult<GrammarExpr> {
@@ -295,7 +343,7 @@ impl<'a> Lowerer<'a> {
             .map(|key| self.lower_literal_key_colon(key))
             .collect::<Vec<_>>();
         for pattern in self.shared_ap_patterns.clone() {
-            excluded.push(self.lower_pattern_key_colon_terminal(&pattern)?);
+            excluded.push(GrammarExpr::RawRegex(pattern_key_colon_regex(&pattern)));
         }
 
         self.add_terminal_rule(
@@ -313,27 +361,32 @@ impl<'a> Lowerer<'a> {
         &mut self,
         pattern: &str,
         fixed_keys: &BTreeSet<String>,
-        local_pattern_terminals: &[GrammarExpr],
+        local_patterns: &[String],
     ) -> ImportResult<GrammarExpr> {
-        let mut excluded = fixed_keys
-            .iter()
-            .map(|key| self.lower_literal_key_colon(key))
-            .collect::<Vec<_>>();
-        excluded.extend(local_pattern_terminals.iter().cloned());
-
-        if excluded.is_empty() {
-            return self.lower_pattern_key_colon_terminal(pattern);
+        let mut alternatives = vec![self.lower_pattern_key_colon_terminal(pattern)?];
+        let overlap_keys = self.pattern_overlapping_literal_keys(pattern)?;
+        let mut addback_literals = Vec::new();
+        'keys: for key in &overlap_keys {
+            if fixed_keys.contains(key) {
+                continue;
+            }
+            for local_pattern in local_patterns {
+                if property_name_matches_pattern(local_pattern, key)? {
+                    continue 'keys;
+                }
+            }
+            addback_literals.push(self.lower_literal_key_colon(key));
+        }
+        if !addback_literals.is_empty() {
+            alternatives.push(choice(addback_literals));
         }
 
-        let base_terminal = self.lower_pattern_key_colon_terminal(pattern)?;
+        if alternatives.len() == 1 {
+            return Ok(alternatives.remove(0));
+        }
+
         let name = self.fresh_rule_name("json_pattern_key_colon_addback");
-        self.add_terminal_rule(
-            &name,
-            GrammarExpr::Exclude {
-                expr: Box::new(base_terminal),
-                exclude: Box::new(choice(excluded)),
-            },
-        );
+        self.add_nonterminal_rule(&name, choice(alternatives));
         Ok(r(&name))
     }
 

@@ -108,11 +108,7 @@ impl<'a> Lowerer<'a> {
 
         let mut tail_pairs = Vec::new();
         for pattern_property in &normalized.pattern_properties {
-            let key = if fixed_names.is_empty() {
-                self.lower_pattern_key_colon(&pattern_property.pattern)?
-            } else {
-                self.lower_pattern_key_colon_excluding(&pattern_property.pattern, &fixed_names)?
-            };
+            let key = self.lower_pattern_key_colon_appearance(&pattern_property.pattern, &fixed_names)?;
             let value = self.lower_schema(&pattern_property.schema)?;
             tail_pairs.push(seq(vec![key, value]));
         }
