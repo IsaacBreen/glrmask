@@ -69,6 +69,10 @@ fn contains_expr_nfa(expr: &GrammarExpr) -> bool {
     }
 }
 
+fn count_rules_with_prefix(grammar: &NamedGrammar, prefix: &str) -> usize {
+    grammar.rules.iter().filter(|rule| rule.name.starts_with(prefix)).count()
+}
+
 fn contains_exclude(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::Exclude { .. } => true,
@@ -397,6 +401,70 @@ fn anyof_allows_sibling_assertions() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn anyof_required_property_object_factors_into_single_expr_nfa_body() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "a": {"type": "boolean"},
+            "b": {"type": "boolean"},
+            "c": {"type": "boolean"}
+        },
+        "additionalProperties": false,
+        "anyOf": [
+            {"required": ["a"]},
+            {"required": ["b"]}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    assert_eq!(count_rules_with_prefix(&grammar, "json_closed_object_body"), 1);
+    assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn anyof_required_property_factoring_falls_back_for_nontrivial_branch() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "a": {"type": "boolean"},
+            "b": {"type": "boolean"},
+            "c": {"type": "boolean"}
+        },
+        "additionalProperties": false,
+        "anyOf": [
+            {"required": ["a", "b"]},
+            {"required": ["c"]}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn anyof_required_property_factoring_falls_back_for_unknown_required_name() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "a": {"type": "boolean"},
+            "b": {"type": "boolean"}
+        },
+        "additionalProperties": true,
+        "anyOf": [
+            {"required": ["missing"]},
+            {"required": ["a"]}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
     lower(&grammar).unwrap();
 }
 

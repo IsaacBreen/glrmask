@@ -261,6 +261,32 @@ fn json_schema_closed_object_required_property_still_mandatory() {
 }
 
 #[test]
+fn json_schema_anyof_required_property_factoring_preserves_acceptance() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "object",
+            "properties": {
+                "a": {"type": "boolean"},
+                "b": {"type": "boolean"},
+                "c": {"type": "boolean"}
+            },
+            "additionalProperties": false,
+            "anyOf": [
+                {"required": ["a"]},
+                {"required": ["b"]}
+            ]
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#"{"a": true}"#);
+    assert_accepts_bytes(&constraint, br#"{"b": false}"#);
+    assert_accepts_bytes(&constraint, br#"{"a": true, "b": false}"#);
+    assert_rejects_bytes(&constraint, br#"{}"#);
+    assert_rejects_bytes(&constraint, br#"{"c": true}"#);
+    assert_rejects_bytes(&constraint, br#"{"b": false, "a": true}"#);
+}
+
+#[test]
 fn json_schema_open_object_all_optional_fixed_props_accepts_tail_only_after_prefix() {
     let constraint = byte_schema(
         r#"{

@@ -12,8 +12,30 @@ use super::error::{ImportResult, SchemaImportError};
 use super::lower::{choice, lit, r, seq, Lowerer, JSON_VALUE_RULE};
 use super::string::property_name_matches_pattern;
 
+struct ObjectItem {
+    pair: GrammarExpr,
+    required: bool,
+    satisfies_any_group: bool,
+}
+
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_object(&mut self, schema: &ObjectSchema) -> ImportResult<GrammarExpr> {
+        self.lower_object_internal(schema, None)
+    }
+
+    pub(crate) fn lower_object_requiring_any_property(
+        &mut self,
+        schema: &ObjectSchema,
+        any_required_names: &BTreeSet<String>,
+    ) -> ImportResult<GrammarExpr> {
+        self.lower_object_internal(schema, Some(any_required_names))
+    }
+
+    fn lower_object_internal(
+        &mut self,
+        schema: &ObjectSchema,
+        any_required_names: Option<&BTreeSet<String>>,
+    ) -> ImportResult<GrammarExpr> {
         let normalized = self.object_with_required_synthetic_properties(schema)?;
         let fixed_names = normalized
             .properties
@@ -26,7 +48,12 @@ impl<'a> Lowerer<'a> {
             .map(|property| {
                 let required = normalized.required.contains(&property.name);
                 self.lower_property_pair(property, &normalized.pattern_properties)
-                    .map(|pair| (pair, required))
+                    .map(|pair| ObjectItem {
+                        pair,
+                        required,
+                        satisfies_any_group: any_required_names
+                            .is_some_and(|names| names.contains(&property.name)),
+                    })
             })
             .collect::<ImportResult<Vec<_>>>()?;
 
@@ -46,6 +73,13 @@ impl<'a> Lowerer<'a> {
                 }
             };
             return self.lower_fixed_object_body_exprnfa(&items, tail_pair);
+        }
+
+        if any_required_names.is_some() {
+            return Err(SchemaImportError::new(
+                "grouped anyOf object factoring requires fixed object properties without patternProperties"
+                    .to_string(),
+            ));
         }
 
         let pattern_keys = normalized
@@ -83,17 +117,18 @@ impl<'a> Lowerer<'a> {
         }
 
         if !tail_pairs.is_empty() {
-            items.push((
-                GrammarExpr::RepeatOne(Box::new(choice(tail_pairs))),
-                false,
-            ));
+            items.push(ObjectItem {
+                pair: GrammarExpr::RepeatOne(Box::new(choice(tail_pairs))),
+                required: false,
+                satisfies_any_group: false,
+            });
         }
 
         let body = if items.is_empty() {
             GrammarExpr::Epsilon
         } else {
             GrammarExpr::SeparatedSequence {
-                items,
+                items: items.into_iter().map(|item| (item.pair, item.required)).collect(),
                 separator: Box::new(self.item_separator_expr()),
                 allow_empty: true,
             }
@@ -104,7 +139,78 @@ impl<'a> Lowerer<'a> {
 
     fn lower_fixed_object_body_exprnfa(
         &mut self,
-        items: &[(GrammarExpr, bool)],
+        items: &[ObjectItem],
+        tail_pair: Option<GrammarExpr>,
+    ) -> ImportResult<GrammarExpr> {
+        if items.iter().all(|item| !item.satisfies_any_group) {
+            return self.lower_fixed_object_body_exprnfa_without_group(items, tail_pair);
+        }
+
+        let mut builder = ExprNfaBuilder::new();
+        let mut states = vec![[[0u32; 2]; 2]; items.len() + 1];
+        for state_set in &mut states {
+            for separator_seen in 0..=1 {
+                for group_seen in 0..=1 {
+                    state_set[separator_seen][group_seen] = builder.add_state();
+                }
+            }
+        }
+        states[0][0][0] = builder.start_state();
+
+        for (index, item) in items.iter().enumerate() {
+            let separator_pair = seq(vec![self.item_separator_expr(), item.pair.clone()]);
+            for separator_seen in 0..=1 {
+                for group_seen in 0..=1 {
+                    if !item.required {
+                        builder.add_epsilon(
+                            states[index][separator_seen][group_seen],
+                            states[index + 1][separator_seen][group_seen],
+                        );
+                    }
+                    let next_group_seen = usize::from(group_seen == 1 || item.satisfies_any_group);
+                    let transition_expr = if separator_seen == 0 {
+                        item.pair.clone()
+                    } else {
+                        separator_pair.clone()
+                    };
+                    builder.add_transition(
+                        states[index][separator_seen][group_seen],
+                        transition_expr,
+                        states[index + 1][1][next_group_seen],
+                    );
+                }
+            }
+        }
+
+        builder.set_accepting(states[items.len()][0][1]);
+        builder.set_accepting(states[items.len()][1][1]);
+
+        if let Some(tail_pair_expr) = tail_pair {
+            let tail_state = builder.add_state();
+            builder.set_accepting(tail_state);
+            builder.add_transition(states[items.len()][0][1], tail_pair_expr.clone(), tail_state);
+            builder.add_transition(
+                states[items.len()][1][1],
+                seq(vec![self.item_separator_expr(), tail_pair_expr.clone()]),
+                tail_state,
+            );
+            builder.add_transition(
+                tail_state,
+                seq(vec![self.item_separator_expr(), tail_pair_expr]),
+                tail_state,
+            );
+        }
+
+        let rule_name = self.fresh_rule_name("json_closed_object_body");
+        let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
+        self.add_nonterminal_rule(&rule_name, body);
+
+        Ok(seq(vec![lit("{"), r(&rule_name), lit("}")]))
+    }
+
+    fn lower_fixed_object_body_exprnfa_without_group(
+        &mut self,
+        items: &[ObjectItem],
         tail_pair: Option<GrammarExpr>,
     ) -> ImportResult<GrammarExpr> {
         let mut builder = ExprNfaBuilder::new();
@@ -116,13 +222,13 @@ impl<'a> Lowerer<'a> {
             state_pair[1] = builder.add_state();
         }
 
-        for (index, (pair_expr, required)) in items.iter().enumerate() {
-            let separator_pair = seq(vec![self.item_separator_expr(), pair_expr.clone()]);
-            if !required {
+        for (index, item) in items.iter().enumerate() {
+            let separator_pair = seq(vec![self.item_separator_expr(), item.pair.clone()]);
+            if !item.required {
                 builder.add_epsilon(states[index][0], states[index + 1][0]);
                 builder.add_epsilon(states[index][1], states[index + 1][1]);
             }
-            builder.add_transition(states[index][0], pair_expr.clone(), states[index + 1][1]);
+            builder.add_transition(states[index][0], item.pair.clone(), states[index + 1][1]);
             builder.add_transition(states[index][1], separator_pair, states[index + 1][1]);
         }
 

@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::import::ast::GrammarExpr;
 
 use super::ast::{
@@ -9,6 +11,10 @@ use super::lower::{choice, r, Lowerer, JSON_VALUE_RULE};
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_any_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
+        if let Some((object, any_required_names)) = try_factor_required_property_any_of(assertions) {
+            return self.lower_object_requiring_any_property(&object, &any_required_names);
+        }
+
         let siblings = sibling_assertion_schema(assertions);
         let alternatives = assertions
             .any_of
@@ -66,6 +72,85 @@ impl<'a> Lowerer<'a> {
             })
             .collect()
     }
+}
+
+fn try_factor_required_property_any_of(
+    assertions: &SchemaAssertions,
+) -> Option<(ObjectSchema, BTreeSet<String>)> {
+    if assertions.any_of.len() < 2 {
+        return None;
+    }
+
+    let siblings = assertions.clone_without_combinators();
+    if siblings.const_value.is_some()
+        || siblings.enum_values.is_some()
+        || siblings.array.is_some()
+        || siblings.string.is_some()
+        || siblings.number.is_some()
+    {
+        return None;
+    }
+    if let Some(types) = &siblings.types {
+        if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+            return None;
+        }
+    }
+
+    let object = siblings.object.clone()?;
+    if !object.pattern_properties.is_empty() || object.properties.is_empty() {
+        return None;
+    }
+
+    let fixed_property_names = object
+        .properties
+        .iter()
+        .map(|property| property.name.clone())
+        .collect::<BTreeSet<_>>();
+    let mut any_required_names = BTreeSet::new();
+    for branch in &assertions.any_of {
+        let required_name = single_required_object_branch_name(branch)?;
+        if !fixed_property_names.contains(required_name) {
+            return None;
+        }
+        if !any_required_names.insert(required_name.to_string()) {
+            return None;
+        }
+    }
+
+    Some((object, any_required_names))
+}
+
+fn single_required_object_branch_name(schema: &Schema) -> Option<&str> {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return None;
+    };
+    if assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || assertions.array.is_some()
+        || assertions.string.is_some()
+        || assertions.number.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+    {
+        return None;
+    }
+    if let Some(types) = &assertions.types {
+        if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+            return None;
+        }
+    }
+
+    let object = assertions.object.as_ref()?;
+    if !object.properties.is_empty()
+        || !object.pattern_properties.is_empty()
+        || !matches!(object.additional_properties, AdditionalProperties::AllowAny)
+        || object.required.len() != 1
+    {
+        return None;
+    }
+
+    object.required.iter().next().map(String::as_str)
 }
 
 fn sibling_assertion_schema(assertions: &SchemaAssertions) -> Option<Schema> {
