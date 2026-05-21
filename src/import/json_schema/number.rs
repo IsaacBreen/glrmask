@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::import::ast::GrammarExpr;
+use crate::import::numeric_range::{rx_float_range, rx_int_range};
 
 use super::ast::NumberSchema;
 use super::error::{ImportResult, SchemaImportError};
@@ -12,6 +13,16 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn lower_number(&mut self, schema: &NumberSchema) -> ImportResult<GrammarExpr> {
         if schema.integer {
             return self.lower_integer(schema);
+        }
+        if schema.multiple_of.is_none() && (schema.minimum.is_some() || schema.maximum.is_some()) {
+            let regex = rx_float_range(
+                schema.minimum,
+                schema.maximum,
+                !schema.exclusive_minimum,
+                !schema.exclusive_maximum,
+            )
+            .map_err(SchemaImportError::new)?;
+            return Ok(GrammarExpr::RawRegex(regex));
         }
         if let Some(multiple) = schema.multiple_of {
             if let Some(regex) = power_of_ten_multiple_regex(multiple) {
@@ -30,7 +41,9 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_integer(&mut self, schema: &NumberSchema) -> ImportResult<GrammarExpr> {
-        if let (Some(lower), Some(upper)) = (integer_lower_bound(schema), integer_upper_bound(schema)) {
+        let lower = integer_lower_bound(schema);
+        let upper = integer_upper_bound(schema);
+        if let (Some(lower), Some(upper)) = (lower, upper) {
             if lower > upper {
                 return Ok(never());
             }
@@ -41,6 +54,10 @@ impl<'a> Lowerer<'a> {
                     .collect::<Vec<_>>();
                 return Ok(choice(alternatives));
             }
+        }
+        if schema.multiple_of.is_none() && (lower.is_some() || upper.is_some()) {
+            let regex = rx_int_range(lower, upper).map_err(SchemaImportError::new)?;
+            return Ok(GrammarExpr::RawRegex(regex));
         }
 
         if let Some(multiple) = schema.multiple_of {

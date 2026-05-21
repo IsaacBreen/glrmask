@@ -553,6 +553,34 @@ fn finite_integer_range_multiple_lowers_to_literals() {
 }
 
 #[test]
+fn bounded_number_lowers_to_range_regex_not_plain_json_number() {
+    let schema = json!({
+        "type": "number",
+        "minimum": 0,
+        "maximum": 65535
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(matches!(start_expr(&grammar), GrammarExpr::RawRegex(_)));
+    assert!(!contains_ref_named(start_expr(&grammar), "JSON_NUMBER"));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn large_bounded_integer_lowers_to_range_regex_not_plain_json_integer() {
+    let schema = json!({
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 65535
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(matches!(start_expr(&grammar), GrammarExpr::RawRegex(_)));
+    assert!(!contains_ref_named(start_expr(&grammar), "JSON_INTEGER"));
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn anyof_lowers_to_choice() {
     let schema = json!({
         "anyOf": [
