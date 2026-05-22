@@ -23,6 +23,7 @@ use self::profile::{
     mask_inner_profile_enabled,
     mask_queue_debug_enabled,
     mask_single_path_to_stacks_fallback_disabled,
+    MaskProfile,
     MaskInnerProfileStats,
 };
 use self::queue::{mask_queue_mode, MaskQueue};
@@ -1017,21 +1018,43 @@ impl<'a> ConstraintState<'a> {
     }
 
     fn fill_mask_uncached(&self, buf: &mut [u32]) {
-        if self.try_fill_mask_single_path_direct(buf) {
-            return;
-        }
-
-        self.fill_mask_uncached_queue(buf);
+        let _ = self.fill_mask_uncached_maybe_profile(buf, false);
     }
 
-    fn fill_mask_uncached_queue(&self, buf: &mut [u32]) {
+    fn fill_mask_uncached_maybe_profile(
+        &self,
+        buf: &mut [u32],
+        force_profile: bool,
+    ) -> Option<MaskProfile> {
+        let total_start = (force_profile || mask_inner_profile_enabled()).then(Instant::now);
+
+        if self.try_fill_mask_single_path_direct(buf) {
+            return total_start.map(|start| MaskProfile {
+                total_ns: elapsed_ns(start),
+                single_path_direct: 1,
+                ..MaskProfile::default()
+            });
+        }
+
+        self.fill_mask_uncached_queue(buf, force_profile, total_start)
+    }
+
+    fn fill_mask_uncached_queue(
+        &self,
+        buf: &mut [u32],
+        force_profile: bool,
+        total_start: Option<Instant>,
+    ) -> Option<MaskProfile> {
         let parser_dwa = self.constraint.parser_dwa();
 
         if self.state.is_empty() || parser_dwa.states().is_empty() {
             buf.fill(0);
             update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
             self.store_mask_cache(buf, &[]);
-            return;
+            return total_start.map(|start| MaskProfile {
+                total_ns: elapsed_ns(start),
+                ..MaskProfile::default()
+            });
         }
 
         let precomputed = &self.constraint.weight_token_dense_masks;
@@ -1051,12 +1074,11 @@ impl<'a> ConstraintState<'a> {
         let mut direct_buf_dirty = false;
 
         let mut queue = MaskQueue::new();
-        let mut profile = if mask_inner_profile_enabled() {
+        let mut profile = if force_profile || mask_inner_profile_enabled() {
             Some(MaskInnerProfileStats::default())
         } else {
             None
         };
-        let total_start = profile.as_ref().map(|_| Instant::now());
         let delta_profile_enabled = profile.is_some() && mask_delta_profile_enabled();
 
         let start_state = parser_dwa.start_state();
@@ -1489,9 +1511,21 @@ impl<'a> ConstraintState<'a> {
             emit_mask_inner_profile_line(&line);
         }
 
+        let returned_profile = profile.map(|profile| {
+            let mut out = MaskProfile::from_parts(profile, *queue_debug, false, false);
+            if out.total_ns == 0 {
+                if let Some(start) = total_start {
+                    out.total_ns = elapsed_ns(start);
+                }
+            }
+            out
+        });
+
         let mut scratch = self.mask_scratch.lock().unwrap();
         scratch.merged_dense = merged;
         scratch.chain_merged_dense.clear();
+
+        returned_profile
     }
 
     pub fn mask(&self) -> Vec<u32> {
@@ -1528,6 +1562,23 @@ impl<'a> ConstraintState<'a> {
         start.elapsed().as_nanos() as u64
     }
 
+    pub fn fill_mask_profiled(&self, buf: &mut [u32]) -> MaskProfile {
+        let total_start = Instant::now();
+        if self.try_fill_mask_from_cache(buf) {
+            return MaskProfile {
+                total_ns: elapsed_ns(total_start),
+                cache_hit: 1,
+                ..MaskProfile::default()
+            };
+        }
+
+        self.fill_mask_uncached_maybe_profile(buf, true)
+            .unwrap_or_else(|| MaskProfile {
+                total_ns: elapsed_ns(total_start),
+                ..MaskProfile::default()
+            })
+    }
+
     pub fn mask_game_fill_mask_and_internal_ids(&self, buf: &mut [u32]) -> Vec<u32> {
         if self.try_fill_mask_from_cache(buf) {
             let cache = self.mask_cache.lock().unwrap();
@@ -1538,10 +1589,10 @@ impl<'a> ConstraintState<'a> {
                 drop(cache);
             } else {
                 drop(cache);
-                self.fill_mask_uncached_queue(buf);
+                let _ = self.fill_mask_uncached_queue(buf, false, None);
             }
         } else {
-            self.fill_mask_uncached_queue(buf);
+            let _ = self.fill_mask_uncached_queue(buf, false, None);
         }
 
         let cache = self.mask_cache.lock().unwrap();

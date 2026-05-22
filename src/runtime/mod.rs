@@ -17,5 +17,6 @@ pub use crate::compiler::glr::parser::{
 };
 pub use commit::profile::{CommitProfile, GssProfileSummary, PerAdvanceEntry};
 pub use constraint::Constraint;
+pub use mask::profile::MaskProfile;
 pub use mask_mapping::FinalMaskMapping;
 pub use state::ConstraintState;

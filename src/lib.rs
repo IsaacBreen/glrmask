@@ -29,6 +29,7 @@ pub use runtime::{
     ConstraintState,
     FinalMaskMapping,
     GssProfileSummary,
+    MaskProfile,
     PerAdvanceEntry,
 };
 pub use vocab::Vocab;
