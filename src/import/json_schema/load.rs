@@ -7,6 +7,23 @@ use super::ast::{
 };
 use super::error::{ImportResult, SchemaImportError};
 
+fn singleton_all_of_ref_without_siblings(assertions: &SchemaAssertions) -> Option<&str> {
+    if assertions.all_of.len() != 1 {
+        return None;
+    }
+
+    let mut siblings = assertions.clone();
+    siblings.all_of.clear();
+    if !siblings.is_empty() {
+        return None;
+    }
+
+    match &assertions.all_of[0].kind {
+        SchemaKind::Ref(reference) => Some(reference.as_str()),
+        _ => None,
+    }
+}
+
 pub(crate) fn load_document(root: &Value) -> ImportResult<SchemaDocument> {
     let mut definitions = Vec::new();
     collect_definitions(root, "#", &mut definitions)?;
@@ -77,7 +94,12 @@ fn load_object_schema(object: &Map<String, Value>, location: &str) -> ImportResu
         ));
     }
 
-    Ok(Schema::assertions(location, load_assertions(object, location)?))
+    let assertions = load_assertions(object, location)?;
+    if let Some(reference) = singleton_all_of_ref_without_siblings(&assertions) {
+        return Ok(Schema { location: location.to_string(), kind: SchemaKind::Ref(reference.to_string()) });
+    }
+
+    Ok(Schema::assertions(location, assertions))
 }
 
 fn load_assertions(object: &Map<String, Value>, location: &str) -> ImportResult<SchemaAssertions> {

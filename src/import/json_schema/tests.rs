@@ -1219,3 +1219,57 @@ fn ref_with_sibling_assertions_is_intersected() {
     assert!(glrm.contains("&"), "{glrm}");
     lower(&grammar).unwrap();
 }
+
+#[test]
+fn singleton_allof_ref_without_siblings_reuses_ref_rule() {
+    let schema = json!({
+        "$defs": {
+            "base": {
+                "type": "object",
+                "properties": {
+                    "enabled": {"type": "boolean"},
+                    "name": {"type": "string"}
+                },
+                "additionalProperties": false
+            }
+        },
+        "type": "object",
+        "properties": {
+            "first": {"allOf": [{"$ref": "#/$defs/base"}]},
+            "second": {"allOf": [{"$ref": "#/$defs/base"}]}
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert_eq!(count_rules_with_prefix(&grammar, "schema_ref"), 1);
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn singleton_allof_ref_with_siblings_does_not_collapse_to_ref_rule() {
+    let schema = json!({
+        "$defs": {
+            "base": {
+                "type": "object",
+                "properties": {
+                    "enabled": {"type": "boolean"},
+                    "name": {"type": "string"}
+                },
+                "additionalProperties": false
+            }
+        },
+        "type": "object",
+        "properties": {
+            "wrapped": {
+                "allOf": [{"$ref": "#/$defs/base"}],
+                "type": "object"
+            }
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert_eq!(count_rules_with_prefix(&grammar, "schema_ref"), 0);
+    lower(&grammar).unwrap();
+}
