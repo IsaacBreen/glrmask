@@ -35,7 +35,7 @@ parse shape.
 Requirements:
 - `commit` max: below `10us`; `10us` is the hard ceiling.
 - `mask` max: below `20us`.
-- `TBM` max: below `25us`.
+- `TBM` max: below `12us`; `12us` is the hard ceiling.
 
 Workflow:
 Notes requirement:
