@@ -7,7 +7,7 @@ use super::ast::{
     SchemaType,
 };
 use super::error::ImportResult;
-use super::lower::{choice, r, Lowerer, JSON_VALUE_RULE};
+use super::lower::{choice, never, r, Lowerer, JSON_VALUE_RULE};
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_any_of(
@@ -64,6 +64,11 @@ impl<'a> Lowerer<'a> {
             branches.push(Schema::assertions("<allOf-siblings>", siblings));
         }
         branches = self.inline_all_of_refs(&branches)?;
+        if let Some(filtered) = drop_vacuous_untyped_family_branches(branches) {
+            branches = filtered;
+        } else {
+            return Ok(never());
+        }
 
         if branches.is_empty() {
             return Ok(r(JSON_VALUE_RULE));
@@ -95,6 +100,88 @@ impl<'a> Lowerer<'a> {
             })
             .collect()
     }
+}
+
+fn explicit_all_of_type_intersection(branches: &[Schema]) -> Option<BTreeSet<SchemaType>> {
+    let mut intersection: Option<BTreeSet<SchemaType>> = None;
+
+    for branch in branches {
+        let SchemaKind::Assertions(assertions) = &branch.kind else {
+            continue;
+        };
+        let Some(types) = &assertions.types else {
+            continue;
+        };
+
+        let branch_types = types.iter().cloned().collect::<BTreeSet<_>>();
+        intersection = Some(match intersection {
+            Some(existing) => existing.intersection(&branch_types).cloned().collect(),
+            None => branch_types,
+        });
+    }
+
+    intersection
+}
+
+fn untyped_single_family_assertion(schema: &Schema) -> Option<SchemaType> {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return None;
+    };
+    if assertions.types.is_some()
+        || assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+    {
+        return None;
+    }
+
+    let mut family = None;
+    for candidate in [
+        (assertions.object.is_some(), SchemaType::Object),
+        (assertions.array.is_some(), SchemaType::Array),
+        (assertions.string.is_some(), SchemaType::String),
+        (assertions.number.is_some(), SchemaType::Number),
+    ] {
+        if !candidate.0 {
+            continue;
+        }
+        if family.is_some() {
+            return None;
+        }
+        family = Some(candidate.1);
+    }
+
+    family
+}
+
+fn family_overlaps_types(family: SchemaType, types: &BTreeSet<SchemaType>) -> bool {
+    match family {
+        SchemaType::Number => {
+            types.contains(&SchemaType::Number) || types.contains(&SchemaType::Integer)
+        }
+        other => types.contains(&other),
+    }
+}
+
+fn drop_vacuous_untyped_family_branches(branches: Vec<Schema>) -> Option<Vec<Schema>> {
+    let Some(explicit_types) = explicit_all_of_type_intersection(&branches) else {
+        return Some(branches);
+    };
+    if explicit_types.is_empty() {
+        return None;
+    }
+
+    Some(
+        branches
+            .into_iter()
+            .filter(|branch| {
+                untyped_single_family_assertion(branch)
+                    .is_none_or(|family| family_overlaps_types(family, &explicit_types))
+            })
+            .collect(),
+    )
 }
 
 fn try_factor_required_property_any_of(

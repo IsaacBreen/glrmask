@@ -303,6 +303,29 @@ fn pattern_property_object_still_uses_separated_sequence() {
 }
 
 #[test]
+fn allof_drops_vacuous_untyped_object_branch_for_typed_property() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "version": {"type": "number"}
+        },
+        "required": ["version"],
+        "additionalProperties": false,
+        "patternProperties": {
+            "^.+$": {
+                "properties": {
+                    "parameters": {"type": "object"}
+                }
+            }
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!contains_intersect(start_expr(&grammar)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn large_snowplow_like_pattern_property_object_uses_expr_nfa_body() {
     let mut properties = serde_json::Map::new();
     for index in 0..64 {
