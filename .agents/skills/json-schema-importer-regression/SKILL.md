@@ -22,6 +22,10 @@ Use this temporary skill when optimizing glrmask JSON-schema importer regression
 - Make good use of `ExprNFA` for object lowering, but inspect the resulting grammar. The NFA structure and emitted grammar structure both affect runtime.
 - Simpler grammars usually win: fewer wrapper choices, fewer duplicated object bodies, fewer overlapping key/value alternatives, fewer live parser paths at close tokens.
 - Do not keep a patch just because it looks like the old grammar. Keep it only if stabilized timings improve and targets are met or the patch is a measured prerequisite with no regression.
+- Exception: when the human explicitly directs a grammar/NFA structure change,
+  keep that structural direction even if the first measurement regresses, then
+  treat the slowdown as the next regression to mitigate. Record the tradeoff
+  clearly instead of reverting by default.
 
 ## Workflow
 
