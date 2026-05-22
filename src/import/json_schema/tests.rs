@@ -303,6 +303,32 @@ fn pattern_property_object_still_uses_separated_sequence() {
 }
 
 #[test]
+fn large_snowplow_like_pattern_property_object_uses_expr_nfa_body() {
+    let mut properties = serde_json::Map::new();
+    for index in 0..64 {
+        properties.insert(format!("k{index}"), json!({"type": "string"}));
+    }
+
+    let schema = serde_json::Value::Object(serde_json::Map::from_iter([
+        ("type".to_string(), json!("object")),
+        ("properties".to_string(), serde_json::Value::Object(properties)),
+        (
+            "patternProperties".to_string(),
+            json!({
+                "^contexts_.*": {"type": "array"},
+                "^unstruct_event_.*": {"type": "string"}
+            }),
+        ),
+        ("additionalProperties".to_string(), json!(false)),
+    ]));
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!contains_separated_sequence(start_expr(&grammar)));
+    assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn shared_additional_key_colon_terminal_is_emitted_once() {
     let schema = json!({
         "type": "object",

@@ -18,6 +18,9 @@ use super::lower::{
 use super::string::property_name_matches_pattern;
 
 const POINT_PATH_PATTERN: &str = "^(/[^/]+)+$";
+const LARGE_OBJECT_LITERAL_KEY_TRIE_MIN_ITEMS: usize = 64;
+const SNOWPLOW_CONTEXTS_PATTERN: &str = "^contexts_.*";
+const SNOWPLOW_UNSTRUCT_EVENT_PATTERN: &str = "^unstruct_event_.*";
 
 struct ObjectItem {
     pair: GrammarExpr,
@@ -350,6 +353,25 @@ impl<'a> Lowerer<'a> {
         }
 
         if !tail_pairs.is_empty() {
+            let is_snowplow_large_closed_pattern_object = normalized.properties.len()
+                >= LARGE_OBJECT_LITERAL_KEY_TRIE_MIN_ITEMS
+                && normalized.required.is_empty()
+                && any_required_names.is_none()
+                && exclusive_group.is_none()
+                && matches!(normalized.additional_properties, AdditionalProperties::Deny)
+                && normalized.pattern_properties.len() == 2
+                && normalized
+                    .pattern_properties
+                    .iter()
+                    .all(|pattern_property| {
+                        pattern_property.pattern == SNOWPLOW_CONTEXTS_PATTERN
+                            || pattern_property.pattern == SNOWPLOW_UNSTRUCT_EVENT_PATTERN
+                    });
+
+            if is_snowplow_large_closed_pattern_object {
+                return self.lower_snowplow_large_pattern_object_key_trie(&items, &tail_pairs);
+            }
+
             let pair = GrammarExpr::RepeatOne(Box::new(choice(tail_pairs)));
             items.push(ObjectItem {
                 separator_pair: seq(vec![self.item_separator_expr(), pair.clone()]),
@@ -631,6 +653,16 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn split_object_pair_symbol_paths(pair: &GrammarExpr) -> ImportResult<Vec<[GrammarExpr; 2]>> {
+        match pair {
+            GrammarExpr::Choice(alternatives) => alternatives
+                .iter()
+                .map(Self::split_object_pair_symbols)
+                .collect(),
+            _ => Ok(vec![Self::split_object_pair_symbols(pair)?]),
+        }
+    }
+
     fn lower_closed_any_of_object_variants_expr_nfa(
         &mut self,
         variants: &[AnyOfFixedObjectVariant],
@@ -852,6 +884,191 @@ impl<'a> Lowerer<'a> {
                     ],
                     tail_state,
                 );
+            }
+        }
+
+        let rule_name = self.fresh_rule_name("json_closed_object_body");
+        let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
+        self.add_nonterminal_rule(&rule_name, body);
+
+        Ok(seq(vec![lit("{"), r(&rule_name), lit("}")]))
+    }
+
+    fn split_literal_key_symbol(symbol: GrammarExpr) -> Vec<GrammarExpr> {
+        match symbol {
+            GrammarExpr::Literal(bytes) if bytes.len() > 1 => bytes
+                .into_iter()
+                .map(|byte| GrammarExpr::Literal(vec![byte]))
+                .collect(),
+            other => Self::split_additional_key_colon_transition(other),
+        }
+    }
+
+    fn object_pair_path_symbols(key_symbol: GrammarExpr, value_symbol: GrammarExpr) -> Vec<GrammarExpr> {
+        let mut symbols = Self::split_literal_key_symbol(key_symbol);
+        symbols.push(value_symbol);
+        symbols
+    }
+
+    fn lower_snowplow_large_pattern_object_key_trie(
+        &mut self,
+        items: &[ObjectItem],
+        tail_pairs: &[GrammarExpr],
+    ) -> ImportResult<GrammarExpr> {
+        let mut builder = ExprNfaBuilder::new();
+        let mut states = vec![[0u32; 2]; items.len() + 1];
+        states[0][0] = builder.start_state();
+        states[0][1] = builder.add_state();
+        for state_pair in states.iter_mut().skip(1) {
+            state_pair[0] = builder.add_state();
+            state_pair[1] = builder.add_state();
+        }
+
+        let use_separator_states = items.iter().any(|item| !item.required);
+        let post_separator_states = if use_separator_states {
+            Some((0..=items.len()).map(|_| builder.add_state()).collect::<Vec<_>>())
+        } else {
+            None
+        };
+        let mut item_symbols = Vec::with_capacity(items.len());
+        for item in items {
+            item_symbols.push(Self::split_object_pair_symbols(&item.pair)?);
+        }
+        let tail_symbol_paths = tail_pairs
+            .iter()
+            .map(Self::split_object_pair_symbol_paths)
+            .collect::<ImportResult<Vec<_>>>()?;
+
+        for (index, item) in items.iter().enumerate() {
+            if !item.required {
+                builder.add_epsilon(states[index][0], states[index + 1][0]);
+                builder.add_epsilon(states[index][1], states[index + 1][1]);
+                if let Some(post_separator_states) = &post_separator_states {
+                    builder.add_epsilon(post_separator_states[index], post_separator_states[index + 1]);
+                }
+            }
+            Self::add_expr_nfa_symbol_path(
+                &mut builder,
+                states[index][0],
+                Self::object_pair_path_symbols(
+                    item_symbols[index][0].clone(),
+                    item_symbols[index][1].clone(),
+                ),
+                states[index + 1][1],
+            );
+            if let Some(post_separator_states) = &post_separator_states {
+                builder.add_transition(
+                    states[index][1],
+                    self.item_separator_expr(),
+                    post_separator_states[index],
+                );
+                Self::add_expr_nfa_symbol_path(
+                    &mut builder,
+                    post_separator_states[index],
+                    Self::object_pair_path_symbols(
+                        item_symbols[index][0].clone(),
+                        item_symbols[index][1].clone(),
+                    ),
+                    states[index + 1][1],
+                );
+            } else {
+                let mut symbols = vec![self.item_separator_expr()];
+                symbols.extend(Self::object_pair_path_symbols(
+                    item_symbols[index][0].clone(),
+                    item_symbols[index][1].clone(),
+                ));
+                Self::add_expr_nfa_symbol_path(
+                    &mut builder,
+                    states[index][1],
+                    symbols,
+                    states[index + 1][1],
+                );
+            }
+        }
+
+        builder.set_accepting(states[items.len()][0]);
+        builder.set_accepting(states[items.len()][1]);
+
+        let tail_state = builder.add_state();
+        builder.set_accepting(tail_state);
+        for tail_symbol_paths in &tail_symbol_paths {
+            for tail_symbols in tail_symbol_paths {
+                Self::add_expr_nfa_symbol_path(
+                    &mut builder,
+                    states[items.len()][0],
+                    Self::object_pair_path_symbols(
+                        tail_symbols[0].clone(),
+                        tail_symbols[1].clone(),
+                    ),
+                    tail_state,
+                );
+            }
+        }
+        if let Some(post_separator_states) = &post_separator_states {
+            builder.add_transition(
+                states[items.len()][1],
+                self.item_separator_expr(),
+                post_separator_states[items.len()],
+            );
+            for tail_symbol_paths in &tail_symbol_paths {
+                for tail_symbols in tail_symbol_paths {
+                    Self::add_expr_nfa_symbol_path(
+                        &mut builder,
+                        post_separator_states[items.len()],
+                        Self::object_pair_path_symbols(
+                            tail_symbols[0].clone(),
+                            tail_symbols[1].clone(),
+                        ),
+                        tail_state,
+                    );
+                }
+            }
+
+            let tail_post_separator_state = builder.add_state();
+            builder.add_transition(
+                tail_state,
+                self.item_separator_expr(),
+                tail_post_separator_state,
+            );
+            for tail_symbol_paths in &tail_symbol_paths {
+                for tail_symbols in tail_symbol_paths {
+                    Self::add_expr_nfa_symbol_path(
+                        &mut builder,
+                        tail_post_separator_state,
+                        Self::object_pair_path_symbols(
+                            tail_symbols[0].clone(),
+                            tail_symbols[1].clone(),
+                        ),
+                        tail_state,
+                    );
+                }
+            }
+        } else {
+            for tail_symbol_paths in &tail_symbol_paths {
+                for tail_symbols in tail_symbol_paths {
+                    let mut symbols = vec![self.item_separator_expr()];
+                    symbols.extend(Self::object_pair_path_symbols(
+                        tail_symbols[0].clone(),
+                        tail_symbols[1].clone(),
+                    ));
+                    Self::add_expr_nfa_symbol_path(
+                        &mut builder,
+                        states[items.len()][1],
+                        symbols,
+                        tail_state,
+                    );
+                    let mut loop_symbols = vec![self.item_separator_expr()];
+                    loop_symbols.extend(Self::object_pair_path_symbols(
+                        tail_symbols[0].clone(),
+                        tail_symbols[1].clone(),
+                    ));
+                    Self::add_expr_nfa_symbol_path(
+                        &mut builder,
+                        tail_state,
+                        loop_symbols,
+                        tail_state,
+                    );
+                }
             }
         }
 
