@@ -459,6 +459,17 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn split_object_pair_symbols(pair: &GrammarExpr) -> ImportResult<[GrammarExpr; 2]> {
+        match pair {
+            GrammarExpr::Sequence(parts) if parts.len() == 2 => {
+                Ok([parts[0].clone(), parts[1].clone()])
+            }
+            _ => Err(SchemaImportError::new(
+                "expected object pair to lower as key-colon/value sequence".to_string(),
+            )),
+        }
+    }
+
     fn lower_closed_any_of_object_variants_expr_nfa(
         &mut self,
         variants: &[AnyOfFixedObjectVariant],
@@ -564,14 +575,55 @@ impl<'a> Lowerer<'a> {
             state_pair[1] = builder.add_state();
         }
 
+        let use_separator_states = tail_pair.is_some() && items.iter().any(|item| !item.required);
+        let post_separator_states = if use_separator_states {
+            Some((0..=items.len()).map(|_| builder.add_state()).collect::<Vec<_>>())
+        } else {
+            None
+        };
+        let mut item_symbols = Vec::with_capacity(items.len());
+        for item in items {
+            item_symbols.push(Self::split_object_pair_symbols(&item.pair)?);
+        }
+        let tail_symbols = tail_pair
+            .as_ref()
+            .map(Self::split_object_pair_symbols)
+            .transpose()?;
+
         for (index, item) in items.iter().enumerate() {
-            let separator_pair = seq(vec![self.item_separator_expr(), item.pair.clone()]);
             if !item.required {
                 builder.add_epsilon(states[index][0], states[index + 1][0]);
                 builder.add_epsilon(states[index][1], states[index + 1][1]);
+                if let Some(post_separator_states) = &post_separator_states {
+                    builder.add_epsilon(post_separator_states[index], post_separator_states[index + 1]);
+                }
             }
-            builder.add_transition(states[index][0], item.pair.clone(), states[index + 1][1]);
-            builder.add_transition(states[index][1], separator_pair, states[index + 1][1]);
+            Self::add_expr_nfa_symbol_path(
+                &mut builder,
+                states[index][0],
+                item_symbols[index].to_vec(),
+                states[index + 1][1],
+            );
+            if let Some(post_separator_states) = &post_separator_states {
+                builder.add_transition(states[index][1], self.item_separator_expr(), post_separator_states[index]);
+                Self::add_expr_nfa_symbol_path(
+                    &mut builder,
+                    post_separator_states[index],
+                    item_symbols[index].to_vec(),
+                    states[index + 1][1],
+                );
+            } else {
+                Self::add_expr_nfa_symbol_path(
+                    &mut builder,
+                    states[index][1],
+                    vec![
+                        self.item_separator_expr(),
+                        item_symbols[index][0].clone(),
+                        item_symbols[index][1].clone(),
+                    ],
+                    states[index + 1][1],
+                );
+            }
         }
 
         builder.set_accepting(states[items.len()][0]);
@@ -580,17 +632,58 @@ impl<'a> Lowerer<'a> {
         if let Some(tail_pair_expr) = tail_pair {
             let tail_state = builder.add_state();
             builder.set_accepting(tail_state);
-            builder.add_transition(states[items.len()][0], tail_pair_expr.clone(), tail_state);
-            builder.add_transition(
-                states[items.len()][1],
-                seq(vec![self.item_separator_expr(), tail_pair_expr.clone()]),
+            let tail_symbols = tail_symbols
+                .as_ref()
+                .expect("tail pair must lower as key-colon/value sequence");
+            Self::add_expr_nfa_symbol_path(
+                &mut builder,
+                states[items.len()][0],
+                tail_symbols.to_vec(),
                 tail_state,
             );
-            builder.add_transition(
-                tail_state,
-                seq(vec![self.item_separator_expr(), tail_pair_expr]),
-                tail_state,
-            );
+            if let Some(post_separator_states) = &post_separator_states {
+                builder.add_transition(
+                    states[items.len()][1],
+                    self.item_separator_expr(),
+                    post_separator_states[items.len()],
+                );
+                Self::add_expr_nfa_symbol_path(
+                    &mut builder,
+                    post_separator_states[items.len()],
+                    tail_symbols.to_vec(),
+                    tail_state,
+                );
+
+                let tail_post_separator_state = builder.add_state();
+                builder.add_transition(tail_state, self.item_separator_expr(), tail_post_separator_state);
+                Self::add_expr_nfa_symbol_path(
+                    &mut builder,
+                    tail_post_separator_state,
+                    tail_symbols.to_vec(),
+                    tail_state,
+                );
+            } else {
+                Self::add_expr_nfa_symbol_path(
+                    &mut builder,
+                    states[items.len()][1],
+                    vec![
+                        self.item_separator_expr(),
+                        tail_symbols[0].clone(),
+                        tail_symbols[1].clone(),
+                    ],
+                    tail_state,
+                );
+                Self::add_expr_nfa_symbol_path(
+                    &mut builder,
+                    tail_state,
+                    vec![
+                        self.item_separator_expr(),
+                        tail_symbols[0].clone(),
+                        tail_symbols[1].clone(),
+                    ],
+                    tail_state,
+                );
+            }
         }
 
         let rule_name = self.fresh_rule_name("json_closed_object_body");
