@@ -12,6 +12,8 @@ mod string;
 #[cfg(test)]
 mod tests;
 
+use std::env;
+
 use serde_json::Value;
 
 use crate::GlrMaskError;
@@ -42,10 +44,25 @@ pub(crate) fn simplify_grammar_enabled() -> bool {
     false
 }
 
-/// Exact terminal subtraction is kept enabled because open-object lowering uses
-/// `JSON_STRING - {fixed literal keys}` for additional-property keys.
+/// Exact terminal subtraction is enabled by default because open-object
+/// lowering uses `JSON_STRING - {fixed literal keys}` for additional-property
+/// keys.
+///
+/// Set `GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS=0` (or `false`, `no`,
+/// `off`, or empty) to disable exact-subtraction lowering in grammar dumps and
+/// downstream import paths.
 pub(crate) fn lower_exact_subtractions_enabled() -> bool {
-    true
+    match env::var("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS") {
+        Ok(value) => {
+            let trimmed = value.trim();
+            !trimmed.is_empty()
+                && !matches!(
+                    trimmed.to_ascii_lowercase().as_str(),
+                    "0" | "false" | "no" | "off"
+                )
+        }
+        Err(_) => true,
+    }
 }
 
 /// Literal-choice promotion was an optimization knob in the old importer.  The

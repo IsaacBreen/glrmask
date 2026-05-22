@@ -3,6 +3,7 @@ use std::{env, ffi::OsString, sync::Mutex};
 
 use super::schema_to_named_grammar;
 use super::string::property_name_matches_pattern;
+use super::lower_exact_subtractions_enabled;
 use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar};
 use crate::grammar::glrm::to_glrm;
 
@@ -51,6 +52,22 @@ fn start_expr(grammar: &NamedGrammar) -> &GrammarExpr {
         .find(|rule| rule.name == grammar.start)
         .expect("start rule exists")
         .expr
+}
+
+#[test]
+fn exact_subtraction_lowering_env_var_defaults_true_and_accepts_falsey_values() {
+    let _lock = ENV_LOCK.lock().unwrap();
+
+    let _unset = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS");
+    assert!(lower_exact_subtractions_enabled());
+
+    for value in ["", "0", "false", "FALSE", "no", "off"] {
+        let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS", value);
+        assert!(!lower_exact_subtractions_enabled(), "value {value:?} should disable exact-sub lowering");
+    }
+
+    let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS", "1");
+    assert!(lower_exact_subtractions_enabled());
 }
 
 fn contains_separated_sequence(expr: &GrammarExpr) -> bool {
