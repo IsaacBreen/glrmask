@@ -5,6 +5,11 @@ description: Optimize glrmask/CFA time-between-mask performance; use when invest
 
 # Optimize TBM
 
+Temporary precedence note: for JSON-schema importer regressions after the modular
+importer rewrite, use `$json-schema-importer-regression` first. This generic TBM
+workflow is temporarily secondary for those cases; still apply its measurement
+integrity rules when the temporary skill asks for TBM evidence.
+
 Use only stabilized timings for decisions: compare per-step values after cross-run per-step minimum stabilization, not raw single-pass sweep spikes.
 
 Do not optimize by caching across timing runs or repeated invocations of the same

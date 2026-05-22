@@ -6,6 +6,12 @@ user-invocable: true
 
 # Optimize Glrmask Build
 
+Temporary precedence note: for JSON-schema importer regressions after the modular
+importer rewrite, use `$json-schema-importer-regression` first. This generic
+build-time workflow is temporarily secondary for those cases; still apply its
+measurement and build-profile rules when the temporary skill asks for build-time
+evidence.
+
 ## When to Use
 - Investigating glrmask compile-time or build-time behaviour.
 
