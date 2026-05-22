@@ -268,6 +268,80 @@ fn large_optional_open_object_uses_fused_prefix_chain_rules() {
 }
 
 #[test]
+fn large_optional_open_object_allow_any_scalars_still_uses_fused_prefix_chain_rules() {
+    let mut properties = serde_json::Map::new();
+    for index in 0..16 {
+        properties.insert(format!("k{index}"), json!({"type": "string"}));
+    }
+
+    let schema = serde_json::Value::Object(serde_json::Map::from_iter([
+        ("type".to_string(), json!("object")),
+        ("properties".to_string(), serde_json::Value::Object(properties)),
+        ("additionalProperties".to_string(), json!(true)),
+    ]));
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(count_rules_with_prefix(&grammar, "json_open_object_prefix") > 0);
+    assert_eq!(count_rules_with_prefix(&grammar, "json_closed_object_body"), 0);
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn large_optional_open_object_allow_any_object_valued_at_16_still_uses_fused_prefix_chain_rules() {
+    let mut properties = serde_json::Map::new();
+    for index in 0..16 {
+        properties.insert(
+            format!("k{index}"),
+            json!({
+                "type": "object",
+                "properties": {
+                    "nested": {"type": "string"}
+                }
+            }),
+        );
+    }
+
+    let schema = serde_json::Value::Object(serde_json::Map::from_iter([
+        ("type".to_string(), json!("object")),
+        ("properties".to_string(), serde_json::Value::Object(properties)),
+        ("additionalProperties".to_string(), json!(true)),
+    ]));
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(count_rules_with_prefix(&grammar, "json_open_object_prefix") > 0);
+    assert!(!contains_expr_nfa(start_expr(&grammar)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn large_optional_open_object_allow_any_object_valued_at_32_uses_expr_nfa_body() {
+    let mut properties = serde_json::Map::new();
+    for index in 0..32 {
+        properties.insert(
+            format!("k{index}"),
+            json!({
+                "type": "object",
+                "properties": {
+                    "nested": {"type": "string"}
+                }
+            }),
+        );
+    }
+
+    let schema = serde_json::Value::Object(serde_json::Map::from_iter([
+        ("type".to_string(), json!("object")),
+        ("properties".to_string(), serde_json::Value::Object(properties)),
+        ("additionalProperties".to_string(), json!(true)),
+    ]));
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert_eq!(count_rules_with_prefix(&grammar, "json_open_object_prefix"), 0);
+    assert!(count_rules_with_prefix(&grammar, "json_closed_object_body") > 0);
+    assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn large_required_open_object_does_not_use_fused_prefix_chain_rules() {
     let mut properties = serde_json::Map::new();
     for index in 0..16 {

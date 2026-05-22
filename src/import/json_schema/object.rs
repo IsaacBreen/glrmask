@@ -50,6 +50,26 @@ struct AnyOfFixedObjectState {
     has_content: bool,
 }
 
+fn is_obviously_object_valued_property(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return false;
+    };
+
+    assertions.object.is_some()
+        || assertions
+            .types
+            .as_ref()
+            .is_some_and(|types| types.iter().any(|schema_type| *schema_type == SchemaType::Object))
+}
+
+fn obvious_object_valued_property_count(schema: &ObjectSchema) -> usize {
+    schema
+        .properties
+        .iter()
+        .filter(|property| is_obviously_object_valued_property(&property.schema))
+        .count()
+}
+
 impl AnyOfFixedObjectVariant {
     fn len(&self) -> usize {
         self.items.len()
@@ -282,10 +302,13 @@ impl<'a> Lowerer<'a> {
             && normalized.required.is_empty()
             && any_required_names.is_none()
             && exclusive_group.is_none()
-            && matches!(
-                normalized.additional_properties,
-                AdditionalProperties::AllowAny | AdditionalProperties::Schema(_)
-            )
+            && match &normalized.additional_properties {
+                AdditionalProperties::Schema(_) => true,
+                AdditionalProperties::AllowAny => {
+                    obvious_object_valued_property_count(&normalized) < 32
+                }
+                AdditionalProperties::Deny => false,
+            }
             && normalized.properties.len() >= 16;
 
         if normalized.pattern_properties.is_empty() && !normalized.properties.is_empty() {
