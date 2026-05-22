@@ -19,6 +19,8 @@ Use this temporary skill when optimizing glrmask JSON-schema importer regression
 - Do not rip out the modular importer or paste back old `json_schema.rs`. The old importer was messy and had bad edge behavior; it is evidence, not architecture.
 - Use old grammar/timing/profile artifacts to identify what shape got worse: object body factoring, `anyOf`/`oneOf` branching, pattern/additional-property mixing, bounded string chunks, enum grouping, or terminal sharing.
 - Prefer simple current-architecture fixes in `src/import/json_schema/*` that produce cleaner grammars and fewer parser paths.
+- When the user asks to optimize JSON-schema build time, keep the lever in JSON-schema importing/lowering first. Optimize downstream compiler cost by changing the generated grammar shape, terminal/key factoring, object-body NFA structure, and sharing decisions. Do not drift into generic compiler or runtime optimization until importer-shape evidence shows there is no importer-side mitigation left.
+- For importer-driven build regressions, measure the downstream phase that grew, but interpret it as feedback on import shape: e.g. too many byte-split terminals, too many ExprNFA states/symbols, duplicated value subexpressions, or excessive parser/terminal-DWA work induced by lowering. The preferred fix is a cleaner emitted schema grammar that preserves the TBM win.
 - Make good use of `ExprNFA` for object lowering, but inspect the resulting grammar. The NFA structure and emitted grammar structure both affect runtime.
 - Simpler grammars usually win: fewer wrapper choices, fewer duplicated object bodies, fewer overlapping key/value alternatives, fewer live parser paths at close tokens.
 - Do not keep a patch just because it looks like the old grammar. Keep it only if stabilized timings improve and targets are met or the patch is a measured prerequisite with no regression.
@@ -47,11 +49,12 @@ Use this temporary skill when optimizing glrmask JSON-schema importer regression
 
 4. Name the exact modular fix before editing.
    - Examples of acceptable targets: a narrower `ExprNFA` object body, required-property `anyOf` factoring, open-object variant factoring, pattern/additional-property key sharing, compact bounded-string shape, or enum terminal grouping.
+   - For build-time regressions caused by a runtime-oriented importer shape, name the importer representation to change and the downstream cost it should reduce, such as replacing per-byte literal-key paths with grouped prefix terminals, sharing repeated value expressions behind nonterminals, or reducing duplicated ExprNFA suffix states while keeping the same parser frontier at the hot token.
    - Avoid schema-specific hacks and broad heuristics that only hide one benchmark.
 
 5. Validate with the same focused artifact and then a nearby broader check.
    - For TBM work, run focused timings with enough repetitions and report before/after rows.
-   - For build-time work, report before/after build wall time and dominant profile buckets.
+   - For build-time work, report before/after build wall time, dominant downstream profile buckets, and the importer-shape stats that explain them (grammar rules, terminal count, ExprNFA states/symbols, parser/DWA state counts when available).
    - If the patch worsens a neighboring known hotspot, revert or narrow it before reporting success.
 
 ## Red Flags
