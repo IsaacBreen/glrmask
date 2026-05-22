@@ -231,7 +231,7 @@ impl<'a> Lowerer<'a> {
             return self.lower_all_of(assertions);
         }
         if !assertions.any_of.is_empty() {
-            return self.lower_any_of(assertions);
+            return self.lower_any_of(schema, assertions);
         }
         if !assertions.one_of.is_empty() {
             return self.lower_one_of(assertions);

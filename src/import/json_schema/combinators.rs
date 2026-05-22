@@ -10,7 +10,11 @@ use super::error::ImportResult;
 use super::lower::{choice, r, Lowerer, JSON_VALUE_RULE};
 
 impl<'a> Lowerer<'a> {
-    pub(crate) fn lower_any_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
+    pub(crate) fn lower_any_of(
+        &mut self,
+        schema: &Schema,
+        assertions: &SchemaAssertions,
+    ) -> ImportResult<GrammarExpr> {
         if let Some((object, any_required_names)) = try_factor_required_property_any_of(assertions) {
             return self.lower_object_requiring_any_property(&object, &any_required_names);
         }
@@ -30,6 +34,10 @@ impl<'a> Lowerer<'a> {
             try_factor_closed_object_variant_any_of(assertions)
         {
             return self.lower_object_with_exclusive_properties(&object, &exclusive_names, require_one);
+        }
+
+        if let Some(expr) = self.try_lower_ref_string_path_object_any_of(schema, &branches)? {
+            return Ok(expr);
         }
 
         let alternatives = branches

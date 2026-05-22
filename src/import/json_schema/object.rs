@@ -13,9 +13,11 @@ use super::lower::{
     choice, lit, r, seq, Lowerer, JSON_ARRAY_RULE, JSON_BOOL_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
     JSON_ADDITIONAL_KEY_COLON_SHARED_RULE, JSON_NULL_RULE,
-    JSON_NUMBER_RULE, JSON_STRING_RULE, JSON_VALUE_RULE,
+    JSON_NUMBER_RULE, JSON_OBJECT_RULE, JSON_STRING_RULE, JSON_VALUE_RULE,
 };
 use super::string::property_name_matches_pattern;
+
+const POINT_PATH_PATTERN: &str = "^(/[^/]+)+$";
 
 struct ObjectItem {
     pair: GrammarExpr,
@@ -129,6 +131,115 @@ impl<'a> Lowerer<'a> {
             &variants,
             include_untyped_non_object_alts,
         )
+    }
+
+    pub(crate) fn try_lower_ref_string_path_object_any_of(
+        &mut self,
+        current_schema: &Schema,
+        branches: &[Schema],
+    ) -> ImportResult<Option<GrammarExpr>> {
+        if branches.len() != 3 {
+            return Ok(None);
+        }
+
+        let mut array_branch = None;
+        let mut saw_ref_string_object = false;
+        let mut saw_path_object = false;
+
+        for branch in branches {
+            let resolved = self.resolve_branch_schema(branch)?;
+            if is_ref_string_open_object_branch(resolved) {
+                if saw_ref_string_object {
+                    return Ok(None);
+                }
+                saw_ref_string_object = true;
+                continue;
+            }
+            if self.is_path_recursive_open_object_branch(current_schema, resolved)? {
+                if saw_path_object {
+                    return Ok(None);
+                }
+                saw_path_object = true;
+                continue;
+            }
+            if is_plain_array_branch(resolved) {
+                if array_branch.is_some() {
+                    return Ok(None);
+                }
+                array_branch = Some(branch.clone());
+                continue;
+            }
+            return Ok(None);
+        }
+
+        if !saw_ref_string_object || !saw_path_object {
+            return Ok(None);
+        }
+
+        let Some(array_branch) = array_branch else {
+            return Ok(None);
+        };
+
+        // This recognizer is intentionally tied to the observed Point-like
+        // overlap shape: the open "$ref": string object branch and the open
+        // path-key object branch together already cover the full object
+        // language, so we can collapse just that object subset and leave the
+        // array sibling untouched.
+        Ok(Some(choice(vec![r(JSON_OBJECT_RULE), self.lower_schema(&array_branch)?])))
+    }
+
+    fn resolve_branch_schema<'b>(&'b self, schema: &'b Schema) -> ImportResult<&'b Schema> {
+        match &schema.kind {
+            SchemaKind::Ref(pointer) => self.resolve_ref_target(pointer),
+            _ => Ok(schema),
+        }
+    }
+
+    fn is_path_recursive_open_object_branch(
+        &self,
+        current_schema: &Schema,
+        schema: &Schema,
+    ) -> ImportResult<bool> {
+        let SchemaKind::Assertions(assertions) = &schema.kind else {
+            return Ok(false);
+        };
+        if assertions.const_value.is_some()
+            || assertions.enum_values.is_some()
+            || assertions.array.is_some()
+            || assertions.string.is_some()
+            || assertions.number.is_some()
+            || !assertions.any_of.is_empty()
+            || !assertions.one_of.is_empty()
+            || !assertions.all_of.is_empty()
+        {
+            return Ok(false);
+        }
+        if let Some(types) = &assertions.types {
+            if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+                return Ok(false);
+            }
+        }
+
+        let Some(object) = &assertions.object else {
+            return Ok(false);
+        };
+        if !object.properties.is_empty() || object.pattern_properties.len() != 1 {
+            return Ok(false);
+        }
+        if !matches!(object.additional_properties, AdditionalProperties::AllowAny) {
+            return Ok(false);
+        }
+
+        let pattern_property = &object.pattern_properties[0];
+        if pattern_property.pattern != POINT_PATH_PATTERN {
+            return Ok(false);
+        }
+
+        let SchemaKind::Ref(pointer) = &pattern_property.schema.kind else {
+            return Ok(false);
+        };
+        let target = self.resolve_ref_target(pointer)?;
+        Ok(target.location == current_schema.location)
     }
 
     fn lower_object_internal(
@@ -866,6 +977,92 @@ impl<'a> Lowerer<'a> {
 
         Ok(normalized)
     }
+}
+
+fn is_ref_string_open_object_branch(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return false;
+    };
+    if assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || assertions.array.is_some()
+        || assertions.number.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+    {
+        return false;
+    }
+    if let Some(types) = &assertions.types {
+        if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+            return false;
+        }
+    }
+
+    let Some(object) = &assertions.object else {
+        return false;
+    };
+    if object.pattern_properties.len() != 0 || object.properties.len() != 1 {
+        return false;
+    }
+    if object.properties[0].name != "$ref" {
+        return false;
+    }
+    if !matches!(object.additional_properties, AdditionalProperties::AllowAny) {
+        return false;
+    }
+
+    is_string_schema(&object.properties[0].schema)
+}
+
+fn is_plain_array_branch(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return false;
+    };
+    if assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || assertions.object.is_some()
+        || assertions.string.is_some()
+        || assertions.number.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+    {
+        return false;
+    }
+    if let Some(types) = &assertions.types {
+        if !types.iter().all(|schema_type| *schema_type == SchemaType::Array) {
+            return false;
+        }
+        return true;
+    }
+
+    assertions.array.is_some()
+}
+
+fn is_string_schema(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return false;
+    };
+    if assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || assertions.object.is_some()
+        || assertions.array.is_some()
+        || assertions.number.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+    {
+        return false;
+    }
+    if let Some(types) = &assertions.types {
+        if !types.iter().all(|schema_type| *schema_type == SchemaType::String) {
+            return false;
+        }
+        return true;
+    }
+
+    assertions.string.is_some()
 }
 
 fn property_matches_pattern(pattern: &str, property_name: &str) -> ImportResult<bool> {
