@@ -43,6 +43,12 @@ struct DenseTokenSetIntersectionKey {
     token_set: usize,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct DenseGssTransitionKey {
+    lower: usize,
+    entries: SmallVec<[(u32, usize, usize, usize); 4]>,
+}
+
 
 /// Dense bitmap accumulator used while walking the parser DWA.
 ///
@@ -460,12 +466,33 @@ fn enqueue_gss(queue: &mut MaskQueue, target: u32, gss: DenseMaskGSS) {
     queue.enqueue(target, gss);
 }
 
+fn dense_gss_transition_key(
+    gss: &DenseMaskGSS,
+    weight: &Weight,
+) -> Option<DenseGssTransitionKey> {
+    let lower = gss.single_interface_lower_id()?;
+    let mut entries = SmallVec::new();
+    gss.for_each_acc(|acc| {
+        for (tsid, dense) in &acc.0 {
+            let token_set = weight
+                .0
+                .get(*tsid)
+                .map(|set| Arc::as_ptr(set) as usize)
+                .unwrap_or(0);
+            entries.push((*tsid, dense.as_ptr() as usize, dense.len(), token_set));
+        }
+    });
+    entries.sort_unstable();
+    Some(DenseGssTransitionKey { lower, entries })
+}
+
 fn enqueue_weighted_transition(
     queue: &mut MaskQueue,
     popped: &DenseMaskGSS,
     target: u32,
     weight: &Weight,
     precomputed: &DenseTokenMaskCache,
+    transition_gss_cache: &mut FxHashMap<DenseGssTransitionKey, DenseMaskGSS>,
     transition_intersection_cache: &mut FxHashMap<
         DenseTokenSetIntersectionKey,
         Option<Arc<[u64]>>,
@@ -484,6 +511,19 @@ fn enqueue_weighted_transition(
         None
     };
     let mut intersect_ns = 0u64;
+    let cache_key = dense_gss_transition_key(popped, weight);
+    if let Some(key) = cache_key.as_ref() {
+        if let Some(cached) = transition_gss_cache.get(key) {
+            if let (Some(profile), Some(start)) = (profile.as_mut(), apply_start) {
+                let apply_ns = elapsed_ns(start);
+                profile.transition_apply_ns += apply_ns;
+                profile.transition_apply_gss_ns += apply_ns;
+            }
+            enqueue_gss(queue, target, cached.clone());
+            return;
+        }
+    }
+
     let pruned = popped.apply_and_prune_no_promote(|allowed| {
         let intersect_start = if profile_enabled {
             Some(Instant::now())
@@ -500,6 +540,9 @@ fn enqueue_weighted_transition(
         }
         intersected
     });
+    if let Some(key) = cache_key {
+        transition_gss_cache.insert(key, pruned.clone());
+    }
     if let (Some(profile), Some(start)) = (profile.as_mut(), apply_start) {
         let apply_ns = elapsed_ns(start);
         profile.transition_apply_ns += apply_ns;
@@ -516,6 +559,7 @@ fn enqueue_parser_state_transition(
     parser_state: u32,
     popped: &DenseMaskGSS,
     precomputed: &DenseTokenMaskCache,
+    transition_gss_cache: &mut FxHashMap<DenseGssTransitionKey, DenseMaskGSS>,
     transition_intersection_cache: &mut FxHashMap<
         DenseTokenSetIntersectionKey,
         Option<Arc<[u64]>>,
@@ -549,6 +593,7 @@ fn enqueue_parser_state_transition(
         *target,
         weight,
         precomputed,
+        transition_gss_cache,
         transition_intersection_cache,
         profile,
     );
@@ -994,6 +1039,7 @@ impl<'a> ConstraintState<'a> {
         start_final_weight: Option<&Weight>,
         start_fast_transitions: &FxHashMap<i32, (u32, Weight)>,
         precomputed: &DenseTokenMaskCache,
+        transition_gss_cache: &mut FxHashMap<DenseGssTransitionKey, DenseMaskGSS>,
         transition_intersection_cache: &mut FxHashMap<
             DenseTokenSetIntersectionKey,
             Option<Arc<[u64]>>,
@@ -1074,6 +1120,7 @@ impl<'a> ConstraintState<'a> {
                     *parser_state,
                     popped,
                     precomputed,
+                    transition_gss_cache,
                     transition_intersection_cache,
                     profile,
                 );
@@ -1150,6 +1197,8 @@ impl<'a> ConstraintState<'a> {
 
         let precomputed = &self.constraint.weight_token_dense_masks;
         let dense_words = self.constraint.internal_token_dense_words;
+        let mut transition_gss_cache: FxHashMap<DenseGssTransitionKey, DenseMaskGSS> =
+            FxHashMap::default();
         let mut transition_intersection_cache: FxHashMap<
             DenseTokenSetIntersectionKey,
             Option<Arc<[u64]>>,
@@ -1184,6 +1233,7 @@ impl<'a> ConstraintState<'a> {
             start_dwa_state.final_weight.as_ref(),
             start_fast_transitions,
             precomputed,
+            &mut transition_gss_cache,
             &mut transition_intersection_cache,
             &mut queue,
             &mut merged,
@@ -1245,6 +1295,7 @@ impl<'a> ConstraintState<'a> {
                     parser_state,
                     &popped,
                     precomputed,
+                    &mut transition_gss_cache,
                     &mut transition_intersection_cache,
                     &mut profile,
                 );

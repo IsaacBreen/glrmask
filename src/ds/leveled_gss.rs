@@ -1715,6 +1715,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Arc::as_ptr(&self.inner) as usize
     }
 
+    pub(crate) fn single_interface_lower_id(&self) -> Option<usize> {
+        match &*self.inner {
+            Upper::Interface(i) => Some(lower_node_id(&i.inner)),
+            Upper::Branch(_) => None,
+        }
+    }
+
 
 
     pub fn empty() -> Self {
