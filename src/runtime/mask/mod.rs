@@ -35,10 +35,12 @@ const DELTA_SEED_MIN_SAVINGS: u64 = 2048;
 const MASK_SINGLE_PATH_DIRECT_MAX_DEPTH: u32 = 64;
 const MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS: usize = 8;
 
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct DenseMaskIntersectionKey {
-    weight: usize,
-    entries: SmallVec<[(u32, usize, usize); 2]>,
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct DenseTokenSetIntersectionKey {
+    tsid: u32,
+    dense: usize,
+    dense_len: usize,
+    token_set: usize,
 }
 
 
@@ -57,17 +59,6 @@ struct DenseMaskIntersectionKey {
 struct DenseMaskAcc(SmallVec<[(u32, Arc<[u64]>); 2]>);
 
 impl DenseMaskAcc {
-    fn intersection_cache_key(&self, weight: &Weight) -> DenseMaskIntersectionKey {
-        let mut entries = SmallVec::new();
-        for (tsid, dense) in &self.0 {
-            entries.push((*tsid, dense.as_ptr() as usize, dense.len()));
-        }
-        DenseMaskIntersectionKey {
-            weight: weight as *const Weight as usize,
-            entries,
-        }
-    }
-
     fn from_dense(tsid: u32, dense: Vec<u64>) -> Option<Self> {
         if dense.iter().all(|&word| word == 0) {
             return None;
@@ -262,7 +253,7 @@ impl DenseMaskAcc {
         &self,
         weight: &Weight,
         precomputed: &DenseTokenMaskCache,
-        cache: &mut FxHashMap<DenseMaskIntersectionKey, Option<Self>>,
+        cache: &mut FxHashMap<DenseTokenSetIntersectionKey, Option<Arc<[u64]>>>,
     ) -> Option<Self> {
         if self.is_empty() {
             return None;
@@ -271,12 +262,47 @@ impl DenseMaskAcc {
             return Some(self.clone());
         }
 
-        let key = self.intersection_cache_key(weight);
+        let mut result = SmallVec::new();
+
+        for (tsid, dense) in &self.0 {
+            let Some(token_set) = weight.0.get(*tsid) else {
+                continue;
+            };
+            if let Some(intersection) = Self::intersect_dense_with_token_set_cached(
+                *tsid,
+                dense,
+                token_set,
+                precomputed,
+                cache,
+            ) {
+                result.push((*tsid, intersection));
+            }
+        }
+
+        if result.is_empty() {
+            None
+        } else {
+            Some(Self(result))
+        }
+    }
+
+    fn intersect_dense_with_token_set_cached(
+        tsid: u32,
+        dense: &Arc<[u64]>,
+        token_set: &Arc<RangeSetBlaze<u32>>,
+        precomputed: &DenseTokenMaskCache,
+        cache: &mut FxHashMap<DenseTokenSetIntersectionKey, Option<Arc<[u64]>>>,
+    ) -> Option<Arc<[u64]>> {
+        let key = DenseTokenSetIntersectionKey {
+            tsid,
+            dense: dense.as_ptr() as usize,
+            dense_len: dense.len(),
+            token_set: Arc::as_ptr(token_set) as usize,
+        };
         if let Some(cached) = cache.get(&key) {
             return cached.clone();
         }
-
-        let result = self.intersect_with_weight(weight, precomputed);
+        let result = Self::intersect_dense_with_token_set(dense, token_set, precomputed);
         cache.insert(key, result.clone());
         result
     }
@@ -440,7 +466,10 @@ fn enqueue_weighted_transition(
     target: u32,
     weight: &Weight,
     precomputed: &DenseTokenMaskCache,
-    transition_intersection_cache: &mut FxHashMap<DenseMaskIntersectionKey, Option<DenseMaskAcc>>,
+    transition_intersection_cache: &mut FxHashMap<
+        DenseTokenSetIntersectionKey,
+        Option<Arc<[u64]>>,
+    >,
     profile: &mut Option<MaskInnerProfileStats>,
 ) {
     if weight.is_full() {
@@ -487,7 +516,10 @@ fn enqueue_parser_state_transition(
     parser_state: u32,
     popped: &DenseMaskGSS,
     precomputed: &DenseTokenMaskCache,
-    transition_intersection_cache: &mut FxHashMap<DenseMaskIntersectionKey, Option<DenseMaskAcc>>,
+    transition_intersection_cache: &mut FxHashMap<
+        DenseTokenSetIntersectionKey,
+        Option<Arc<[u64]>>,
+    >,
     profile: &mut Option<MaskInnerProfileStats>,
 ) {
     let positive_label = encode_positive_label(parser_state);
@@ -962,7 +994,10 @@ impl<'a> ConstraintState<'a> {
         start_final_weight: Option<&Weight>,
         start_fast_transitions: &FxHashMap<i32, (u32, Weight)>,
         precomputed: &DenseTokenMaskCache,
-        transition_intersection_cache: &mut FxHashMap<DenseMaskIntersectionKey, Option<DenseMaskAcc>>,
+        transition_intersection_cache: &mut FxHashMap<
+            DenseTokenSetIntersectionKey,
+            Option<Arc<[u64]>>,
+        >,
         queue: &mut MaskQueue,
         merged: &mut [u64],
         direct_buf: &mut Option<&mut [u32]>,
@@ -1116,8 +1151,8 @@ impl<'a> ConstraintState<'a> {
         let precomputed = &self.constraint.weight_token_dense_masks;
         let dense_words = self.constraint.internal_token_dense_words;
         let mut transition_intersection_cache: FxHashMap<
-            DenseMaskIntersectionKey,
-            Option<DenseMaskAcc>,
+            DenseTokenSetIntersectionKey,
+            Option<Arc<[u64]>>,
         > = FxHashMap::default();
 
         let mut merged = {
