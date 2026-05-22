@@ -21,6 +21,7 @@ const POINT_PATH_PATTERN: &str = "^(/[^/]+)+$";
 const LARGE_OBJECT_LITERAL_KEY_TRIE_MIN_ITEMS: usize = 64;
 const SNOWPLOW_CONTEXTS_PATTERN: &str = "^contexts_.*";
 const SNOWPLOW_UNSTRUCT_EVENT_PATTERN: &str = "^unstruct_event_.*";
+const SNOWPLOW_KEY_TRIE_PREFIX_SPLIT_BYTES: usize = 2;
 
 struct ObjectItem {
     pair: GrammarExpr,
@@ -896,15 +897,31 @@ impl<'a> Lowerer<'a> {
 
     fn split_literal_key_symbol(symbol: GrammarExpr) -> Vec<GrammarExpr> {
         match symbol {
-            GrammarExpr::Literal(bytes) if bytes.len() > 1 => bytes
-                .into_iter()
-                .map(|byte| GrammarExpr::Literal(vec![byte]))
-                .collect(),
+            GrammarExpr::Literal(bytes) if bytes.len() > 1 => {
+                let split_len = SNOWPLOW_KEY_TRIE_PREFIX_SPLIT_BYTES.min(bytes.len());
+                if split_len >= bytes.len() {
+                    bytes
+                        .into_iter()
+                        .map(|byte| GrammarExpr::Literal(vec![byte]))
+                        .collect()
+                } else {
+                    let mut symbols = bytes[..split_len]
+                        .iter()
+                        .copied()
+                        .map(|byte| GrammarExpr::Literal(vec![byte]))
+                        .collect::<Vec<_>>();
+                    symbols.push(GrammarExpr::Literal(bytes[split_len..].to_vec()));
+                    symbols
+                }
+            }
             other => Self::split_additional_key_colon_transition(other),
         }
     }
 
-    fn object_pair_path_symbols(key_symbol: GrammarExpr, value_symbol: GrammarExpr) -> Vec<GrammarExpr> {
+    fn object_pair_path_symbols(
+        key_symbol: GrammarExpr,
+        value_symbol: GrammarExpr,
+    ) -> Vec<GrammarExpr> {
         let mut symbols = Self::split_literal_key_symbol(key_symbol);
         symbols.push(value_symbol);
         symbols
