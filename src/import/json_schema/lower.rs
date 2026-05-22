@@ -197,7 +197,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    fn lower_ref(&mut self, pointer: &str) -> ImportResult<GrammarExpr> {
+    pub(crate) fn lower_ref(&mut self, pointer: &str) -> ImportResult<GrammarExpr> {
         let normalized = normalize_local_ref(pointer)?;
         if normalized == "#" {
             return Ok(r("start"));

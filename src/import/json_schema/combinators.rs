@@ -58,6 +58,10 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(crate) fn lower_all_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
+        if let Some(expr) = self.try_lower_single_ref_with_object_siblings(assertions)? {
+            return Ok(expr);
+        }
+
         let mut branches = assertions.all_of.clone();
         let siblings = assertions.clone_without_combinators();
         if siblings.has_value_assertions_without_combinators() {
@@ -89,6 +93,54 @@ impl<'a> Lowerer<'a> {
             expr: Box::new(left),
             intersect: Box::new(right),
         }))
+    }
+
+    fn try_lower_single_ref_with_object_siblings(
+        &mut self,
+        assertions: &SchemaAssertions,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        if assertions.all_of.len() != 1 {
+            return Ok(None);
+        }
+
+        let SchemaKind::Ref(pointer) = &assertions.all_of[0].kind else {
+            return Ok(None);
+        };
+
+        let Ok(target) = self.resolve_ref_target(pointer) else {
+            return Ok(None);
+        };
+        if plain_object_schema(target).is_none() {
+            return Ok(None);
+        }
+
+        let siblings = assertions.clone_without_combinators();
+        if siblings.const_value.is_some()
+            || siblings.enum_values.is_some()
+            || siblings.array.is_some()
+            || siblings.string.is_some()
+            || siblings.number.is_some()
+        {
+            return Ok(None);
+        }
+        if let Some(types) = &siblings.types
+            && !types.iter().all(|schema_type| *schema_type == SchemaType::Object)
+        {
+            return Ok(None);
+        }
+
+        let sibling_object = siblings.object.unwrap_or_default();
+        if !sibling_object.pattern_properties.is_empty()
+            || !matches!(sibling_object.additional_properties, AdditionalProperties::AllowAny)
+        {
+            return Ok(None);
+        }
+
+        if sibling_object.properties.is_empty() && sibling_object.required.is_empty() {
+            return self.lower_ref(pointer).map(Some);
+        }
+
+        Ok(None)
     }
 
     fn inline_all_of_refs(&self, branches: &[Schema]) -> ImportResult<Vec<Schema>> {
