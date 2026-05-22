@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use regex::escape as regex_escape;
 use serde_json::Value;
 
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule};
@@ -27,6 +28,8 @@ pub(crate) const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE: &str =
     "JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED";
 pub(crate) const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE: &str =
     "json_additional_excluded_key_colon_shared";
+const STRING_ENUM_REGEX_MIN_VALUES: usize = 64;
+const STRING_ENUM_REGEX_MIN_ENCODED_BYTES: usize = 1024;
 
 pub(crate) fn lower_document(
     document: &SchemaDocument,
@@ -240,6 +243,9 @@ impl<'a> Lowerer<'a> {
         if let Some(value) = &assertions.const_value {
             return Ok(self.lower_json_literal(value));
         }
+        if let Some(encoded_literals) = large_string_enum_regex_literals(assertions)? {
+            return Ok(GrammarExpr::RawRegex(string_enum_regex(&encoded_literals)));
+        }
         if let Some(values) = &assertions.enum_values {
             let values = if let Some(string_schema) = &assertions.string {
                 values
@@ -390,6 +396,67 @@ impl<'a> Lowerer<'a> {
             }
         }
     }
+}
+
+fn large_string_enum_regex_literals(assertions: &SchemaAssertions) -> ImportResult<Option<Vec<String>>> {
+    let Some(values) = &assertions.enum_values else {
+        return Ok(None);
+    };
+    if assertions.const_value.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+        || assertions.object.is_some()
+        || assertions.array.is_some()
+        || assertions.number.is_some()
+    {
+        return Ok(None);
+    }
+    if let Some(types) = &assertions.types
+        && (types.len() != 1 || types[0] != SchemaType::String)
+    {
+        return Ok(None);
+    }
+    if assertions.string.as_ref().is_some_and(|schema| schema.pattern.is_some()) {
+        return Ok(None);
+    }
+
+    let mut encoded_literals = Vec::new();
+    for value in values {
+        let Value::String(text) = value else {
+            return Ok(None);
+        };
+        if let Some(string_schema) = &assertions.string
+            && !string_value_satisfies_schema(value, string_schema)?
+        {
+            continue;
+        }
+        encoded_literals.push(serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string()));
+    }
+
+    if encoded_literals.is_empty() {
+        return Ok(None);
+    }
+
+    let encoded_bytes = encoded_literals.iter().map(|literal| literal.len()).sum::<usize>();
+    if encoded_literals.len() < STRING_ENUM_REGEX_MIN_VALUES
+        && encoded_bytes < STRING_ENUM_REGEX_MIN_ENCODED_BYTES
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(encoded_literals))
+}
+
+fn string_enum_regex(encoded_literals: &[String]) -> String {
+    format!(
+        "(?:{})",
+        encoded_literals
+            .iter()
+            .map(|literal| regex_escape(literal))
+            .collect::<Vec<_>>()
+            .join("|")
+    )
 }
 
 fn collect_shared_ap_exclusion_plan(document: &SchemaDocument) -> (BTreeSet<String>, Vec<String>) {

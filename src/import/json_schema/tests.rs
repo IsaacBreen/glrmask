@@ -753,6 +753,52 @@ fn enum_and_const_lower_to_exact_json_literals() {
 }
 
 #[test]
+fn large_string_enum_at_root_uses_raw_regex() {
+    let values = (0..80)
+        .map(|index| json!(format!("value-{index:02}")))
+        .collect::<Vec<_>>();
+    let schema = json!({"type": "string", "enum": values});
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(matches!(start_expr(&grammar), GrammarExpr::RawRegex(_)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn small_string_enum_at_root_remains_choice() {
+    let schema = json!({"type": "string", "enum": ["red", "green", "blue"]});
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn patterned_string_enum_does_not_use_raw_regex_fast_path() {
+    let values = (0..80)
+        .map(|index| json!(format!("value{index}")))
+        .collect::<Vec<_>>();
+    let schema = json!({
+        "type": "string",
+        "pattern": "^value[0-9]+$",
+        "enum": values
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!matches!(start_expr(&grammar), GrammarExpr::RawRegex(_)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn mixed_type_enum_does_not_use_raw_regex_fast_path() {
+    let schema = json!({"enum": ["red", 7, "blue"]});
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!matches!(start_expr(&grammar), GrammarExpr::RawRegex(_)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn integer_power_of_ten_multiple_lowers_to_regex() {
     let schema = json!({"type": "integer", "multipleOf": 10});
     let grammar = schema_to_named_grammar(&schema).unwrap();
