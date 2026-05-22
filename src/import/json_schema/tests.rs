@@ -1,9 +1,48 @@
 use serde_json::json;
+use std::{env, ffi::OsString, sync::Mutex};
 
 use super::schema_to_named_grammar;
 use super::string::property_name_matches_pattern;
 use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar};
 use crate::grammar::glrm::to_glrm;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = env::var_os(key);
+        unsafe {
+            env::set_var(key, value);
+        }
+        Self { key, original }
+    }
+
+    fn unset(key: &'static str) -> Self {
+        let original = env::var_os(key);
+        unsafe {
+            env::remove_var(key);
+        }
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(value) => unsafe {
+                env::set_var(self.key, value);
+            },
+            None => unsafe {
+                env::remove_var(self.key);
+            },
+        }
+    }
+}
 
 fn start_expr(grammar: &NamedGrammar) -> &GrammarExpr {
     &grammar
@@ -369,7 +408,40 @@ fn string_pattern_lowers_as_terminal_pattern() {
 }
 
 #[test]
-fn medium_bounded_string_lowers_to_terminal_constrained_rule() {
+fn medium_bounded_string_uses_split_chunk_rules_by_default() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _terminalize_guard = EnvVarGuard::unset(
+        "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
+    );
+
+    let schema = json!({
+        "type": "string",
+        "maxLength": 1024
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(
+        !grammar
+            .rules
+            .iter()
+            .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
+        "{:?}",
+        grammar.rules
+    );
+
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("json_string_char_exact_50"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn medium_bounded_string_terminalizes_with_env_override() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _terminalize_guard = EnvVarGuard::set(
+        "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
+        "1024",
+    );
+
     let schema = json!({
         "type": "string",
         "maxLength": 1024

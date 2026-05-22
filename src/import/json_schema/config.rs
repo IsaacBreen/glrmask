@@ -36,7 +36,7 @@ impl Default for JsonSchemaConfig {
         let merge_open_split_close = QuoteMerge { merge_open: true, merge_close: false };
         Self {
             repeat_chunk_size: 50,
-            terminalize_bounded_string_max: 1024,
+            terminalize_bounded_string_max: 50,
             value_merging: MergeFamily {
                 generic: split_open_merge_close,
                 literal: split_open_merge_close,
