@@ -280,13 +280,19 @@ impl<'a> Lowerer<'a> {
         Ok(r(&name))
     }
 
-    fn pattern_overlapping_literal_keys(&self, pattern: &str) -> ImportResult<Vec<String>> {
+    fn pattern_overlapping_literal_keys(&mut self, pattern: &str) -> ImportResult<Vec<String>> {
+        if let Some(overlaps) = self.shared_pattern_overlap_keys.get(pattern) {
+            return Ok(overlaps.clone());
+        }
+
         let mut overlaps = Vec::new();
         for key in &self.shared_ap_literal_keys {
             if property_name_matches_pattern(pattern, key)? {
                 overlaps.push(key.clone());
             }
         }
+        self.shared_pattern_overlap_keys
+            .insert(pattern.to_string(), overlaps.clone());
         Ok(overlaps)
     }
 
