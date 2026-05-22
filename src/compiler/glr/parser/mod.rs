@@ -22,6 +22,7 @@ pub type ParserGSS = LeveledGSS<u32, TerminalsDisallowed>;
 
 type ReduceSources = SmallVec<[(u32, ParserGSS); 4]>;
 type ReduceBranches = SmallVec<[(ParserGSS, u32, bool); 4]>;
+type FloorCrossShift = (u32, u32, bool);
 
 const SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH: usize = 64;
 const GUARDED_STACK_TO_STACKS_MAX_DEPTH: usize = 64;
@@ -404,6 +405,21 @@ fn advance_pure_frontier_shifts(
         return None;
     }
     Some(gss.apply_top_pure_shifts(shifts))
+}
+
+fn rebuild_floor_cross_from_shifts(
+    popped: ParserGSS,
+    shifts: SmallVec<[FloorCrossShift; 8]>,
+) -> ParserGSS {
+    if shifts.iter().any(|(_, _, is_replace)| *is_replace) {
+        popped.apply_top_pure_shifts(shifts)
+    } else {
+        popped.remap_top_values_owned(
+            shifts
+                .into_iter()
+                .map(|(goto_from, target, _)| (goto_from, target)),
+        )
+    }
 }
 
 fn push_states(mut gss: ParserGSS, states: &[u32]) -> ParserGSS {
@@ -796,27 +812,13 @@ fn advance_deterministically_from_vstack_raw(
                     }
                 } else {
                     let popped = stack.into_gss_after_popping(rhs_len);
-                    let mut normal_shifts = SmallVec::<[(u32, u32); 8]>::new();
-                    let mut replace_gotos = SmallVec::<[(u32, u32); 4]>::new();
+                    let mut shifts = SmallVec::<[FloorCrossShift; 8]>::new();
                     for goto_from in popped.peek_values() {
                         if let Some((target, is_replace)) = table.goto_target(goto_from, *nt) {
-                            if is_replace {
-                                replace_gotos.push((goto_from, target));
-                            } else {
-                                normal_shifts.push((goto_from, target));
-                            }
+                            shifts.push((goto_from, target, is_replace));
                         }
                     }
-                    let rebuilt = if replace_gotos.is_empty() {
-                        popped.remap_top_values_owned(normal_shifts)
-                    } else {
-                        let mut r = popped.remap_top_values(normal_shifts);
-                        for (goto_from, target) in replace_gotos {
-                            let base = popped.isolate(Some(goto_from));
-                            r = r.merge(&base.popn(1).push(target));
-                        }
-                        r
-                    };
+                    let rebuilt = rebuild_floor_cross_from_shifts(popped, shifts);
                       let Some(next_stack) = rebuilt.try_virtual_stack() else {
                           return (AdvancedBranch::Gss(rebuilt), false);
                       };
@@ -997,28 +999,14 @@ fn advance_deterministically_profiled(
                     profile.n_det_popn_ops += 1;
                     let floor_cross_start = std::time::Instant::now();
                     let popped = stack.into_gss_after_popping(rhs_len);
-                    let mut normal_shifts = SmallVec::<[(u32, u32); 8]>::new();
-                    let mut replace_gotos = SmallVec::<[(u32, u32); 4]>::new();
+                    let mut shifts = SmallVec::<[FloorCrossShift; 8]>::new();
                     for goto_from in popped.peek_values() {
                         profile.n_det_goto_lookups += 1;
                         if let Some((target, is_replace)) = table.goto_target(goto_from, *nt) {
-                            if is_replace {
-                                replace_gotos.push((goto_from, target));
-                            } else {
-                                normal_shifts.push((goto_from, target));
-                            }
+                            shifts.push((goto_from, target, is_replace));
                         }
                     }
-                    let rebuilt = if replace_gotos.is_empty() {
-                        popped.remap_top_values_owned(normal_shifts)
-                    } else {
-                        let mut rebuilt = popped.remap_top_values(normal_shifts);
-                        for (goto_from, target) in replace_gotos {
-                            let base = popped.isolate(Some(goto_from));
-                            rebuilt = rebuilt.merge(&base.popn(1).push(target));
-                        }
-                        rebuilt
-                    };
+                    let rebuilt = rebuild_floor_cross_from_shifts(popped, shifts);
                     profile.det_floor_cross_ns += floor_cross_start.elapsed().as_nanos() as u64;
                     let Some(next_stack) = rebuilt.try_virtual_stack() else {
                         *gss = rebuilt;
@@ -1356,27 +1344,13 @@ fn advance_deterministically(
                     }
                 } else {
                     let popped = stack.into_gss_after_popping(rhs_len);
-                    let mut normal_shifts = SmallVec::<[(u32, u32); 8]>::new();
-                    let mut replace_gotos = SmallVec::<[(u32, u32); 4]>::new();
+                    let mut shifts = SmallVec::<[FloorCrossShift; 8]>::new();
                     for goto_from in popped.peek_values() {
                         if let Some((target, is_replace)) = table.goto_target(goto_from, *nt) {
-                            if is_replace {
-                                replace_gotos.push((goto_from, target));
-                            } else {
-                                normal_shifts.push((goto_from, target));
-                            }
+                            shifts.push((goto_from, target, is_replace));
                         }
                     }
-                    let rebuilt = if replace_gotos.is_empty() {
-                        popped.remap_top_values_owned(normal_shifts)
-                    } else {
-                        let mut r = popped.remap_top_values(normal_shifts);
-                        for (goto_from, target) in replace_gotos {
-                            let base = popped.isolate(Some(goto_from));
-                            r = r.merge(&base.popn(1).push(target));
-                        }
-                        r
-                    };
+                    let rebuilt = rebuild_floor_cross_from_shifts(popped, shifts);
                     let Some(next_stack) = rebuilt.try_virtual_stack() else {
                         *gss = rebuilt;
                         return false;
