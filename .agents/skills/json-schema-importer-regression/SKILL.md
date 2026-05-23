@@ -19,11 +19,13 @@ Use this temporary skill when optimizing glrmask JSON-schema importer regression
 - Last monolithic importer baseline: `8512868acef0e01b241247fe0d3ffcfb02b991a6` (`Move JSON schema importer tests to separate file`).
 - Modular rewrite commit: `08d8d1764ded847e0e1c05dd5734d38b072b3194` (`Replace JSON schema importer with modular rewrite`).
 - For importer-regression work, compare current emitted grammar and stabilized timings against `8512868ace` before assuming a parser/GSS fix is required.
+- Cross-product evidence on `/tmp/o9961_ctx_tbm_candidate2.json` showed old-emitted GLRM running on the current runtime recovered most of the advantage (`8.083us` vs current-emitted/current-runtime `13.125us`, old full wheel `9.125us`). Treat this as proof that the primary lever is importer-emitted grammar shape.
 
 ## Principles
 
 - Do not rip out the modular importer or paste back old `json_schema.rs`. The old importer was messy and had bad edge behavior; it is evidence, not architecture.
 - Use old grammar/timing/profile artifacts to identify what shape got worse: object body factoring, `anyOf`/`oneOf` branching, pattern/additional-property mixing, bounded string chunks, enum grouping, or terminal sharing.
+- Stay on the importer unless fresh cross-product evidence disproves it. Do not drift into parser/GSS/runtime redesign while old-emitted grammar on current runtime is faster.
 - Prefer simple current-architecture fixes in `src/import/json_schema/*` that produce cleaner grammars and fewer parser paths.
 - When the user asks to optimize JSON-schema build time, keep the lever in JSON-schema importing/lowering first. Optimize downstream compiler cost by changing the generated grammar shape, terminal/key factoring, object-body NFA structure, and sharing decisions. Do not drift into generic compiler or runtime optimization until importer-shape evidence shows there is no importer-side mitigation left.
 - For importer-driven build regressions, measure the downstream phase that grew, but interpret it as feedback on import shape: e.g. too many byte-split terminals, too many ExprNFA states/symbols, duplicated value subexpressions, or excessive parser/terminal-DWA work induced by lowering. The preferred fix is a cleaner emitted schema grammar that preserves the TBM win.
@@ -47,11 +49,14 @@ Use this temporary skill when optimizing glrmask JSON-schema importer regression
 
 3. Compare current grammar with old grammar.
    - Use old commit `8512868acef0e01b241247fe0d3ffcfb02b991a6` or the relevant pre-overhaul commit.
+   - Use `make show-grammar-glrmask` in `constraint-framework-analysis` for corpus examples when possible; it is the fastest way to inspect the emitted GLRM grammar without detouring into runtime internals.
    - Look for structural differences, not code to copy wholesale.
    - Useful old-source command:
      ```bash
      git show 8512868acef0e01b241247fe0d3ffcfb02b991a6:src/import/json_schema.rs
      ```
+   - For minimized/custom schemas, dump GLRM with `_glrmask.dump_json_schema_grammar_glrm(schema_json)` from isolated old/current wheels and compare the dumps directly.
+   - When switching old/current frequently, prefer isolated wheel or environment paths over repeated global rebuilds. Keep both old and current dump/run artifacts in `/tmp` with explicit names, and record which binary/wheel produced each artifact.
 
 4. Name the exact modular fix before editing.
    - Examples of acceptable targets: a narrower `ExprNFA` object body, required-property `anyOf` factoring, open-object variant factoring, pattern/additional-property key sharing, compact bounded-string shape, or enum terminal grouping.
@@ -59,6 +64,8 @@ Use this temporary skill when optimizing glrmask JSON-schema importer regression
    - Avoid schema-specific hacks and broad heuristics that only hide one benchmark.
 
 5. Validate with the same focused artifact and then a nearby broader check.
+   - First gate importer-shape patches on the warmed minimized reproducer `/tmp/o9961_ctx_tbm_candidate2.json` when the change targets the `o9961` anyOf/object-family regression.
+   - For that reproducer, ignore cold round 1; use warmed round 2 or later. Round 1 includes one-time initialization spikes and is not comparable to CFA stabilized rows.
    - For TBM work, run focused timings with enough repetitions and report before/after rows.
    - For build-time work, report before/after build wall time, dominant downstream profile buckets, and the importer-shape stats that explain them (grammar rules, terminal count, ExprNFA states/symbols, parser/DWA state counts when available).
    - If the patch worsens a neighboring known hotspot, revert or narrow it before reporting success.
