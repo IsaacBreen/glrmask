@@ -12,6 +12,18 @@ integrity rules when the temporary skill asks for TBM evidence.
 
 Use only stabilized timings for decisions: compare per-step values after cross-run per-step minimum stabilization, not raw single-pass sweep spikes.
 
+Full-report invariant:
+- Never run CFA full-report, chunked full-report, report-slow-steps intended for
+  report plots, or broad sweep artifacts in `glrmask_native`-only mode.
+- Do not set `FORCE_DISABLE_LLGUIDANCE_NATIVE` for report or sweep work. That
+  mode is only allowed for a narrow one-off diagnostic when the human explicitly
+  asks for glrmask-only data in that turn.
+- Standard CFA report plots require at least two frameworks. If a run has only
+  `glrmask_native`, stop and rerun with the normal framework set instead of
+  inventing replacement plots or reporting the artifact as a full report.
+- If llguidance is slow, reduce sample size, chunk size, timing runs, or run a
+  focused two-framework subset. Do not remove llguidance from the report.
+
 Do not optimize by caching across timing runs or repeated invocations of the same
 step/example. Cross-run memoization, warmed materialized-mask caches, and
 constraint-level caches keyed by a completed mask/dense set are invalid for TBM

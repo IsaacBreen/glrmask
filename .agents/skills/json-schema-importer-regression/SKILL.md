@@ -24,6 +24,12 @@ Use this temporary skill when optimizing glrmask JSON-schema importer regression
 ## Principles
 
 - Do not rip out the modular importer or paste back old `json_schema.rs`. The old importer was messy and had bad edge behavior; it is evidence, not architecture.
+- Do not use `glrmask_native`-only CFA full reports, chunked reports, or broad
+  sweep artifacts for importer-regression decisions. Full/report artifacts must
+  include the normal comparison framework set so plots, discrepancies, and
+  relative regressions remain available. Never set
+  `FORCE_DISABLE_LLGUIDANCE_NATIVE` unless the human explicitly asks for a
+  narrow glrmask-only diagnostic in that turn.
 - Use old grammar/timing/profile artifacts to identify what shape got worse: object body factoring, `anyOf`/`oneOf` branching, pattern/additional-property mixing, bounded string chunks, enum grouping, or terminal sharing.
 - Stay on the importer unless fresh cross-product evidence disproves it. Do not drift into parser/GSS/runtime redesign while old-emitted grammar on current runtime is faster.
 - Prefer simple current-architecture fixes in `src/import/json_schema/*` that produce cleaner grammars and fewer parser paths.
