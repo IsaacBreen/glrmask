@@ -57,6 +57,13 @@ Use this temporary skill when optimizing glrmask JSON-schema importer regression
    - For build-time work, report before/after build wall time, dominant downstream profile buckets, and the importer-shape stats that explain them (grammar rules, terminal count, ExprNFA states/symbols, parser/DWA state counts when available).
    - If the patch worsens a neighboring known hotspot, revert or narrow it before reporting success.
 
+
+## Pre-Commit Evidence Checklist
+
+Before committing importer-performance work, verify the commit message and body name the exact problem/schema ID(s) and examples improved, the metric improved (`TBM`, `commit`, `mask`, or build time), the threshold used for accept/reject, and the before/after measurements for those named cases when known. Include measurement artifact or log paths when available. If validation is partial, the commit body must explicitly state what was run, what was not run, and why the remaining measurement was skipped. Also record any paired tradeoff, especially when an importer shape improves runtime but changes build time or vice versa.
+
+Do not accept vague bodies such as "improves TBM" or "reduces build time"; each claimed win must be tied to named cases and numbers.
+
 ## Red Flags
 
 - Restoring old monolithic importer logic wholesale.
