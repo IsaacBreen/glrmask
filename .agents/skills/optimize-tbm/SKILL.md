@@ -23,6 +23,11 @@ Full-report invariant:
   inventing replacement plots or reporting the artifact as a full report.
 - If llguidance is slow, reduce sample size, chunk size, timing runs, or run a
   focused two-framework subset. Do not remove llguidance from the report.
+- For report/sweep commands, use the Makefile defaults. Only set `SAMPLE_SIZE`
+  and `OUT_DIR` when the human asks for a particular size or destination. Do not
+  override frameworks, timing runs, min-run thresholds, build runs, build
+  timeouts, discrepancy budgets, chunk size, seeds, or other knobs unless there
+  is a specific documented reason in the current task.
 
 Do not optimize by caching across timing runs or repeated invocations of the same
 step/example. Cross-run memoization, warmed materialized-mask caches, and

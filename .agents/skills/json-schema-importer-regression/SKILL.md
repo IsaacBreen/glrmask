@@ -30,6 +30,10 @@ Use this temporary skill when optimizing glrmask JSON-schema importer regression
   relative regressions remain available. Never set
   `FORCE_DISABLE_LLGUIDANCE_NATIVE` unless the human explicitly asks for a
   narrow glrmask-only diagnostic in that turn.
+- For CFA report/sweep commands, use Makefile defaults. Only set `SAMPLE_SIZE`
+  and `OUT_DIR` when the human asks for a particular size or destination; do not
+  override frameworks, timing, build, discrepancy, seed, chunking, or timeout
+  parameters without a specific documented reason in the current task.
 - Use old grammar/timing/profile artifacts to identify what shape got worse: object body factoring, `anyOf`/`oneOf` branching, pattern/additional-property mixing, bounded string chunks, enum grouping, or terminal sharing.
 - Stay on the importer unless fresh cross-product evidence disproves it. Do not drift into parser/GSS/runtime redesign while old-emitted grammar on current runtime is faster.
 - Prefer simple current-architecture fixes in `src/import/json_schema/*` that produce cleaner grammars and fewer parser paths.
