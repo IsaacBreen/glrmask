@@ -14,6 +14,12 @@ Use this temporary skill when optimizing glrmask JSON-schema importer regression
 - Build time should be below `10s` for all cases except one or two schemas that were already genuinely slow before the rewrite.
 - Treat old pre-overhaul timings as diagnostic baselines, not as a reason to restore the old importer.
 
+## Known Baseline Boundary
+
+- Last monolithic importer baseline: `8512868acef0e01b241247fe0d3ffcfb02b991a6` (`Move JSON schema importer tests to separate file`).
+- Modular rewrite commit: `08d8d1764ded847e0e1c05dd5734d38b072b3194` (`Replace JSON schema importer with modular rewrite`).
+- For importer-regression work, compare current emitted grammar and stabilized timings against `8512868ace` before assuming a parser/GSS fix is required.
+
 ## Principles
 
 - Do not rip out the modular importer or paste back old `json_schema.rs`. The old importer was messy and had bad edge behavior; it is evidence, not architecture.
