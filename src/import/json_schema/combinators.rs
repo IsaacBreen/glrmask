@@ -26,7 +26,17 @@ impl<'a> Lowerer<'a> {
             .cloned()
             .map(|branch| branch_with_siblings(branch, siblings.clone()))
             .collect::<Vec<_>>();
-        if let Some(expr) = self.try_lower_closed_object_any_of_variants(&branches)? {
+        let resolved_branches;
+        let has_ref_branch = branches.iter().any(schema_contains_ref);
+        let factoring_branches = if has_ref_branch {
+            resolved_branches = self.inline_all_of_refs(&branches)?;
+            &resolved_branches
+        } else {
+            &branches
+        };
+        if let Some(expr) =
+            self.try_lower_closed_object_any_of_variants(factoring_branches, has_ref_branch)?
+        {
             return Ok(expr);
         }
 
@@ -146,11 +156,27 @@ impl<'a> Lowerer<'a> {
     fn inline_all_of_refs(&self, branches: &[Schema]) -> ImportResult<Vec<Schema>> {
         branches
             .iter()
-            .map(|branch| match &branch.kind {
-                SchemaKind::Ref(pointer) => self.resolve_ref_target(pointer).map(Clone::clone),
-                _ => Ok(branch.clone()),
-            })
+            .map(|branch| self.inline_refs_in_all_of_branch(branch))
             .collect()
+    }
+
+    fn inline_refs_in_all_of_branch(&self, branch: &Schema) -> ImportResult<Schema> {
+        match &branch.kind {
+            SchemaKind::Ref(pointer) => self.resolve_ref_target(pointer).map(Clone::clone),
+            SchemaKind::Assertions(assertions) if !assertions.all_of.is_empty() => {
+                let mut inlined = assertions.as_ref().clone();
+                inlined.all_of = assertions
+                    .all_of
+                    .iter()
+                    .map(|part| match &part.kind {
+                        SchemaKind::Ref(pointer) => self.resolve_ref_target(pointer).map(Clone::clone),
+                        _ => Ok(part.clone()),
+                    })
+                    .collect::<ImportResult<Vec<_>>>()?;
+                Ok(Schema::assertions(branch.location.clone(), inlined))
+            }
+            _ => Ok(branch.clone()),
+        }
     }
 }
 
@@ -594,6 +620,18 @@ fn branch_with_siblings(branch: Schema, siblings: Option<Schema>) -> Schema {
         return branch;
     };
     all_of_schema(branch, siblings)
+}
+
+fn schema_contains_ref(schema: &Schema) -> bool {
+    match &schema.kind {
+        SchemaKind::Ref(_) => true,
+        SchemaKind::Assertions(assertions) => {
+            assertions.all_of.iter().any(schema_contains_ref)
+                || assertions.any_of.iter().any(schema_contains_ref)
+                || assertions.one_of.iter().any(schema_contains_ref)
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn try_merge_all_of_objects(branches: &[Schema]) -> Option<ObjectSchema> {

@@ -550,6 +550,13 @@ pub(crate) fn seq(mut parts: Vec<GrammarExpr>) -> GrammarExpr {
 }
 
 pub(crate) fn choice(mut alternatives: Vec<GrammarExpr>) -> GrammarExpr {
+    if alternatives
+        .iter()
+        .any(|expr| matches!(expr, GrammarExpr::Ref(name) if name == JSON_NUMBER_RULE))
+    {
+        alternatives
+            .retain(|expr| !matches!(expr, GrammarExpr::Ref(name) if name == JSON_INTEGER_RULE));
+    }
     match alternatives.len() {
         0 => never(),
         1 => alternatives.pop().unwrap(),

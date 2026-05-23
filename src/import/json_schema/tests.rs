@@ -924,6 +924,16 @@ fn large_bounded_integer_lowers_to_range_regex_not_plain_json_integer() {
 }
 
 #[test]
+fn number_integer_union_uses_json_number_once() {
+    let schema = json!({"type": ["number", "integer"]});
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(matches!(start_expr(&grammar), GrammarExpr::Ref(name) if name == "JSON_NUMBER"));
+    assert!(!contains_ref_named(start_expr(&grammar), "JSON_INTEGER"));
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn anyof_lowers_to_choice() {
     let schema = json!({
         "anyOf": [

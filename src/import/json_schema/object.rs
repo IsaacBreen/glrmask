@@ -196,6 +196,7 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn try_lower_closed_object_any_of_variants(
         &mut self,
         branches: &[Schema],
+        suppress_untyped_non_object_alts: bool,
     ) -> ImportResult<Option<GrammarExpr>> {
         if branches.len() < 2 {
             return Ok(None);
@@ -209,7 +210,8 @@ impl<'a> Lowerer<'a> {
             else {
                 return Ok(None);
             };
-            include_untyped_non_object_alts |= branch_requires_untyped_non_object_alts;
+            include_untyped_non_object_alts |=
+                branch_requires_untyped_non_object_alts && !suppress_untyped_non_object_alts;
             variants.push(variant);
         }
 
@@ -707,10 +709,8 @@ impl<'a> Lowerer<'a> {
                 return Ok(None);
             }
         }
-        let include_untyped_non_object_alts = assertions.types.is_none();
-
         let merged_object;
-        let object = if !assertions.all_of.is_empty() {
+        let (object, include_untyped_non_object_alts) = if !assertions.all_of.is_empty() {
             if assertions.object.as_ref().is_some_and(|object| {
                 !object.properties.is_empty()
                     || !object.required.is_empty()
@@ -723,10 +723,17 @@ impl<'a> Lowerer<'a> {
                 Some(object) => object,
                 None => return Ok(None),
             };
-            &merged_object
+            (
+                &merged_object,
+                assertions.types.is_none()
+                    && !assertions
+                        .all_of
+                        .iter()
+                        .any(|schema| matches!(schema.kind, SchemaKind::Ref(_))),
+            )
         } else {
             match &assertions.object {
-                Some(object) => object,
+                Some(object) => (object, assertions.types.is_none()),
                 None => return Ok(None),
             }
         };
@@ -780,10 +787,8 @@ impl<'a> Lowerer<'a> {
                 return Ok(None);
             }
         }
-        let include_untyped_non_object_alts = assertions.types.is_none();
-
         let merged_object;
-        let object = if !assertions.all_of.is_empty() {
+        let (object, include_untyped_non_object_alts) = if !assertions.all_of.is_empty() {
             if assertions.object.as_ref().is_some_and(|object| {
                 !object.properties.is_empty()
                     || !object.required.is_empty()
@@ -796,10 +801,17 @@ impl<'a> Lowerer<'a> {
                 Some(object) => object,
                 None => return Ok(None),
             };
-            &merged_object
+            (
+                &merged_object,
+                assertions.types.is_none()
+                    && !assertions
+                        .all_of
+                        .iter()
+                        .any(|schema| matches!(schema.kind, SchemaKind::Ref(_))),
+            )
         } else {
             match &assertions.object {
-                Some(object) => object,
+                Some(object) => (object, assertions.types.is_none()),
                 None => return Ok(None),
             }
         };
