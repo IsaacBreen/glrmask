@@ -84,3 +84,5 @@ Keep the dated notes in `/Users/isaacbreen/Projects2/gcg-paper/notes/` current w
 - patch hypothesis,
 - before/after stabilized timings,
 - keep/revert decision and reason.
+
+Do not report success, pause the investigation, or commit importer-performance work until the dated note has been updated for the completed chunk. The note must include artifact paths and the keep/revert decision, not just a final summary reconstructed later.

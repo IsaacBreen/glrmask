@@ -47,6 +47,7 @@ Notes requirement:
 - For TBM optimization work, keep a running dated note in `/Users/isaacbreen/Projects2/gcg-paper/notes/` as work proceeds.
 - Record slow-step sources, profile commands, env vars, before/after stabilized timings, failed experiments, and keep/revert decisions.
 - Check the current note before retrying an approach.
+- Do not report success, pause the investigation, or commit TBM/runtime work until the dated note has been updated for the completed chunk. The note must include artifact paths and the keep/revert decision, not just a final summary reconstructed later.
 
 ## Pre-Commit Evidence Checklist
 Before committing TBM or runtime-latency work, verify the commit message and body name the exact problem/schema ID(s) and examples improved, the metric (`mask`, `commit`, `TBM`, or build time), the threshold used for accept/reject, and before/after stabilized values for those named cases when known. Include profile/sweep/log artifact paths when available. If before/after is unavailable, state exactly what was run, what was not run, why the remaining measurement was skipped, and the motivating evidence without implying a measured win. Mention any known tradeoff, especially when a runtime optimization changes compile/build behavior.

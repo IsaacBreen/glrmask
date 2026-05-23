@@ -37,6 +37,7 @@ evidence.
 - When optimizing glrmask build/compile time, keep a running dated note in `/Users/isaacbreen/Projects2/gcg-paper/notes/` as work proceeds.
 - Record committed wins, failed experiments, exact env vars, representative before/after timings, and keep/revert decisions.
 - Before retrying an idea, check the current note for rejected experiments so work is not repeated.
+- Do not report success, pause the investigation, or commit build-performance work until the dated note has been updated for the completed chunk. The note must include artifact paths and the keep/revert decision, not just a final summary reconstructed later.
 
 ## Pre-Commit Evidence Checklist
 Before committing build-performance work, verify the commit message and body name the exact problem/schema ID(s) improved, the build metric, before/after build values for those named cases when known, and any measured broad distribution/count changes such as timeout counts or `>10s`/`>5s` buckets. Include profile/sweep/log artifact paths when available. If the change is motivated by a timeout or tail-latency artifact but exact before/after is unavailable, state exactly what was run, what was not run, why the remaining measurement was skipped, and the motivating evidence without implying a measured win. Mention any known tradeoff, especially when a build-time shortcut can affect runtime TBM or mask latency.
