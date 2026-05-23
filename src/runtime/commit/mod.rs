@@ -901,6 +901,8 @@ fn commit_bytes_small_queue_fast_path(
         return None;
     }
 
+    let single_initial_tokenizer_state = state.len() == 1;
+
     let mut processing_queue: Vec<SmallVec<[(u32, ParserGSS); 4]>> =
         (0..=bytes.len()).map(|_| SmallVec::new()).collect();
     for (&tokenizer_state, gss) in state.iter() {
@@ -942,6 +944,17 @@ fn commit_bytes_small_queue_fast_path(
                 &exec_result.matches,
                 None,
             );
+
+            if single_initial_tokenizer_state
+                && offset == 0
+                && normalized_matches.is_empty()
+                && let Some(end_state) = exec_result.end_state
+                && end_state_may_advance(constraint, &gss_at_offset, end_state)
+            {
+                state.clear();
+                state.insert(end_state, gss_at_offset);
+                return Some(Ok(()));
+            }
 
             for matched in normalized_matches {
                 let new_offset = offset + matched.width;
