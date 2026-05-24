@@ -39,6 +39,9 @@ impl<'a> Lowerer<'a> {
         {
             return Ok(expr);
         }
+        if let Some(expr) = self.try_lower_open_object_any_of_variants(factoring_branches)? {
+            return Ok(expr);
+        }
 
         if let Some((object, exclusive_names, require_one)) =
             try_factor_closed_object_variant_any_of(assertions)

@@ -221,7 +221,7 @@ impl<'a> Lowerer<'a> {
         )
     }
 
-    fn try_lower_open_object_any_of_variants(
+    pub(crate) fn try_lower_open_object_any_of_variants(
         &mut self,
         branches: &[Schema],
     ) -> ImportResult<Option<GrammarExpr>> {

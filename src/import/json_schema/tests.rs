@@ -1335,6 +1335,89 @@ fn allof_merges_plain_object_branches() {
 }
 
 #[test]
+fn open_object_anyof_uses_single_object_body_nfa() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "ctx": {
+                "type": "object",
+                "patternProperties": {
+                    "^[0-9a-zA-Z_-]{1,255}$": {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "a": {"type": "string", "maxLength": 32767},
+                                    "b": {"type": "number"},
+                                    "c": {
+                                        "type": "object",
+                                        "properties": {
+                                            "key": {
+                                                "type": "string",
+                                                "pattern": "^[0-9a-zA-Z_-]{1,255}$"
+                                            },
+                                            "value": {
+                                                "type": "string",
+                                                "minLength": 1,
+                                                "maxLength": 255
+                                            }
+                                        },
+                                        "additionalProperties": false
+                                    }
+                                }
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "id": {
+                                        "type": "string",
+                                        "pattern": "^[A-Fa-f\\d]{24}$"
+                                    },
+                                    "name": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 255
+                                    },
+                                    "description": {
+                                        "type": "string",
+                                        "maxLength": 32767
+                                    },
+                                    "tags": {
+                                        "type": "object",
+                                        "patternProperties": {
+                                            "^[0-9a-zA-Z_-]{1,255}$": {
+                                                "type": "array",
+                                                "minItems": 1,
+                                                "items": {
+                                                    "type": "string",
+                                                    "minLength": 1,
+                                                    "maxLength": 255
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            }
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("json_anyof_object_body"), "{glrm}");
+    assert!(
+        !glrm.contains("\"{\" json_closed_object_body")
+            || !glrm.contains("| \"{\" json_closed_object_body"),
+        "{glrm}"
+    );
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn ref_with_sibling_assertions_is_intersected() {
     let schema = json!({
         "$defs": {
