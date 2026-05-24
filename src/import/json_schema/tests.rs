@@ -570,7 +570,7 @@ fn medium_bounded_string_uses_split_chunk_rules_by_default() {
     );
 
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("json_string_char_exact_1000"), "{glrm}");
+    assert!(glrm.contains("json_string_char_exact_50"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -598,7 +598,7 @@ fn medium_bounded_string_terminalizes_with_env_override() {
     );
 
     let glrm = to_glrm(&grammar);
-    assert!(!glrm.contains("json_string_char_exact_1000"), "{glrm}");
+    assert!(!glrm.contains("json_string_char_exact_50"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -620,7 +620,7 @@ fn very_large_bounded_string_still_uses_split_chunk_rules() {
     );
 
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("json_string_char_exact_1000"), "{glrm}");
+    assert!(glrm.contains("json_string_char_exact_50"), "{glrm}");
     lower(&grammar).unwrap();
 }
 

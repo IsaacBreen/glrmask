@@ -508,31 +508,6 @@ fn apply_push_sequences(base: ParserGSS, pushes: &[&[u32]]) -> ParserGSS {
 }
 
 fn apply_stack_shifts(gss: ParserGSS, shifts: &[StackShift]) -> ParserGSS {
-    if let Some(first) = shifts.first()
-        && shifts
-            .iter()
-            .all(|shift| shift.pop == first.pop && shift.pushes.len() == 1)
-        && let Some(shifted) = gss.apply_shared_pop_push_single_branches(
-            first.pop as usize,
-            shifts.iter().map(|shift| &shift.pushes[0]),
-        )
-    {
-        return shifted;
-    }
-
-    if let Some(first) = shifts.first()
-        && !first.pushes.is_empty()
-        && shifts
-            .iter()
-            .all(|shift| shift.pop == first.pop && !shift.pushes.is_empty())
-        && let Some(shifted) = gss.apply_shared_pop_push_branches(
-            first.pop as usize,
-            shifts.iter().map(|shift| shift.pushes.as_slice()),
-        )
-    {
-        return shifted;
-    }
-
     if let Some(shifted) = gss.apply_stack_effects_to_single_concrete_path(
             shifts
                 .iter()
@@ -554,6 +529,20 @@ fn apply_stack_shifts(gss: ParserGSS, shifts: &[StackShift]) -> ParserGSS {
             stack.push(state);
         }
         return stack.into_gss();
+    }
+
+    if let Some(stack) = gss.try_virtual_stack()
+        && let Some(first) = shifts.first()
+        && !first.pushes.is_empty()
+        && shifts
+            .iter()
+            .all(|shift| shift.pop == first.pop && !shift.pushes.is_empty())
+        && let Some(shifted) = stack.into_gss_after_popping_and_pushing_branches(
+            first.pop as usize,
+            shifts.iter().map(|shift| shift.pushes.as_slice()),
+        )
+    {
+        return shifted;
     }
 
     let mut out = ParserGSS::empty();
