@@ -109,3 +109,14 @@ Keep the dated notes in `/Users/isaacbreen/Projects2/gcg-paper/notes/` current w
 - keep/revert decision and reason.
 
 Do not report success, pause the investigation, or commit importer-performance work until the dated note has been updated for the completed chunk. The note must include artifact paths and the keep/revert decision, not just a final summary reconstructed later.
+
+## Old Grammar Reproduction Discipline
+
+When a pre-overhaul importer grammar is known to be faster, do not replace that evidence with speculative importer or runtime guesses. First make the old/current grammar delta explicit enough that a patch can be judged against it.
+
+- Use `make show-grammar-glrmask PROBLEM=<problem>` in `constraint-framework-analysis` for the current grammar, and compare it to a grammar dump produced by the last monolithic importer baseline (`8512868acef0e01b241247fe0d3ffcfb02b991a6`) or an already saved pre-overhaul dump.
+- For a hot row, identify the exact old nonterminal family and the current nonterminal family around the JSON path in the prefix. Record the old/current snippets in the dated note or in a `/tmp/..._exact_diff.txt` artifact.
+- Specify importer patches as "reproduce this old grammar slice for this schema fragment" whenever possible. Avoid vague changes like "factor objects more" or "make the NFA closer to old" without naming the literal rules, terminals, exclusions, or object-body structure that should match.
+- If the old grammar appears to use non-standard JSON-editor schema annotations or unknown sibling keys as effective object properties, treat that as a concrete compatibility hypothesis, not as noise. Decide explicitly whether to reproduce that behavior, normalize it earlier, or reject it as semantically unsound, and record the reason.
+- Before implementing a runtime workaround, run or reuse a cross-product check when feasible: old-emitted GLRM on current runtime versus current-emitted GLRM on current runtime. If old-emitted/current-runtime is faster, stay focused on importer shape.
+- A patch that does not recreate the relevant old grammar surface and does not meet the stabilized `TBM < 12us` target should usually be reverted, even if a single `profile_step` trace looks cleaner.
