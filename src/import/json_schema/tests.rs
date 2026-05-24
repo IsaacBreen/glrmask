@@ -210,11 +210,11 @@ fn contains_ref_named(expr: &GrammarExpr, name: &str) -> bool {
 }
 
 #[test]
-fn closed_object_lowers_to_expr_nfa_body() {
+fn closed_object_lowers_to_prefix_chain_body() {
     let schema = json!({
         "type": "object",
         "properties": {
-            "name": {"type": "string"},
+            "name": {"type": "string", "maxLength": 10000},
             "age": {"type": "integer"}
         },
         "required": ["name"],
@@ -222,8 +222,10 @@ fn closed_object_lowers_to_expr_nfa_body() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
     assert!(!contains_separated_sequence(start_expr(&grammar)));
-    assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
+    assert!(glrm.contains("json_closed_object_prefix"), "{glrm}");
+    assert!(!grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
     lower(&grammar).unwrap();
 }
 
@@ -621,6 +623,8 @@ fn very_large_bounded_string_still_uses_split_chunk_rules() {
 
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("json_string_char_exact_50"), "{glrm}");
+    assert!(glrm.contains("json_string_char_exact_open_50"), "{glrm}");
+    assert!(glrm.contains("json_string_char_upto_wrapped_50"), "{glrm}");
     lower(&grammar).unwrap();
 }
 

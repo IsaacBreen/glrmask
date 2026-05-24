@@ -159,6 +159,23 @@ impl<'a> Lowerer<'a> {
         r(&rule_name)
     }
 
+    fn string_char_exact_open_ref(&mut self, count: usize) -> GrammarExpr {
+        if count == 0 {
+            return lit("\"");
+        }
+        let rule_name = self.fresh_rule_name(&format!("json_string_char_exact_open_{count}"));
+        let exact = self.string_char_exact_ref(count);
+        self.add_terminal_rule(&rule_name, seq(vec![lit("\""), exact]));
+        r(&rule_name)
+    }
+
+    fn string_char_upto_wrapped_ref(&mut self, max: usize) -> GrammarExpr {
+        let rule_name = self.fresh_rule_name(&format!("json_string_char_upto_wrapped_{max}"));
+        let upto = self.string_char_upto_ref(max);
+        self.add_terminal_rule(&rule_name, seq(vec![lit("\""), upto, lit("\"")]));
+        r(&rule_name)
+    }
+
     fn split_string_exact_expr(&mut self, count: usize) -> GrammarExpr {
         let chunk = self.config.repeat_chunk_size.max(1);
         if count <= chunk {
@@ -209,6 +226,48 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_split_bounded_string(&mut self, min: usize, max: usize) -> GrammarExpr {
+        if max >= 10_000 {
+            let expr = if min == 0 && max > self.config.repeat_chunk_size.max(1) {
+                let chunk = self.config.repeat_chunk_size.max(1);
+                let full_chunks = max / chunk;
+                let remainder = max % chunk;
+                let exact_chunk = self.string_char_exact_ref(chunk);
+                let exact_open_chunk = self.string_char_exact_open_ref(chunk);
+                let mut alternatives = vec![self.string_char_upto_wrapped_ref(chunk)];
+                alternatives.push(seq(vec![
+                    exact_open_chunk.clone(),
+                    GrammarExpr::RepeatRange {
+                        expr: Box::new(exact_chunk.clone()),
+                        min: 0,
+                        max: full_chunks.saturating_sub(2),
+                    },
+                    self.string_char_upto_close_ref(chunk),
+                ]));
+                if remainder > 0 {
+                    alternatives.push(seq(vec![
+                        exact_open_chunk,
+                        GrammarExpr::RepeatRange {
+                            expr: Box::new(exact_chunk),
+                            min: full_chunks.saturating_sub(1),
+                            max: full_chunks.saturating_sub(1),
+                        },
+                        self.string_char_upto_close_ref(remainder),
+                    ]));
+                }
+                choice(alternatives)
+            } else if min == max {
+                seq(vec![lit("\""), self.split_string_exact_expr(min), lit("\"")])
+            } else {
+                seq(vec![
+                    lit("\""),
+                    self.split_string_exact_expr(min),
+                    self.split_string_upto_close_expr(max - min),
+                ])
+            };
+            let rule_name = self.fresh_rule_name("json_string_bounded_split");
+            self.add_nonterminal_rule(&rule_name, expr);
+            return r(&rule_name);
+        }
         if min == max {
             return seq(vec![lit("\""), self.split_string_exact_expr(min), lit("\"")]);
         }

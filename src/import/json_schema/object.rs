@@ -21,7 +21,7 @@ const POINT_PATH_PATTERN: &str = "^(/[^/]+)+$";
 const LARGE_OBJECT_LITERAL_KEY_TRIE_MIN_ITEMS: usize = 64;
 const SNOWPLOW_CONTEXTS_PATTERN: &str = "^contexts_.*";
 const SNOWPLOW_UNSTRUCT_EVENT_PATTERN: &str = "^unstruct_event_.*";
-const SNOWPLOW_KEY_TRIE_PREFIX_SPLIT_BYTES: usize = 2;
+const SNOWPLOW_KEY_TRIE_PREFIX_SPLIT_BYTES: usize = 1;
 
 struct ObjectItem {
     pair: GrammarExpr,
@@ -402,6 +402,15 @@ impl<'a> Lowerer<'a> {
             && normalized.properties.len() >= 16;
 
         if normalized.pattern_properties.is_empty() && !normalized.properties.is_empty() {
+            let use_closed_object_prefix_chain =
+                matches!(normalized.additional_properties, AdditionalProperties::Deny)
+                    && any_required_names.is_none()
+                    && exclusive_group.is_none()
+                    && normalized
+                        .properties
+                        .iter()
+                        .any(|property| self.schema_has_huge_bounded_string(&property.schema));
+
             let tail_pair = match &normalized.additional_properties {
                 AdditionalProperties::Deny => None,
                 AdditionalProperties::AllowAny => Some(seq(vec![
@@ -420,6 +429,9 @@ impl<'a> Lowerer<'a> {
                 if let Some(tail_pair_expr) = tail_pair {
                     return self.lower_large_optional_open_object_fused_prefix_chain(&items, tail_pair_expr);
                 }
+            }
+            if use_closed_object_prefix_chain {
+                return Ok(self.lower_large_closed_object_prefix_chain(&items));
             }
             return self.lower_fixed_object_body_exprnfa(
                 &items,
@@ -516,6 +528,23 @@ impl<'a> Lowerer<'a> {
         };
 
         Ok(seq(vec![lit("{"), body, lit("}")]))
+    }
+
+    fn schema_has_huge_bounded_string(&self, schema: &Schema) -> bool {
+        let SchemaKind::Assertions(assertions) = &schema.kind else {
+            return false;
+        };
+        assertions
+            .string
+            .as_ref()
+            .and_then(|string| string.max_length)
+            .is_some_and(|max_length| max_length >= 10_000)
+            || assertions
+                .any_of
+                .iter()
+                .chain(assertions.one_of.iter())
+                .chain(assertions.all_of.iter())
+                .any(|branch| self.schema_has_huge_bounded_string(branch))
     }
 
     fn try_lower_pattern_map_pair_list_object(
@@ -1609,6 +1638,42 @@ impl<'a> Lowerer<'a> {
         }
 
         Ok(seq(vec![lit("{"), choice(body_alternatives), lit("}")]))
+    }
+
+    fn lower_large_closed_object_prefix_chain(&mut self, items: &[ObjectItem]) -> GrammarExpr {
+        let mut prefix_rule_names: Vec<String> = Vec::with_capacity(items.len());
+        for end_exclusive in 1..=items.len() {
+            let mut alternatives = Vec::new();
+            for start in 0..end_exclusive {
+                if items[start..end_exclusive - 1].iter().any(|item| item.required) {
+                    continue;
+                }
+                if start == 0 {
+                    alternatives.push(items[end_exclusive - 1].pair.clone());
+                } else {
+                    alternatives.push(seq(vec![
+                        r(&prefix_rule_names[start - 1]),
+                        items[end_exclusive - 1].separator_pair.clone(),
+                    ]));
+                }
+            }
+            let rule_name = self.fresh_rule_name("json_closed_object_prefix");
+            self.add_nonterminal_rule(&rule_name, choice(alternatives));
+            prefix_rule_names.push(rule_name);
+        }
+
+        let mut body_alternatives = Vec::new();
+        if items.iter().all(|item| !item.required) {
+            body_alternatives.push(GrammarExpr::Epsilon);
+        }
+        for (index, prefix_rule_name) in prefix_rule_names.iter().enumerate() {
+            if items[index + 1..].iter().any(|item| item.required) {
+                continue;
+            }
+            body_alternatives.push(r(prefix_rule_name));
+        }
+
+        seq(vec![lit("{"), choice(body_alternatives), lit("}")])
     }
 
     fn lower_property_item(
