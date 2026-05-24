@@ -1068,9 +1068,14 @@ mod tests {
         // 0 JSON_STRING
         // 1 JSON_ITEM_SEPARATOR
         //
-        // This is a parser-table witness, not a literal JSON production: the
-        // parent rule supplies the same separator lookahead that the accepting
-        // ExprNFA state can also consume internally.
+        // This is a parser-table witness for the original `"x",` shape: the
+        // value terminal completes at the closing quote, then the comma is
+        // separator lookahead. A numeric regex-continuation GSS split is not an
+        // equivalent witness for that bug.
+        //
+        // This is not a literal JSON production: the parent rule supplies the
+        // same separator lookahead that the accepting ExprNFA state can also
+        // consume internally.
         fn r(name: &str) -> GrammarExpr {
             GrammarExpr::Ref(name.to_string())
         }
