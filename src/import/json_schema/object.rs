@@ -970,7 +970,6 @@ impl<'a> Lowerer<'a> {
         let mut builder = ExprNfaBuilder::new();
         let accept = builder.add_state();
         builder.set_accepting(accept);
-
         let mut state_ids = BTreeMap::<AnyOfFixedObjectState, u32>::new();
         let mut queue = VecDeque::<AnyOfFixedObjectState>::new();
         for (variant_idx, _) in variants.iter().enumerate() {
@@ -1061,6 +1060,10 @@ impl<'a> Lowerer<'a> {
         let mut builder = ExprNfaBuilder::new();
         let accept = builder.add_state();
         builder.set_accepting(accept);
+        let anyof_fixed_keys = variants
+            .iter()
+            .flat_map(|variant| variant.fixed_keys.iter().cloned())
+            .collect::<BTreeSet<_>>();
 
         let mut state_ids = BTreeMap::<AnyOfObjectState, u32>::new();
         let mut queue = VecDeque::<AnyOfObjectState>::new();
@@ -1150,7 +1153,7 @@ impl<'a> Lowerer<'a> {
                     symbols.push(self.item_separator_expr());
                 }
                 symbols.push(self.lower_additional_key_colon(
-                    &variant.fixed_keys,
+                    &anyof_fixed_keys,
                     &variant.pattern_keys,
                 )?);
                 symbols.push(value_expr.clone());
