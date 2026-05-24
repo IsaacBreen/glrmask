@@ -1022,6 +1022,8 @@ mod tests {
     use super::{build_table, grouped_item_lookahead_counts};
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::glr::table::Action;
+    use crate::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule, lower};
+    use crate::grammar::expr_nfa::ExprNfaBuilder;
     use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
 
     fn multi_lookahead_grammar() -> AnalyzedGrammar {
@@ -1057,13 +1059,106 @@ mod tests {
     }
 
     #[test]
+    fn expr_nfa_accept_with_same_separator_follow_splits_on_value_terminal() {
+        // Nonterminals:
+        // 0 body_with_same_separator_follow
+        // 1 expr_nfa_body, lowered like an ExprNFA accept state
+        //   with an outgoing JSON_ITEM_SEPARATOR transition.
+        // Terminals:
+        // 0 JSON_STRING
+        // 1 JSON_ITEM_SEPARATOR
+        //
+        // This is a parser-table witness, not a literal JSON production: the
+        // parent rule supplies the same separator lookahead that the accepting
+        // ExprNFA state can also consume internally.
+        fn r(name: &str) -> GrammarExpr {
+            GrammarExpr::Ref(name.to_string())
+        }
+
+        fn lit(bytes: &[u8]) -> GrammarExpr {
+            GrammarExpr::Literal(bytes.to_vec())
+        }
+
+        fn terminal(name: &str, expr: GrammarExpr) -> NamedRule {
+            NamedRule {
+                name: name.to_string(),
+                expr,
+                is_terminal: true,
+                is_internal: false,
+            }
+        }
+
+        fn nonterminal(name: &str, expr: GrammarExpr) -> NamedRule {
+            NamedRule {
+                name: name.to_string(),
+                expr,
+                is_terminal: false,
+                is_internal: false,
+            }
+        }
+
+        let mut body = ExprNfaBuilder::new();
+        let after_value = body.add_state();
+        let after_separator = body.add_state();
+        body.add_transition(body.start_state(), r("JSON_STRING"), after_value);
+        body.set_accepting(after_value);
+        body.add_transition(after_value, r("JSON_ITEM_SEPARATOR"), after_separator);
+        body.add_transition(
+            after_separator,
+            GrammarExpr::Epsilon,
+            after_value,
+        );
+
+        let named = NamedGrammar {
+            start: "body_with_same_separator_follow".to_string(),
+            ignore: None,
+            rules: vec![
+                terminal("JSON_STRING", lit(br#""x""#)),
+                terminal("JSON_ITEM_SEPARATOR", lit(b", ")),
+                nonterminal(
+                    "body_with_same_separator_follow",
+                    GrammarExpr::Sequence(vec![
+                        r("expr_nfa_body"),
+                        r("JSON_ITEM_SEPARATOR"),
+                    ]),
+                ),
+                nonterminal(
+                    "expr_nfa_body",
+                    GrammarExpr::ExprNFA(Box::new(body.build().into_determinized_and_minimized())),
+                ),
+            ],
+        };
+
+        let flat = lower(&named).unwrap();
+        let grammar = AnalyzedGrammar::from_grammar_def(&flat);
+        let table = build_table(&grammar);
+
+        let split_on_value = table.action.iter().any(|row| {
+            row.values().any(|action| match action {
+                Action::StackShifts(shifts) => {
+                    shifts.len() == 2 && shifts.iter().all(|shift| shift.pop == 1)
+                }
+                _ => false,
+            })
+        });
+
+        assert!(split_on_value, "{:#?}", table.action);
+    }
+
+    #[test]
     fn grouped_lr1_items_merge_multiple_lookaheads_on_one_core() {
         let grammar = multi_lookahead_grammar();
         let counts = grouped_item_lookahead_counts(&grammar);
 
-        assert!(counts.iter().flatten().any(|&(rule, dot, _stack_depth, lookahead_count)| {
-            rule == 4 && dot == 1 && lookahead_count == 3
-        }), "{counts:?}");
+        assert!(
+            counts
+                .iter()
+                .flatten()
+                .any(|&(rule, dot, _stack_depth, lookahead_count)| {
+                    rule == 4 && dot == 1 && lookahead_count == 3
+                }),
+            "{counts:?}"
+        );
     }
 
     #[test]
@@ -1077,4 +1172,5 @@ mod tests {
                 && matches!(row.get(&3), Some(Action::Reduce(1, 1)))
         }));
     }
+
 }
