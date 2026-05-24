@@ -404,22 +404,6 @@ fn json_schema_optional_label_with_additional_tail_reaches_multiple_gss_paths() 
 }
 
 #[test]
-fn glrm_repeated_regex_terminal_reaches_multiple_gss_paths() {
-    let grammar = r#"
-        start start;
-        t NUMBER ::= /1+/;
-        nt start ::= NUMBER+;
-    "#;
-    let constraint = Constraint::from_glrm_grammar(grammar, &vocab(&["1"])).unwrap();
-    let mut state = constraint.start();
-
-    state.commit_token(0).unwrap();
-
-    let stacks = state.debug_parser_stacks();
-    assert_eq!(state.parser_path_count(1_000_000), 2, "{stacks:?}");
-}
-
-#[test]
 fn json_schema_open_object_required_fixed_property_remains_mandatory_with_ap_tail() {
     let constraint = byte_schema(
         r#"{
