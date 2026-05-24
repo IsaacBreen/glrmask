@@ -1384,30 +1384,26 @@ fn apply_reduce_to_frame(
     };
 
     let guard_pop = frame.pop;
-    let mut target: Option<u32> = None;
-    let mut by_replace: BTreeMap<bool, BTreeSet<u32>> = BTreeMap::new();
+    let mut by_target: BTreeMap<(u32, bool), BTreeSet<u32>> = BTreeMap::new();
     let mut missing = 0usize;
     for goto_from in goto_froms {
         let Some((next_target, replace)) = table.goto[goto_from as usize].get(&nt).copied() else {
             missing += 1;
             continue;
         };
-        match target {
-            None => target = Some(next_target),
-            Some(existing) if existing == next_target => {}
-            Some(_) => return None,
-        }
-        by_replace.entry(replace).or_default().insert(goto_from);
+        by_target
+            .entry((next_target, replace))
+            .or_default()
+            .insert(goto_from);
     }
 
-    if missing > 0 && by_replace.is_empty() {
+    if missing > 0 && by_target.is_empty() {
         return Some(ReduceFrameResult::Dead);
     }
 
-    let target = target?;
-    let needs_guard = missing > 0 || by_replace.len() > 1;
+    let needs_guard = missing > 0 || by_target.len() > 1;
     let mut frames = Vec::new();
-    for (replace, froms) in by_replace {
+    for ((target, replace), froms) in by_target {
         let mut next_frame = frame.clone();
         if needs_guard && !add_guard_to_frame(&mut next_frame, guard_pop, froms.into_iter()) {
             continue;
@@ -1998,7 +1994,59 @@ mod tests {
             ]
         );
     }
-}
+
+    #[test]
+    fn reduce_frame_groups_origin_dependent_gotos_by_target() {
+        let mut table = table_with_stack_shifts(Vec::new(), &[
+            (1, &[(10, (3, false))]),
+            (2, &[(10, (4, false))]),
+        ]);
+        table.num_states = 6;
+        table.action.resize(6, ActionRow::default());
+        table.goto.resize(6, GotoRow::default());
+
+        let mut predecessors = vec![BTreeSet::new(); 6];
+        predecessors[5] = BTreeSet::from([1, 2]);
+
+        let result = apply_reduce_to_frame(
+            &table,
+            &predecessors,
+            5,
+            StackEffectFrame {
+                pop: 0,
+                pushes: Vec::new(),
+                guards: Vec::new(),
+            },
+            10,
+            1,
+        );
+
+        let Some(ReduceFrameResult::Frames { frames, .. }) = result else {
+            panic!("expected guarded frames");
+        };
+        assert_eq!(
+            frames,
+            vec![
+                StackEffectFrame {
+                    pop: 1,
+                    pushes: vec![3],
+                    guards: vec![StackShiftGuard {
+                        pop: 1,
+                        states: vec![1],
+                    }],
+                },
+                StackEffectFrame {
+                    pop: 1,
+                    pushes: vec![4],
+                    guards: vec![StackShiftGuard {
+                        pop: 1,
+                        states: vec![2],
+                    }],
+                },
+            ]
+        );
+    }
+  }
 
 fn try_inline_unit_reductions_for_cell(
     table: &mut GLRTable,
