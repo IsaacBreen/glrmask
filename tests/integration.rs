@@ -404,13 +404,13 @@ fn json_schema_optional_label_with_additional_tail_reaches_multiple_gss_paths() 
 }
 
 #[test]
-fn glrm_optional_repeated_tail_reaches_multiple_gss_paths() {
+fn glrm_repeated_regex_terminal_reaches_multiple_gss_paths() {
     let grammar = r#"
         start start;
         t NUMBER ::= /1+/;
-        nt start ::= "x" (", " "b" NUMBER (", " "b" NUMBER)*)?;
+        nt start ::= NUMBER+;
     "#;
-    let constraint = Constraint::from_glrm_grammar(grammar, &vocab(&["x, b1"])).unwrap();
+    let constraint = Constraint::from_glrm_grammar(grammar, &vocab(&["1"])).unwrap();
     let mut state = constraint.start();
 
     state.commit_token(0).unwrap();
