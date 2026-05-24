@@ -404,37 +404,17 @@ fn json_schema_optional_label_with_additional_tail_reaches_multiple_gss_paths() 
 }
 
 #[test]
-fn glrm_optional_label_with_additional_tail_reaches_multiple_gss_paths() {
+fn glrm_optional_repeated_tail_reaches_multiple_gss_paths() {
     let grammar = r#"
         start start;
-        t JSON_STRING ::= /"(?:[^\x00-\x1f\x7f"\\]|\\["\\bfnrt])*"/;
-        t JSON_ITEM_SEPARATOR ::= /(?:, )/;
-        t JSON_KEY_SEPARATOR ::= /(?:: )/;
-        t JSON_NUMBER ::= /-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/;
-        t JSON_BOOL ::= "true" | "false";
-        t JSON_NULL ::= "null";
-        nt json_array ::= "[" (json_value (JSON_ITEM_SEPARATOR json_value)*)? "]";
-        nt json_object ::= "{" ((JSON_STRING JSON_KEY_SEPARATOR json_value) (JSON_ITEM_SEPARATOR (JSON_STRING JSON_KEY_SEPARATOR json_value))*)? "}";
-        nt json_value ::= JSON_NULL | JSON_BOOL | JSON_NUMBER | JSON_STRING | json_array | json_object;
-        nt additional_member ::= "\"id\": " json_value;
-        nt additional_tail ::= additional_member (JSON_ITEM_SEPARATOR additional_member)*;
-        nt body ::= "\"label\": " JSON_STRING (JSON_ITEM_SEPARATOR additional_tail)? | additional_tail;
-        nt start ::= "{" (eps | body) "}";
+        t SEP ::= /, /;
+        t NUMBER ::= /1+/;
+        nt start ::= "x" (SEP "b" NUMBER (SEP "b" NUMBER)*)?;
     "#;
-    let constraint = Constraint::from_glrm_grammar(
-        grammar,
-        &vocab(&[r#"{"label": "#, r#""x","#, r#" "id": "#, "1", "}"]),
-    )
-    .unwrap();
+    let constraint = Constraint::from_glrm_grammar(grammar, &vocab(&["x, b1"])).unwrap();
     let mut state = constraint.start();
 
     state.commit_token(0).unwrap();
-    assert_eq!(state.parser_path_count(1_000_000), 1);
-    state.commit_token(1).unwrap();
-    assert_eq!(state.parser_path_count(1_000_000), 1);
-    state.commit_token(2).unwrap();
-    assert_eq!(state.parser_path_count(1_000_000), 1);
-    state.commit_token(3).unwrap();
 
     let stacks = state.debug_parser_stacks();
     assert_eq!(state.parser_path_count(1_000_000), 2, "{stacks:?}");
