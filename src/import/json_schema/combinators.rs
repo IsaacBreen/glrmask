@@ -7,7 +7,7 @@ use super::ast::{
     SchemaType,
 };
 use super::error::ImportResult;
-use super::lower::{choice, never, r, Lowerer, JSON_VALUE_RULE};
+use super::lower::{choice, never, normalize_local_ref, r, Lowerer, JSON_VALUE_RULE};
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_any_of(
@@ -97,6 +97,9 @@ impl<'a> Lowerer<'a> {
         if let Some(object) = try_merge_all_of_objects(&branches) {
             return self.lower_object(&object);
         }
+        if let Some(object) = self.try_merge_all_of_single_ref_object_branches(&branches)? {
+            return self.lower_object(&object);
+        }
         if let Some(distributed) = distribute_all_of_over_single_object_any_of(&branches) {
             let alternatives = distributed
                 .iter()
@@ -174,16 +177,91 @@ impl<'a> Lowerer<'a> {
             .collect()
     }
 
+    fn schema_transitively_refs_pointer(
+        &self,
+        schema: &Schema,
+        wanted: &str,
+        seen_refs: &mut BTreeSet<String>,
+    ) -> ImportResult<bool> {
+        match &schema.kind {
+            SchemaKind::Any | SchemaKind::Never => Ok(false),
+            SchemaKind::Ref(pointer) => {
+                let normalized = normalize_local_ref(pointer)?;
+                if normalized == wanted {
+                    return Ok(true);
+                }
+                if !seen_refs.insert(normalized.clone()) {
+                    return Ok(false);
+                }
+                let target = self.resolve_ref_target(pointer)?;
+                self.schema_transitively_refs_pointer(target, wanted, seen_refs)
+            }
+            SchemaKind::Assertions(assertions) => {
+                if let Some(object) = &assertions.object {
+                    for property in &object.properties {
+                        if self.schema_transitively_refs_pointer(&property.schema, wanted, seen_refs)? {
+                            return Ok(true);
+                        }
+                    }
+                    for property in &object.pattern_properties {
+                        if self.schema_transitively_refs_pointer(&property.schema, wanted, seen_refs)? {
+                            return Ok(true);
+                        }
+                    }
+                    if let AdditionalProperties::Schema(schema) = &object.additional_properties
+                        && self.schema_transitively_refs_pointer(schema, wanted, seen_refs)?
+                    {
+                        return Ok(true);
+                    }
+                }
+
+                if let Some(array) = &assertions.array {
+                    if self.schema_transitively_refs_pointer(&array.items, wanted, seen_refs)? {
+                        return Ok(true);
+                    }
+                    for item in &array.prefix_items {
+                        if self.schema_transitively_refs_pointer(item, wanted, seen_refs)? {
+                            return Ok(true);
+                        }
+                    }
+                }
+
+                for branch in assertions
+                    .any_of
+                    .iter()
+                    .chain(assertions.one_of.iter())
+                    .chain(assertions.all_of.iter())
+                {
+                    if self.schema_transitively_refs_pointer(branch, wanted, seen_refs)? {
+                        return Ok(true);
+                    }
+                }
+
+                Ok(false)
+            }
+        }
+    }
+
+    fn inline_all_of_ref_target(&self, pointer: &str, fallback: &Schema) -> ImportResult<Schema> {
+        let normalized = normalize_local_ref(pointer)?;
+        let target = self.resolve_ref_target(pointer)?;
+        if self.schema_transitively_refs_pointer(target, &normalized, &mut BTreeSet::new())? {
+            Ok(fallback.clone())
+        } else {
+            Ok(target.clone())
+        }
+    }
+
     fn inline_refs_in_all_of_branch(&self, branch: &Schema) -> ImportResult<Schema> {
         match &branch.kind {
-            SchemaKind::Ref(pointer) => self.resolve_ref_target(pointer).map(Clone::clone),
+            SchemaKind::Ref(pointer) => self.inline_all_of_ref_target(pointer, branch),
             SchemaKind::Assertions(assertions) if !assertions.all_of.is_empty() => {
                 let mut inlined = assertions.as_ref().clone();
                 inlined.all_of = assertions
                     .all_of
                     .iter()
                     .map(|part| match &part.kind {
-                        SchemaKind::Ref(pointer) => self.resolve_ref_target(pointer).map(Clone::clone),
+                        SchemaKind::Ref(pointer) => self.inline_all_of_ref_target(pointer, part),
                         _ => Ok(part.clone()),
                     })
                     .collect::<ImportResult<Vec<_>>>()?;
@@ -191,6 +269,43 @@ impl<'a> Lowerer<'a> {
             }
             _ => Ok(branch.clone()),
         }
+    }
+
+    fn try_merge_all_of_single_ref_object_branches(
+        &self,
+        branches: &[Schema],
+    ) -> ImportResult<Option<ObjectSchema>> {
+        let mut merged: Option<ObjectSchema> = None;
+        let mut saw_ref_branch = false;
+
+        for branch in branches {
+            let object = match &branch.kind {
+                SchemaKind::Ref(pointer) => {
+                    if saw_ref_branch {
+                        return Ok(None);
+                    }
+                    saw_ref_branch = true;
+                    let target = self.resolve_ref_target(pointer)?;
+                    let Some(object) = plain_object_schema(target) else {
+                        return Ok(None);
+                    };
+                    object
+                }
+                _ => {
+                    let Some(object) = plain_object_schema(branch) else {
+                        return Ok(None);
+                    };
+                    object
+                }
+            };
+
+            merged = Some(match merged {
+                Some(current) => merge_two_objects(&current, object),
+                None => object.clone(),
+            });
+        }
+
+        Ok(saw_ref_branch.then_some(merged).flatten())
     }
 }
 

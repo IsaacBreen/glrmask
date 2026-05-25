@@ -520,7 +520,7 @@ fn collect_shared_ap_exclusions_from_schema(
     }
 }
 
-fn normalize_local_ref(pointer: &str) -> ImportResult<String> {
+pub(crate) fn normalize_local_ref(pointer: &str) -> ImportResult<String> {
     if pointer == "#" {
         return Ok("#".to_string());
     }

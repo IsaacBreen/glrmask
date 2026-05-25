@@ -1477,6 +1477,35 @@ fn allof_collapses_single_anyof_ref_before_intersect() {
 }
 
 #[test]
+fn recursive_ref_in_allof_is_not_inlined() {
+    let schema = json!({
+        "definitions": {
+            "A": {
+                "allOf": [
+                    {"$ref": "#/definitions/B"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"}
+                        }
+                    }
+                ]
+            },
+            "B": {
+                "type": "object",
+                "properties": {
+                    "child": {"$ref": "#/definitions/A"}
+                }
+            }
+        },
+        "$ref": "#/definitions/A"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn allof_drops_vacuous_json_value_property_when_refined() {
     let schema = json!({
         "definitions": {
