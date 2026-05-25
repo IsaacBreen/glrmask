@@ -92,7 +92,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn should_split_bounded_string(&self, min: usize, max: usize) -> bool {
-        if max <= self.config.terminalize_bounded_string_max {
+        if max <= self.config.terminalize_bounded_string_max.max(64) {
             return false;
         }
         let chunk = self.config.repeat_chunk_size.max(1);
@@ -210,18 +210,16 @@ impl<'a> Lowerer<'a> {
                 min: 0,
                 max: full_chunks.saturating_sub(1),
             },
-            self.string_char_upto_close_ref(chunk),
+            self.string_char_upto_close_ref(chunk - 1),
         ])];
-        if remainder > 0 {
-            alternatives.push(seq(vec![
-                GrammarExpr::RepeatRange {
-                    expr: Box::new(exact_chunk),
-                    min: full_chunks,
-                    max: full_chunks,
-                },
-                self.string_char_upto_close_ref(remainder),
-            ]));
-        }
+        alternatives.push(seq(vec![
+            GrammarExpr::RepeatRange {
+                expr: Box::new(exact_chunk),
+                min: full_chunks,
+                max: full_chunks,
+            },
+            self.string_char_upto_close_ref(remainder),
+        ]));
         choice(alternatives)
     }
 

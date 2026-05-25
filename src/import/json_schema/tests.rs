@@ -751,6 +751,45 @@ fn medium_bounded_string_terminalizes_with_env_override() {
 }
 
 #[test]
+fn moderately_bounded_string_terminalizes_by_default() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _terminalize_guard = EnvVarGuard::unset(
+        "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
+    );
+
+    let schema = json!({
+        "type": "string",
+        "maxLength": 64
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("JSON_STRING_CHAR{0,64}"), "{glrm}");
+    assert!(glrm.contains("json_string_constrained"), "{glrm}");
+    assert!(!glrm.contains("json_string_char_exact_50"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn split_bounded_string_chunks_do_not_overlap_at_boundary() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _terminalize_guard = EnvVarGuard::unset(
+        "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
+    );
+
+    let schema = json!({
+        "type": "string",
+        "maxLength": 102
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("json_string_char_upto_close_49"), "{glrm}");
+    assert!(!glrm.contains("json_string_char_upto_close_50"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn very_large_bounded_string_still_uses_split_chunk_rules() {
     let schema = json!({
         "type": "string",
