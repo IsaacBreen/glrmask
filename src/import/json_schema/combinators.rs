@@ -775,7 +775,7 @@ fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSchema 
 
     for property in &right.properties {
         if let Some(existing) = merged.properties.iter_mut().find(|candidate| candidate.name == property.name) {
-            existing.schema = all_of_schema(existing.schema.clone(), property.schema.clone());
+            existing.schema = merge_property_schemas(existing.schema.clone(), property.schema.clone());
         } else {
             merged.properties.push(property.clone());
         }
@@ -788,6 +788,46 @@ fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSchema 
     );
     merged.additional_properties = additional_properties;
     merged
+}
+
+fn merge_property_schemas(left: Schema, right: Schema) -> Schema {
+    if is_vacuous_json_value_schema(&left) {
+        right
+    } else if is_vacuous_json_value_schema(&right) {
+        left
+    } else {
+        all_of_schema(left, right)
+    }
+}
+
+fn is_vacuous_json_value_schema(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return matches!(schema.kind, SchemaKind::Any);
+    };
+    if assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+    {
+        return false;
+    }
+    if !option_objects_shape_equivalent(assertions.object.as_ref(), Some(&ObjectSchema::default()))
+        || !option_arrays_shape_equivalent(assertions.array.as_ref(), Some(&super::ast::ArraySchema::default()))
+        || !option_strings_shape_equivalent(assertions.string.as_ref(), Some(&super::ast::StringSchema::default()))
+        || !option_numbers_shape_equivalent(assertions.number.as_ref(), Some(&super::ast::NumberSchema::default()))
+    {
+        return false;
+    }
+    let Some(types) = &assertions.types else {
+        return true;
+    };
+    types.contains(&SchemaType::Null)
+        && types.contains(&SchemaType::Boolean)
+        && types.contains(&SchemaType::Object)
+        && types.contains(&SchemaType::Array)
+        && types.contains(&SchemaType::String)
+        && types.contains(&SchemaType::Number)
 }
 
 fn merge_additional_properties(

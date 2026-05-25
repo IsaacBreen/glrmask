@@ -1477,6 +1477,41 @@ fn allof_collapses_single_anyof_ref_before_intersect() {
 }
 
 #[test]
+fn allof_drops_vacuous_json_value_property_when_refined() {
+    let schema = json!({
+        "definitions": {
+            "Request": {
+                "type": "object",
+                "properties": {
+                    "arguments": {
+                        "type": ["array", "boolean", "integer", "null", "number", "object", "string"]
+                    }
+                }
+            },
+            "SpecificArguments": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                }
+            }
+        },
+        "allOf": [
+            {"$ref": "#/definitions/Request"},
+            {
+                "type": "object",
+                "properties": {
+                    "arguments": {"$ref": "#/definitions/SpecificArguments"}
+                },
+                "required": ["arguments"]
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn allof_distributes_over_object_anyof_before_lowering() {
     let schema = json!({
         "allOf": [
