@@ -1401,7 +1401,15 @@ fn apply_reduce_to_frame(
         return Some(ReduceFrameResult::Dead);
     }
 
-    let needs_guard = missing > 0 || by_target.len() > 1;
+    // Multi-target predecessor-sensitive reductions create guarded stack shifts
+    // that are expensive in runtime `may_advance` because they force path isolation
+    // and guard evaluation. Leave those reductions un-inlined unless every reachable
+    // predecessor shares one target.
+    if by_target.len() > 1 {
+        return None;
+    }
+
+    let needs_guard = missing > 0;
     let mut frames = Vec::new();
     for ((target, replace), froms) in by_target {
         let mut next_frame = frame.clone();
@@ -1996,7 +2004,7 @@ mod tests {
     }
 
     #[test]
-    fn reduce_frame_groups_origin_dependent_gotos_by_target() {
+    fn reduce_frame_refuses_origin_dependent_multiple_goto_targets() {
         let mut table = table_with_stack_shifts(Vec::new(), &[
             (1, &[(10, (3, false))]),
             (2, &[(10, (4, false))]),
@@ -2021,28 +2029,47 @@ mod tests {
             1,
         );
 
-        let Some(ReduceFrameResult::Frames { frames, .. }) = result else {
-            panic!("expected guarded frames");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn reduce_frame_allows_origin_dependent_single_goto_target() {
+        let mut table = table_with_stack_shifts(Vec::new(), &[
+            (1, &[(10, (3, false))]),
+            (2, &[(10, (3, false))]),
+        ]);
+        table.num_states = 6;
+        table.action.resize(6, ActionRow::default());
+        table.goto.resize(6, GotoRow::default());
+
+        let mut predecessors = vec![BTreeSet::new(); 6];
+        predecessors[5] = BTreeSet::from([1, 2]);
+
+        let result = apply_reduce_to_frame(
+            &table,
+            &predecessors,
+            5,
+            StackEffectFrame {
+                pop: 0,
+                pushes: Vec::new(),
+                guards: Vec::new(),
+            },
+            10,
+            1,
+        );
+
+        let Some(ReduceFrameResult::Frames { frames, origin_dependent }) = result else {
+            panic!("expected frames");
         };
+        assert!(origin_dependent);
         assert_eq!(
             frames,
             vec![
                 StackEffectFrame {
                     pop: 1,
                     pushes: vec![3],
-                    guards: vec![StackShiftGuard {
-                        pop: 1,
-                        states: vec![1],
-                    }],
-                },
-                StackEffectFrame {
-                    pop: 1,
-                    pushes: vec![4],
-                    guards: vec![StackShiftGuard {
-                        pop: 1,
-                        states: vec![2],
-                    }],
-                },
+                    guards: Vec::new(),
+                }
             ]
         );
     }
