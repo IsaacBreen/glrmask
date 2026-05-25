@@ -1417,15 +1417,18 @@ fn allof_merges_plain_object_branches() {
 #[test]
 fn allof_flattens_nested_object_allof_before_intersect() {
     let schema = json!({
+        "definitions": {
+            "baseConfig": {
+                "type": "object",
+                "properties": {
+                    "config": {"type": "object"}
+                }
+            }
+        },
         "allOf": [
             {
                 "allOf": [
-                    {
-                        "type": "object",
-                        "properties": {
-                            "config": {"type": "object"}
-                        }
-                    },
+                    {"$ref": "#/definitions/baseConfig"},
                     {
                         "properties": {
                             "mainClass": {"type": "string"}

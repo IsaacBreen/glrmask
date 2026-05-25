@@ -82,6 +82,7 @@ impl<'a> Lowerer<'a> {
         }
         branches = self.inline_all_of_refs(&branches)?;
         branches = flatten_pure_all_of_branches(branches);
+        branches = self.inline_all_of_refs(&branches)?;
         if let Some(filtered) = drop_vacuous_untyped_family_branches(branches) {
             branches = filtered;
         } else {
