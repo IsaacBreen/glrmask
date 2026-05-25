@@ -1111,6 +1111,26 @@ fn choose_direct_linear_step(
                 end_state: None,
             });
         }
+
+        if chosen_at_width
+            && chosen.is_some_and(|(_, _, ignored)| !ignored)
+            && index + 1 < bytes.len()
+        {
+            let next_byte = bytes[index + 1];
+            let next_state = constraint
+                .tokenizer_fast_transitions
+                .get(tokenizer_state as usize)
+                .map_or(u32::MAX, |transitions| transitions[next_byte as usize]);
+            if next_state == u32::MAX {
+                let (_, terminal, _) = chosen.unwrap();
+                return Some(DirectLinearStep {
+                    width,
+                    terminal,
+                    ignored: false,
+                    end_state: None,
+                });
+            }
+        }
     }
 
     let (width, terminal, ignored) = chosen?;
