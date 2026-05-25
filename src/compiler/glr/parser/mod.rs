@@ -1503,10 +1503,13 @@ pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: T
 
 #[cfg(test)]
 mod tests {
-    use super::{ParserGSS, advance_stacks};
+    use super::{ParserGSS, advance_stacks, stack_may_advance_on, stack_may_advance_on_any};
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::table::testing::build_test_table;
-    use crate::compiler::glr::table::{Action, StackShift};
+    use crate::compiler::glr::table::{
+        Action, GuardedStackShift, StackShift, StackShiftGuard,
+    };
+    use crate::ds::bitset::BitSet;
 
     #[test]
     fn advance_stacks_matches_reduce_fanout_collapse_fast_path() {
@@ -1539,6 +1542,48 @@ mod tests {
         let expected = ParserGSS::from_single_stack(vec![7], TerminalsDisallowed::new());
 
         assert_eq!(advance_stacks(&table, &before, token), expected);
+    }
+
+    #[test]
+    fn may_advance_evaluates_guarded_stack_shift_guards() {
+        let token = 0;
+        let table = build_test_table(
+            4,
+            1,
+            &[
+                &[],
+                &[],
+                &[(
+                    token,
+                    Action::GuardedStackShifts(vec![GuardedStackShift {
+                        guards: vec![StackShiftGuard {
+                            pop: 1,
+                            states: vec![1],
+                        }],
+                        pop: 1,
+                        pushes: vec![3],
+                    }]),
+                )],
+                &[],
+            ],
+            &[&[], &[], &[], &[]],
+        );
+        let mut terminals = BitSet::new(1);
+        terminals.set(token as usize);
+
+        let non_matching = ParserGSS::from_single_stack(vec![0, 2], TerminalsDisallowed::new());
+        assert!(table.action(2, token).is_some());
+        assert_eq!(non_matching.peek_values().as_slice(), &[2]);
+        assert!(!stack_may_advance_on(&table, &non_matching, token));
+        assert!(!stack_may_advance_on_any(
+            &table,
+            &non_matching,
+            &terminals
+        ));
+
+        let matching = ParserGSS::from_single_stack(vec![1, 2], TerminalsDisallowed::new());
+        assert!(stack_may_advance_on(&table, &matching, token));
+        assert!(stack_may_advance_on_any(&table, &matching, &terminals));
     }
 }
 
