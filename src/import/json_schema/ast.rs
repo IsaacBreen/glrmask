@@ -12,6 +12,7 @@ use serde_json::Value;
 pub(crate) struct SchemaDocument {
     pub(crate) root: Schema,
     pub(crate) definitions: Vec<SchemaDefinition>,
+    pub(crate) ref_targets: Vec<SchemaDefinition>,
 }
 
 #[derive(Debug, Clone)]

@@ -67,6 +67,9 @@ impl<'a> Lowerer<'a> {
         for definition in &document.definitions {
             definition_by_pointer.insert(definition.pointer.clone(), &definition.schema);
         }
+        for target in &document.ref_targets {
+            definition_by_pointer.insert(target.pointer.clone(), &target.schema);
+        }
         definition_by_pointer.insert("#".to_string(), &document.root);
 
         let mut lowerer = Self {

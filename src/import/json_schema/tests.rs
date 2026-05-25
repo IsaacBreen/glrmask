@@ -802,6 +802,35 @@ fn legacy_id_metadata_is_accepted() {
 }
 
 #[test]
+fn local_ref_to_property_schema_is_loaded() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "MD001": {"type": "boolean"},
+            "heading-increment": {"$ref": "#/properties/MD001"}
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn default_object_named_properties_is_not_scanned_for_ref_targets() {
+    let schema = json!({
+        "type": "string",
+        "default": {
+            "properties": {
+                "not_a_schema": "not a schema"
+            }
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn property_named_definitions_is_not_definition_container() {
     let schema = json!({
         "type": "object",
