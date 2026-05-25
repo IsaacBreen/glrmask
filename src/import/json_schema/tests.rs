@@ -1415,6 +1415,37 @@ fn allof_merges_plain_object_branches() {
 }
 
 #[test]
+fn allof_distributes_over_object_anyof_before_lowering() {
+    let schema = json!({
+        "allOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "match": {"type": "string"},
+                    "browser": {"type": "string"}
+                },
+                "required": ["match"]
+            },
+            {
+                "anyOf": [
+                    {"properties": {"devices": {"type": "object"}}},
+                    {"properties": {"device": {"type": "string"}}}
+                ]
+            },
+            {
+                "properties": {
+                    "platforms": {"type": "array", "items": {"type": "string"}},
+                    "engine": {"type": "string"}
+                }
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn open_object_anyof_uses_single_object_body_nfa() {
     let schema = json!({
         "type": "object",

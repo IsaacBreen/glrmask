@@ -93,6 +93,13 @@ impl<'a> Lowerer<'a> {
         if let Some(object) = try_merge_all_of_objects(&branches) {
             return self.lower_object(&object);
         }
+        if let Some(distributed) = distribute_all_of_over_single_object_any_of(&branches) {
+            let alternatives = distributed
+                .iter()
+                .map(|branch| self.lower_schema(branch))
+                .collect::<ImportResult<Vec<_>>>()?;
+            return Ok(choice(alternatives));
+        }
 
         let mut lowered = branches
             .iter()
@@ -665,6 +672,64 @@ fn plain_object_schema(schema: &Schema) -> Option<&ObjectSchema> {
         }
     }
     assertions.object.as_ref()
+}
+
+fn pure_any_of_branch(schema: &Schema) -> Option<&[Schema]> {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return None;
+    };
+    if assertions.any_of.is_empty()
+        || assertions.types.is_some()
+        || assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || assertions.object.is_some()
+        || assertions.array.is_some()
+        || assertions.string.is_some()
+        || assertions.number.is_some()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+    {
+        return None;
+    }
+    Some(&assertions.any_of)
+}
+
+fn distribute_all_of_over_single_object_any_of(branches: &[Schema]) -> Option<Vec<Schema>> {
+    let mut any_of_index = None;
+    for (index, branch) in branches.iter().enumerate() {
+        if let Some(alternatives) = pure_any_of_branch(branch) {
+            if any_of_index.is_some() || alternatives.iter().any(|alternative| plain_object_schema(alternative).is_none()) {
+                return None;
+            }
+            any_of_index = Some(index);
+        } else if plain_object_schema(branch).is_none() {
+            return None;
+        }
+    }
+
+    let any_of_index = any_of_index?;
+    let alternatives = pure_any_of_branch(&branches[any_of_index])?;
+    let object_siblings = branches
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != any_of_index)
+        .map(|(_, branch)| branch.clone())
+        .collect::<Vec<_>>();
+
+    Some(
+        alternatives
+            .iter()
+            .map(|alternative| {
+                let mut all_of = Vec::with_capacity(object_siblings.len() + 1);
+                all_of.push(alternative.clone());
+                all_of.extend(object_siblings.iter().cloned());
+                Schema::assertions(
+                    "<distributed-allOf-anyOf>",
+                    SchemaAssertions { all_of, ..SchemaAssertions::default() },
+                )
+            })
+            .collect(),
+    )
 }
 
 fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSchema {
