@@ -83,6 +83,8 @@ impl<'a> Lowerer<'a> {
         branches = self.inline_all_of_refs(&branches)?;
         branches = flatten_pure_all_of_branches(branches);
         branches = self.inline_all_of_refs(&branches)?;
+        branches = collapse_pure_single_any_of_branches(branches);
+        branches = self.inline_all_of_refs(&branches)?;
         if let Some(filtered) = drop_vacuous_untyped_family_branches(branches) {
             branches = filtered;
         } else {
@@ -288,6 +290,19 @@ fn flatten_pure_all_of_branches(branches: Vec<Schema>) -> Vec<Schema> {
         }
     }
     out
+}
+
+fn collapse_pure_single_any_of_branches(branches: Vec<Schema>) -> Vec<Schema> {
+    branches
+        .into_iter()
+        .map(|branch| {
+            if let Some([single]) = pure_any_of_branch(&branch) {
+                single.clone()
+            } else {
+                branch
+            }
+        })
+        .collect()
 }
 
 fn try_factor_required_property_any_of(

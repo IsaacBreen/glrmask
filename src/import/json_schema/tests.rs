@@ -1445,6 +1445,38 @@ fn allof_flattens_nested_object_allof_before_intersect() {
 }
 
 #[test]
+fn allof_collapses_single_anyof_ref_before_intersect() {
+    let schema = json!({
+        "definitions": {
+            "coreProperties": {
+                "type": "object",
+                "properties": {
+                    "spFolder": {"type": "string"},
+                    "distFolder": {"type": "string"}
+                },
+                "patternProperties": {
+                    "^_": {"additionalProperties": true}
+                }
+            },
+            "brandingConfig": {
+                "type": "object",
+                "properties": {
+                    "logoPath": {"type": "string"}
+                }
+            }
+        },
+        "allOf": [
+            {"$ref": "#/definitions/coreProperties"},
+            {"anyOf": [{"$ref": "#/definitions/brandingConfig"}]},
+            {"required": ["spFolder", "distFolder"]}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn allof_distributes_over_object_anyof_before_lowering() {
     let schema = json!({
         "allOf": [
