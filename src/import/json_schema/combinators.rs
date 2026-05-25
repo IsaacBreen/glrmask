@@ -791,9 +791,9 @@ fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSchema 
 }
 
 fn merge_property_schemas(left: Schema, right: Schema) -> Schema {
-    if is_vacuous_json_value_schema(&left) {
+    if is_vacuous_json_value_schema(&left) || is_vacuous_object_schema(&left) {
         right
-    } else if is_vacuous_json_value_schema(&right) {
+    } else if is_vacuous_json_value_schema(&right) || is_vacuous_object_schema(&right) {
         left
     } else {
         all_of_schema(left, right)
@@ -828,6 +828,30 @@ fn is_vacuous_json_value_schema(schema: &Schema) -> bool {
         && types.contains(&SchemaType::Array)
         && types.contains(&SchemaType::String)
         && types.contains(&SchemaType::Number)
+}
+
+fn is_vacuous_object_schema(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return false;
+    };
+    if assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+    {
+        return false;
+    }
+    let Some(types) = &assertions.types else {
+        return false;
+    };
+    if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+        return false;
+    }
+    option_objects_shape_equivalent(assertions.object.as_ref(), Some(&ObjectSchema::default()))
+        && assertions.array.is_none()
+        && assertions.string.is_none()
+        && assertions.number.is_none()
 }
 
 fn merge_additional_properties(

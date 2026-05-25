@@ -1512,6 +1512,38 @@ fn allof_drops_vacuous_json_value_property_when_refined() {
 }
 
 #[test]
+fn allof_drops_vacuous_object_property_when_refined() {
+    let schema = json!({
+        "definitions": {
+            "assembly": {
+                "type": "object",
+                "properties": {
+                    "options": {"type": "object"}
+                }
+            },
+            "specificOptions": {
+                "type": "object",
+                "properties": {
+                    "serialization": {"type": "string"}
+                }
+            }
+        },
+        "allOf": [
+            {"$ref": "#/definitions/assembly"},
+            {
+                "type": "object",
+                "properties": {
+                    "options": {"$ref": "#/definitions/specificOptions"}
+                }
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn allof_distributes_over_object_anyof_before_lowering() {
     let schema = json!({
         "allOf": [
