@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule};
 
 use super::ast::{
-    Schema, SchemaAssertions, SchemaDocument, SchemaKind, SchemaType,
+    AdditionalProperties, Schema, SchemaAssertions, SchemaDocument, SchemaKind, SchemaType,
 };
 use super::config::JsonSchemaConfig;
 use super::error::{ImportResult, SchemaImportError};
@@ -486,15 +486,23 @@ fn collect_shared_ap_exclusions_from_schema(
     };
 
     if let Some(object) = &assertions.object {
-        for required_name in &object.required {
-            literal_keys.insert(required_name.clone());
+        let include_object_keys =
+            !matches!(object.additional_properties, AdditionalProperties::Deny);
+        if include_object_keys {
+            for required_name in &object.required {
+                literal_keys.insert(required_name.clone());
+            }
         }
         for property in &object.properties {
-            literal_keys.insert(property.name.clone());
+            if include_object_keys {
+                literal_keys.insert(property.name.clone());
+            }
             collect_shared_ap_exclusions_from_schema(&property.schema, literal_keys, patterns);
         }
         for pattern_property in &object.pattern_properties {
-            patterns.insert(pattern_property.pattern.clone());
+            if include_object_keys {
+                patterns.insert(pattern_property.pattern.clone());
+            }
             collect_shared_ap_exclusions_from_schema(&pattern_property.schema, literal_keys, patterns);
         }
         if let super::ast::AdditionalProperties::Schema(schema) = &object.additional_properties {

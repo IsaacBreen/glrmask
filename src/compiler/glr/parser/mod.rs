@@ -916,6 +916,20 @@ fn advance_reduce_branch(
     }
 }
 
+fn single_concrete_path_as_vstack(
+    gss: &ParserGSS,
+) -> Option<VirtualStack<u32, TerminalsDisallowed>> {
+    let mut top_first = SmallVec::<[u32; 16]>::new();
+    let acc = gss.single_path_top_first_and_acc(&mut top_first)?;
+    if top_first.len() > SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH {
+        return None;
+    }
+
+    let mut stack = top_first.into_vec();
+    stack.reverse();
+    ParserGSS::from_single_stack(stack, acc).try_virtual_stack()
+}
+
 fn advance_split_from_vstack(
     table: &GLRTable,
     stack: &VirtualStack<u32, TerminalsDisallowed>,
@@ -971,7 +985,10 @@ fn advance_deterministically_profiled(
     token: TerminalID,
     profile: &mut AdvanceProfile,
 ) -> bool {
-    let Some(mut stack) = gss.try_virtual_stack() else {
+    let Some(mut stack) = gss
+        .try_virtual_stack()
+        .or_else(|| single_concrete_path_as_vstack(gss))
+    else {
         profile.det_exit_reason = 6;
         return false;
     };
@@ -1366,7 +1383,10 @@ fn advance_deterministically(
     gss: &mut ParserGSS,
     token: TerminalID,
 ) -> bool {
-    let Some(mut stack) = gss.try_virtual_stack() else {
+    let Some(mut stack) = gss
+        .try_virtual_stack()
+        .or_else(|| single_concrete_path_as_vstack(gss))
+    else {
         return false;
     };
 
@@ -1544,6 +1564,55 @@ mod tests {
         let mut terminals = BitSet::new(1);
         terminals.set(token as usize);
         assert!(!stack_may_advance_on_any(&table, &stack, &terminals));
+    }
+
+    #[test]
+    fn advance_stacks_materializes_single_concrete_path_for_split() {
+        let token = 0;
+        let nt = 0;
+        let table = build_test_table(
+            6,
+            1,
+            &[
+                &[],
+                &[],
+                &[(token, Action::Split {
+                    shift: Some((3, false)),
+                    reduces: vec![(nt, 1)],
+                    accept: false,
+                })],
+                &[],
+                &[(token, Action::Shift(5, false))],
+                &[],
+            ],
+            &[
+                &[(nt, (4, false))],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+            ],
+        );
+
+        let acc = TerminalsDisallowed::new();
+        let before = ParserGSS::from_stacks(&[
+            (vec![0, 1], acc.clone()),
+            (vec![0, 2], acc.clone()),
+        ])
+        .popn(1)
+        .push(2);
+        let expected = ParserGSS::from_stacks(&[
+            (vec![0, 2, 3], acc.clone()),
+            (vec![0, 4, 5], acc),
+        ]);
+
+        let mut actual_stacks = advance_stacks(&table, &before, token).to_stacks();
+        let mut expected_stacks = expected.to_stacks();
+        actual_stacks.sort_by(|left, right| left.0.cmp(&right.0));
+        expected_stacks.sort_by(|left, right| left.0.cmp(&right.0));
+
+        assert_eq!(actual_stacks, expected_stacks);
     }
 }
 

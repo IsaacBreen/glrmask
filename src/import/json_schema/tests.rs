@@ -209,6 +209,40 @@ fn contains_ref_named(expr: &GrammarExpr, name: &str) -> bool {
     }
 }
 
+fn contains_literal_bytes(expr: &GrammarExpr, bytes: &[u8]) -> bool {
+    match expr {
+        GrammarExpr::Literal(literal) => literal == bytes,
+        GrammarExpr::Grouped(inner)
+        | GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner) => contains_literal_bytes(inner, bytes),
+        GrammarExpr::RepeatRange { expr, .. } => contains_literal_bytes(expr, bytes),
+        GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
+            items.iter().any(|item| contains_literal_bytes(item, bytes))
+        }
+        GrammarExpr::SeparatedSequence { items, separator, .. } => {
+            items.iter().any(|(item, _)| contains_literal_bytes(item, bytes))
+                || contains_literal_bytes(separator, bytes)
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            contains_literal_bytes(expr, bytes) || contains_literal_bytes(exclude, bytes)
+        }
+        GrammarExpr::Intersect { expr, intersect } => {
+            contains_literal_bytes(expr, bytes) || contains_literal_bytes(intersect, bytes)
+        }
+        GrammarExpr::ExprNFA(nfa) => nfa
+            .symbols
+            .iter()
+            .any(|symbol| contains_literal_bytes(symbol, bytes)),
+        GrammarExpr::Ref(_)
+        | GrammarExpr::Epsilon
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte => false,
+    }
+}
+
 #[test]
 fn closed_object_lowers_to_prefix_chain_body() {
     let schema = json!({
@@ -477,6 +511,42 @@ fn additional_properties_factoring_uses_shared_key_colon_terminal() {
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn shared_additional_excluded_key_skips_closed_object_keys() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "closed_child": {
+                "type": "object",
+                "properties": {
+                    "closed_only": {"type": "string"}
+                },
+                "additionalProperties": false
+            },
+            "open_child": {
+                "type": "object",
+                "properties": {
+                    "open_only": {"type": "string"}
+                },
+                "additionalProperties": {"type": "string"}
+            }
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let excluded_rule = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.name == "json_additional_excluded_key_colon_shared")
+        .expect("shared excluded-key rule exists");
+
+    assert!(contains_literal_bytes(&excluded_rule.expr, b"\"open_only\": "));
+    assert!(!contains_literal_bytes(&excluded_rule.expr, b"\"closed_only\": "));
+
     lower(&grammar).unwrap();
 }
 

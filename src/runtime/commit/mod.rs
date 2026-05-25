@@ -579,15 +579,14 @@ fn apply_single_path_reduce_chain_fast(
     gss: &ParserGSS,
     terminal: u32,
 ) -> Option<ParserGSS> {
-    if gss.max_depth() as usize > SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH {
+    let mut top_first = SmallVec::<[u32; 16]>::new();
+    let acc = gss.single_path_top_first_and_acc(&mut top_first)?;
+    if top_first.len() > SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH {
         return None;
     }
 
-    let mut stacks = gss.to_stacks();
-    if stacks.len() != 1 {
-        return None;
-    }
-    let (mut stack, acc) = stacks.pop().unwrap();
+    let mut stack = top_first.into_vec();
+    stack.reverse();
 
     loop {
         let state = *stack.last()?;
@@ -622,6 +621,64 @@ fn apply_single_path_reduce_chain_fast(
                             .map(|shift| (shift.pop as usize, shift.pushes.as_slice())),
                         SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH,
                     );
+            }
+            Action::Split {
+                shift,
+                reduces,
+                accept: false,
+            } => {
+                let mut out: Vec<(Vec<u32>, TerminalsDisallowed)> = Vec::new();
+
+                if let Some((target, is_replace)) = shift {
+                    let mut branch = stack.clone();
+                    if *is_replace {
+                        *branch.last_mut()? = *target;
+                    } else {
+                        branch.push(*target);
+                    }
+                    out.push((branch, acc.clone()));
+                }
+
+                for &(nt, len) in reduces {
+                    let mut branch = stack.clone();
+                    let rhs_len = len as usize;
+                    if rhs_len >= branch.len() {
+                        return None;
+                    }
+                    branch.truncate(branch.len() - rhs_len);
+                    let goto_from = *branch.last()?;
+                    let (target, is_replace) = table.goto_target(goto_from, nt)?;
+                    if is_replace {
+                        *branch.last_mut()? = target;
+                    } else {
+                        branch.push(target);
+                    }
+
+                    let follow_state = *branch.last()?;
+                    match table.action(follow_state, terminal)? {
+                        Action::Shift(target, is_replace) => {
+                            if *is_replace {
+                                *branch.last_mut()? = *target;
+                            } else {
+                                branch.push(*target);
+                            }
+                            out.push((branch, acc.clone()));
+                        }
+                        Action::StackShifts(shifts) => {
+                            let shifted = ParserGSS::from_single_stack(branch, acc.clone())
+                                .apply_stack_effects_to_single_concrete_path(
+                                    shifts
+                                        .iter()
+                                        .map(|shift| (shift.pop as usize, shift.pushes.as_slice())),
+                                    SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH,
+                                )?;
+                            out.extend(shifted.to_stacks());
+                        }
+                        _ => return None,
+                    }
+                }
+
+                return (!out.is_empty()).then(|| ParserGSS::from_stacks(&out));
             }
             _ => return None,
         }
