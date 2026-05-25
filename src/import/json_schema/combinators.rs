@@ -81,6 +81,7 @@ impl<'a> Lowerer<'a> {
             branches.push(Schema::assertions("<allOf-siblings>", siblings));
         }
         branches = self.inline_all_of_refs(&branches)?;
+        branches = flatten_pure_all_of_branches(branches);
         if let Some(filtered) = drop_vacuous_untyped_family_branches(branches) {
             branches = filtered;
         } else {
@@ -270,6 +271,22 @@ fn drop_vacuous_untyped_family_branches(branches: Vec<Schema>) -> Option<Vec<Sch
             })
             .collect(),
     )
+}
+
+fn flatten_pure_all_of_branches(branches: Vec<Schema>) -> Vec<Schema> {
+    let mut out = Vec::new();
+    for branch in branches {
+        match &branch.kind {
+            SchemaKind::Assertions(assertions)
+                if !assertions.all_of.is_empty()
+                    && assertions.clone_without_combinators().is_empty() =>
+            {
+                out.extend(flatten_pure_all_of_branches(assertions.all_of.clone()));
+            }
+            _ => out.push(branch),
+        }
+    }
+    out
 }
 
 fn try_factor_required_property_any_of(

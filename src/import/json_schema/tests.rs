@@ -1415,6 +1415,33 @@ fn allof_merges_plain_object_branches() {
 }
 
 #[test]
+fn allof_flattens_nested_object_allof_before_intersect() {
+    let schema = json!({
+        "allOf": [
+            {
+                "allOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "config": {"type": "object"}
+                        }
+                    },
+                    {
+                        "properties": {
+                            "mainClass": {"type": "string"}
+                        }
+                    }
+                ]
+            },
+            {"required": ["mainClass"]}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn allof_distributes_over_object_anyof_before_lowering() {
     let schema = json!({
         "allOf": [
