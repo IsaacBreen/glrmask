@@ -1166,17 +1166,21 @@ fn commit_bytes_direct_linear_fast_path(
             {
                 advanced
             } else {
-                if !stack_may_advance_on(&constraint.table, &gss, step.terminal) {
-                    return None;
-                }
                 if let Some(profile) = profile.as_deref_mut() {
                     let (advanced, advance_profile) =
                         advance_stacks_profiled(&constraint.table, &gss, step.terminal);
+                    if advanced.is_empty() {
+                        return None;
+                    }
                     profile.advance_core_ns += advance_profile.total_ns;
                     apply_advance_profile(profile, &advance_profile);
                     advanced
                 } else {
-                    advance_stacks_owned(&constraint.table, gss, step.terminal)
+                    let advanced = advance_stacks(&constraint.table, &gss, step.terminal);
+                    if advanced.is_empty() {
+                        return None;
+                    }
+                    advanced
                 }
             };
             if let (Some(profile), Some(start)) = (profile.as_deref_mut(), advance_start) {
@@ -1313,14 +1317,9 @@ fn commit_bytes_fast_path_profiled(
     };
 
     let end_state_check_start = Instant::now();
-    if let Some(end_state) = exec_result.end_state {
-        if end_state_may_advance(constraint, gss, end_state) {
-            profile.fast_path_end_state_check_ns =
-                end_state_check_start.elapsed().as_nanos() as u64;
-            profile.failed_fast_path_probe_ns += total_start.elapsed().as_nanos() as u64;
-            return None;
-        }
-    }
+    let end_state_to_keep = exec_result
+        .end_state
+        .filter(|&end_state| end_state_may_advance(constraint, gss, end_state));
     profile.fast_path_end_state_check_ns = end_state_check_start.elapsed().as_nanos() as u64;
 
     let no_end_state = exec_result.end_state.is_none();
@@ -1444,6 +1443,7 @@ fn commit_bytes_fast_path_profiled(
     profile.fast_path_prune_ns = prune_start.elapsed().as_nanos() as u64;
     profile.prune_ns = profile.fast_path_prune_ns;
 
+    let end_state_gss = end_state_to_keep.map(|_| pruned_gss.clone());
     let advance_start = Instant::now();
     let advanced = advance_stacks_owned(&constraint.table, pruned_gss.clone(), terminal);
     profile.fast_path_advance_ns = advance_start.elapsed().as_nanos() as u64;
@@ -1490,6 +1490,20 @@ fn commit_bytes_fast_path_profiled(
 
     let update_start = Instant::now();
     state.insert(constraint.tokenizer.initial_state(), fused);
+    if let Some(end_state) = end_state_to_keep {
+        let Some(end_gss) = end_state_gss else {
+            return Some(Err(
+                "commit rejected: no valid parser states remain".to_string(),
+            ));
+        };
+        let fused = end_gss.fuse(Some(1));
+        if !fused.is_empty() {
+            state
+                .entry(end_state)
+                .and_modify(|existing| *existing = existing.merge(&fused))
+                .or_insert(fused);
+        }
+    }
     profile.fast_path_state_update_ns = update_start.elapsed().as_nanos() as u64;
     profile.fast_path_total_ns = total_start.elapsed().as_nanos() as u64;
     profile.total_ns = profile.fast_path_total_ns;
@@ -2076,14 +2090,15 @@ fn commit_bytes_linear_fast_path(
             let advanced = if let Some(advanced) = fast_advanced {
                 advanced
             } else {
-                if !stack_may_advance_on(&constraint.table, &gss, terminal) {
+                let advanced = advance_stacks(&constraint.table, &gss, terminal);
+                if advanced.is_empty() {
                     return if offset > 0 {
                         LinearFastPathResult::Continue { gss, offset }
                     } else {
                         LinearFastPathResult::Restart
                     };
                 }
-                advance_stacks_owned(&constraint.table, gss, terminal)
+                advanced
             };
             if advanced.is_empty() {
                 return LinearFastPathResult::Complete(Err(
@@ -2214,9 +2229,12 @@ fn commit_bytes_linear_fast_path_profiled(
                     let advance_elapsed = advance_profile.total_ns;
                     (advanced, advance_profile, advance_elapsed)
                 } else {
-                    let may_start = Instant::now();
-                    if !stack_may_advance_on(&constraint.table, &gss, terminal) {
-                        profile.advance_may_check_ns += may_start.elapsed().as_nanos() as u64;
+                    let advance_start = Instant::now();
+                    let (advanced, advance_profile) =
+                        advance_stacks_profiled(&constraint.table, &gss, terminal);
+                    let advance_elapsed = advance_start.elapsed().as_nanos() as u64;
+                    if advanced.is_empty() {
+                        profile.advance_core_ns += advance_elapsed;
                         let result = if offset > 0 {
                             LinearFastPathResult::Continue { gss, offset }
                         } else {
@@ -2225,15 +2243,7 @@ fn commit_bytes_linear_fast_path_profiled(
                         profile.linear_fast_path_total_ns = total_start.elapsed().as_nanos() as u64;
                         return result;
                     }
-                    let may_elapsed = may_start.elapsed().as_nanos() as u64;
-                    profile.advance_may_check_ns += may_elapsed;
-
-                    let advance_start = Instant::now();
-                    let (advanced, advance_profile) =
-                        advance_stacks_profiled(&constraint.table, &gss, terminal);
-                    let advance_elapsed = advance_start.elapsed().as_nanos() as u64;
-                    profile.linear_fast_path_advance_ns += may_elapsed;
-                    (advanced, advance_profile, may_elapsed + advance_elapsed)
+                    (advanced, advance_profile, advance_elapsed)
                 };
             profile.advance_core_ns += advance_profile.total_ns;
             profile.linear_fast_path_advance_ns += advance_profile.total_ns;
@@ -2317,6 +2327,20 @@ fn commit_bytes_impl(
     }
 
     let ignore_terminal = constraint.ignore_terminal;
+
+    if state.len() == 1 {
+        let (&tokenizer_state, _) = state.iter().next().unwrap();
+        let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
+        if let Some(result) = commit_bytes_fast_path(
+            constraint,
+            state,
+            bytes,
+            tokenizer_state,
+            &exec_result,
+        ) {
+            return result;
+        }
+    }
 
     // Single tokenizer state: execute tokenizer ONCE, try fast path, reuse result
     if state.len() == 1 {
