@@ -284,6 +284,33 @@ fn large_optional_closed_object_uses_fixed_pair_loop() {
 }
 
 #[test]
+fn required_prefix_open_object_uses_pair_loop_body() {
+    let mut properties = serde_json::Map::new();
+    properties.insert("a".to_string(), json!({"type": "string"}));
+    properties.insert("b".to_string(), json!({"type": "string"}));
+    for index in 0..8 {
+        properties.insert(format!("opt{index}"), json!({"type": "number"}));
+    }
+
+    let schema = json!({
+        "type": "object",
+        "properties": properties,
+        "required": ["a", "b"],
+        "patternProperties": {
+            "^_": {"type": "string"}
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(
+        glrm.contains("json_required_prefix_open_object_pair_loop_body"),
+        "{glrm}"
+    );
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn open_no_pattern_object_lowers_to_expr_nfa_body() {
     let schema = json!({
         "type": "object",

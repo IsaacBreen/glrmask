@@ -515,6 +515,22 @@ impl<'a> Lowerer<'a> {
         }
 
         if !tail_pairs.is_empty() {
+            let required_prefix_len = items.iter().take_while(|item| item.required).count();
+            let required_count = items.iter().filter(|item| item.required).count();
+            let use_required_prefix_open_object_pair_loop = required_prefix_len > 0
+                && required_prefix_len == required_count
+                && items.len().saturating_sub(required_prefix_len) + tail_pairs.len() >= 8
+                && any_required_names.is_none()
+                && exclusive_group.is_none();
+
+            if use_required_prefix_open_object_pair_loop {
+                return self.lower_required_prefix_open_object_pair_loop(
+                    &items,
+                    required_prefix_len,
+                    &tail_pairs,
+                );
+            }
+
             let is_snowplow_large_closed_pattern_object = normalized.properties.len()
                 >= LARGE_OBJECT_LITERAL_KEY_TRIE_MIN_ITEMS
                 && normalized.required.is_empty()
@@ -1775,6 +1791,108 @@ impl<'a> Lowerer<'a> {
             r(&body_rule_name),
             lit("}"),
         ]))
+    }
+
+    fn lower_required_prefix_open_object_pair_loop(
+        &mut self,
+        items: &[ObjectItem],
+        required_prefix_len: usize,
+        tail_pairs: &[GrammarExpr],
+    ) -> ImportResult<GrammarExpr> {
+        let mut builder = ExprNfaBuilder::new();
+        let start_state = builder.start_state();
+        let mut required_state = start_state;
+
+        for (index, item) in items.iter().take(required_prefix_len).enumerate() {
+            let [key_symbol, value_symbol] = Self::split_object_pair_symbols(&item.pair)?;
+            let next_state = builder.add_state();
+            let path = if index == 0 {
+                Self::object_pair_path_symbols(key_symbol, value_symbol)
+            } else {
+                let mut symbols = vec![self.item_separator_expr()];
+                symbols.extend(Self::object_pair_path_symbols(key_symbol, value_symbol));
+                symbols
+            };
+            Self::add_expr_nfa_symbol_path(&mut builder, required_state, path, next_state);
+            required_state = next_state;
+        }
+
+        builder.set_accepting(required_state);
+
+        let mut pair_paths = Vec::new();
+        let mut grouped_keys: Vec<(GrammarExpr, Vec<GrammarExpr>)> = Vec::new();
+        for item in &items[required_prefix_len..] {
+            let [key_symbol, value_symbol] = Self::split_object_pair_symbols(&item.pair)?;
+            if let Some((_, key_symbols)) = grouped_keys
+                .iter_mut()
+                .find(|(group_value_symbol, _)| *group_value_symbol == value_symbol)
+            {
+                key_symbols.push(key_symbol);
+            } else {
+                grouped_keys.push((value_symbol, vec![key_symbol]));
+            }
+        }
+
+        for (value_symbol, key_symbols) in grouped_keys {
+            let mut key_builder = ExprNfaBuilder::new();
+            let key_start = key_builder.start_state();
+            let key_end = key_builder.add_state();
+            key_builder.set_accepting(key_end);
+            for key_symbol in key_symbols {
+                Self::add_expr_nfa_symbol_path(
+                    &mut key_builder,
+                    key_start,
+                    Self::split_literal_key_symbol(key_symbol),
+                    key_end,
+                );
+            }
+
+            let key_rule_name = self.fresh_rule_name("json_closed_object_key_group");
+            self.add_nonterminal_rule(
+                &key_rule_name,
+                GrammarExpr::ExprNFA(Box::new(
+                    key_builder.build().into_determinized_and_minimized(),
+                )),
+            );
+            pair_paths.push(vec![r(&key_rule_name), value_symbol]);
+        }
+
+        for tail_pair in tail_pairs {
+            for [key_symbol, value_symbol] in Self::split_object_pair_symbol_paths(tail_pair)? {
+                pair_paths.push(Self::object_pair_path_symbols(key_symbol, value_symbol));
+            }
+        }
+
+        let loop_state = builder.add_state();
+        builder.set_accepting(loop_state);
+
+        for pair_path in pair_paths {
+            let mut first_loop_symbols = vec![self.item_separator_expr()];
+            first_loop_symbols.extend(pair_path.clone());
+            Self::add_expr_nfa_symbol_path(
+                &mut builder,
+                required_state,
+                first_loop_symbols,
+                loop_state,
+            );
+            let mut loop_symbols = vec![self.item_separator_expr()];
+            loop_symbols.extend(pair_path);
+            Self::add_expr_nfa_symbol_path(
+                &mut builder,
+                loop_state,
+                loop_symbols,
+                loop_state,
+            );
+        }
+
+        let body_rule_name =
+            self.fresh_rule_name("json_required_prefix_open_object_pair_loop_body");
+        self.add_nonterminal_rule(
+            &body_rule_name,
+            GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized())),
+        );
+
+        Ok(seq(vec![lit("{"), r(&body_rule_name), lit("}")]))
     }
 
     fn lower_property_item(
