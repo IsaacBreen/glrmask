@@ -107,6 +107,7 @@ pub(crate) enum SchemaType {
 pub(crate) struct ObjectSchema {
     pub(crate) properties: Vec<PropertySchema>,
     pub(crate) required: BTreeSet<String>,
+    pub(crate) min_properties: usize,
     pub(crate) pattern_properties: Vec<PatternPropertySchema>,
     pub(crate) additional_properties: AdditionalProperties,
 }
@@ -116,6 +117,7 @@ impl Default for ObjectSchema {
         Self {
             properties: Vec::new(),
             required: BTreeSet::new(),
+            min_properties: 0,
             pattern_properties: Vec::new(),
             additional_properties: AdditionalProperties::AllowAny,
         }

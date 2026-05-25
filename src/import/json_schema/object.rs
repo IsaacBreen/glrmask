@@ -363,6 +363,23 @@ impl<'a> Lowerer<'a> {
         exclusive_group: Option<(&BTreeSet<String>, bool)>,
     ) -> ImportResult<GrammarExpr> {
         let normalized = self.object_with_required_synthetic_properties(schema)?;
+        let min_property_group_required = if normalized.min_properties <= normalized.required.len() {
+            false
+        } else if normalized.min_properties == 1
+            && normalized.required.is_empty()
+            && matches!(normalized.additional_properties, AdditionalProperties::Deny)
+            && normalized.pattern_properties.is_empty()
+            && !normalized.properties.is_empty()
+            && any_required_names.is_none()
+            && exclusive_group.is_none()
+        {
+            true
+        } else {
+            return Err(SchemaImportError::new(
+                "minProperties is only supported when it is redundant or requires at least one fixed property on a closed object"
+                    .to_string(),
+            ));
+        };
         let fixed_names = normalized
             .properties
             .iter()
@@ -378,7 +395,8 @@ impl<'a> Lowerer<'a> {
                     &normalized.pattern_properties,
                     required,
                     any_required_names
-                        .is_some_and(|names| names.contains(&property.name)),
+                        .is_some_and(|names| names.contains(&property.name))
+                        || min_property_group_required,
                     exclusive_group
                         .is_some_and(|(names, _)| names.contains(&property.name)),
                 )
@@ -436,7 +454,7 @@ impl<'a> Lowerer<'a> {
             return self.lower_fixed_object_body_exprnfa(
                 &items,
                 tail_pair,
-                any_required_names.is_some(),
+                any_required_names.is_some() || min_property_group_required,
                 exclusive_group.is_some_and(|(_, require_one)| require_one),
             );
         }

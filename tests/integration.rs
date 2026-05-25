@@ -242,6 +242,26 @@ fn json_schema_closed_object_all_optional_accepts_sparse_in_order_members() {
 }
 
 #[test]
+fn json_schema_closed_object_min_properties_one_requires_a_property() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "minProperties": 1,
+            "additionalProperties": false
+        }"#,
+    );
+
+    assert_rejects_bytes(&constraint, br#"{}"#);
+    assert_accepts_bytes(&constraint, br#"{"a": "x"}"#);
+    assert_accepts_bytes(&constraint, br#"{"b": "y"}"#);
+    assert_accepts_bytes(&constraint, br#"{"a": "x", "b": "y"}"#);
+}
+
+#[test]
 fn json_schema_closed_object_required_property_still_mandatory() {
     let constraint = byte_schema(
         r#"{

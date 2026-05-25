@@ -549,6 +549,21 @@ fn plain_items_ignore_additional_items_without_tuple() {
 }
 
 #[test]
+fn map_shaped_min_properties_still_errors() {
+    let schema = json!({
+        "type": "object",
+        "patternProperties": {
+            ".+": {"type": "string"}
+        },
+        "additionalProperties": false,
+        "minProperties": 1
+    });
+
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("minProperties is only supported"), "{error}");
+}
+
+#[test]
 fn string_pattern_lowers_as_terminal_pattern() {
     let schema = json!({
         "type": "string",

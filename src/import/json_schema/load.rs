@@ -145,7 +145,6 @@ fn is_unsupported_validation_key(key: &str) -> bool {
         key,
         "not"
             | "propertyNames"
-            | "minProperties"
             | "maxProperties"
             | "uniqueItems"
             | "contains"
@@ -229,7 +228,13 @@ fn load_schema_array(
 
 fn should_load_object_assertion(object: &Map<String, Value>, types: Option<&[SchemaType]>) -> bool {
     type_mentions(types, SchemaType::Object)
-        || ["properties", "required", "patternProperties", "additionalProperties"]
+        || [
+            "properties",
+            "required",
+            "patternProperties",
+            "additionalProperties",
+            "minProperties",
+        ]
             .iter()
             .any(|key| object.contains_key(*key))
 }
@@ -314,6 +319,8 @@ fn load_object_keywords(
             )?)),
         };
     }
+
+    schema.min_properties = read_usize_keyword(object, "minProperties", location)?.unwrap_or(0);
 
     Ok(schema)
 }

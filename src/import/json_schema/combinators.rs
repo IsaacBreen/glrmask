@@ -406,6 +406,7 @@ fn try_factor_closed_object_variant_any_of(
         ObjectSchema {
             properties: merged_properties,
             required: BTreeSet::new(),
+            min_properties: 0,
             pattern_properties: Vec::new(),
             additional_properties: AdditionalProperties::Deny,
         },
@@ -668,6 +669,7 @@ fn plain_object_schema(schema: &Schema) -> Option<&ObjectSchema> {
 
 fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSchema {
     let mut merged = left.clone();
+    merged.min_properties = merged.min_properties.max(right.min_properties);
 
     for required in &right.required {
         merged.required.insert(required.clone());
