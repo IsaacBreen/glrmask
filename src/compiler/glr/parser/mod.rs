@@ -1461,6 +1461,23 @@ fn advance_deterministically(
     false
 }
 
+/// Precise predicate for whether this parser stack can advance on `token`.
+///
+/// Returns `true` if and only if at least one current parser path can definitely
+/// advance on the given terminal. Returns `false` if no current parser path can
+/// advance.
+///
+/// Ordinary actions (for example shifts and reduces) are applicable from the top
+/// state/action row. In particular, LR(1) reduce lookaheads are precise: if the
+/// row has a reduce action for this terminal, that reduce is a valid parser
+/// transition for the lookahead under the table invariants; it does not require
+/// an additional lower-stack guard check here. `GuardedStackShifts` also have
+/// lower-stack predicates, so they must evaluate their guards against the current
+/// GSS before this predicate can return `true`.
+///
+/// TODO: Rename this eventually, e.g. to `stack_can_advance_on`. The current
+/// `may_advance` name sounds like a speculative approximation, but this is an
+/// exact applicability predicate.
 pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
     let virtual_stack = stack.try_virtual_stack();
     stack.peek_values().into_iter().any(|state| {
@@ -1525,6 +1542,24 @@ mod tests {
     }
 }
 
+/// Precise predicate for whether this parser stack can advance on any terminal in
+/// `terminals`.
+///
+/// Returns `true` if and only if at least one current parser path can definitely
+/// advance on one of the given terminals. Returns `false` if no current parser
+/// path can advance on any of them.
+///
+/// Ordinary actions are applicable from the top state/action row. In particular,
+/// LR(1) reduce lookaheads are precise: if a row has a reduce action for one of
+/// these terminals, that reduce is a valid parser transition for that lookahead
+/// under the table invariants; it does not require an additional lower-stack
+/// guard check here. `GuardedStackShifts` also have lower-stack predicates, so
+/// they must evaluate their guards against the current GSS before this predicate
+/// can return `true`.
+///
+/// TODO: Rename this eventually, e.g. to `stack_can_advance_on_any`. The current
+/// `may_advance` name sounds like a speculative approximation, but this is an
+/// exact applicability predicate.
 pub(crate) fn stack_may_advance_on_any(
     table: &GLRTable,
     stack: &ParserGSS,
