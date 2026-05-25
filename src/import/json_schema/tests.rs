@@ -796,7 +796,7 @@ fn unknown_metadata_keys_are_ignored() {
 }
 
 #[test]
-fn oneof_errors_as_unimplemented_key() {
+fn oneof_lowers_as_choice() {
     let schema = json!({
         "oneOf": [
             {"const": "left"},
@@ -804,8 +804,8 @@ fn oneof_errors_as_unimplemented_key() {
         ]
     });
 
-    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
-    assert!(error.contains("oneOf"), "{error}");
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
 }
 
 #[test]

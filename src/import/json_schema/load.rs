@@ -144,7 +144,6 @@ fn is_unsupported_validation_key(key: &str) -> bool {
     matches!(
         key,
         "not"
-            | "oneOf"
             | "propertyNames"
             | "minProperties"
             | "maxProperties"
