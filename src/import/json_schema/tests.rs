@@ -885,6 +885,65 @@ fn oneof_lowers_as_choice() {
 }
 
 #[test]
+fn oneof_single_ref_wrapper_is_supported() {
+    let schema = json!({
+        "definitions": {
+            "name": {"type": "string"}
+        },
+        "oneOf": [
+            {"$ref": "#/definitions/name"}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn oneof_ref_and_null_is_supported() {
+    let schema = json!({
+        "definitions": {
+            "input": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"}
+                },
+                "required": ["id"]
+            }
+        },
+        "oneOf": [
+            {"$ref": "#/definitions/input"},
+            {"type": ["null"]}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn oneof_mixed_ref_and_inline_errors() {
+    let schema = json!({
+        "definitions": {
+            "input": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"}
+                },
+                "required": ["id"]
+            }
+        },
+        "oneOf": [
+            {"type": "string"},
+            {"$ref": "#/definitions/input"}
+        ]
+    });
+
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("mixed $ref and inline"), "{error}");
+}
+
+#[test]
 fn not_errors_as_unimplemented_key() {
     let schema = json!({
         "type": "string",

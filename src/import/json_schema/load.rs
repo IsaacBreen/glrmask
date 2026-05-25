@@ -24,6 +24,36 @@ fn singleton_all_of_ref_without_siblings(assertions: &SchemaAssertions) -> Optio
     }
 }
 
+fn one_of_mixes_ref_and_inline_branches(branches: &[Schema]) -> bool {
+    branches.len() > 1
+        && branches
+            .iter()
+            .any(|branch| matches!(branch.kind, SchemaKind::Ref(_)))
+        && branches
+            .iter()
+            .any(|branch| {
+                !matches!(branch.kind, SchemaKind::Ref(_))
+                    && !schema_is_null_only_inline_branch(branch)
+            })
+}
+
+fn schema_is_null_only_inline_branch(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return false;
+    };
+
+    matches!(assertions.types.as_deref(), Some([SchemaType::Null]))
+        && assertions.const_value.is_none()
+        && assertions.enum_values.is_none()
+        && assertions.object.is_none()
+        && assertions.array.is_none()
+        && assertions.string.is_none()
+        && assertions.number.is_none()
+        && assertions.any_of.is_empty()
+        && assertions.one_of.is_empty()
+        && assertions.all_of.is_empty()
+}
+
 pub(crate) fn load_document(root: &Value) -> ImportResult<SchemaDocument> {
     let mut definitions = Vec::new();
     collect_definitions(root, "#", &mut definitions)?;
@@ -205,6 +235,12 @@ fn load_assertions(object: &Map<String, Value>, location: &str) -> ImportResult<
     assertions.enum_values = load_enum_values(object, location)?;
     assertions.any_of = load_schema_array(object, "anyOf", location)?;
     assertions.one_of = load_schema_array(object, "oneOf", location)?;
+    if one_of_mixes_ref_and_inline_branches(&assertions.one_of) {
+        return Err(SchemaImportError::at(
+            location,
+            "oneOf constraints with mixed $ref and inline branches are not supported",
+        ));
+    }
     assertions.all_of = load_schema_array(object, "allOf", location)?;
 
     if should_load_object_assertion(object, assertions.types.as_deref()) {
