@@ -60,6 +60,18 @@ fn collect_definitions(
             continue;
         }
         let child_location = format!("{location}/{}", escape_pointer_segment(key));
+        if matches!(key.as_str(), "properties" | "patternProperties") {
+            if let Some(children) = child.as_object() {
+                for (name, schema_value) in children {
+                    let schema_location = format!(
+                        "{child_location}/{}",
+                        escape_pointer_segment(name)
+                    );
+                    collect_definitions(schema_value, &schema_location, out)?;
+                }
+                continue;
+            }
+        }
         collect_definitions(child, &child_location, out)?;
     }
     Ok(())

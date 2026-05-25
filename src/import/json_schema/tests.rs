@@ -802,6 +802,24 @@ fn legacy_id_metadata_is_accepted() {
 }
 
 #[test]
+fn property_named_definitions_is_not_definition_container() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "definitions": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string"}
+                }
+            }
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn unknown_format_is_ignored_as_annotation() {
     let schema = json!({
         "type": "string",
