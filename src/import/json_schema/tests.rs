@@ -535,6 +535,20 @@ fn legacy_tuple_items_use_additional_items_tail() {
 }
 
 #[test]
+fn plain_items_ignore_additional_items_without_tuple() {
+    let schema = json!({
+        "type": "array",
+        "items": {"type": "string"},
+        "additionalItems": false,
+        "minItems": 1,
+        "maxItems": 2
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn string_pattern_lowers_as_terminal_pattern() {
     let schema = json!({
         "type": "string",

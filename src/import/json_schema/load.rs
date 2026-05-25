@@ -358,12 +358,7 @@ fn load_array_keywords(
     }
 
     if let Some(additional_items) = object.get("additionalItems") {
-        if schema.prefix_items.is_empty() {
-            return Err(SchemaImportError::at(
-                location,
-                "additionalItems is only supported with prefixItems or tuple-form items",
-            ));
-        } else {
+        if !schema.prefix_items.is_empty() {
             schema.items = Box::new(load_schema_at(
                 additional_items,
                 &format!("{location}/additionalItems"),
