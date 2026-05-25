@@ -27,10 +27,22 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     let merge1_started_at = std::time::Instant::now();
     table.merge_identical_rows();
     let merge_identical1_ms = merge1_started_at.elapsed().as_secs_f64() * 1000.0;
+    // From here on, `action` is allowed to become an optimized execution table
+    // containing guarded stack effects. Capture the exact recognizer/admission
+    // row support before that lowering so runtime `may_advance` stays a pure
+    // row-presence query.
+    table.rebuild_advance_rows_from_actions();
     let unit_collapse_enabled = unit_reduction_inlining_enabled();
     let collapse_started_at = std::time::Instant::now();
     if unit_collapse_enabled {
         table.collapse_sr_unit_reductions_with_compatible_gotos();
+        // Unit-collapse may append synthetic merged states. Preserve the
+        // captured admission semantics for existing rows while backfilling the
+        // new synthetic rows from their current action support.
+        table.extend_advance_rows_from_actions();
+        if !table.advance.is_empty() {
+            debug_assert_eq!(table.advance.len(), table.num_states as usize);
+        }
     }
     let unit_collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
     let prune_started_at = std::time::Instant::now();
@@ -233,6 +245,7 @@ fn finish_table(
         num_rules: grammar.rules.len() as u32,
         rules: grammar.rules.clone(),
         nonterminal_display_names: grammar.nonterminal_display_names.clone(),
+        advance: Vec::new(),
         forwarded_shifts,
     }
 }
@@ -1073,14 +1086,14 @@ mod tests {
     }
 
     #[test]
-    fn grouped_lr1_items_still_emit_expected_reduce_actions() {
+    fn grouped_lr1_items_still_emit_expected_lowered_shift_actions() {
         let grammar = multi_lookahead_grammar();
         let table = build_table(&grammar);
 
         assert!(table.action.iter().any(|row| {
-            matches!(row.get(&1), Some(Action::Reduce(1, 1)))
-                && matches!(row.get(&2), Some(Action::Reduce(1, 1)))
-                && matches!(row.get(&3), Some(Action::Reduce(1, 1)))
+            matches!(row.get(&1), Some(Action::Shift(3, true)))
+                && matches!(row.get(&2), Some(Action::Shift(3, true)))
+                && matches!(row.get(&3), Some(Action::Shift(3, true)))
         }));
     }
 

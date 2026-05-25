@@ -1,4 +1,5 @@
 use super::*;
+use crate::ds::bitset::BitSet;
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 
@@ -74,6 +75,11 @@ impl GLRTable {
                 canonicalize_stack_shift_predecessors_by_goto_superset(self, &mut shifts);
                 let Some(action) = stack_shift_action(shifts) else {
                     self.action[state].remove(&terminal);
+                    if self.advance.len() == self.num_states as usize
+                        && let Some(bit) = self.terminal_bit(terminal)
+                    {
+                        self.advance[state].clear(bit);
+                    }
                     continue;
                 };
                 self.action[state].insert(terminal, action);
@@ -90,15 +96,19 @@ impl GLRTable {
             let mut remap: Vec<u32> = (0..self.num_states).collect();
             let mut changed = false;
 
+            let has_advance_rows = self.advance.len() == self.num_states as usize;
             for state in 0..self.num_states as usize {
-                let fingerprint = row_fingerprint(&self.action[state], &self.goto[state]);
+                let advance_row = has_advance_rows.then(|| &self.advance[state]);
+                let fingerprint = row_fingerprint(&self.action[state], &self.goto[state], advance_row);
                 let reps = sig_to_reps.entry(fingerprint).or_default();
                 if let Some(&rep) = reps.iter().find(|&&rep| {
                     rows_equal(
                         &self.action[state],
                         &self.goto[state],
+                        advance_row,
                         &self.action[rep as usize],
                         &self.goto[rep as usize],
+                        has_advance_rows.then(|| &self.advance[rep as usize]),
                     )
                 }) {
                     remap[state] = rep;
@@ -147,8 +157,17 @@ impl GLRTable {
                 })
                 .collect();
 
+            let new_advance = has_advance_rows.then(|| {
+                kept.iter()
+                    .map(|&s| self.advance[s as usize].clone())
+                    .collect::<Vec<_>>()
+            });
+
             self.action = new_action;
             self.goto = new_goto;
+            if let Some(new_advance) = new_advance {
+                self.advance = new_advance;
+            }
             self.forwarded_shifts = self.forwarded_shifts
                 .iter()
                 .map(|&(state, terminal)| (mapping[state as usize], terminal))
@@ -208,6 +227,12 @@ impl GLRTable {
                     .collect()
             })
             .collect();
+        if self.advance.len() == reachable.len() {
+            self.advance = kept
+                .iter()
+                .map(|&state| self.advance[state as usize].clone())
+                .collect();
+        }
         self.forwarded_shifts = self.forwarded_shifts
             .iter()
             .filter_map(|&(state, terminal)| {
@@ -301,6 +326,11 @@ impl GLRTable {
                     }
                     CellUpdate::Remove => {
                         self.action[state].remove(&tid);
+                        if self.advance.len() == self.num_states as usize
+                            && let Some(bit) = self.terminal_bit(tid)
+                        {
+                            self.advance[state].clear(bit);
+                        }
                     }
                 }
                 dirty_original_states.insert(state as u32);
@@ -768,7 +798,11 @@ impl GLRTable {
     }
 }
 
-fn row_fingerprint(action_row: &ActionRow, goto_row: &GotoRow) -> u64 {
+fn row_fingerprint(
+    action_row: &ActionRow,
+    goto_row: &GotoRow,
+    advance_row: Option<&BitSet>,
+) -> u64 {
     let mut hasher = FxHasher::default();
 
     let mut action = action_row.iter().collect::<Vec<_>>();
@@ -787,16 +821,23 @@ fn row_fingerprint(action_row: &ActionRow, goto_row: &GotoRow) -> u64 {
         target.hash(&mut hasher);
     }
 
+    if let Some(advance_row) = advance_row {
+        advance_row.hash(&mut hasher);
+    }
+
     hasher.finish()
 }
 
 fn rows_equal(
     action_a: &ActionRow,
     goto_a: &GotoRow,
+    advance_a: Option<&BitSet>,
     action_b: &ActionRow,
     goto_b: &GotoRow,
+    advance_b: Option<&BitSet>,
 ) -> bool {
-    action_a.len() == action_b.len()
+    advance_a == advance_b
+        && action_a.len() == action_b.len()
         && goto_a.len() == goto_b.len()
         && action_a
             .iter()
@@ -1103,6 +1144,29 @@ fn build_merged_goto_row(
     Ok(row)
 }
 
+fn union_advance_rows(table: &GLRTable, subset: &BTreeSet<u32>) -> BitSet {
+    let mut out = BitSet::new(table.num_terminals as usize + 1);
+    if table.advance.len() == table.num_states as usize {
+        for &state in subset {
+            out.union_with(&table.advance[state as usize]);
+        }
+    } else {
+        for &state in subset {
+            for terminal in table.action[state as usize].keys() {
+                let bit = if terminal == EOF {
+                    table.num_terminals as usize
+                } else if terminal < table.num_terminals {
+                    terminal as usize
+                } else {
+                    continue;
+                };
+                out.set(bit);
+            }
+        }
+    }
+    out
+}
+
 fn ensure_subset_state(
     table: &mut GLRTable,
     subset: &BTreeSet<u32>,
@@ -1123,10 +1187,16 @@ fn ensure_subset_state(
         return Err(());
     }
 
+    let had_advance_rows = table.advance.len() == table.num_states as usize;
+    let advance_row = had_advance_rows.then(|| union_advance_rows(table, subset));
+
     let state = table.num_states;
     table.num_states += 1;
     table.action.push(ActionRow::default());
     table.goto.push(GotoRow::default());
+    if let Some(advance_row) = advance_row {
+        table.advance.push(advance_row);
+    }
     constituent_sets.push(subset.clone());
     subset_to_state.insert(key.clone(), state);
 
@@ -1159,6 +1229,9 @@ fn ensure_subset_state(
             failed_subsets.insert(key);
             table.action.pop();
             table.goto.pop();
+            if had_advance_rows {
+                table.advance.pop();
+            }
             table.num_states -= 1;
             constituent_sets.pop();
             Err(())
@@ -1206,6 +1279,9 @@ fn refresh_merged_states_depending_on(
         if let Ok((action_row, goto_row)) = rebuilt {
             table.action[state] = action_row;
             table.goto[state] = goto_row;
+            if table.advance.len() == table.num_states as usize {
+                table.advance[state] = union_advance_rows(table, &subset);
+            }
         }
 
         state += 1;
@@ -1401,15 +1477,7 @@ fn apply_reduce_to_frame(
         return Some(ReduceFrameResult::Dead);
     }
 
-    // Multi-target predecessor-sensitive reductions create guarded stack shifts
-    // that are expensive in runtime `may_advance` because they force path isolation
-    // and guard evaluation. Leave those reductions un-inlined unless every reachable
-    // predecessor shares one target.
-    if by_target.len() > 1 {
-        return None;
-    }
-
-    let needs_guard = missing > 0;
+    let needs_guard = missing > 0 || by_target.len() > 1;
     let mut frames = Vec::new();
     for ((target, replace), froms) in by_target {
         let mut next_frame = frame.clone();
@@ -1791,6 +1859,7 @@ mod tests {
             num_rules: 0,
             rules: Vec::new(),
             nonterminal_display_names: Vec::new(),
+            advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
         }
     }
@@ -2004,7 +2073,7 @@ mod tests {
     }
 
     #[test]
-    fn reduce_frame_refuses_origin_dependent_multiple_goto_targets() {
+    fn reduce_frame_allows_origin_dependent_multiple_goto_targets() {
         let mut table = table_with_stack_shifts(Vec::new(), &[
             (1, &[(10, (3, false))]),
             (2, &[(10, (4, false))]),
@@ -2029,7 +2098,31 @@ mod tests {
             1,
         );
 
-        assert!(result.is_none());
+        let Some(ReduceFrameResult::Frames { frames, origin_dependent }) = result else {
+            panic!("expected frames");
+        };
+        assert!(origin_dependent);
+        assert_eq!(
+            frames,
+            vec![
+                StackEffectFrame {
+                    pop: 1,
+                    pushes: vec![3],
+                    guards: vec![StackShiftGuard {
+                        pop: 1,
+                        states: vec![1],
+                    }],
+                },
+                StackEffectFrame {
+                    pop: 1,
+                    pushes: vec![4],
+                    guards: vec![StackShiftGuard {
+                        pop: 1,
+                        states: vec![2],
+                    }],
+                },
+            ]
+        );
     }
 
     #[test]
@@ -2296,6 +2389,7 @@ struct RowSignature {
     core_class: u32,
     action: Vec<(TerminalID, ActionSig)>,
     goto: Vec<(NonterminalID, (u32, bool))>,
+    advance: Option<BitSet>,
 }
 
 fn remap_action_to_partition(action: &Action, partition: &[u32]) -> ActionSig {
@@ -2372,6 +2466,7 @@ fn core_classes(core_keys: &[Vec<Item>]) -> Vec<u32> {
 
 fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<u32> {
     let nstates = table.num_states as usize;
+    let has_advance_rows = table.advance.len() == nstates;
     let core_class_of = core_classes(core_keys);
     let mut partition = core_class_of.clone();
 
@@ -2395,6 +2490,7 @@ fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<
                 core_class: core_class_of[state],
                 action,
                 goto,
+                advance: has_advance_rows.then(|| table.advance[state].clone()),
             };
 
             let class = *sig_to_part.entry(signature).or_insert_with(|| {
@@ -2443,6 +2539,14 @@ pub(super) fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>
                 .collect()
         })
         .collect();
+    let advance = if table.advance.len() == nstates {
+        representatives
+            .iter()
+            .map(|&rep| table.advance[rep as usize].clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // Remap forwarded_shifts to use merged state IDs
     let forwarded_shifts: FxHashSet<(u32, TerminalID)> = table.forwarded_shifts
@@ -2458,6 +2562,7 @@ pub(super) fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>
         num_rules: table.num_rules,
         rules: table.rules,
         nonterminal_display_names: table.nonterminal_display_names,
+        advance,
         forwarded_shifts,
     }
 }

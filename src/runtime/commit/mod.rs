@@ -150,10 +150,10 @@ impl ActionableTerminals {
 
     fn contains(&self, constraint: &Constraint, terminal: u32) -> bool {
         match self {
-            Self::SingleState(state_id) => constraint.table.action(*state_id, terminal).is_some(),
+            Self::SingleState(state_id) => constraint.table.advance_row_allows(*state_id, terminal),
             Self::ManyStates(states) => states
                 .iter()
-                .any(|state_id| constraint.table.action(*state_id, terminal).is_some()),
+                .any(|state_id| constraint.table.advance_row_allows(*state_id, terminal)),
         }
     }
 }

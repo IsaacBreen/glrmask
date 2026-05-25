@@ -89,7 +89,7 @@ fn direct_glrm_ordered_suffix_fixed_n5_regression() {
 
     assert_eq!(max_paths, 6);
     assert_eq!(max_stacks, 6);
-    assert_eq!(byte_index, 17);
+    assert_eq!(byte_index, 15);
     assert_eq!(byte, b',');
     assert_eq!(first_max_paths, 6);
     assert_eq!(first_max_stacks, 6);

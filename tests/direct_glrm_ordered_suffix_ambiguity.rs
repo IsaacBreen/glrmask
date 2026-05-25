@@ -147,7 +147,7 @@ fn direct_glrm_ordered_suffix_ambiguity_grows() {
         (2usize, 0b01usize, 1usize, 1usize),
         (3usize, 0b011usize, 3usize, 3usize),
         (5usize, 0b01111usize, 6usize, 6usize),
-        (8usize, 0b00110011usize, 8usize, 8usize),
+        (8usize, 0b00110011usize, 9usize, 9usize),
     ];
 
     for (n_caps, mask, expected_max_paths, expected_max_stacks) in cases {
@@ -171,7 +171,7 @@ fn direct_glrm_ordered_suffix_ambiguity_grows() {
                 "first_max byte_index={byte_index} char={} max_paths={first_max_paths} max_stacks={first_max_stacks}",
                 byte as char
             );
-            assert_eq!(byte_index, 17);
+            assert_eq!(byte_index, 15);
             assert_eq!(byte, b',');
             assert_eq!(first_max_paths, 6);
             assert_eq!(first_max_stacks, 6);

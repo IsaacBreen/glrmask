@@ -714,6 +714,7 @@ mod tests {
             num_rules: 0,
             rules: Vec::new(),
             nonterminal_display_names: Vec::new(),
+            advance: Vec::new(),
             forwarded_shifts: Default::default(),
         };
 
