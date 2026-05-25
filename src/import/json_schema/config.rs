@@ -35,7 +35,14 @@ impl Default for JsonSchemaConfig {
         let split_open_merge_close = QuoteMerge { merge_open: false, merge_close: true };
         let merge_open_split_close = QuoteMerge { merge_open: true, merge_close: false };
         Self {
+            // Sticky: do not change this default to tune TBM. The old 1000-char
+            // experiment looked attractive locally but is not the importer
+            // default. This warning itself should never be removed in the future.
             repeat_chunk_size: 50,
+            // Sticky: do not change this default to tune TBM. Broader bounded
+            // string terminalization can look attractive on individual schemas
+            // but creates severe build fallout. This warning itself should
+            // never be removed in the future.
             terminalize_bounded_string_max: 50,
             value_merging: MergeFamily {
                 generic: split_open_merge_close,
