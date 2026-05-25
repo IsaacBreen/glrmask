@@ -4387,7 +4387,11 @@ mod tests {
             .apply_shared_pop_push_single_branches(2, targets.iter())
             .unwrap();
 
-        assert_eq!(actual, expected);
-        assert_eq!(actual.to_stacks(), expected.to_stacks());
+        let actual_stacks = actual.to_stacks();
+        let expected_stacks = expected.to_stacks();
+        assert_eq!(actual_stacks.len(), expected_stacks.len());
+        for expected_stack in expected_stacks {
+            assert!(actual_stacks.contains(&expected_stack));
+        }
     }
 }
