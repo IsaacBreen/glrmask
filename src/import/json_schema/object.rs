@@ -420,6 +420,12 @@ impl<'a> Lowerer<'a> {
             && normalized.properties.len() >= 16;
 
         if normalized.pattern_properties.is_empty() && !normalized.properties.is_empty() {
+            let use_large_closed_object_fixed_pair_loop =
+                matches!(normalized.additional_properties, AdditionalProperties::Deny)
+                    && normalized.required.is_empty()
+                    && any_required_names.is_none()
+                    && exclusive_group.is_none()
+                    && normalized.properties.len() >= LARGE_OBJECT_LITERAL_KEY_TRIE_MIN_ITEMS;
             let use_closed_object_prefix_chain =
                 matches!(normalized.additional_properties, AdditionalProperties::Deny)
                     && any_required_names.is_none()
@@ -447,6 +453,9 @@ impl<'a> Lowerer<'a> {
                 if let Some(tail_pair_expr) = tail_pair {
                     return self.lower_large_optional_open_object_fused_prefix_chain(&items, tail_pair_expr);
                 }
+            }
+            if use_large_closed_object_fixed_pair_loop {
+                return self.lower_large_closed_object_fixed_pair_loop(&items);
             }
             if use_closed_object_prefix_chain {
                 return Ok(self.lower_large_closed_object_prefix_chain(&items));
@@ -1692,6 +1701,80 @@ impl<'a> Lowerer<'a> {
         }
 
         seq(vec![lit("{"), choice(body_alternatives), lit("}")])
+    }
+
+    fn lower_large_closed_object_fixed_pair_loop(
+        &mut self,
+        items: &[ObjectItem],
+    ) -> ImportResult<GrammarExpr> {
+        let mut grouped_keys: Vec<(GrammarExpr, Vec<GrammarExpr>)> = Vec::new();
+        for item in items {
+            let [key_symbol, value_symbol] = Self::split_object_pair_symbols(&item.pair)?;
+            if let Some((_, key_symbols)) = grouped_keys
+                .iter_mut()
+                .find(|(group_value_symbol, _)| *group_value_symbol == value_symbol)
+            {
+                key_symbols.push(key_symbol);
+            } else {
+                grouped_keys.push((value_symbol, vec![key_symbol]));
+            }
+        }
+
+        let mut grouped_pairs = Vec::with_capacity(grouped_keys.len());
+        for (value_symbol, key_symbols) in grouped_keys {
+            let mut key_builder = ExprNfaBuilder::new();
+            let key_start = key_builder.start_state();
+            let key_end = key_builder.add_state();
+            key_builder.set_accepting(key_end);
+            for key_symbol in key_symbols {
+                Self::add_expr_nfa_symbol_path(
+                    &mut key_builder,
+                    key_start,
+                    Self::split_literal_key_symbol(key_symbol),
+                    key_end,
+                );
+            }
+
+            let key_rule_name = self.fresh_rule_name("json_closed_object_key_group");
+            self.add_nonterminal_rule(
+                &key_rule_name,
+                GrammarExpr::ExprNFA(Box::new(
+                    key_builder.build().into_determinized_and_minimized(),
+                )),
+            );
+            grouped_pairs.push((r(&key_rule_name), value_symbol));
+        }
+
+        let mut builder = ExprNfaBuilder::new();
+        let start_state = builder.start_state();
+        let seen_state = builder.add_state();
+        builder.set_accepting(start_state);
+        builder.set_accepting(seen_state);
+
+        for (key_group_ref, value_symbol) in grouped_pairs {
+            let pair_path = vec![key_group_ref.clone(), value_symbol.clone()];
+            Self::add_expr_nfa_symbol_path(
+                &mut builder,
+                start_state,
+                pair_path.clone(),
+                seen_state,
+            );
+            let mut loop_symbols = vec![self.item_separator_expr()];
+            loop_symbols.extend(pair_path);
+            Self::add_expr_nfa_symbol_path(&mut builder, seen_state, loop_symbols, seen_state);
+        }
+
+        let body_rule_name = self.fresh_rule_name("json_closed_object_fixed_pair_loop_body");
+        self.add_nonterminal_rule(
+            &body_rule_name,
+            GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized())),
+        );
+
+        Ok(seq(vec![
+            lit("{"),
+            r(&body_rule_name),
+            lit("}"),
+        ]))
     }
 
     fn lower_property_item(
