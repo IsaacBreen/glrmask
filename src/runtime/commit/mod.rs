@@ -2124,11 +2124,16 @@ fn commit_bytes_linear_fast_path(
 ) -> LinearFastPathResult {
     let ignore_terminal = constraint.ignore_terminal;
     let mut gss = start_gss;
+    let mut carried_stack = gss.try_virtual_stack();
     let mut offset = 0usize;
     let mut exec_result = first_exec_result;
 
     loop {
-        let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss);
+        let actionable_terminals = if let Some(stack) = carried_stack.as_ref() {
+            stack.top().copied().map(ActionableTerminals::SingleState)
+        } else {
+            ActionableTerminals::from_gss(constraint, &gss)
+        };
         let mut chosen: Option<(usize, u32, bool)> = None;
 
         for matched in &exec_result.matches {
@@ -2165,6 +2170,26 @@ fn commit_bytes_linear_fast_path(
             };
         };
 
+        if let Some(end_state) = exec_result.end_state
+            && let Some(stack) = carried_stack.as_ref()
+        {
+            let keep_carried = stack.top().copied().is_some_and(|top_state| {
+                end_state != constraint.tokenizer.initial_state()
+                    && !constraint.table.advance_row_intersects(
+                        top_state,
+                        constraint.tokenizer.possible_future_terminals(end_state),
+                    )
+                    && !constraint
+                        .tokenizer
+                        .dfa
+                        .possible_future_group_ids(end_state)
+                        .contains(terminal as usize)
+            });
+            if !keep_carried {
+                gss = carried_stack.take().unwrap().into_gss();
+            }
+        }
+
         if let Some(end_state) = exec_result.end_state {
             if end_state_may_advance(constraint, &gss, end_state) {
                 return if offset > 0 {
@@ -2176,6 +2201,58 @@ fn commit_bytes_linear_fast_path(
         }
 
         if !ignored {
+            let mut shifted_carried_stack = false;
+            if let Some(stack) = carried_stack.as_mut()
+                && let Some(top_state) = stack.top().copied()
+                && let Some(Action::Shift(target, is_replace)) = constraint.table.action(top_state, terminal)
+                && exec_result.end_state.is_none_or(|end_state| {
+                    end_state != constraint.tokenizer.initial_state()
+                        && !constraint.table.advance_row_intersects(
+                            top_state,
+                            constraint.tokenizer.possible_future_terminals(end_state),
+                        )
+                        && !constraint
+                            .tokenizer
+                            .dfa
+                            .possible_future_group_ids(end_state)
+                            .contains(terminal as usize)
+                })
+            {
+                if *is_replace {
+                    if stack.replace_top(*target) {
+                        shifted_carried_stack = true;
+                    }
+                } else {
+                    stack.push(*target);
+                    shifted_carried_stack = true;
+                }
+            }
+
+            if shifted_carried_stack {
+                offset += width;
+                if offset == bytes.len() {
+                    gss = carried_stack.take().unwrap().into_gss();
+                    let fused = gss.fuse(Some(1));
+                    if fused.is_empty() {
+                        return LinearFastPathResult::Complete(Err(
+                            "commit rejected: no valid parser states remain".to_string(),
+                        ));
+                    }
+                    return LinearFastPathResult::Complete(Ok(fused));
+                }
+
+                exec_result = execute_tokenizer_from_state_small(
+                    constraint,
+                    &bytes[offset..],
+                    constraint.tokenizer.initial_state(),
+                );
+                continue;
+            }
+
+            if let Some(stack) = carried_stack.take() {
+                gss = stack.into_gss();
+            }
+
             let fast_advanced = if let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
             {
@@ -2212,6 +2289,9 @@ fn commit_bytes_linear_fast_path(
 
         offset += width;
         if offset == bytes.len() {
+            if let Some(stack) = carried_stack.take() {
+                gss = stack.into_gss();
+            }
             let fused = gss.fuse(Some(1));
             if fused.is_empty() {
                 return LinearFastPathResult::Complete(Err(
