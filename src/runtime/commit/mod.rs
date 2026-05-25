@@ -46,6 +46,12 @@ const SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH: usize = 256;
 /// address reuse (ABA problem) within a single `commit_bytes_impl` call.
 type AdvanceResultCache = FxHashMap<(usize, u32), (ParserGSS, ParserGSS)>;
 
+fn state_has_nonempty_accumulators(state: &BTreeMap<u32, ParserGSS>) -> bool {
+    state
+        .values()
+        .any(|gss| !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()))
+}
+
 
 fn parser_stacks_only(gss: &ParserGSS) -> Vec<Vec<u32>> {
     gss.to_stacks().into_iter().map(|(stack, _)| stack).collect()
@@ -691,9 +697,6 @@ fn commit_bytes_fast_path(
     let no_end_state = exec_result.end_state.is_none();
     let accs_empty = gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
     let all_accs_empty = no_end_state && accs_empty;
-    let end_state_to_keep = exec_result
-        .end_state
-        .filter(|&end_state| end_state_may_advance(constraint, gss, end_state));
 
     // Ultra-fast path: single Interface, empty accs, no end_state, pure shift.
     // Inlines the entire advance + prune + fuse to avoid all function call overhead.
@@ -748,39 +751,42 @@ fn commit_bytes_fast_path(
         pruned
     };
 
-    // Advance the parser — use owned variant to avoid initial Arc clone
+    let end_state_to_keep = exec_result
+        .end_state
+        .filter(|&end_state| end_state_may_advance(constraint, &pruned_gss, end_state));
     let end_state_gss = end_state_to_keep.map(|_| pruned_gss.clone());
+
+    // The terminal and tokenizer end-state continuations are independent.
+    // Preserve either branch if it produces viable parser state.
     let advanced = advance_stacks_owned(&constraint.table, pruned_gss, terminal);
-    if advanced.is_empty() {
-        return Some(Err(
-            "commit rejected: no valid parser states remain".to_string(),
-        ));
+    let mut produced_state = false;
+    if !advanced.is_empty() {
+        let advanced =
+            apply_future_terminal_disallow(constraint, &exec_result, terminal, advanced);
+        if !advanced.is_empty() {
+            let fused = advanced.fuse(Some(1));
+            if !fused.is_empty() {
+                state.insert(constraint.tokenizer.initial_state(), fused);
+                produced_state = true;
+            }
+        }
     }
 
-    let advanced =
-        apply_future_terminal_disallow(constraint, &exec_result, terminal, advanced);
-    let fused = advanced.fuse(Some(1));
-
-    if fused.is_empty() {
-        return Some(Err(
-            "commit rejected: no valid parser states remain".to_string(),
-        ));
-    }
-
-    state.insert(constraint.tokenizer.initial_state(), fused);
-    if let Some(end_state) = end_state_to_keep {
-        let Some(end_gss) = end_state_gss else {
-            return Some(Err(
-                "commit rejected: no valid parser states remain".to_string(),
-            ));
-        };
+    if let (Some(end_state), Some(end_gss)) = (end_state_to_keep, end_state_gss) {
         let fused = end_gss.fuse(Some(1));
         if !fused.is_empty() {
             state
                 .entry(end_state)
                 .and_modify(|existing| *existing = existing.merge(&fused))
                 .or_insert(fused);
+            produced_state = true;
         }
+    }
+
+    if !produced_state {
+        return Some(Err(
+            "commit rejected: no valid parser states remain".to_string(),
+        ));
     }
     Some(Ok(()))
 }
@@ -791,6 +797,9 @@ fn commit_bytes_full_width_fast_path(
     bytes: &[u8],
 ) -> Option<Result<(), String>> {
     if state.len() > 2 {
+        return None;
+    }
+    if state.len() > 1 && state_has_nonempty_accumulators(state) {
         return None;
     }
 
@@ -898,6 +907,9 @@ fn commit_bytes_small_queue_fast_path(
     bytes: &[u8],
 ) -> Option<Result<(), String>> {
     if bytes.len() > 8 || state.len() > 2 {
+        return None;
+    }
+    if state.len() > 1 && state_has_nonempty_accumulators(state) {
         return None;
     }
 
@@ -1316,12 +1328,6 @@ fn commit_bytes_fast_path_profiled(
         return None;
     };
 
-    let end_state_check_start = Instant::now();
-    let end_state_to_keep = exec_result
-        .end_state
-        .filter(|&end_state| end_state_may_advance(constraint, gss, end_state));
-    profile.fast_path_end_state_check_ns = end_state_check_start.elapsed().as_nanos() as u64;
-
     let no_end_state = exec_result.end_state.is_none();
     let all_accs_empty = no_end_state
         && gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
@@ -1443,27 +1449,22 @@ fn commit_bytes_fast_path_profiled(
     profile.fast_path_prune_ns = prune_start.elapsed().as_nanos() as u64;
     profile.prune_ns = profile.fast_path_prune_ns;
 
+    let end_state_check_start = Instant::now();
+    let end_state_to_keep = exec_result
+        .end_state
+        .filter(|&end_state| end_state_may_advance(constraint, &pruned_gss, end_state));
+    profile.fast_path_end_state_check_ns = end_state_check_start.elapsed().as_nanos() as u64;
     let end_state_gss = end_state_to_keep.map(|_| pruned_gss.clone());
+
     let advance_start = Instant::now();
     let advanced = advance_stacks_owned(&constraint.table, pruned_gss.clone(), terminal);
     profile.fast_path_advance_ns = advance_start.elapsed().as_nanos() as u64;
     profile.advance_core_ns = profile.fast_path_advance_ns;
-    if advanced.is_empty() {
-        return Some(Err("commit rejected: no valid parser states remain".to_string()));
-    }
-
-    let future_start = Instant::now();
-    let advanced = apply_future_terminal_disallow(constraint, exec_result, terminal, advanced);
-    profile.fast_path_future_disallow_ns = future_start.elapsed().as_nanos() as u64;
-    profile.advance_future_disallow_ns = profile.fast_path_future_disallow_ns;
-    profile.advance_ns = profile.fast_path_advance_ns + profile.fast_path_future_disallow_ns;
     profile.n_advances = 1;
-    if advanced.is_empty() {
-        return Some(Err("commit rejected: no valid parser states remain".to_string()));
-    }
 
     if let Some(advances) = advances {
-        let (after_for_entry, advance_profile) = advance_stacks_profiled(&constraint.table, &pruned_gss, terminal);
+        let (after_for_entry, advance_profile) =
+            advance_stacks_profiled(&constraint.table, &pruned_gss, terminal);
         profile.adv_summary_ns += record_per_advance_entry(
             advances,
             tokenizer_state,
@@ -1479,32 +1480,51 @@ fn commit_bytes_fast_path_profiled(
         apply_advance_profile(profile, &advance_profile);
     }
 
-    let fuse_start = Instant::now();
-    let fused = advanced.fuse(Some(1));
-    profile.fast_path_fuse_ns = fuse_start.elapsed().as_nanos() as u64;
-    profile.fuse_ns = profile.fast_path_fuse_ns;
+    let mut produced_state = false;
+    if !advanced.is_empty() {
+        let future_start = Instant::now();
+        let advanced = apply_future_terminal_disallow(constraint, exec_result, terminal, advanced);
+        profile.fast_path_future_disallow_ns = future_start.elapsed().as_nanos() as u64;
+        profile.advance_future_disallow_ns = profile.fast_path_future_disallow_ns;
+        profile.advance_ns = profile.fast_path_advance_ns + profile.fast_path_future_disallow_ns;
 
-    if fused.is_empty() {
-        return Some(Err("commit rejected: no valid parser states remain".to_string()));
+        if !advanced.is_empty() {
+            let fuse_start = Instant::now();
+            let fused = advanced.fuse(Some(1));
+            profile.fast_path_fuse_ns = fuse_start.elapsed().as_nanos() as u64;
+            profile.fuse_ns = profile.fast_path_fuse_ns;
+
+            if !fused.is_empty() {
+                let update_start = Instant::now();
+                state.insert(constraint.tokenizer.initial_state(), fused);
+                profile.fast_path_state_update_ns += update_start.elapsed().as_nanos() as u64;
+                produced_state = true;
+            }
+        }
+    } else {
+        profile.advance_ns = profile.fast_path_advance_ns;
     }
 
-    let update_start = Instant::now();
-    state.insert(constraint.tokenizer.initial_state(), fused);
-    if let Some(end_state) = end_state_to_keep {
-        let Some(end_gss) = end_state_gss else {
-            return Some(Err(
-                "commit rejected: no valid parser states remain".to_string(),
-            ));
-        };
+    if let (Some(end_state), Some(end_gss)) = (end_state_to_keep, end_state_gss) {
+        let fuse_start = Instant::now();
         let fused = end_gss.fuse(Some(1));
+        let fuse_elapsed = fuse_start.elapsed().as_nanos() as u64;
+        profile.fast_path_fuse_ns += fuse_elapsed;
+        profile.fuse_ns += fuse_elapsed;
         if !fused.is_empty() {
+            let update_start = Instant::now();
             state
                 .entry(end_state)
                 .and_modify(|existing| *existing = existing.merge(&fused))
                 .or_insert(fused);
+            profile.fast_path_state_update_ns += update_start.elapsed().as_nanos() as u64;
+            produced_state = true;
         }
     }
-    profile.fast_path_state_update_ns = update_start.elapsed().as_nanos() as u64;
+
+    if !produced_state {
+        return Some(Err("commit rejected: no valid parser states remain".to_string()));
+    }
     profile.fast_path_total_ns = total_start.elapsed().as_nanos() as u64;
     profile.total_ns = profile.fast_path_total_ns;
     profile.fast_path_tokenizer_exec_ns = profile.exec_ns;

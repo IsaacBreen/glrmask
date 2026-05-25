@@ -32,7 +32,7 @@ fn snowplow_hostname_replay_mask_includes_token_15() {
         bytes_state.parser_path_count(1_000_000),
         replay_state.parser_path_count(1_000_000)
     );
-    assert_ne!(bytes_stacks, replay_stacks);
+    assert_eq!(bytes_stacks, replay_stacks);
 
     let mut replay_commit_bytes = replay_state.clone();
     replay_commit_bytes.commit_bytes(b"0").unwrap();
