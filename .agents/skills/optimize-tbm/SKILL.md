@@ -35,8 +35,12 @@ Full-report invariant:
 - Standard CFA report plots require at least two frameworks. If a run has only
   `glrmask_native`, stop and rerun with the normal framework set instead of
   inventing replacement plots or reporting the artifact as a full report.
-- If llguidance is slow, reduce sample size, chunk size, timing runs, or run a
-  focused two-framework subset. Do not remove llguidance from the report.
+- If llguidance is slow, narrow the problem/example set or use an already
+  focused target such as `make example-specific`. Do not lower `TIMING_RUNS`,
+  min-run thresholds, sample counts, build runs, seeds, discrepancy budgets, or
+  other timing/statistical knobs unless the human explicitly asks for that exact
+  override in the current turn. If the human specifies a knob value, use that
+  value exactly and record it in notes/artifacts.
 - For report/sweep commands, use the Makefile defaults. Only set `SAMPLE_SIZE`
   and `OUT_DIR` when the human asks for a particular size or destination. Do not
   override frameworks, timing runs, min-run thresholds, build runs, build
