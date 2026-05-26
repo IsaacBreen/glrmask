@@ -1153,6 +1153,7 @@ fn uri_string_value_satisfaction_filters_invalid_literals() {
     assert!(string_value_satisfies_schema(&json!("ecdsa-koblitz-pubkey:abc123"), &schema).unwrap());
     assert!(!string_value_satisfies_schema(&json!("<<"), &schema).unwrap());
     assert!(!string_value_satisfies_schema(&json!("ecd:]"), &schema).unwrap());
+    assert!(!string_value_satisfies_schema(&json!("ecd:\u{ff49}"), &schema).unwrap());
 }
 
 #[test]
