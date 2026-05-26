@@ -523,6 +523,16 @@ fn apply_single_top_action_fast(
             }
         }
         Action::StackShifts(shifts) => {
+            if let [shift] = shifts.as_slice() {
+                let mut branch = gss.try_virtual_stack()?;
+                if branch.pop(shift.pop as usize) != 0 {
+                    return None;
+                }
+                for &target in &shift.pushes {
+                    branch.push(target);
+                }
+                return Some(branch.into_gss());
+            }
             if let Some(first) = shifts.first()
                 && shifts
                     .iter()
@@ -554,18 +564,8 @@ fn apply_single_top_action_fast(
             ) {
                 return Some(shifted);
             }
-            let stack = gss.try_virtual_stack()?;
-            if let [shift] = shifts.as_slice() {
-                let mut branch = stack;
-                if branch.pop(shift.pop as usize) != 0 {
-                    return None;
-                }
-                for &target in &shift.pushes {
-                    branch.push(target);
-                }
-                return Some(branch.into_gss());
-            }
 
+            let stack = gss.try_virtual_stack()?;
             let mut shifted = ParserGSS::empty();
             for shift in shifts {
                 let mut branch = stack.clone();
@@ -1241,7 +1241,11 @@ fn commit_bytes_direct_linear_fast_path(
             carried_top_state,
         ) else {
             if let Some(stack) = carried_stack.take() {
+                let materialize_start = profile.as_ref().map(|_| std::time::Instant::now());
                 gss = stack.into_gss();
+                if let (Some(profile), Some(start)) = (profile.as_deref_mut(), materialize_start) {
+                    profile.linear_fast_path_materialize_ns += start.elapsed().as_nanos() as u64;
+                }
             }
             if offset > 0 && profile.is_none() {
                 return Some(LinearFastPathResult::Continue { gss, offset });
@@ -1253,9 +1257,10 @@ fn commit_bytes_direct_linear_fast_path(
             profile.linear_fast_path_steps += 1;
         }
 
-        if let Some(end_state) = step.end_state
+        let keep_carried = if let Some(end_state) = step.end_state
             && let Some(stack) = carried_stack.as_ref()
         {
+            let carried_gate_start = profile.as_ref().map(|_| std::time::Instant::now());
             let keep_carried = stack.top().copied().is_some_and(|top_state| {
                 end_state != constraint.tokenizer.initial_state()
                     && !constraint.table.advance_row_intersects(
@@ -1268,28 +1273,59 @@ fn commit_bytes_direct_linear_fast_path(
                         .possible_future_group_ids(end_state)
                         .contains(step.terminal as usize)
             });
+            if let (Some(profile), Some(start)) = (profile.as_deref_mut(), carried_gate_start) {
+                let elapsed = start.elapsed().as_nanos() as u64;
+                profile.linear_fast_path_carried_gate_ns += elapsed;
+                profile.linear_fast_path_end_state_check_ns += elapsed;
+            }
+            keep_carried
+        } else {
+            false
+        };
+        if step.end_state.is_some() {
             if !keep_carried {
-                gss = carried_stack.take().unwrap().into_gss();
+                if let Some(stack) = carried_stack.take() {
+                    let materialize_start = profile.as_ref().map(|_| std::time::Instant::now());
+                    gss = stack.into_gss();
+                    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), materialize_start) {
+                        profile.linear_fast_path_materialize_ns += start.elapsed().as_nanos() as u64;
+                    }
+                }
             }
         }
 
-        if let Some(end_state) = step.end_state
-            && end_state_may_advance(constraint, &gss, end_state)
-        {
-            if let Some(stack) = carried_stack.take() {
-                gss = stack.into_gss();
+        if let Some(end_state) = step.end_state {
+            let carried_gate_start = profile.as_ref().map(|_| std::time::Instant::now());
+            let should_restart = end_state_may_advance(constraint, &gss, end_state);
+            if let (Some(profile), Some(start)) = (profile.as_deref_mut(), carried_gate_start) {
+                let elapsed = start.elapsed().as_nanos() as u64;
+                profile.linear_fast_path_carried_gate_ns += elapsed;
+                profile.linear_fast_path_end_state_check_ns += elapsed;
             }
-            if offset > 0 && profile.is_none() {
-                return Some(LinearFastPathResult::Continue { gss, offset });
+            if should_restart {
+                if let Some(stack) = carried_stack.take() {
+                    let materialize_start = profile.as_ref().map(|_| std::time::Instant::now());
+                    gss = stack.into_gss();
+                    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), materialize_start) {
+                        profile.linear_fast_path_materialize_ns += start.elapsed().as_nanos() as u64;
+                    }
+                }
+                if offset > 0 && profile.is_none() {
+                    return Some(LinearFastPathResult::Continue { gss, offset });
+                }
+                return None;
             }
-            return None;
         }
 
         if !step.ignored {
             if offset == 0 {
                 if !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()) {
                     if let Some(stack) = carried_stack.take() {
+                        let materialize_start = profile.as_ref().map(|_| std::time::Instant::now());
                         gss = stack.into_gss();
+                        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), materialize_start) {
+                            profile.linear_fast_path_materialize_ns += start.elapsed().as_nanos() as u64;
+                        }
                     }
                     let prune_start = profile.as_ref().map(|_| std::time::Instant::now());
                     gss = prune_single_initial_state_for_terminal(
@@ -1311,12 +1347,10 @@ fn commit_bytes_direct_linear_fast_path(
             }
 
             let mut shifted_carried_stack = false;
-            let mut carried_shift_action = None;
-            let shift_start = profile.as_ref().map(|_| std::time::Instant::now());
-            if let Some(stack) = carried_stack.as_mut()
+            let mut carried_apply_elapsed_ns = 0u64;
+            let action_lookup_start = profile.as_ref().map(|_| std::time::Instant::now());
+            let carried_action = if let Some(stack) = carried_stack.as_ref()
                 && let Some(top_state) = stack.top().copied()
-                && let Some(crate::compiler::glr::table::Action::Shift(target, is_replace)) =
-                    constraint.table.action(top_state, step.terminal)
                 && step.end_state.is_none_or(|end_state| {
                     end_state != constraint.tokenizer.initial_state()
                         && !constraint.table.advance_row_intersects(
@@ -1330,27 +1364,60 @@ fn commit_bytes_direct_linear_fast_path(
                             .contains(step.terminal as usize)
                 })
             {
-                carried_shift_action = Some((*target, *is_replace));
-                if *is_replace {
-                    if stack.replace_top(*target) {
-                        shifted_carried_stack = true;
+                constraint.table.action(top_state, step.terminal)
+            } else {
+                None
+            };
+            if let (Some(profile), Some(start)) = (profile.as_deref_mut(), action_lookup_start) {
+                profile.linear_fast_path_action_lookup_ns += start.elapsed().as_nanos() as u64;
+            }
+            if let Some(action) = carried_action {
+                let apply_action_start = profile.as_ref().map(|_| std::time::Instant::now());
+                if let Some(stack) = carried_stack.as_mut() {
+                    match action {
+                        Action::Shift(target, is_replace) => {
+                            if *is_replace {
+                                if stack.replace_top(*target) {
+                                    shifted_carried_stack = true;
+                                }
+                            } else {
+                                stack.push(*target);
+                                shifted_carried_stack = true;
+                            }
+                        }
+                        Action::StackShifts(shifts) => {
+                            if let [shift] = shifts.as_slice()
+                                && stack.pop(shift.pop as usize) == 0
+                            {
+                                for &target in &shift.pushes {
+                                    stack.push(target);
+                                }
+                                shifted_carried_stack = true;
+                            }
+                        }
+                        _ => {}
                     }
-                } else {
-                    stack.push(*target);
-                    shifted_carried_stack = true;
+                }
+                if let (Some(profile), Some(start)) = (profile.as_deref_mut(), apply_action_start) {
+                    carried_apply_elapsed_ns = start.elapsed().as_nanos() as u64;
+                    profile.linear_fast_path_apply_action_wall_ns += carried_apply_elapsed_ns;
                 }
             }
             if shifted_carried_stack {
-                if let (Some(profile), Some(start)) = (profile.as_deref_mut(), shift_start) {
-                    let elapsed = start.elapsed().as_nanos() as u64;
-                    let (target, is_replace) = carried_shift_action.unwrap();
-                    let action = crate::compiler::glr::table::Action::Shift(target, is_replace);
-                    let advance_profile = fast_action_advance_profile(&gss, &action, elapsed);
+                if let Some(profile) = profile.as_deref_mut() {
+                    let bookkeeping_start = std::time::Instant::now();
+                    let advance_profile = fast_action_advance_profile(
+                        &gss,
+                        carried_action.unwrap(),
+                        carried_apply_elapsed_ns,
+                    );
                     profile.advance_core_ns += advance_profile.total_ns;
-                    profile.advance_ns += elapsed;
-                    profile.linear_fast_path_advance_ns += elapsed;
+                    profile.advance_ns += carried_apply_elapsed_ns;
+                    profile.linear_fast_path_advance_ns += carried_apply_elapsed_ns;
                     profile.n_advances += 1;
                     apply_advance_profile(profile, &advance_profile);
+                    profile.linear_fast_path_profile_bookkeeping_ns +=
+                        bookkeeping_start.elapsed().as_nanos() as u64;
                 }
 
                 offset += step.width;
@@ -1359,7 +1426,11 @@ fn commit_bytes_direct_linear_fast_path(
             }
 
             if let Some(stack) = carried_stack.take() {
+                let materialize_start = profile.as_ref().map(|_| std::time::Instant::now());
                 gss = stack.into_gss();
+                if let (Some(profile), Some(start)) = (profile.as_deref_mut(), materialize_start) {
+                    profile.linear_fast_path_materialize_ns += start.elapsed().as_nanos() as u64;
+                }
             }
             let advance_start = profile.as_ref().map(|_| std::time::Instant::now());
             let advanced = if let Some(top_state) = gss.single_exclusive_top_value()
@@ -1375,8 +1446,11 @@ fn commit_bytes_direct_linear_fast_path(
                     if advanced.is_empty() {
                         return None;
                     }
+                    let bookkeeping_start = std::time::Instant::now();
                     profile.advance_core_ns += advance_profile.total_ns;
                     apply_advance_profile(profile, &advance_profile);
+                    profile.linear_fast_path_profile_bookkeeping_ns +=
+                        bookkeeping_start.elapsed().as_nanos() as u64;
                     advanced
                 } else {
                     let advanced = advance_stacks(&constraint.table, &gss, step.terminal);
@@ -1388,6 +1462,7 @@ fn commit_bytes_direct_linear_fast_path(
             };
             if let (Some(profile), Some(start)) = (profile.as_deref_mut(), advance_start) {
                 let elapsed = start.elapsed().as_nanos() as u64;
+                profile.linear_fast_path_apply_action_wall_ns += elapsed;
                 profile.advance_ns += elapsed;
                 profile.linear_fast_path_advance_ns += elapsed;
                 profile.n_advances += 1;
@@ -1426,7 +1501,11 @@ fn commit_bytes_direct_linear_fast_path(
     }
 
     if let Some(stack) = carried_stack.take() {
+        let materialize_start = profile.as_ref().map(|_| std::time::Instant::now());
         gss = stack.into_gss();
+        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), materialize_start) {
+            profile.linear_fast_path_materialize_ns += start.elapsed().as_nanos() as u64;
+        }
     }
     let fuse_start = profile.as_ref().map(|_| std::time::Instant::now());
     let fused = gss.fuse(Some(1));

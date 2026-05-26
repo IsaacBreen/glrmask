@@ -666,6 +666,11 @@ impl PyConstraintState {
         dict.set_item("linear_fast_path_match_scan_ns", profile.linear_fast_path_match_scan_ns)?;
         dict.set_item("linear_fast_path_end_state_check_ns", profile.linear_fast_path_end_state_check_ns)?;
         dict.set_item("linear_fast_path_advance_ns", profile.linear_fast_path_advance_ns)?;
+        dict.set_item("linear_fast_path_action_lookup_ns", profile.linear_fast_path_action_lookup_ns)?;
+        dict.set_item("linear_fast_path_carried_gate_ns", profile.linear_fast_path_carried_gate_ns)?;
+        dict.set_item("linear_fast_path_materialize_ns", profile.linear_fast_path_materialize_ns)?;
+        dict.set_item("linear_fast_path_apply_action_wall_ns", profile.linear_fast_path_apply_action_wall_ns)?;
+        dict.set_item("linear_fast_path_profile_bookkeeping_ns", profile.linear_fast_path_profile_bookkeeping_ns)?;
         dict.set_item("linear_fast_path_future_disallow_ns", profile.linear_fast_path_future_disallow_ns)?;
         dict.set_item("linear_fast_path_fuse_ns", profile.linear_fast_path_fuse_ns)?;
         dict.set_item("linear_fast_path_eligibility_ns", profile.linear_fast_path_eligibility_ns)?;
@@ -817,6 +822,11 @@ impl PyConstraintState {
         commit_dict.set_item("linear_fast_path_match_scan_ns", commit_profile.linear_fast_path_match_scan_ns)?;
         commit_dict.set_item("linear_fast_path_end_state_check_ns", commit_profile.linear_fast_path_end_state_check_ns)?;
         commit_dict.set_item("linear_fast_path_advance_ns", commit_profile.linear_fast_path_advance_ns)?;
+        commit_dict.set_item("linear_fast_path_action_lookup_ns", commit_profile.linear_fast_path_action_lookup_ns)?;
+        commit_dict.set_item("linear_fast_path_carried_gate_ns", commit_profile.linear_fast_path_carried_gate_ns)?;
+        commit_dict.set_item("linear_fast_path_materialize_ns", commit_profile.linear_fast_path_materialize_ns)?;
+        commit_dict.set_item("linear_fast_path_apply_action_wall_ns", commit_profile.linear_fast_path_apply_action_wall_ns)?;
+        commit_dict.set_item("linear_fast_path_profile_bookkeeping_ns", commit_profile.linear_fast_path_profile_bookkeeping_ns)?;
         commit_dict.set_item("linear_fast_path_future_disallow_ns", commit_profile.linear_fast_path_future_disallow_ns)?;
         commit_dict.set_item("linear_fast_path_fuse_ns", commit_profile.linear_fast_path_fuse_ns)?;
         commit_dict.set_item("linear_fast_path_steps", commit_profile.linear_fast_path_steps)?;
