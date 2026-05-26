@@ -412,9 +412,7 @@ impl<'a> Lowerer<'a> {
             && exclusive_group.is_none()
             && match &normalized.additional_properties {
                 AdditionalProperties::Schema(_) => true,
-                AdditionalProperties::AllowAny => {
-                    obvious_object_valued_property_count(&normalized) < 32
-                }
+                AdditionalProperties::AllowAny => false,
                 AdditionalProperties::Deny => false,
             }
             && normalized.properties.len() >= 16;

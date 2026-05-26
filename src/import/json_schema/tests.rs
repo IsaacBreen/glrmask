@@ -352,7 +352,7 @@ fn large_optional_open_object_uses_fused_prefix_chain_rules() {
 }
 
 #[test]
-fn large_optional_open_object_allow_any_scalars_still_uses_fused_prefix_chain_rules() {
+fn large_optional_open_object_allow_any_scalars_uses_expr_nfa_body() {
     let mut properties = serde_json::Map::new();
     for index in 0..16 {
         properties.insert(format!("k{index}"), json!({"type": "string"}));
@@ -365,13 +365,13 @@ fn large_optional_open_object_allow_any_scalars_still_uses_fused_prefix_chain_ru
     ]));
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(count_rules_with_prefix(&grammar, "json_open_object_prefix") > 0);
-    assert_eq!(count_rules_with_prefix(&grammar, "json_closed_object_body"), 0);
+    assert_eq!(count_rules_with_prefix(&grammar, "json_open_object_prefix"), 0);
+    assert!(count_rules_with_prefix(&grammar, "json_closed_object_body") > 0);
     lower(&grammar).unwrap();
 }
 
 #[test]
-fn large_optional_open_object_allow_any_object_valued_at_16_still_uses_fused_prefix_chain_rules() {
+fn large_optional_open_object_allow_any_object_valued_at_16_uses_expr_nfa_body() {
     let mut properties = serde_json::Map::new();
     for index in 0..16 {
         properties.insert(
@@ -392,8 +392,9 @@ fn large_optional_open_object_allow_any_object_valued_at_16_still_uses_fused_pre
     ]));
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(count_rules_with_prefix(&grammar, "json_open_object_prefix") > 0);
-    assert!(!contains_expr_nfa(start_expr(&grammar)));
+    assert_eq!(count_rules_with_prefix(&grammar, "json_open_object_prefix"), 0);
+    assert!(count_rules_with_prefix(&grammar, "json_closed_object_body") > 0);
+    assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
     lower(&grammar).unwrap();
 }
 
@@ -2221,6 +2222,33 @@ fn open_object_anyof_uses_single_object_body_nfa() {
             || !glrm.contains("| \"{\" json_closed_object_body"),
         "{glrm}"
     );
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn single_anyof_object_ref_with_sibling_properties_merges_before_lowering() {
+    let schema = json!({
+        "definitions": {
+            "base": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                }
+            }
+        },
+        "anyOf": [
+            {"$ref": "#/definitions/base"}
+        ],
+        "properties": {
+            "extra": {"type": "string"}
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(!glrm.contains(" & "), "{glrm}");
+    assert!(glrm.contains("\\\"name\\\""), "{glrm}");
+    assert!(glrm.contains("\\\"extra\\\""), "{glrm}");
     lower(&grammar).unwrap();
 }
 

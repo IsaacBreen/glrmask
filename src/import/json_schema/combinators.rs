@@ -18,6 +18,9 @@ impl<'a> Lowerer<'a> {
         if let Some((object, any_required_names)) = try_factor_required_property_any_of(assertions) {
             return self.lower_object_requiring_any_property(&object, &any_required_names);
         }
+        if let Some(object) = self.try_merge_single_object_any_of_with_siblings(assertions)? {
+            return self.lower_object(&object);
+        }
 
         let siblings = sibling_assertion_schema(assertions);
         let branches = assertions
@@ -58,6 +61,30 @@ impl<'a> Lowerer<'a> {
             .map(|branch| self.lower_schema(branch))
             .collect::<ImportResult<Vec<_>>>()?;
         Ok(choice(alternatives))
+    }
+
+    fn try_merge_single_object_any_of_with_siblings(
+        &self,
+        assertions: &SchemaAssertions,
+    ) -> ImportResult<Option<ObjectSchema>> {
+        if assertions.any_of.len() != 1 {
+            return Ok(None);
+        }
+
+        let siblings = assertions.clone_without_combinators();
+        if siblings.is_empty() {
+            return Ok(None);
+        }
+
+        let branch = match &assertions.any_of[0].kind {
+            SchemaKind::Ref(pointer) => self.resolve_ref_target(pointer)?.clone(),
+            _ => assertions.any_of[0].clone(),
+        };
+        if !schema_has_explicit_object_only_type(&branch) {
+            return Ok(None);
+        }
+        let sibling_schema = Schema::assertions("<single-anyOf-siblings>", siblings);
+        Ok(try_merge_all_of_objects(&[branch, sibling_schema]))
     }
 
     pub(crate) fn lower_one_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
@@ -247,6 +274,17 @@ impl<'a> Lowerer<'a> {
         let target = self.resolve_ref_target(pointer)?;
         if self.schema_transitively_refs_pointer(target, &normalized, &mut BTreeSet::new())? {
             Ok(fallback.clone())
+        } else if let SchemaKind::Assertions(assertions) = &target.kind
+            && let Some(object) = self.try_merge_single_object_any_of_with_siblings(assertions)?
+        {
+            Ok(Schema::assertions(
+                target.location.clone(),
+                SchemaAssertions {
+                    types: Some(vec![SchemaType::Object]),
+                    object: Some(object),
+                    ..SchemaAssertions::default()
+                },
+            ))
         } else {
             Ok(target.clone())
         }
@@ -791,6 +829,16 @@ fn schema_contains_ref(schema: &Schema) -> bool {
         }
         _ => false,
     }
+}
+
+fn schema_has_explicit_object_only_type(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return false;
+    };
+    assertions
+        .types
+        .as_ref()
+        .is_some_and(|types| types.iter().all(|schema_type| *schema_type == SchemaType::Object))
 }
 
 pub(crate) fn try_merge_all_of_objects(branches: &[Schema]) -> Option<ObjectSchema> {
