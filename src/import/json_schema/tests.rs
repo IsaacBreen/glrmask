@@ -312,47 +312,6 @@ fn required_prefix_open_object_uses_pair_loop_body() {
 }
 
 #[test]
-fn closed_object_required_prefix_small() {
-    let schema = json!({
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "pattern": "^[0-9a-zA-Z_-]{1,255}$"
-            },
-            "mode": {
-                "type": "string",
-                "enum": ["all", "whitelist", "blacklist"]
-            },
-            "deviceIds": {
-                "type": "array",
-                "items": {
-                    "type": "string",
-                    "pattern": "^[A-Fa-f\\d]{24}$"
-                },
-                "maxItems": 1000
-            },
-            "deviceTags": {
-                "type": "array",
-                "items": {"type": "string"},
-                "maxItems": 100
-            }
-        },
-        "required": ["name", "mode"],
-        "additionalProperties": false
-    });
-
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
-    assert!(
-        glrm.contains("json_small_closed_required_prefix_object_body"),
-        "{glrm}"
-    );
-    assert_eq!(count_rules_with_prefix(&grammar, "json_closed_object_body"), 0);
-    lower(&grammar).unwrap();
-}
-
-#[test]
 fn open_no_pattern_object_lowers_to_expr_nfa_body() {
     let schema = json!({
         "type": "object",

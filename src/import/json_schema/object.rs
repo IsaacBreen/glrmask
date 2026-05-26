@@ -93,20 +93,6 @@ fn obvious_object_valued_property_count(schema: &ObjectSchema) -> usize {
         .count()
 }
 
-fn required_prefix_len(items: &[ObjectItem]) -> Option<usize> {
-    let required_count = items.iter().filter(|item| item.required).count();
-    if required_count == 0 || required_count == items.len() {
-        return None;
-    }
-    if items[..required_count].iter().all(|item| item.required)
-        && items[required_count..].iter().all(|item| !item.required)
-    {
-        Some(required_count)
-    } else {
-        None
-    }
-}
-
 impl AnyOfFixedObjectVariant {
     fn len(&self) -> usize {
         self.items.len()
@@ -473,14 +459,6 @@ impl<'a> Lowerer<'a> {
             }
             if use_closed_object_prefix_chain {
                 return Ok(self.lower_large_closed_object_prefix_chain(&items));
-            }
-            if matches!(normalized.additional_properties, AdditionalProperties::Deny)
-                && any_required_names.is_none()
-                && exclusive_group.is_none()
-                && (2..=4).contains(&items.len())
-                && let Some(prefix_len) = required_prefix_len(&items)
-            {
-                return Ok(self.lower_small_closed_required_prefix_object(&items, prefix_len));
             }
             return self.lower_fixed_object_body_exprnfa(
                 &items,
@@ -1707,11 +1685,7 @@ impl<'a> Lowerer<'a> {
         Ok(seq(vec![lit("{"), choice(body_alternatives), lit("}")]))
     }
 
-    fn lower_closed_object_prefix_chain_body(
-        &mut self,
-        items: &[ObjectItem],
-        allow_empty: bool,
-    ) -> GrammarExpr {
+    fn lower_large_closed_object_prefix_chain(&mut self, items: &[ObjectItem]) -> GrammarExpr {
         let mut prefix_rule_names: Vec<String> = Vec::with_capacity(items.len());
         for end_exclusive in 1..=items.len() {
             let mut alternatives = Vec::new();
@@ -1734,7 +1708,7 @@ impl<'a> Lowerer<'a> {
         }
 
         let mut body_alternatives = Vec::new();
-        if allow_empty && items.iter().all(|item| !item.required) {
+        if items.iter().all(|item| !item.required) {
             body_alternatives.push(GrammarExpr::Epsilon);
         }
         for (index, prefix_rule_name) in prefix_rule_names.iter().enumerate() {
@@ -1744,43 +1718,7 @@ impl<'a> Lowerer<'a> {
             body_alternatives.push(r(prefix_rule_name));
         }
 
-        choice(body_alternatives)
-    }
-
-    fn lower_small_closed_required_prefix_object(
-        &mut self,
-        items: &[ObjectItem],
-        required_prefix_len: usize,
-    ) -> GrammarExpr {
-        let mut prefix_symbols = Vec::with_capacity(required_prefix_len * 2 - 1);
-        for (index, item) in items.iter().take(required_prefix_len).enumerate() {
-            if index > 0 {
-                prefix_symbols.push(self.item_separator_expr());
-            }
-            prefix_symbols.push(item.pair.clone());
-        }
-        let prefix_expr = seq(prefix_symbols);
-        let mut body_alternatives = vec![prefix_expr.clone()];
-
-        let optional_items = &items[required_prefix_len..];
-        if !optional_items.is_empty() {
-            body_alternatives.push(seq(vec![
-                prefix_expr,
-                self.item_separator_expr(),
-                self.lower_closed_object_prefix_chain_body(optional_items, false),
-            ]));
-        }
-
-        let body_rule_name = self.fresh_rule_name("json_small_closed_required_prefix_object_body");
-        self.add_nonterminal_rule(&body_rule_name, choice(body_alternatives));
-
-        seq(vec![lit("{"), r(&body_rule_name), lit("}")])
-    }
-
-    fn lower_large_closed_object_prefix_chain(&mut self, items: &[ObjectItem]) -> GrammarExpr {
-        let body = self.lower_closed_object_prefix_chain_body(items, true);
-
-        seq(vec![lit("{"), body, lit("}")])
+        seq(vec![lit("{"), choice(body_alternatives), lit("}")])
     }
 
     fn lower_large_closed_object_fixed_pair_loop(
