@@ -54,6 +54,28 @@ accepted or rejected. Do not retain extra parser states, delayed continuations,
 goto distinctions, or action structure merely because they preserve an unused
 parse shape.
 
+Ambiguity-classification requirement:
+- Before naming an ambiguity or choosing a fix, inspect both the emitted GLRM
+  grammar and the final parser action/profile shape. Do not stop at a
+  grammar-level story such as "shift/reduce" if unit-reduction forwarding,
+  stack-effect lowering, parser-DWA construction, or runtime profiling has
+  compiled the ambiguity into another representation.
+- For any ambiguous step, identify the exact emitted GLRM fragment, the concrete
+  pre/post parser stacks, and the final table/runtime action kind. In
+  particular, check whether the ambiguity is encoded as `Action::Split`,
+  `Action::StackShifts(Vec<StackShift>)`, or
+  `Action::GuardedStackShifts(Vec<GuardedStackShift>)`.
+- Treat multi-entry `StackShifts` and `GuardedStackShifts` as possible compiled
+  ambiguity carriers, not merely deterministic fast paths. A single action can
+  fan out one concrete stack into multiple recognized continuations after unit
+  reductions or other table rewrites have removed the visible reduce operation.
+- When the profile shows `n_nondet_reduce_ops == 0`, do not infer there was no
+  grammar ambiguity. First check for stack-effect fanout, frontier-state fanout,
+  and prior advances that materialized the ambiguity into multiple GSS paths.
+- The master/lead must do this classification directly for hard TBM cases
+  before delegating implementation. Workers can gather logs, but the lead owns
+  the exact diagnosis, action representation, and proof target.
+
 Requirements:
 - `commit` max: below `10us`; `10us` is the hard ceiling.
 - `mask` max: below `20us`.
