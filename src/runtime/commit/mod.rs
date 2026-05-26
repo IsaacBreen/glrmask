@@ -8,6 +8,7 @@ use crate::automata::lexer::tokenizer::{TokenizerExecResult, TokenizerMatch};
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
     ParserGSS,
+    apply_guarded_stack_shifts_fast,
     advance_stacks,
     advance_stacks_profiled,
     advance_stacks_owned,
@@ -299,6 +300,14 @@ fn prune_initial_states(
     accepted_terminals: &FxHashMap<u32, FxHashSet<u32>>,
     remapped_tokenizer_states: &FxHashMap<u32, u32>,
 ) {
+    if accepted_terminals.is_empty()
+        && state
+            .values()
+            .all(|parser_state| parser_state.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()))
+    {
+        return;
+    }
+
     for parser_state in state.values_mut() {
         *parser_state = parser_state.apply_and_prune_no_promote(
             |terminals_disallowed: &TerminalsDisallowed| {
@@ -347,6 +356,12 @@ fn prune_single_initial_state_for_exec(
     }
 
     if accepted_terminals.is_empty() && exec_result.end_state.is_none() {
+        return gss;
+    }
+
+    if accepted_terminals.is_empty()
+        && gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
+    {
         return gss;
     }
 
@@ -569,6 +584,7 @@ fn apply_single_top_action_fast(
             }
             Some(shifted)
         }
+        Action::GuardedStackShifts(shifts) => apply_guarded_stack_shifts_fast(gss, shifts),
         Action::Reduce(..) => apply_single_path_reduce_chain_fast(table, gss, terminal),
         _ => None,
     }
@@ -1116,12 +1132,13 @@ fn choose_direct_linear_step(
     gss: &ParserGSS,
     bytes: &[u8],
     start_state: u32,
+    carried_top_state: Option<u32>,
 ) -> Option<DirectLinearStep> {
     let ignore_terminal = constraint.ignore_terminal;
     let mut tokenizer_state = start_state;
     let mut chosen: Option<(usize, u32, bool)> = None;
     let mut consumed_all = true;
-    let mut actionable_terminals: Option<ActionableTerminals> = None;
+    let mut actionable_terminals = carried_top_state.map(ActionableTerminals::SingleState);
 
     for (index, &byte) in bytes.iter().enumerate() {
         let next_state = constraint
@@ -1192,9 +1209,6 @@ fn choose_direct_linear_step(
 
     let (width, terminal, ignored) = chosen?;
     let end_state = consumed_all.then_some(tokenizer_state);
-    if end_state.is_some_and(|state| end_state_may_advance(constraint, gss, state)) {
-        return None;
-    }
 
     Some(DirectLinearStep {
         width,
@@ -1212,12 +1226,23 @@ fn commit_bytes_direct_linear_fast_path(
     mut profile: Option<&mut CommitProfile>,
 ) -> Option<LinearFastPathResult> {
     let mut gss = start_gss;
+    let mut carried_stack = gss.try_virtual_stack();
     let mut offset = 0usize;
     let mut tokenizer_state = start_tokenizer_state;
 
     while offset < bytes.len() {
         let choose_start = profile.as_ref().map(|_| std::time::Instant::now());
-        let Some(step) = choose_direct_linear_step(constraint, &gss, &bytes[offset..], tokenizer_state) else {
+        let carried_top_state = carried_stack.as_ref().and_then(|stack| stack.top().copied());
+        let Some(step) = choose_direct_linear_step(
+            constraint,
+            &gss,
+            &bytes[offset..],
+            tokenizer_state,
+            carried_top_state,
+        ) else {
+            if let Some(stack) = carried_stack.take() {
+                gss = stack.into_gss();
+            }
             if offset > 0 && profile.is_none() {
                 return Some(LinearFastPathResult::Continue { gss, offset });
             }
@@ -1227,9 +1252,45 @@ fn commit_bytes_direct_linear_fast_path(
             profile.linear_fast_path_match_scan_ns += start.elapsed().as_nanos() as u64;
             profile.linear_fast_path_steps += 1;
         }
+
+        if let Some(end_state) = step.end_state
+            && let Some(stack) = carried_stack.as_ref()
+        {
+            let keep_carried = stack.top().copied().is_some_and(|top_state| {
+                end_state != constraint.tokenizer.initial_state()
+                    && !constraint.table.advance_row_intersects(
+                        top_state,
+                        constraint.tokenizer.possible_future_terminals(end_state),
+                    )
+                    && !constraint
+                        .tokenizer
+                        .dfa
+                        .possible_future_group_ids(end_state)
+                        .contains(step.terminal as usize)
+            });
+            if !keep_carried {
+                gss = carried_stack.take().unwrap().into_gss();
+            }
+        }
+
+        if let Some(end_state) = step.end_state
+            && end_state_may_advance(constraint, &gss, end_state)
+        {
+            if let Some(stack) = carried_stack.take() {
+                gss = stack.into_gss();
+            }
+            if offset > 0 && profile.is_none() {
+                return Some(LinearFastPathResult::Continue { gss, offset });
+            }
+            return None;
+        }
+
         if !step.ignored {
             if offset == 0 {
                 if !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()) {
+                    if let Some(stack) = carried_stack.take() {
+                        gss = stack.into_gss();
+                    }
                     let prune_start = profile.as_ref().map(|_| std::time::Instant::now());
                     gss = prune_single_initial_state_for_terminal(
                         gss,
@@ -1245,7 +1306,60 @@ fn commit_bytes_direct_linear_fast_path(
                             "commit rejected: no valid parser states remain".to_string(),
                         )));
                     }
+                    carried_stack = gss.try_virtual_stack();
                 }
+            }
+
+            let mut shifted_carried_stack = false;
+            let mut carried_shift_action = None;
+            let shift_start = profile.as_ref().map(|_| std::time::Instant::now());
+            if let Some(stack) = carried_stack.as_mut()
+                && let Some(top_state) = stack.top().copied()
+                && let Some(crate::compiler::glr::table::Action::Shift(target, is_replace)) =
+                    constraint.table.action(top_state, step.terminal)
+                && step.end_state.is_none_or(|end_state| {
+                    end_state != constraint.tokenizer.initial_state()
+                        && !constraint.table.advance_row_intersects(
+                            top_state,
+                            constraint.tokenizer.possible_future_terminals(end_state),
+                        )
+                        && !constraint
+                            .tokenizer
+                            .dfa
+                            .possible_future_group_ids(end_state)
+                            .contains(step.terminal as usize)
+                })
+            {
+                carried_shift_action = Some((*target, *is_replace));
+                if *is_replace {
+                    if stack.replace_top(*target) {
+                        shifted_carried_stack = true;
+                    }
+                } else {
+                    stack.push(*target);
+                    shifted_carried_stack = true;
+                }
+            }
+            if shifted_carried_stack {
+                if let (Some(profile), Some(start)) = (profile.as_deref_mut(), shift_start) {
+                    let elapsed = start.elapsed().as_nanos() as u64;
+                    let (target, is_replace) = carried_shift_action.unwrap();
+                    let action = crate::compiler::glr::table::Action::Shift(target, is_replace);
+                    let advance_profile = fast_action_advance_profile(&gss, &action, elapsed);
+                    profile.advance_core_ns += advance_profile.total_ns;
+                    profile.advance_ns += elapsed;
+                    profile.linear_fast_path_advance_ns += elapsed;
+                    profile.n_advances += 1;
+                    apply_advance_profile(profile, &advance_profile);
+                }
+
+                offset += step.width;
+                tokenizer_state = constraint.tokenizer.initial_state();
+                continue;
+            }
+
+            if let Some(stack) = carried_stack.take() {
+                gss = stack.into_gss();
             }
             let advance_start = profile.as_ref().map(|_| std::time::Instant::now());
             let advanced = if let Some(top_state) = gss.single_exclusive_top_value()
@@ -1311,6 +1425,9 @@ fn commit_bytes_direct_linear_fast_path(
         tokenizer_state = constraint.tokenizer.initial_state();
     }
 
+    if let Some(stack) = carried_stack.take() {
+        gss = stack.into_gss();
+    }
     let fuse_start = profile.as_ref().map(|_| std::time::Instant::now());
     let fused = gss.fuse(Some(1));
     if let (Some(profile), Some(start)) = (profile.as_deref_mut(), fuse_start) {

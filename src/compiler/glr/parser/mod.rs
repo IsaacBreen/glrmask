@@ -565,25 +565,37 @@ fn apply_stack_shifts(gss: ParserGSS, shifts: &[StackShift]) -> ParserGSS {
     out
 }
 
-fn apply_guarded_stack_shifts(gss: ParserGSS, shifts: &[GuardedStackShift]) -> ParserGSS {
+pub(crate) fn apply_guarded_stack_shifts_fast(
+    gss: &ParserGSS,
+    shifts: &[GuardedStackShift],
+) -> Option<ParserGSS> {
     if let Some(stack) = gss.try_virtual_stack() {
-        return apply_guarded_stack_shifts_to_vstack(&stack, shifts);
+        return Some(apply_guarded_stack_shifts_to_vstack(&stack, shifts));
     }
 
     if !guarded_stack_to_stacks_fallback_disabled()
         && let Some(shifted) = gss.apply_guarded_stack_effects_to_single_concrete_path(
-        shifts.iter().map(|shift| {
-            (
-                shift
-                    .guards
-                    .iter()
-                    .map(|guard| (guard.pop as usize, guard.states.as_slice())),
-                shift.pop as usize,
-                shift.pushes.as_slice(),
-            )
-        }),
-        GUARDED_STACK_TO_STACKS_MAX_DEPTH,
-    ) {
+            shifts.iter().map(|shift| {
+                (
+                    shift
+                        .guards
+                        .iter()
+                        .map(|guard| (guard.pop as usize, guard.states.as_slice())),
+                    shift.pop as usize,
+                    shift.pushes.as_slice(),
+                )
+            }),
+            GUARDED_STACK_TO_STACKS_MAX_DEPTH,
+        )
+    {
+        return Some(shifted);
+    }
+
+    None
+}
+
+fn apply_guarded_stack_shifts(gss: ParserGSS, shifts: &[GuardedStackShift]) -> ParserGSS {
+    if let Some(shifted) = apply_guarded_stack_shifts_fast(&gss, shifts) {
         return shifted;
     }
 

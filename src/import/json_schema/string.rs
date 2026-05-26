@@ -34,6 +34,52 @@ impl<'a> Lowerer<'a> {
         self.lower_string_expr(schema)
     }
 
+    pub(crate) fn lower_inline_bounded_array_string_item_expr(
+        &mut self,
+        schema: &super::ast::Schema,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        let super::ast::SchemaKind::Assertions(assertions) = &schema.kind else {
+            return Ok(None);
+        };
+        if assertions.enum_values.is_some()
+            || assertions.const_value.is_some()
+            || assertions.object.is_some()
+            || assertions.array.is_some()
+            || !assertions.any_of.is_empty()
+            || !assertions.one_of.is_empty()
+            || !assertions.all_of.is_empty()
+        {
+            return Ok(None);
+        }
+        let Some(string) = &assertions.string else {
+            return Ok(None);
+        };
+
+        if let Some(pattern) = &string.pattern {
+            if string.min_length != 0 || string.max_length.is_some() || string.format.is_some() {
+                return Ok(None);
+            }
+            return Ok(Some(GrammarExpr::RawRegex(quoted_string_body_regex(
+                &string_pattern_as_body_regex(pattern)?,
+            ))));
+        }
+
+        if let Some(format_body_regex) = recognized_string_format_body_regex(string.format.as_deref()) {
+            if string.min_length != 0 || string.max_length.is_some() {
+                return Ok(None);
+            }
+            return Ok(Some(GrammarExpr::RawRegex(quoted_string_body_regex(
+                format_body_regex,
+            ))));
+        }
+
+        if string.max_length.is_some_and(|max| self.should_split_bounded_string(string.min_length, max)) {
+            return Ok(None);
+        }
+
+        Ok(Some(self.lower_string_expr(string)?))
+    }
+
     fn lower_constrained_string_terminal_expr(
         &mut self,
         schema: &StringSchema,
@@ -229,56 +275,52 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_split_bounded_string(&mut self, min: usize, max: usize) -> GrammarExpr {
-        if max >= 10_000 {
-            let expr = if min == 0 && max > self.config.repeat_chunk_size.max(1) {
-                let chunk = self.config.repeat_chunk_size.max(1);
-                let full_chunks = max / chunk;
-                let remainder = max % chunk;
-                let exact_chunk = self.string_char_exact_ref(chunk);
-                let exact_open_chunk = self.string_char_exact_open_ref(chunk);
-                let mut alternatives = vec![self.string_char_upto_wrapped_ref(chunk)];
+        let chunk = self.config.repeat_chunk_size.max(1);
+        let should_wrap = max >= 10_000 || (max / chunk) > 2;
+        let expr = if should_wrap && min == 0 && max > chunk {
+            let full_chunks = max / chunk;
+            let remainder = max % chunk;
+            let exact_chunk = self.string_char_exact_ref(chunk);
+            let exact_open_chunk = self.string_char_exact_open_ref(chunk);
+            let mut alternatives = vec![self.string_char_upto_wrapped_ref(chunk)];
+            alternatives.push(seq(vec![
+                exact_open_chunk.clone(),
+                GrammarExpr::RepeatRange {
+                    expr: Box::new(exact_chunk.clone()),
+                    min: 0,
+                    max: full_chunks.saturating_sub(2),
+                },
+                self.string_char_upto_close_ref(chunk),
+            ]));
+            if remainder > 0 {
                 alternatives.push(seq(vec![
-                    exact_open_chunk.clone(),
+                    exact_open_chunk,
                     GrammarExpr::RepeatRange {
-                        expr: Box::new(exact_chunk.clone()),
-                        min: 0,
-                        max: full_chunks.saturating_sub(2),
+                        expr: Box::new(exact_chunk),
+                        min: full_chunks.saturating_sub(1),
+                        max: full_chunks.saturating_sub(1),
                     },
-                    self.string_char_upto_close_ref(chunk),
+                    self.string_char_upto_close_ref(remainder),
                 ]));
-                if remainder > 0 {
-                    alternatives.push(seq(vec![
-                        exact_open_chunk,
-                        GrammarExpr::RepeatRange {
-                            expr: Box::new(exact_chunk),
-                            min: full_chunks.saturating_sub(1),
-                            max: full_chunks.saturating_sub(1),
-                        },
-                        self.string_char_upto_close_ref(remainder),
-                    ]));
-                }
-                choice(alternatives)
-            } else if min == max {
-                seq(vec![lit("\""), self.split_string_exact_expr(min), lit("\"")])
-            } else {
-                seq(vec![
-                    lit("\""),
-                    self.split_string_exact_expr(min),
-                    self.split_string_upto_close_expr(max - min),
-                ])
-            };
-            let rule_name = self.fresh_rule_name("json_string_bounded_split");
-            self.add_nonterminal_rule(&rule_name, expr);
-            return r(&rule_name);
+            }
+            choice(alternatives)
+        } else if min == max {
+            seq(vec![lit("\""), self.split_string_exact_expr(min), lit("\"")])
+        } else {
+            seq(vec![
+                lit("\""),
+                self.split_string_exact_expr(min),
+                self.split_string_upto_close_expr(max - min),
+            ])
+        };
+
+        if !should_wrap {
+            return expr;
         }
-        if min == max {
-            return seq(vec![lit("\""), self.split_string_exact_expr(min), lit("\"")]);
-        }
-        seq(vec![
-            lit("\""),
-            self.split_string_exact_expr(min),
-            self.split_string_upto_close_expr(max - min),
-        ])
+
+        let rule_name = self.fresh_rule_name("json_string_bounded_split");
+        self.add_nonterminal_rule(&rule_name, expr);
+        r(&rule_name)
     }
 
     pub(crate) fn lower_string_literal(&mut self, text: &str) -> GrammarExpr {
