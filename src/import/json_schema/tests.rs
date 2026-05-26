@@ -1239,6 +1239,7 @@ fn email_string_value_satisfaction_filters_invalid_literals() {
     assert!(string_value_satisfies_schema(&json!("user@example.com"), &schema).unwrap());
     assert!(!string_value_satisfies_schema(&json!("><"), &schema).unwrap());
     assert!(!string_value_satisfies_schema(&json!(".user@example.com"), &schema).unwrap());
+    assert!(!string_value_satisfies_schema(&json!("missing-at"), &schema).unwrap());
 }
 
 #[test]
