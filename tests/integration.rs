@@ -997,6 +997,42 @@ fn json_schema_number_multiple_of_keeps_exclusive_maximum() {
 }
 
 #[test]
+fn json_schema_object_property_untyped_numeric_assertions_allow_non_numbers() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "object",
+            "properties": {
+                "size": {"maximum": 100000}
+            }
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#"{"size": 50000}"#);
+    assert_accepts_bytes(&constraint, br#"{"size": "free"}"#);
+
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#"{"size": 100001}"#).is_err());
+}
+
+#[test]
+fn json_schema_object_property_untyped_string_assertions_allow_non_strings() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "object",
+            "properties": {
+                "name": {"pattern": "^.*.txt$"}
+            }
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#"{"name": "example.txt"}"#);
+    assert_accepts_bytes(&constraint, br#"{"name": []}"#);
+
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#"{"name": "example.csv"}"#).is_err());
+}
+
+#[test]
 fn json_schema_additional_property_required_only_key_does_not_fall_back_through_ap() {
     let constraint = byte_schema(
         r#"{

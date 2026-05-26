@@ -1909,7 +1909,7 @@ impl<'a> Lowerer<'a> {
                 effective_schema = all_of_schema(effective_schema, pattern_schema);
             }
         }
-        let value = self.lower_schema(&effective_schema)?;
+        let value = self.lower_object_property_value_schema(&effective_schema)?;
         Ok(ObjectItem {
             pair: seq(vec![key, value.clone()]),
             separator_pair: seq(vec![separator_key, value]),
@@ -1917,6 +1917,48 @@ impl<'a> Lowerer<'a> {
             satisfies_any_group,
             exclusive_group,
         })
+    }
+
+    fn lower_object_property_value_schema(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {
+        let SchemaKind::Assertions(assertions) = &schema.kind else {
+            return self.lower_schema(schema);
+        };
+        if assertions.types.is_some()
+            || assertions.const_value.is_some()
+            || assertions.enum_values.is_some()
+            || assertions.object.is_some()
+            || assertions.array.is_some()
+            || !assertions.any_of.is_empty()
+            || !assertions.one_of.is_empty()
+            || !assertions.all_of.is_empty()
+        {
+            return self.lower_schema(schema);
+        }
+        if let Some(number) = &assertions.number
+            && assertions.string.is_none()
+        {
+            return Ok(choice(vec![
+                self.lower_number(number)?,
+                r(JSON_OBJECT_RULE),
+                r(JSON_ARRAY_RULE),
+                r(JSON_STRING_RULE),
+                r(JSON_BOOL_RULE),
+                r(JSON_NULL_RULE),
+            ]));
+        }
+        if let Some(string) = &assertions.string
+            && assertions.number.is_none()
+        {
+            return Ok(choice(vec![
+                self.lower_string(string)?,
+                r(JSON_OBJECT_RULE),
+                r(JSON_ARRAY_RULE),
+                r(JSON_NUMBER_RULE),
+                r(JSON_BOOL_RULE),
+                r(JSON_NULL_RULE),
+            ]));
+        }
+        self.lower_schema(schema)
     }
 
     fn object_with_required_synthetic_properties(
