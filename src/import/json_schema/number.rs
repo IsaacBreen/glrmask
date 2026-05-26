@@ -14,30 +14,45 @@ impl<'a> Lowerer<'a> {
         if schema.integer {
             return self.lower_integer(schema);
         }
-        if schema.multiple_of.is_none() && (schema.minimum.is_some() || schema.maximum.is_some()) {
-            let regex = rx_float_range(
-                schema.minimum,
-                schema.maximum,
-                !schema.exclusive_minimum,
-                !schema.exclusive_maximum,
-            )
-            .map_err(SchemaImportError::new)?;
-            return Ok(GrammarExpr::RawRegex(regex));
-        }
-        if let Some(multiple) = schema.multiple_of {
+
+        let range_expr = if schema.minimum.is_some() || schema.maximum.is_some() {
+            Some(GrammarExpr::RawRegex(
+                rx_float_range(
+                    schema.minimum,
+                    schema.maximum,
+                    !schema.exclusive_minimum,
+                    !schema.exclusive_maximum,
+                )
+                .map_err(SchemaImportError::new)?,
+            ))
+        } else {
+            None
+        };
+
+        let base_expr = if let Some(multiple) = schema.multiple_of {
             if let Some(regex) = power_of_ten_multiple_regex(multiple) {
-                return Ok(GrammarExpr::RawRegex(regex));
-            }
-            if let Some(regex) = decimal_multiple_regex(multiple) {
-                return Ok(GrammarExpr::RawRegex(regex));
-            }
-            return Err(SchemaImportError::new(
-                format!(
+                GrammarExpr::RawRegex(regex)
+            } else if let Some(regex) = decimal_multiple_regex(multiple) {
+                GrammarExpr::RawRegex(regex)
+            } else {
+                return Err(SchemaImportError::new(format!(
                     "multipleOf={multiple} for non-integer numbers is unsupported in the simple importer"
-                ),
-            ));
+                )));
+            }
+        } else if let Some(range_expr) = range_expr.clone() {
+            return Ok(range_expr);
+        } else {
+            r(JSON_NUMBER_RULE)
+        };
+
+        if let Some(range_expr) = range_expr {
+            return Ok(GrammarExpr::Intersect {
+                expr: Box::new(base_expr),
+                intersect: Box::new(range_expr),
+            });
         }
-        Ok(r(JSON_NUMBER_RULE))
+
+        Ok(base_expr)
     }
 
     fn lower_integer(&mut self, schema: &NumberSchema) -> ImportResult<GrammarExpr> {

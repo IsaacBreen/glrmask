@@ -978,6 +978,25 @@ fn json_schema_open_anyof_variant_additional_properties_allow_other_variant_keys
 }
 
 #[test]
+fn json_schema_number_multiple_of_keeps_exclusive_maximum() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "number",
+            "multipleOf": 10,
+            "exclusiveMaximum": 100
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#"20"#);
+
+    let mut too_large = constraint.start();
+    assert!(too_large.commit_bytes(br#"600"#).is_err());
+
+    let mut boundary = constraint.start();
+    assert!(boundary.commit_bytes(br#"100"#).is_err());
+}
+
+#[test]
 fn json_schema_additional_property_required_only_key_does_not_fall_back_through_ap() {
     let constraint = byte_schema(
         r#"{
