@@ -949,6 +949,35 @@ fn json_schema_additional_property_pattern_addback_restores_globally_excluded_pa
 }
 
 #[test]
+fn json_schema_open_anyof_variant_additional_properties_allow_other_variant_keys() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "object",
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "string"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "b": {"type": "boolean"}
+                    }
+                }
+            ]
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#"{"a": []}"#);
+    assert_accepts_bytes(&constraint, br#"{"b": []}"#);
+
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#"[]"#).is_err());
+}
+
+#[test]
 fn json_schema_additional_property_required_only_key_does_not_fall_back_through_ap() {
     let constraint = byte_schema(
         r#"{
