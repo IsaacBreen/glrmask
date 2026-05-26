@@ -986,6 +986,35 @@ fn email_format_lowers_to_constrained_terminal() {
 }
 
 #[test]
+fn hostname_ipv4_ipv6_formats_lower_to_constrained_terminals() {
+    for (format, expected) in [
+        ("hostname", "[A-Za-z0-9]"),
+        ("ipv4", "25[0-5]"),
+        ("ipv6", "[A-Fa-f0-9]"),
+    ] {
+        let schema = json!({
+            "type": "string",
+            "format": format
+        });
+
+        let grammar = schema_to_named_grammar(&schema).unwrap();
+        assert!(
+            grammar
+                .rules
+                .iter()
+                .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
+            "{:?}",
+            grammar.rules
+        );
+        assert!(!contains_ref_named(start_expr(&grammar), "JSON_STRING"));
+
+        let glrm = to_glrm(&grammar);
+        assert!(glrm.contains(expected), "{glrm}");
+        lower(&grammar).unwrap();
+    }
+}
+
+#[test]
 fn uri_format_lowers_to_constrained_terminal() {
     let schema = json!({
         "type": "string",
@@ -1240,6 +1269,31 @@ fn email_string_value_satisfaction_filters_invalid_literals() {
     assert!(!string_value_satisfies_schema(&json!("><"), &schema).unwrap());
     assert!(!string_value_satisfies_schema(&json!(".user@example.com"), &schema).unwrap());
     assert!(!string_value_satisfies_schema(&json!("missing-at"), &schema).unwrap());
+}
+
+#[test]
+fn host_string_value_satisfaction_filters_invalid_literals() {
+    let hostname = StringSchema {
+        format: Some("hostname".to_string()),
+        ..Default::default()
+    };
+    assert!(string_value_satisfies_schema(&json!("localhost"), &hostname).unwrap());
+    assert!(string_value_satisfies_schema(&json!("redshift.example.com"), &hostname).unwrap());
+    assert!(!string_value_satisfies_schema(&json!(";"), &hostname).unwrap());
+
+    let ipv4 = StringSchema {
+        format: Some("ipv4".to_string()),
+        ..Default::default()
+    };
+    assert!(string_value_satisfies_schema(&json!("127.0.0.1"), &ipv4).unwrap());
+    assert!(!string_value_satisfies_schema(&json!("999.0.0.1"), &ipv4).unwrap());
+
+    let ipv6 = StringSchema {
+        format: Some("ipv6".to_string()),
+        ..Default::default()
+    };
+    assert!(string_value_satisfies_schema(&json!("::1"), &ipv6).unwrap());
+    assert!(!string_value_satisfies_schema(&json!(";"), &ipv6).unwrap());
 }
 
 #[test]
