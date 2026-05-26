@@ -874,6 +874,9 @@ impl SuffixQuotient {
         Self {
             suffix_to_state: FxHashMap::default(),
             failed_suffixes: FxHashSet::default(),
+            // Do not lower this default to mask correctness or crash bugs.
+            // If a schema fails only above this cap, fix the quotient/table
+            // invariant that fails at scale instead of hiding the failure.
             max_states: env_usize(RECOGNIZER_SUFFIX_QUOTIENT_MAX_STATES_ENV, 4096),
             max_alts: env_usize(RECOGNIZER_SUFFIX_QUOTIENT_MAX_ALTS_ENV, 16),
             max_width: env_usize(RECOGNIZER_SUFFIX_QUOTIENT_MAX_WIDTH_ENV, 8),
