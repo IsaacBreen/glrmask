@@ -12,6 +12,20 @@ integrity rules when the temporary skill asks for TBM evidence.
 
 Use only stabilized timings for decisions: compare per-step values after cross-run per-step minimum stabilization, not raw single-pass sweep spikes.
 
+Default optimization target:
+- Unless the human explicitly asks for runtime optimization, prefer fixing TBM
+  issues on the compilation side. In JSON-schema cases, focus first on the JSON
+  importer and schema lowering: emitted grammar shape, object/property factoring,
+  repeat expansion, ambiguity introduced during lowering, and table actions
+  produced by importer choices.
+- Treat runtime parser/mask changes as secondary for JSON importer workloads.
+  Reach for runtime edits only when compile-side lowering cannot reasonably
+  remove the hot action shape, or when the human explicitly requests runtime
+  work.
+- When a slow runtime profile points at `StackShifts`, `GuardedStackShifts`, GSS
+  operations, or parser advance, still ask whether the importer could emit a
+  simpler grammar/table representation that avoids that runtime shape entirely.
+
 Full-report invariant:
 - Never run CFA full-report, chunked full-report, report-slow-steps intended for
   report plots, or broad sweep artifacts in `glrmask_native`-only mode.
