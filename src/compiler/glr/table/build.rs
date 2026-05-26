@@ -58,7 +58,6 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     // artifacts. Running the recognizer-only equivalence pass here costs more
     // on large schemas than it saves in later phases.
     table.canonicalize_stack_shift_predecessors();
-    table.quotient_recognizer_stack_suffixes();
     let recog_ms = t3.elapsed().as_secs_f64() * 1000.0;
     let _ = (
         lr1_ms,
