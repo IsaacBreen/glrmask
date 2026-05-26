@@ -710,7 +710,7 @@ fn plain_items_ignore_additional_items_without_tuple() {
 }
 
 #[test]
-fn map_shaped_min_properties_still_errors() {
+fn map_shaped_min_properties_lowers_as_bounded_pattern_map() {
     let schema = json!({
         "type": "object",
         "patternProperties": {
@@ -720,8 +720,8 @@ fn map_shaped_min_properties_still_errors() {
         "minProperties": 1
     });
 
-    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
-    assert!(error.contains("minProperties is only supported"), "{error}");
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
 }
 
 #[test]
@@ -789,6 +789,37 @@ fn medium_bounded_string_uses_split_chunk_rules_by_default() {
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("json_string_char_exact_50"), "{glrm}");
     lower(&grammar).unwrap();
+}
+
+#[test]
+fn bounded_pattern_map_respects_min_and_max_properties() {
+    let schema = json!({
+        "type": "object",
+        "minProperties": 1,
+        "maxProperties": 2,
+        "additionalProperties": false,
+        "patternProperties": {
+            ".+": {"type": "string"}
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn unsupported_nonredundant_max_properties_errors() {
+    let schema = json!({
+        "type": "object",
+        "maxProperties": 1,
+        "properties": {
+            "a": {"type": "string"},
+            "b": {"type": "string"}
+        }
+    });
+
+    let err = schema_to_named_grammar(&schema).unwrap_err();
+    assert!(err.to_string().contains("maxProperties"), "{err}");
 }
 
 #[test]

@@ -600,6 +600,7 @@ fn try_factor_closed_object_variant_any_of(
             properties: merged_properties,
             required: BTreeSet::new(),
             min_properties: 0,
+            max_properties: None,
             pattern_properties: Vec::new(),
             additional_properties: AdditionalProperties::Deny,
         },
@@ -713,6 +714,8 @@ fn option_objects_shape_equivalent(left: Option<&ObjectSchema>, right: Option<&O
 fn object_schemas_shape_equivalent(left: &ObjectSchema, right: &ObjectSchema) -> bool {
     additional_properties_shape_equivalent(&left.additional_properties, &right.additional_properties)
         && left.required == right.required
+        && left.min_properties == right.min_properties
+        && left.max_properties == right.max_properties
         && left.pattern_properties.len() == right.pattern_properties.len()
         && left
             .pattern_properties
@@ -931,6 +934,11 @@ fn distribute_all_of_over_single_object_any_of(branches: &[Schema]) -> Option<Ve
 fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSchema {
     let mut merged = left.clone();
     merged.min_properties = merged.min_properties.max(right.min_properties);
+    merged.max_properties = match (merged.max_properties, right.max_properties) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(max), None) | (None, Some(max)) => Some(max),
+        (None, None) => None,
+    };
 
     for required in &right.required {
         merged.required.insert(required.clone());

@@ -277,7 +277,6 @@ fn is_unsupported_validation_key(key: &str) -> bool {
         key,
         "not"
             | "propertyNames"
-            | "maxProperties"
             | "uniqueItems"
             | "contains"
             | "minContains"
@@ -453,6 +452,7 @@ fn load_object_keywords(
     }
 
     schema.min_properties = read_usize_keyword(object, "minProperties", location)?.unwrap_or(0);
+    schema.max_properties = read_usize_keyword(object, "maxProperties", location)?;
 
     Ok(schema)
 }

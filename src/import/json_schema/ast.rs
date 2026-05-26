@@ -109,6 +109,7 @@ pub(crate) struct ObjectSchema {
     pub(crate) properties: Vec<PropertySchema>,
     pub(crate) required: BTreeSet<String>,
     pub(crate) min_properties: usize,
+    pub(crate) max_properties: Option<usize>,
     pub(crate) pattern_properties: Vec<PatternPropertySchema>,
     pub(crate) additional_properties: AdditionalProperties,
 }
@@ -119,6 +120,7 @@ impl Default for ObjectSchema {
             properties: Vec::new(),
             required: BTreeSet::new(),
             min_properties: 0,
+            max_properties: None,
             pattern_properties: Vec::new(),
             additional_properties: AdditionalProperties::AllowAny,
         }

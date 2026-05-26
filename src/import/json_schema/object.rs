@@ -10,7 +10,7 @@ use super::ast::{
 use super::combinators::{all_of_schema, try_merge_all_of_objects};
 use super::error::{ImportResult, SchemaImportError};
 use super::lower::{
-    choice, lit, r, seq, Lowerer, JSON_ARRAY_RULE, JSON_BOOL_RULE,
+    choice, lit, never, r, seq, Lowerer, JSON_ARRAY_RULE, JSON_BOOL_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
     JSON_ADDITIONAL_KEY_COLON_SHARED_RULE, JSON_NULL_RULE,
     JSON_NUMBER_RULE, JSON_OBJECT_RULE, JSON_STRING_RULE, JSON_VALUE_RULE,
@@ -363,7 +363,28 @@ impl<'a> Lowerer<'a> {
         exclusive_group: Option<(&BTreeSet<String>, bool)>,
     ) -> ImportResult<GrammarExpr> {
         let normalized = self.object_with_required_synthetic_properties(schema)?;
+        if let Some(max_properties) = normalized.max_properties {
+            let fixed_closed_redundant = normalized.pattern_properties.is_empty()
+                && matches!(normalized.additional_properties, AdditionalProperties::Deny)
+                && max_properties >= normalized.properties.len();
+            let pattern_map_candidate = normalized.properties.is_empty()
+                && normalized.required.is_empty()
+                && matches!(normalized.additional_properties, AdditionalProperties::Deny)
+                && normalized.pattern_properties.len() == 1;
+            if !fixed_closed_redundant && !pattern_map_candidate {
+                return Err(SchemaImportError::new(
+                    "maxProperties is only supported for bounded pattern maps or redundant closed fixed-property objects"
+                        .to_string(),
+                ));
+            }
+        }
         let min_property_group_required = if normalized.min_properties <= normalized.required.len() {
+            false
+        } else if normalized.properties.is_empty()
+            && normalized.required.is_empty()
+            && matches!(normalized.additional_properties, AdditionalProperties::Deny)
+            && normalized.pattern_properties.len() == 1
+        {
             false
         } else if normalized.min_properties == 1
             && normalized.required.is_empty()
@@ -612,17 +633,54 @@ impl<'a> Lowerer<'a> {
         let pair_name = self.fresh_rule_name("json_pattern_map_pair");
         self.add_nonterminal_rule(&pair_name, pair_expr);
 
-        let list_name = self.fresh_rule_name("json_pattern_map_list");
-        self.add_nonterminal_rule(
-            &list_name,
-            choice(vec![
-                r(&pair_name),
-                seq(vec![r(&list_name), self.item_separator_expr(), r(&pair_name)]),
-            ]),
-        );
+        if schema.max_properties.is_some_and(|max| max < schema.min_properties) {
+            return Ok(Some(never()));
+        }
+
+        let body = match schema.max_properties {
+            Some(0) => GrammarExpr::Epsilon,
+            Some(max) => {
+                let separator_pair = seq(vec![self.item_separator_expr(), r(&pair_name)]);
+                if schema.min_properties == 0 {
+                    GrammarExpr::Optional(Box::new(seq(vec![
+                        r(&pair_name),
+                        GrammarExpr::RepeatRange {
+                            expr: Box::new(separator_pair),
+                            min: 0,
+                            max: max - 1,
+                        },
+                    ])))
+                } else {
+                    seq(vec![
+                        r(&pair_name),
+                        GrammarExpr::RepeatRange {
+                            expr: Box::new(separator_pair),
+                            min: schema.min_properties - 1,
+                            max: max - 1,
+                        },
+                    ])
+                }
+            }
+            None => {
+                let list_name = self.fresh_rule_name("json_pattern_map_list");
+                self.add_nonterminal_rule(
+                    &list_name,
+                    choice(vec![
+                        r(&pair_name),
+                        seq(vec![r(&list_name), self.item_separator_expr(), r(&pair_name)]),
+                    ]),
+                );
+
+                if schema.min_properties == 0 {
+                    choice(vec![GrammarExpr::Epsilon, r(&list_name)])
+                } else {
+                    r(&list_name)
+                }
+            }
+        };
 
         let body_name = self.fresh_rule_name("json_pattern_map_body");
-        self.add_nonterminal_rule(&body_name, choice(vec![GrammarExpr::Epsilon, r(&list_name)]));
+        self.add_nonterminal_rule(&body_name, body);
 
         Ok(Some(seq(vec![lit("{"), r(&body_name), lit("}")])))
     }
