@@ -5,27 +5,30 @@ use std::hash::{Hash, Hasher};
 
 const DISABLE_STACK_SHIFT_PREDECESSOR_CANONICALIZATION_ENV: &str =
     "GLRMASK_DISABLE_STACK_SHIFT_PREDECESSOR_CANONICALIZATION";
-const DISABLE_RECOGNIZER_SUFFIX_QUOTIENT_ENV: &str =
-    "GLRMASK_DISABLE_RECOGNIZER_SUFFIX_QUOTIENT";
-const RECOGNIZER_SUFFIX_QUOTIENT_MAX_STATES_ENV: &str =
-    "GLRMASK_RECOGNIZER_SUFFIX_QUOTIENT_MAX_STATES";
-const RECOGNIZER_SUFFIX_QUOTIENT_MAX_ALTS_ENV: &str =
-    "GLRMASK_RECOGNIZER_SUFFIX_QUOTIENT_MAX_ALTS";
-const RECOGNIZER_SUFFIX_QUOTIENT_MAX_WIDTH_ENV: &str =
-    "GLRMASK_RECOGNIZER_SUFFIX_QUOTIENT_MAX_WIDTH";
+const DISABLE_RECOGNITION_QUOTIENT_ENV: &str = "GLRMASK_DISABLE_RECOGNITION_QUOTIENT";
+const RECOGNITION_QUOTIENT_MAX_STATES_ENV: &str = "GLRMASK_RECOGNITION_QUOTIENT_MAX_STATES";
+const RECOGNITION_QUOTIENT_MAX_ITERS_ENV: &str = "GLRMASK_RECOGNITION_QUOTIENT_MAX_ITERS";
 
 fn stack_shift_predecessor_canonicalization_enabled() -> bool {
     !env_flag_enabled(DISABLE_STACK_SHIFT_PREDECESSOR_CANONICALIZATION_ENV, false)
 }
 
-fn recognizer_suffix_quotient_enabled() -> bool {
-    !env_flag_enabled(DISABLE_RECOGNIZER_SUFFIX_QUOTIENT_ENV, false)
+fn recognition_quotient_enabled() -> bool {
+    !env_flag_enabled(DISABLE_RECOGNITION_QUOTIENT_ENV, false)
+}
+
+fn recognition_quotient_max_states() -> usize {
+    env_usize(RECOGNITION_QUOTIENT_MAX_STATES_ENV, 100_000)
+}
+
+fn recognition_quotient_max_iters() -> usize {
+    env_usize(RECOGNITION_QUOTIENT_MAX_ITERS_ENV, 128)
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
-        .and_then(|value| value.parse::<usize>().ok())
+        .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|&value| value > 0)
         .unwrap_or(default)
 }
@@ -817,459 +820,138 @@ impl GLRTable {
         }
     }
 
-    /// Collapse recognizer-equivalent stack-effect alternatives by replacing a
-    /// set of pushed LR stack suffixes with one synthetic suffix state.
+    /// Quotient LR table states by recognition semantics and normalize action
+    /// alternatives through the quotient.
     ///
-    /// A synthetic suffix state denotes a finite union of concrete LR stack
-    /// suffixes over the same lower stack. Its rows are compiled from those
-    /// concrete suffixes into ordinary `StackShifts`/`GuardedStackShifts`, so the
-    /// runtime still consumes the same table representation. The pass is purely
-    /// table-level: it does not change import, grammar lowering, or parser
-    /// runtime behavior.
-    pub(super) fn quotient_recognizer_stack_suffixes(&mut self) {
-        if !recognizer_suffix_quotient_enabled() {
+    /// This is intentionally after unit-reduction stack-effect lowering: the
+    /// visible ambiguity may be a `StackShifts`/`GuardedStackShifts` fanout
+    /// rather than an explicit reduce/reduce split. The equivalence is a fixed
+    /// point over table rows, where state references are observed only through
+    /// their current quotient class and nonterminal identities are observed only
+    /// through their goto columns. The admission/advance row is part of the
+    /// state signature, so masks and token admission remain exact.
+    pub(super) fn eliminate_recognition_equivalent_ambiguity(&mut self) {
+        if !recognition_quotient_enabled() || self.num_states <= 1 {
+            self.normalize_action_alternatives_identity();
             return;
         }
 
-        let mut quotient = SuffixQuotient::new();
-        let original_states = self.num_states as usize;
-        let mut changed = false;
-
-        for state in 0..original_states {
-            let terminals: Vec<TerminalID> = self.action[state].keys().collect();
-            for terminal in terminals {
-                let Some(action) = self.action[state].get(&terminal).cloned() else {
-                    continue;
-                };
-                let Some(new_action) = quotient.normalize_action(self, action.clone()) else {
-                    continue;
-                };
-                if new_action != action {
-                    self.action[state].insert(terminal, new_action);
-                    changed = true;
-                }
-            }
+        if self.num_states as usize > recognition_quotient_max_states() {
+            // Size guard: still perform local action normalization/deduplication,
+            // but avoid the O(states × nonterminals) quotient refinement on very
+            // large generated tables unless explicitly allowed by the caller.
+            self.normalize_action_alternatives_identity();
+            return;
         }
 
-        if changed || quotient.created_states > 0 {
-            self.extend_advance_rows_from_actions();
-            self.prune_unreachable_states();
-            self.merge_identical_rows();
-        }
-    }
-}
-
-#[derive(Debug)]
-struct SuffixQuotient {
-    suffix_to_state: FxHashMap<Vec<Vec<u32>>, u32>,
-    failed_suffixes: FxHashSet<Vec<Vec<u32>>>,
-    max_states: usize,
-    max_alts: usize,
-    max_width: usize,
-    created_states: usize,
-}
-
-impl SuffixQuotient {
-    fn new() -> Self {
-        Self {
-            suffix_to_state: FxHashMap::default(),
-            failed_suffixes: FxHashSet::default(),
-            max_states: env_usize(RECOGNIZER_SUFFIX_QUOTIENT_MAX_STATES_ENV, 4096),
-            max_alts: env_usize(RECOGNIZER_SUFFIX_QUOTIENT_MAX_ALTS_ENV, 16),
-            max_width: env_usize(RECOGNIZER_SUFFIX_QUOTIENT_MAX_WIDTH_ENV, 8),
-            created_states: 0,
-        }
+        self.normalize_action_alternatives_identity();
+        let quotient = recognition_quotient(self);
+        self.apply_recognition_quotient(&quotient);
+        self.normalize_action_alternatives_identity();
+        self.merge_identical_rows();
     }
 
-    fn normalize_action(&mut self, table: &mut GLRTable, action: Action) -> Option<Action> {
-        match action {
-            Action::StackShifts(shifts) => {
-                let mut effects = shifts
-                    .into_iter()
-                    .map(|shift| GuardedStackShift {
-                        guards: Vec::new(),
-                        pop: shift.pop,
-                        pushes: shift.pushes,
-                    })
-                    .collect::<Vec<_>>();
-                let normalized = self.quotient_effect_groups(table, &mut effects).ok()?;
-                Some(normalized)
-            }
-            Action::GuardedStackShifts(mut effects) => {
-                let normalized = self.quotient_effect_groups(table, &mut effects).ok()?;
-                Some(normalized)
-            }
-            Action::Split {
-                shift,
-                reduces,
-                accept,
-            } if reduces.is_empty() && !accept => {
-                shift.map(|(target, replace)| Action::Shift(target, replace))
-            }
-            _ => None,
-        }
+    pub(super) fn action_cell_count(&self) -> usize {
+        self.action.iter().map(ActionRow::len).sum()
     }
 
-    fn quotient_effect_groups(
-        &mut self,
-        table: &mut GLRTable,
-        effects: &mut Vec<GuardedStackShift>,
-    ) -> Result<Action, ()> {
-        normalize_guarded_effects_for_suffix_quotient(effects);
-        if effects.is_empty() {
-            return Err(());
-        }
+    fn normalize_action_alternatives_identity(&mut self) {
+        let state_identity: Vec<u32> = (0..self.num_states).collect();
+        let max_nt = table_nonterminal_capacity(self);
+        let nt_identity: Vec<u32> = (0..max_nt as u32).collect();
+        let nt_reps: Vec<NonterminalID> = (0..max_nt as NonterminalID).collect();
 
-        let mut groups: BTreeMap<(Vec<StackShiftGuard>, u32), Vec<Vec<u32>>> = BTreeMap::new();
-        for effect in effects.iter() {
-            groups
-                .entry((effect.guards.clone(), effect.pop))
-                .or_default()
-                .push(effect.pushes.clone());
-        }
-
-        let mut out = Vec::new();
-        for ((guards, pop), mut suffixes) in groups {
-            normalize_suffixes(&mut suffixes);
-            if suffixes.len() > 1
-                && suffixes.iter().all(|suffix| !suffix.is_empty())
-                && let Ok(target) = self.ensure_suffix_state(table, suffixes.clone())
-            {
-                out.push(GuardedStackShift {
-                    guards,
-                    pop,
-                    pushes: vec![target],
-                });
-            } else {
-                for pushes in suffixes {
-                    out.push(GuardedStackShift {
-                        guards: guards.clone(),
-                        pop,
-                        pushes,
-                    });
-                }
-            }
-        }
-
-        normalize_guarded_effects_for_suffix_quotient(&mut out);
-        if out.iter().all(|effect| effect.guards.is_empty()) {
-            let shifts = out
-                .into_iter()
-                .map(|effect| StackShift {
-                    pop: effect.pop,
-                    pushes: effect.pushes,
+        for state in 0..self.num_states as usize {
+            let entries: Vec<(TerminalID, Action)> = self.action[state]
+                .iter()
+                .filter_map(|(terminal, action)| {
+                    normalize_action_to_quotient(action, &state_identity, &nt_identity, &nt_reps)
+                        .map(|action| (terminal, action))
                 })
                 .collect();
-            return stack_shift_action(shifts).ok_or(());
-        }
-        Ok(Action::GuardedStackShifts(out))
-    }
-
-    fn ensure_suffix_state(
-        &mut self,
-        table: &mut GLRTable,
-        mut suffixes: Vec<Vec<u32>>,
-    ) -> Result<u32, ()> {
-        normalize_suffixes(&mut suffixes);
-        if suffixes.is_empty() || suffixes.iter().any(|suffix| suffix.is_empty()) {
-            return Err(());
-        }
-        if suffixes.len() > self.max_alts || suffixes.iter().any(|suffix| suffix.len() > self.max_width) {
-            return Err(());
-        }
-        if suffixes.len() == 1 && suffixes[0].len() == 1 {
-            return Ok(suffixes[0][0]);
-        }
-        if let Some(&state) = self.suffix_to_state.get(&suffixes) {
-            return Ok(state);
-        }
-        if self.failed_suffixes.contains(&suffixes) || self.created_states >= self.max_states {
-            return Err(());
-        }
-
-        let had_advance_rows = table.advance.len() == table.num_states as usize;
-        let state = table.num_states;
-        table.num_states += 1;
-        table.action.push(ActionRow::default());
-        table.goto.push(GotoRow::default());
-        if had_advance_rows {
-            table
-                .advance
-                .push(super::action_presence_row(&ActionRow::default(), table.num_terminals));
-        }
-        self.created_states += 1;
-        self.suffix_to_state.insert(suffixes.clone(), state);
-        let built = (|| {
-            let action = self.build_suffix_action_row(table, &suffixes)?;
-            let goto = self.build_suffix_goto_row(table, &suffixes)?;
-            Ok::<_, ()>((action, goto))
-        })();
-
-        match built {
-            Ok((action, goto)) => {
-                table.action[state as usize] = action;
-                table.goto[state as usize] = goto;
-                if had_advance_rows {
-                    table.advance[state as usize] =
-                        super::action_presence_row(&table.action[state as usize], table.num_terminals);
-                }
-                Ok(state)
-            }
-            Err(()) => {
-                self.suffix_to_state.remove(&suffixes);
-                self.failed_suffixes.insert(suffixes);
-                table.action.pop();
-                table.goto.pop();
-                if had_advance_rows {
-                    table.advance.pop();
-                }
-                table.num_states -= 1;
-                self.created_states -= 1;
-                Err(())
-            }
+            self.action[state] = entries.into_iter().collect();
         }
     }
 
-    fn build_suffix_action_row(
-        &mut self,
-        table: &mut GLRTable,
-        suffixes: &[Vec<u32>],
-    ) -> Result<ActionRow, ()> {
-        let mut terminals = BTreeSet::new();
-        for suffix in suffixes {
-            let top = *suffix.last().ok_or(())?;
-            for terminal in table.action[top as usize].keys() {
-                terminals.insert(terminal);
-            }
+    fn apply_recognition_quotient(&mut self, quotient: &RecognizerQuotient) {
+        let nclasses = quotient.state_representatives.len();
+        if nclasses == 0 {
+            return;
         }
 
-        let mut row = ActionRow::default();
-        for terminal in terminals {
-            let mut effects = Vec::new();
-            let mut accepts = 0usize;
-            for suffix in suffixes {
-                let top = *suffix.last().ok_or(())?;
-                let Some(action) = table.action[top as usize].get(&terminal).cloned() else {
-                    continue;
-                };
-                self.collect_effects_for_suffix_action(suffix, &action, &mut effects, &mut accepts)?;
-            }
+        let had_advance_rows = self.advance.len() == self.num_states as usize;
+        let mut action = Vec::with_capacity(nclasses);
+        let mut goto = Vec::with_capacity(nclasses);
+        let mut advance = if had_advance_rows {
+            Vec::with_capacity(nclasses)
+        } else {
+            Vec::new()
+        };
 
-            if accepts > 0 {
-                if !effects.is_empty() {
-                    return Err(());
-                }
-                row.insert(terminal, Action::Accept);
-                continue;
-            }
+        for &rep in &quotient.state_representatives {
+            let action_row: ActionRow = self.action[rep as usize]
+                .iter()
+                .filter_map(|(terminal, action)| {
+                    normalize_action_to_quotient(
+                        action,
+                        &quotient.state_class_of,
+                        &quotient.nt_class_of,
+                        &quotient.nt_representatives,
+                    )
+                    .map(|action| (terminal, action))
+                })
+                .collect();
+            action.push(action_row);
 
-            if effects.is_empty() {
-                continue;
-            }
-            let action = self.quotient_effect_groups(table, &mut effects)?;
-            row.insert(terminal, action);
-        }
-        Ok(row)
-    }
-
-    fn build_suffix_goto_row(
-        &mut self,
-        table: &mut GLRTable,
-        suffixes: &[Vec<u32>],
-    ) -> Result<GotoRow, ()> {
-        let mut nts = BTreeSet::new();
-        for suffix in suffixes {
-            let top = *suffix.last().ok_or(())?;
-            for &nt in table.goto[top as usize].keys() {
-                nts.insert(nt);
-            }
-        }
-
-        let mut row = GotoRow::default();
-        for nt in nts {
-            let mut result_suffixes = Vec::new();
-            for suffix in suffixes {
-                let top = *suffix.last().ok_or(())?;
-                let Some(&(target, replace)) = table.goto[top as usize].get(&nt) else {
-                    continue;
-                };
-                result_suffixes.push(apply_goto_to_suffix(suffix, target, replace));
-            }
-            normalize_suffixes(&mut result_suffixes);
-            if result_suffixes.is_empty() {
-                continue;
-            }
-            let target = self.ensure_suffix_target(table, result_suffixes)?;
-            row.insert(nt, (target, true));
-        }
-        Ok(row)
-    }
-
-    fn ensure_suffix_target(
-        &mut self,
-        table: &mut GLRTable,
-        mut suffixes: Vec<Vec<u32>>,
-    ) -> Result<u32, ()> {
-        normalize_suffixes(&mut suffixes);
-        match suffixes.as_slice() {
-            [only] if only.len() == 1 => Ok(only[0]),
-            _ => self.ensure_suffix_state(table, suffixes),
-        }
-    }
-
-    fn collect_effects_for_suffix_action(
-        &mut self,
-        suffix: &[u32],
-        action: &Action,
-        effects: &mut Vec<GuardedStackShift>,
-        accepts: &mut usize,
-    ) -> Result<(), ()> {
-        match action {
-            Action::Shift(target, replace) => {
-                effects.push(unguarded_suffix_effect(
-                    suffix,
-                    if *replace { 1 } else { 0 },
-                    &[*target],
-                )?);
-                Ok(())
-            }
-            Action::StackShifts(shifts) => {
-                for shift in shifts {
-                    effects.push(unguarded_suffix_effect(suffix, shift.pop, &shift.pushes)?);
-                }
-                Ok(())
-            }
-            Action::GuardedStackShifts(shifts) => {
-                for shift in shifts {
-                    if let Some(effect) = guarded_suffix_effect(suffix, shift)? {
-                        effects.push(effect);
+            let mut goto_row = GotoRow::default();
+            for (&nt, &(target, replace)) in self.goto[rep as usize].iter() {
+                let mapped_nt = quotient.canonical_nonterminal(nt);
+                let mapped_target = quotient.state_class_of[target as usize];
+                match goto_row.get(&mapped_nt).copied() {
+                    Some(existing) if existing == (mapped_target, replace) => {}
+                    Some(_) => {
+                        // The partition refinement treats such rows as distinct;
+                        // reaching this arm means an out-of-range NT slipped in.
+                        // Preserve the first mapping rather than inventing a new
+                        // behavior.
+                    }
+                    None => {
+                        goto_row.insert(mapped_nt, (mapped_target, replace));
                     }
                 }
-                Ok(())
             }
-            Action::Split {
-                shift,
-                reduces,
-                accept,
-            } => {
-                if !reduces.is_empty() {
-                    return Err(());
+            goto.push(goto_row);
+
+            if had_advance_rows {
+                advance.push(self.advance[rep as usize].clone());
+            }
+        }
+
+        self.action = action;
+        self.goto = goto;
+        self.advance = advance;
+        self.forwarded_shifts = self
+            .forwarded_shifts
+            .iter()
+            .filter_map(|&(state, terminal)| {
+                quotient
+                    .state_class_of
+                    .get(state as usize)
+                    .copied()
+                    .map(|state| (state, terminal))
+            })
+            .collect();
+        self.num_states = nclasses as u32;
+
+        for rule in &mut self.rules {
+            rule.lhs = quotient.canonical_nonterminal(rule.lhs);
+            for symbol in &mut rule.rhs {
+                if let Symbol::Nonterminal(nt) = symbol {
+                    *nt = quotient.canonical_nonterminal(*nt);
                 }
-                if *accept {
-                    *accepts += 1;
-                }
-                if let Some((target, replace)) = shift {
-                    effects.push(unguarded_suffix_effect(
-                        suffix,
-                        if *replace { 1 } else { 0 },
-                        &[*target],
-                    )?);
-                }
-                Ok(())
             }
-            Action::Accept => {
-                *accepts += 1;
-                Ok(())
-            }
-            Action::Reduce(..) => Err(()),
         }
     }
-}
-
-fn normalize_suffixes(suffixes: &mut Vec<Vec<u32>>) {
-    suffixes.sort();
-    suffixes.dedup();
-}
-
-fn normalize_guarded_effects_for_suffix_quotient(effects: &mut Vec<GuardedStackShift>) {
-    for effect in effects.iter_mut() {
-        for guard in &mut effect.guards {
-            guard.states.sort_unstable();
-            guard.states.dedup();
-        }
-        effect.guards.retain(|guard| !guard.states.is_empty());
-        effect.guards.sort_by_key(|guard| guard.pop);
-        effect.guards.dedup();
-    }
-    effects.sort();
-    effects.dedup();
-}
-
-fn apply_goto_to_suffix(suffix: &[u32], target: u32, replace: bool) -> Vec<u32> {
-    let mut out = suffix.to_vec();
-    if replace {
-        if let Some(top) = out.last_mut() {
-            *top = target;
-        } else {
-            out.push(target);
-        }
-    } else {
-        out.push(target);
-    }
-    out
-}
-
-fn unguarded_suffix_effect(
-    suffix: &[u32],
-    pop: u32,
-    pushes: &[u32],
-) -> Result<GuardedStackShift, ()> {
-    suffix_effect(suffix, Vec::new(), pop, pushes)
-}
-
-fn guarded_suffix_effect(
-    suffix: &[u32],
-    shift: &GuardedStackShift,
-) -> Result<Option<GuardedStackShift>, ()> {
-    let suffix_len = suffix.len() as u32;
-    let mut translated_guards = Vec::new();
-
-    for guard in &shift.guards {
-        if guard.pop < suffix_len {
-            let index = suffix.len() - 1 - guard.pop as usize;
-            if guard.states.binary_search(&suffix[index]).is_err() {
-                return Ok(None);
-            }
-        } else {
-            translated_guards.push(StackShiftGuard {
-                pop: 1 + (guard.pop - suffix_len),
-                states: guard.states.clone(),
-            });
-        }
-    }
-
-    let effect = suffix_effect(suffix, translated_guards, shift.pop, &shift.pushes)?;
-    Ok(Some(effect))
-}
-
-fn suffix_effect(
-    suffix: &[u32],
-    mut guards: Vec<StackShiftGuard>,
-    pop: u32,
-    pushes: &[u32],
-) -> Result<GuardedStackShift, ()> {
-    if suffix.is_empty() {
-        return Err(());
-    }
-    let suffix_len = suffix.len() as u32;
-    let (macro_pop, macro_pushes) = if pop <= suffix_len {
-        let keep = suffix.len() - pop as usize;
-        let mut out = suffix[..keep].to_vec();
-        out.extend_from_slice(pushes);
-        (1, out)
-    } else {
-        (1 + (pop - suffix_len), pushes.to_vec())
-    };
-
-    guards.sort_by_key(|guard| guard.pop);
-    guards.dedup();
-    debug_assert!(guards.iter().all(|guard| guard.pop <= macro_pop));
-
-    Ok(GuardedStackShift {
-        guards,
-        pop: macro_pop,
-        pushes: macro_pushes,
-    })
 }
 
 fn row_fingerprint(
@@ -1319,6 +1001,410 @@ fn rows_equal(
         && goto_a
             .iter()
             .all(|(&nonterminal, target)| goto_b.get(&nonterminal) == Some(target))
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum RecognizerActionSig {
+    Shift(u32, bool),
+    StackShifts(Vec<(u32, Vec<u32>)>),
+    GuardedStackShifts(Vec<(Vec<(u32, Vec<u32>)>, u32, Vec<u32>)>),
+    Reduce(u32, u32),
+    Split {
+        shift: Option<(u32, bool)>,
+        reduces: Vec<(u32, u32)>,
+        accept: bool,
+    },
+    Accept,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RecognizerStateSig {
+    advance: Option<BitSet>,
+    action: Vec<(TerminalID, RecognizerActionSig)>,
+    goto: Vec<(u32, u32, bool)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RecognizerNtSig {
+    column: Vec<(u32, u32, bool)>,
+}
+
+#[derive(Debug, Clone)]
+struct RecognizerQuotient {
+    state_class_of: Vec<u32>,
+    state_representatives: Vec<u32>,
+    nt_class_of: Vec<u32>,
+    nt_representatives: Vec<NonterminalID>,
+}
+
+impl RecognizerQuotient {
+    fn canonical_nonterminal(&self, nt: NonterminalID) -> NonterminalID {
+        self.nt_class_of
+            .get(nt as usize)
+            .and_then(|&class| self.nt_representatives.get(class as usize).copied())
+            .unwrap_or(nt)
+    }
+}
+
+fn table_nonterminal_capacity(table: &GLRTable) -> usize {
+    let mut max_nt = table.nonterminal_display_names.len();
+    for rule in &table.rules {
+        max_nt = max_nt.max(rule.lhs as usize + 1);
+        for symbol in &rule.rhs {
+            if let Symbol::Nonterminal(nt) = symbol {
+                max_nt = max_nt.max(*nt as usize + 1);
+            }
+        }
+    }
+    for row in &table.goto {
+        for &nt in row.keys() {
+            max_nt = max_nt.max(nt as usize + 1);
+        }
+    }
+    for row in &table.action {
+        for (_, action) in row.iter() {
+            max_nonterminal_in_action(action, &mut max_nt);
+        }
+    }
+    max_nt
+}
+
+fn max_nonterminal_in_action(action: &Action, max_nt: &mut usize) {
+    match action {
+        Action::Reduce(nt, _) => *max_nt = (*max_nt).max(*nt as usize + 1),
+        Action::Split { reduces, .. } => {
+            for &(nt, _) in reduces {
+                *max_nt = (*max_nt).max(nt as usize + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn recognition_quotient(table: &GLRTable) -> RecognizerQuotient {
+    let nstates = table.num_states as usize;
+    let nnts = table_nonterminal_capacity(table);
+    let mut state_class_of = vec![0u32; nstates];
+    let mut nt_class_of = vec![0u32; nnts];
+    let mut converged = false;
+
+    for _ in 0..recognition_quotient_max_iters() {
+        let (next_nt_class_of, _) = refine_recognizer_nt_partition(table, &state_class_of, nnts);
+        let (next_state_class_of, _) = refine_recognizer_state_partition(
+            table,
+            &state_class_of,
+            &next_nt_class_of,
+        );
+
+        if next_state_class_of == state_class_of && next_nt_class_of == nt_class_of {
+            converged = true;
+            break;
+        }
+
+        state_class_of = next_state_class_of;
+        nt_class_of = next_nt_class_of;
+    }
+
+    if !converged {
+        return identity_recognition_quotient(table, nnts);
+    }
+
+    // One final NT refinement with the fixed state partition gives canonical
+    // representatives that correspond exactly to the table we are about to emit.
+    let (nt_class_of, nt_representatives) = refine_recognizer_nt_partition(table, &state_class_of, nnts);
+    let state_representatives = representatives_for_partition(&state_class_of);
+
+    RecognizerQuotient {
+        state_class_of,
+        state_representatives,
+        nt_class_of,
+        nt_representatives,
+    }
+}
+
+fn identity_recognition_quotient(table: &GLRTable, nnts: usize) -> RecognizerQuotient {
+    RecognizerQuotient {
+        state_class_of: (0..table.num_states).collect(),
+        state_representatives: (0..table.num_states).collect(),
+        nt_class_of: (0..nnts as u32).collect(),
+        nt_representatives: (0..nnts as NonterminalID).collect(),
+    }
+}
+
+fn refine_recognizer_nt_partition(
+    table: &GLRTable,
+    state_class_of: &[u32],
+    nnts: usize,
+) -> (Vec<u32>, Vec<NonterminalID>) {
+    let mut signatures = Vec::with_capacity(nnts);
+    for nt in 0..nnts as NonterminalID {
+        let mut column = Vec::new();
+        for (state, row) in table.goto.iter().enumerate() {
+            if let Some(&(target, replace)) = row.get(&nt) {
+                column.push((state as u32, state_class_of[target as usize], replace));
+            }
+        }
+        signatures.push(RecognizerNtSig { column });
+    }
+    partition_with_representatives(signatures)
+}
+
+fn refine_recognizer_state_partition(
+    table: &GLRTable,
+    state_class_of: &[u32],
+    nt_class_of: &[u32],
+) -> (Vec<u32>, Vec<u32>) {
+    let has_advance_rows = table.advance.len() == table.num_states as usize;
+    let mut signatures = Vec::with_capacity(table.num_states as usize);
+
+    for state in 0..table.num_states as usize {
+        let mut action = table.action[state]
+            .iter()
+            .map(|(terminal, action)| {
+                (
+                    terminal,
+                    recognizer_action_sig(action, state_class_of, nt_class_of),
+                )
+            })
+            .collect::<Vec<_>>();
+        action.sort_unstable_by_key(|(terminal, _)| *terminal);
+
+        let mut goto = table.goto[state]
+            .iter()
+            .map(|(&nt, &(target, replace))| {
+                (
+                    nt_class_of.get(nt as usize).copied().unwrap_or(nt),
+                    state_class_of[target as usize],
+                    replace,
+                )
+            })
+            .collect::<Vec<_>>();
+        goto.sort_unstable();
+        goto.dedup();
+
+        signatures.push(RecognizerStateSig {
+            advance: has_advance_rows.then(|| table.advance[state].clone()),
+            action,
+            goto,
+        });
+    }
+
+    partition_with_representatives(signatures)
+}
+
+fn partition_with_representatives<T, R>(signatures: Vec<T>) -> (Vec<u32>, Vec<R>)
+where
+    T: Eq + Hash,
+    R: From<u32>,
+{
+    let mut sig_to_class: FxHashMap<T, u32> = FxHashMap::default();
+    let mut class_of = Vec::with_capacity(signatures.len());
+    let mut representatives = Vec::new();
+
+    for (idx, signature) in signatures.into_iter().enumerate() {
+        let class = match sig_to_class.get(&signature).copied() {
+            Some(class) => class,
+            None => {
+                let class = sig_to_class.len() as u32;
+                sig_to_class.insert(signature, class);
+                representatives.push(R::from(idx as u32));
+                class
+            }
+        };
+        class_of.push(class);
+    }
+
+    (class_of, representatives)
+}
+
+fn representatives_for_partition(partition: &[u32]) -> Vec<u32> {
+    let nclasses = partition.iter().copied().max().map(|class| class + 1).unwrap_or(0) as usize;
+    let mut reps = vec![u32::MAX; nclasses];
+    for (state, &class) in partition.iter().enumerate() {
+        let slot = &mut reps[class as usize];
+        if *slot == u32::MAX {
+            *slot = state as u32;
+        }
+    }
+    reps
+}
+
+fn recognizer_action_sig(
+    action: &Action,
+    state_class_of: &[u32],
+    nt_class_of: &[u32],
+) -> RecognizerActionSig {
+    match action {
+        Action::Shift(target, replace) => {
+            RecognizerActionSig::Shift(state_class_of[*target as usize], *replace)
+        }
+        Action::StackShifts(shifts) => {
+            let mut shifts = shifts
+                .iter()
+                .map(|shift| {
+                    (
+                        shift.pop,
+                        shift.pushes.iter().map(|&state| state_class_of[state as usize]).collect(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            shifts.sort_unstable();
+            shifts.dedup();
+            RecognizerActionSig::StackShifts(shifts)
+        }
+        Action::GuardedStackShifts(shifts) => {
+            let mut shifts = shifts
+                .iter()
+                .map(|shift| {
+                    let mut guards = shift
+                        .guards
+                        .iter()
+                        .map(|guard| {
+                            let mut states = guard
+                                .states
+                                .iter()
+                                .map(|&state| state_class_of[state as usize])
+                                .collect::<Vec<_>>();
+                            states.sort_unstable();
+                            states.dedup();
+                            (guard.pop, states)
+                        })
+                        .collect::<Vec<_>>();
+                    guards.sort_unstable();
+                    guards.dedup();
+                    let pushes = shift
+                        .pushes
+                        .iter()
+                        .map(|&state| state_class_of[state as usize])
+                        .collect::<Vec<_>>();
+                    (guards, shift.pop, pushes)
+                })
+                .collect::<Vec<_>>();
+            shifts.sort_unstable();
+            shifts.dedup();
+            RecognizerActionSig::GuardedStackShifts(shifts)
+        }
+        Action::Reduce(nt, len) => {
+            RecognizerActionSig::Reduce(nt_class_of.get(*nt as usize).copied().unwrap_or(*nt), *len)
+        }
+        Action::Split { shift, reduces, accept } => {
+            let shift = shift.map(|(target, replace)| (state_class_of[target as usize], replace));
+            let mut reduces = reduces
+                .iter()
+                .map(|&(nt, len)| (nt_class_of.get(nt as usize).copied().unwrap_or(nt), len))
+                .collect::<Vec<_>>();
+            reduces.sort_unstable();
+            reduces.dedup();
+            RecognizerActionSig::Split { shift, reduces, accept: *accept }
+        }
+        Action::Accept => RecognizerActionSig::Accept,
+    }
+}
+
+fn normalize_action_to_quotient(
+    action: &Action,
+    state_class_of: &[u32],
+    nt_class_of: &[u32],
+    nt_representatives: &[NonterminalID],
+) -> Option<Action> {
+    match action {
+        Action::Shift(target, replace) => Some(Action::Shift(state_class_of[*target as usize], *replace)),
+        Action::StackShifts(shifts) => {
+            let shifts = shifts
+                .iter()
+                .map(|shift| StackShift {
+                    pop: shift.pop,
+                    pushes: shift
+                        .pushes
+                        .iter()
+                        .map(|&state| state_class_of[state as usize])
+                        .collect(),
+                })
+                .collect();
+            stack_shift_action(shifts)
+        }
+        Action::GuardedStackShifts(shifts) => {
+            let mut shifts = shifts
+                .iter()
+                .map(|shift| GuardedStackShift {
+                    guards: shift
+                        .guards
+                        .iter()
+                        .map(|guard| {
+                            let mut states = guard
+                                .states
+                                .iter()
+                                .map(|&state| state_class_of[state as usize])
+                                .collect::<Vec<_>>();
+                            states.sort_unstable();
+                            states.dedup();
+                            StackShiftGuard { pop: guard.pop, states }
+                        })
+                        .collect(),
+                    pop: shift.pop,
+                    pushes: shift
+                        .pushes
+                        .iter()
+                        .map(|&state| state_class_of[state as usize])
+                        .collect(),
+                })
+                .collect::<Vec<_>>();
+            guarded_stack_shift_action(&mut shifts)
+        }
+        Action::Reduce(nt, len) => Some(Action::Reduce(
+            canonical_nt(*nt, nt_class_of, nt_representatives),
+            *len,
+        )),
+        Action::Split { shift, reduces, accept } => {
+            let shift = shift.map(|(target, replace)| (state_class_of[target as usize], replace));
+            let reduces = reduces
+                .iter()
+                .map(|&(nt, len)| (canonical_nt(nt, nt_class_of, nt_representatives), len))
+                .collect();
+            normalize_split_action(shift, reduces, *accept)
+        }
+        Action::Accept => Some(Action::Accept),
+    }
+}
+
+fn canonical_nt(
+    nt: NonterminalID,
+    nt_class_of: &[u32],
+    nt_representatives: &[NonterminalID],
+) -> NonterminalID {
+    nt_class_of
+        .get(nt as usize)
+        .and_then(|&class| nt_representatives.get(class as usize).copied())
+        .unwrap_or(nt)
+}
+
+fn normalize_split_action(
+    shift: Option<(u32, bool)>,
+    reduces: Vec<(NonterminalID, u32)>,
+    accept: bool,
+) -> Option<Action> {
+    PendingAction { shift, reduces, accept }.maybe_finish()
+}
+
+fn guarded_stack_shift_action(shifts: &mut Vec<GuardedStackShift>) -> Option<Action> {
+    normalize_guarded_effects(shifts);
+    if shifts.is_empty() {
+        return None;
+    }
+
+    if shifts.iter().all(|shift| shift.guards.is_empty()) {
+        let shifts = shifts
+            .drain(..)
+            .map(|shift| StackShift {
+                pop: shift.pop,
+                pushes: shift.pushes,
+            })
+            .collect();
+        return stack_shift_action(shifts);
+    }
+
+    Some(Action::GuardedStackShifts(std::mem::take(shifts)))
 }
 
 fn push_reachable_state(state: u32, reachable: &mut [bool], stack: &mut Vec<u32>) {
@@ -2642,122 +2728,146 @@ mod tests {
     }
 
     #[test]
-    fn suffix_quotient_collapses_same_pop_stack_shift_fanout() {
-        let token0 = 0;
-        let token1 = 1;
-        let mut action = vec![ActionRow::default(); 8];
-        action[0].insert(
-            token0,
-            Action::StackShifts(vec![
-                StackShift {
-                    pop: 1,
-                    pushes: vec![1, 2],
-                },
-                StackShift {
-                    pop: 1,
-                    pushes: vec![3, 4],
-                },
-            ]),
-        );
-        action[2].insert(
-            token1,
-            Action::StackShifts(vec![
-                StackShift {
-                    pop: 1,
-                    pushes: vec![5],
-                },
-                StackShift {
-                    pop: 2,
-                    pushes: vec![6],
-                },
-            ]),
-        );
-        action[4].insert(
-            token1,
-            Action::StackShifts(vec![StackShift {
-                pop: 2,
-                pushes: vec![7],
-            }]),
+    fn recognition_quotient_collapses_equivalent_stack_shift_fanout() {
+        let token = 0;
+        let next = 1;
+        let mut table = crate::compiler::glr::table::testing::build_test_table(
+            7,
+            2,
+            &[
+                &[(
+                    token,
+                    Action::StackShifts(vec![
+                        StackShift { pop: 1, pushes: vec![1, 3] },
+                        StackShift { pop: 1, pushes: vec![2, 4] },
+                    ]),
+                )],
+                &[],
+                &[],
+                &[(next, Action::Shift(5, false))],
+                &[(next, Action::Shift(6, false))],
+                &[(next, Action::Accept)],
+                &[(next, Action::Accept)],
+            ],
+            &[&[], &[], &[], &[], &[], &[], &[]],
         );
 
-        let mut table = GLRTable {
-            action,
-            goto: vec![GotoRow::default(); 8],
-            num_states: 8,
-            num_terminals: 2,
-            num_rules: 0,
-            rules: Vec::new(),
-            nonterminal_display_names: Vec::new(),
-            advance: Vec::new(),
-            forwarded_shifts: FxHashSet::default(),
-        };
-        table.rebuild_advance_rows_from_actions();
+        assert!(table.has_ambiguity());
+        table.eliminate_recognition_equivalent_ambiguity();
 
-        table.quotient_recognizer_stack_suffixes();
-
-        assert!(matches!(table.action(0, token0), Some(Action::Shift(_, true))));
-        assert!(
-            table.ambiguous_actions().is_empty(),
-            "{:#?}",
-            table.ambiguous_actions()
-        );
+        assert!(!table.has_ambiguity(), "quotient should deduplicate equivalent stack effects");
+        match table.action(0, token).expect("state 0 token action") {
+            Action::StackShifts(shifts) => {
+                assert_eq!(shifts.len(), 1);
+                assert_eq!(shifts[0].pop, 1);
+                assert_eq!(shifts[0].pushes.len(), 2);
+            }
+            action => panic!("expected one normalized stack-shift effect, got {action:?}"),
+        }
     }
 
     #[test]
-    fn suffix_quotient_preserves_guarded_stack_shift_guards() {
+    fn recognition_quotient_is_guard_aware() {
         let token = 0;
-        let guard = StackShiftGuard {
-            pop: 1,
-            states: vec![9],
-        };
-        let mut action = vec![ActionRow::default(); 12];
-        action[0].insert(
-            token,
-            Action::GuardedStackShifts(vec![
-                GuardedStackShift {
-                    guards: vec![guard.clone()],
-                    pop: 1,
-                    pushes: vec![1, 2],
-                },
-                GuardedStackShift {
-                    guards: vec![guard.clone()],
-                    pop: 1,
-                    pushes: vec![3, 4],
-                },
-            ]),
+        let next = 1;
+        let mut table = crate::compiler::glr::table::testing::build_test_table(
+            7,
+            2,
+            &[
+                &[(
+                    token,
+                    Action::GuardedStackShifts(vec![
+                        GuardedStackShift {
+                            guards: vec![StackShiftGuard { pop: 1, states: vec![1] }],
+                            pop: 1,
+                            pushes: vec![3],
+                        },
+                        GuardedStackShift {
+                            guards: vec![StackShiftGuard { pop: 1, states: vec![2] }],
+                            pop: 1,
+                            pushes: vec![4],
+                        },
+                    ]),
+                )],
+                &[],
+                &[],
+                &[(next, Action::Shift(5, false))],
+                &[(next, Action::Shift(6, false))],
+                &[(next, Action::Accept)],
+                &[(next, Action::Accept)],
+            ],
+            &[&[], &[], &[], &[], &[], &[], &[]],
         );
 
-        let mut table = GLRTable {
-            action,
-            goto: vec![GotoRow::default(); 12],
-            num_states: 12,
-            num_terminals: 1,
-            num_rules: 0,
-            rules: Vec::new(),
-            nonterminal_display_names: Vec::new(),
-            advance: Vec::new(),
-            forwarded_shifts: FxHashSet::default(),
-        };
-        table.rebuild_advance_rows_from_actions();
+        table.eliminate_recognition_equivalent_ambiguity();
 
-        table.quotient_recognizer_stack_suffixes();
-
-        let Some(Action::GuardedStackShifts(shifts)) = table.action(0, token) else {
-            panic!("expected one guarded stack-shift action");
-        };
-        assert_eq!(shifts.len(), 1);
-        assert_eq!(shifts[0].guards.len(), 1);
-        assert_eq!(shifts[0].guards[0].pop, guard.pop);
-        assert!(!shifts[0].guards[0].states.is_empty());
-        assert_eq!(shifts[0].pop, 1);
-        assert_eq!(shifts[0].pushes.len(), 1);
-        assert!(
-            table.ambiguous_actions().is_empty(),
-            "{:#?}",
-            table.ambiguous_actions()
-        );
+        assert!(!table.has_ambiguity(), "guarded alternatives that differ only by quotient-equivalent states should merge");
+        match table.action(0, token).expect("state 0 token action") {
+            Action::GuardedStackShifts(shifts) => {
+                assert_eq!(shifts.len(), 1);
+                assert_eq!(shifts[0].guards.len(), 1);
+                assert_eq!(shifts[0].guards[0].states.len(), 1);
+            }
+            action => panic!("expected one normalized guarded stack-shift effect, got {action:?}"),
+        }
     }
-}
+
+    #[test]
+    fn recognition_quotient_collapses_split_reduces_with_equivalent_goto_columns() {
+        let token = 0;
+        let nt_a = 10;
+        let nt_b = 11;
+        let mut table = crate::compiler::glr::table::testing::build_test_table(
+            4,
+            1,
+            &[
+                &[(
+                    token,
+                    Action::Split {
+                        shift: None,
+                        reduces: vec![(nt_a, 1), (nt_b, 1)],
+                        accept: false,
+                    },
+                )],
+                &[],
+                &[(token, Action::Accept)],
+                &[(token, Action::Accept)],
+            ],
+            &[&[], &[(nt_a, (2, false)), (nt_b, (3, false))], &[], &[]],
+        );
+
+        assert!(table.has_ambiguity());
+        table.eliminate_recognition_equivalent_ambiguity();
+
+        assert!(!table.has_ambiguity());
+        assert!(matches!(table.action(0, token), Some(Action::Reduce(_, 1))));
+    }
+
+    #[test]
+    fn recognition_quotient_is_idempotent_on_normalized_tables() {
+        let token = 0;
+        let mut table = crate::compiler::glr::table::testing::build_test_table(
+            3,
+            1,
+            &[
+                &[(token, Action::Shift(1, false))],
+                &[(token, Action::Shift(2, true))],
+                &[(token, Action::Accept)],
+            ],
+            &[&[], &[], &[]],
+        );
+
+        table.eliminate_recognition_equivalent_ambiguity();
+        let states = table.num_states;
+        let actions = table.action.clone();
+        let gotos = table.goto.clone();
+        table.eliminate_recognition_equivalent_ambiguity();
+
+        assert_eq!(table.num_states, states);
+        assert_eq!(table.action, actions);
+        assert_eq!(table.goto, gotos);
+    }
+  }
 
 fn try_inline_unit_reductions_for_cell(
     table: &mut GLRTable,
@@ -2911,18 +3021,17 @@ fn remap_action_targets(action: &Action, mapping: &[u32]) -> Action {
     match action {
         Action::Shift(target, replace) => Action::Shift(mapping[*target as usize], *replace),
         Action::StackShifts(shifts) => {
-            let mut remapped = shifts
+            let remapped = shifts
                 .iter()
                 .map(|shift| StackShift {
                     pop: shift.pop,
                     pushes: shift.pushes.iter().map(|&state| mapping[state as usize]).collect(),
                 })
                 .collect();
-            normalize_stack_shifts(&mut remapped);
-            Action::StackShifts(remapped)
+            stack_shift_action(remapped).expect("remapping a non-empty stack-shift action should stay non-empty")
         }
-        Action::GuardedStackShifts(shifts) => Action::GuardedStackShifts(
-            shifts
+        Action::GuardedStackShifts(shifts) => {
+            let mut remapped = shifts
                 .iter()
                 .map(|shift| GuardedStackShift {
                     guards: shift
@@ -2945,8 +3054,10 @@ fn remap_action_targets(action: &Action, mapping: &[u32]) -> Action {
                     pop: shift.pop,
                     pushes: shift.pushes.iter().map(|&state| mapping[state as usize]).collect(),
                 })
-                .collect(),
-        ),
+                .collect();
+            guarded_stack_shift_action(&mut remapped)
+                .expect("remapping a non-empty guarded stack-shift action should stay non-empty")
+        }
         Action::Reduce(nt, len) => Action::Reduce(*nt, *len),
         Action::Split {
             shift,

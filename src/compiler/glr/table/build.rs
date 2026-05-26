@@ -53,12 +53,19 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     let merge_identical2_ms = merge2_started_at.elapsed().as_secs_f64() * 1000.0;
     let merge_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
+    let quotient_pre_states = table.num_states;
+    let quotient_pre_action_cells = table.action_cell_count();
+    let quotient_pre_ambiguities = table.ambiguous_actions().len();
+    let quotient_started_at = std::time::Instant::now();
+    table.eliminate_recognition_equivalent_ambiguity();
+    let quotient_ms = quotient_started_at.elapsed().as_secs_f64() * 1000.0;
+    let quotient_post_states = table.num_states;
+    let quotient_post_action_cells = table.action_cell_count();
+    let quotient_post_ambiguities = table.ambiguous_actions().len();
+
     let t3 = std::time::Instant::now();
-    // The downstream parser and template builders already merge equivalent
-    // artifacts. Running the recognizer-only equivalence pass here costs more
-    // on large schemas than it saves in later phases.
     table.canonicalize_stack_shift_predecessors();
-    table.quotient_recognizer_stack_suffixes();
+    table.eliminate_recognition_equivalent_ambiguity();
     let recog_ms = t3.elapsed().as_secs_f64() * 1000.0;
     let _ = (
         lr1_ms,
@@ -69,6 +76,13 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
         unit_collapse_ms,
         prune_ms,
         merge_identical2_ms,
+        quotient_pre_states,
+        quotient_pre_action_cells,
+        quotient_pre_ambiguities,
+        quotient_ms,
+        quotient_post_states,
+        quotient_post_action_cells,
+        quotient_post_ambiguities,
         recog_ms,
         item_sets,
     );
@@ -81,7 +95,7 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
     {
         eprintln!(
-            "[glrmask/profile][glr_table] lr1_item_sets_ms={:.3} ielr_ms={:.3} pre_merge_states={} post_merge_states={} unit_collapse={} merge_ms={:.3} merge_identical1_ms={:.3} unit_collapse_ms={:.3} prune_ms={:.3} merge_identical2_ms={:.3} stack_shift_canon_ms={:.3}",
+            "[glrmask/profile][glr_table] lr1_item_sets_ms={:.3} ielr_ms={:.3} pre_merge_states={} post_merge_states={} unit_collapse={} merge_ms={:.3} merge_identical1_ms={:.3} unit_collapse_ms={:.3} prune_ms={:.3} merge_identical2_ms={:.3} quotient_ms={:.3} quotient_states={}->{} quotient_action_cells={}->{} quotient_ambiguities={}->{} stack_shift_canon_ms={:.3}",
             lr1_ms,
             ielr_ms,
             pre_merge_states,
@@ -92,6 +106,13 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
             unit_collapse_ms,
             prune_ms,
             merge_identical2_ms,
+            quotient_ms,
+            quotient_pre_states,
+            quotient_post_states,
+            quotient_pre_action_cells,
+            quotient_post_action_cells,
+            quotient_pre_ambiguities,
+            quotient_post_ambiguities,
             recog_ms,
         );
     }
