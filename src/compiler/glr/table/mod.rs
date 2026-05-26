@@ -200,6 +200,125 @@ impl GLRTable {
             .and_then(|by_nt| by_nt.get(&nt).copied())
     }
 
+    pub(super) fn validate_structure(&self, context: &str) {
+        let expected_len = self.num_states as usize;
+        if self.action.len() != expected_len {
+            panic!(
+                "{context}: action row count {} does not match num_states {}",
+                self.action.len(),
+                self.num_states,
+            );
+        }
+        if self.goto.len() != expected_len {
+            panic!(
+                "{context}: goto row count {} does not match num_states {}",
+                self.goto.len(),
+                self.num_states,
+            );
+        }
+        if !self.advance.is_empty() && self.advance.len() != expected_len {
+            panic!(
+                "{context}: advance row count {} does not match num_states {}",
+                self.advance.len(),
+                self.num_states,
+            );
+        }
+
+        let validate_target = |source_state: u32,
+                               label_kind: &str,
+                               label_value: u32,
+                               path: &str,
+                               target: u32| {
+            if target >= self.num_states {
+                panic!(
+                    "{context}: state {} {} {} has invalid {} target {} >= num_states {}",
+                    source_state,
+                    label_kind,
+                    label_value,
+                    path,
+                    target,
+                    self.num_states,
+                );
+            }
+        };
+
+        for (source_state, row) in self.action.iter().enumerate() {
+            let source_state = source_state as u32;
+            for (terminal, action) in row.iter() {
+                match action {
+                    Action::Shift(target, _) => {
+                        validate_target(source_state, "terminal", terminal, "Action::Shift", *target);
+                    }
+                    Action::StackShifts(shifts) => {
+                        for (shift_idx, shift) in shifts.iter().enumerate() {
+                            for (push_idx, &target) in shift.pushes.iter().enumerate() {
+                                validate_target(
+                                    source_state,
+                                    "terminal",
+                                    terminal,
+                                    &format!("Action::StackShifts[{shift_idx}].pushes[{push_idx}]"),
+                                    target,
+                                );
+                            }
+                        }
+                    }
+                    Action::GuardedStackShifts(shifts) => {
+                        for (shift_idx, shift) in shifts.iter().enumerate() {
+                            for (guard_idx, guard) in shift.guards.iter().enumerate() {
+                                for (state_idx, &target) in guard.states.iter().enumerate() {
+                                    validate_target(
+                                        source_state,
+                                        "terminal",
+                                        terminal,
+                                        &format!("Action::GuardedStackShifts[{shift_idx}].guards[{guard_idx}].states[{state_idx}]"),
+                                        target,
+                                    );
+                                }
+                            }
+                            for (push_idx, &target) in shift.pushes.iter().enumerate() {
+                                validate_target(
+                                    source_state,
+                                    "terminal",
+                                    terminal,
+                                    &format!("Action::GuardedStackShifts[{shift_idx}].pushes[{push_idx}]"),
+                                    target,
+                                );
+                            }
+                        }
+                    }
+                    Action::Split { shift: Some((target, _)), .. } => {
+                        validate_target(
+                            source_state,
+                            "terminal",
+                            terminal,
+                            "Action::Split.shift",
+                            *target,
+                        );
+                    }
+                    Action::Split { shift: None, .. } | Action::Reduce(..) | Action::Accept => {}
+                }
+            }
+        }
+
+        for (source_state, row) in self.goto.iter().enumerate() {
+            let source_state = source_state as u32;
+            for (&nonterminal, &(target, _)) in row.iter() {
+                validate_target(source_state, "nonterminal", nonterminal, "goto", target);
+            }
+        }
+
+        for &(state, terminal) in &self.forwarded_shifts {
+            if state >= self.num_states {
+                panic!(
+                    "{context}: forwarded_shifts has invalid state {} for terminal {} >= num_states {}",
+                    state,
+                    terminal,
+                    self.num_states,
+                );
+            }
+        }
+    }
+
     #[inline]
     pub fn nonterminal_display_name(&self, nt: NonterminalID) -> Option<&str> {
         self.nonterminal_display_names
@@ -340,5 +459,19 @@ mod ambiguity_tests {
         assert_eq!(ambiguities[1].alternatives, 2);
         assert_eq!(ambiguities[2].kind, TableAmbiguityKind::GuardedStackShifts);
         assert_eq!(ambiguities[2].alternatives, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "validator test action target")]
+    fn validate_structure_panics_on_invalid_action_target() {
+        let token = 0;
+        let table = build_test_table(
+            2,
+            1,
+            &[&[(token, Action::Shift(2, false))], &[]],
+            &[&[], &[]],
+        );
+
+        table.validate_structure("validator test action target");
     }
 }

@@ -853,8 +853,10 @@ impl GLRTable {
 
         if changed || quotient.created_states > 0 {
             self.extend_advance_rows_from_actions();
+            self.validate_structure("recognizer suffix quotient before prune");
             self.prune_unreachable_states();
             self.merge_identical_rows();
+            self.validate_structure("recognizer suffix quotient after merge");
         }
     }
 }
@@ -990,8 +992,10 @@ impl SuffixQuotient {
             return Err(());
         }
 
+        let rollback_state = table.num_states;
+        let rollback_created_states = self.created_states;
         let had_advance_rows = table.advance.len() == table.num_states as usize;
-        let state = table.num_states;
+        let state = rollback_state;
         table.num_states += 1;
         table.action.push(ActionRow::default());
         table.goto.push(GotoRow::default());
@@ -1019,15 +1023,15 @@ impl SuffixQuotient {
                 Ok(state)
             }
             Err(()) => {
-                self.suffix_to_state.remove(&suffixes);
-                self.failed_suffixes.insert(suffixes);
-                table.action.pop();
-                table.goto.pop();
+                self.suffix_to_state.retain(|_, mapped_state| *mapped_state < rollback_state);
+                table.action.truncate(rollback_state as usize);
+                table.goto.truncate(rollback_state as usize);
                 if had_advance_rows {
-                    table.advance.pop();
+                    table.advance.truncate(rollback_state as usize);
                 }
-                table.num_states -= 1;
-                self.created_states -= 1;
+                table.num_states = rollback_state;
+                self.created_states = rollback_created_states;
+                self.failed_suffixes.insert(suffixes);
                 Err(())
             }
         }
@@ -2758,6 +2762,59 @@ mod tests {
             table.ambiguous_actions().is_empty(),
             "{:#?}",
             table.ambiguous_actions()
+        );
+    }
+
+    #[test]
+    fn suffix_quotient_rolls_back_nested_created_states_on_outer_failure() {
+        let outer_suffixes = vec![vec![10, 1], vec![10, 2]];
+
+        let mut table = GLRTable {
+            action: vec![ActionRow::default(); 11],
+            goto: vec![GotoRow::default(); 11],
+            num_states: 11,
+            num_terminals: 0,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            advance: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+        };
+        table.goto[1].insert(0, (3, false));
+        table.goto[2].insert(0, (4, false));
+        table.goto[1].insert(1, (5, false));
+        table.goto[2].insert(1, (6, false));
+        table.rebuild_advance_rows_from_actions();
+
+        let original_num_states = table.num_states;
+        let original_action_len = table.action.len();
+        let original_goto_len = table.goto.len();
+        let original_advance_len = table.advance.len();
+
+        let mut quotient = SuffixQuotient {
+            suffix_to_state: FxHashMap::default(),
+            failed_suffixes: FxHashSet::default(),
+            max_states: 2,
+            max_alts: 8,
+            max_width: 8,
+            created_states: 0,
+        };
+
+        assert_eq!(
+            quotient.ensure_suffix_state(&mut table, outer_suffixes.clone()),
+            Err(())
+        );
+        assert_eq!(table.num_states, original_num_states);
+        assert_eq!(table.action.len(), original_action_len);
+        assert_eq!(table.goto.len(), original_goto_len);
+        assert_eq!(table.advance.len(), original_advance_len);
+        assert_eq!(quotient.created_states, 0);
+        assert!(quotient.failed_suffixes.contains(&outer_suffixes));
+        assert!(
+            quotient
+                .suffix_to_state
+                .values()
+                .all(|&state| state < original_num_states)
         );
     }
 }
