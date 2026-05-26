@@ -45,3 +45,7 @@ harness = false
 [[bench]]
 name = "cfa_sweep_schema_build_multithreaded"
 harness = false
+
+[[bench]]
+name = "bounded_string_array_close"
+harness = false
