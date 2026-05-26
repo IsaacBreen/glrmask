@@ -825,16 +825,25 @@ fn decoded_string_patterns_are_matched_against_json_string_bodies() {
 }
 
 #[test]
-fn uuid_format_is_ignored_as_annotation() {
+fn uuid_format_lowers_to_constrained_terminal() {
     let schema = json!({
         "type": "string",
         "format": "uuid"
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(
+        grammar
+            .rules
+            .iter()
+            .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
+        "{:?}",
+        grammar.rules
+    );
+    assert!(!contains_ref_named(start_expr(&grammar), "JSON_STRING"));
+
     let glrm = to_glrm(&grammar);
-    assert!(!glrm.contains("[0-9A-Fa-f]{8}"), "{glrm}");
-    assert!(glrm.contains("JSON_STRING"), "{glrm}");
+    assert!(glrm.contains("[0-9A-Fa-f]{8}"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -1128,6 +1137,21 @@ fn date_string_value_satisfaction_filters_invalid_literals() {
     };
 
     assert!(string_value_satisfies_schema(&json!("2024-05-01"), &schema).unwrap());
+    assert!(!string_value_satisfies_schema(&json!("|"), &schema).unwrap());
+}
+
+#[test]
+fn uuid_string_value_satisfaction_filters_invalid_literals() {
+    let schema = StringSchema {
+        format: Some("uuid".to_string()),
+        ..Default::default()
+    };
+
+    assert!(string_value_satisfies_schema(
+        &json!("123e4567-e89b-12d3-a456-426614174000"),
+        &schema
+    )
+    .unwrap());
     assert!(!string_value_satisfies_schema(&json!("|"), &schema).unwrap());
 }
 
