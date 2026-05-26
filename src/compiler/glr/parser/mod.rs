@@ -2,7 +2,7 @@ use super::accumulator::TerminalsDisallowed;
 use super::analysis::EOF;
 use super::table::{Action, GLRTable, GuardedStackShift, StackShift, StackShiftGuard};
 use crate::ds::bitset::BitSet;
-use crate::ds::leveled_gss::{LeveledGSS, VirtualStack};
+use crate::ds::leveled_gss::{LeveledGSS, Merge, VirtualStack};
 use crate::grammar::flat::TerminalID;
 use smallvec::SmallVec;
 use std::sync::OnceLock;
@@ -441,6 +441,62 @@ fn try_advance_single_alt_pop1_common_suffix_stackshift_wave(
 
     let common_suffix = common_suffix?;
     Some(closure.apply_top_pure_shifts(per_state_prefixes).push(common_suffix))
+}
+
+fn try_advance_small_stackshift_wave_by_stacks(
+    table: &GLRTable,
+    closure: &ParserGSS,
+    token: TerminalID,
+) -> Option<ParserGSS> {
+    let states = closure.peek_values();
+    if !(2..=4).contains(&states.len()) {
+        return None;
+    }
+    if closure.path_count_at_most(5) > 4 || closure.max_depth() > 16 {
+        return None;
+    }
+
+    for state in states {
+        let Some(Action::StackShifts(_)) = table.action(state, token) else {
+            return None;
+        };
+    }
+
+    let stacks = closure.to_stacks();
+    let mut out: Vec<(Vec<u32>, TerminalsDisallowed)> = Vec::new();
+
+    for (stack, acc) in stacks {
+        let Some(&state) = stack.last() else {
+            continue;
+        };
+        let Some(Action::StackShifts(shifts)) = table.action(state, token) else {
+            return None;
+        };
+
+        for shift in shifts {
+            let pop = shift.pop as usize;
+            if pop > stack.len() {
+                continue;
+            }
+
+            let mut next = stack[..stack.len() - pop].to_vec();
+            next.extend_from_slice(&shift.pushes);
+
+            if let Some((_, existing_acc)) =
+                out.iter_mut().find(|(existing_stack, _)| *existing_stack == next)
+            {
+                *existing_acc = existing_acc.merge(&acc);
+            } else {
+                out.push((next, acc.clone()));
+            }
+        }
+    }
+
+    if out.is_empty() {
+        Some(ParserGSS::empty())
+    } else {
+        Some(ParserGSS::from_stacks(&out))
+    }
 }
 
 fn rebuild_floor_cross_from_shifts(
@@ -1165,6 +1221,28 @@ fn advance_nondeterministically_profiled(
             return shifted;
         }
 
+        if let Some(shifted_wave) =
+            try_advance_small_stackshift_wave_by_stacks(table, &closure, token)
+        {
+            if let Some(trace) = profile.trace.as_mut()
+                && let Some(wave) = trace.nondet_waves.last_mut()
+            {
+                for &state in &frontier_states {
+                    let branch_gss = closure.isolate(Some(state));
+                    wave.branches.push(trace_action_summary(
+                        table,
+                        state,
+                        &branch_gss,
+                        table.action(state, token),
+                    ));
+                }
+            }
+            profile.n_nondet_branches += frontier_states.len() as u32;
+            profile.n_nondet_merges += 1;
+            merge_into(&mut shifted, shifted_wave);
+            return shifted;
+        }
+
         let mut next = ParserGSS::empty();
 
         for state in frontier_states {
@@ -1280,6 +1358,13 @@ fn advance_nondeterministically(
     loop {
         if let Some(shifted_wave) =
             try_advance_single_alt_pop1_common_suffix_stackshift_wave(table, &closure, token)
+        {
+            merge_into(&mut shifted, shifted_wave);
+            return shifted;
+        }
+
+        if let Some(shifted_wave) =
+            try_advance_small_stackshift_wave_by_stacks(table, &closure, token)
         {
             merge_into(&mut shifted, shifted_wave);
             return shifted;
