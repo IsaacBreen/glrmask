@@ -426,6 +426,14 @@ impl PyConstraint {
     }
 
     #[staticmethod]
+    fn from_glrm_grammar(glrm_source: &str, vocab: &PyVocab) -> PyResult<Self> {
+        Self::from_constraint_result(
+            glrmask::Constraint::from_glrm_grammar(glrm_source, &vocab.inner),
+            vocab,
+        )
+    }
+
+    #[staticmethod]
     fn from_ebnf(ebnf_source: &str, vocab: &PyVocab) -> PyResult<Self> {
         Self::from_constraint_result(
             glrmask::Constraint::from_ebnf(ebnf_source, &vocab.inner),
