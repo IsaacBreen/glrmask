@@ -91,16 +91,23 @@ Ambiguity-classification requirement:
   the exact diagnosis, action representation, and proof target.
 
 MRE construction for ambiguity/TBM cases:
-- Prefer a schema MRE obtained from the exact CFA schema that produced the slow
-  step. Reduce by deleting/subsetting original schema material first: remove
-  unrelated root properties, anyOf branches, object properties, required entries,
-  enum entries, descriptions, bounds, and nested keys only when the same live
-  prefix/token oracle still reproduces. Do not invent a fresh ambiguous schema
-  or splice properties between unrelated original branches.
+- This is the primary workflow for JSON-schema TBM/TPM ambiguity work. Start
+  from the exact CFA schema that produced the slow step and reduce it by
+  deleting/subsetting original schema material only. Remove unrelated root
+  properties, anyOf branches, object properties, required entries, enum entries,
+  descriptions, bounds, and nested keys only when the same live prefix/token
+  oracle still reproduces. Do not invent a fresh ambiguous schema, add new
+  properties, rename fields, change values, or splice properties between
+  unrelated original branches. Invented MREs can reproduce a different ambiguity
+  and must not be used as proof for the original TBM fix.
 - Keep the oracle anchored to the original CFA problem/example/step: the same
   prefix tail, token bytes/id class, parser stack split, action kind, and
   nondeterministic wave counters. A smaller schema that merely has some
   ambiguity is not a valid TBM MRE if it changes the causal ambiguity class.
+- When practical, turn the reduced schema into a crate-level regression test
+  that asserts the same action/profile shape or equivalent parser-table oracle,
+  not just accepted strings. The test should fail on the original hot ambiguity
+  and pass only when the importer/runtime change removes that exact shape.
 - In the Rust MRE comment, state which CFA problem/example/step it came from and
   what was deleted. If the minimized schema contains surprising survivors or
   misspellings from the source schema, keep them unchanged and call out that
