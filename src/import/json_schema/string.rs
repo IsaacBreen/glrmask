@@ -84,13 +84,8 @@ impl<'a> Lowerer<'a> {
         &mut self,
         schema: &StringSchema,
     ) -> ImportResult<GrammarExpr> {
-        let base_schema = StringSchema {
-            min_length: schema.min_length,
-            max_length: schema.max_length,
-            pattern: None,
-            format: None,
-        };
-        let mut expr = self.lower_string_expr(&base_schema)?;
+        let body = self.string_body_for_length(schema.min_length, schema.max_length);
+        let mut expr = seq(vec![lit("\""), body, lit("\"")]);
         let mut constraints = Vec::new();
 
         if let Some(pattern) = &schema.pattern {
