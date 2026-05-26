@@ -126,6 +126,10 @@ impl<'a> ConstraintState<'a> {
         self.state.values().map(|gss| gss.path_count_at_most(limit)).sum::<usize>().min(limit)
     }
 
+    pub fn has_parser_ambiguity(&self) -> bool {
+        self.parser_path_count(2) > 1
+    }
+
     /// Return all flattened parser stacks for debugging.
     /// Each entry is (tokenizer_state, Vec<(stack_of_parser_states, disallowed_terminals)>).
     pub fn debug_parser_stacks(&self) -> Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)> {

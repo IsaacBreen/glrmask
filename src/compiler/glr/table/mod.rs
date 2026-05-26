@@ -58,6 +58,41 @@ pub struct GLRTable {
     pub forwarded_shifts: FxHashSet<(u32, TerminalID)>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TableAmbiguityKind {
+    Split,
+    StackShifts,
+    GuardedStackShifts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TableAmbiguity {
+    pub state: u32,
+    pub terminal: TerminalID,
+    pub kind: TableAmbiguityKind,
+    pub alternatives: usize,
+}
+
+fn action_ambiguity(action: &Action) -> Option<(TableAmbiguityKind, usize)> {
+    match action {
+        Action::Split {
+            shift,
+            reduces,
+            accept,
+        } => {
+            let alternatives = usize::from(shift.is_some()) + reduces.len() + usize::from(*accept);
+            (alternatives > 1).then_some((TableAmbiguityKind::Split, alternatives))
+        }
+        Action::StackShifts(shifts) => {
+            (shifts.len() > 1).then_some((TableAmbiguityKind::StackShifts, shifts.len()))
+        }
+        Action::GuardedStackShifts(shifts) => {
+            (shifts.len() > 1).then_some((TableAmbiguityKind::GuardedStackShifts, shifts.len()))
+        }
+        _ => None,
+    }
+}
+
 impl GLRTable {
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
         build_table(grammar)
@@ -132,6 +167,30 @@ impl GLRTable {
         self.action
             .get(state as usize)
             .and_then(|by_terminal| by_terminal.get(&terminal))
+    }
+
+    pub fn ambiguous_actions(&self) -> Vec<TableAmbiguity> {
+        let mut ambiguities = Vec::new();
+        for (state, row) in self.action.iter().enumerate() {
+            for (terminal, action) in row {
+                if let Some((kind, alternatives)) = action_ambiguity(action) {
+                    ambiguities.push(TableAmbiguity {
+                        state: state as u32,
+                        terminal,
+                        kind,
+                        alternatives,
+                    });
+                }
+            }
+        }
+        ambiguities
+    }
+
+    pub fn has_ambiguity(&self) -> bool {
+        self.action.iter().enumerate().any(|(_, row)| {
+            row.into_iter()
+                .any(|(_, action)| action_ambiguity(action).is_some())
+        })
     }
 
     #[inline]
@@ -216,5 +275,70 @@ pub(crate) mod testing {
             advance,
             forwarded_shifts: Default::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod ambiguity_tests {
+    use super::testing::build_test_table;
+    use super::{Action, GuardedStackShift, StackShift, TableAmbiguityKind};
+
+    #[test]
+    fn ambiguous_actions_reports_split_and_stack_shift_fanout() {
+        let token = 0;
+        let table = build_test_table(
+            4,
+            1,
+            &[
+                &[(token, Action::Shift(1, false))],
+                &[(
+                    token,
+                    Action::Split {
+                        shift: Some((2, false)),
+                        reduces: vec![(0, 1)],
+                        accept: false,
+                    },
+                )],
+                &[(
+                    token,
+                    Action::StackShifts(vec![
+                        StackShift {
+                            pop: 1,
+                            pushes: vec![2],
+                        },
+                        StackShift {
+                            pop: 2,
+                            pushes: vec![3],
+                        },
+                    ]),
+                )],
+                &[(
+                    token,
+                    Action::GuardedStackShifts(vec![
+                        GuardedStackShift {
+                            guards: Vec::new(),
+                            pop: 1,
+                            pushes: vec![2],
+                        },
+                        GuardedStackShift {
+                            guards: Vec::new(),
+                            pop: 1,
+                            pushes: vec![3],
+                        },
+                    ]),
+                )],
+            ],
+            &[&[], &[], &[], &[]],
+        );
+
+        let ambiguities = table.ambiguous_actions();
+        assert!(table.has_ambiguity());
+        assert_eq!(ambiguities.len(), 3);
+        assert_eq!(ambiguities[0].kind, TableAmbiguityKind::Split);
+        assert_eq!(ambiguities[0].alternatives, 2);
+        assert_eq!(ambiguities[1].kind, TableAmbiguityKind::StackShifts);
+        assert_eq!(ambiguities[1].alternatives, 2);
+        assert_eq!(ambiguities[2].kind, TableAmbiguityKind::GuardedStackShifts);
+        assert_eq!(ambiguities[2].alternatives, 2);
     }
 }

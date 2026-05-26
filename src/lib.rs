@@ -17,6 +17,7 @@ pub use ds::weight::{
     clear_weight_op_caches,
 };
 pub use error::{Error, GlrMaskError, Result};
+pub use compiler::glr::table::{TableAmbiguity, TableAmbiguityKind};
 pub use runtime::{
     AdvanceProfile,
     AdvanceTrace,

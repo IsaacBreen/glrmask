@@ -6,6 +6,7 @@ use rustc_hash::FxHashMap;
 use rayon::prelude::*;
 
 use crate::automata::weighted::dwa::DWA;
+use crate::compiler::glr::table::TableAmbiguity;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 
@@ -137,6 +138,14 @@ fn count_complement_subgroups(missing: u64, valid_mask: u64) -> (u32, u32, u32) 
 }
 
 impl Constraint {
+    pub fn table_ambiguous_actions(&self) -> Vec<TableAmbiguity> {
+        self.table.ambiguous_actions()
+    }
+
+    pub fn table_has_ambiguity(&self) -> bool {
+        self.table.has_ambiguity()
+    }
+
     pub fn terminal_display_names(&self) -> &[String] {
         &self.terminal_display_names
     }

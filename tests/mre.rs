@@ -78,6 +78,11 @@ fn chunk16_bounded_service_name_allows_spaces_token_after_open_quote() {
     let vocab = Vocab::new(vec![(0, vec![b' '; 24])], None);
 
     let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
+    let table_ambiguities = constraint.table_ambiguous_actions();
+    assert!(
+        table_ambiguities.is_empty(),
+        "table-level ambiguity should be eliminated before runtime: {table_ambiguities:#?}",
+    );
     let mut state = constraint.start();
     state.commit_bytes(prefix).unwrap();
 
@@ -125,6 +130,11 @@ fn minimized_sp343_separator_wave_matches_profile_oracle() {
     let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(prefix).unwrap();
+    assert!(
+        !state.has_parser_ambiguity(),
+        "parser ambiguity should be eliminated before runtime stack fanout: {:?}",
+        state.debug_parser_stacks(),
+    );
 
     assert!(token_allowed(&state.mask(), separator_token_id as usize));
     assert_eq!(state.parser_path_count(1_000_000), 2);
