@@ -2,7 +2,8 @@ use serde_json::json;
 use std::{env, ffi::OsString, sync::Mutex};
 
 use super::schema_to_named_grammar;
-use super::string::property_name_matches_pattern;
+use super::ast::StringSchema;
+use super::string::{property_name_matches_pattern, string_value_satisfies_schema};
 use super::lower_exact_subtractions_enabled;
 use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar};
 use crate::grammar::glrm::to_glrm;
@@ -824,7 +825,7 @@ fn decoded_string_patterns_are_matched_against_json_string_bodies() {
 }
 
 #[test]
-fn string_format_is_ignored_as_annotation() {
+fn uuid_format_is_ignored_as_annotation() {
     let schema = json!({
         "type": "string",
         "format": "uuid"
@@ -834,6 +835,30 @@ fn string_format_is_ignored_as_annotation() {
     let glrm = to_glrm(&grammar);
     assert!(!glrm.contains("[0-9A-Fa-f]{8}"), "{glrm}");
     assert!(glrm.contains("JSON_STRING"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn date_time_format_lowers_to_constrained_terminal() {
+    let schema = json!({
+        "type": "string",
+        "format": "date-time"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(
+        grammar
+            .rules
+            .iter()
+            .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
+        "{:?}",
+        grammar.rules
+    );
+    assert!(!contains_ref_named(start_expr(&grammar), "JSON_STRING"));
+
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("[Tt]"), "{glrm}");
+    assert!(glrm.contains("[+-]"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -1013,6 +1038,17 @@ fn unknown_format_is_ignored_as_annotation() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     lower(&grammar).unwrap();
+}
+
+#[test]
+fn date_time_string_value_satisfaction_filters_invalid_literals() {
+    let schema = StringSchema {
+        format: Some("date-time".to_string()),
+        ..Default::default()
+    };
+
+    assert!(string_value_satisfies_schema(&json!("2024-05-01T12:34:56Z"), &schema).unwrap());
+    assert!(!string_value_satisfies_schema(&json!("."), &schema).unwrap());
 }
 
 #[test]

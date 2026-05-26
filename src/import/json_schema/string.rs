@@ -20,7 +20,10 @@ impl<'a> Lowerer<'a> {
         let should_terminalize_length = schema.max_length.is_none_or(|max_length| {
             !self.should_split_bounded_string(schema.min_length, max_length)
         });
+        let has_recognized_format = schema.pattern.is_none()
+            && recognized_string_format_body_regex(schema.format.as_deref()).is_some();
         if schema.pattern.is_some()
+            || has_recognized_format
             || ((schema.min_length != 0 || schema.max_length.is_some()) && should_terminalize_length)
         {
             let expr = self.lower_constrained_string_terminal_expr(schema)?;
@@ -50,6 +53,8 @@ impl<'a> Lowerer<'a> {
 
         if let Some(pattern) = &schema.pattern {
             constraints.push(quoted_string_body_regex(&string_pattern_as_body_regex(pattern)?));
+        } else if let Some(format_body_regex) = recognized_string_format_body_regex(schema.format.as_deref()) {
+            constraints.push(quoted_string_body_regex(format_body_regex));
         }
 
         for (index, constraint) in constraints.into_iter().enumerate() {
@@ -639,6 +644,15 @@ fn quoted_string_body_regex(body_regex: &str) -> String {
     format!(r#""(?:{body_regex})""#)
 }
 
+fn recognized_string_format_body_regex(format: Option<&str>) -> Option<&'static str> {
+    match format {
+        Some("date-time") => Some(
+            r#"[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])[Tt]([01][0-9]|2[0-3]):[0-5][0-9]:([0-5][0-9]|60)(\.[0-9]+)?([Zz]|[+-]([01][0-9]|2[0-3]):[0-5][0-9])"#,
+        ),
+        _ => None,
+    }
+}
+
 fn pattern_key_colon_regex(pattern: &str) -> ImportResult<String> {
     let body = string_pattern_as_body_regex(pattern)?;
     Ok(format!(r#""{body}"(?:: )"#))
@@ -895,5 +909,17 @@ pub(crate) fn string_value_satisfies_schema(
             .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")));
     }
     let length = text.chars().count();
-    Ok(length >= schema.min_length && schema.max_length.is_none_or(|max| length <= max))
+    if length < schema.min_length || schema.max_length.is_some_and(|max| length > max) {
+        return Ok(false);
+    }
+    if let Some(format_body_regex) = recognized_string_format_body_regex(schema.format.as_deref()) {
+        let regex = Regex::new(&format!(r#"^(?:{format_body_regex})$"#)).map_err(|error| {
+            SchemaImportError::new(format!(
+                "invalid recognized string format regex {:?}: {error}",
+                schema.format
+            ))
+        })?;
+        return Ok(regex.is_match(text));
+    }
+    Ok(true)
 }
