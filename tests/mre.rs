@@ -38,6 +38,25 @@ fn token_allowed(mask: &[u32], id: usize) -> bool {
         .unwrap_or(false)
 }
 
+fn total_parser_stack_count(state: &glrmask::ConstraintState<'_>) -> usize {
+    state
+        .debug_parser_stacks()
+        .iter()
+        .map(|(_, stacks)| stacks.len())
+        .sum()
+}
+
+fn total_final_stack_count(stacks: &[(u32, Vec<Vec<u32>>)]) -> usize {
+    stacks.iter().map(|(_, stacks)| stacks.len()).sum()
+}
+
+fn byte_vocab_with_separator_token() -> (Vocab, u32) {
+    let mut entries: Vec<(u32, Vec<u8>)> = (0u32..=255).map(|byte| (byte, vec![byte as u8])).collect();
+    let separator_token_id = 256;
+    entries.push((separator_token_id, b" \"".to_vec()));
+    (Vocab::new(entries, None), separator_token_id)
+}
+
 #[test]
 fn chunk16_bounded_service_name_allows_spaces_token_after_open_quote() {
     let _lock = ENV_LOCK.lock().unwrap();
@@ -64,4 +83,77 @@ fn chunk16_bounded_service_name_allows_spaces_token_after_open_quote() {
 
     assert!(token_allowed(&state.mask(), 0));
     state.commit_token(0).unwrap();
+}
+
+#[test]
+fn minimized_sp343_separator_wave_matches_profile_oracle() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _trace = EnvVarGuard::set("GLRMASK_PROFILE_ADVANCE_TRACE", "1");
+
+    let schema = r#"{
+        "properties": {
+            "failure": {
+                "properties": {
+                    "messages": {
+                        "items": {
+                            "anyOf": [
+                                {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                        "error": { "type": "string" },
+                                        "field": {}
+                                    },
+                                    "required": ["field"]
+                                },
+                                {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                        "error": {},
+                                        "schemaKey": {}
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+    }"#;
+    let prefix = b"{\"failure\": {\"messages\": [{\"error\": \"Json parsing issue\",";
+    let (vocab, separator_token_id) = byte_vocab_with_separator_token();
+
+    let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_bytes(prefix).unwrap();
+
+    assert!(token_allowed(&state.mask(), separator_token_id as usize));
+    assert_eq!(state.parser_path_count(1_000_000), 2);
+    assert_eq!(total_parser_stack_count(&state), 2);
+
+    let (advances, final_stacks, commit_profile) = state.commit_token_per_advance(separator_token_id).unwrap();
+
+    assert_eq!(advances.len(), 1);
+    assert_eq!(commit_profile.n_advances, 1);
+    assert_eq!(commit_profile.adv_det_exit_reason, 6);
+    assert_eq!(commit_profile.adv_n_nondet_waves, 1);
+    assert_eq!(commit_profile.adv_n_nondet_reduce_ops, 0);
+    assert_eq!(commit_profile.adv_n_nondet_merges, 2);
+    assert_eq!(commit_profile.adv_n_nondet_isolates, 2);
+
+    let advance = &advances[0];
+    assert_eq!(advance.profile.det_exit_reason, 6);
+    assert_eq!(advance.profile.n_nondet_waves, 1);
+    assert_eq!(advance.profile.n_nondet_reduce_ops, 0);
+    assert_eq!(advance.profile.n_nondet_merges, 2);
+    assert_eq!(advance.profile.n_nondet_isolates, 2);
+    assert_eq!(advance.gss_stacks_before.len(), 2);
+    assert_eq!(advance.gss_stacks_after.len(), 3);
+    assert_eq!(total_final_stack_count(&final_stacks), 3);
+
+    let trace = advance.profile.trace.as_ref().expect("advance trace should be enabled for this test");
+    assert_eq!(trace.nondet_waves.len(), 1);
+    let wave = &trace.nondet_waves[0];
+    assert_eq!(wave.frontier_states.len(), 2);
+    assert_eq!(wave.branches.len(), 2);
+    assert!(wave.branches.iter().all(|branch| branch.action_kind == "stack-shifts"));
 }
