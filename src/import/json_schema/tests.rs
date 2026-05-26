@@ -863,6 +863,29 @@ fn date_time_format_lowers_to_constrained_terminal() {
 }
 
 #[test]
+fn date_format_lowers_to_constrained_terminal() {
+    let schema = json!({
+        "type": "string",
+        "format": "date"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(
+        grammar
+            .rules
+            .iter()
+            .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
+        "{:?}",
+        grammar.rules
+    );
+    assert!(!contains_ref_named(start_expr(&grammar), "JSON_STRING"));
+
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("1[0-2]"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn email_format_lowers_to_constrained_terminal() {
     let schema = json!({
         "type": "string",
@@ -1072,6 +1095,17 @@ fn date_time_string_value_satisfaction_filters_invalid_literals() {
 
     assert!(string_value_satisfies_schema(&json!("2024-05-01T12:34:56Z"), &schema).unwrap());
     assert!(!string_value_satisfies_schema(&json!("."), &schema).unwrap());
+}
+
+#[test]
+fn date_string_value_satisfaction_filters_invalid_literals() {
+    let schema = StringSchema {
+        format: Some("date".to_string()),
+        ..Default::default()
+    };
+
+    assert!(string_value_satisfies_schema(&json!("2024-05-01"), &schema).unwrap());
+    assert!(!string_value_satisfies_schema(&json!("|"), &schema).unwrap());
 }
 
 #[test]
