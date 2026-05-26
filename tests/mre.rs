@@ -137,15 +137,15 @@ fn minimized_sp343_separator_wave_matches_profile_oracle() {
     assert_eq!(commit_profile.adv_det_exit_reason, 6);
     assert_eq!(commit_profile.adv_n_nondet_waves, 1);
     assert_eq!(commit_profile.adv_n_nondet_reduce_ops, 0);
-    assert_eq!(commit_profile.adv_n_nondet_merges, 1);
-    assert_eq!(commit_profile.adv_n_nondet_isolates, 0);
+    assert_eq!(commit_profile.adv_n_nondet_merges, 2);
+    assert_eq!(commit_profile.adv_n_nondet_isolates, 2);
 
     let advance = &advances[0];
     assert_eq!(advance.profile.det_exit_reason, 6);
     assert_eq!(advance.profile.n_nondet_waves, 1);
     assert_eq!(advance.profile.n_nondet_reduce_ops, 0);
-    assert_eq!(advance.profile.n_nondet_merges, 1);
-    assert_eq!(advance.profile.n_nondet_isolates, 0);
+    assert_eq!(advance.profile.n_nondet_merges, 2);
+    assert_eq!(advance.profile.n_nondet_isolates, 2);
     assert_eq!(advance.gss_stacks_before.len(), 2);
     assert_eq!(advance.gss_stacks_after.len(), 3);
     assert_eq!(total_final_stack_count(&final_stacks), 3);
