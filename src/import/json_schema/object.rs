@@ -798,6 +798,7 @@ impl<'a> Lowerer<'a> {
             (
                 &merged_object,
                 assertions.types.is_none()
+                    && !all_of_has_explicit_object_only_type(&assertions.all_of)
                     && !assertions
                         .all_of
                         .iter()
@@ -876,6 +877,7 @@ impl<'a> Lowerer<'a> {
             (
                 &merged_object,
                 assertions.types.is_none()
+                    && !all_of_has_explicit_object_only_type(&assertions.all_of)
                     && !assertions
                         .all_of
                         .iter()
@@ -1992,6 +1994,24 @@ fn is_ref_string_open_object_branch(schema: &Schema) -> bool {
     }
 
     is_string_schema(&object.properties[0].schema)
+}
+
+fn all_of_has_explicit_object_only_type(branches: &[Schema]) -> bool {
+    branches.iter().any(schema_has_explicit_object_only_type)
+}
+
+fn schema_has_explicit_object_only_type(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return false;
+    };
+    if assertions
+        .types
+        .as_ref()
+        .is_some_and(|types| types.iter().all(|schema_type| *schema_type == SchemaType::Object))
+    {
+        return true;
+    }
+    all_of_has_explicit_object_only_type(&assertions.all_of)
 }
 
 fn is_plain_array_branch(schema: &Schema) -> bool {

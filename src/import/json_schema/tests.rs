@@ -1445,6 +1445,31 @@ fn anyof_required_property_object_factors_into_single_expr_nfa_body() {
 }
 
 #[test]
+fn anyof_required_sets_with_object_sibling_type_do_not_allow_non_objects() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"},
+            "layerType": {"enum": ["KML"], "type": "string"},
+            "path": {"pattern": "^file:.+\\.km[lz]$", "type": "string"},
+            "title": {"type": "string"},
+            "url": {"type": "string"}
+        },
+        "additionalProperties": false,
+        "anyOf": [
+            {"required": ["id", "layerType", "title", "url"]},
+            {"required": ["id", "layerType", "path", "title"]}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!contains_ref_named(start_expr(&grammar), "JSON_BOOL"));
+    assert!(!contains_ref_named(start_expr(&grammar), "JSON_NULL"));
+
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn anyof_closed_object_variants_factor_into_single_expr_nfa_body() {
     let schema = json!({
         "anyOf": [
