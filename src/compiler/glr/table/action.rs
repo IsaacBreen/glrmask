@@ -16,7 +16,7 @@ pub struct StackShiftGuard {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct GuardedStackShift {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub guards: Vec<StackShiftGuard>,
     pub pop: u32,
     pub pushes: Vec<u32>,
@@ -106,5 +106,34 @@ impl Action {
             Action::Split { reduces, .. } => reduces.len(),
             _ => 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Action, GuardedStackShift, StackShiftGuard};
+
+    #[test]
+    fn guarded_stack_shifts_bincode_roundtrip_preserves_empty_guards() {
+        let action = Action::GuardedStackShifts(vec![
+            GuardedStackShift {
+                guards: Vec::new(),
+                pop: 0,
+                pushes: vec![1],
+            },
+            GuardedStackShift {
+                guards: vec![StackShiftGuard {
+                    pop: 1,
+                    states: vec![2],
+                }],
+                pop: 1,
+                pushes: vec![3],
+            },
+        ]);
+
+        let bytes = bincode::serialize(&action).expect("serialization should succeed");
+        let decoded: Action = bincode::deserialize(&bytes).expect("deserialization should succeed");
+
+        assert_eq!(decoded, action);
     }
 }
