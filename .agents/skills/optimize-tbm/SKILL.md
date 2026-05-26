@@ -76,6 +76,22 @@ Ambiguity-classification requirement:
   before delegating implementation. Workers can gather logs, but the lead owns
   the exact diagnosis, action representation, and proof target.
 
+MRE construction for ambiguity/TBM cases:
+- Prefer a schema MRE obtained from the exact CFA schema that produced the slow
+  step. Reduce by deleting/subsetting original schema material first: remove
+  unrelated root properties, anyOf branches, object properties, required entries,
+  enum entries, descriptions, bounds, and nested keys only when the same live
+  prefix/token oracle still reproduces. Do not invent a fresh ambiguous schema
+  or splice properties between unrelated original branches.
+- Keep the oracle anchored to the original CFA problem/example/step: the same
+  prefix tail, token bytes/id class, parser stack split, action kind, and
+  nondeterministic wave counters. A smaller schema that merely has some
+  ambiguity is not a valid TBM MRE if it changes the causal ambiguity class.
+- In the Rust MRE comment, state which CFA problem/example/step it came from and
+  what was deleted. If the minimized schema contains surprising survivors or
+  misspellings from the source schema, keep them unchanged and call out that
+  they came from the original rather than being invented.
+
 Requirements:
 - `commit` max: below `10us`; `10us` is the hard ceiling.
 - `mask` max: below `20us`.

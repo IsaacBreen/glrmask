@@ -158,3 +158,37 @@ fn minimized_sp343_separator_wave_matches_profile_oracle() {
     assert_eq!(advance.gss_stacks_after.len(), 1);
     assert_eq!(total_final_stack_count(&final_stacks), 1);
 }
+
+#[test]
+fn sp343_delete_only_subset_separator_wave_matches_cfa_oracle() {
+    let _lock = ENV_LOCK.lock().unwrap();
+
+    // Deletion-only subset of CFA `jsb/data/Snowplow---sp_343_Normalized`.
+    // This keeps the same `failure.messages[*]` branches that produce the
+    // full-case separator ambiguity, and deletes unrelated root properties,
+    // descriptions, and the unused first-branch `value` property. No branch is
+    // invented from scratch.
+    let schema = r#"{"additionalProperties":false,"properties":{"failure":{"additionalProperties":false,"properties":{"messages":{"items":{"anyOf":[{"additionalProperties":false,"properties":{"error":{"type":"string"},"field":{"maxLength":64,"type":"string"}},"required":["field","error"],"type":"object"},{"additionalProperties":false,"properties":{"error":{"anyOf":[{"additionalProperties":false,"properties":{"error":{"enum":["ResolutionError"]},"lookupHistory":{"items":{"properties":{"attempts":{"minimum":0,"type":"integer"},"errors":{"items":{"properties":{"error":{"enum":["RepoFailure","ClientFailure","NotFound"]},"message":{"maxLength":256,"type":"string"}},"required":["error"],"type":"object"},"minItems":1,"type":"array"},"lastAttempt":{"_format":"date-time","type":"string"},"repostitory":{"type":"string"}},"required":["repository","errors","attempts","lastAttempt"],"type":"object"},"minItems":1,"type":"array"}},"required":["error","lookupHistory"]},{"additionalProperties":false,"properties":{"dataReports":{"items":{"additionalProperties":false,"properties":{"keyword":{"type":["string","null"]},"message":{"type":"string"},"path":{"type":["string","null"]},"targets":{"type":["array","null"]}},"required":["path","message","keyword","targets"]},"minItems":1,"type":"array"},"error":{"enum":["ValidationError"]}},"required":["dataReports"]},{"additionalProperties":false,"properties":{"error":{"enum":["ValidationError"]},"schemaIssues":{"items":{"additionalProperties":false,"properties":{"message":{"type":"string"},"path":{"type":"string"}},"required":["path","message"],"type":"object"},"minItems":1,"type":"array"}},"required":["error"]}]},"schemaKey":{"type":"string"}},"type":"object"}]},"type":"array"}},"required":["messages"],"type":"object"}},"required":["failure"],"type":"object"}"#;
+    let prefix = b"{\"failure\": {\"messages\": [{\"error\": \"Json parsing issue\",";
+    let (vocab, separator_token_id) = byte_vocab_with_separator_token();
+
+    let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_bytes(prefix).unwrap();
+
+    assert!(token_allowed(&state.mask(), separator_token_id as usize));
+    assert!(
+        !state.has_parser_ambiguity(),
+        "delete-only Snowplow subset should collapse like the minimized MRE: {:?}",
+        state.debug_parser_stacks(),
+    );
+
+    let (advances, final_stacks, commit_profile) =
+        state.commit_token_per_advance(separator_token_id).unwrap();
+    assert_eq!(advances.len(), 1);
+    assert_eq!(commit_profile.adv_n_nondet_waves, 0);
+    assert_eq!(commit_profile.adv_n_nondet_reduce_ops, 0);
+    assert_eq!(commit_profile.adv_n_nondet_merges, 0);
+    assert_eq!(commit_profile.adv_n_nondet_isolates, 0);
+    assert_eq!(total_final_stack_count(&final_stacks), 1);
+}
