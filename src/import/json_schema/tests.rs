@@ -711,6 +711,17 @@ fn string_pattern_lowers_ascii_digit_subranges() {
 }
 
 #[test]
+fn json_string_char_terminal_requires_valid_utf8_sequences() {
+    let schema = json!({"type": "string"});
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("[\\xC2-\\xDF][\\x80-\\xBF]"), "{glrm}");
+    assert!(!glrm.contains("[^\\x00-\\x1f\\x7f"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn medium_bounded_string_uses_split_chunk_rules_by_default() {
     let _env_lock = ENV_LOCK.lock().unwrap();
     let _terminalize_guard = EnvVarGuard::unset(

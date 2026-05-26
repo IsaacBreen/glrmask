@@ -891,11 +891,11 @@ fn json_body_char_regex_for_decoded_char(ch: char) -> String {
 }
 
 fn json_string_body_char_regex() -> &'static str {
-    r#"(?:[^\x00-\x1f\x7f"\\]|\\["\\bfnrt])"#
+    r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt])"#
 }
 
 fn is_safe_raw_json_string_char(ch: char) -> bool {
-    !matches!(ch, '"' | '\\' | '\u{00}'..='\u{1f}' | '\u{7f}')
+    ch.is_ascii() && !matches!(ch, '"' | '\\' | '\u{00}'..='\u{1f}' | '\u{7f}')
 }
 
 pub(crate) fn property_name_matches_pattern(pattern: &str, property_name: &str) -> ImportResult<bool> {
