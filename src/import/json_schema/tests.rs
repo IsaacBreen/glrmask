@@ -909,6 +909,29 @@ fn email_format_lowers_to_constrained_terminal() {
 }
 
 #[test]
+fn uri_format_lowers_to_constrained_terminal() {
+    let schema = json!({
+        "type": "string",
+        "format": "uri"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(
+        grammar
+            .rules
+            .iter()
+            .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
+        "{:?}",
+        grammar.rules
+    );
+    assert!(!contains_ref_named(start_expr(&grammar), "JSON_STRING"));
+
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("[A-Za-z]"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn string_pattern_takes_precedence_over_format() {
     let schema = json!({
         "type": "string",
@@ -1118,6 +1141,17 @@ fn email_string_value_satisfaction_filters_invalid_literals() {
     assert!(string_value_satisfies_schema(&json!("user@example.com"), &schema).unwrap());
     assert!(!string_value_satisfies_schema(&json!("><"), &schema).unwrap());
     assert!(!string_value_satisfies_schema(&json!(".user@example.com"), &schema).unwrap());
+}
+
+#[test]
+fn uri_string_value_satisfaction_filters_invalid_literals() {
+    let schema = StringSchema {
+        format: Some("uri".to_string()),
+        ..Default::default()
+    };
+
+    assert!(string_value_satisfies_schema(&json!("ecdsa-koblitz-pubkey:abc123"), &schema).unwrap());
+    assert!(!string_value_satisfies_schema(&json!("<<"), &schema).unwrap());
 }
 
 #[test]

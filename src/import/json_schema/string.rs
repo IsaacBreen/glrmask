@@ -653,6 +653,7 @@ fn recognized_string_format_body_regex(format: Option<&str>) -> Option<&'static 
         Some("email") => Some(
             r#"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-][A-Za-z0-9!#$%&'*+/=?^_`{|}~-]*(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*"#,
         ),
+        Some("uri") => Some(r#"[A-Za-z][A-Za-z0-9+.-]*:[^\x00-\x20"<>\\^`{|}]*"#),
         _ => None,
     }
 }
