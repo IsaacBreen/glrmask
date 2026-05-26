@@ -697,6 +697,20 @@ fn string_pattern_lowers_as_terminal_pattern() {
 }
 
 #[test]
+fn string_pattern_lowers_ascii_digit_subranges() {
+    let schema = json!({
+        "type": "string",
+        "pattern": "^[1-5][0-9a-f]$"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("[1-5]"), "{glrm}");
+    assert!(!glrm.contains("[^\\s\\S](?:[0-9a-f])"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn medium_bounded_string_uses_split_chunk_rules_by_default() {
     let _env_lock = ENV_LOCK.lock().unwrap();
     let _terminalize_guard = EnvVarGuard::unset(

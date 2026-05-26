@@ -794,7 +794,7 @@ fn lower_decoded_class_to_json_body_regex(class: &Class) -> String {
 }
 
 fn is_non_ascii_decimal_digit_range(start: char, end: char) -> bool {
-    start != '0'
+    !start.is_ascii_digit()
         && start.is_numeric()
         && end.is_numeric()
 }
