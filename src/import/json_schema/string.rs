@@ -85,12 +85,8 @@ impl<'a> Lowerer<'a> {
         schema: &StringSchema,
     ) -> ImportResult<GrammarExpr> {
         let base_schema = StringSchema {
-            min_length: if schema.pattern.is_some() { 0 } else { schema.min_length },
-            max_length: if schema.pattern.is_some() {
-                None
-            } else {
-                schema.max_length
-            },
+            min_length: schema.min_length,
+            max_length: schema.max_length,
             pattern: None,
             format: None,
         };

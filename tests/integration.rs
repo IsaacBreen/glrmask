@@ -1033,6 +1033,26 @@ fn json_schema_object_property_untyped_string_assertions_allow_non_strings() {
 }
 
 #[test]
+fn json_schema_string_pattern_keeps_min_length() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 63,
+            "pattern": "^[0-9a-z-]*$"
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#""abcd""#);
+
+    let mut empty = constraint.start();
+    assert!(empty.commit_bytes(br#""""#).is_err());
+
+    let mut short = constraint.start();
+    assert!(short.commit_bytes(br#""abc""#).is_err());
+}
+
+#[test]
 fn json_schema_additional_property_required_only_key_does_not_fall_back_through_ap() {
     let constraint = byte_schema(
         r#"{
