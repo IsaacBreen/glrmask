@@ -890,7 +890,8 @@ fn date_format_lowers_to_constrained_terminal() {
     assert!(!contains_ref_named(start_expr(&grammar), "JSON_STRING"));
 
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("1[0-2]"), "{glrm}");
+    assert!(glrm.contains("0[13578]"), "{glrm}");
+    assert!(glrm.contains("02-(?:0[1-9]|1[0-9]|2[0-8])"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -1126,7 +1127,10 @@ fn date_time_string_value_satisfaction_filters_invalid_literals() {
     };
 
     assert!(string_value_satisfies_schema(&json!("2024-05-01T12:34:56Z"), &schema).unwrap());
+    assert!(string_value_satisfies_schema(&json!("2020-02-29T12:34:56Z"), &schema).unwrap());
     assert!(!string_value_satisfies_schema(&json!("."), &schema).unwrap());
+    assert!(!string_value_satisfies_schema(&json!("2019-02-29T12:34:56Z"), &schema).unwrap());
+    assert!(!string_value_satisfies_schema(&json!("2020-06-31T12:34:56Z"), &schema).unwrap());
 }
 
 #[test]
@@ -1137,7 +1141,10 @@ fn date_string_value_satisfaction_filters_invalid_literals() {
     };
 
     assert!(string_value_satisfies_schema(&json!("2024-05-01"), &schema).unwrap());
+    assert!(string_value_satisfies_schema(&json!("2020-02-29"), &schema).unwrap());
     assert!(!string_value_satisfies_schema(&json!("|"), &schema).unwrap());
+    assert!(!string_value_satisfies_schema(&json!("2019-02-29"), &schema).unwrap());
+    assert!(!string_value_satisfies_schema(&json!("2020-06-31"), &schema).unwrap());
 }
 
 #[test]
