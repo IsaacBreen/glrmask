@@ -244,6 +244,12 @@ impl<'a> Lowerer<'a> {
         if !assertions.one_of.is_empty() {
             return self.lower_one_of(assertions);
         }
+        if assertions.not.is_some() {
+            return Err(SchemaImportError::at(
+                &schema.location,
+                "not is only supported for mutually exclusive object-property anyOf branches",
+            ));
+        }
 
         if let Some(value) = &assertions.const_value {
             return Ok(self.lower_json_literal(value));

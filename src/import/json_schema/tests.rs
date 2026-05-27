@@ -1430,7 +1430,7 @@ fn oneof_mixed_ref_and_inline_errors() {
 }
 
 #[test]
-fn not_errors_as_unimplemented_key() {
+fn unsupported_not_shape_errors() {
     let schema = json!({
         "type": "string",
         "not": {"const": "forbidden"}
@@ -1438,6 +1438,37 @@ fn not_errors_as_unimplemented_key() {
 
     let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
     assert!(error.contains("not"), "{error}");
+}
+
+#[test]
+fn anyof_property_not_mutual_exclusion_lowers_as_exclusive_group() {
+    let schema = json!({
+        "type": "object",
+        "additionalProperties": true,
+        "anyOf": [
+            {
+                "properties": {"bundleDependencies": {"type": "array"}},
+                "not": {
+                    "properties": {"bundledDependencies": {}},
+                    "required": ["bundledDependencies"]
+                }
+            },
+            {
+                "properties": {"bundledDependencies": {"type": "array"}},
+                "not": {
+                    "properties": {"bundleDependencies": {}},
+                    "required": ["bundleDependencies"]
+                }
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+
+    assert!(glrm.contains("bundleDependencies"), "{glrm}");
+    assert!(glrm.contains("bundledDependencies"), "{glrm}");
+    assert!(glrm.contains("json_anyof_object_body"), "{glrm}");
 }
 
 #[test]

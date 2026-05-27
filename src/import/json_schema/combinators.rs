@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use crate::import::ast::GrammarExpr;
 
 use super::ast::{
-    AdditionalProperties, ObjectSchema, Schema, SchemaAssertions, SchemaKind,
+    AdditionalProperties, ObjectSchema, PropertySchema, Schema, SchemaAssertions, SchemaKind,
     SchemaType,
 };
 use super::error::ImportResult;
@@ -44,6 +44,12 @@ impl<'a> Lowerer<'a> {
         }
         if let Some(expr) = self.try_lower_open_object_any_of_variants(factoring_branches)? {
             return Ok(expr);
+        }
+
+        if let Some((object, exclusive_names, require_one)) =
+            try_factor_mutually_exclusive_property_not_any_of(assertions)
+        {
+            return self.lower_object_with_exclusive_properties(&object, &exclusive_names, require_one);
         }
 
         if let Some((object, exclusive_names, require_one)) =
@@ -260,6 +266,11 @@ impl<'a> Lowerer<'a> {
                     .chain(assertions.all_of.iter())
                 {
                     if self.schema_transitively_refs_pointer(branch, wanted, seen_refs)? {
+                        return Ok(true);
+                    }
+                }
+                if let Some(schema) = &assertions.not {
+                    if self.schema_transitively_refs_pointer(schema, wanted, seen_refs)? {
                         return Ok(true);
                     }
                 }
@@ -609,6 +620,127 @@ fn try_factor_closed_object_variant_any_of(
     ))
 }
 
+fn try_factor_mutually_exclusive_property_not_any_of(
+    assertions: &SchemaAssertions,
+) -> Option<(ObjectSchema, BTreeSet<String>, bool)> {
+    if assertions.any_of.len() != 2 {
+        return None;
+    }
+
+    let siblings = assertions.clone_without_combinators();
+    if siblings.const_value.is_some()
+        || siblings.enum_values.is_some()
+        || siblings.array.is_some()
+        || siblings.string.is_some()
+        || siblings.number.is_some()
+        || siblings.object.is_some()
+        || siblings.types.as_ref().is_some_and(|types| {
+            !types.iter().all(|schema_type| *schema_type == SchemaType::Object)
+        })
+    {
+        return None;
+    }
+
+    let mut properties = Vec::<PropertySchema>::new();
+    let mut property_names = BTreeSet::<String>::new();
+    let mut forbidden_names = BTreeSet::<String>::new();
+
+    for branch in &assertions.any_of {
+        let (property, forbidden_name) = mutually_exclusive_property_not_branch(branch)?;
+        if !property_names.insert(property.name.clone()) {
+            return None;
+        }
+        forbidden_names.insert(forbidden_name);
+        properties.push(property.clone());
+    }
+
+    if property_names != forbidden_names {
+        return None;
+    }
+
+    Some((
+        ObjectSchema {
+            properties,
+            required: BTreeSet::new(),
+            min_properties: 0,
+            max_properties: None,
+            pattern_properties: Vec::new(),
+            additional_properties: AdditionalProperties::AllowAny,
+        },
+        property_names,
+        false,
+    ))
+}
+
+fn mutually_exclusive_property_not_branch(schema: &Schema) -> Option<(&PropertySchema, String)> {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return None;
+    };
+    if assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || assertions.array.is_some()
+        || assertions.string.is_some()
+        || assertions.number.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+    {
+        return None;
+    }
+    if let Some(types) = &assertions.types {
+        if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+            return None;
+        }
+    }
+
+    let object = assertions.object.as_ref()?;
+    if object.properties.len() != 1
+        || !object.required.is_empty()
+        || !object.pattern_properties.is_empty()
+        || !matches!(object.additional_properties, AdditionalProperties::AllowAny)
+    {
+        return None;
+    }
+    let property = &object.properties[0];
+    let forbidden_name = single_required_object_not_name(assertions.not.as_ref()?)?;
+    if forbidden_name == property.name {
+        return None;
+    }
+    Some((property, forbidden_name.to_string()))
+}
+
+fn single_required_object_not_name(schema: &Schema) -> Option<&str> {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return None;
+    };
+    if assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || assertions.array.is_some()
+        || assertions.string.is_some()
+        || assertions.number.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+        || assertions.not.is_some()
+    {
+        return None;
+    }
+    if let Some(types) = &assertions.types {
+        if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+            return None;
+        }
+    }
+
+    let object = assertions.object.as_ref()?;
+    if object.required.len() != 1
+        || !object.pattern_properties.is_empty()
+        || !matches!(object.additional_properties, AdditionalProperties::AllowAny)
+    {
+        return None;
+    }
+    object.required.iter().next().map(String::as_str)
+}
+
 fn single_required_object_branch_name(schema: &Schema) -> Option<&str> {
     let SchemaKind::Assertions(assertions) = &schema.kind else {
         return None;
@@ -698,7 +830,16 @@ fn schemas_shape_equivalent(left: &Schema, right: &Schema) -> bool {
                 && schema_slices_shape_equivalent(&left.any_of, &right.any_of)
                 && schema_slices_shape_equivalent(&left.one_of, &right.one_of)
                 && schema_slices_shape_equivalent(&left.all_of, &right.all_of)
+                && option_schemas_shape_equivalent(left.not.as_ref(), right.not.as_ref())
         }
+        _ => false,
+    }
+}
+
+fn option_schemas_shape_equivalent(left: Option<&Schema>, right: Option<&Schema>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => schemas_shape_equivalent(left, right),
         _ => false,
     }
 }
@@ -829,6 +970,7 @@ fn schema_contains_ref(schema: &Schema) -> bool {
             assertions.all_of.iter().any(schema_contains_ref)
                 || assertions.any_of.iter().any(schema_contains_ref)
                 || assertions.one_of.iter().any(schema_contains_ref)
+                || assertions.not.as_ref().is_some_and(schema_contains_ref)
         }
         _ => false,
     }

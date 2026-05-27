@@ -242,6 +242,7 @@ fn load_assertions(object: &Map<String, Value>, location: &str) -> ImportResult<
         ));
     }
     assertions.all_of = load_schema_array(object, "allOf", location)?;
+    assertions.not = load_schema_member(object, "not", location)?;
 
     if should_load_object_assertion(object, assertions.types.as_deref()) {
         assertions.object = Some(load_object_keywords(object, location)?);
@@ -275,8 +276,7 @@ fn validate_supported_keys(object: &Map<String, Value>, location: &str) -> Impor
 fn is_unsupported_validation_key(key: &str) -> bool {
     matches!(
         key,
-        "not"
-            | "propertyNames"
+        "propertyNames"
             | "uniqueItems"
             | "contains"
             | "minContains"
@@ -355,6 +355,17 @@ fn load_schema_array(
         .enumerate()
         .map(|(index, child)| load_schema_at(child, &format!("{location}/{key}/{index}")))
         .collect()
+}
+
+fn load_schema_member(
+    object: &Map<String, Value>,
+    key: &str,
+    location: &str,
+) -> ImportResult<Option<Schema>> {
+    let Some(value) = object.get(key) else {
+        return Ok(None);
+    };
+    load_schema_at(value, &format!("{location}/{key}")).map(Some)
 }
 
 fn should_load_object_assertion(object: &Map<String, Value>, types: Option<&[SchemaType]>) -> bool {

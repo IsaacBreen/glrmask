@@ -51,6 +51,7 @@ pub(crate) struct SchemaAssertions {
     pub(crate) any_of: Vec<Schema>,
     pub(crate) one_of: Vec<Schema>,
     pub(crate) all_of: Vec<Schema>,
+    pub(crate) not: Option<Schema>,
 }
 
 impl SchemaAssertions {
@@ -65,6 +66,7 @@ impl SchemaAssertions {
             && self.any_of.is_empty()
             && self.one_of.is_empty()
             && self.all_of.is_empty()
+            && self.not.is_none()
     }
 
     pub(crate) fn has_value_assertions_without_combinators(&self) -> bool {
@@ -89,6 +91,7 @@ impl SchemaAssertions {
             any_of: Vec::new(),
             one_of: Vec::new(),
             all_of: Vec::new(),
+            not: None,
         }
     }
 }
