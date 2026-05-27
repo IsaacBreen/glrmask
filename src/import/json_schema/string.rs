@@ -805,6 +805,9 @@ fn lower_decoded_class_to_json_body_regex(class: &Class) -> String {
     if is_unicode_decimal_digit_class(class) {
         return "[0-9]".to_string();
     }
+    if is_dot_like_unicode_class(class) {
+        return json_string_body_dot_regex().to_string();
+    }
 
     let mut raw_ranges = Vec::new();
     match class {
@@ -877,6 +880,18 @@ fn is_unicode_decimal_digit_class(class: &Class) -> bool {
     })
 }
 
+fn is_dot_like_unicode_class(class: &Class) -> bool {
+    let Class::Unicode(class) = class else {
+        return false;
+    };
+    let ranges = class.ranges();
+    ranges.len() == 2
+        && ranges[0].start() == '\0'
+        && ranges[0].end() == '\t'
+        && ranges[1].start() == '\u{b}'
+        && ranges[1].end() == '\u{10ffff}'
+}
+
 fn push_safe_raw_char_ranges(start: char, end: char, output: &mut Vec<String>) {
     let mut range_start = None;
     let mut previous = None;
@@ -946,6 +961,10 @@ fn json_body_char_regex_for_decoded_char(ch: char) -> String {
 
 fn json_string_body_char_regex() -> &'static str {
     r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt])"#
+}
+
+fn json_string_body_dot_regex() -> &'static str {
+    r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bft])"#
 }
 
 fn is_safe_raw_json_string_char(ch: char) -> bool {

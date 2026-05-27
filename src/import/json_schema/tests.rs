@@ -761,6 +761,27 @@ fn string_pattern_lowers_ascii_digit_subranges() {
 }
 
 #[test]
+fn terminalized_dot_pattern_lowers_utf8_lead_byte_alternatives() {
+    let schema = json!({
+        "type": "string",
+        "pattern": "^.*.txt$"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let rule = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
+        .expect("expected terminalized constrained string rule");
+
+    let GrammarExpr::RawRegex(regex) = &rule.expr else {
+        panic!("expected raw regex terminal: {:?}", rule.expr);
+    };
+    assert!(regex.contains(r#"\xC2-\xDF"#), "{regex}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn json_string_char_terminal_requires_valid_utf8_sequences() {
     let schema = json!({"type": "string"});
 

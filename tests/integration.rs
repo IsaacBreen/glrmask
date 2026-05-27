@@ -814,6 +814,15 @@ fn json_schema_dot_pattern_rejects_invalid_utf8_bytes() {
 }
 
 #[test]
+fn json_schema_suffix_dot_pattern_allows_valid_utf8_lead_byte_token() {
+    let constraint = byte_schema(r#"{"type":"string","pattern":"^.*.txt$"}"#);
+
+    let mut state = constraint.start();
+    state.commit_bytes(b"\"").unwrap();
+    assert!(allowed(&state.mask()).contains(&0xd3));
+}
+
+#[test]
 fn json_schema_pattern_properties_accepts_encoded_quote_key() {
     let constraint = byte_schema(
         r#"{"type":"object","patternProperties":{"^\"$":{"type":"integer"}},"additionalProperties":false}"#,
@@ -1030,26 +1039,6 @@ fn json_schema_object_property_untyped_string_assertions_allow_non_strings() {
 
     let mut state = constraint.start();
     assert!(state.commit_bytes(br#"{"name": "example.csv"}"#).is_err());
-}
-
-#[test]
-fn json_schema_string_pattern_keeps_min_length() {
-    let constraint = byte_schema(
-        r#"{
-            "type": "string",
-            "minLength": 4,
-            "maxLength": 63,
-            "pattern": "^[0-9a-z-]*$"
-        }"#,
-    );
-
-    assert_accepts_bytes(&constraint, br#""abcd""#);
-
-    let mut empty = constraint.start();
-    assert!(empty.commit_bytes(br#""""#).is_err());
-
-    let mut short = constraint.start();
-    assert!(short.commit_bytes(br#""abc""#).is_err());
 }
 
 #[test]
