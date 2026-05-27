@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Instant;
 
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable, GuardedStackShift, StackShiftGuard};
@@ -69,6 +70,8 @@ pub(crate) struct TerminalCharacterizationProfile {
 
 type DenseTerminalActionSignature = Vec<(u32, Option<Action>, bool)>;
 type TerminalActionSignature<'a> = Vec<(u32, Option<&'a Action>, bool)>;
+const NT_CONTINUATION_PARALLEL_THRESHOLD: usize = 256;
+const NT_CONTINUATION_CHUNK_SIZE: usize = 64;
 
 #[derive(Debug, Clone, Default)]
 struct CharacterizationIndex {
@@ -104,6 +107,13 @@ struct StackEdit {
 }
 
 impl CharacterizationOutput {
+    fn extend_from(&mut self, other: CharacterizationOutput) {
+        self.escapes.extend(other.escapes);
+        self.reduces.extend(other.reduces);
+        self.nt_escapes.extend(other.nt_escapes);
+        self.nt_rereduces.extend(other.nt_rereduces);
+    }
+
     fn emit_escape(
         &mut self,
         source: CharacterizationSource,
@@ -435,6 +445,27 @@ fn constrain_matcher(matcher: &mut StackMatcher, allowed: &[u32]) -> bool {
     }
 }
 
+fn constrain_matcher_with_sorted_allowed(matcher: &mut StackMatcher, allowed: &[u32]) -> bool {
+    let next = match matcher {
+        StackMatcher::Any => states_matcher(allowed.to_vec()),
+        StackMatcher::State(state) => {
+            if allowed.binary_search(state).is_ok() {
+                Some(StackMatcher::State(*state))
+            } else {
+                None
+            }
+        }
+        StackMatcher::States(states) => states_matcher(intersect_sorted(states, allowed)),
+    };
+
+    if let Some(next) = next {
+        *matcher = next;
+        true
+    } else {
+        false
+    }
+}
+
 fn finite_states(matcher: &StackMatcher) -> Option<Vec<u32>> {
     match matcher {
         StackMatcher::Any => None,
@@ -516,61 +547,33 @@ fn ensure_input_len(input: &mut Vec<StackMatcher>, len: usize) {
     }
 }
 
-fn guard_constraints(
-    shift_pop: usize,
-    guards: &[StackShiftGuard],
-) -> Option<BTreeMap<usize, Vec<u32>>> {
-    let mut out: BTreeMap<usize, Vec<u32>> = BTreeMap::new();
-    let mut previous_pop = None;
-
-    for guard in guards {
-        let depth = guard.pop as usize;
-
-        if let Some(previous) = previous_pop {
-            if depth < previous {
-                return None;
-            }
-        }
-        previous_pop = Some(depth);
-
-        if depth > shift_pop {
-            return None;
-        }
-
-        let states = sorted_dedup(guard.states.clone());
-        if states.is_empty() {
-            return None;
-        }
-
-        out.entry(depth)
-            .and_modify(|existing| {
-                *existing = intersect_sorted(existing, &states);
-            })
-            .or_insert(states);
-
-        if out.get(&depth).is_some_and(|states| states.is_empty()) {
-            return None;
-        }
-    }
-
-    Some(out)
-}
-
 fn stack_effect_edits(
     config: &RelationConfig,
     shift_pop: usize,
     shifted_pushes: &[u32],
     guards: &[StackShiftGuard],
 ) -> Vec<StackEdit> {
-    let Some(guards) = guard_constraints(shift_pop, guards) else {
-        return Vec::new();
-    };
-
     let segment_len = config.segment.len();
     let base_input_len = config.input.len();
     let mut input = config.input.clone();
 
-    for (&depth, allowed) in &guards {
+    let mut previous_depth = None;
+    let mut revealed_guarded = false;
+    for guard in guards {
+        let depth = guard.pop as usize;
+        let allowed = guard.states.as_slice();
+
+        if let Some(previous) = previous_depth {
+            if depth < previous {
+                return Vec::new();
+            }
+        }
+        previous_depth = Some(depth);
+
+        if depth > shift_pop || allowed.is_empty() {
+            return Vec::new();
+        }
+
         if depth < segment_len {
             let state = config.segment[segment_len - 1 - depth];
             if allowed.binary_search(&state).is_err() {
@@ -580,9 +583,13 @@ fn stack_effect_edits(
             let below_segment_index = depth - segment_len;
             let input_index = base_input_len + below_segment_index;
             ensure_input_len(&mut input, input_index + 1);
-            if !constrain_matcher(&mut input[input_index], allowed) {
+            if !constrain_matcher_with_sorted_allowed(&mut input[input_index], allowed) {
                 return Vec::new();
             }
+        }
+
+        if depth == shift_pop {
+            revealed_guarded = true;
         }
     }
 
@@ -595,7 +602,7 @@ fn stack_effect_edits(
         return vec![StackEdit { pop: input, pushes }];
     }
 
-    if guards.contains_key(&shift_pop) {
+    if revealed_guarded {
         let revealed_input_index = base_input_len + unknown_popped;
         ensure_input_len(&mut input, revealed_input_index + 1);
         let Some(revealed_states) = finite_states(&input[revealed_input_index]) else {
@@ -842,7 +849,39 @@ fn characterize_nt_continuations_for_terminal(
         return;
     };
 
-    for &top_state in action_states {
+    if action_states.len() < NT_CONTINUATION_PARALLEL_THRESHOLD {
+        characterize_nt_continuations_for_top_states(table, index, terminal, action_states, output);
+        return;
+    }
+
+    let chunk_results: Vec<CharacterizationOutput> = action_states
+        .par_chunks(NT_CONTINUATION_CHUNK_SIZE)
+        .map(|top_states| {
+            let mut local_output = CharacterizationOutput::default();
+            characterize_nt_continuations_for_top_states(
+                table,
+                index,
+                terminal,
+                top_states,
+                &mut local_output,
+            );
+            local_output
+        })
+        .collect();
+
+    for local_output in chunk_results {
+        output.extend_from(local_output);
+    }
+}
+
+fn characterize_nt_continuations_for_top_states(
+    table: &GLRTable,
+    index: &CharacterizationIndex,
+    terminal: TerminalID,
+    top_states: &[u32],
+    output: &mut CharacterizationOutput,
+) {
+    for &top_state in top_states {
         let Some(predecessors) = index.goto_predecessors_by_target.get(top_state as usize) else {
             continue;
         };
@@ -964,8 +1003,6 @@ pub(crate) fn characterize_terminals_profiled(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
 ) -> (BTreeMap<TerminalID, TerminalCharacterization>, TerminalCharacterizationProfile) {
-    use rayon::prelude::*;
-
     let total_started_at = Instant::now();
     let terminal_count = grammar.num_terminals as usize;
     let index = build_characterization_index(table, grammar);

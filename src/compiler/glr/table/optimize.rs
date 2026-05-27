@@ -299,6 +299,8 @@ impl GLRTable {
             // after the scan, so stack-effect results are memoizable.
             let mut stack_effect_memo: FxHashMap<StackEffectKey, Option<StackEffectResult>> =
                 FxHashMap::default();
+            let mut states_at_depth_cache: FxHashMap<(u32, u32), Option<BTreeSet<u32>>> =
+                FxHashMap::default();
             let nstates = original_num_states as usize;
             let mut pending_updates: Vec<(usize, TerminalID, CellUpdate)> = Vec::new();
 
@@ -317,6 +319,7 @@ impl GLRTable {
                         &action,
                         &mut constituent_sets,
                         &mut stack_effect_memo,
+                        &mut states_at_depth_cache,
                         &mut subset_to_state,
                         &mut failed_subsets,
                     ) else {
@@ -1851,7 +1854,12 @@ fn states_at_depth(
     predecessors: &[BTreeSet<u32>],
     origin_state: u32,
     depth: u32,
+    cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
 ) -> Option<BTreeSet<u32>> {
+    if let Some(cached) = cache.get(&(origin_state, depth)) {
+        return cached.clone();
+    }
+
     let mut states = BTreeSet::from([origin_state]);
     for _ in 0..depth {
         let mut next = BTreeSet::new();
@@ -1859,11 +1867,15 @@ fn states_at_depth(
             next.extend(predecessors.get(state as usize)?.iter().copied());
         }
         if next.is_empty() {
+            cache.insert((origin_state, depth), None);
             return None;
         }
         states = next;
     }
-    Some(states)
+
+    let result = Some(states);
+    cache.insert((origin_state, depth), result.clone());
+    result
 }
 
 fn normalize_states(mut states: Vec<u32>) -> Vec<u32> {
@@ -1955,6 +1967,7 @@ fn apply_reduce_to_frame(
     mut frame: StackEffectFrame,
     nt: NonterminalID,
     len: u32,
+    states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
 ) -> Option<ReduceFrameResult> {
     pop_frame(&mut frame, len);
 
@@ -1963,7 +1976,7 @@ fn apply_reduce_to_frame(
         BTreeSet::from([state])
     } else {
         origin_dependent = true;
-        states_at_depth(predecessors, origin_state, frame.pop)?
+        states_at_depth(predecessors, origin_state, frame.pop, states_at_depth_cache)?
     };
 
     let guard_pop = frame.pop;
@@ -2049,6 +2062,7 @@ fn stack_effects_for_action(
     state: u32,
     action: &Action,
     frame: StackEffectFrame,
+    states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
     visiting: &mut FxHashSet<StackEffectVisitKey>,
     memo: &mut FxHashMap<StackEffectKey, Option<StackEffectResult>>,
 ) -> Option<StackEffectResult> {
@@ -2100,7 +2114,15 @@ fn stack_effects_for_action(
                 }
             }
             Action::Reduce(nt, len) => {
-                let frames = match apply_reduce_to_frame(table, predecessors, origin_state, frame, *nt, *len)? {
+                let frames = match apply_reduce_to_frame(
+                    table,
+                    predecessors,
+                    origin_state,
+                    frame,
+                    *nt,
+                    *len,
+                    states_at_depth_cache,
+                )? {
                     ReduceFrameResult::Dead => {
                         return Some(StackEffectResult {
                             effects: Vec::new(),
@@ -2130,6 +2152,7 @@ fn stack_effects_for_action(
                         next_state,
                         next,
                         frame,
+                        states_at_depth_cache,
                         visiting,
                         memo,
                     )?;
@@ -2151,6 +2174,7 @@ fn stack_effects_for_action(
                         state,
                         &shift_action,
                         frame.clone(),
+                        states_at_depth_cache,
                         visiting,
                         memo,
                     )?;
@@ -2167,6 +2191,7 @@ fn stack_effects_for_action(
                         state,
                         &reduce_action,
                         frame.clone(),
+                        states_at_depth_cache,
                         visiting,
                         memo,
                     )?;
@@ -2233,6 +2258,7 @@ fn try_inline_action_to_stack_shifts(
     tid: TerminalID,
     action: &Action,
     stack_effect_memo: &mut FxHashMap<StackEffectKey, Option<StackEffectResult>>,
+    states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
 ) -> Option<Action> {
     let has_reductions = match action {
         Action::Reduce(..) => true,
@@ -2259,6 +2285,7 @@ fn try_inline_action_to_stack_shifts(
             pushes: Vec::new(),
             guards: Vec::new(),
         },
+        states_at_depth_cache,
         &mut FxHashSet::default(),
         stack_effect_memo,
     )?
@@ -2611,6 +2638,7 @@ mod tests {
             },
             10,
             1,
+            &mut FxHashMap::default(),
         );
 
         let Some(ReduceFrameResult::Frames { frames, origin_dependent }) = result else {
@@ -2664,6 +2692,7 @@ mod tests {
             },
             10,
             1,
+            &mut FxHashMap::default(),
         );
 
         let Some(ReduceFrameResult::Frames { frames, origin_dependent }) = result else {
@@ -2861,6 +2890,7 @@ fn try_inline_unit_reductions_for_cell(
     action: &Action,
     constituent_sets: &mut Vec<BTreeSet<u32>>,
     stack_effect_memo: &mut FxHashMap<StackEffectKey, Option<StackEffectResult>>,
+    states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
 ) -> Result<Option<CellUpdate>, ()> {
@@ -2871,6 +2901,7 @@ fn try_inline_unit_reductions_for_cell(
         tid,
         action,
         stack_effect_memo,
+        states_at_depth_cache,
     ) {
         return Ok(Some(CellUpdate::Set(action)));
     }
