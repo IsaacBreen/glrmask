@@ -320,7 +320,10 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn lower_string_literal(&mut self, text: &str) -> GrammarExpr {
         let encoded = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
-        lit_bytes(encoded.into_bytes())
+        let body_and_close = encoded
+            .strip_prefix('"')
+            .expect("serde_json string encoding starts with a quote");
+        seq(vec![lit("\""), lit_bytes(body_and_close.as_bytes().to_vec())])
     }
 
     pub(crate) fn lower_literal_key_colon(&mut self, key: &str) -> GrammarExpr {

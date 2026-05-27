@@ -670,9 +670,12 @@ fn prefix_items_lower_with_no_tail() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("\\\"a\\\""), "{glrm}");
-    assert!(glrm.contains("\\\"b\\\""), "{glrm}");
+    let expr = start_expr(&grammar);
+    assert!(contains_literal_bytes(expr, b"\""), "{expr:?}");
+    assert!(contains_literal_bytes(expr, b"a\""), "{expr:?}");
+    assert!(contains_literal_bytes(expr, b"b\""), "{expr:?}");
+    assert!(!contains_literal_bytes(expr, b"\"a\""), "{expr:?}");
+    assert!(!contains_literal_bytes(expr, b"\"b\""), "{expr:?}");
     lower(&grammar).unwrap();
 }
 
@@ -689,8 +692,11 @@ fn legacy_tuple_items_use_additional_items_tail() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
+    let expr = start_expr(&grammar);
+    assert!(contains_literal_bytes(expr, b"\""), "{expr:?}");
+    assert!(contains_literal_bytes(expr, b"head\""), "{expr:?}");
+    assert!(!contains_literal_bytes(expr, b"\"head\""), "{expr:?}");
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("\\\"head\\\""), "{glrm}");
     assert!(glrm.contains("JSON_INTEGER") || glrm.contains("JSON_NUMBER"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -1480,8 +1486,20 @@ fn enum_and_const_lower_to_exact_json_literals() {
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("\"null\""), "{glrm}");
     assert!(glrm.contains("\"true\""), "{glrm}");
-    assert!(glrm.contains("\"\\\"ready\\\"\""), "{glrm}");
+    assert!(glrm.contains("\"\\\"\" \"ready\\\"\""), "{glrm}");
     assert!(glrm.contains("\"7\""), "{glrm}");
+}
+
+#[test]
+fn string_const_splits_open_quote_from_literal_body() {
+    let schema = json!({"const": "ready"});
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let expr = start_expr(&grammar);
+
+    assert!(contains_literal_bytes(expr, b"\""), "{expr:?}");
+    assert!(contains_literal_bytes(expr, b"ready\""), "{expr:?}");
+    assert!(!contains_literal_bytes(expr, b"\"ready\""), "{expr:?}");
+    lower(&grammar).unwrap();
 }
 
 #[test]
