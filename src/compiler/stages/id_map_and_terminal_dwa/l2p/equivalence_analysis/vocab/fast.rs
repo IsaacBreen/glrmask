@@ -2177,6 +2177,34 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
         (&dfa, initial_states, None)
     };
     let compacted_states = compact_to_original.map_or(dfa.num_states, |states| states.len());
+    let num_tokens = strings.len();
+    let num_initial_states = initial_states_ref.len();
+
+    if num_initial_states == 0 || num_tokens == 0 {
+        return BTreeSet::from_iter(vec![(0..num_tokens).collect()]);
+    }
+
+    if initial_states_ref
+        .iter()
+        .all(|&state| dfa_ref.is_dead_end[state])
+    {
+        if profiling {
+            eprintln!(
+                "[glrmask/profile][vocab_equiv] strings={} initial_states={} batches=0 used_trie_walk=false active_final={} original_states={} effective_states={} compacted={} build_dfa_ms={:.3} compact_dfa_ms={:.3} state_order_ms=0.000 sort_tokens_ms=0.000 signature_ms=0.000 refinement_ms=0.000 final_groups_ms=0.000 dfs_step_ms=0.000 collect_targets_ms=0.000 single_target_suffix_ms=0.000 multi_target_suffix_ms=0.000 finish_signature_ms=0.000 dfs_steps=0 dfs_steps_without_new_dirty=0 dfs_states_visited=0 dfs_dead_transitions=0 dfs_dead_without_new_dirty=0 dfs_new_dirty_groups=0 dfs_new_dirty_states=0 clean_tokens={} dirty_tokens=0 single_target_tokens=0 multi_target_tokens=0 total_targets=0 total_ms={:.3}",
+                num_tokens,
+                num_initial_states,
+                num_tokens,
+                dfa.num_states,
+                compacted_states,
+                compact_to_original.is_some(),
+                build_dfa_ms,
+                compact_dfa_ms,
+                num_tokens,
+                elapsed_ms(total_started_at),
+            );
+        }
+        return BTreeSet::from_iter(vec![(0..num_tokens).collect()]);
+    }
 
     let state_order_started_at = profiling.then(Instant::now);
     let ordered_states = if diversity_state_order_enabled() {
@@ -2193,12 +2221,6 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     } else {
         ordered_states.clone()
     };
-    let num_tokens = strings.len();
-    let num_initial_states = ordered_states.len();
-
-    if num_initial_states == 0 || num_tokens == 0 {
-        return BTreeSet::from_iter(vec![(0..num_tokens).collect()]);
-    }
 
     let num_groups = dfa_ref.num_groups;
     // Use all states in a single batch when feasible.  A single batch avoids
@@ -2431,4 +2453,3 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
 
     groups.into_iter().collect()
 }
-
