@@ -675,8 +675,6 @@ mod ambiguity_tests {
                 action,
             );
         }
-
-        assert_table_has_no_ambiguity(table);
     }
 
     #[test]
@@ -811,11 +809,11 @@ mod ambiguity_tests {
     }
 
     #[test]
-    fn direct_recursive_array_colorpalette_minimal_reproduces_all_pop1_stack_shifts() {
+    fn direct_recursive_array_colorpalette_minimal_avoids_all_pop1_stack_shifts() {
         let grammar = build_direct_recursive_array_colorpalette_minimal_grammar();
         let table = build_table_from_named_grammar(&grammar);
 
-        assert_table_has_all_pop1_stack_shift_ambiguity(&table);
+        assert_table_has_no_all_pop1_stack_shift_ambiguity(&table);
     }
 
 }

@@ -898,10 +898,16 @@ impl SuffixQuotient {
                     })
                     .collect::<Vec<_>>();
                 let normalized = self.quotient_effect_groups(table, &mut effects).ok()?;
+                if Self::action_has_multi_stack_shifts(&normalized) {
+                    return None;
+                }
                 Some(normalized)
             }
             Action::GuardedStackShifts(mut effects) => {
                 let normalized = self.quotient_effect_groups(table, &mut effects).ok()?;
+                if Self::action_has_multi_stack_shifts(&normalized) {
+                    return None;
+                }
                 Some(normalized)
             }
             Action::Split {
@@ -1014,6 +1020,18 @@ impl SuffixQuotient {
 
         match built {
             Ok((action, goto)) => {
+                if Self::action_row_has_multi_stack_shifts(&action) {
+                    self.suffix_to_state.retain(|_, mapped_state| *mapped_state < rollback_state);
+                    table.action.truncate(rollback_state as usize);
+                    table.goto.truncate(rollback_state as usize);
+                    if had_advance_rows {
+                        table.advance.truncate(rollback_state as usize);
+                    }
+                    table.num_states = rollback_state;
+                    self.created_states = rollback_created_states;
+                    self.failed_suffixes.insert(suffixes);
+                    return Err(());
+                }
                 table.action[state as usize] = action;
                 table.goto[state as usize] = goto;
                 if had_advance_rows {
@@ -1112,6 +1130,14 @@ impl SuffixQuotient {
         Ok(row)
     }
 
+
+fn action_row_has_multi_stack_shifts(row: &ActionRow) -> bool {
+    row.values().any(|action| matches!(action, Action::StackShifts(shifts) if shifts.len() > 1))
+}
+
+fn action_has_multi_stack_shifts(action: &Action) -> bool {
+    matches!(action, Action::StackShifts(shifts) if shifts.len() > 1)
+}
     fn ensure_suffix_target(
         &mut self,
         table: &mut GLRTable,
@@ -2240,7 +2266,11 @@ fn try_inline_action_to_stack_shifts(
     if effects.is_empty() {
         return None;
     }
-    stack_effect_action(table, effects)
+    let action = stack_effect_action(table, effects)?;
+    if is_multi_stack_shift_action(&action) {
+        return None;
+    }
+    Some(action)
 }
 
 fn normalize_stack_shifts(shifts: &mut Vec<StackShift>) {
@@ -2311,6 +2341,10 @@ fn stack_shift_action(mut shifts: Vec<StackShift>) -> Option<Action> {
         }
     }
     Some(Action::StackShifts(shifts))
+}
+
+fn is_multi_stack_shift_action(action: &Action) -> bool {
+    matches!(action, Action::StackShifts(shifts) if shifts.len() > 1)
 }
 
 #[cfg(test)]
