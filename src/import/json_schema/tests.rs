@@ -735,7 +735,8 @@ fn string_pattern_lowers_as_terminal_pattern() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("& /\"(?:(?:[A-Za-z])+)\"/"), "{glrm}");
+    assert!(glrm.contains("/\"(?:(?:[A-Za-z])+)\"/"), "{glrm}");
+    assert!(!glrm.contains("& /\"(?:(?:[A-Za-z])+)\"/"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -1079,7 +1080,8 @@ fn string_pattern_takes_precedence_over_format() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("& /\"(?:abc)\"/"), "{glrm}");
+    assert!(glrm.contains("/\"(?:abc)\"/"), "{glrm}");
+    assert!(!glrm.contains("& /\"(?:abc)\"/"), "{glrm}");
     assert!(!glrm.contains("[0-9A-Fa-f]{8}"), "{glrm}");
     lower(&grammar).unwrap();
 }

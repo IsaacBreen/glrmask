@@ -84,13 +84,17 @@ impl<'a> Lowerer<'a> {
         &mut self,
         schema: &StringSchema,
     ) -> ImportResult<GrammarExpr> {
+        if let Some(pattern) = &schema.pattern {
+            return Ok(GrammarExpr::RawRegex(quoted_string_body_regex(
+                &string_pattern_as_body_regex(pattern)?,
+            )));
+        }
+
         let body = self.string_body_for_length(schema.min_length, schema.max_length);
         let mut expr = seq(vec![lit("\""), body, lit("\"")]);
         let mut constraints = Vec::new();
 
-        if let Some(pattern) = &schema.pattern {
-            constraints.push(quoted_string_body_regex(&string_pattern_as_body_regex(pattern)?));
-        } else if let Some(format_body_regex) = recognized_string_format_body_regex(schema.format.as_deref()) {
+        if let Some(format_body_regex) = recognized_string_format_body_regex(schema.format.as_deref()) {
             constraints.push(quoted_string_body_regex(format_body_regex));
         }
 
