@@ -5,6 +5,8 @@ use super::schema_to_named_grammar;
 use super::ast::StringSchema;
 use super::string::{property_name_matches_pattern, string_value_satisfies_schema};
 use super::lower_exact_subtractions_enabled;
+use crate::compiler::glr::analysis::AnalyzedGrammar;
+use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguityKind};
 use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar};
 use crate::grammar::glrm::to_glrm;
 
@@ -153,6 +155,59 @@ fn contains_exclude(expr: &GrammarExpr) -> bool {
         | GrammarExpr::AnyByte
         | GrammarExpr::ExprNFA(_) => false,
     }
+}
+
+fn find_all_pop1_stackshifts(table: &GLRTable) -> Option<(u32, u32, Action)> {
+    table.ambiguous_actions().iter().find_map(|ambiguity| {
+        if ambiguity.kind != TableAmbiguityKind::StackShifts {
+            return None;
+        }
+        match table.action(ambiguity.state, ambiguity.terminal).cloned() {
+            Some(Action::StackShifts(shifts))
+                if shifts.len() > 1 && shifts.iter().all(|shift| shift.pop == 1) =>
+            {
+                Some((ambiguity.state, ambiguity.terminal, Action::StackShifts(shifts)))
+            }
+            _ => None,
+        }
+    })
+}
+
+#[test]
+fn recursive_array_additional_properties_schema_does_not_reproduce_all_pop1_stackshifts() {
+    let schema = json!({
+        "type": "object",
+        "required": ["icons"],
+        "properties": {
+            "icons": {
+                "type": "object",
+                "required": ["ColorPalette"],
+                "properties": {
+                    "ColorPalette": {
+                        "type": "object",
+                        "additionalProperties": { "$ref": "#/definitions/node" }
+                    }
+                }
+            }
+        },
+        "definitions": {
+            "node": {
+                "type": "array",
+                "items": { "$ref": "#/definitions/node" }
+            }
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).expect("schema should lower to named grammar");
+    let lowered = lower(&grammar).expect("schema grammar should lower");
+    let analyzed = AnalyzedGrammar::from_grammar_def(&lowered);
+    let table = GLRTable::build(&analyzed);
+    let oracle = find_all_pop1_stackshifts(&table);
+
+    assert!(
+        oracle.is_none(),
+        "recursive-array additionalProperties schema should not keep the all-pop1 StackShifts ambiguity"
+    );
 }
 
 fn contains_intersect(expr: &GrammarExpr) -> bool {

@@ -73,6 +73,57 @@ pub struct TableAmbiguity {
     pub alternatives: usize,
 }
 
+fn guarded_stack_shift_constraints(
+    guards: &[StackShiftGuard],
+) -> Option<BTreeMap<u32, BTreeSet<u32>>> {
+    let mut constraints: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+    for guard in guards {
+        let states: BTreeSet<u32> = guard.states.iter().copied().collect();
+        if states.is_empty() {
+            return None;
+        }
+        if let Some(existing) = constraints.get_mut(&guard.pop) {
+            existing.retain(|state| states.contains(state));
+            if existing.is_empty() {
+                return None;
+            }
+        } else {
+            constraints.insert(guard.pop, states);
+        }
+    }
+    Some(constraints)
+}
+
+fn guarded_stack_shifts_overlap(left: &GuardedStackShift, right: &GuardedStackShift) -> bool {
+    let Some(left_constraints) = guarded_stack_shift_constraints(&left.guards) else {
+        return false;
+    };
+    let Some(right_constraints) = guarded_stack_shift_constraints(&right.guards) else {
+        return false;
+    };
+
+    for (pop, left_states) in &left_constraints {
+        if let Some(right_states) = right_constraints.get(pop)
+            && left_states.is_disjoint(right_states)
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn guarded_stack_shifts_are_ambiguous(shifts: &[GuardedStackShift]) -> bool {
+    for first in 0..shifts.len() {
+        for second in (first + 1)..shifts.len() {
+            if guarded_stack_shifts_overlap(&shifts[first], &shifts[second]) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn action_ambiguity(action: &Action) -> Option<(TableAmbiguityKind, usize)> {
     match action {
         Action::Split {
@@ -87,7 +138,8 @@ fn action_ambiguity(action: &Action) -> Option<(TableAmbiguityKind, usize)> {
             (shifts.len() > 1).then_some((TableAmbiguityKind::StackShifts, shifts.len()))
         }
         Action::GuardedStackShifts(shifts) => {
-            (shifts.len() > 1).then_some((TableAmbiguityKind::GuardedStackShifts, shifts.len()))
+            (guarded_stack_shifts_are_ambiguous(shifts))
+                .then_some((TableAmbiguityKind::GuardedStackShifts, shifts.len()))
         }
         _ => None,
     }
@@ -399,8 +451,233 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod ambiguity_tests {
+    use crate::compiler::glr::analysis::AnalyzedGrammar;
+    use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar, NamedRule};
+    use crate::grammar::expr_nfa::ExprNfaBuilder;
+    use crate::grammar::glrm::from_glrm;
+
     use super::testing::build_test_table;
-    use super::{Action, GuardedStackShift, StackShift, TableAmbiguityKind};
+    use super::{Action, GLRTable, GuardedStackShift, StackShift, TableAmbiguity, TableAmbiguityKind};
+
+    fn build_table_from_glrm(glrm: &str) -> GLRTable {
+        let named = from_glrm(glrm).unwrap();
+        build_table_from_named_grammar(&named)
+    }
+
+    fn build_table_from_named_grammar(named: &NamedGrammar) -> GLRTable {
+        let grammar = lower(&named).unwrap();
+        let analyzed = AnalyzedGrammar::from_grammar_def(&grammar);
+        GLRTable::build(&analyzed)
+    }
+
+    fn build_expr_nfa_optional_pair_suffix_grammar_with_value(
+        value_symbol: GrammarExpr,
+        extra_rules: Vec<NamedRule>,
+    ) -> NamedGrammar {
+        let mut builder = ExprNfaBuilder::new();
+
+        let start = builder.start_state();
+        let after_a = builder.add_state();
+        let after_av = builder.add_state();
+        let before_b_or_c = builder.add_state();
+        let after_b = builder.add_state();
+        let after_bv = builder.add_state();
+        let before_c = builder.add_state();
+        let after_c = builder.add_state();
+        let after_cv = builder.add_state();
+        let accept = builder.add_state();
+
+        builder.add_epsilon(start, before_b_or_c);
+        builder.add_transition(start, GrammarExpr::Literal(b"a".to_vec()), after_a);
+        builder.add_transition(after_a, value_symbol.clone(), after_av);
+        builder.add_transition(after_av, GrammarExpr::Literal(b",".to_vec()), before_b_or_c);
+
+        builder.add_epsilon(before_b_or_c, before_c);
+        builder.add_transition(before_b_or_c, GrammarExpr::Literal(b"b".to_vec()), after_b);
+        builder.add_transition(after_b, value_symbol.clone(), after_bv);
+        builder.add_transition(after_bv, GrammarExpr::Literal(b",".to_vec()), before_c);
+
+        builder.add_transition(before_c, GrammarExpr::Literal(b"c".to_vec()), after_c);
+        builder.add_transition(after_c, value_symbol, after_cv);
+        builder.add_transition(after_cv, GrammarExpr::Literal(b"$".to_vec()), accept);
+        builder.set_accepting(accept);
+
+        let expr_nfa = builder.build().into_determinized_and_minimized();
+        let mut rules = vec![NamedRule {
+            name: "start".into(),
+            expr: GrammarExpr::ExprNFA(Box::new(expr_nfa)),
+            is_terminal: false,
+            is_internal: false,
+        }];
+        rules.extend(extra_rules);
+        NamedGrammar {
+            rules,
+            start: "start".into(),
+            ignore: None,
+        }
+    }
+
+    fn glrm_recursive_array_colorpalette_minimal_stackshift_mre() -> &'static str {
+        r#"
+            start start;
+            t JSON_ITEM_SEPARATOR ::= /(?:, )/;
+            nt json_array ::= "[" (json_value (JSON_ITEM_SEPARATOR json_value)*)? "]";
+            nt json_value ::= json_array;
+            nt start ::= "{" "\"icons\": " "{" "\"ColorPalette\": " "{" ("\"k\": " json_value)* "}" "}" "}";
+        "#
+    }
+
+    fn build_direct_recursive_array_colorpalette_minimal_grammar() -> NamedGrammar {
+        let start_expr = GrammarExpr::Sequence(vec![
+            GrammarExpr::Literal(b"{".to_vec()),
+            GrammarExpr::Sequence(vec![
+                GrammarExpr::Literal(b"\"icons\": ".to_vec()),
+                GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b"{".to_vec()),
+                    GrammarExpr::SeparatedSequence {
+                        items: vec![(
+                            GrammarExpr::Sequence(vec![
+                                GrammarExpr::Literal(b"\"ColorPalette\": ".to_vec()),
+                                GrammarExpr::Sequence(vec![
+                                    GrammarExpr::Literal(b"{".to_vec()),
+                                    GrammarExpr::SeparatedSequence {
+                                        items: vec![(
+                                            GrammarExpr::Repeat(Box::new(GrammarExpr::Sequence(vec![
+                                                GrammarExpr::Literal(b"\"k\": ".to_vec()),
+                                                GrammarExpr::Ref("json_value".into()),
+                                            ]))),
+                                            false,
+                                        )],
+                                        separator: Box::new(GrammarExpr::Ref("JSON_ITEM_SEPARATOR".into())),
+                                        allow_empty: true,
+                                    },
+                                    GrammarExpr::Literal(b"}".to_vec()),
+                                ]),
+                            ]),
+                            false,
+                        )],
+                        separator: Box::new(GrammarExpr::Ref("JSON_ITEM_SEPARATOR".into())),
+                        allow_empty: true,
+                    },
+                    GrammarExpr::Literal(b"}".to_vec()),
+                ]),
+            ]),
+            GrammarExpr::Literal(b"}".to_vec()),
+        ]);
+
+        NamedGrammar {
+            rules: vec![
+                NamedRule {
+                    name: "JSON_ITEM_SEPARATOR".into(),
+                    expr: GrammarExpr::RawRegex("(?:, )".into()),
+                    is_terminal: true,
+                    is_internal: false,
+                },
+                NamedRule {
+                    name: "json_array".into(),
+                    expr: GrammarExpr::Sequence(vec![
+                        GrammarExpr::Literal(b"[".to_vec()),
+                        GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
+                            GrammarExpr::Ref("json_value".into()),
+                            GrammarExpr::Repeat(Box::new(GrammarExpr::Sequence(vec![
+                                GrammarExpr::Ref("JSON_ITEM_SEPARATOR".into()),
+                                GrammarExpr::Ref("json_value".into()),
+                            ]))),
+                        ]))),
+                        GrammarExpr::Literal(b"]".to_vec()),
+                    ]),
+                    is_terminal: false,
+                    is_internal: false,
+                },
+                NamedRule {
+                    name: "json_value".into(),
+                    expr: GrammarExpr::Ref("json_array".into()),
+                    is_terminal: false,
+                    is_internal: false,
+                },
+                NamedRule {
+                    name: "start".into(),
+                    expr: start_expr,
+                    is_terminal: false,
+                    is_internal: false,
+                },
+            ],
+            start: "start".into(),
+            ignore: None,
+        }
+    }
+
+    fn assert_table_has_all_pop1_stack_shift_ambiguity(table: &GLRTable) {
+        let ambiguities = table.ambiguous_actions();
+        let Some(ambiguity) = ambiguities.iter().find(|ambiguity| {
+            ambiguity.kind == TableAmbiguityKind::StackShifts
+                && matches!(
+                    table.action(ambiguity.state, ambiguity.terminal),
+                    Some(Action::StackShifts(shifts))
+                        if shifts.len() > 1 && shifts.iter().all(|shift| shift.pop == 1)
+                )
+        }) else {
+            panic!("expected all-pop1 StackShifts ambiguity, but table had none: {:?}", table.ambiguous_actions());
+        };
+
+        let action = table
+            .action(ambiguity.state, ambiguity.terminal)
+            .expect("ambiguous action should still be present in table");
+        match action {
+            Action::StackShifts(shifts) => {
+                assert!(shifts.iter().all(|shift| shift.pop == 1));
+            }
+            other => panic!("expected StackShifts action, found {:?}", other),
+        }
+    }
+
+    fn assert_table_has_no_ambiguity(table: &GLRTable) {
+        let ambiguities = table.ambiguous_actions();
+        if let Some(TableAmbiguity {
+            state,
+            terminal,
+            kind,
+            alternatives,
+        }) = ambiguities.first()
+        {
+            let action = table
+                .action(*state, *terminal)
+                .expect("ambiguous action should still be present in table");
+            panic!(
+                "expected unambiguous table, found ambiguity at state={} terminal={} kind={:?} alternatives={} action={:?}",
+                state,
+                terminal,
+                kind,
+                alternatives,
+                action
+            );
+        }
+    }
+
+    fn assert_table_has_no_all_pop1_stack_shift_ambiguity(table: &GLRTable) {
+        let ambiguities = table.ambiguous_actions();
+        if let Some(ambiguity) = ambiguities.iter().find(|ambiguity| {
+            ambiguity.kind == TableAmbiguityKind::StackShifts
+                && matches!(
+                    table.action(ambiguity.state, ambiguity.terminal),
+                    Some(Action::StackShifts(shifts))
+                        if shifts.len() > 1 && shifts.iter().all(|shift| shift.pop == 1)
+                )
+        }) {
+            let action = table
+                .action(ambiguity.state, ambiguity.terminal)
+                .expect("ambiguous action should still be present in table");
+            panic!(
+                "expected unambiguous table, found all-pop1 StackShifts ambiguity at state={} terminal={} alternatives={} action={:?}",
+                ambiguity.state,
+                ambiguity.terminal,
+                ambiguity.alternatives,
+                action,
+            );
+        }
+
+        assert_table_has_no_ambiguity(table);
+    }
 
     #[test]
     fn ambiguous_actions_reports_split_and_stack_shift_fanout() {
@@ -462,6 +739,40 @@ mod ambiguity_tests {
     }
 
     #[test]
+    fn guarded_stack_shifts_with_disjoint_guards_are_not_ambiguous() {
+        let token = 0;
+        let table = build_test_table(
+            1,
+            1,
+            &[&[(
+                token,
+                Action::GuardedStackShifts(vec![
+                    GuardedStackShift {
+                        guards: vec![super::StackShiftGuard {
+                            pop: 1,
+                            states: vec![7],
+                        }],
+                        pop: 2,
+                        pushes: vec![5],
+                    },
+                    GuardedStackShift {
+                        guards: vec![super::StackShiftGuard {
+                            pop: 1,
+                            states: vec![10],
+                        }],
+                        pop: 2,
+                        pushes: vec![8],
+                    },
+                ]),
+            )]],
+            &[&[]],
+        );
+
+        assert!(!table.has_ambiguity());
+        assert!(table.ambiguous_actions().is_empty());
+    }
+
+    #[test]
     #[should_panic(expected = "validator test action target")]
     fn validate_structure_panics_on_invalid_action_target() {
         let token = 0;
@@ -474,4 +785,37 @@ mod ambiguity_tests {
 
         table.validate_structure("validator test action target");
     }
+
+    #[test]
+    fn expr_nfa_optional_pair_suffixes_with_value_ref_have_no_table_ambiguity() {
+        let grammar = build_expr_nfa_optional_pair_suffix_grammar_with_value(
+            GrammarExpr::Ref("value".into()),
+            vec![NamedRule {
+                name: "value".into(),
+                expr: GrammarExpr::Literal(b"v".to_vec()),
+                is_terminal: false,
+                is_internal: false,
+            }],
+        );
+
+        let table = build_table_from_named_grammar(&grammar);
+
+        assert_table_has_no_ambiguity(&table);
+    }
+
+    #[test]
+    fn glrm_recursive_array_colorpalette_minimal_does_not_reproduce_all_pop1_stack_shifts() {
+        let table = build_table_from_glrm(glrm_recursive_array_colorpalette_minimal_stackshift_mre());
+
+        assert_table_has_no_all_pop1_stack_shift_ambiguity(&table);
+    }
+
+    #[test]
+    fn direct_recursive_array_colorpalette_minimal_reproduces_all_pop1_stack_shifts() {
+        let grammar = build_direct_recursive_array_colorpalette_minimal_grammar();
+        let table = build_table_from_named_grammar(&grammar);
+
+        assert_table_has_all_pop1_stack_shift_ambiguity(&table);
+    }
+
 }
