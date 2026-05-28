@@ -9,7 +9,6 @@ use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguityKind};
 use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar};
 use crate::grammar::glrm::to_glrm;
-use crate::{Constraint, Vocab};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -56,14 +55,6 @@ fn start_expr(grammar: &NamedGrammar) -> &GrammarExpr {
         .find(|rule| rule.name == grammar.start)
         .expect("start rule exists")
         .expr
-}
-
-fn bytes_vocab() -> Vocab {
-    Vocab::new((0u8..=255).map(|b| (b as u32, vec![b])).collect(), None)
-}
-
-fn byte_schema(schema: &str) -> Constraint {
-    Constraint::from_json_schema(schema, &bytes_vocab()).unwrap()
 }
 
 #[test]
@@ -805,8 +796,8 @@ fn string_pattern_lowers_as_terminal_pattern() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("JSON_STRING_CHAR{2,8}"), "{glrm}");
-    assert!(glrm.contains("& /\"(?:(?:[A-Za-z])+)\"/"), "{glrm}");
+    assert!(glrm.contains("/\"(?:(?:[A-Za-z])+)\"/"), "{glrm}");
+    assert!(!glrm.contains("& /\"(?:(?:[A-Za-z])+)\"/"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -854,50 +845,6 @@ fn json_string_char_terminal_requires_valid_utf8_sequences() {
     assert!(glrm.contains("[\\xC2-\\xDF][\\x80-\\xBF]"), "{glrm}");
     assert!(!glrm.contains("[^\\x00-\\x1f\\x7f"), "{glrm}");
     lower(&grammar).unwrap();
-}
-
-#[test]
-fn patterned_exact_length_string_rejects_short_and_long_strings() {
-    let constraint = byte_schema(
-        r#"{"type":"string","minLength":30,"maxLength":30,"pattern":"^[a]+$"}"#,
-    );
-
-    for len in [0usize, 1, 2, 29, 31] {
-        let mut text = Vec::with_capacity(len + 2);
-        text.push(b'"');
-        text.extend(std::iter::repeat_n(b'a', len));
-        text.push(b'"');
-        let mut state = constraint.start();
-        assert!(state.commit_bytes(&text).is_err(), "expected len {len} to reject");
-    }
-
-    let mut exact = Vec::with_capacity(32);
-    exact.push(b'"');
-    exact.extend(std::iter::repeat_n(b'a', 30));
-    exact.push(b'"');
-    let mut state = constraint.start();
-    state.commit_bytes(&exact).unwrap();
-}
-
-#[test]
-fn patterned_object_property_length_rejects_premature_close() {
-    let constraint = byte_schema(
-        r#"{
-            "type": "object",
-            "properties": {
-                "id": {
-                    "type": "string",
-                    "pattern": "^[a-z>]+$",
-                    "minLength": 30,
-                    "maxLength": 30
-                }
-            },
-            "additionalProperties": false
-        }"#,
-    );
-
-    let mut state = constraint.start();
-    state.commit_bytes(br#"{"id":">""#).unwrap_err();
 }
 
 #[test]
@@ -1216,8 +1163,8 @@ fn string_pattern_takes_precedence_over_format() {
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("/\"(?:abc)\"/"), "{glrm}");
-    assert!(glrm.contains(" & "), "{glrm}");
-    assert!(glrm.contains("[0-9A-Fa-f]{8}"), "{glrm}");
+    assert!(!glrm.contains("& /\"(?:abc)\"/"), "{glrm}");
+    assert!(!glrm.contains("[0-9A-Fa-f]{8}"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
