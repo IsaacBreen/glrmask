@@ -1146,6 +1146,31 @@ fn email_format_lowers_to_constrained_terminal() {
 }
 
 #[test]
+fn email_format_with_large_max_length_does_not_preserve_length_envelope() {
+    let schema = json!({
+        "type": "string",
+        "format": "email",
+        "maxLength": 1024
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(
+        grammar
+            .rules
+            .iter()
+            .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
+        "{:?}",
+        grammar.rules
+    );
+
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("@"), "{glrm}");
+    assert!(!glrm.contains("JSON_STRING_CHAR{0,1024}"), "{glrm}");
+    assert!(!glrm.contains("json_string_char_exact_50"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn hostname_ipv4_ipv6_formats_lower_to_constrained_terminals() {
     for (format, expected) in [
         ("hostname", "[A-Za-z0-9]"),

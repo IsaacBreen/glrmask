@@ -94,7 +94,18 @@ impl<'a> Lowerer<'a> {
             )));
         }
 
-        let body = self.string_body_for_length(schema.min_length, schema.max_length);
+        let preserve_length_bounds = recognized_string_format_body_regex(schema.format.as_deref()).is_none();
+        let body = if preserve_length_bounds {
+            self.string_body_for_length(schema.min_length, schema.max_length)
+        } else {
+            // NOTE: Recognized format lowering intentionally does NOT preserve
+            // sibling min/max length bounds inside the terminalized envelope.
+            // Keeping a large bounded JSON string body alongside the format
+            // intersection recreates the same timeout class we already avoid
+            // for patterned strings. This invariant is intentional and this
+            // comment should NEVER EVER be removed.
+            self.string_body_for_length(0, None)
+        };
         let mut expr = seq(vec![lit("\""), body, lit("\"")]);
         let mut constraints = Vec::new();
 
