@@ -31,7 +31,7 @@ impl<'a> Lowerer<'a> {
             .collect::<Vec<_>>();
         let has_ref_branch = branches.iter().any(schema_contains_ref);
         let factoring_branches = if has_ref_branch {
-            self.inline_all_of_refs(&branches)?
+            self.inline_all_of_refs_for_any_of_factoring(&branches)?
         } else {
             branches.clone()
         };
@@ -213,6 +213,20 @@ impl<'a> Lowerer<'a> {
             .iter()
             .map(|branch| self.inline_refs_in_all_of_branch(branch))
             .collect()
+    }
+
+    fn inline_all_of_refs_for_any_of_factoring(
+        &self,
+        branches: &[Schema],
+    ) -> ImportResult<Vec<Schema>> {
+        // Object-anyOf factoring needs short alias chains such as
+        // `$ref -> allOf([$ref -> allOf(...)])` to expose their object branches.
+        // Keep this bounded and local to factoring so general ref lowering stays conservative.
+        let mut current = branches.to_vec();
+        for _ in 0..4 {
+            current = self.inline_all_of_refs(&current)?;
+        }
+        Ok(current)
     }
 
     fn schema_transitively_refs_pointer(

@@ -2650,6 +2650,101 @@ fn open_object_anyof_uses_single_object_body_nfa() {
 }
 
 #[test]
+fn array_items_anyof_allof_ref_alias_variants_lower_to_shared_open_object_body() {
+    let schema = json!({
+        "$schema": "http://json-schema.org/draft-06/schema#",
+        "definitions": {
+            "Statement": {
+                "type": "object",
+                "properties": {
+                    "evidence": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source_api": {"type": "string"},
+                                "text": {"type": "string"}
+                            }
+                        }
+                    },
+                    "id": {"type": "string"},
+                    "supports": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    },
+                    "supported_by": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    }
+                },
+                "required": ["id"]
+            },
+            "Agent": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "db_refs": {"type": "object"}
+                },
+                "required": ["name", "db_refs"]
+            },
+            "RegulateActivity": {
+                "allOf": [
+                    {"$ref": "#/definitions/Statement"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "pattern": "^((Activation)|(Inhibition))$"
+                            },
+                            "subj": {"$ref": "#/definitions/Agent"},
+                            "obj": {"$ref": "#/definitions/Agent"},
+                            "obj_activity": {"type": "string"}
+                        },
+                        "required": ["type"]
+                    }
+                ]
+            },
+            "ActiveForm": {
+                "allOf": [
+                    {"$ref": "#/definitions/Statement"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "pattern": "^ActiveForm$"
+                            },
+                            "agent": {"$ref": "#/definitions/Agent"},
+                            "activity": {"type": "string"},
+                            "is_active": {"type": "boolean"}
+                        },
+                        "required": ["type"]
+                    }
+                ]
+            },
+            "ActiveFormAlias": {
+                "allOf": [
+                    {"$ref": "#/definitions/ActiveForm"}
+                ]
+            }
+        },
+        "type": "array",
+        "items": {
+            "anyOf": [
+                {"$ref": "#/definitions/RegulateActivity"},
+                {"$ref": "#/definitions/ActiveFormAlias"}
+            ]
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("json_anyof_object_body"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn anyof_drops_subsumed_open_object_branch_for_o83993_shape() {
     let schema = json!({
         "anyOf": [
