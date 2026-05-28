@@ -28,6 +28,7 @@ pub(crate) const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE: &str =
     "JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED";
 pub(crate) const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE: &str =
     "json_additional_excluded_key_colon_shared";
+pub(crate) const MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS: usize = 256;
 const STRING_ENUM_REGEX_MIN_VALUES: usize = 64;
 const STRING_ENUM_REGEX_MIN_ENCODED_BYTES: usize = 1024;
 

@@ -12,7 +12,7 @@ use super::lower::{
     choice, lit, lit_bytes, never, r, seq, Lowerer,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE, JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
-    JSON_STRING_CHAR_RULE, JSON_STRING_RULE,
+    JSON_STRING_CHAR_RULE, JSON_STRING_RULE, MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS,
 };
 
 impl<'a> Lowerer<'a> {
@@ -489,10 +489,52 @@ impl<'a> Lowerer<'a> {
         fixed_keys: &BTreeSet<String>,
         local_patterns: &[String],
     ) -> ImportResult<GrammarExpr> {
+        if !self.use_shared_additional_key_colon() {
+            return self.lower_additional_key_colon_expanded_addback(fixed_keys, local_patterns);
+        }
+
         if self.shared_ap_patterns.is_empty() && local_patterns.is_empty() {
             return self.lower_additional_key_colon_literal_only(fixed_keys);
         }
 
+        let mut alternatives = vec![self.shared_additional_key_colon_base()?];
+
+        for key in self.shared_ap_literal_keys.clone() {
+            if fixed_keys.contains(&key) {
+                continue;
+            }
+            let mut covered_by_local_pattern = false;
+            for pattern in local_patterns {
+                if property_name_matches_pattern(pattern, &key)? {
+                    covered_by_local_pattern = true;
+                    break;
+                }
+            }
+            if covered_by_local_pattern {
+                continue;
+            }
+            alternatives.push(self.lower_literal_key_colon(&key));
+        }
+
+        for pattern in self.shared_ap_patterns.clone() {
+            if local_patterns.iter().any(|local| local == &pattern) {
+                continue;
+            }
+            alternatives.push(self.lower_pattern_key_colon_addback(&pattern, fixed_keys, local_patterns)?);
+        }
+
+        Ok(choice(alternatives))
+    }
+
+    fn use_shared_additional_key_colon(&self) -> bool {
+        self.shared_ap_literal_keys.len() <= MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS
+    }
+
+    fn lower_additional_key_colon_expanded_addback(
+        &mut self,
+        fixed_keys: &BTreeSet<String>,
+        local_patterns: &[String],
+    ) -> ImportResult<GrammarExpr> {
         let mut alternatives = vec![self.shared_additional_key_colon_base()?];
 
         for key in self.shared_ap_literal_keys.clone() {
