@@ -7,7 +7,7 @@ use super::ast::{
     SchemaType,
 };
 use super::error::ImportResult;
-use super::lower::{choice, never, normalize_local_ref, r, Lowerer, JSON_VALUE_RULE};
+use super::lower::{choice, never, normalize_local_ref, r, Lowerer, JSON_OBJECT_RULE, JSON_VALUE_RULE};
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_any_of(
@@ -35,6 +35,9 @@ impl<'a> Lowerer<'a> {
         } else {
             branches.clone()
         };
+        if open_object_any_of_covers_json_object(&factoring_branches) {
+            return Ok(r(JSON_OBJECT_RULE));
+        }
         let factoring_branches = drop_subsumed_open_object_any_of_branches(factoring_branches);
         if let Some(expr) =
             self.try_lower_closed_object_any_of_variants(&factoring_branches, has_ref_branch)?
@@ -896,6 +899,41 @@ fn drop_subsumed_open_object_any_of_branches(branches: Vec<Schema>) -> Vec<Schem
         .zip(keep)
         .filter_map(|(branch, keep)| keep.then_some(branch))
         .collect()
+}
+
+pub(super) fn open_object_any_of_covers_json_object(branches: &[Schema]) -> bool {
+    if branches.len() < 2 {
+        return false;
+    }
+
+    let Some(objects) = branches
+        .iter()
+        .map(object_branch)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+
+    if objects.iter().any(|object| {
+        !matches!(object.additional_properties, AdditionalProperties::AllowAny)
+            || !object.required.is_empty()
+            || object.min_properties != 0
+            || object.max_properties.is_some()
+            || !object.pattern_properties.is_empty()
+    }) {
+        return false;
+    }
+
+    let property_names = objects
+        .iter()
+        .flat_map(|object| object.properties.iter().map(|property| property.name.as_str()))
+        .collect::<BTreeSet<_>>();
+
+    property_names.into_iter().all(|name| {
+        objects
+            .iter()
+            .any(|object| property_schema_by_name(object, name).is_none())
+    })
 }
 
 fn object_branch(schema: &Schema) -> Option<&ObjectSchema> {

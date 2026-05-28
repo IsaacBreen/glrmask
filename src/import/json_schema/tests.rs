@@ -1892,6 +1892,96 @@ fn anyof_required_property_factoring_falls_back_for_nontrivial_branch() {
 }
 
 #[test]
+fn anyof_open_objects_with_disjoint_optional_properties_collapses_to_json_object() {
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"}
+                }
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "b": {"type": "number"}
+                }
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("nt start ::= json_object;"), "{glrm}");
+    assert!(!glrm.contains("\\\"a\\\":"), "{glrm}");
+    assert!(!glrm.contains("\\\"b\\\":"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn anyof_open_objects_with_shared_optional_property_does_not_collapse_to_json_object() {
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"}
+                }
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number"}
+                }
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(!matches!(start_expr(&grammar), GrammarExpr::Ref(name) if name == "json_object"));
+    assert!(glrm.contains("\\\"a\\\":"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn pattern_map_anyof_open_objects_with_disjoint_optional_properties_collapses_value_to_json_object()
+{
+    let schema = json!({
+        "type": "object",
+        "patternProperties": {
+            "^[a-z]+$": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "a": {"type": "string"}
+                        }
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "b": {"type": "number"}
+                        }
+                    }
+                ]
+            }
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    let pattern_pair_rule = glrm
+        .lines()
+        .find(|line| line.contains("json_pattern_map_pair_"))
+        .unwrap_or_else(|| panic!("{glrm}"));
+    assert!(pattern_pair_rule.ends_with(" json_object;"), "{glrm}");
+    assert!(!glrm.contains("obj_ord_"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn anyof_closed_object_variant_factoring_falls_back_for_two_variant_properties() {
     let schema = json!({
         "anyOf": [
@@ -2545,7 +2635,12 @@ fn open_object_anyof_uses_single_object_body_nfa() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("json_anyof_object_body"), "{glrm}");
+    let pattern_pair_rule = glrm
+        .lines()
+        .find(|line| line.contains("json_pattern_map_pair_"))
+        .unwrap_or_else(|| panic!("{glrm}"));
+    assert!(pattern_pair_rule.ends_with(" json_object;"), "{glrm}");
+    assert!(!glrm.contains("json_anyof_object_body"), "{glrm}");
     assert!(
         !glrm.contains("\"{\" json_closed_object_body")
             || !glrm.contains("| \"{\" json_closed_object_body"),

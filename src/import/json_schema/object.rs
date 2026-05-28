@@ -7,7 +7,9 @@ use super::ast::{
     AdditionalProperties, ObjectSchema, PatternPropertySchema,
     PropertySchema, Schema, SchemaAssertions, SchemaKind, SchemaType,
 };
-use super::combinators::{all_of_schema, try_merge_all_of_objects};
+use super::combinators::{
+    all_of_schema, open_object_any_of_covers_json_object, try_merge_all_of_objects,
+};
 use super::error::{ImportResult, SchemaImportError};
 use super::lower::{
     choice, lit, never, r, seq, Lowerer, JSON_ARRAY_RULE, JSON_BOOL_RULE,
@@ -716,6 +718,10 @@ impl<'a> Lowerer<'a> {
             || !assertions.all_of.is_empty()
         {
             return Ok(None);
+        }
+
+        if open_object_any_of_covers_json_object(&assertions.any_of) {
+            return Ok(Some(r(JSON_OBJECT_RULE)));
         }
 
         self.try_lower_open_object_any_of_variants(&assertions.any_of)
