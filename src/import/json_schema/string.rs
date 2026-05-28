@@ -611,7 +611,15 @@ impl<'a> Lowerer<'a> {
         fixed_keys: &BTreeSet<String>,
         local_patterns: &[String],
     ) -> ImportResult<GrammarExpr> {
-        let mut alternatives = vec![self.lower_pattern_key_colon_terminal(pattern)?];
+        let mut pattern_expr = self.lower_pattern_key_colon_terminal(pattern)?;
+        for local_pattern in local_patterns {
+            pattern_expr = GrammarExpr::Exclude {
+                expr: Box::new(pattern_expr),
+                exclude: Box::new(self.pattern_key_colon_full_language(local_pattern)?),
+            };
+        }
+
+        let mut alternatives = vec![pattern_expr];
         let overlap_keys = self.pattern_overlapping_literal_keys(pattern)?;
         let mut addback_literals = Vec::new();
         'keys: for key in &overlap_keys {

@@ -2745,6 +2745,54 @@ fn array_items_anyof_allof_ref_alias_variants_lower_to_shared_open_object_body()
 }
 
 #[test]
+fn sibling_pattern_addback_subtracts_local_pattern_language_for_o10297_shape() {
+    let schema = json!({
+        "$schema": "http://json-schema.org/draft-04/schema#",
+        "type": "object",
+        "properties": {
+            "score_history": {
+                "type": "object",
+                "patternProperties": {
+                    "^\\d+$": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "player_id": {"type": "integer"},
+                                "score": {"type": "integer"},
+                                "rating_delta": {"type": "number"},
+                                "place": {"type": "integer"}
+                            },
+                            "required": ["player_id", "score", "rating_delta", "place"]
+                        }
+                    }
+                }
+            },
+            "hands_value_summary": {
+                "type": "object",
+                "patternProperties": {
+                    "^-?\\d+$": {"type": "integer"}
+                }
+            }
+        },
+        "required": ["score_history", "hands_value_summary"],
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+
+    assert!(
+        glrm.lines()
+            .any(|line| line.contains("json_pattern_key_colon_")
+                && line.contains(" - json_pattern_key_colon_")),
+        "{glrm}"
+    );
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn anyof_drops_subsumed_open_object_branch_for_o83993_shape() {
     let schema = json!({
         "anyOf": [
