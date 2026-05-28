@@ -447,6 +447,91 @@ fn find_indirect_lr_cycle(
     find_cycle(graph, 2, false)
 }
 
+fn find_nontrivial_sccs(
+    graph: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
+) -> Vec<BTreeSet<NonterminalID>> {
+    let mut nodes: Vec<NonterminalID> = graph.keys().copied().collect();
+    for neighbors in graph.values() {
+        nodes.extend(neighbors.iter().copied());
+    }
+    nodes.sort_unstable();
+    nodes.dedup();
+
+    if nodes.is_empty() {
+        return Vec::new();
+    }
+
+    let node_to_idx: HashMap<NonterminalID, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, &node)| (node, index))
+        .collect();
+    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+    let mut reverse_adjacency: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+
+    for (&node, neighbors) in graph {
+        let from_index = node_to_idx[&node];
+        for &neighbor in neighbors {
+            let to_index = node_to_idx[&neighbor];
+            adjacency[from_index].push(to_index);
+            reverse_adjacency[to_index].push(from_index);
+        }
+    }
+
+    let mut visited = vec![false; nodes.len()];
+    let mut finish_order = Vec::with_capacity(nodes.len());
+    for start in 0..nodes.len() {
+        if visited[start] {
+            continue;
+        }
+        let mut stack = vec![(start, 0usize)];
+        visited[start] = true;
+        while let Some((node_index, neighbor_index)) = stack.last_mut() {
+            if *neighbor_index < adjacency[*node_index].len() {
+                let next = adjacency[*node_index][*neighbor_index];
+                *neighbor_index += 1;
+                if !visited[next] {
+                    visited[next] = true;
+                    stack.push((next, 0));
+                }
+            } else {
+                finish_order.push(*node_index);
+                stack.pop();
+            }
+        }
+    }
+
+    visited.fill(false);
+    let mut sccs = Vec::new();
+    for &start in finish_order.iter().rev() {
+        if visited[start] {
+            continue;
+        }
+        let mut component_indices = Vec::new();
+        let mut stack = vec![start];
+        visited[start] = true;
+        while let Some(node_index) = stack.pop() {
+            component_indices.push(node_index);
+            for &next in &reverse_adjacency[node_index] {
+                if !visited[next] {
+                    visited[next] = true;
+                    stack.push(next);
+                }
+            }
+        }
+
+        if component_indices.len() >= 2 {
+            let component: BTreeSet<NonterminalID> = component_indices
+                .into_iter()
+                .map(|node_index| nodes[node_index])
+                .collect();
+            sccs.push(component);
+        }
+    }
+
+    sccs
+}
+
 /// Find a cycle of length ≥ 2 in the graph (self-loops are skipped).
 /// Used by `eliminate_right_recursion` to find indirect cycles.
 fn find_cycle_excluding_self_loops(
@@ -1315,22 +1400,86 @@ pub(crate) fn inline_null_productions(rules: &[Rule], num_nt: u32) -> Vec<Rule> 
 fn eliminate_hidden_left_recursion(
     rules: &mut Vec<Rule>,
     nullable: &BTreeSet<NonterminalID>,
+    normalize_iteration: usize,
 ) {
+    let profile_enabled = compile_profile_enabled();
+
     loop {
+        let rules_len = rules.len();
+        let lr_graph_started_at = profile_enabled.then(Instant::now);
         let lr_graph = build_left_reachability_graph(rules, nullable);
-        let cycle = match find_indirect_lr_cycle(&lr_graph) {
-            Some(c) => c,
-            None => return,
-        };
-        let cycle_nodes: BTreeSet<NonterminalID> = cycle.into_iter().collect();
+        let build_left_reachability_graph_ms = lr_graph_started_at
+            .map(elapsed_ms)
+            .unwrap_or(0.0);
+        let left_reachability_node_count = lr_graph.len();
+        let left_reachability_edge_count: usize =
+            lr_graph.values().map(BTreeSet::len).sum();
+        let cycle_sccs = find_nontrivial_sccs(&lr_graph);
+        if cycle_sccs.is_empty() && cfg!(debug_assertions) {
+            debug_assert!(find_indirect_lr_cycle(&lr_graph).is_none());
+        }
+        if cycle_sccs.is_empty() {
+            if profile_enabled {
+                emit_normalize_profile(
+                    "hidden_left_recursion_helper_counters",
+                    Some(normalize_iteration),
+                    build_left_reachability_graph_ms,
+                    rules_len,
+                    rules_len,
+                    &format!(
+                        " rules_len={} build_rhs_by_lhs_ms=0.000 rhs_lhs_bucket_count=0 rhs_total_entries=0 build_left_reachability_graph_ms={:.3} left_reachability_node_count={} left_reachability_edge_count={}",
+                        rules_len,
+                        build_left_reachability_graph_ms,
+                        left_reachability_node_count,
+                        left_reachability_edge_count,
+                    ),
+                );
+            }
+            return;
+        }
+        let rhs_by_lhs_started_at = profile_enabled.then(Instant::now);
         let rhs_by_lhs = build_rhs_by_lhs(rules);
+        let build_rhs_by_lhs_ms = rhs_by_lhs_started_at.map(elapsed_ms).unwrap_or(0.0);
+        let rhs_lhs_bucket_count = rhs_by_lhs.len();
+        let rhs_total_entries: usize = rhs_by_lhs.values().map(BTreeSet::len).sum();
+
+        if profile_enabled {
+            emit_normalize_profile(
+                "hidden_left_recursion_helper_counters",
+                Some(normalize_iteration),
+                build_left_reachability_graph_ms + build_rhs_by_lhs_ms,
+                rules_len,
+                rules_len,
+                &format!(
+                    " rules_len={} build_rhs_by_lhs_ms={:.3} rhs_lhs_bucket_count={} rhs_total_entries={} build_left_reachability_graph_ms={:.3} left_reachability_node_count={} left_reachability_edge_count={}",
+                    rules_len,
+                    build_rhs_by_lhs_ms,
+                    rhs_lhs_bucket_count,
+                    rhs_total_entries,
+                    build_left_reachability_graph_ms,
+                    left_reachability_node_count,
+                    left_reachability_edge_count,
+                ),
+            );
+        }
 
         let mut additions = Vec::new();
         let mut replaced_cycle_rules = HashSet::new();
+        let cycle_scc_by_nt: HashMap<NonterminalID, usize> = cycle_sccs
+            .iter()
+            .enumerate()
+            .flat_map(|(scc_index, cycle_nodes)| {
+                cycle_nodes
+                    .iter()
+                    .copied()
+                    .map(move |nonterminal| (nonterminal, scc_index))
+            })
+            .collect();
         for rule in rules.iter() {
-            if !cycle_nodes.contains(&rule.lhs) {
+            let Some(&scc_index) = cycle_scc_by_nt.get(&rule.lhs) else {
                 continue;
-            }
+            };
+            let cycle_nodes = &cycle_sccs[scc_index];
 
             let prefix_end = nullable_prefix_len(&rule.rhs, nullable);
             // For each skip length, if next symbol is a cycle member, add a shortened rule.
@@ -2159,7 +2308,7 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
         with_resynced_next_nonterminal(rules, &next_nt, |rules| {
             let nullable = compute_nullable(rules, max_nt_id(rules) + 1);
             nullable_count = nullable.len();
-            eliminate_hidden_left_recursion(rules, &nullable);
+            eliminate_hidden_left_recursion(rules, &nullable, iteration + 1);
         });
 
         if let Some(started_at) = hlr_started_at {
@@ -2573,6 +2722,24 @@ mod tests {
         );
 
         assert!(grammar.check_table_build_normal_form().is_ok());
+    }
+
+    #[test]
+    fn nontrivial_sccs_include_multiple_disjoint_cycles_and_skip_self_loops() {
+        let graph = BTreeMap::from([
+            (0, BTreeSet::from([1])),
+            (1, BTreeSet::from([0])),
+            (2, BTreeSet::from([3])),
+            (3, BTreeSet::from([4])),
+            (4, BTreeSet::from([2])),
+            (5, BTreeSet::from([5])),
+            (6, BTreeSet::from([7])),
+        ]);
+
+        let mut sccs = find_nontrivial_sccs(&graph);
+        sccs.sort_by_key(|component| component.iter().next().copied().unwrap_or(u32::MAX));
+
+        assert_eq!(sccs, vec![BTreeSet::from([0, 1]), BTreeSet::from([2, 3, 4])]);
     }
 
     #[test]
