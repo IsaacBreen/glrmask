@@ -2293,11 +2293,7 @@ fn try_inline_action_to_stack_shifts(
     if effects.is_empty() {
         return None;
     }
-    let action = stack_effect_action(table, effects)?;
-    if is_multi_stack_shift_action(&action) {
-        return None;
-    }
-    Some(action)
+    stack_effect_action(table, effects)
 }
 
 fn normalize_stack_shifts(shifts: &mut Vec<StackShift>) {
@@ -2368,10 +2364,6 @@ fn stack_shift_action(mut shifts: Vec<StackShift>) -> Option<Action> {
         }
     }
     Some(Action::StackShifts(shifts))
-}
-
-fn is_multi_stack_shift_action(action: &Action) -> bool {
-    matches!(action, Action::StackShifts(shifts) if shifts.len() > 1)
 }
 
 #[cfg(test)]
@@ -2709,6 +2701,209 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn inline_action_to_stack_shifts_keeps_multishift_replacement_reduce_chain() {
+        let mut action = vec![ActionRow::default(); 5];
+        action[2].insert(
+            0,
+            Action::Split {
+                shift: Some((4, false)),
+                reduces: vec![(10, 1)],
+                accept: false,
+            },
+        );
+        action[3].insert(0, Action::Shift(4, false));
+
+        let mut goto = vec![GotoRow::default(); 5];
+        goto[1].insert(10, (3, true));
+
+        let table = GLRTable {
+            action,
+            goto,
+            num_states: 5,
+            num_terminals: 1,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            advance: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+        };
+        let mut predecessors = vec![BTreeSet::new(); 5];
+        predecessors[2].insert(1);
+
+        let action = table.action(2, 0).expect("expected split action");
+        let result = try_inline_action_to_stack_shifts(
+            &table,
+            &predecessors,
+            2,
+            0,
+            action,
+            &mut FxHashMap::default(),
+            &mut FxHashMap::default(),
+        );
+
+        let Some(Action::StackShifts(shifts)) = result else {
+            panic!("expected multi-stack-shift action, got {result:?}");
+        };
+        assert_eq!(
+            shifts,
+            vec![
+                StackShift {
+                    pop: 0,
+                    pushes: vec![4],
+                },
+                StackShift {
+                    pop: 2,
+                    pushes: vec![3, 4],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn inline_action_to_stack_shifts_handles_replace_shift_and_replace_goto() {
+        let mut action = vec![ActionRow::default(); 6];
+        action[2].insert(
+            0,
+            Action::Split {
+                shift: Some((4, true)),
+                reduces: vec![(10, 1)],
+                accept: false,
+            },
+        );
+        action[3].insert(0, Action::Shift(5, true));
+
+        let mut goto = vec![GotoRow::default(); 6];
+        goto[1].insert(10, (3, true));
+
+        let table = GLRTable {
+            action,
+            goto,
+            num_states: 6,
+            num_terminals: 1,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            advance: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+        };
+        let mut predecessors = vec![BTreeSet::new(); 6];
+        predecessors[2].insert(1);
+
+        let action = table.action(2, 0).expect("expected split action");
+        let result = try_inline_action_to_stack_shifts(
+            &table,
+            &predecessors,
+            2,
+            0,
+            action,
+            &mut FxHashMap::default(),
+            &mut FxHashMap::default(),
+        );
+
+        let Some(Action::StackShifts(shifts)) = result else {
+            panic!("expected replacement stack shifts, got {result:?}");
+        };
+        assert_eq!(
+            shifts,
+            vec![
+                StackShift {
+                    pop: 1,
+                    pushes: vec![4],
+                },
+                StackShift {
+                    pop: 2,
+                    pushes: vec![5],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn inline_action_to_stack_shifts_guards_divergent_replace_gotos_by_predecessor() {
+        let mut action = vec![ActionRow::default(); 9];
+        action[2].insert(0, Action::Reduce(10, 1));
+        action[3].insert(0, Action::Shift(7, false));
+        action[4].insert(0, Action::Shift(8, false));
+
+        let mut goto = vec![GotoRow::default(); 9];
+        goto[1].insert(10, (3, true));
+        goto[6].insert(10, (4, true));
+
+        let table = GLRTable {
+            action,
+            goto,
+            num_states: 9,
+            num_terminals: 1,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            advance: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+        };
+        let mut predecessors = vec![BTreeSet::new(); 9];
+        predecessors[2].extend([1, 6]);
+
+        let action = table.action(2, 0).expect("expected reduce action");
+        let result = try_inline_action_to_stack_shifts(
+            &table,
+            &predecessors,
+            2,
+            0,
+            action,
+            &mut FxHashMap::default(),
+            &mut FxHashMap::default(),
+        );
+
+        let Some(Action::GuardedStackShifts(shifts)) = result else {
+            panic!("expected guarded replacement stack shifts, got {result:?}");
+        };
+        assert_eq!(
+            shifts,
+            vec![
+                GuardedStackShift {
+                    guards: vec![StackShiftGuard {
+                        pop: 1,
+                        states: vec![1],
+                    }],
+                    pop: 2,
+                    pushes: vec![3, 7],
+                },
+                GuardedStackShift {
+                    guards: vec![StackShiftGuard {
+                        pop: 1,
+                        states: vec![6],
+                    }],
+                    pop: 2,
+                    pushes: vec![4, 8],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn compatible_goto_unit_destination_still_refuses_replace_goto() {
+        let action = vec![ActionRow::default(); 4];
+        let mut goto = vec![GotoRow::default(); 4];
+        goto[1].insert(10, (3, true));
+
+        let table = GLRTable {
+            action,
+            goto,
+            num_states: 4,
+            num_terminals: 1,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            advance: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+        };
+        let mut predecessors = vec![BTreeSet::new(); 4];
+        predecessors[2].insert(1);
+
+        assert_eq!(unit_reduce_destination(&table, &predecessors, 2, 10), None);
     }
 
     #[test]
