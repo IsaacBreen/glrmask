@@ -30,8 +30,6 @@ evidence.
 
 ## Measurement Workflow
 - `constraint-framework-analysis` imports the installed `_glrmask` extension, not the repo source tree directly.
-- For CFA comparisons between `glrmask_native` and `llguidance_native`, build availability must be interpreted as a paired contract. A schema should not be treated as comparable if one native framework builds and the other fails or times out. The sweep intentionally suppresses a successful paired native build after the peer fails and records the real time under `suppressed_build_seconds`; reconstruct underlying asymmetry from `paired native build failure` plus `suppressed_build_seconds` when triaging. Fix or explicitly classify asymmetric native build failures before using that problem for correctness or timing comparisons.
-- `llguidance_native` may intentionally approximate `oneOf` as `anyOf` for comparability (`x-guidance.coerce_one_of`, or the CFA normalization equivalent). Do not use broader `lenient=true` unless the investigation explicitly accepts that unsupported keywords and formats will also be ignored.
 - After any Rust or Python extension change in `/Users/isaacbreen/Projects2/glrmask2`, run `make ffi-release` there, then restart the CFA `GlrmaskWorkerPool`, or measurements may use stale installed code.
 - For timeout schemas, use short capped probes first (10s, then at most 30s unless the user asks otherwise). Treat a small schema that exceeds those caps as a compiler bug to localize, not as a reason to add an importer shortcut for that schema's pattern text.
 
