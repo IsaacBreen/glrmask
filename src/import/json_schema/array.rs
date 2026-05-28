@@ -19,7 +19,9 @@ impl<'a> Lowerer<'a> {
                 let item = self.lower_schema(&schema.items)?;
                 return Ok(self.bounded_homogeneous_array_exprnfa(item, schema.min_items, max));
             }
-            if let Some(item) = self.lower_inline_bounded_array_string_item_expr(&schema.items)? {
+            if self.should_terminalize_bounded_scalar_array(max)
+                && let Some(item) = self.lower_inline_bounded_array_string_item_expr(&schema.items)?
+            {
                 return Ok(self.bounded_homogeneous_array_terminal(item, schema.min_items, max));
             }
         }
@@ -31,6 +33,10 @@ impl<'a> Lowerer<'a> {
             self.lower_tuple_array_body(schema)?
         };
         Ok(seq(vec![lit("["), body, lit("]")]))
+    }
+
+    fn should_terminalize_bounded_scalar_array(&self, max_items: usize) -> bool {
+        max_items <= self.config.repeat_chunk_size.max(2)
     }
 
     fn array_body(&self, item: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr {
