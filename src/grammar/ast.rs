@@ -878,6 +878,15 @@ impl Lowerer {
         lhs: NonterminalID,
         parts: &[GrammarExpr],
     ) -> Result<(), GlrMaskError> {
+        if parts.iter().any(|part| !self.expr_is_nullable(part)) {
+            let mut rhs = Vec::with_capacity(parts.len());
+            for part in parts {
+                rhs.push(self.lower_expr_terminalish(part)?);
+            }
+            self.rules.push(Rule { lhs, rhs });
+            return Ok(());
+        }
+
         for (nonempty_index, nonempty_part) in parts.iter().enumerate() {
             let Some(nonempty_symbol) = self.lower_nonnullable_expr_symbol(nonempty_part)? else {
                 continue;
@@ -2470,5 +2479,49 @@ mod tests {
 
         let err = lower(&grammar).unwrap_err();
         assert!(format!("{err}").contains("no exact alternative"), "{err}");
+    }
+
+    #[test]
+    fn nonnullable_sequence_with_nonnullable_part_reduces_rules() {
+        let grammar = NamedGrammar {
+            rules: vec![
+                nonterminal(
+                    "body",
+                    GrammarExpr::Choice(vec![
+                        literal("abc"),
+                        GrammarExpr::Epsilon,
+                    ]),
+                ),
+                nonterminal(
+                    "item",
+                    GrammarExpr::RepeatOne(Box::new(GrammarExpr::Sequence(vec![
+                        literal("{"),
+                        GrammarExpr::Ref("body".to_string()),
+                        literal("}"),
+                    ]))),
+                ),
+                nonterminal("start", GrammarExpr::Ref("item".to_string())),
+            ],
+            start: "start".to_string(),
+            ignore: None,
+        };
+
+        let gdef = lower(&grammar).unwrap();
+        let brace_rules_count = gdef
+            .rules
+            .iter()
+            .filter(|rule| {
+                matches!(
+                    rule.rhs.first(),
+                    Some(crate::grammar::flat::Symbol::Terminal(tid))
+                        if gdef.terminal_display_name(*tid) == "{"
+                )
+            })
+            .count();
+        assert_eq!(
+            brace_rules_count,
+            1,
+            "nonnullable sequence should not synthesize duplicate brace-start alternatives"
+        );
     }
 }
