@@ -517,6 +517,31 @@ fn pattern_property_object_still_uses_separated_sequence() {
 }
 
 #[test]
+fn large_optional_open_object_with_pattern_properties_uses_fused_prefix_chain_rules() {
+    let mut properties = serde_json::Map::new();
+    for index in 0..16 {
+        properties.insert(format!("k{index}"), json!({"type": "string"}));
+    }
+
+    let schema = serde_json::Value::Object(serde_json::Map::from_iter([
+        ("type".to_string(), json!("object")),
+        ("properties".to_string(), serde_json::Value::Object(properties)),
+        (
+            "patternProperties".to_string(),
+            json!({"^x": {"type": "string"}}),
+        ),
+        ("additionalProperties".to_string(), json!({"type": "string"})),
+    ]));
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(count_rules_with_prefix(&grammar, "json_open_object_prefix") > 0);
+    assert!(!contains_separated_sequence(start_expr(&grammar)));
+    assert!(glrm.contains("json_open_object_prefix"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn allof_drops_vacuous_untyped_object_branch_for_typed_property() {
     let schema = json!({
         "type": "object",

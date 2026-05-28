@@ -534,6 +534,18 @@ impl<'a> Lowerer<'a> {
         }
 
         if !tail_pairs.is_empty() {
+            let use_large_optional_open_object_prefix_chain = normalized.required.is_empty()
+                && any_required_names.is_none()
+                && exclusive_group.is_none()
+                && !matches!(normalized.additional_properties, AdditionalProperties::Deny)
+                && normalized.properties.len() >= 16;
+            if use_large_optional_open_object_prefix_chain {
+                return self.lower_large_optional_open_object_fused_prefix_chain(
+                    &items,
+                    choice(tail_pairs),
+                );
+            }
+
             let required_prefix_len = items.iter().take_while(|item| item.required).count();
             let required_count = items.iter().filter(|item| item.required).count();
             let use_required_prefix_open_object_pair_loop = required_prefix_len > 0
