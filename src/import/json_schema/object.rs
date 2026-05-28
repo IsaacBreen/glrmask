@@ -11,7 +11,8 @@ use super::combinators::{all_of_schema, try_merge_all_of_objects};
 use super::error::{ImportResult, SchemaImportError};
 use super::lower::{
     choice, lit, never, r, seq, Lowerer, JSON_ARRAY_RULE, JSON_BOOL_RULE,
-    JSON_NULL_RULE,
+    JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
+    JSON_ADDITIONAL_KEY_COLON_SHARED_RULE, JSON_NULL_RULE,
     JSON_NUMBER_RULE, JSON_OBJECT_RULE, JSON_STRING_RULE, JSON_VALUE_RULE,
 };
 use super::string::property_name_matches_pattern;
@@ -31,7 +32,6 @@ struct ObjectItem {
 }
 
 const ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES: usize = 4096;
-const EXPR_NFA_TRANSITION_CHOICE_SPLIT_MAX_ALTS: usize = 8;
 
 struct AnyOfFixedObjectItem {
     key: String,
@@ -1026,33 +1026,55 @@ impl<'a> Lowerer<'a> {
         let last = symbols.len() - 1;
         for (index, symbol) in symbols.into_iter().enumerate() {
             let next = if index == last { to } else { builder.add_state() };
-            for transition_symbol in Self::split_expr_nfa_transition_symbols(symbol) {
+            for transition_symbol in Self::split_additional_key_colon_transition(symbol) {
                 builder.add_transition(current, transition_symbol, next);
             }
             current = next;
         }
     }
 
-    fn split_expr_nfa_transition_symbols(symbol: GrammarExpr) -> Vec<GrammarExpr> {
+    fn split_additional_key_colon_transition(symbol: GrammarExpr) -> Vec<GrammarExpr> {
         match symbol {
             GrammarExpr::Choice(alternatives)
-                if Self::should_split_expr_nfa_transition_choice(&alternatives) => {
+                if Self::is_shared_additional_key_colon_choice(&alternatives) =>
+            {
                 alternatives
             }
             other => vec![other],
         }
     }
 
-    fn should_split_expr_nfa_transition_choice(alternatives: &[GrammarExpr]) -> bool {
-        alternatives.len() >= 2
-            && alternatives.len() <= EXPR_NFA_TRANSITION_CHOICE_SPLIT_MAX_ALTS
-            && !alternatives.iter().any(Self::is_explicit_epsilon_expr)
+    fn is_shared_additional_key_colon_choice(alternatives: &[GrammarExpr]) -> bool {
+        if alternatives.len() != 2 {
+            return false;
+        }
+
+        let has_shared_base = alternatives
+            .iter()
+            .any(Self::is_shared_additional_key_colon_base_ref);
+        let has_shared_excluded_addback = alternatives
+            .iter()
+            .any(Self::is_shared_additional_key_colon_addback);
+
+        has_shared_base && has_shared_excluded_addback
     }
 
-    fn is_explicit_epsilon_expr(expr: &GrammarExpr) -> bool {
+    fn is_shared_additional_key_colon_base_ref(expr: &GrammarExpr) -> bool {
+        matches!(expr, GrammarExpr::Ref(rule_name) if rule_name == JSON_ADDITIONAL_KEY_COLON_SHARED_RULE)
+    }
+
+    fn is_shared_additional_key_colon_addback(expr: &GrammarExpr) -> bool {
         match expr {
-            GrammarExpr::Grouped(inner) => Self::is_explicit_epsilon_expr(inner),
-            GrammarExpr::Epsilon => true,
+            GrammarExpr::Ref(rule_name) => {
+                rule_name == JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE
+            }
+            GrammarExpr::Exclude { expr, .. } => {
+                matches!(
+                    expr.as_ref(),
+                    GrammarExpr::Ref(rule_name)
+                        if rule_name == JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE
+                )
+            }
             _ => false,
         }
     }
@@ -1490,7 +1512,7 @@ impl<'a> Lowerer<'a> {
                     symbols
                 }
             }
-            other => Self::split_expr_nfa_transition_symbols(other),
+            other => Self::split_additional_key_colon_transition(other),
         }
     }
 

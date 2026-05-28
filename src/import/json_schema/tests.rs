@@ -1869,70 +1869,7 @@ fn anyof_closed_object_variants_factor_into_single_expr_nfa_body() {
 }
 
 #[test]
-fn anyof_closed_object_variants_split_small_choice_value_transitions() {
-    let schema = json!({
-        "anyOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "error": {"type": "string"},
-                    "field": {"type": "string"}
-                },
-                "required": ["error", "field"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "error": {},
-                    "schemaKey": {"type": "string"}
-                },
-                "required": ["error", "schemaKey"],
-                "additionalProperties": false
-            }
-        ]
-    });
-
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
-    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
-
-    let body_rule = grammar
-        .rules
-        .iter()
-        .find(|rule| rule.name.starts_with("json_anyof_object_body"))
-        .expect("anyOf object body rule should exist");
-    let GrammarExpr::ExprNFA(expr_nfa) = &body_rule.expr else {
-        panic!("expected ExprNFA anyOf body, got {:?}", body_rule.expr);
-    };
-
-    assert!(
-        expr_nfa
-            .symbols
-            .iter()
-            .any(|expr| matches!(expr, GrammarExpr::Ref(rule_name) if rule_name == "JSON_STRING")),
-        "expected direct JSON_STRING transition in ExprNFA symbols: {:?}",
-        expr_nfa.symbols
-    );
-    assert!(
-        !expr_nfa.symbols.iter().any(|expr| matches!(
-            expr,
-            GrammarExpr::Choice(alternatives)
-                if alternatives.iter().any(|alt| matches!(
-                    alt,
-                    GrammarExpr::Ref(rule_name) if rule_name == "JSON_STRING"
-                ))
-        )),
-        "did not expect top-level choice transition to carry JSON_STRING after split: {:?}",
-        expr_nfa.symbols
-    );
-    assert!(glrm.contains("json_anyof_object_body"), "{glrm}");
-    assert!(glrm.contains("JSON_STRING"), "{glrm}");
-    lower(&grammar).unwrap();
-}
-
-#[test]
-fn anyof_required_property_nontrivial_branch_uses_exact_variant_nfa() {
+fn anyof_required_property_factoring_falls_back_for_nontrivial_branch() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -1948,9 +1885,7 @@ fn anyof_required_property_nontrivial_branch_uses_exact_variant_nfa() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(!matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
-    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
-    assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
+    assert!(matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
     lower(&grammar).unwrap();
 }
 
@@ -2202,7 +2137,7 @@ fn untyped_object_and_array_assertions_do_not_take_plain_object_fallback() {
 }
 
 #[test]
-fn anyof_required_property_unknown_required_name_uses_exact_variant_nfa() {
+fn anyof_required_property_factoring_falls_back_for_unknown_required_name() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -2217,9 +2152,7 @@ fn anyof_required_property_unknown_required_name_uses_exact_variant_nfa() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(!matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
-    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
-    assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
+    assert!(matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
     lower(&grammar).unwrap();
 }
 
