@@ -443,7 +443,7 @@ impl<'a> Lowerer<'a> {
                 .map(|key| self.lower_literal_key_colon(key))
                 .collect::<Vec<_>>(),
         );
-        self.add_nonterminal_rule(&name, expr);
+        self.add_terminal_rule(&name, expr);
         self.shared_pattern_overlap_literal_rules
             .insert(pattern.to_string(), name.clone());
         Ok(Some(r(&name)))
