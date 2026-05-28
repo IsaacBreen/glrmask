@@ -1885,7 +1885,9 @@ fn anyof_required_property_factoring_falls_back_for_nontrivial_branch() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    assert!(!matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
+    assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
     lower(&grammar).unwrap();
 }
 
@@ -2152,7 +2154,9 @@ fn anyof_required_property_factoring_falls_back_for_unknown_required_name() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    assert!(!matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
+    assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
     lower(&grammar).unwrap();
 }
 
@@ -2547,6 +2551,43 @@ fn open_object_anyof_uses_single_object_body_nfa() {
             || !glrm.contains("| \"{\" json_closed_object_body"),
         "{glrm}"
     );
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn anyof_drops_subsumed_open_object_branch_for_o83993_shape() {
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "sort": {"type": "string"},
+                    "thumbnail": {
+                        "type": "object",
+                        "properties": {
+                            "href": {"type": "string"}
+                        },
+                        "required": ["href"]
+                    }
+                },
+                "required": ["name"]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "sort": {"type": "string"}
+                },
+                "required": ["name"]
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"), "{glrm}");
+    assert!(!glrm.contains("\"thumbnail\""), "{glrm}");
     lower(&grammar).unwrap();
 }
 

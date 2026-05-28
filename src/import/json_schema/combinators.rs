@@ -29,20 +29,19 @@ impl<'a> Lowerer<'a> {
             .cloned()
             .map(|branch| branch_with_siblings(branch, siblings.clone()))
             .collect::<Vec<_>>();
-        let resolved_branches;
         let has_ref_branch = branches.iter().any(schema_contains_ref);
         let factoring_branches = if has_ref_branch {
-            resolved_branches = self.inline_all_of_refs(&branches)?;
-            &resolved_branches
+            self.inline_all_of_refs(&branches)?
         } else {
-            &branches
+            branches.clone()
         };
+        let factoring_branches = drop_subsumed_open_object_any_of_branches(factoring_branches);
         if let Some(expr) =
-            self.try_lower_closed_object_any_of_variants(factoring_branches, has_ref_branch)?
+            self.try_lower_closed_object_any_of_variants(&factoring_branches, has_ref_branch)?
         {
             return Ok(expr);
         }
-        if let Some(expr) = self.try_lower_open_object_any_of_variants(factoring_branches)? {
+        if let Some(expr) = self.try_lower_open_object_any_of_variants(&factoring_branches)? {
             return Ok(expr);
         }
 
@@ -58,11 +57,11 @@ impl<'a> Lowerer<'a> {
             return self.lower_object_with_exclusive_properties(&object, &exclusive_names, require_one);
         }
 
-        if let Some(expr) = self.try_lower_ref_string_path_object_any_of(schema, &branches)? {
+        if let Some(expr) = self.try_lower_ref_string_path_object_any_of(schema, &factoring_branches)? {
             return Ok(expr);
         }
 
-        let alternatives = branches
+        let alternatives = factoring_branches
             .iter()
             .map(|branch| self.lower_schema(branch))
             .collect::<ImportResult<Vec<_>>>()?;
@@ -863,6 +862,100 @@ fn closed_object_variant_branch(schema: &Schema) -> Option<&ObjectSchema> {
     }
 
     Some(object)
+}
+
+fn drop_subsumed_open_object_any_of_branches(branches: Vec<Schema>) -> Vec<Schema> {
+    let keep = branches
+        .iter()
+        .enumerate()
+        .map(|(index, branch)| {
+            let Some(branch_object) = object_branch(branch) else {
+                return true;
+            };
+
+            !branches.iter().enumerate().any(|(other_index, other_branch)| {
+                if index == other_index {
+                    return false;
+                }
+
+                let Some(other_object) = object_branch(other_branch) else {
+                    return false;
+                };
+
+                if !object_schema_subsumes(other_object, branch_object) {
+                    return false;
+                }
+
+                !object_schema_subsumes(branch_object, other_object) || other_index < index
+            })
+        })
+        .collect::<Vec<_>>();
+
+    branches
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(branch, keep)| keep.then_some(branch))
+        .collect()
+}
+
+fn object_branch(schema: &Schema) -> Option<&ObjectSchema> {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return None;
+    };
+    if assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || assertions.array.is_some()
+        || assertions.string.is_some()
+        || assertions.number.is_some()
+        || assertions.not.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+    {
+        return None;
+    }
+    if let Some(types) = &assertions.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object)
+    {
+        return None;
+    }
+
+    assertions.object.as_ref()
+}
+
+fn object_schema_subsumes(superset: &ObjectSchema, subset: &ObjectSchema) -> bool {
+    if !matches!(superset.additional_properties, AdditionalProperties::AllowAny)
+        || !superset.pattern_properties.is_empty()
+        || !subset.pattern_properties.is_empty()
+    {
+        return false;
+    }
+
+    if !superset
+        .required
+        .iter()
+        .all(|required| subset.required.contains(required))
+    {
+        return false;
+    }
+
+    if superset.min_properties > subset.min_properties {
+        return false;
+    }
+
+    if let Some(superset_max) = superset.max_properties {
+        let Some(subset_max) = subset.max_properties else {
+            return false;
+        };
+        if subset_max > superset_max {
+            return false;
+        }
+    }
+
+    superset.properties.iter().all(|property| {
+        property_schema_by_name(subset, &property.name)
+            .is_some_and(|actual| schemas_shape_equivalent(&property.schema, actual))
+    })
 }
 
 fn property_schema_by_name<'a>(object: &'a ObjectSchema, name: &str) -> Option<&'a Schema> {
