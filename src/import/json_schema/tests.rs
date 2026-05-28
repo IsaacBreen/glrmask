@@ -2301,6 +2301,103 @@ fn allof_distributes_over_object_anyof_before_lowering() {
 }
 
 #[test]
+fn allof_ref_to_nested_object_oneof_with_siblings_lowers() {
+    let schema = json!({
+        "definitions": {
+            "namedObject": {
+                "properties": {
+                    "name": {"type": "string"}
+                },
+                "required": ["name"]
+            },
+            "competency": {
+                "allOf": [
+                    {"$ref": "#/definitions/namedObject"},
+                    {
+                        "oneOf": [
+                            {
+                                "properties": {
+                                    "competencies": {
+                                        "type": "array",
+                                        "items": {"$ref": "#/definitions/competency"}
+                                    }
+                                },
+                                "required": ["competencies"]
+                            },
+                            {
+                                "properties": {
+                                    "abilities": {
+                                        "type": "array",
+                                        "items": {"type": "string"}
+                                    }
+                                },
+                                "required": ["abilities"]
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        "allOf": [
+            {"$ref": "#/definitions/competency"},
+            {
+                "properties": {
+                    "description": {"type": "string"}
+                },
+                "required": ["description"]
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(count_rules_with_prefix(&grammar, "json_closed_object_body") > 0);
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn oneof_object_branches_with_root_type_object_and_required_anyof_lowers() {
+    let schema = json!({
+        "type": "object",
+        "oneOf": [
+            {
+                "properties": {
+                    "fromNumber": {"type": "string"},
+                    "bodyTemplate": {"type": "string"},
+                    "mediaUrl": {"type": "string", "format": "uri"}
+                },
+                "allOf": [
+                    {"required": ["fromNumber"]},
+                    {"anyOf": [
+                        {"required": ["bodyTemplate"]},
+                        {"required": ["mediaUrl"]}
+                    ]}
+                ],
+                "additionalProperties": false
+            },
+            {
+                "properties": {
+                    "messagingServiceSid": {"type": "string"},
+                    "bodyTemplate": {"type": "string"},
+                    "mediaUrl": {"type": "string", "format": "uri"}
+                },
+                "allOf": [
+                    {"required": ["messagingServiceSid"]},
+                    {"anyOf": [
+                        {"required": ["bodyTemplate"]},
+                        {"required": ["mediaUrl"]}
+                    ]}
+                ],
+                "additionalProperties": false
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(count_rules_with_prefix(&grammar, "json_closed_object_body") > 0);
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn open_object_anyof_uses_single_object_body_nfa() {
     let schema = json!({
         "type": "object",

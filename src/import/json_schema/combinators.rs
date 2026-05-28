@@ -116,7 +116,7 @@ impl<'a> Lowerer<'a> {
         branches = self.inline_all_of_refs(&branches)?;
         branches = flatten_pure_all_of_branches(branches);
         branches = self.inline_all_of_refs(&branches)?;
-        branches = collapse_pure_single_any_of_branches(branches);
+        branches = collapse_pure_single_choice_branches(branches);
         branches = self.inline_all_of_refs(&branches)?;
         if let Some(filtered) = drop_vacuous_untyped_family_branches(branches) {
             branches = filtered;
@@ -127,13 +127,16 @@ impl<'a> Lowerer<'a> {
         if branches.is_empty() {
             return Ok(r(JSON_VALUE_RULE));
         }
+        if let Some(merged) = merge_all_of_object_like_schema(&branches) {
+            return self.lower_schema(&merged);
+        }
         if let Some(object) = try_merge_all_of_objects(&branches) {
             return self.lower_object(&object);
         }
         if let Some(object) = self.try_merge_all_of_single_ref_object_branches(&branches)? {
             return self.lower_object(&object);
         }
-        if let Some(distributed) = distribute_all_of_over_single_object_any_of(&branches) {
+        if let Some((_, distributed)) = distribute_all_of_over_single_object_choice(&branches) {
             let alternatives = distributed
                 .iter()
                 .map(|branch| self.lower_schema(branch))
@@ -284,7 +287,11 @@ impl<'a> Lowerer<'a> {
         let normalized = normalize_local_ref(pointer)?;
         let target = self.resolve_ref_target(pointer)?;
         if self.schema_transitively_refs_pointer(target, &normalized, &mut BTreeSet::new())? {
-            Ok(fallback.clone())
+            if let Some(rewritten) = self.try_rewrite_all_of_object_choice_target(target)? {
+                Ok(rewritten)
+            } else {
+                Ok(fallback.clone())
+            }
         } else if let SchemaKind::Assertions(assertions) = &target.kind
             && let Some(object) = self.try_merge_single_object_any_of_with_siblings(assertions)?
         {
@@ -296,9 +303,60 @@ impl<'a> Lowerer<'a> {
                     ..SchemaAssertions::default()
                 },
             ))
+        } else if let Some(rewritten) = self.try_rewrite_all_of_object_choice_target(target)? {
+            Ok(rewritten)
         } else {
             Ok(target.clone())
         }
+    }
+
+    fn try_rewrite_all_of_object_choice_target(&self, target: &Schema) -> ImportResult<Option<Schema>> {
+        let SchemaKind::Assertions(assertions) = &target.kind else {
+            return Ok(None);
+        };
+        if assertions.all_of.is_empty() {
+            return Ok(None);
+        }
+
+        let mut branches = assertions.all_of.clone();
+        let siblings = assertions.clone_without_combinators();
+        if siblings.has_value_assertions_without_combinators() {
+            branches.push(Schema::assertions("<allOf-siblings>", siblings));
+        }
+
+        branches = self.inline_all_of_refs(&branches)?;
+        branches = flatten_pure_all_of_branches(branches);
+        branches = collapse_pure_single_choice_branches(branches);
+
+        let Some((kind, distributed)) = distribute_all_of_over_single_object_choice(&branches) else {
+            return Ok(None);
+        };
+        let alternatives = distributed
+            .into_iter()
+            .map(|branch| {
+                let SchemaKind::Assertions(assertions) = &branch.kind else {
+                    return branch;
+                };
+                if assertions.all_of.is_empty() || !assertions.clone_without_combinators().is_empty() {
+                    return branch;
+                }
+                merge_all_of_object_like_schema(&assertions.all_of).unwrap_or(branch)
+            })
+            .collect::<Vec<_>>();
+
+        Ok(Some(Schema::assertions(
+            target.location.clone(),
+            match kind {
+                ChoiceKind::AnyOf => SchemaAssertions {
+                    any_of: alternatives,
+                    ..SchemaAssertions::default()
+                },
+                ChoiceKind::OneOf => SchemaAssertions {
+                    one_of: alternatives,
+                    ..SchemaAssertions::default()
+                },
+            },
+        )))
     }
 
     fn inline_refs_in_all_of_branch(&self, branch: &Schema) -> ImportResult<Schema> {
@@ -456,11 +514,11 @@ fn flatten_pure_all_of_branches(branches: Vec<Schema>) -> Vec<Schema> {
     out
 }
 
-fn collapse_pure_single_any_of_branches(branches: Vec<Schema>) -> Vec<Schema> {
+fn collapse_pure_single_choice_branches(branches: Vec<Schema>) -> Vec<Schema> {
     branches
         .into_iter()
         .map(|branch| {
-            if let Some([single]) = pure_any_of_branch(&branch) {
+            if let Some((_, [single])) = pure_choice_branch(&branch) {
                 single.clone()
             } else {
                 branch
@@ -960,7 +1018,37 @@ fn branch_with_siblings(branch: Schema, siblings: Option<Schema>) -> Schema {
     let Some(siblings) = siblings else {
         return branch;
     };
+    if is_vacuous_object_schema(&siblings)
+        && let Some(branch) = push_object_only_type_into_branch(&branch)
+    {
+        return branch;
+    }
     all_of_schema(branch, siblings)
+}
+
+fn push_object_only_type_into_branch(branch: &Schema) -> Option<Schema> {
+    let SchemaKind::Assertions(assertions) = &branch.kind else {
+        return None;
+    };
+    if assertions.const_value.is_some() || assertions.enum_values.is_some() {
+        return None;
+    }
+    if let Some(types) = &assertions.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object)
+    {
+        return None;
+    }
+    if assertions.object.is_none()
+        && assertions.all_of.is_empty()
+        && assertions.any_of.is_empty()
+        && assertions.one_of.is_empty()
+    {
+        return None;
+    }
+
+    let mut updated = assertions.as_ref().clone();
+    updated.types = Some(vec![SchemaType::Object]);
+    Some(Schema::assertions(branch.location.clone(), updated))
 }
 
 fn schema_contains_ref(schema: &Schema) -> bool {
@@ -1015,49 +1103,63 @@ fn plain_object_schema(schema: &Schema) -> Option<&ObjectSchema> {
     assertions.object.as_ref()
 }
 
-fn pure_any_of_branch(schema: &Schema) -> Option<&[Schema]> {
+#[derive(Clone, Copy)]
+enum ChoiceKind {
+    AnyOf,
+    OneOf,
+}
+
+fn pure_choice_branch(schema: &Schema) -> Option<(ChoiceKind, &[Schema])> {
     let SchemaKind::Assertions(assertions) = &schema.kind else {
         return None;
     };
-    if assertions.any_of.is_empty()
-        || assertions.types.is_some()
+    if assertions.types.is_some()
         || assertions.const_value.is_some()
         || assertions.enum_values.is_some()
         || assertions.object.is_some()
         || assertions.array.is_some()
         || assertions.string.is_some()
         || assertions.number.is_some()
-        || !assertions.one_of.is_empty()
         || !assertions.all_of.is_empty()
     {
         return None;
     }
-    Some(&assertions.any_of)
+
+    match (assertions.any_of.is_empty(), assertions.one_of.is_empty()) {
+        (false, true) => Some((ChoiceKind::AnyOf, &assertions.any_of)),
+        (true, false) => Some((ChoiceKind::OneOf, &assertions.one_of)),
+        _ => None,
+    }
 }
 
-fn distribute_all_of_over_single_object_any_of(branches: &[Schema]) -> Option<Vec<Schema>> {
-    let mut any_of_index = None;
-    for (index, branch) in branches.iter().enumerate() {
-        if let Some(alternatives) = pure_any_of_branch(branch) {
-            if any_of_index.is_some() || alternatives.iter().any(|alternative| plain_object_schema(alternative).is_none()) {
+fn distribute_all_of_over_single_object_choice(
+    branches: &[Schema],
+) -> Option<(ChoiceKind, Vec<Schema>)> {
+    let mut choice_branch = None;
+    for branch in branches {
+        if let Some((kind, alternatives)) = pure_choice_branch(branch) {
+            if choice_branch.is_some()
+                || alternatives
+                    .iter()
+                    .any(|alternative| !schema_is_object_like(alternative))
+            {
                 return None;
             }
-            any_of_index = Some(index);
-        } else if plain_object_schema(branch).is_none() {
+            choice_branch = Some((kind, alternatives));
+        } else if !schema_is_object_like(branch) {
             return None;
         }
     }
 
-    let any_of_index = any_of_index?;
-    let alternatives = pure_any_of_branch(&branches[any_of_index])?;
+    let (kind, alternatives) = choice_branch?;
     let object_siblings = branches
         .iter()
-        .enumerate()
-        .filter(|(index, _)| *index != any_of_index)
-        .map(|(_, branch)| branch.clone())
+        .filter(|branch| pure_choice_branch(branch).is_none())
+        .cloned()
         .collect::<Vec<_>>();
 
-    Some(
+    Some((
+        kind,
         alternatives
             .iter()
             .map(|alternative| {
@@ -1070,8 +1172,55 @@ fn distribute_all_of_over_single_object_any_of(branches: &[Schema]) -> Option<Ve
                 )
             })
             .collect(),
-    )
+    ))
 }
+
+fn schema_is_object_like(schema: &Schema) -> bool {
+    plain_object_schema(schema).is_some() || is_vacuous_object_schema(schema)
+}
+
+fn merge_all_of_object_like_schema(branches: &[Schema]) -> Option<Schema> {
+    let mut objects = Vec::new();
+    let has_explicit_object_only_type = branches.iter().any(schema_has_explicit_object_only_type);
+
+    for branch in branches {
+        if let Some(object) = plain_object_schema(branch) {
+            objects.push(object.clone());
+            continue;
+        }
+        if is_vacuous_object_schema(branch) {
+            continue;
+        }
+        return None;
+    }
+
+    if objects.is_empty() {
+        return has_explicit_object_only_type.then(|| {
+            Schema::assertions(
+                "<merged-allOf-object-like>",
+                SchemaAssertions {
+                    types: Some(vec![SchemaType::Object]),
+                    ..SchemaAssertions::default()
+                },
+            )
+        });
+    }
+
+    let mut merged = objects.remove(0);
+    for object in objects {
+        merged = merge_two_objects(&merged, &object);
+    }
+
+    Some(Schema::assertions(
+        "<merged-allOf-object-like>",
+        SchemaAssertions {
+            types: has_explicit_object_only_type.then_some(vec![SchemaType::Object]),
+            object: Some(merged),
+            ..SchemaAssertions::default()
+        },
+    ))
+}
+
 
 fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSchema {
     let mut merged = left.clone();
