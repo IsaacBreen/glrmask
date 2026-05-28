@@ -1069,6 +1069,13 @@ fn decoded_string_patterns_are_matched_against_json_string_bodies() {
         "\""
     ).unwrap());
     assert!(!property_name_matches_pattern("^\"$", "x").unwrap());
+
+    let word_pattern = r"^$|(^(?:\S+\s+){0,19}\S+$)";
+    assert!(property_name_matches_pattern(word_pattern, "").unwrap());
+    assert!(property_name_matches_pattern(word_pattern, "REST").unwrap());
+    assert!(property_name_matches_pattern(word_pattern, "REST JSON").unwrap());
+    assert!(!property_name_matches_pattern(word_pattern, " C").unwrap());
+    assert!(!property_name_matches_pattern(word_pattern, "REST ").unwrap());
 }
 
 #[test]

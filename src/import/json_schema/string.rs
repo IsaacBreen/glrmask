@@ -734,6 +734,26 @@ fn string_pattern_as_body_regex(pattern: &str) -> ImportResult<String> {
     let hir = Parser::new()
         .parse(pattern)
         .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")))?;
+    string_pattern_hir_as_body_regex(&hir)
+}
+
+fn string_pattern_hir_as_body_regex(hir: &Hir) -> ImportResult<String> {
+    match hir.kind() {
+        HirKind::Alternation(parts) => {
+            let alternatives = parts
+                .iter()
+                .map(string_pattern_hir_as_body_regex)
+                .collect::<ImportResult<Vec<_>>>()?;
+            Ok(format!("(?:{})", alternatives.join("|")))
+        }
+        HirKind::Capture(capture) => {
+            string_pattern_hir_as_body_regex(&capture.sub)
+        }
+        _ => string_pattern_branch_as_body_regex(hir.clone()),
+    }
+}
+
+fn string_pattern_branch_as_body_regex(hir: Hir) -> ImportResult<String> {
     let (hir, anchored_start, anchored_end) = strip_outer_anchors(hir);
     let lowered = lower_decoded_regex_hir_to_json_body_regex(&hir)?;
     let string_char = json_string_body_char_regex();
