@@ -2226,6 +2226,11 @@ fn push_class_char(out: &mut String, b: u8) {
     }
 }
 
+fn dedup_rules_preserving_first_occurrence(rules: &mut Vec<Rule>) {
+    let mut seen = HashSet::new();
+    rules.retain(|rule| seen.insert(rule.clone()));
+}
+
 pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     validate_expr_nfa_placement(grammar)?;
 
@@ -2358,6 +2363,8 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
             .find_map(|(&id, name)| (name == ignore_name).then_some(id))
     });
 
+    dedup_rules_preserving_first_occurrence(&mut lowerer.rules);
+
     Ok(GrammarDef {
         rules: lowerer.rules,
         start,
@@ -2479,6 +2486,26 @@ mod tests {
 
         let err = lower(&grammar).unwrap_err();
         assert!(format!("{err}").contains("no exact alternative"), "{err}");
+    }
+
+    #[test]
+    fn lower_deduplicates_identical_rules() {
+        let grammar = NamedGrammar {
+            rules: vec![nonterminal(
+                "start",
+                GrammarExpr::Choice(vec![literal("a"), literal("a")]),
+            )],
+            start: "start".to_string(),
+            ignore: None,
+        };
+
+        let gdef = lower(&grammar).unwrap();
+        let start_rules = gdef
+            .rules
+            .iter()
+            .filter(|rule| rule.lhs == gdef.start)
+            .count();
+        assert_eq!(start_rules, 1, "duplicate alternatives should not create duplicate rules");
     }
 
     #[test]
