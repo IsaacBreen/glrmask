@@ -1076,6 +1076,16 @@ fn decoded_string_patterns_are_matched_against_json_string_bodies() {
     assert!(property_name_matches_pattern(word_pattern, "REST JSON").unwrap());
     assert!(!property_name_matches_pattern(word_pattern, " C").unwrap());
     assert!(!property_name_matches_pattern(word_pattern, "REST ").unwrap());
+
+    assert!(property_name_matches_pattern(r"^\S+$", "π").unwrap());
+    assert!(property_name_matches_pattern(r"^\S+$", "中文").unwrap());
+    assert!(!property_name_matches_pattern(r"^\S+$", " ").unwrap());
+    assert!(!property_name_matches_pattern(r"^\S+$", "\u{00A0}").unwrap());
+    assert!(!property_name_matches_pattern(r"^\S+$", "\u{2003}").unwrap());
+    assert!(property_name_matches_pattern("INTERVAL_TICK|INTERVAL_M1", "xxINTERVAL_M1yy").unwrap());
+    assert!(!property_name_matches_pattern("INTERVAL_TICK|INTERVAL_M1", "INTERVAL_M2").unwrap());
+    assert!(property_name_matches_pattern(r"^(?:\S+\s+){0,19}\S+$", "Up to 24 hours π").unwrap());
+    assert!(property_name_matches_pattern(r"^(?:\S+\s+){0,19}\S+$", "Up コ").unwrap());
 }
 
 #[test]

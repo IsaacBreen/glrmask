@@ -742,9 +742,34 @@ fn string_pattern_hir_as_body_regex(hir: &Hir) -> ImportResult<String> {
         HirKind::Alternation(parts) => {
             let alternatives = parts
                 .iter()
-                .map(string_pattern_hir_as_body_regex)
+                .cloned()
+                .map(lower_string_pattern_branch_parts)
                 .collect::<ImportResult<Vec<_>>>()?;
-            Ok(format!("(?:{})", alternatives.join("|")))
+            if let Some((_, anchored_start, anchored_end)) = alternatives.first() {
+                if alternatives
+                    .iter()
+                    .all(|(_, branch_start, branch_end)| branch_start == anchored_start && branch_end == anchored_end)
+                {
+                    let lowered = alternatives
+                        .iter()
+                        .map(|(lowered, _, _)| lowered.as_str())
+                        .collect::<Vec<_>>();
+                    let body = format!("(?:{})", lowered.join("|"));
+                    return Ok(wrap_lowered_string_pattern_branch(
+                        &body,
+                        *anchored_start,
+                        *anchored_end,
+                    ));
+                }
+            }
+
+            let wrapped = alternatives
+                .iter()
+                .map(|(lowered, anchored_start, anchored_end)| {
+                    wrap_lowered_string_pattern_branch(lowered, *anchored_start, *anchored_end)
+                })
+                .collect::<Vec<_>>();
+            Ok(format!("(?:{})", wrapped.join("|")))
         }
         HirKind::Capture(capture) => {
             string_pattern_hir_as_body_regex(&capture.sub)
@@ -754,15 +779,28 @@ fn string_pattern_hir_as_body_regex(hir: &Hir) -> ImportResult<String> {
 }
 
 fn string_pattern_branch_as_body_regex(hir: Hir) -> ImportResult<String> {
+    let (lowered, anchored_start, anchored_end) = lower_string_pattern_branch_parts(hir)?;
+    Ok(wrap_lowered_string_pattern_branch(
+        &lowered,
+        anchored_start,
+        anchored_end,
+    ))
+}
+
+fn lower_string_pattern_branch_parts(hir: Hir) -> ImportResult<(String, bool, bool)> {
     let (hir, anchored_start, anchored_end) = strip_outer_anchors(hir);
     let lowered = lower_decoded_regex_hir_to_json_body_regex(&hir)?;
+    Ok((lowered, anchored_start, anchored_end))
+}
+
+fn wrap_lowered_string_pattern_branch(lowered: &str, anchored_start: bool, anchored_end: bool) -> String {
     let string_char = json_string_body_char_regex();
-    Ok(match (anchored_start, anchored_end) {
-        (true, true) => lowered,
+    match (anchored_start, anchored_end) {
+        (true, true) => lowered.to_string(),
         (true, false) => format!("(?:{lowered})(?:{string_char})*"),
         (false, true) => format!("(?:{string_char})*(?:{lowered})"),
         (false, false) => format!("(?:{string_char})*(?:{lowered})(?:{string_char})*"),
-    })
+    }
 }
 
 fn quoted_string_body_regex(body_regex: &str) -> String {
@@ -881,6 +919,12 @@ fn lower_decoded_repetition_to_json_body_regex(repetition: &Repetition) -> Impor
         (1, None) => format!("{atom}+"),
         (0, Some(1)) => format!("{atom}?"),
         (min, Some(max)) if min == max => format!("{atom}{{{min}}}"),
+        (min, Some(max)) if max <= 20 => {
+            let alternatives = (min..=max)
+                .map(|count| atom.repeat(count as usize))
+                .collect::<Vec<_>>();
+            format!("(?:{})", alternatives.join("|"))
+        }
         (min, Some(max)) => format!("{atom}{{{min},{max}}}"),
         (min, None) => format!("{atom}{{{min},}}"),
     })
@@ -926,6 +970,9 @@ fn lower_decoded_class_to_json_body_regex(class: &Class) -> String {
         if decoded_class_contains(class, ch) {
             alternatives.push(json_body_char_regex_for_decoded_char(ch));
         }
+    }
+    if class_contains_general_non_ascii_non_whitespace(class) {
+        alternatives.push(json_string_body_non_ascii_non_whitespace_regex().to_string());
     }
 
     match alternatives.len() {
@@ -1014,6 +1061,12 @@ fn decoded_class_contains(class: &Class, ch: char) -> bool {
     }
 }
 
+fn class_contains_general_non_ascii_non_whitespace(class: &Class) -> bool {
+    ['π', '中', '😀']
+        .into_iter()
+        .all(|ch| decoded_class_contains(class, ch))
+}
+
 fn regex_char_class_range(start: char, end: char) -> String {
     let start = escape_regex_class_char(start);
     let end = escape_regex_class_char(end);
@@ -1048,6 +1101,10 @@ fn json_string_body_char_regex() -> &'static str {
     r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt])"#
 }
 
+fn json_string_body_non_ascii_non_whitespace_regex() -> &'static str {
+    r#"(?:\xC2[\x80-\x84\x86-\x9F\xA1-\xBF]|[\xC3-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|\xE1[\x80-\x99\x9B-\xBF][\x80-\xBF]|\xE1\x9A[\x81-\xBF]|\xE2\x80[\x8B-\xA7\xAA-\xAE\xB0-\xBF]|\xE2\x81[\x80-\x9E\xA0-\xBF]|\xE2[\x82-\xBF][\x80-\xBF]|\xE3\x80[\x81-\xBF]|\xE3[\x81-\xBF][\x80-\xBF]|[\xE4-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2})"#
+}
+
 fn json_string_body_dot_regex() -> &'static str {
     r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bft])"#
 }
@@ -1057,12 +1114,9 @@ fn is_safe_raw_json_string_char(ch: char) -> bool {
 }
 
 pub(crate) fn property_name_matches_pattern(pattern: &str, property_name: &str) -> ImportResult<bool> {
-    let encoded = serde_json::to_string(property_name).unwrap_or_else(|_| "\"\"".to_string());
-    let body = encoded.strip_prefix('"').and_then(|text| text.strip_suffix('"')).unwrap_or("");
-    let body_regex = string_pattern_as_body_regex(pattern)?;
-    let regex = Regex::new(&format!(r#"^(?:{})$"#, body_regex))
-        .map_err(|error| SchemaImportError::new(format!("invalid patternProperties regex {pattern:?}: {error}")))?;
-    Ok(regex.is_match(body))
+    Regex::new(pattern)
+        .map(|regex| regex.is_match(property_name))
+        .map_err(|error| SchemaImportError::new(format!("invalid patternProperties regex {pattern:?}: {error}")))
 }
 
 pub(crate) fn string_value_satisfies_schema(
