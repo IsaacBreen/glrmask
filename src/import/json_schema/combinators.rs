@@ -156,12 +156,27 @@ impl<'a> Lowerer<'a> {
         if let Some(object) = self.try_merge_all_of_single_ref_object_branches(&branches)? {
             return self.lower_object(&object);
         }
-        if let Some((_, distributed)) = distribute_all_of_over_single_object_choice(&branches) {
-            let alternatives = distributed
-                .iter()
-                .map(|branch| self.lower_schema(branch))
-                .collect::<ImportResult<Vec<_>>>()?;
-            return Ok(choice(alternatives));
+        if let Some((kind, distributed)) = distribute_all_of_over_single_object_choice(&branches) {
+            return match kind {
+                ChoiceKind::AnyOf => {
+                    if let Some(expr) = self.try_lower_open_object_any_of_variants(&distributed)? {
+                        Ok(expr)
+                    } else {
+                        let alternatives = distributed
+                            .iter()
+                            .map(|branch| self.lower_schema(branch))
+                            .collect::<ImportResult<Vec<_>>>()?;
+                        Ok(choice(alternatives))
+                    }
+                }
+                ChoiceKind::OneOf => {
+                    let alternatives = distributed
+                        .iter()
+                        .map(|branch| self.lower_schema(branch))
+                        .collect::<ImportResult<Vec<_>>>()?;
+                    Ok(choice(alternatives))
+                }
+            };
         }
 
         let mut lowered = branches

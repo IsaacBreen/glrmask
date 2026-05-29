@@ -2569,6 +2569,8 @@ fn allof_distributes_over_object_anyof_before_lowering() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("json_anyof_object_body"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -2665,7 +2667,12 @@ fn oneof_object_branches_with_root_type_object_and_required_anyof_lowers() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(count_rules_with_prefix(&grammar, "json_closed_object_body") > 0);
+    let glrm = to_glrm(&grammar);
+    assert!(
+        count_rules_with_prefix(&grammar, "json_closed_object_body") > 0
+            || glrm.contains("json_anyof_object_body"),
+        "{glrm}"
+    );
     lower(&grammar).unwrap();
 }
 
