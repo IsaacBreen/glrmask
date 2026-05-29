@@ -126,6 +126,24 @@ impl<'a> Lowerer<'a> {
             return Ok(never());
         }
 
+        if let Some(explicit_types) = explicit_all_of_type_intersection(&branches) {
+            let explicit_types_vec = explicit_types.into_iter().collect::<Vec<_>>();
+            for branch in &mut branches {
+                if let SchemaKind::Assertions(assertions) = &mut branch.kind {
+                    if assertions.any_of.is_empty()
+                        && assertions.one_of.is_empty()
+                        && assertions.all_of.is_empty()
+                    {
+                        if assertions.types.is_none() {
+                            assertions.types = Some(explicit_types_vec.clone());
+                        } else if let Some(types) = &mut assertions.types {
+                            types.retain(|t| explicit_types_vec.contains(t));
+                        }
+                    }
+                }
+            }
+        }
+
         if branches.is_empty() {
             return Ok(r(JSON_VALUE_RULE));
         }
