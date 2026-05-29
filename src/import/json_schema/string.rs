@@ -94,30 +94,30 @@ impl<'a> Lowerer<'a> {
                 return Ok(pattern_expr);
             }
 
-            // Patterned strings with small bounds keep those bounds by intersecting
-            // the existing bounded JSON string envelope with the pattern regex.
-            // For large bounded patterned strings, we reject the schema instead of
-            // silently dropping bounds, because preserving them in the terminalized
-            // path is known to risk severe timeout blowups.
-            if schema
+            // Patterned strings keep sibling length bounds by intersecting the
+            // pattern regex with the existing bounded JSON string envelope.
+            // Large bounded strings reuse the terminal-safe split envelope so
+            // the intersection stays sound without introducing nonterminal refs
+            // into the terminalized constrained-string path.
+            let bounded_envelope = if schema
                 .max_length
-                .is_none_or(|max_length| !self.should_split_bounded_string(schema.min_length, max_length))
+                .is_some_and(|max_length| self.should_split_bounded_string(schema.min_length, max_length))
             {
-                let bounded_envelope = seq(vec![
+                self.split_bounded_string_terminal_expr(
+                    schema.min_length,
+                    schema.max_length.expect("split bounded string requires a max length"),
+                )
+            } else {
+                seq(vec![
                     lit("\""),
                     self.string_body_for_length(schema.min_length, schema.max_length),
                     lit("\""),
-                ]);
-                return Ok(GrammarExpr::Intersect {
-                    expr: Box::new(bounded_envelope),
-                    intersect: Box::new(pattern_expr),
-                });
-            }
-
-            return Err(SchemaImportError::new(format!(
-                "unsupported patterned string with large length bounds: preserving minLength/maxLength is required for soundness, but bounded-pattern terminalization above maxLength={} is rejected to avoid known timeout blowups",
-                schema.max_length.unwrap()
-            )));
+                ])
+            };
+            return Ok(GrammarExpr::Intersect {
+                expr: Box::new(bounded_envelope),
+                intersect: Box::new(pattern_expr),
+            });
         }
 
         let preserve_length_bounds = recognized_string_format_body_regex(schema.format.as_deref()).is_none();
@@ -311,9 +311,23 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_split_bounded_string(&mut self, min: usize, max: usize) -> GrammarExpr {
+        let expr = self.split_bounded_string_terminal_expr(min, max);
         let chunk = self.config.repeat_chunk_size.max(1);
         let should_wrap = max >= 10_000 || (max / chunk) > 2;
-        let expr = if should_wrap && min == 0 && max > chunk {
+
+        if !should_wrap {
+            return expr;
+        }
+
+        let rule_name = self.fresh_rule_name("json_string_bounded_split");
+        self.add_nonterminal_rule(&rule_name, expr);
+        r(&rule_name)
+    }
+
+    fn split_bounded_string_terminal_expr(&mut self, min: usize, max: usize) -> GrammarExpr {
+        let chunk = self.config.repeat_chunk_size.max(1);
+        let should_wrap = max >= 10_000 || (max / chunk) > 2;
+        if should_wrap && min == 0 && max > chunk {
             let full_chunks = max / chunk;
             let remainder = max % chunk;
             let exact_chunk = self.string_char_exact_ref(chunk);
@@ -348,15 +362,7 @@ impl<'a> Lowerer<'a> {
                 self.split_string_exact_expr(min),
                 self.split_string_upto_close_expr(max - min),
             ])
-        };
-
-        if !should_wrap {
-            return expr;
         }
-
-        let rule_name = self.fresh_rule_name("json_string_bounded_split");
-        self.add_nonterminal_rule(&rule_name, expr);
-        r(&rule_name)
     }
 
     pub(crate) fn lower_string_literal(&mut self, text: &str) -> GrammarExpr {

@@ -157,6 +157,37 @@ fn contains_exclude(expr: &GrammarExpr) -> bool {
     }
 }
 
+fn contains_ref_with_prefix(expr: &GrammarExpr, prefix: &str) -> bool {
+    match expr {
+        GrammarExpr::Ref(name) => name.starts_with(prefix),
+        GrammarExpr::Grouped(inner)
+        | GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner) => contains_ref_with_prefix(inner, prefix),
+        GrammarExpr::RepeatRange { expr, .. } => contains_ref_with_prefix(expr, prefix),
+        GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
+            items.iter().any(|item| contains_ref_with_prefix(item, prefix))
+        }
+        GrammarExpr::SeparatedSequence { items, separator, .. } => {
+            items.iter().any(|(item, _)| contains_ref_with_prefix(item, prefix))
+                || contains_ref_with_prefix(separator, prefix)
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            contains_ref_with_prefix(expr, prefix) || contains_ref_with_prefix(exclude, prefix)
+        }
+        GrammarExpr::Intersect { expr, intersect } => {
+            contains_ref_with_prefix(expr, prefix) || contains_ref_with_prefix(intersect, prefix)
+        }
+        GrammarExpr::Epsilon
+        | GrammarExpr::Literal(_)
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte
+        | GrammarExpr::ExprNFA(_) => false,
+    }
+}
+
 fn find_all_pop1_stackshifts(table: &GLRTable) -> Option<(u32, u32, Action)> {
     table.ambiguous_actions().iter().find_map(|ambiguity| {
         if ambiguity.kind != TableAmbiguityKind::StackShifts {
@@ -867,18 +898,34 @@ fn small_bounded_string_pattern_intersects_length_envelope() {
 }
 
 #[test]
-fn large_bounded_string_pattern_errors_instead_of_dropping_bounds() {
+fn large_bounded_string_pattern_uses_split_length_envelope_intersection() {
     let schema = json!({
         "type": "string",
-        "maxLength": 128,
-        "pattern": "^[A-Za-z]+$"
+        "maxLength": 512,
+        "pattern": "^/.*"
     });
 
-    let err = schema_to_named_grammar(&schema).unwrap_err();
-    assert!(
-        err.to_string().contains("unsupported patterned string with large length bounds"),
-        "{err}"
-    );
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let rule = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
+        .expect("expected terminalized constrained string rule");
+
+    let GrammarExpr::Intersect { expr, intersect } = &rule.expr else {
+        panic!("expected intersected constrained string rule: {:?}", rule.expr);
+    };
+
+    assert!(contains_ref_with_prefix(expr, "json_string_char_exact_open_50"), "{expr:?}");
+    assert!(contains_ref_with_prefix(expr, "json_string_char_upto_close_50"), "{expr:?}");
+    assert!(!contains_ref_with_prefix(expr, "json_string_bounded_split"), "{expr:?}");
+
+    let GrammarExpr::RawRegex(regex) = intersect.as_ref() else {
+        panic!("expected raw regex intersection: {:?}", intersect);
+    };
+    assert!(regex.contains("(?:/"), "{regex}");
+
+    lower(&grammar).unwrap();
 }
 
 #[test]
