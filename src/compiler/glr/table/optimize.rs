@@ -2286,7 +2286,7 @@ fn try_inline_action_to_stack_shifts(
         return None;
     }
 
-    let effects = stack_effects_for_action(
+    let result = stack_effects_for_action(
         table,
         predecessors,
         state,
@@ -2301,8 +2301,15 @@ fn try_inline_action_to_stack_shifts(
         states_at_depth_cache,
         &mut FxHashSet::default(),
         stack_effect_memo,
-    )?
-    .effects;
+    )?;
+    let effects = result.effects;
+    if result.origin_dependent
+        && matches!(action, Action::Reduce(_, 1))
+        && !effects.is_empty()
+        && effects.iter().all(|effect| effect.pushes.len() == 1)
+    {
+        return None;
+    }
     if effects.is_empty() {
         return None;
     }
