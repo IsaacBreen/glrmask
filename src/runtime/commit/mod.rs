@@ -524,9 +524,6 @@ fn apply_single_top_action_fast(
         }
         Action::StackShifts(shifts) => {
             if let [shift] = shifts.as_slice() {
-                if let Some(fast) = gss.try_pop_push_within_top_segment(shift.pop as usize, &shift.pushes) {
-                    return Some(fast);
-                }
                 let mut branch = gss.try_virtual_stack()?;
                 if branch.pop(shift.pop as usize) != 0 {
                     return None;
@@ -3183,19 +3180,3 @@ impl<'a> ConstraintState<'a> {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_try_pop_push_within_top_segment() {
-        let gss = ParserGSS::from_stacks(&[(vec![0, 1, 13, 22, 62, 236], TerminalsDisallowed::new())]);
-        let result = gss.try_pop_push_within_top_segment(3, &[56]);
-        assert!(result.is_some(), "Expected Some from try_pop_push_within_top_segment");
-        let popped = result.unwrap();
-        let stacks = parser_stacks_only(&popped);
-        assert_eq!(stacks, vec![vec![0, 1, 13, 56]]);
-    }
-}
-

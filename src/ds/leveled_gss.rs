@@ -2030,39 +2030,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             _ => Some(Self::from_stacks(&out)),
         }
     }
-    pub fn try_pop_push_within_top_segment(&self, pop: usize, pushes: &[T]) -> Option<Self> {
-        let interface = match &*self.inner {
-            Upper::Interface(iface) => iface,
-            _ => return None,
-        };
-        let seg = match &*interface.inner {
-            Lower::Segment(seg) => seg,
-            _ => return None,
-        };
-        if seg.values.len() >= pop {
-            let keep = seg.values.len() - pop;
-            let mut values = seg.values.take(keep);
-            for value in pushes {
-                if !values.try_harder_push(value.clone()) {
-                    return None;
-                }
-            }
-            if values.is_empty() {
-                Some(Self {
-                    inner: new_interface(seg.next.clone(), interface.acc.clone()),
-                })
-            } else {
-                Some(Self {
-                    inner: new_interface(
-                        new_segment(values, seg.next.clone()),
-                        interface.acc.clone(),
-                    ),
-                })
-            }
-        } else {
-            None
-        }
-    }
 
     pub fn apply_shared_pop_push_branches<'a, I>(
         &self,
