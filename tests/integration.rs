@@ -1129,6 +1129,24 @@ fn json_schema_const_quote_reencodes_literal() {
 }
 
 #[test]
+fn json_schema_pattern_and_date_format_rejects_invalid_month_token() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "string",
+            "format": "date",
+            "pattern": "^([0-9]{4})(-([0-9]{2}))?(-([0-9]{2}))?$"
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#""2023-09-01""#);
+    assert_rejects_bytes(&constraint, br#""2023-93""#);
+
+    let mut state = constraint.start();
+    state.commit_bytes(br#""2023-"#).unwrap();
+    assert!(state.commit_bytes(b"93").is_err());
+}
+
+#[test]
 fn nullable_repeat_alternative_accepts_nonempty_branch_before_nullable_suffix() {
     let grammar = r#"
         start s;

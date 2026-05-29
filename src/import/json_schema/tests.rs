@@ -1331,7 +1331,7 @@ fn uri_format_lowers_to_constrained_terminal() {
 }
 
 #[test]
-fn string_pattern_takes_precedence_over_format() {
+fn string_pattern_is_intersected_with_format() {
     let schema = json!({
         "type": "string",
         "format": "uuid",
@@ -1341,8 +1341,8 @@ fn string_pattern_takes_precedence_over_format() {
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("/\"(?:abc)\"/"), "{glrm}");
-    assert!(!glrm.contains("& /\"(?:abc)\"/"), "{glrm}");
-    assert!(!glrm.contains("[0-9A-Fa-f]{8}"), "{glrm}");
+    assert!(glrm.contains("[0-9A-Fa-f]{8}"), "{glrm}");
+    assert!(glrm.contains(" & /\"(?:[0-9A-Fa-f]{8}"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
