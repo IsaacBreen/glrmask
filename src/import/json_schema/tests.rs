@@ -851,7 +851,7 @@ fn map_shaped_min_properties_lowers_as_bounded_pattern_map() {
 }
 
 #[test]
-fn string_pattern_lowers_as_terminal_pattern() {
+fn small_bounded_string_pattern_intersects_length_envelope() {
     let schema = json!({
         "type": "string",
         "minLength": 2,
@@ -861,9 +861,24 @@ fn string_pattern_lowers_as_terminal_pattern() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("/\"(?:(?:[A-Za-z])+)\"/"), "{glrm}");
-    assert!(!glrm.contains("& /\"(?:(?:[A-Za-z])+)\"/"), "{glrm}");
+    assert!(glrm.contains("JSON_STRING_CHAR{2,8}"), "{glrm}");
+    assert!(glrm.contains("& /\"(?:(?:[A-Za-z])+)\"/"), "{glrm}");
     lower(&grammar).unwrap();
+}
+
+#[test]
+fn large_bounded_string_pattern_errors_instead_of_dropping_bounds() {
+    let schema = json!({
+        "type": "string",
+        "maxLength": 128,
+        "pattern": "^[A-Za-z]+$"
+    });
+
+    let err = schema_to_named_grammar(&schema).unwrap_err();
+    assert!(
+        err.to_string().contains("unsupported patterned string with large length bounds"),
+        "{err}"
+    );
 }
 
 #[test]

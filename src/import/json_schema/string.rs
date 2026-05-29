@@ -85,12 +85,38 @@ impl<'a> Lowerer<'a> {
         schema: &StringSchema,
     ) -> ImportResult<GrammarExpr> {
         if let Some(pattern) = &schema.pattern {
-            // NOTE: Pattern strength intentionally does NOT preserve min/max
-            // length bounds here. Preserving those bounds alongside the
-            // terminalized pattern can cause massive timeouts; this invariant is
-            // intentional and this comment should NEVER EVER be removed.
-            return Ok(GrammarExpr::RawRegex(quoted_string_body_regex(
+            let pattern_expr = GrammarExpr::RawRegex(quoted_string_body_regex(
                 &string_pattern_as_body_regex(pattern)?,
+            ));
+            let has_length_bounds = schema.min_length != 0 || schema.max_length.is_some();
+
+            if !has_length_bounds {
+                return Ok(pattern_expr);
+            }
+
+            // Patterned strings with small bounds keep those bounds by intersecting
+            // the existing bounded JSON string envelope with the pattern regex.
+            // For large bounded patterned strings, we reject the schema instead of
+            // silently dropping bounds, because preserving them in the terminalized
+            // path is known to risk severe timeout blowups.
+            if schema
+                .max_length
+                .is_none_or(|max_length| !self.should_split_bounded_string(schema.min_length, max_length))
+            {
+                let bounded_envelope = seq(vec![
+                    lit("\""),
+                    self.string_body_for_length(schema.min_length, schema.max_length),
+                    lit("\""),
+                ]);
+                return Ok(GrammarExpr::Intersect {
+                    expr: Box::new(bounded_envelope),
+                    intersect: Box::new(pattern_expr),
+                });
+            }
+
+            return Err(SchemaImportError::new(format!(
+                "unsupported patterned string with large length bounds: preserving minLength/maxLength is required for soundness, but bounded-pattern terminalization above maxLength={} is rejected to avoid known timeout blowups",
+                schema.max_length.unwrap()
             )));
         }
 
