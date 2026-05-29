@@ -1625,10 +1625,42 @@ fn advance_deterministically(
 /// `may_advance` name sounds like a speculative approximation, but this is an
 /// exact applicability predicate.
 pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
-    stack
-        .peek_values()
-        .into_iter()
-        .any(|state| table.advance_row_allows(state, token))
+    for state in stack.peek_values() {
+        if !table.advance_row_allows(state, token) {
+            continue;
+        }
+
+        match table.action(state, token) {
+            Some(Action::GuardedStackShifts(shifts)) => {
+                let guarded_stack = stack.isolate(Some(state));
+                if stack_may_apply_guarded_shifts(&guarded_stack, shifts) {
+                    return true;
+                }
+            }
+            Some(_) => return true,
+            None => {}
+        }
+    }
+
+    false
+}
+
+fn stack_may_apply_guarded_shifts(stack: &ParserGSS, shifts: &[GuardedStackShift]) -> bool {
+    if let Some(virtual_stack) = stack.try_virtual_stack() {
+        return shifts
+            .iter()
+            .any(|shift| virtual_stack_may_apply_guarded_shift(&virtual_stack, shift));
+    }
+
+    stack.to_stacks().into_iter().any(|(stack_values, acc)| {
+        let single = ParserGSS::from_single_stack(stack_values, acc);
+        let Some(virtual_stack) = single.try_virtual_stack() else {
+            return false;
+        };
+        shifts
+            .iter()
+            .any(|shift| virtual_stack_may_apply_guarded_shift(&virtual_stack, shift))
+    })
 }
 
 #[cfg(test)]
@@ -1691,6 +1723,41 @@ mod tests {
 
         let stack = ParserGSS::from_single_stack(vec![1], TerminalsDisallowed::new());
         assert!(table.action(1, token).is_some());
+        assert!(!stack_may_advance_on(&table, &stack, token));
+
+        let mut terminals = BitSet::new(1);
+        terminals.set(token as usize);
+        assert!(!stack_may_advance_on_any(&table, &stack, &terminals));
+    }
+
+    #[test]
+    fn may_advance_rechecks_guarded_stack_shifts_against_concrete_stack() {
+        let token = 0;
+        let table = build_test_table(
+            3,
+            1,
+            &[
+                &[],
+                &[],
+                &[(
+                    token,
+                    Action::GuardedStackShifts(vec![GuardedStackShift {
+                        guards: vec![StackShiftGuard {
+                            pop: 1,
+                            states: vec![0],
+                        }],
+                        pop: 2,
+                        pushes: vec![7],
+                    }]),
+                )],
+            ],
+            &[&[], &[], &[]],
+        );
+
+        let stack = ParserGSS::from_single_stack(vec![1, 2], TerminalsDisallowed::new());
+
+        assert!(table.advance_row_allows(2, token));
+        assert!(advance_stacks(&table, &stack, token).is_empty());
         assert!(!stack_may_advance_on(&table, &stack, token));
 
         let mut terminals = BitSet::new(1);
@@ -1857,10 +1924,44 @@ pub(crate) fn stack_may_advance_on_any(
     stack: &ParserGSS,
     terminals: &BitSet,
 ) -> bool {
-    stack
-        .peek_values()
+    let top_states = stack.peek_values();
+    let mut guarded_terminals = SmallVec::<[TerminalID; 8]>::new();
+
+    for state in top_states {
+        if !table.advance_row_intersects(state, terminals) {
+            continue;
+        }
+
+        for bit in 0..terminals.len() {
+            if !terminals.contains(bit) {
+                continue;
+            }
+
+            let terminal = if bit == table.num_terminals as usize {
+                EOF
+            } else {
+                bit as TerminalID
+            };
+
+            if !table.advance_row_allows(state, terminal) {
+                continue;
+            }
+
+            match table.action(state, terminal) {
+                Some(Action::GuardedStackShifts(_)) => {
+                    if !guarded_terminals.contains(&terminal) {
+                        guarded_terminals.push(terminal);
+                    }
+                }
+                Some(_) => return true,
+                None => {}
+            }
+        }
+    }
+
+    guarded_terminals
         .into_iter()
-        .any(|state| table.advance_row_intersects(state, terminals))
+        .any(|terminal| stack_may_advance_on(table, stack, terminal))
 }
 
 pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
