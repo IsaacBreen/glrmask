@@ -709,6 +709,37 @@ fn json_schema_pattern_with_s_separator_accepts_tab_and_formfeed_prefixes() {
 }
 
 #[test]
+fn json_schema_bounded_free_text_pattern_rejects_leading_space_slash_token() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 0,
+            "pattern": "^$|(^(?:\\S+\\s+){0,19}\\S+$)"
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#""REST API""#);
+    assert_rejects_bytes(&constraint, br#"" /""#);
+}
+
+#[test]
+fn json_schema_optional_decimal_pattern_rejects_backslash_prefix_token() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "string",
+            "pattern": "^$|^\\d{1,15}(?:\\.\\d{1,5})?$"
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#""""#);
+    assert_accepts_bytes(&constraint, br#""123.45""#);
+
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(br#""\\"#).is_err());
+}
+
+#[test]
 fn json_schema_pattern_accepts_decoded_quote_string() {
     let constraint = byte_schema(r#"{"type":"string","pattern":"^\"$"}"#);
     assert_accepts_bytes(&constraint, br#""\"""#);

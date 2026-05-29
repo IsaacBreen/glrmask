@@ -892,27 +892,82 @@ fn pattern_key_colon_regex(pattern: &str) -> ImportResult<String> {
     Ok(format!(r#""{body}"(?:: )"#))
 }
 
-fn strip_outer_anchors(hir: Hir) -> (Hir, bool, bool) {
-    let mut parts = match hir.kind() {
-        HirKind::Concat(parts) => parts.clone(),
-        HirKind::Look(look) if is_start_look(*look) => return (Hir::empty(), true, false),
-        HirKind::Look(look) if is_end_look(*look) => return (Hir::empty(), false, true),
-        _ => return (hir, false, false),
-    };
+fn strip_outer_captures(mut hir: Hir) -> Hir {
+    loop {
+        match hir.kind() {
+            HirKind::Capture(capture) => hir = *capture.sub.clone(),
+            _ => return hir,
+        }
+    }
+}
 
-    let anchored_start = parts
-        .first()
-        .is_some_and(|part| matches!(part.kind(), HirKind::Look(look) if is_start_look(*look)));
-    if anchored_start {
-        parts.remove(0);
+fn strip_outer_start_anchor(hir: Hir) -> Option<Hir> {
+    let hir = strip_outer_captures(hir);
+    match hir.kind() {
+        HirKind::Concat(parts)
+            if parts
+                .first()
+                .is_some_and(|part| matches!(part.kind(), HirKind::Look(look) if is_start_look(*look))) =>
+        {
+            Some(Hir::concat(parts[1..].to_vec()))
+        }
+        HirKind::Look(look) if is_start_look(*look) => Some(Hir::empty()),
+        _ => None,
     }
-    let anchored_end = parts
-        .last()
-        .is_some_and(|part| matches!(part.kind(), HirKind::Look(look) if is_end_look(*look)));
-    if anchored_end {
-        parts.pop();
+}
+
+fn strip_outer_end_anchor(hir: Hir) -> Option<Hir> {
+    let hir = strip_outer_captures(hir);
+    match hir.kind() {
+        HirKind::Concat(parts)
+            if parts
+                .last()
+                .is_some_and(|part| matches!(part.kind(), HirKind::Look(look) if is_end_look(*look))) =>
+        {
+            Some(Hir::concat(parts[..parts.len() - 1].to_vec()))
+        }
+        HirKind::Look(look) if is_end_look(*look) => Some(Hir::empty()),
+        _ => None,
     }
-    (Hir::concat(parts), anchored_start, anchored_end)
+}
+
+fn strip_outer_anchors(hir: Hir) -> (Hir, bool, bool) {
+    let mut hir = strip_outer_captures(hir);
+    let mut anchored_start = false;
+    let mut anchored_end = false;
+
+    if let Some(stripped) = strip_outer_start_anchor(hir.clone()) {
+        hir = stripped;
+        anchored_start = true;
+    }
+    if let Some(stripped) = strip_outer_end_anchor(hir.clone()) {
+        hir = stripped;
+        anchored_end = true;
+    }
+
+    hir = strip_outer_captures(hir);
+    if let HirKind::Alternation(parts) = hir.kind() {
+        let mut parts = parts.clone();
+
+        if !anchored_start && parts.iter().all(|part| strip_outer_start_anchor(part.clone()).is_some()) {
+            parts = parts
+                .into_iter()
+                .map(|part| strip_outer_start_anchor(part).expect("checked common start anchor"))
+                .collect();
+            anchored_start = true;
+        }
+        if !anchored_end && parts.iter().all(|part| strip_outer_end_anchor(part.clone()).is_some()) {
+            parts = parts
+                .into_iter()
+                .map(|part| strip_outer_end_anchor(part).expect("checked common end anchor"))
+                .collect();
+            anchored_end = true;
+        }
+
+        hir = Hir::alternation(parts);
+    }
+
+    (hir, anchored_start, anchored_end)
 }
 
 fn is_start_look(look: Look) -> bool {
@@ -1234,7 +1289,9 @@ pub(crate) fn string_value_satisfies_schema(
 
 #[cfg(test)]
 mod tests {
-    use super::preprocess_ascii_shorthand;
+    use regex::Regex;
+
+    use super::{preprocess_ascii_shorthand, quoted_string_body_regex, string_pattern_as_body_regex};
 
     #[test]
     fn preprocess_ascii_shorthand_rewrites_generic_word_shorthand() {
@@ -1245,5 +1302,24 @@ mod tests {
     #[test]
     fn preprocess_ascii_shorthand_preserves_escaped_word_shorthand() {
         assert_eq!(preprocess_ascii_shorthand(r"^\\w+$"), r"^\\w+$");
+    }
+
+    #[test]
+    fn lowered_bounded_free_text_pattern_rejects_leading_space_slash() {
+        let body = string_pattern_as_body_regex(r"^$|(^(?:\S+\s+){0,19}\S+$)").unwrap();
+        let regex = Regex::new(&format!(r"^(?:{})$", quoted_string_body_regex(&body))).unwrap();
+
+        assert!(regex.is_match(r#""REST API""#));
+        assert!(!regex.is_match(r#"" /""#));
+    }
+
+    #[test]
+    fn lowered_optional_decimal_pattern_rejects_backslash_digit_string() {
+        let body = string_pattern_as_body_regex(r"^$|^\d{1,15}(?:\.\d{1,5})?$").unwrap();
+        let regex = Regex::new(&format!(r"^(?:{})$", quoted_string_body_regex(&body))).unwrap();
+
+        assert!(regex.is_match(r#""""#));
+        assert!(regex.is_match(r#""123.45""#));
+        assert!(!regex.is_match(r#""\\1""#));
     }
 }
