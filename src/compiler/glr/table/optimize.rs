@@ -13,6 +13,7 @@ const RECOGNIZER_SUFFIX_QUOTIENT_MAX_ALTS_ENV: &str =
     "GLRMASK_RECOGNIZER_SUFFIX_QUOTIENT_MAX_ALTS";
 const RECOGNIZER_SUFFIX_QUOTIENT_MAX_WIDTH_ENV: &str =
     "GLRMASK_RECOGNIZER_SUFFIX_QUOTIENT_MAX_WIDTH";
+const MAX_GUARDED_STACK_EFFECTS_ENV: &str = "GLRMASK_MAX_GUARDED_STACK_EFFECTS";
 
 fn stack_shift_predecessor_canonicalization_enabled() -> bool {
     !env_flag_enabled(DISABLE_STACK_SHIFT_PREDECESSOR_CANONICALIZATION_ENV, false)
@@ -37,6 +38,13 @@ fn env_flag_enabled(name: &str, default: bool) -> bool {
             !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
         })
         .unwrap_or(default)
+}
+
+fn max_guarded_stack_effects() -> Option<usize> {
+    std::env::var(MAX_GUARDED_STACK_EFFECTS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2248,6 +2256,11 @@ fn stack_effect_action(table: &GLRTable, mut effects: Vec<GuardedStackShift>) ->
         }
         return stack_shift_action(shifts);
     }
+    // Opt-in diagnostic knob only. Do not use this to hide correctness or
+    // compile-time bugs in guarded stack-effect lowering.
+    if max_guarded_stack_effects().is_some_and(|limit| effects.len() > limit) {
+        return None;
+    }
     Some(Action::GuardedStackShifts(effects))
 }
 
@@ -2395,6 +2408,7 @@ mod tests {
             nonterminal_display_names: Vec::new(),
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            guarded_shift_index: Vec::new(),
         }
     }
 
@@ -2729,6 +2743,7 @@ mod tests {
             nonterminal_display_names: Vec::new(),
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            guarded_shift_index: Vec::new(),
         };
         let mut predecessors = vec![BTreeSet::new(); 5];
         predecessors[2].insert(1);
@@ -2788,6 +2803,7 @@ mod tests {
             nonterminal_display_names: Vec::new(),
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            guarded_shift_index: Vec::new(),
         };
         let mut predecessors = vec![BTreeSet::new(); 6];
         predecessors[2].insert(1);
@@ -2842,6 +2858,7 @@ mod tests {
             nonterminal_display_names: Vec::new(),
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            guarded_shift_index: Vec::new(),
         };
         let mut predecessors = vec![BTreeSet::new(); 9];
         predecessors[2].extend([1, 6]);
@@ -2899,6 +2916,7 @@ mod tests {
             nonterminal_display_names: Vec::new(),
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            guarded_shift_index: Vec::new(),
         };
         let mut predecessors = vec![BTreeSet::new(); 4];
         predecessors[2].insert(1);
@@ -2955,6 +2973,7 @@ mod tests {
             nonterminal_display_names: Vec::new(),
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            guarded_shift_index: Vec::new(),
         };
         table.rebuild_advance_rows_from_actions();
 
@@ -3002,6 +3021,7 @@ mod tests {
             nonterminal_display_names: Vec::new(),
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            guarded_shift_index: Vec::new(),
         };
         table.rebuild_advance_rows_from_actions();
 
@@ -3037,6 +3057,7 @@ mod tests {
             nonterminal_display_names: Vec::new(),
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            guarded_shift_index: Vec::new(),
         };
         table.goto[1].insert(0, (3, false));
         table.goto[2].insert(0, (4, false));
@@ -3475,5 +3496,6 @@ pub(super) fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>
         nonterminal_display_names: table.nonterminal_display_names,
         advance,
         forwarded_shifts,
+        guarded_shift_index: Vec::new(),
     }
 }

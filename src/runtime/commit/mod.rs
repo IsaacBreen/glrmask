@@ -503,6 +503,7 @@ fn apply_future_terminal_disallow(
 fn apply_single_top_action_fast(
     table: &GLRTable,
     gss: &ParserGSS,
+    state: u32,
     terminal: u32,
     action: &Action,
 ) -> Option<ParserGSS> {
@@ -584,7 +585,9 @@ fn apply_single_top_action_fast(
             }
             Some(shifted)
         }
-        Action::GuardedStackShifts(shifts) => apply_guarded_stack_shifts_fast(gss, shifts),
+        Action::GuardedStackShifts(shifts) => {
+            apply_guarded_stack_shifts_fast(gss, shifts, table.guarded_shift_index(state, terminal))
+        }
         Action::Reduce(..) => apply_single_path_reduce_chain_fast(table, gss, terminal),
         _ => None,
     }
@@ -777,7 +780,7 @@ fn commit_bytes_fast_path(
         if let Some(top_state) = gss.single_exclusive_top_value() {
             if let Some(action) = constraint.table.action(top_state, terminal) {
                 if let Some(shifted) =
-                    apply_single_top_action_fast(&constraint.table, gss, terminal, action)
+                    apply_single_top_action_fast(&constraint.table, gss, top_state, terminal, action)
                 {
                     state.clear();
                     state.insert(constraint.tokenizer.initial_state(), shifted);
@@ -916,7 +919,13 @@ fn commit_bytes_full_width_fast_path(
             let advanced = if let Some(top_state) = pruned_gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
                 && let Some(advanced) =
-                    apply_single_top_action_fast(&constraint.table, &pruned_gss, terminal, action)
+                    apply_single_top_action_fast(
+                        &constraint.table,
+                        &pruned_gss,
+                        top_state,
+                        terminal,
+                        action,
+                    )
             {
                 advanced
             } else {
@@ -1056,6 +1065,7 @@ fn commit_bytes_small_queue_fast_path(
                     && let Some(advanced) = apply_single_top_action_fast(
                         &constraint.table,
                         &gss_at_offset,
+                        top_state,
                         matched.terminal_id,
                         action,
                     )
@@ -1436,7 +1446,13 @@ fn commit_bytes_direct_linear_fast_path(
             let advanced = if let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, step.terminal)
                 && let Some(advanced) =
-                    apply_single_top_action_fast(&constraint.table, &gss, step.terminal, action)
+                    apply_single_top_action_fast(
+                        &constraint.table,
+                        &gss,
+                        top_state,
+                        step.terminal,
+                        action,
+                    )
             {
                 advanced
             } else {
@@ -2452,7 +2468,7 @@ fn commit_bytes_linear_fast_path(
             let fast_advanced = if let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
             {
-                apply_single_top_action_fast(&constraint.table, &gss, terminal, action)
+                apply_single_top_action_fast(&constraint.table, &gss, top_state, terminal, action)
             } else {
                 None
             };
@@ -2589,7 +2605,13 @@ fn commit_bytes_linear_fast_path_profiled(
             let fast_advanced = if let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
                 && let Some(advanced) =
-                    apply_single_top_action_fast(&constraint.table, &gss, terminal, action)
+                    apply_single_top_action_fast(
+                        &constraint.table,
+                        &gss,
+                        top_state,
+                        terminal,
+                        action,
+                    )
             {
                 let elapsed = fast_start.elapsed().as_nanos() as u64;
                 Some((advanced, fast_action_advance_profile(&gss, action, elapsed)))

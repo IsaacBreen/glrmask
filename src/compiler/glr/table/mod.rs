@@ -31,6 +31,14 @@ fn default_action_rows_enabled() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardedShiftCellIndex {
+    pub guard_pops: Box<[u32]>,
+    pub by_guard_key: FxHashMap<(u32, u32), Box<[u32]>>,
+    pub guard_counts: Box<[u16]>,
+    pub unguarded_indices: Box<[u32]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GLRTable {
     pub action: Vec<ActionRow>,
     pub goto: Vec<GotoRow>,
@@ -56,6 +64,8 @@ pub struct GLRTable {
     /// transfer mechanism. The characterization should treat these as
     /// non-replace to avoid creating pop-0 reduces in the template NFA.
     pub forwarded_shifts: FxHashSet<(u32, TerminalID)>,
+    #[serde(skip)]
+    pub guarded_shift_index: Vec<FxHashMap<TerminalID, GuardedShiftCellIndex>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -168,6 +178,69 @@ impl GLRTable {
 
     pub(crate) fn rebuild_advance_rows_from_actions(&mut self) {
         self.advance = action_presence_rows(&self.action, self.num_terminals);
+    }
+
+    pub(crate) fn rebuild_guarded_shift_index(&mut self) {
+        self.guarded_shift_index = vec![FxHashMap::default(); self.num_states as usize];
+
+        for (state, row) in self.action.iter().enumerate() {
+            let mut index_row = FxHashMap::default();
+
+            for (terminal, action) in row {
+                let Action::GuardedStackShifts(shifts) = action else {
+                    continue;
+                };
+
+                let mut guard_pops = BTreeSet::new();
+                let mut by_guard_key: FxHashMap<(u32, u32), Vec<u32>> = FxHashMap::default();
+                let mut guard_counts = vec![0u16; shifts.len()];
+                let mut unguarded_indices = Vec::new();
+
+                for (shift_index, shift) in shifts.iter().enumerate() {
+                    if shift.guards.is_empty() {
+                        unguarded_indices.push(shift_index as u32);
+                        continue;
+                    }
+
+                    for guard in &shift.guards {
+                        guard_pops.insert(guard.pop);
+                        guard_counts[shift_index] += 1;
+                        for &guard_state in &guard.states {
+                            by_guard_key
+                                .entry((guard.pop, guard_state))
+                                .or_default()
+                                .push(shift_index as u32);
+                        }
+                    }
+                }
+
+                index_row.insert(
+                    terminal,
+                    GuardedShiftCellIndex {
+                        guard_pops: guard_pops.into_iter().collect::<Vec<_>>().into_boxed_slice(),
+                        by_guard_key: by_guard_key
+                            .into_iter()
+                            .map(|(key, shift_indices)| (key, shift_indices.into_boxed_slice()))
+                            .collect(),
+                        guard_counts: guard_counts.into_boxed_slice(),
+                        unguarded_indices: unguarded_indices.into_boxed_slice(),
+                    },
+                );
+            }
+
+            self.guarded_shift_index[state] = index_row;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn guarded_shift_index(
+        &self,
+        state: u32,
+        terminal: TerminalID,
+    ) -> Option<&GuardedShiftCellIndex> {
+        self.guarded_shift_index
+            .get(state as usize)
+            .and_then(|row| row.get(&terminal))
     }
 
     #[inline]
@@ -445,6 +518,7 @@ pub(crate) mod testing {
             nonterminal_display_names: Vec::new(),
             advance,
             forwarded_shifts: Default::default(),
+            guarded_shift_index: Vec::new(),
         }
     }
 }

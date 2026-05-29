@@ -1,9 +1,17 @@
 use super::accumulator::TerminalsDisallowed;
 use super::analysis::EOF;
-use super::table::{Action, GLRTable, GuardedStackShift, StackShift, StackShiftGuard};
+use super::table::{
+    Action,
+    GLRTable,
+    GuardedShiftCellIndex,
+    GuardedStackShift,
+    StackShift,
+    StackShiftGuard,
+};
 use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::{LeveledGSS, VirtualStack};
 use crate::grammar::flat::TerminalID;
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::sync::OnceLock;
 
@@ -232,7 +240,11 @@ pub(crate) fn advance_stacks_profiled(
                 }
                 profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
                 let apply_start = Instant::now();
-                let shifted = apply_guarded_stack_shifts(gss, shifts);
+                let shifted = apply_guarded_stack_shifts(
+                    gss,
+                    shifts,
+                    table.guarded_shift_index(state, token),
+                );
                 profile.stack_shift_apply_ns = apply_start.elapsed().as_nanos() as u64;
                 profile.total_ns = total_start.elapsed().as_nanos() as u64;
                 return (shifted, profile);
@@ -304,7 +316,7 @@ fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) 
             return apply_stack_shifts(gss, shifts);
         }
         if let Some(Action::GuardedStackShifts(shifts)) = table.action(state, token) {
-            return apply_guarded_stack_shifts(gss, shifts);
+            return apply_guarded_stack_shifts(gss, shifts, table.guarded_shift_index(state, token));
         }
         if matches!(table.action(state, token), Some(Action::Reduce(..)))
             && let Some(shifted) = try_collapse_small_reduce_fanout(table, &gss, token)
@@ -568,9 +580,10 @@ fn apply_stack_shifts(gss: ParserGSS, shifts: &[StackShift]) -> ParserGSS {
 pub(crate) fn apply_guarded_stack_shifts_fast(
     gss: &ParserGSS,
     shifts: &[GuardedStackShift],
+    index: Option<&GuardedShiftCellIndex>,
 ) -> Option<ParserGSS> {
     if let Some(stack) = gss.try_virtual_stack() {
-        return Some(apply_guarded_stack_shifts_to_vstack(&stack, shifts));
+        return Some(apply_guarded_stack_shifts_to_vstack(&stack, shifts, index));
     }
 
     if !guarded_stack_to_stacks_fallback_disabled()
@@ -594,8 +607,12 @@ pub(crate) fn apply_guarded_stack_shifts_fast(
     None
 }
 
-fn apply_guarded_stack_shifts(gss: ParserGSS, shifts: &[GuardedStackShift]) -> ParserGSS {
-    if let Some(shifted) = apply_guarded_stack_shifts_fast(&gss, shifts) {
+fn apply_guarded_stack_shifts(
+    gss: ParserGSS,
+    shifts: &[GuardedStackShift],
+    index: Option<&GuardedShiftCellIndex>,
+) -> ParserGSS {
+    if let Some(shifted) = apply_guarded_stack_shifts_fast(&gss, shifts, index) {
         return shifted;
     }
 
@@ -646,9 +663,43 @@ fn apply_guarded_stack_shifts(gss: ParserGSS, shifts: &[GuardedStackShift]) -> P
     out
 }
 
+fn indexed_guarded_shift_candidates(
+    stack: &VirtualStack<u32, TerminalsDisallowed>,
+    index: &GuardedShiftCellIndex,
+) -> SmallVec<[u32; 8]> {
+    let mut counts: FxHashMap<u32, u16> = FxHashMap::default();
+
+    for &pop in &index.guard_pops {
+        let Some(state) = stack.top_after_popping(pop as usize).copied() else {
+            continue;
+        };
+        if let Some(shift_indices) = index.by_guard_key.get(&(pop, state)) {
+            for &shift_index in shift_indices.iter() {
+                *counts.entry(shift_index).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut candidates = SmallVec::<[u32; 8]>::new();
+    for (shift_index, count) in counts {
+        if index
+            .guard_counts
+            .get(shift_index as usize)
+            .is_some_and(|required| *required == count)
+        {
+            candidates.push(shift_index);
+        }
+    }
+    candidates.extend(index.unguarded_indices.iter().copied());
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates
+}
+
 fn apply_guarded_stack_shifts_to_vstack(
     stack: &VirtualStack<u32, TerminalsDisallowed>,
     shifts: &[GuardedStackShift],
+    index: Option<&GuardedShiftCellIndex>,
 ) -> ParserGSS {
     let mut groups: SmallVec<[(u32, SmallVec<[&[u32]; 4]>); 4]> = SmallVec::new();
     let mut empty_pushes: SmallVec<[u32; 4]> = SmallVec::new();
@@ -669,14 +720,20 @@ fn apply_guarded_stack_shifts_to_vstack(
         value
     }
 
-    for shift in shifts {
+    fn consider_guarded_shift<'a>(
+        stack: &VirtualStack<u32, TerminalsDisallowed>,
+        stack_len: usize,
+        state_after_pop_cache: &mut SmallVec<[(u32, Option<u32>); 8]>,
+        groups: &mut SmallVec<[(u32, SmallVec<[&'a [u32]; 4]>); 4]>,
+        empty_pushes: &mut SmallVec<[u32; 4]>,
+        shift: &'a GuardedStackShift,
+    ) {
         debug_assert!(shift.guards.windows(2).all(|w| w[0].pop <= w[1].pop));
         debug_assert!(shift.guards.iter().all(|guard| guard.pop <= shift.pop));
 
         let mut dead = false;
-
         for guard in &shift.guards {
-            let Some(state) = state_after_popping(stack, &mut state_after_pop_cache, guard.pop) else {
+            let Some(state) = state_after_popping(stack, state_after_pop_cache, guard.pop) else {
                 dead = true;
                 break;
             };
@@ -687,7 +744,7 @@ fn apply_guarded_stack_shifts_to_vstack(
         }
 
         if dead || shift.pop as usize > stack_len {
-            continue;
+            return;
         }
 
         if shift.pushes.is_empty() {
@@ -698,6 +755,32 @@ fn apply_guarded_stack_shifts_to_vstack(
             let mut pushes = SmallVec::new();
             pushes.push(shift.pushes.as_slice());
             groups.push((shift.pop, pushes));
+        }
+    }
+
+    if let Some(index) = index {
+        for shift_index in indexed_guarded_shift_candidates(stack, index) {
+            if let Some(shift) = shifts.get(shift_index as usize) {
+                consider_guarded_shift(
+                    stack,
+                    stack_len,
+                    &mut state_after_pop_cache,
+                    &mut groups,
+                    &mut empty_pushes,
+                    shift,
+                );
+            }
+        }
+    } else {
+        for shift in shifts {
+            consider_guarded_shift(
+                stack,
+                stack_len,
+                &mut state_after_pop_cache,
+                &mut groups,
+                &mut empty_pushes,
+                shift,
+            );
         }
     }
 
@@ -885,7 +968,14 @@ fn advance_deterministically_from_vstack_raw(
                 return (AdvancedBranch::Gss(apply_stack_shifts(stack.into_gss(), shifts)), true);
             }
             Some(Action::GuardedStackShifts(shifts)) => {
-                return (AdvancedBranch::Gss(apply_guarded_stack_shifts_to_vstack(&stack, shifts)), true);
+                return (
+                    AdvancedBranch::Gss(apply_guarded_stack_shifts_to_vstack(
+                        &stack,
+                        shifts,
+                        table.guarded_shift_index(state, token),
+                    )),
+                    true,
+                );
             }
             Some(Action::Split { .. }) | Some(Action::Accept) | None => break,
         }
@@ -1097,7 +1187,11 @@ fn advance_deterministically_profiled(
                 return true;
             }
             Some(Action::GuardedStackShifts(shifts)) => {
-                *gss = apply_guarded_stack_shifts_to_vstack(&stack, shifts);
+                *gss = apply_guarded_stack_shifts_to_vstack(
+                    &stack,
+                    shifts,
+                    table.guarded_shift_index(state, token),
+                );
                 profile.det_exit_reason = 1;
                 return true;
             }
@@ -1213,9 +1307,17 @@ fn advance_nondeterministically_profiled(
                 Action::GuardedStackShifts(shifts) => {
                     profile.n_nondet_merges += 1;
                     let branch = if let Some(stack) = isolated.try_virtual_stack() {
-                        apply_guarded_stack_shifts_to_vstack(&stack, shifts)
+                        apply_guarded_stack_shifts_to_vstack(
+                            &stack,
+                            shifts,
+                            table.guarded_shift_index(state, token),
+                        )
                     } else {
-                        apply_guarded_stack_shifts(isolated, shifts)
+                        apply_guarded_stack_shifts(
+                            isolated,
+                            shifts,
+                            table.guarded_shift_index(state, token),
+                        )
                     };
                     merge_into(&mut shifted, branch);
                     continue;
@@ -1320,9 +1422,17 @@ fn advance_nondeterministically(
                 }
                 Action::GuardedStackShifts(shifts) => {
                     let branch = if let Some(stack) = isolated.try_virtual_stack() {
-                        apply_guarded_stack_shifts_to_vstack(&stack, shifts)
+                        apply_guarded_stack_shifts_to_vstack(
+                            &stack,
+                            shifts,
+                            table.guarded_shift_index(state, token),
+                        )
                     } else {
-                        apply_guarded_stack_shifts(isolated, shifts)
+                        apply_guarded_stack_shifts(
+                            isolated,
+                            shifts,
+                            table.guarded_shift_index(state, token),
+                        )
                     };
                     merge_into(&mut shifted, branch);
                     continue;
@@ -1471,7 +1581,11 @@ fn advance_deterministically(
                 return true;
             }
             Some(Action::GuardedStackShifts(shifts)) => {
-                *gss = apply_guarded_stack_shifts_to_vstack(&stack, shifts);
+                *gss = apply_guarded_stack_shifts_to_vstack(
+                    &stack,
+                    shifts,
+                    table.guarded_shift_index(state, token),
+                );
                 return true;
             }
             Some(Action::Split { shift, reduces, accept: false }) => {
@@ -1519,10 +1633,16 @@ pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: T
 
 #[cfg(test)]
 mod tests {
-    use super::{ParserGSS, advance_stacks, stack_may_advance_on, stack_may_advance_on_any};
+    use super::{
+        ParserGSS,
+        advance_stacks,
+        apply_guarded_stack_shifts_to_vstack,
+        stack_may_advance_on,
+        stack_may_advance_on_any,
+    };
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::table::testing::build_test_table;
-    use crate::compiler::glr::table::{Action, StackShift};
+    use crate::compiler::glr::table::{Action, GuardedStackShift, StackShift, StackShiftGuard};
     use crate::ds::bitset::BitSet;
 
     #[test]
@@ -1625,6 +1745,92 @@ mod tests {
         expected_stacks.sort_by(|left, right| left.0.cmp(&right.0));
 
         assert_eq!(actual_stacks, expected_stacks);
+    }
+
+    #[test]
+    fn indexed_guarded_vstack_matches_linear_guarded_vstack() {
+        let token = 0;
+        let mut table = build_test_table(
+            1,
+            1,
+            &[&[(
+                token,
+                Action::GuardedStackShifts(vec![
+                    GuardedStackShift {
+                        guards: vec![
+                            StackShiftGuard {
+                                pop: 1,
+                                states: vec![10, 20],
+                            },
+                            StackShiftGuard {
+                                pop: 2,
+                                states: vec![1],
+                            },
+                        ],
+                        pop: 3,
+                        pushes: vec![50],
+                    },
+                    GuardedStackShift {
+                        guards: vec![
+                            StackShiftGuard {
+                                pop: 1,
+                                states: vec![10],
+                            },
+                            StackShiftGuard {
+                                pop: 2,
+                                states: vec![2],
+                            },
+                        ],
+                        pop: 3,
+                        pushes: vec![51],
+                    },
+                    GuardedStackShift {
+                        guards: vec![StackShiftGuard {
+                            pop: 1,
+                            states: vec![10, 20],
+                        }],
+                        pop: 2,
+                        pushes: vec![52],
+                    },
+                    GuardedStackShift {
+                        guards: vec![
+                            StackShiftGuard {
+                                pop: 1,
+                                states: vec![30],
+                            },
+                            StackShiftGuard {
+                                pop: 2,
+                                states: vec![1],
+                            },
+                        ],
+                        pop: 3,
+                        pushes: vec![53],
+                    },
+                ]),
+            )]],
+            &[&[]],
+        );
+        table.rebuild_guarded_shift_index();
+
+        let shifts = match table.action(0, token) {
+            Some(Action::GuardedStackShifts(shifts)) => shifts,
+            other => panic!("expected guarded stack shifts, got {other:?}"),
+        };
+        let index = table
+            .guarded_shift_index(0, token)
+            .expect("expected guarded shift index");
+
+        let stack_a = ParserGSS::from_single_stack(vec![0, 1, 10, 99], TerminalsDisallowed::new());
+        let stack_b = ParserGSS::from_single_stack(vec![0, 2, 10, 99], TerminalsDisallowed::new());
+
+        for stack in [&stack_a, &stack_b] {
+            let vstack = stack.try_virtual_stack().expect("expected virtual stack");
+            let mut indexed = apply_guarded_stack_shifts_to_vstack(&vstack, shifts, Some(index)).to_stacks();
+            let mut linear = apply_guarded_stack_shifts_to_vstack(&vstack, shifts, None).to_stacks();
+            indexed.sort_by(|left, right| left.0.cmp(&right.0));
+            linear.sort_by(|left, right| left.0.cmp(&right.0));
+            assert_eq!(indexed, linear);
+        }
     }
 }
 

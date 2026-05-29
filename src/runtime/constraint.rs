@@ -393,6 +393,7 @@ impl Constraint {
     }
 
     pub(crate) fn rebuild_runtime_caches_impl(&mut self) {
+        self.table.rebuild_guarded_shift_index();
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);

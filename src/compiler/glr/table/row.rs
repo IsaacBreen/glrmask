@@ -716,6 +716,7 @@ mod tests {
             nonterminal_display_names: Vec::new(),
             advance: Vec::new(),
             forwarded_shifts: Default::default(),
+            guarded_shift_index: Vec::new(),
         };
 
         let before = (0..table.num_terminals)

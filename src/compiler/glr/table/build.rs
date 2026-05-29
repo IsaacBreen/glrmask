@@ -77,6 +77,8 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
         table.compress_default_action_rows();
     }
 
+    table.rebuild_guarded_shift_index();
+
     if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
     {
@@ -248,6 +250,7 @@ fn finish_table(
         nonterminal_display_names: grammar.nonterminal_display_names.clone(),
         advance: Vec::new(),
         forwarded_shifts,
+        guarded_shift_index: Vec::new(),
     }
 }
 
