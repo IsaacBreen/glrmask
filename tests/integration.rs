@@ -1042,6 +1042,37 @@ fn json_schema_object_property_untyped_string_assertions_allow_non_strings() {
 }
 
 #[test]
+fn json_schema_object_property_untyped_array_assertions_allow_non_arrays() {
+    let constraint = byte_schema(
+        r#"{
+            "type": "object",
+            "properties": {
+                "dataFormats": {
+                    "maxItems": 1,
+                    "items": {"enum": ["application/json"]}
+                }
+            }
+        }"#,
+    );
+
+    assert_accepts_bytes(&constraint, br#"{"dataFormats": ["application/json"]}"#);
+    assert_accepts_bytes(&constraint, br#"{"dataFormats": true}"#);
+    assert_accepts_bytes(&constraint, br#"{"dataFormats": "anything"}"#);
+
+    let mut invalid_item = constraint.start();
+    assert!(invalid_item.commit_bytes(br#"{"dataFormats": ["text/plain"]}"#).is_err());
+
+    let mut too_many_items = constraint.start();
+    assert!(too_many_items
+        .commit_bytes(br#"{"dataFormats": ["application/json", "application/json"]}"#)
+        .is_err());
+
+    let mut state = constraint.start();
+    state.commit_bytes(br#"{"dataFormats":"#).unwrap();
+    state.commit_bytes(b" true").unwrap();
+}
+
+#[test]
 fn json_schema_additional_property_required_only_key_does_not_fall_back_through_ap() {
     let constraint = byte_schema(
         r#"{

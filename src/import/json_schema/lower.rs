@@ -270,20 +270,11 @@ impl<'a> Lowerer<'a> {
             return Ok(choice(values.into_iter().map(|value| self.lower_json_literal(value)).collect()));
         }
 
-        if assertions.types.is_none()
-            && assertions.object.is_some()
-            && assertions.array.is_none()
-            && assertions.string.is_none()
-            && assertions.number.is_none()
-        {
-            return Ok(choice(vec![
-                self.lower_object(assertions.object.as_ref().unwrap())?,
-                r(JSON_ARRAY_RULE),
-                r(JSON_STRING_RULE),
-                r(JSON_NUMBER_RULE),
-                r(JSON_BOOL_RULE),
-                r(JSON_NULL_RULE),
-            ]));
+        if assertions.types.is_none() {
+            let inferred = self.inferred_constrained_types(assertions);
+            if inferred.len() == 1 {
+                return self.lower_untyped_single_family_assertions(inferred[0], assertions);
+            }
         }
 
         let selected_types = self.selected_types(schema, assertions)?;
@@ -307,19 +298,7 @@ impl<'a> Lowerer<'a> {
             return Ok(types.clone());
         }
 
-        let mut inferred = Vec::new();
-        if assertions.object.is_some() {
-            inferred.push(SchemaType::Object);
-        }
-        if assertions.array.is_some() {
-            inferred.push(SchemaType::Array);
-        }
-        if assertions.string.is_some() {
-            inferred.push(SchemaType::String);
-        }
-        if assertions.number.is_some() {
-            inferred.push(SchemaType::Number);
-        }
+        let inferred = self.inferred_constrained_types(assertions);
 
         if inferred.len() > 1 {
             return Err(SchemaImportError::at(
@@ -360,6 +339,54 @@ impl<'a> Lowerer<'a> {
                 self.lower_number(&number)
             }
         }
+    }
+
+    fn inferred_constrained_types(&self, assertions: &SchemaAssertions) -> Vec<SchemaType> {
+        let mut inferred = Vec::new();
+        if assertions.object.is_some() {
+            inferred.push(SchemaType::Object);
+        }
+        if assertions.array.is_some() {
+            inferred.push(SchemaType::Array);
+        }
+        if assertions.string.is_some() {
+            inferred.push(SchemaType::String);
+        }
+        if assertions.number.is_some() {
+            inferred.push(SchemaType::Number);
+        }
+        inferred
+    }
+
+    fn lower_untyped_single_family_assertions(
+        &mut self,
+        constrained_type: SchemaType,
+        assertions: &SchemaAssertions,
+    ) -> ImportResult<GrammarExpr> {
+        let mut alternatives = vec![self.lower_for_type(constrained_type, assertions)?];
+
+        for fallback_type in [
+            SchemaType::Object,
+            SchemaType::Array,
+            SchemaType::String,
+            SchemaType::Number,
+            SchemaType::Boolean,
+            SchemaType::Null,
+        ] {
+            if fallback_type == constrained_type {
+                continue;
+            }
+            alternatives.push(match fallback_type {
+                SchemaType::Object => r(JSON_OBJECT_RULE),
+                SchemaType::Array => r(JSON_ARRAY_RULE),
+                SchemaType::String => r(JSON_STRING_RULE),
+                SchemaType::Number | SchemaType::Integer => r(JSON_NUMBER_RULE),
+                SchemaType::Boolean => r(JSON_BOOL_RULE),
+                SchemaType::Null => r(JSON_NULL_RULE),
+            });
+        }
+
+        Ok(choice(alternatives))
     }
 
     pub(crate) fn lower_json_literal(&mut self, value: &Value) -> GrammarExpr {
