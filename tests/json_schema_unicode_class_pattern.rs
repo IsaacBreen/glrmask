@@ -123,6 +123,76 @@ fn unicode_class_pattern_keeps_generic_digit_shorthand_ascii_only() {
 }
 
 #[test]
+fn unicode_class_pattern_keeps_generic_word_shorthand_ascii_only_inside_class() {
+    let schema = r#"{
+        "type": "string",
+        "pattern": "^[A\\w]$"
+    }"#;
+
+    let mut entries = Vec::new();
+    for byte in 0..=255u8 {
+        entries.push((byte as u32, vec![byte]));
+    }
+    let vocab = Vocab::new(entries, None);
+
+    let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_bytes(b"\"").unwrap();
+
+    let mask = state.mask();
+    let is_a_allowed = (mask[65 / 32] >> (65 % 32)) & 1 != 0;
+    let is_5_allowed = (mask[53 / 32] >> (53 % 32)) & 1 != 0;
+    let is_underscore_allowed = (mask[95 / 32] >> (95 % 32)) & 1 != 0;
+    let is_d8_allowed = (mask[216 / 32] >> (216 % 32)) & 1 != 0;
+
+    assert!(is_a_allowed, "glrmask should allow ASCII 'A'");
+    assert!(is_5_allowed, "glrmask should allow ASCII digit '5' from generic \\w");
+    assert!(
+        is_underscore_allowed,
+        "glrmask should allow ASCII underscore from generic \\w"
+    );
+    assert!(
+        !is_d8_allowed,
+        "glrmask should not allow non-ASCII lead byte 0xd8 from generic \\w"
+    );
+}
+
+#[test]
+fn unicode_class_pattern_keeps_generic_word_shorthand_ascii_only_outside_class() {
+    let schema = r#"{
+        "type": "string",
+        "pattern": "^\\w+$"
+    }"#;
+
+    let mut entries = Vec::new();
+    for byte in 0..=255u8 {
+        entries.push((byte as u32, vec![byte]));
+    }
+    let vocab = Vocab::new(entries, None);
+
+    let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_bytes(b"\"").unwrap();
+
+    let mask = state.mask();
+    let is_a_allowed = (mask[65 / 32] >> (65 % 32)) & 1 != 0;
+    let is_5_allowed = (mask[53 / 32] >> (53 % 32)) & 1 != 0;
+    let is_underscore_allowed = (mask[95 / 32] >> (95 % 32)) & 1 != 0;
+    let is_eb_allowed = (mask[235 / 32] >> (235 % 32)) & 1 != 0;
+
+    assert!(is_a_allowed, "glrmask should allow ASCII letters from generic \\w");
+    assert!(is_5_allowed, "glrmask should allow ASCII digits from generic \\w");
+    assert!(
+        is_underscore_allowed,
+        "glrmask should allow ASCII underscore from generic \\w"
+    );
+    assert!(
+        !is_eb_allowed,
+        "glrmask should not allow non-ASCII lead byte 0xeb from generic \\w"
+    );
+}
+
+#[test]
 fn unicode_class_pattern_preserves_explicit_fullwidth_digit_range_in_mixed_class() {
     let schema = r#"{
         "type": "string",

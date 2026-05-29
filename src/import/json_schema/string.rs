@@ -739,14 +739,14 @@ impl<'a> Lowerer<'a> {
 }
 
 fn string_pattern_as_body_regex(pattern: &str) -> ImportResult<String> {
-    let pattern = preprocess_ascii_digit_shorthand(pattern);
+    let pattern = preprocess_ascii_shorthand(pattern);
     let hir = Parser::new()
         .parse(&pattern)
         .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")))?;
     string_pattern_hir_as_body_regex(&hir)
 }
 
-fn preprocess_ascii_digit_shorthand(pattern: &str) -> String {
+fn preprocess_ascii_shorthand(pattern: &str) -> String {
     let mut lowered = String::with_capacity(pattern.len());
     let mut chars = pattern.chars().peekable();
     let mut in_class = false;
@@ -759,6 +759,13 @@ fn preprocess_ascii_digit_shorthand(pattern: &str) -> String {
                         lowered.push_str("0-9");
                     } else {
                         lowered.push_str("[0-9]");
+                    }
+                }
+                Some('w') => {
+                    if in_class {
+                        lowered.push_str("A-Za-z0-9_");
+                    } else {
+                        lowered.push_str("[A-Za-z0-9_]");
                     }
                 }
                 Some(next) => {
@@ -1223,4 +1230,20 @@ pub(crate) fn string_value_satisfies_schema(
         return Ok(regex.is_match(text));
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preprocess_ascii_shorthand;
+
+    #[test]
+    fn preprocess_ascii_shorthand_rewrites_generic_word_shorthand() {
+        assert_eq!(preprocess_ascii_shorthand(r"^\w+$"), r"^[A-Za-z0-9_]+$");
+        assert_eq!(preprocess_ascii_shorthand(r"^[\w.-]+$"), r"^[A-Za-z0-9_.-]+$");
+    }
+
+    #[test]
+    fn preprocess_ascii_shorthand_preserves_escaped_word_shorthand() {
+        assert_eq!(preprocess_ascii_shorthand(r"^\\w+$"), r"^\\w+$");
+    }
 }
