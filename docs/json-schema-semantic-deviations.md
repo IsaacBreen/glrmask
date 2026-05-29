@@ -22,3 +22,24 @@ pattern produced a tokenizer/terminal DFA with about 253k states and caused
 large build-time regressions. Ignoring the sibling length bound keeps the
 pattern enforcement, avoids that product construction, and may accept strings
 that match the pattern but violate the ignored length bound.
+
+## Additional and pattern properties are tail-only in objects
+
+When lowering object schemas, glrmask preserves fixed properties in their
+schema-lowered positions and only permits `additionalProperties` and
+`patternProperties` in the free-property tail after the remaining fixed
+properties for that branch.
+
+This is a deliberate grammar-size and build-time tradeoff. Fully interleaving
+fixed, additional, and pattern properties creates much larger unordered object
+state spaces. In production experiments on recursive, object-heavy schemas such
+as `Github_hard---o13029`, broad interleaving attempts caused severe build-time
+blowups and timeouts.
+
+Compared with full JSON Schema semantics and tools such as llguidance, this can
+reject objects where a non-fixed additional or pattern-matched property appears
+before a later fixed property that the same branch still expects. Discrepancies
+should only be classified under this deliberate deviation when acceptance truly
+depends on that non-fixed property appearing before a later fixed property. Do
+not apply this deviation when the relevant keys are themselves fixed properties
+in the same branch.
