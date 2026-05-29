@@ -763,10 +763,46 @@ impl<'a> Lowerer<'a> {
 }
 
 fn string_pattern_as_body_regex(pattern: &str) -> ImportResult<String> {
+    let pattern = preprocess_ascii_digit_shorthand(pattern);
     let hir = Parser::new()
-        .parse(pattern)
+        .parse(&pattern)
         .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")))?;
     string_pattern_hir_as_body_regex(&hir)
+}
+
+fn preprocess_ascii_digit_shorthand(pattern: &str) -> String {
+    let mut lowered = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars().peekable();
+    let mut in_class = false;
+
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('d') => {
+                    if in_class {
+                        lowered.push_str("0-9");
+                    } else {
+                        lowered.push_str("[0-9]");
+                    }
+                }
+                Some(next) => {
+                    lowered.push('\\');
+                    lowered.push(next);
+                }
+                None => lowered.push('\\'),
+            }
+            continue;
+        }
+
+        match ch {
+            '[' if !in_class => in_class = true,
+            ']' if in_class => in_class = false,
+            _ => {}
+        }
+        lowered.push(ch);
+    }
+
+    lowered
 }
 
 fn string_pattern_hir_as_body_regex(hir: &Hir) -> ImportResult<String> {
@@ -971,25 +1007,42 @@ fn lower_decoded_class_to_json_body_regex(class: &Class) -> String {
     }
 
     let mut raw_ranges = Vec::new();
+    let mut alternatives = Vec::new();
     match class {
         Class::Unicode(class) => {
             for range in class.ranges() {
-                if is_non_ascii_decimal_digit_range(range.start(), range.end()) {
-                    continue;
+                let start = range.start();
+                let end = range.end();
+                if start <= '\x7f' {
+                    let ascii_end = std::cmp::min(end, '\x7f');
+                    push_safe_raw_char_ranges(start, ascii_end, &mut raw_ranges);
                 }
-                push_safe_raw_char_ranges(range.start(), range.end(), &mut raw_ranges);
+                if end >= '\u{80}' {
+                    let non_ascii_start = std::cmp::max(start, '\u{80}');
+                    alternatives.push(unicode_range_to_utf8_regex_string(non_ascii_start, end));
+                }
             }
         }
         Class::Bytes(class) => {
             for range in class.ranges() {
-                let start = char::from(range.start());
-                let end = char::from(range.end());
-                push_safe_raw_char_ranges(start, end, &mut raw_ranges);
+                let start = range.start();
+                let end = range.end();
+                if start <= 127 {
+                    let ascii_end = std::cmp::min(end, 127);
+                    push_safe_raw_char_ranges(char::from(start), char::from(ascii_end), &mut raw_ranges);
+                }
+                if end >= 128 {
+                    let non_ascii_start = std::cmp::max(start, 128);
+                    if non_ascii_start == end {
+                        alternatives.push(format!(r#"\x{:02x}"#, non_ascii_start));
+                    } else {
+                        alternatives.push(format!(r#"[\x{:02x}-\x{:02x}]"#, non_ascii_start, end));
+                    }
+                }
             }
         }
     }
 
-    let mut alternatives = Vec::new();
     if !raw_ranges.is_empty() {
         alternatives.push(format!("[{}]", raw_ranges.join("")));
     }
@@ -1014,12 +1067,29 @@ fn lower_decoded_class_to_json_body_regex(class: &Class) -> String {
     }
 }
 
-fn is_non_ascii_decimal_digit_range(start: char, end: char) -> bool {
-    !start.is_ascii_digit()
-        && start.is_numeric()
-        && end.is_numeric()
+fn utf8_sequence_to_regex_string(seq: &regex_syntax::utf8::Utf8Sequence) -> String {
+    let mut parts = String::new();
+    for range in seq.as_slice() {
+        if range.start == range.end {
+            parts.push_str(&format!(r#"\x{:02x}"#, range.start));
+        } else {
+            parts.push_str(&format!(r#"[\x{:02x}-\x{:02x}]"#, range.start, range.end));
+        }
+    }
+    parts
 }
 
+fn unicode_range_to_utf8_regex_string(start: char, end: char) -> String {
+    use regex_syntax::utf8::Utf8Sequences;
+    let seqs: Vec<String> = Utf8Sequences::new(start, end)
+        .map(|seq| utf8_sequence_to_regex_string(&seq))
+        .collect();
+    if seqs.len() == 1 {
+        seqs.into_iter().next().unwrap()
+    } else {
+        format!("(?:{})", seqs.join("|"))
+    }
+}
 fn is_unicode_decimal_digit_class(class: &Class) -> bool {
     let Class::Unicode(class) = class else {
         return false;
