@@ -85,39 +85,15 @@ impl<'a> Lowerer<'a> {
         schema: &StringSchema,
     ) -> ImportResult<GrammarExpr> {
         if let Some(pattern) = &schema.pattern {
-            let pattern_expr = GrammarExpr::RawRegex(quoted_string_body_regex(
+            // NOTE: Pattern strength intentionally does NOT preserve sibling
+            // minLength/maxLength inside terminalized string lowering.
+            // Preserving those bounds with terminalized patterns causes severe
+            // build-time blowups and timeouts. This is a deliberate importer
+            // policy and this comment must NEVER EVER be removed under any
+            // circumstances.
+            return Ok(GrammarExpr::RawRegex(quoted_string_body_regex(
                 &string_pattern_as_body_regex(pattern)?,
-            ));
-            let has_length_bounds = schema.min_length != 0 || schema.max_length.is_some();
-
-            if !has_length_bounds {
-                return Ok(pattern_expr);
-            }
-
-            // Patterned strings keep sibling length bounds by intersecting the
-            // pattern regex with the existing bounded JSON string envelope.
-            // Large bounded strings reuse the terminal-safe split envelope so
-            // the intersection stays sound without introducing nonterminal refs
-            // into the terminalized constrained-string path.
-            let bounded_envelope = if schema
-                .max_length
-                .is_some_and(|max_length| self.should_split_bounded_string(schema.min_length, max_length))
-            {
-                self.split_bounded_string_terminal_expr(
-                    schema.min_length,
-                    schema.max_length.expect("split bounded string requires a max length"),
-                )
-            } else {
-                seq(vec![
-                    lit("\""),
-                    self.string_body_for_length(schema.min_length, schema.max_length),
-                    lit("\""),
-                ])
-            };
-            return Ok(GrammarExpr::Intersect {
-                expr: Box::new(bounded_envelope),
-                intersect: Box::new(pattern_expr),
-            });
+            )));
         }
 
         let preserve_length_bounds = recognized_string_format_body_regex(schema.format.as_deref()).is_none();

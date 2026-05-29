@@ -1,10 +1,10 @@
 use serde_json::json;
 use std::{env, ffi::OsString, sync::Mutex};
 
-use super::schema_to_named_grammar;
 use super::ast::StringSchema;
-use super::string::{property_name_matches_pattern, string_value_satisfies_schema};
 use super::lower_exact_subtractions_enabled;
+use super::schema_to_named_grammar;
+use super::string::{property_name_matches_pattern, string_value_satisfies_schema};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguityKind};
 use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar};
@@ -882,7 +882,7 @@ fn map_shaped_min_properties_lowers_as_bounded_pattern_map() {
 }
 
 #[test]
-fn small_bounded_string_pattern_intersects_length_envelope() {
+fn small_bounded_string_pattern_ignores_length_bounds() {
     let schema = json!({
         "type": "string",
         "minLength": 2,
@@ -891,14 +891,25 @@ fn small_bounded_string_pattern_intersects_length_envelope() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
+    let rule = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
+        .expect("expected terminalized constrained string rule");
+
+    let GrammarExpr::RawRegex(regex) = &rule.expr else {
+        panic!("expected raw regex constrained string rule: {:?}", rule.expr);
+    };
+
+    assert!(regex.contains("[A-Za-z]"), "{regex}");
+
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("JSON_STRING_CHAR{2,8}"), "{glrm}");
-    assert!(glrm.contains("& /\"(?:(?:[A-Za-z])+)\"/"), "{glrm}");
+    assert!(!glrm.contains("JSON_STRING_CHAR{2,8}"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
 #[test]
-fn large_bounded_string_pattern_uses_split_length_envelope_intersection() {
+fn large_bounded_string_pattern_ignores_length_bounds() {
     let schema = json!({
         "type": "string",
         "maxLength": 512,
@@ -912,18 +923,16 @@ fn large_bounded_string_pattern_uses_split_length_envelope_intersection() {
         .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
         .expect("expected terminalized constrained string rule");
 
-    let GrammarExpr::Intersect { expr, intersect } = &rule.expr else {
-        panic!("expected intersected constrained string rule: {:?}", rule.expr);
+    let GrammarExpr::RawRegex(regex) = &rule.expr else {
+        panic!("expected raw regex constrained string rule: {:?}", rule.expr);
     };
 
-    assert!(contains_ref_with_prefix(expr, "json_string_char_exact_open_50"), "{expr:?}");
-    assert!(contains_ref_with_prefix(expr, "json_string_char_upto_close_50"), "{expr:?}");
-    assert!(!contains_ref_with_prefix(expr, "json_string_bounded_split"), "{expr:?}");
-
-    let GrammarExpr::RawRegex(regex) = intersect.as_ref() else {
-        panic!("expected raw regex intersection: {:?}", intersect);
-    };
     assert!(regex.contains("(?:/"), "{regex}");
+
+    let glrm = to_glrm(&grammar);
+    assert!(!glrm.contains("json_string_char_exact_open_50"), "{glrm}");
+    assert!(!glrm.contains("json_string_char_upto_close_50"), "{glrm}");
+    assert!(!glrm.contains("json_string_bounded_split"), "{glrm}");
 
     lower(&grammar).unwrap();
 }
