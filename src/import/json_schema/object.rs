@@ -441,12 +441,6 @@ impl<'a> Lowerer<'a> {
             && normalized.properties.len() >= 16;
 
         if normalized.pattern_properties.is_empty() && !normalized.properties.is_empty() {
-            let use_large_closed_object_fixed_pair_loop =
-                matches!(normalized.additional_properties, AdditionalProperties::Deny)
-                    && normalized.required.is_empty()
-                    && any_required_names.is_none()
-                    && exclusive_group.is_none()
-                    && normalized.properties.len() >= LARGE_OBJECT_LITERAL_KEY_TRIE_MIN_ITEMS;
             let use_closed_object_prefix_chain =
                 matches!(normalized.additional_properties, AdditionalProperties::Deny)
                     && any_required_names.is_none()
@@ -474,9 +468,6 @@ impl<'a> Lowerer<'a> {
                 if let Some(tail_pair_expr) = tail_pair {
                     return self.lower_large_optional_open_object_fused_prefix_chain(&items, tail_pair_expr);
                 }
-            }
-            if use_large_closed_object_fixed_pair_loop {
-                return self.lower_large_closed_object_fixed_pair_loop(&items);
             }
             if use_closed_object_prefix_chain {
                 return Ok(self.lower_large_closed_object_prefix_chain(&items));

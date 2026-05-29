@@ -398,6 +398,34 @@ fn json_schema_open_object_tail_rejects_fixed_property_name() {
 }
 
 #[test]
+fn json_schema_large_closed_object_rejects_duplicate_keys_and_trailing_commas() {
+    let property_entries = (0..64)
+        .map(|index| format!(r#""k{index}": {{"type": "boolean"}}"#))
+        .collect::<Vec<_>>();
+    let schema_text = format!(
+        r#"{{
+            "type": "object",
+            "properties": {{ {} }},
+            "additionalProperties": false
+        }}"#,
+        property_entries.join(", ")
+    );
+    let constraint = byte_schema(&schema_text);
+
+    let valid_body = (0..64)
+        .map(|index| format!(r#""k{index}": true"#))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let valid = format!("{{{valid_body}}}");
+    let duplicate = format!("{{{valid_body}, \"k0\": true}}");
+    let trailing_comma = format!("{{{valid_body},}}");
+
+    assert_accepts_bytes(&constraint, valid.as_bytes());
+    assert_rejects_bytes(&constraint, duplicate.as_bytes());
+    assert_rejects_bytes(&constraint, trailing_comma.as_bytes());
+}
+
+#[test]
 fn json_schema_optional_label_with_additional_tail_reaches_multiple_gss_paths() {
     let constraint = schema(
         &[r#"{"label": "#, r#""x","#, r#" "id": "#, "1", "}"],

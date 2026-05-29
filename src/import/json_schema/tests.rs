@@ -351,7 +351,7 @@ fn closed_object_lowers_to_prefix_chain_body() {
 }
 
 #[test]
-fn large_optional_closed_object_uses_fixed_pair_loop() {
+fn large_optional_closed_object_uses_expr_nfa_body() {
     let mut properties = serde_json::Map::new();
     for index in 0..64 {
         properties.insert(format!("incomeTaxKey{index}"), json!({"type": "number"}));
@@ -365,7 +365,7 @@ fn large_optional_closed_object_uses_fixed_pair_loop() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("json_closed_object_fixed_pair_loop_body"), "{glrm}");
+    assert!(!glrm.contains("json_closed_object_fixed_pair_loop_body"), "{glrm}");
     assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
     lower(&grammar).unwrap();
 }
