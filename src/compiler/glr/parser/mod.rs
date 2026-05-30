@@ -416,6 +416,9 @@ fn advance_pure_frontier_shifts(
     if shifts.is_empty() {
         return None;
     }
+    if let Some(shifted) = gss.try_apply_selective_top_pure_shifts(shifts.iter().copied()) {
+        return Some(shifted);
+    }
     Some(gss.apply_top_pure_shifts(shifts))
 }
 
@@ -1706,6 +1709,38 @@ mod tests {
             (vec![1, 4], acc),
         ]);
         let expected = ParserGSS::from_single_stack(vec![7], TerminalsDisallowed::new());
+
+        assert_eq!(advance_stacks(&table, &before, token), expected);
+    }
+
+    #[test]
+    fn advance_stacks_selective_pure_frontier_shift_keeps_only_actionable_top() {
+        let token = 0;
+        let mut action_rows = vec![Vec::new(); 134];
+        action_rows[131] = vec![(
+            token,
+            Action::StackShifts(vec![StackShift {
+                pop: 0,
+                pushes: vec![96],
+            }]),
+        )];
+        let action_refs: Vec<&[(u32, Action)]> =
+            action_rows.iter().map(|row| row.as_slice()).collect();
+        let goto_rows = vec![Vec::new(); 134];
+        let goto_refs: Vec<&[(u32, (u32, bool))]> =
+            goto_rows.iter().map(|row| row.as_slice()).collect();
+        let table = build_test_table(134, 1, &action_refs, &goto_refs);
+
+        let acc = TerminalsDisallowed::new();
+        let before = ParserGSS::from_stacks(&[
+            (vec![0_u32, 1, 17, 47, 74, 131], acc.clone()),
+            (vec![0_u32, 1, 17, 47, 74, 132], acc.clone()),
+            (vec![0_u32, 1, 17, 47, 74, 133], acc),
+        ]);
+        let expected = ParserGSS::from_single_stack(
+            vec![0_u32, 1, 17, 47, 74, 131, 96],
+            TerminalsDisallowed::new(),
+        );
 
         assert_eq!(advance_stacks(&table, &before, token), expected);
     }

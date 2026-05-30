@@ -2346,6 +2346,46 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     /// Apply pure top-frontier shifts in one pass. Each tuple is
     /// `(current_top, target_top, replace_top)`.
+    pub fn try_apply_selective_top_pure_shifts<I>(&self, shifts: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = (T, T, bool)>,
+    {
+        let shifts: SmallVec<[(T, T, bool); 2]> = shifts.into_iter().collect();
+        let [(from, to, replace_top)] = shifts.as_slice() else {
+            return None;
+        };
+
+        let Upper::Interface(i) = &*self.inner else {
+            return None;
+        };
+        let Lower::General { children, .. } = &*i.inner else {
+            return None;
+        };
+        let kids = children.get(from)?;
+
+        fn lower_with_top<T: Clone + Eq + Hash>(
+            top: T,
+            kids: &CompactOrdMap<Arc<Lower<T>>>,
+        ) -> Arc<Lower<T>> {
+            if kids.len() == 1 {
+                let (_, child) = kids.iter().next().unwrap();
+                new_segment(SV::unit(top), child.clone())
+            } else {
+                new_lower(CompactMap::unit(top, kids.clone()), false)
+            }
+        }
+
+        let shifted_root = if *replace_top {
+            lower_with_top(to.clone(), kids)
+        } else {
+            new_segment(SV::unit(to.clone()), lower_with_top(from.clone(), kids))
+        };
+
+        Some(LeveledGSS {
+            inner: new_interface(shifted_root, i.acc.clone()),
+        })
+    }
+
     pub fn apply_top_pure_shifts<I>(&self, shifts: I) -> Self
     where
         I: IntoIterator<Item = (T, T, bool)>,
@@ -4393,5 +4433,24 @@ mod tests {
         for expected_stack in expected_stacks {
             assert!(actual_stacks.contains(&expected_stack));
         }
+    }
+
+    #[test]
+    fn selective_top_pure_shift_extracts_one_shared_prefix_path() {
+        let acc = TestAcc(7);
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1, 17, 47, 74, 131], acc.clone()),
+            (vec![0_u32, 1, 17, 47, 74, 132], acc.clone()),
+            (vec![0_u32, 1, 17, 47, 74, 133], acc.clone()),
+        ]);
+
+        let shifted = gss
+            .try_apply_selective_top_pure_shifts([(131_u32, 96_u32, false)])
+            .unwrap();
+
+        assert_eq!(
+            shifted.to_stacks(),
+            vec![(vec![0_u32, 1, 17, 47, 74, 131, 96], acc)]
+        );
     }
 }
