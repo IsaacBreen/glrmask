@@ -2855,6 +2855,47 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.popn(1)
     }
 
+    /// Fast path for a top-level interface whose alternatives all share the
+    /// same base after popping one value.
+    pub fn pop1_common_interface_base(&self) -> Option<Self> {
+        let Upper::Interface(interface) = &*self.inner else {
+            return None;
+        };
+        let Lower::General {
+            children,
+            empty: false,
+            ..
+        } = &*interface.inner
+        else {
+            return None;
+        };
+        if children.len() < 2 {
+            return None;
+        }
+
+        let mut common_child: Option<Arc<Lower<T>>> = None;
+        let mut common_child_id: Option<usize> = None;
+        for kids in children.values() {
+            if kids.len() != 1 {
+                return None;
+            }
+            let child = kids.values().next().expect("single child");
+            let child_id = lower_node_id(child);
+            match common_child_id {
+                None => {
+                    common_child = Some(child.clone());
+                    common_child_id = Some(child_id);
+                }
+                Some(id) if id == child_id => {}
+                Some(_) => return None,
+            }
+        }
+
+        Some(Self {
+            inner: new_interface(common_child?, interface.acc.clone()),
+        })
+    }
+
     /// Like `decompose_and_pop` but invokes a callback for each (value, popped_gss) pair
     /// instead of allocating a Vec. Avoids heap allocation for the common single-element case.
     pub fn for_each_decomposed(&self, mut f: impl FnMut(T, Self)) {

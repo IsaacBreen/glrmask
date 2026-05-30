@@ -468,20 +468,24 @@ fn try_advance_pop1_reduce_plus_stackshift_wave(
         return None;
     }
 
-    let base = closure.popn(1);
+    let base = if let Some(base) = closure.pop1_common_interface_base() {
+        base
+    } else {
+        let base = closure.popn(1);
+        let mut reconstructed = ParserGSS::empty();
+        for &state in &states {
+            merge_into(&mut reconstructed, base.clone().push(state));
+        }
+        if &reconstructed != closure {
+            return None;
+        }
+        base
+    };
     let base_values = base.peek_values();
     let [base_top] = base_values.as_slice() else {
         return None;
     };
     let base_top = *base_top;
-
-    let mut reconstructed = ParserGSS::empty();
-    for &state in &states {
-        merge_into(&mut reconstructed, base.clone().push(state));
-    }
-    if &reconstructed != closure {
-        return None;
-    }
 
     let mut reduce_nt: Option<u32> = None;
     let mut shifted = ParserGSS::empty();
@@ -2159,6 +2163,34 @@ pub(crate) fn stack_may_advance_on_any(
 
     for state in top_states {
         if !table.advance_row_intersects(state, terminals) {
+            continue;
+        }
+
+        if let Some(row) = table.action.get(state as usize)
+            && row.len() < terminals.len()
+        {
+            for (terminal, action) in row {
+                let bit = if terminal == EOF {
+                    table.num_terminals as usize
+                } else {
+                    terminal as usize
+                };
+                if bit > table.num_terminals as usize {
+                    continue;
+                };
+                if !terminals.contains(bit) || !table.advance_row_allows(state, terminal) {
+                    continue;
+                }
+
+                match action {
+                    Action::GuardedStackShifts(_) => {
+                        if !guarded_terminals.contains(&terminal) {
+                            guarded_terminals.push(terminal);
+                        }
+                    }
+                    _ => return true,
+                }
+            }
             continue;
         }
 
