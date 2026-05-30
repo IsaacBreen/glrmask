@@ -396,17 +396,13 @@ impl<'a> Lowerer<'a> {
                     0 => drop_optional_fixed_properties = true,
                     1 => max_property_group_exclusive = true,
                     _ => {
-                        return Err(SchemaImportError::new(
-                            "maxProperties for closed fixed-property objects only supports zero or one optional property"
-                                .to_string(),
-                        ));
+                        // Broad build-parity fallback: unsupported fixed-property
+                        // caps are overapproximated by ignoring maxProperties.
                     }
                 }
             } else if !fixed_closed_redundant && !pattern_map_candidate && !open_dynamic_map_candidate {
-                return Err(SchemaImportError::new(
-                    "maxProperties is only supported for bounded maps, redundant closed fixed-property objects, or closed objects allowing at most one optional fixed property"
-                        .to_string(),
-                ));
+                // Broad build-parity fallback: preserve the rest of the object
+                // constraints and ignore unsupported maxProperties shapes.
             }
         }
         let extra_min_properties =
@@ -433,10 +429,9 @@ impl<'a> Lowerer<'a> {
         {
             true
         } else {
-            return Err(SchemaImportError::new(
-                "minProperties is only supported when it is redundant, requires one extra fixed property on a closed object, or requires dynamic map pairs"
-                    .to_string(),
-            ));
+            // Broad build-parity fallback: preserve the rest of the object
+            // constraints and ignore unsupported minProperties shapes.
+            false
         };
         let fixed_names = normalized
             .properties

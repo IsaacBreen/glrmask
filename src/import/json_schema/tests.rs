@@ -1227,7 +1227,7 @@ fn bounded_pattern_map_respects_min_and_max_properties() {
 }
 
 #[test]
-fn unsupported_nonredundant_max_properties_errors() {
+fn unsupported_nonredundant_max_properties_broadens() {
     let schema = json!({
         "type": "object",
         "maxProperties": 1,
@@ -1237,8 +1237,51 @@ fn unsupported_nonredundant_max_properties_errors() {
         }
     });
 
-    let err = schema_to_named_grammar(&schema).unwrap_err();
-    assert!(err.to_string().contains("maxProperties"), "{err}");
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn unsupported_nonredundant_min_properties_broadens() {
+    let schema = json!({
+        "type": "object",
+        "minProperties": 3,
+        "properties": {
+            "a": {"type": "string"},
+            "b": {"type": "string"}
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn oversized_pattern_properties_overlap_check_broadens() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "costs": {
+                "type": "object",
+                "patternProperties": {
+                    "^[/][/.\\\\w-]{0,254}$": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "value": {"type": "number"}
+                            }
+                        }
+                    }
+                },
+                "additionalProperties": false
+            }
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
 }
 
 #[test]

@@ -412,8 +412,16 @@ impl<'a> Lowerer<'a> {
 
         let mut overlaps = Vec::new();
         for key in &self.shared_ap_literal_keys {
-            if property_name_matches_pattern(pattern, key)? {
-                overlaps.push(key.clone());
+            match property_name_matches_pattern(pattern, key) {
+                Ok(true) => overlaps.push(key.clone()),
+                Ok(false) => {}
+                Err(error) if is_regex_compile_limit_error(&error) => {
+                    // Broad build-parity fallback: if overlap checking would compile
+                    // an oversized regex, skip the overlap optimization and keep lowering.
+                    overlaps.clear();
+                    break;
+                }
+                Err(error) => return Err(error),
             }
         }
         self.shared_pattern_overlap_keys
@@ -428,8 +436,15 @@ impl<'a> Lowerer<'a> {
     ) -> ImportResult<Vec<String>> {
         let mut overlaps = Vec::new();
         for key in fixed_keys {
-            if property_name_matches_pattern(pattern, key)? {
-                overlaps.push(key.clone());
+            match property_name_matches_pattern(pattern, key) {
+                Ok(true) => overlaps.push(key.clone()),
+                Ok(false) => {}
+                Err(error) if is_regex_compile_limit_error(&error) => {
+                    // Same broad fallback as the shared overlap cache: unknown
+                    // overlaps are treated as no optimization instead of a build error.
+                    return Ok(Vec::new());
+                }
+                Err(error) => return Err(error),
             }
         }
         Ok(overlaps)
@@ -1257,6 +1272,10 @@ pub(crate) fn property_name_matches_pattern(pattern: &str, property_name: &str) 
     Regex::new(pattern)
         .map(|regex| regex.is_match(property_name))
         .map_err(|error| SchemaImportError::new(format!("invalid patternProperties regex {pattern:?}: {error}")))
+}
+
+fn is_regex_compile_limit_error(error: &SchemaImportError) -> bool {
+    error.message().contains("Compiled regex exceeds size limit")
 }
 
 pub(crate) fn string_value_satisfies_schema(
