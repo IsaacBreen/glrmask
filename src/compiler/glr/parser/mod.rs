@@ -519,17 +519,6 @@ fn try_advance_pop1_reduce_plus_stackshift_wave(
     }
 
     let (target, is_replace) = table.goto_target(base_top, reduce_nt)?;
-    let post_goto = if is_replace {
-        base.popn(1).push(target)
-    } else {
-        base.push(target)
-    };
-    let post_goto_state = post_goto.single_exclusive_top_value()?;
-    match table.action(post_goto_state, token)? {
-        Action::Shift(..) | Action::StackShifts(..) => {}
-        _ => return None,
-    }
-
     let (branch, det_ok) = advance_reduce_branch(table, base, target, is_replace, token);
     if !det_ok {
         return None;
