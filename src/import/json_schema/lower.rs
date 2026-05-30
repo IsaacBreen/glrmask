@@ -546,6 +546,9 @@ fn collect_shared_ap_exclusion_plan(document: &SchemaDocument) -> (BTreeSet<Stri
     for definition in &document.definitions {
         collect_shared_ap_exclusions_from_schema(&definition.schema, &mut literal_keys, &mut patterns);
     }
+    for target in &document.ref_targets {
+        collect_shared_ap_exclusions_from_schema(&target.schema, &mut literal_keys, &mut patterns);
+    }
 
     (literal_keys, patterns.into_iter().collect())
 }

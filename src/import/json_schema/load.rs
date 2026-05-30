@@ -54,11 +54,50 @@ fn schema_is_null_only_inline_branch(schema: &Schema) -> bool {
         && assertions.all_of.is_empty()
 }
 
+fn collect_all_ref_pointers(value: &Value, refs: &mut std::collections::BTreeSet<String>) {
+    if let Some(obj) = value.as_object() {
+        if let Some(r) = obj.get("$ref").and_then(Value::as_str) {
+            refs.insert(r.to_string());
+        }
+        for val in obj.values() {
+            collect_all_ref_pointers(val, refs);
+        }
+    } else if let Some(arr) = value.as_array() {
+        for val in arr {
+            collect_all_ref_pointers(val, refs);
+        }
+    }
+}
+
 pub(crate) fn load_document(root: &Value) -> ImportResult<SchemaDocument> {
     let mut definitions = Vec::new();
     collect_definitions(root, "#", &mut definitions)?;
     let mut ref_targets = Vec::new();
     collect_ref_targets(root, "#", &mut ref_targets)?;
+
+    let mut ref_pointers = std::collections::BTreeSet::new();
+    collect_all_ref_pointers(root, &mut ref_pointers);
+
+    for r in ref_pointers {
+        if r == "#" {
+            continue;
+        }
+        if r.starts_with("#/") {
+            let pointer_path = &r[1..];
+            let exists = definitions.iter().any(|d| d.pointer == r)
+                || ref_targets.iter().any(|d| d.pointer == r);
+            if !exists {
+                if let Some(resolved_val) = root.pointer(pointer_path) {
+                    let schema = load_schema_at(resolved_val, &r)?;
+                    ref_targets.push(SchemaDefinition {
+                        pointer: r.clone(),
+                        schema,
+                    });
+                }
+            }
+        }
+    }
+
     Ok(SchemaDocument {
         root: load_schema_at(root, "#")?,
         definitions,
