@@ -392,7 +392,47 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn lower_json_literal(&mut self, value: &Value) -> GrammarExpr {
         match value {
             Value::String(text) => self.lower_string_literal(text),
-            _ => lit_bytes(serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()).into_bytes()),
+            Value::Null => lit("null"),
+            Value::Bool(true) => lit("true"),
+            Value::Bool(false) => lit("false"),
+            Value::Number(_) => lit_bytes(
+                serde_json::to_string(value)
+                    .unwrap_or_else(|_| "null".to_string())
+                    .into_bytes(),
+            ),
+            Value::Array(items) => {
+                if items.is_empty() {
+                    return seq(vec![lit("["), lit("]")]);
+                }
+
+                let mut parts = Vec::with_capacity(items.len() * 2 + 1);
+                parts.push(lit("["));
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        parts.push(r(JSON_ITEM_SEPARATOR_RULE));
+                    }
+                    parts.push(self.lower_json_literal(item));
+                }
+                parts.push(lit("]"));
+                seq(parts)
+            }
+            Value::Object(map) => {
+                if map.is_empty() {
+                    return seq(vec![lit("{"), lit("}")]);
+                }
+
+                let mut parts = Vec::with_capacity(map.len() * 3 + 1);
+                parts.push(lit("{"));
+                for (index, (key, item)) in map.iter().enumerate() {
+                    if index > 0 {
+                        parts.push(r(JSON_ITEM_SEPARATOR_RULE));
+                    }
+                    parts.push(self.lower_literal_key_colon(key));
+                    parts.push(self.lower_json_literal(item));
+                }
+                parts.push(lit("}"));
+                seq(parts)
+            }
         }
     }
 

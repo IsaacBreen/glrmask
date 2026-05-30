@@ -1757,6 +1757,22 @@ fn string_const_splits_open_quote_from_literal_body() {
 }
 
 #[test]
+fn object_const_uses_json_separator_rules() {
+    let schema = json!({
+        "const": {
+            "$data": "1/password",
+            "items": [1, true]
+        }
+    });
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let expr = start_expr(&grammar);
+
+    assert!(contains_literal_bytes(expr, b"\"$data\": "), "{expr:?}");
+    assert!(contains_ref_named(expr, "JSON_ITEM_SEPARATOR"), "{expr:?}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn large_string_enum_at_root_uses_raw_regex() {
     let values = (0..80)
         .map(|index| json!(format!("value-{index:02}")))
