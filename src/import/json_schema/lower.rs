@@ -609,12 +609,20 @@ pub(crate) fn normalize_local_ref(pointer: &str) -> ImportResult<String> {
     if pointer == "#" {
         return Ok("#".to_string());
     }
-    if pointer.starts_with("#/") {
+    if pointer.starts_with("#/") || is_local_fragment_alias(pointer) || is_absolute_self_ref_alias(pointer) {
         return Ok(pointer.to_string());
     }
     Err(SchemaImportError::new(format!(
         "only local JSON pointer $ref values are supported, got {pointer:?}"
     )))
+}
+
+fn is_local_fragment_alias(pointer: &str) -> bool {
+    pointer.starts_with("#") && !pointer.starts_with("#/")
+}
+
+fn is_absolute_self_ref_alias(pointer: &str) -> bool {
+    pointer.contains("://") && pointer.ends_with("#")
 }
 
 pub(crate) fn r(name: &str) -> GrammarExpr {

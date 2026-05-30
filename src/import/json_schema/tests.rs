@@ -1848,6 +1848,42 @@ fn oneof_single_ref_wrapper_is_supported() {
 }
 
 #[test]
+fn fragment_id_ref_alias_lowers() {
+    let schema = json!({
+        "type": "object",
+        "definitions": {
+            "name": {
+                "id": "#nameAlias",
+                "const": "ok"
+            }
+        },
+        "properties": {
+            "name": {"$ref": "#nameAlias"}
+        },
+        "required": ["name"],
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn absolute_root_id_self_ref_lowers() {
+    let schema = json!({
+        "id": "http://example.test/schema.json#",
+        "type": "object",
+        "properties": {
+            "child": {"$ref": "http://example.test/schema.json#"}
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn oneof_ref_and_null_is_supported() {
     let schema = json!({
         "definitions": {

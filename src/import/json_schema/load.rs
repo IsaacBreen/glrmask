@@ -69,6 +69,20 @@ fn collect_all_ref_pointers(value: &Value, refs: &mut std::collections::BTreeSet
     }
 }
 
+fn local_id_alias(object: &Map<String, Value>, location: &str) -> Option<String> {
+    let alias = object
+        .get("$id")
+        .or_else(|| object.get("id"))
+        .and_then(Value::as_str)?;
+    if alias.starts_with("#") {
+        return Some(alias.to_string());
+    }
+    if location == "#" && alias.ends_with("#") {
+        return Some(alias.to_string());
+    }
+    None
+}
+
 pub(crate) fn load_document(root: &Value) -> ImportResult<SchemaDocument> {
     let mut definitions = Vec::new();
     collect_definitions(root, "#", &mut definitions)?;
@@ -157,6 +171,13 @@ fn collect_ref_targets(
     let Some(object) = value.as_object() else {
         return Ok(());
     };
+
+    if let Some(alias) = local_id_alias(object, location) {
+        out.push(SchemaDefinition {
+            pointer: alias,
+            schema: load_schema_at(value, location)?,
+        });
+    }
 
     for map_key in ["properties", "patternProperties"] {
         let child_location = format!("{location}/{}", escape_pointer_segment(map_key));
