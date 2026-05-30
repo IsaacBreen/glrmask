@@ -68,11 +68,23 @@ enum AnyOfObjectPhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum ShadowOwnerState {
+    None,
+    Impossible,
+    Possible {
+        variant_idx: u16,
+        cursor: u16,
+        phase: AnyOfObjectPhase,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct AnyOfObjectState {
     variant_idx: u16,
     cursor: u16,
     has_content: bool,
     phase: AnyOfObjectPhase,
+    shadow_owner: ShadowOwnerState,
 }
 
 fn is_obviously_object_valued_property(schema: &Schema) -> bool {
@@ -170,6 +182,10 @@ impl AnyOfObjectVariant {
             .iter()
             .find(|item| item.key == key)
             .map(|item| item.value_expr.clone())
+    }
+
+    fn has_required_items(&self) -> bool {
+        self.items.iter().any(|item| item.required)
     }
 }
 
@@ -987,6 +1003,22 @@ impl<'a> Lowerer<'a> {
         &mut self,
         branch: &Schema,
     ) -> ImportResult<Option<(AnyOfObjectVariant, bool)>> {
+        self.collect_open_any_of_object_variant_inner(branch, 0)
+    }
+
+    fn collect_open_any_of_object_variant_inner(
+        &mut self,
+        branch: &Schema,
+        ref_depth: usize,
+    ) -> ImportResult<Option<(AnyOfObjectVariant, bool)>> {
+        if let SchemaKind::Ref(pointer) = &branch.kind {
+            if ref_depth >= 4 {
+                return Ok(None);
+            }
+            let target = self.resolve_ref_target(pointer)?;
+            return self.collect_open_any_of_object_variant_inner(target, ref_depth + 1);
+        }
+
         let SchemaKind::Assertions(assertions) = &branch.kind else {
             return Ok(None);
         };
@@ -1267,6 +1299,161 @@ impl<'a> Lowerer<'a> {
         Ok(Some(object_expr))
     }
 
+    fn is_json_value_expr(expr: &GrammarExpr) -> bool {
+        matches!(expr, GrammarExpr::Ref(rule_name) if rule_name == JSON_VALUE_RULE)
+    }
+
+    fn is_json_string_expr(expr: &GrammarExpr) -> bool {
+        matches!(expr, GrammarExpr::Ref(rule_name) if rule_name == JSON_STRING_RULE)
+    }
+
+    fn is_json_string_constrained_expr(expr: &GrammarExpr) -> bool {
+        matches!(expr, GrammarExpr::Ref(rule_name) if rule_name.starts_with("json_string_constrained"))
+    }
+
+    fn non_string_json_value_expr() -> GrammarExpr {
+        choice(vec![
+            r(JSON_NULL_RULE),
+            r(JSON_BOOL_RULE),
+            r(JSON_NUMBER_RULE),
+            r(JSON_OBJECT_RULE),
+            r(JSON_ARRAY_RULE),
+        ])
+    }
+
+    fn invalid_residual_value_for_owner(owner_value_expr: &GrammarExpr) -> Option<GrammarExpr> {
+        if Self::is_json_string_expr(owner_value_expr) {
+            return Some(Self::non_string_json_value_expr());
+        }
+        if Self::is_json_string_constrained_expr(owner_value_expr) {
+            return Some(choice(vec![
+                Self::non_string_json_value_expr(),
+                GrammarExpr::Exclude {
+                    expr: Box::new(r(JSON_STRING_RULE)),
+                    exclude: Box::new(owner_value_expr.clone()),
+                },
+            ]));
+        }
+        None
+    }
+
+    fn select_shadow_owner_for_variant(
+        variants: &[AnyOfObjectVariant],
+        residual_idx: usize,
+    ) -> Option<usize> {
+        let residual = &variants[residual_idx];
+        if !residual.pattern_pairs.is_empty()
+            || !residual.pattern_keys.is_empty()
+            || !residual
+                .additional_value_expr
+                .as_ref()
+                .is_some_and(Self::is_json_value_expr)
+            || residual.items.iter().any(|item| item.required)
+        {
+            return None;
+        }
+
+        let mut candidate = None;
+        for (owner_idx, owner) in variants.iter().enumerate() {
+            if owner_idx == residual_idx
+                || !owner.pattern_pairs.is_empty()
+                || !owner.pattern_keys.is_empty()
+                || !owner
+                    .additional_value_expr
+                    .as_ref()
+                    .is_some_and(Self::is_json_value_expr)
+                || !owner.has_required_items()
+            {
+                continue;
+            }
+            if owner
+                .items
+                .iter()
+                .any(|item| item.required && Self::invalid_residual_value_for_owner(&item.value_expr).is_none())
+            {
+                continue;
+            }
+            if candidate.replace(owner_idx).is_some() {
+                return None;
+            }
+        }
+        candidate
+    }
+
+    fn shadow_owner_suppresses_close(
+        variants: &[AnyOfObjectVariant],
+        shadow_owner: ShadowOwnerState,
+    ) -> bool {
+        match shadow_owner {
+            ShadowOwnerState::Possible {
+                variant_idx,
+                cursor,
+                phase,
+            } => {
+                let owner = &variants[variant_idx as usize];
+                phase != AnyOfObjectPhase::Fixed || owner.close_allowed(cursor as usize)
+            }
+            ShadowOwnerState::None | ShadowOwnerState::Impossible => false,
+        }
+    }
+
+    fn shadow_owner_can_take_additional(
+        owner: &AnyOfObjectVariant,
+        cursor: usize,
+        phase: AnyOfObjectPhase,
+    ) -> bool {
+        owner.additional_value_expr.as_ref().is_some_and(Self::is_json_value_expr)
+            && match phase {
+                AnyOfObjectPhase::Fixed => owner.close_allowed(cursor),
+                AnyOfObjectPhase::Additional => true,
+                AnyOfObjectPhase::Pattern => false,
+            }
+    }
+
+    fn advance_shadow_owner_on_key(
+        variants: &[AnyOfObjectVariant],
+        shadow_owner: ShadowOwnerState,
+        key: &str,
+        value_expr: &GrammarExpr,
+    ) -> ShadowOwnerState {
+        let ShadowOwnerState::Possible {
+            variant_idx,
+            cursor,
+            phase,
+        } = shadow_owner
+        else {
+            return shadow_owner;
+        };
+        if !Self::is_json_value_expr(value_expr) {
+            return ShadowOwnerState::Impossible;
+        }
+
+        let owner = &variants[variant_idx as usize];
+        let cursor = cursor as usize;
+        if phase == AnyOfObjectPhase::Fixed
+            && let Some(next_cursor) = owner.advance_cursor(cursor, key)
+            && owner.value_expr_for_key(key).is_some()
+        {
+            return ShadowOwnerState::Possible {
+                variant_idx,
+                cursor: next_cursor as u16,
+                phase: AnyOfObjectPhase::Fixed,
+            };
+        }
+
+        if !owner.fixed_keys.contains(key)
+            && Self::shadow_owner_can_take_additional(owner, cursor, phase)
+        {
+            return ShadowOwnerState::Possible {
+                variant_idx,
+                cursor: owner.len() as u16,
+                phase: AnyOfObjectPhase::Additional,
+            };
+        }
+
+        ShadowOwnerState::Impossible
+    }
+
     fn lower_open_any_of_object_variants_expr_nfa(
         &mut self,
         variants: &[AnyOfObjectVariant],
@@ -1279,14 +1466,25 @@ impl<'a> Lowerer<'a> {
         let mut builder = ExprNfaBuilder::new();
         let accept = builder.add_state();
         builder.set_accepting(accept);
+        let shadow_owners = (0..variants.len())
+            .map(|variant_idx| Self::select_shadow_owner_for_variant(variants, variant_idx))
+            .collect::<Vec<_>>();
         let mut state_ids = BTreeMap::<AnyOfObjectState, u32>::new();
         let mut queue = VecDeque::<AnyOfObjectState>::new();
         for (variant_idx, _) in variants.iter().enumerate() {
+            let shadow_owner = shadow_owners[variant_idx]
+                .map(|owner_idx| ShadowOwnerState::Possible {
+                    variant_idx: owner_idx as u16,
+                    cursor: 0,
+                    phase: AnyOfObjectPhase::Fixed,
+                })
+                .unwrap_or(ShadowOwnerState::None);
             let state = AnyOfObjectState {
                 variant_idx: variant_idx as u16,
                 cursor: 0,
                 has_content: false,
                 phase: AnyOfObjectPhase::Fixed,
+                shadow_owner,
             };
             let state_id = builder.add_state();
             builder.add_epsilon(builder.start_state(), state_id);
@@ -1305,7 +1503,9 @@ impl<'a> Lowerer<'a> {
             let fixed_phase = state.phase == AnyOfObjectPhase::Fixed;
             let can_leave_fixed_tail = !fixed_phase || variant.close_allowed(cursor);
 
-            if can_leave_fixed_tail {
+            if can_leave_fixed_tail
+                && !Self::shadow_owner_suppresses_close(variants, state.shadow_owner)
+            {
                 builder.add_epsilon(state_id, accept);
             }
 
@@ -1318,6 +1518,7 @@ impl<'a> Lowerer<'a> {
                     cursor: variant.len() as u16,
                     has_content: true,
                     phase: AnyOfObjectPhase::Pattern,
+                    shadow_owner: ShadowOwnerState::Impossible,
                 };
                 let next_state_id = if let Some(&existing) = state_ids.get(&next_state) {
                     existing
@@ -1347,11 +1548,67 @@ impl<'a> Lowerer<'a> {
             if can_leave_fixed_tail
                 && let Some(value_expr) = &variant.additional_value_expr
             {
+                let mut excluded_fixed_keys = variant.fixed_keys.clone();
+                let mut owner_fixed_keys = Vec::<(String, bool)>::new();
+                if let ShadowOwnerState::Possible {
+                    variant_idx: owner_idx,
+                    cursor: owner_cursor,
+                    phase: owner_phase,
+                } = state.shadow_owner
+                {
+                    let owner = &variants[owner_idx as usize];
+                    match owner_phase {
+                        AnyOfObjectPhase::Fixed => {
+                            for owner_key in owner.legal_next_keys(owner_cursor as usize) {
+                                if !variant.fixed_keys.contains(owner_key) {
+                                    let can_split = owner
+                                        .value_expr_for_key(owner_key)
+                                        .as_ref()
+                                        .and_then(Self::invalid_residual_value_for_owner)
+                                        .is_some();
+                                    excluded_fixed_keys.insert(owner_key.to_string());
+                                    owner_fixed_keys.push((owner_key.to_string(), can_split));
+                                }
+                            }
+                        }
+                        AnyOfObjectPhase::Additional => {
+                            for owner_key in &owner.fixed_keys {
+                                if !variant.fixed_keys.contains(owner_key) {
+                                    excluded_fixed_keys.insert(owner_key.clone());
+                                    owner_fixed_keys.push((owner_key.clone(), false));
+                                }
+                            }
+                        }
+                        AnyOfObjectPhase::Pattern => {}
+                    }
+                }
+
+                let broad_key_shadow = match state.shadow_owner {
+                    ShadowOwnerState::Possible {
+                        variant_idx,
+                        cursor,
+                        phase,
+                    } if Self::shadow_owner_can_take_additional(
+                        &variants[variant_idx as usize],
+                        cursor as usize,
+                        phase,
+                    ) =>
+                    {
+                        ShadowOwnerState::Possible {
+                            variant_idx,
+                            cursor: variants[variant_idx as usize].len() as u16,
+                            phase: AnyOfObjectPhase::Additional,
+                        }
+                    }
+                    ShadowOwnerState::Possible { .. } => ShadowOwnerState::Impossible,
+                    other => other,
+                };
                 let next_state = AnyOfObjectState {
                     variant_idx: state.variant_idx,
                     cursor: variant.len() as u16,
                     has_content: true,
                     phase: AnyOfObjectPhase::Additional,
+                    shadow_owner: broad_key_shadow,
                 };
                 let next_state_id = if let Some(&existing) = state_ids.get(&next_state) {
                     existing
@@ -1367,11 +1624,121 @@ impl<'a> Lowerer<'a> {
                     symbols.push(self.item_separator_expr());
                 }
                 symbols.push(self.lower_additional_key_colon(
-                    &variant.fixed_keys,
+                    &excluded_fixed_keys,
                     &variant.pattern_keys,
                 )?);
                 symbols.push(value_expr.clone());
                 Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, next_state_id);
+
+                for (owner_key, owner_fixed_key_can_advance) in owner_fixed_keys {
+                    let ShadowOwnerState::Possible {
+                        variant_idx: owner_idx,
+                        cursor: owner_cursor,
+                        phase: owner_phase,
+                    } = state.shadow_owner
+                    else {
+                        continue;
+                    };
+                    let owner = &variants[owner_idx as usize];
+                    if !owner_fixed_key_can_advance || owner_phase != AnyOfObjectPhase::Fixed {
+                        let invalid_state = AnyOfObjectState {
+                            variant_idx: state.variant_idx,
+                            cursor: variant.len() as u16,
+                            has_content: true,
+                            phase: AnyOfObjectPhase::Additional,
+                            shadow_owner: ShadowOwnerState::Impossible,
+                        };
+                        let invalid_state_id =
+                            if let Some(&existing) = state_ids.get(&invalid_state) {
+                                existing
+                            } else {
+                                let id = builder.add_state();
+                                state_ids.insert(invalid_state, id);
+                                queue.push_back(invalid_state);
+                                id
+                            };
+                        let mut symbols = Vec::new();
+                        if state.has_content {
+                            symbols.push(self.item_separator_expr());
+                        }
+                        symbols.push(self.lower_literal_key_colon(&owner_key));
+                        symbols.push(value_expr.clone());
+                        Self::add_expr_nfa_symbol_path(
+                            &mut builder,
+                            state_id,
+                            symbols,
+                            invalid_state_id,
+                        );
+                        continue;
+                    }
+                    let Some(next_owner_cursor) = owner.advance_cursor(owner_cursor as usize, &owner_key) else {
+                        continue;
+                    };
+                    let Some(owner_value_expr) = owner.value_expr_for_key(&owner_key) else {
+                        continue;
+                    };
+                    let Some(invalid_residual_value_expr) =
+                        Self::invalid_residual_value_for_owner(&owner_value_expr)
+                    else {
+                        continue;
+                    };
+
+                    let owner_valid_state = AnyOfObjectState {
+                        variant_idx: state.variant_idx,
+                        cursor: variant.len() as u16,
+                        has_content: true,
+                        phase: AnyOfObjectPhase::Additional,
+                        shadow_owner: ShadowOwnerState::Possible {
+                            variant_idx: owner_idx,
+                            cursor: next_owner_cursor as u16,
+                            phase: AnyOfObjectPhase::Fixed,
+                        },
+                    };
+                    let owner_valid_state_id =
+                        if let Some(&existing) = state_ids.get(&owner_valid_state) {
+                            existing
+                        } else {
+                            let id = builder.add_state();
+                            state_ids.insert(owner_valid_state, id);
+                            queue.push_back(owner_valid_state);
+                            id
+                        };
+                    let mut symbols = Vec::new();
+                    if state.has_content {
+                        symbols.push(self.item_separator_expr());
+                    }
+                    symbols.push(self.lower_literal_key_colon(&owner_key));
+                    symbols.push(owner_value_expr);
+                    Self::add_expr_nfa_symbol_path(
+                        &mut builder,
+                        state_id,
+                        symbols,
+                        owner_valid_state_id,
+                    );
+
+                    let invalid_state = AnyOfObjectState {
+                        variant_idx: state.variant_idx,
+                        cursor: variant.len() as u16,
+                        has_content: true,
+                        phase: AnyOfObjectPhase::Additional,
+                        shadow_owner: ShadowOwnerState::Impossible,
+                    };
+                    let invalid_state_id = if let Some(&existing) = state_ids.get(&invalid_state) {
+                        existing
+                    } else {
+                        let id = builder.add_state();
+                        state_ids.insert(invalid_state, id);
+                        queue.push_back(invalid_state);
+                        id
+                    };
+                    let mut symbols = Vec::new();
+                    if state.has_content {
+                        symbols.push(self.item_separator_expr());
+                    }
+                    symbols.push(self.lower_literal_key_colon(&owner_key));
+                    symbols.push(invalid_residual_value_expr);
+                    Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, invalid_state_id);
+                }
             }
 
             if !fixed_phase {
@@ -1391,6 +1758,12 @@ impl<'a> Lowerer<'a> {
                     cursor: next_cursor as u16,
                     has_content: true,
                     phase: AnyOfObjectPhase::Fixed,
+                    shadow_owner: Self::advance_shadow_owner_on_key(
+                        variants,
+                        state.shadow_owner,
+                        key,
+                        &value_expr,
+                    ),
                 };
                 let next_state_id = if let Some(&existing) = state_ids.get(&next_state) {
                     existing

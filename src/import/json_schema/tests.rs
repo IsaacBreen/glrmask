@@ -9,6 +9,7 @@ use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguityKind};
 use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar};
 use crate::grammar::glrm::to_glrm;
+use crate::Vocab;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -131,6 +132,32 @@ fn contains_expr_nfa(expr: &GrammarExpr) -> bool {
 
 fn count_rules_with_prefix(grammar: &NamedGrammar, prefix: &str) -> usize {
     grammar.rules.iter().filter(|rule| rule.name.starts_with(prefix)).count()
+}
+
+fn byte_vocab() -> Vocab {
+    let mut entries = (0u32..=255)
+        .map(|byte| (byte, vec![byte as u8]))
+        .collect::<Vec<_>>();
+    entries.push((256, b"<|endoftext|>".to_vec()));
+    Vocab::new(entries, Some(256))
+}
+
+fn schema_accepts_bytes(schema: &serde_json::Value, input: &[u8]) -> bool {
+    let grammar = schema_to_named_grammar(schema).expect("schema should import");
+    let lowered = lower(&grammar).expect("schema grammar should lower");
+    let constraint = crate::compiler::compile_owned(lowered, &byte_vocab());
+    let mut state = constraint.start();
+    state.commit_bytes(input).is_ok() && state.is_complete()
+}
+
+fn parser_path_count_after_bytes(schema: &serde_json::Value, input: &[u8], limit: usize) -> usize {
+    let grammar = schema_to_named_grammar(schema).expect("schema should import");
+    let lowered = lower(&grammar).expect("schema grammar should lower");
+    let constraint = crate::compiler::compile_owned(lowered, &byte_vocab());
+    let mut state = constraint.start();
+    state.commit_bytes(input).expect("input should be accepted");
+    assert!(state.is_complete(), "input should finish the schema");
+    state.parser_path_count(limit)
 }
 
 fn contains_exclude(expr: &GrammarExpr) -> bool {
@@ -3557,6 +3584,196 @@ fn anyof_does_not_drop_open_object_branch_that_widens_base_property() {
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("JSON_STRING"), "{glrm}");
     lower(&grammar).unwrap();
+}
+
+fn shadow_author_author_path_schema() -> serde_json::Value {
+    json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "email": {"type": "string"},
+                    "last_modification": {"type": "string", "format": "date-time"}
+                },
+                "required": ["name"]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "$ref": {
+                        "type": "object",
+                        "properties": {
+                            "$ref": {"type": "string", "format": "uri"}
+                        }
+                    }
+                }
+            }
+        ]
+    })
+}
+
+#[test]
+fn shadow_owner_owned_object_close_suppresses_residual_duplicate() {
+    let schema = shadow_author_author_path_schema();
+    let input = br#"{"name": "Ada"}"#;
+
+    assert!(schema_accepts_bytes(&schema, input));
+    assert_eq!(parser_path_count_after_bytes(&schema, input, 4), 1);
+}
+
+#[test]
+fn shadow_owner_missing_required_key_keeps_residual_open_branch() {
+    let schema = shadow_author_author_path_schema();
+
+    assert!(schema_accepts_bytes(&schema, br#"{"email": "ada@example.com"}"#));
+}
+
+#[test]
+fn shadow_owner_invalid_owner_fixed_type_keeps_residual_open_branch() {
+    let schema = shadow_author_author_path_schema();
+
+    assert!(schema_accepts_bytes(&schema, br#"{"name": 123}"#));
+}
+
+#[test]
+fn shadow_owner_invalid_date_time_string_keeps_residual_string_subtraction() {
+    let schema = shadow_author_author_path_schema();
+
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"name": "Ada", "last_modification": "not-a-date"}"#
+    ));
+}
+
+#[test]
+fn shadow_owner_out_of_order_fixed_fields_keep_residual_open_branch() {
+    let schema = shadow_author_author_path_schema();
+
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"email": "ada@example.com", "name": "Ada"}"#
+    ));
+}
+
+#[test]
+fn shadow_owner_skips_residual_with_unsafe_additional_constraints() {
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "email": {"type": "string"}
+                },
+                "required": ["name"]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "$ref": {"type": "string"}
+                },
+                "additionalProperties": {"type": "string"}
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(!glrm.contains(" - json_string_constrained"), "{glrm}");
+    assert!(schema_accepts_bytes(&schema, br#"{"name": "Ada"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"name": 123}"#));
+}
+
+#[test]
+fn shadow_owner_allows_unsupported_optional_owner_fields() {
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "language": {"type": "string"},
+                    "text": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["language", "text"]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "$ref": {"type": "string", "format": "uri"}
+                }
+            }
+        ]
+    });
+
+    let required_only = br#"{"language": "en", "text": "Hello"}"#;
+    assert!(schema_accepts_bytes(&schema, required_only));
+    assert_eq!(parser_path_count_after_bytes(&schema, required_only, 4), 1);
+
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"language": "en", "text": "Hello", "tags": 123}"#
+    ));
+}
+
+#[test]
+fn shadow_owner_ref_branch_context_uses_factored_open_object_body() {
+    let schema = json!({
+        "definitions": {
+            "Translation": {
+                "type": "object",
+                "properties": {
+                    "language": {"type": "string"},
+                    "text": {"type": "string"},
+                    "contexts": {
+                        "type": "object",
+                        "patternProperties": {
+                            "^/": {"$ref": "#/definitions/Context"}
+                        }
+                    }
+                },
+                "required": ["language", "text"]
+            },
+            "Context": {
+                "anyOf": [
+                    {"$ref": "#/definitions/Translation"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "$ref": {"type": "string", "format": "uri"}
+                        }
+                    }
+                ]
+            }
+        },
+        "$ref": "#/definitions/Context"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("json_anyof_object_body"), "{glrm}");
+    assert!(
+        !glrm.lines().any(|line| {
+            line.contains(" ::= schema_ref_") && line.contains("| \"{\" json_closed_object_body")
+        }),
+        "{glrm}"
+    );
+
+    assert!(schema_accepts_bytes(&schema, br#"{}"#));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"$ref": "https://example.com"}"#
+    ));
+
+    let required_only = br#"{"language": "en", "text": "Hi"}"#;
+    assert!(schema_accepts_bytes(&schema, required_only));
+    assert_eq!(parser_path_count_after_bytes(&schema, required_only, 4), 1);
+
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"language": "en", "text": "Hi", "contexts": 123}"#
+    ));
 }
 
 #[test]

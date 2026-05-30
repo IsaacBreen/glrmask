@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -61,6 +62,35 @@ fn split_top_level_group_ops(expr: &Expr) -> (Expr, Vec<Expr>, Vec<Expr>) {
     }
 }
 
+fn materialize_nested_group_ops(expr: Expr) -> Expr {
+    match expr {
+        Expr::Exclude { .. } | Expr::Intersect { .. } => Expr::Dfa(Arc::new(compile_with_plan(
+            build_exclusion_compile_plan(std::slice::from_ref(&expr)),
+        ))),
+        Expr::Seq(parts) => Expr::Seq(parts.into_iter().map(materialize_nested_group_ops).collect()),
+        Expr::Choice(options) => Expr::Choice(
+            options
+                .into_iter()
+                .map(materialize_nested_group_ops)
+                .collect(),
+        ),
+        Expr::Repeat { expr, min, max } => Expr::Repeat {
+            expr: Box::new(materialize_nested_group_ops(*expr)),
+            min,
+            max,
+        },
+        Expr::Shared(inner) => {
+            let rewritten = materialize_nested_group_ops((*inner).clone());
+            if rewritten == *inner {
+                Expr::Shared(inner)
+            } else {
+                rewritten
+            }
+        }
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => expr,
+    }
+}
+
 struct ExclusionCompilePlan {
     compiled_exprs: Vec<Expr>,
     exclusions: BTreeMap<u32, BTreeSet<u32>>,
@@ -76,6 +106,15 @@ fn build_exclusion_compile_plan(exprs: &[Expr]) -> ExclusionCompilePlan {
 
     for expr in exprs {
         let (base, excluded, intersections) = split_top_level_group_ops(expr);
+        let base = materialize_nested_group_ops(base);
+        let excluded = excluded
+            .into_iter()
+            .map(materialize_nested_group_ops)
+            .collect::<Vec<_>>();
+        let intersections = intersections
+            .into_iter()
+            .map(materialize_nested_group_ops)
+            .collect::<Vec<_>>();
         assert!(
             !expr_contains_group_op(&base),
             "Expr::Exclude and Expr::Intersect are currently only supported at the top level of a terminal expression"
@@ -1504,6 +1543,67 @@ mod tests {
     use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::ds::u8set::U8Set;
     use std::sync::Arc;
+
+    fn byte_expr(byte: u8) -> Expr {
+        Expr::U8Seq(vec![byte])
+    }
+
+    fn byte_choice(bytes: &[u8]) -> Expr {
+        Expr::Choice(bytes.iter().copied().map(byte_expr).collect())
+    }
+
+    fn terminal_matches(expr: Expr, input: &[u8]) -> bool {
+        let regex = build_regex(std::slice::from_ref(&expr));
+        let tokenizer = Tokenizer {
+            dfa: regex.dfa,
+            num_terminals: 1,
+            exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+        };
+        let exec = tokenizer.execute_from_state(input, tokenizer.initial_state());
+        exec.matches
+            .iter()
+            .any(|matched| matched.id == 0 && matched.width == input.len())
+    }
+
+    #[test]
+    fn nested_exclude_in_exclusion_branch_compiles() {
+        let nested_residual = Expr::Exclude {
+            expr: Box::new(byte_choice(b"ab")),
+            exclude: Box::new(byte_expr(b'a')),
+        };
+        assert!(!terminal_matches(nested_residual.clone(), b"a"));
+        assert!(terminal_matches(nested_residual.clone(), b"b"));
+        assert!(!terminal_matches(nested_residual.clone(), b"c"));
+
+        let expr = Expr::Exclude {
+            expr: Box::new(byte_choice(b"bc")),
+            exclude: Box::new(nested_residual),
+        };
+
+        assert!(!terminal_matches(expr.clone(), b"a"));
+        assert!(!terminal_matches(expr.clone(), b"b"));
+        assert!(terminal_matches(expr, b"c"));
+    }
+
+    #[test]
+    fn nested_intersect_in_exclusion_branch_compiles() {
+        let nested_intersection = Expr::Intersect {
+            expr: Box::new(byte_choice(b"ab")),
+            intersect: Box::new(byte_expr(b'b')),
+        };
+        assert!(!terminal_matches(nested_intersection.clone(), b"a"));
+        assert!(terminal_matches(nested_intersection.clone(), b"b"));
+        assert!(!terminal_matches(nested_intersection.clone(), b"c"));
+
+        let expr = Expr::Exclude {
+            expr: Box::new(byte_choice(b"bc")),
+            exclude: Box::new(nested_intersection),
+        };
+
+        assert!(!terminal_matches(expr.clone(), b"a"));
+        assert!(!terminal_matches(expr.clone(), b"b"));
+        assert!(terminal_matches(expr, b"c"));
+    }
 
     #[test]
     fn standalone_exact_repeat_matches_only_at_full_length() {
