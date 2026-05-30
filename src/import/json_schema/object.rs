@@ -2042,13 +2042,27 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
 
-            let synthetic_schema = match &schema.additional_properties {
-                AdditionalProperties::AllowAny => Schema::any(format!("<required:{required_name}>")),
-                AdditionalProperties::Schema(schema) => schema.as_ref().clone(),
-                AdditionalProperties::Deny => {
-                    return Err(SchemaImportError::new(format!(
-                        "required property {required_name:?} is not listed in properties and additionalProperties is false"
-                    )));
+            let mut matching_pattern_schema = None;
+            for pattern_property in &schema.pattern_properties {
+                if property_matches_pattern(&pattern_property.pattern, required_name)? {
+                    matching_pattern_schema = Some(match matching_pattern_schema {
+                        Some(schema) => all_of_schema(schema, pattern_property.schema.clone()),
+                        None => pattern_property.schema.clone(),
+                    });
+                }
+            }
+
+            let synthetic_schema = if let Some(schema) = matching_pattern_schema {
+                schema
+            } else {
+                match &schema.additional_properties {
+                    AdditionalProperties::AllowAny => {
+                        Schema::any(format!("<required:{required_name}>"))
+                    }
+                    AdditionalProperties::Schema(schema) => schema.as_ref().clone(),
+                    AdditionalProperties::Deny => {
+                        Schema::never(format!("<required:{required_name}:unsatisfiable>"))
+                    }
                 }
             };
             normalized.properties.push(PropertySchema {

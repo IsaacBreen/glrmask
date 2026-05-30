@@ -398,6 +398,80 @@ fn required_prefix_open_object_uses_pair_loop_body() {
 }
 
 #[test]
+fn required_property_covered_by_pattern_properties_is_synthesized() {
+    let schema = json!({
+        "type": "object",
+        "required": ["line1"],
+        "patternProperties": {
+            "^line[1-3]$": {"type": "string"}
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("\\\"line1\\\": "), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn required_property_matching_multiple_patterns_applies_all_pattern_schemas() {
+    let schema = json!({
+        "type": "object",
+        "required": ["line1"],
+        "patternProperties": {
+            "^line": {"type": "string"},
+            "1$": {"const": "ok"}
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("\\\"line1\\\": "), "{glrm}");
+    assert!(glrm.contains("ok"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn required_property_not_covered_by_closed_object_lowers_to_empty_language() {
+    let schema = json!({
+        "type": "object",
+        "required": ["missing"],
+        "patternProperties": {
+            "^line[1-3]$": {"type": "string"}
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("\\\"missing\\\": "), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn fixed_property_still_intersects_matching_pattern_property() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "line1": {"type": "string"}
+        },
+        "required": ["line1"],
+        "patternProperties": {
+            "^line[1-3]$": {"const": "ok"}
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("\\\"line1\\\": "), "{glrm}");
+    assert!(glrm.contains("ok"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn open_no_pattern_object_lowers_to_expr_nfa_body() {
     let schema = json!({
         "type": "object",
