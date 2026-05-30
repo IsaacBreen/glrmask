@@ -458,6 +458,82 @@ fn try_advance_single_alt_pop1_common_suffix_stackshift_wave(
     Some(closure.apply_top_pure_shifts(per_state_prefixes).push(common_suffix))
 }
 
+fn try_advance_pop1_reduce_plus_stackshift_wave(
+    table: &GLRTable,
+    closure: &ParserGSS,
+    token: TerminalID,
+) -> Option<ParserGSS> {
+    let states = closure.peek_values();
+    if !(2..=3).contains(&states.len()) {
+        return None;
+    }
+
+    let base = closure.popn(1);
+    let base_values = base.peek_values();
+    let [base_top] = base_values.as_slice() else {
+        return None;
+    };
+    let base_top = *base_top;
+
+    let mut reconstructed = ParserGSS::empty();
+    for &state in &states {
+        merge_into(&mut reconstructed, base.clone().push(state));
+    }
+    if &reconstructed != closure {
+        return None;
+    }
+
+    let mut reduce_nt: Option<u32> = None;
+    let mut shifted = ParserGSS::empty();
+    for state in states {
+        let action = table.action(state, token)?;
+        match action {
+            Action::Reduce(nt, 1) => {
+                if reduce_nt.replace(*nt).is_some() {
+                    return None;
+                }
+            }
+            Action::StackShifts(shifts) => {
+                merge_into(&mut shifted, apply_stack_shifts(base.push(state), shifts));
+            }
+            Action::Shift(target, is_replace) => {
+                let branch = base.push(state);
+                let is_replace = *is_replace && !table.forwarded_shifts.contains(&(state, token));
+                if is_replace {
+                    merge_into(&mut shifted, branch.popn(1).push(*target));
+                } else {
+                    merge_into(&mut shifted, branch.push(*target));
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    let reduce_nt = reduce_nt?;
+    if shifted.is_empty() {
+        return None;
+    }
+
+    let (target, is_replace) = table.goto_target(base_top, reduce_nt)?;
+    let post_goto = if is_replace {
+        base.popn(1).push(target)
+    } else {
+        base.push(target)
+    };
+    let post_goto_state = post_goto.single_exclusive_top_value()?;
+    match table.action(post_goto_state, token)? {
+        Action::Shift(..) | Action::StackShifts(..) => {}
+        _ => return None,
+    }
+
+    let (branch, det_ok) = advance_reduce_branch(table, base, target, is_replace, token);
+    if !det_ok {
+        return None;
+    }
+    merge_into(&mut shifted, branch.into_gss());
+    Some(shifted)
+}
+
 fn rebuild_floor_cross_from_shifts(
     popped: ParserGSS,
     shifts: SmallVec<[FloorCrossShift; 8]>,
@@ -1253,6 +1329,29 @@ fn advance_nondeterministically_profiled(
         }
 
         if let Some(shifted_wave) =
+            try_advance_pop1_reduce_plus_stackshift_wave(table, &closure, token)
+        {
+            if let Some(trace) = profile.trace.as_mut()
+                && let Some(wave) = trace.nondet_waves.last_mut()
+            {
+                for &state in &frontier_states {
+                    let branch_gss = closure.isolate(Some(state));
+                    wave.branches.push(trace_action_summary(
+                        table,
+                        state,
+                        &branch_gss,
+                        table.action(state, token),
+                    ));
+                }
+            }
+            profile.n_nondet_branches += frontier_states.len() as u32;
+            profile.n_nondet_reduce_ops += 1;
+            profile.n_nondet_merges += 1;
+            merge_into(&mut shifted, shifted_wave);
+            return shifted;
+        }
+
+        if let Some(shifted_wave) =
             try_advance_single_alt_pop1_common_suffix_stackshift_wave(table, &closure, token)
         {
             if let Some(trace) = profile.trace.as_mut()
@@ -1395,6 +1494,13 @@ fn advance_nondeterministically(
     let mut shifted = ParserGSS::empty();
 
     loop {
+        if let Some(shifted_wave) =
+            try_advance_pop1_reduce_plus_stackshift_wave(table, &closure, token)
+        {
+            merge_into(&mut shifted, shifted_wave);
+            return shifted;
+        }
+
         if let Some(shifted_wave) =
             try_advance_single_alt_pop1_common_suffix_stackshift_wave(table, &closure, token)
         {
@@ -1674,6 +1780,7 @@ mod tests {
         apply_guarded_stack_shifts_to_vstack,
         stack_may_advance_on,
         stack_may_advance_on_any,
+        try_advance_pop1_reduce_plus_stackshift_wave,
     };
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::table::testing::build_test_table;
@@ -1743,6 +1850,94 @@ mod tests {
         );
 
         assert_eq!(advance_stacks(&table, &before, token), expected);
+    }
+
+    #[test]
+    fn pop1_reduce_plus_stackshift_wave_fast_path_matches_snowplow_shape() {
+        let token = 0;
+        let nt = 0;
+        let mut action_rows = vec![Vec::new(); 989];
+        action_rows[655] = vec![(
+            token,
+            Action::StackShifts(vec![StackShift { pop: 1, pushes: vec![975] }]),
+        )];
+        action_rows[659] = vec![(
+            token,
+            Action::StackShifts(vec![
+                StackShift { pop: 1, pushes: vec![654] },
+                StackShift { pop: 1, pushes: vec![988] },
+            ]),
+        )];
+        action_rows[987] = vec![(token, Action::Reduce(nt, 1))];
+        let action_refs: Vec<&[(u32, Action)]> =
+            action_rows.iter().map(|row| row.as_slice()).collect();
+
+        let mut goto_rows = vec![Vec::new(); 989];
+        goto_rows[87] = vec![(nt, (659, true))];
+        let goto_refs: Vec<&[(u32, (u32, bool))]> =
+            goto_rows.iter().map(|row| row.as_slice()).collect();
+
+        let table = build_test_table(989, 1, &action_refs, &goto_refs);
+        let acc = TerminalsDisallowed::new();
+        let before = ParserGSS::from_stacks(&[
+            (vec![0_u32, 87, 987], acc.clone()),
+            (vec![0_u32, 87, 655], acc),
+        ]);
+        let expected = ParserGSS::from_stacks(&[
+            (vec![0_u32, 87, 975], TerminalsDisallowed::new()),
+            (vec![0_u32, 654], TerminalsDisallowed::new()),
+            (vec![0_u32, 988], TerminalsDisallowed::new()),
+        ]);
+
+        let mut fast_stacks = try_advance_pop1_reduce_plus_stackshift_wave(&table, &before, token)
+            .expect("fast path should match this wave")
+            .to_stacks();
+        let mut expected_stacks = expected.to_stacks();
+        fast_stacks.sort_by(|left, right| left.0.cmp(&right.0));
+        expected_stacks.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(fast_stacks, expected_stacks);
+
+        let mut actual_stacks = advance_stacks(&table, &before, token).to_stacks();
+        actual_stacks.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(actual_stacks, expected_stacks);
+    }
+
+    #[test]
+    fn pop1_reduce_plus_stackshift_wave_rejects_cross_product_base() {
+        let token = 0;
+        let nt = 0;
+        let mut action_rows = vec![Vec::new(); 989];
+        action_rows[655] = vec![(
+            token,
+            Action::StackShifts(vec![StackShift { pop: 1, pushes: vec![975] }]),
+        )];
+        action_rows[659] = vec![(
+            token,
+            Action::StackShifts(vec![
+                StackShift { pop: 1, pushes: vec![654] },
+                StackShift { pop: 1, pushes: vec![988] },
+            ]),
+        )];
+        action_rows[987] = vec![(token, Action::Reduce(nt, 1))];
+        let action_refs: Vec<&[(u32, Action)]> =
+            action_rows.iter().map(|row| row.as_slice()).collect();
+
+        let mut goto_rows = vec![Vec::new(); 989];
+        goto_rows[87] = vec![(nt, (659, true))];
+        let goto_refs: Vec<&[(u32, (u32, bool))]> =
+            goto_rows.iter().map(|row| row.as_slice()).collect();
+
+        let table = build_test_table(989, 1, &action_refs, &goto_refs);
+        let acc = TerminalsDisallowed::new();
+        let before = ParserGSS::from_stacks(&[
+            (vec![0_u32, 87, 987], acc.clone()),
+            (vec![1_u32, 87, 655], acc),
+        ]);
+
+        assert_eq!(
+            try_advance_pop1_reduce_plus_stackshift_wave(&table, &before, token),
+            None
+        );
     }
 
     #[test]
