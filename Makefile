@@ -4,7 +4,7 @@ BENCH_CASE_ENV = $(if $(CASE),GLRMASK_BENCH_CASE='$(CASE)',$(error set CASE, e.g
 BENCH_PROFILE_ENV = $(if $(PROFILE),GLRMASK_BENCH_PROFILE='$(PROFILE)')
 
 ffi:
-	maturin develop --manifest-path python/Cargo.toml
+	maturin develop --release --manifest-path python/Cargo.toml
 
 ffi-release:
 	maturin develop --release --manifest-path python/Cargo.toml
