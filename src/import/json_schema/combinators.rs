@@ -13,6 +13,7 @@ use super::lower::{
     JSON_ITEM_SEPARATOR_RULE, JSON_KEY_SEPARATOR_RULE, JSON_NULL_RULE, JSON_NUMBER_RULE,
     JSON_OBJECT_RULE, JSON_STRING_CHAR_RULE, JSON_STRING_RULE, JSON_VALUE_RULE,
 };
+use super::string::string_value_satisfies_schema;
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_any_of(
@@ -43,7 +44,7 @@ impl<'a> Lowerer<'a> {
         if open_object_any_of_covers_json_object(&factoring_branches) {
             return Ok(r(JSON_OBJECT_RULE));
         }
-        let factoring_branches = drop_subsumed_open_object_any_of_branches(factoring_branches);
+        let factoring_branches = self.drop_subsumed_open_object_any_of_branches(factoring_branches)?;
         if let Some(expr) =
             self.try_lower_closed_object_any_of_variants(&factoring_branches, has_ref_branch)?
         {
@@ -476,6 +477,191 @@ impl<'a> Lowerer<'a> {
         }
 
         Ok(saw_ref_branch.then_some(merged).flatten())
+    }
+
+    fn drop_subsumed_open_object_any_of_branches(
+        &self,
+        branches: Vec<Schema>,
+    ) -> ImportResult<Vec<Schema>> {
+        let keep = branches
+            .iter()
+            .enumerate()
+            .map(|(index, branch)| {
+                let Some(branch_object) = self.object_branch_resolved(branch)? else {
+                    return Ok(true);
+                };
+
+                for (other_index, other_branch) in branches.iter().enumerate() {
+                    if index == other_index {
+                        continue;
+                    }
+
+                    let Some(other_object) = self.object_branch_resolved(other_branch)? else {
+                        continue;
+                    };
+
+                    if !self.object_schema_subsumes(
+                        other_object,
+                        branch_object,
+                        &mut BTreeSet::new(),
+                    )? {
+                        continue;
+                    }
+
+                    if !self.object_schema_subsumes(
+                        branch_object,
+                        other_object,
+                        &mut BTreeSet::new(),
+                    )? || other_index < index
+                    {
+                        return Ok(false);
+                    }
+                }
+
+                Ok(true)
+            })
+            .collect::<ImportResult<Vec<_>>>()?;
+
+        Ok(branches
+            .into_iter()
+            .zip(keep)
+            .filter_map(|(branch, keep)| keep.then_some(branch))
+            .collect())
+    }
+
+    fn object_branch_resolved<'schema>(
+        &'schema self,
+        schema: &'schema Schema,
+    ) -> ImportResult<Option<&'schema ObjectSchema>> {
+        match &schema.kind {
+            SchemaKind::Ref(pointer) => self.object_branch_resolved(self.resolve_ref_target(pointer)?),
+            _ => Ok(object_branch(schema)),
+        }
+    }
+
+    fn object_schema_subsumes(
+        &self,
+        superset: &ObjectSchema,
+        subset: &ObjectSchema,
+        seen_pairs: &mut BTreeSet<(String, String)>,
+    ) -> ImportResult<bool> {
+        if !matches!(superset.additional_properties, AdditionalProperties::AllowAny)
+            || !superset.pattern_properties.is_empty()
+            || (!subset.pattern_properties.is_empty()
+                && !matches!(superset.additional_properties, AdditionalProperties::AllowAny))
+        {
+            return Ok(false);
+        }
+
+        if !superset
+            .required
+            .iter()
+            .all(|required| subset.required.contains(required))
+        {
+            return Ok(false);
+        }
+
+        if superset.min_properties > subset.min_properties {
+            return Ok(false);
+        }
+
+        if let Some(superset_max) = superset.max_properties {
+            let Some(subset_max) = subset.max_properties else {
+                return Ok(false);
+            };
+            if subset_max > superset_max {
+                return Ok(false);
+            }
+        }
+
+        for property in &superset.properties {
+            let Some(actual) = property_schema_by_name(subset, &property.name) else {
+                return Ok(false);
+            };
+            if !self.schema_subsumes(&property.schema, actual, seen_pairs)? {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    fn schema_subsumes(
+        &self,
+        superset: &Schema,
+        subset: &Schema,
+        seen_pairs: &mut BTreeSet<(String, String)>,
+    ) -> ImportResult<bool> {
+        if schemas_shape_equivalent(superset, subset) {
+            return Ok(true);
+        }
+        if matches!(superset.kind, SchemaKind::Any) || matches!(subset.kind, SchemaKind::Never) {
+            return Ok(true);
+        }
+        if matches!(superset.kind, SchemaKind::Never) {
+            return Ok(false);
+        }
+
+        let pair = (
+            schema_subsumption_key(superset)?,
+            schema_subsumption_key(subset)?,
+        );
+        if !seen_pairs.insert(pair.clone()) {
+            return Ok(true);
+        }
+
+        let result = match (&superset.kind, &subset.kind) {
+            (SchemaKind::Ref(pointer), _) => {
+                self.schema_subsumes(self.resolve_ref_target(pointer)?, subset, seen_pairs)?
+            }
+            (_, SchemaKind::Ref(pointer)) => {
+                self.schema_subsumes(superset, self.resolve_ref_target(pointer)?, seen_pairs)?
+            }
+            (SchemaKind::Assertions(superset_assertions), _)
+                if pure_any_of_assertions(superset_assertions) =>
+            {
+                let mut subsumes = false;
+                for branch in &superset_assertions.any_of {
+                    if self.schema_subsumes(branch, subset, seen_pairs)? {
+                        subsumes = true;
+                        break;
+                    }
+                }
+                subsumes
+            }
+            (_, SchemaKind::Assertions(subset_assertions))
+                if pure_any_of_assertions(subset_assertions) =>
+            {
+                let mut all_subsumed = true;
+                for branch in &subset_assertions.any_of {
+                    if !self.schema_subsumes(superset, branch, seen_pairs)? {
+                        all_subsumed = false;
+                        break;
+                    }
+                }
+                all_subsumed
+            }
+            (SchemaKind::Assertions(superset_assertions), SchemaKind::Assertions(subset_assertions)) => {
+                if let (Some(string_schema), Some(values)) = (
+                    broad_string_assertions(superset_assertions),
+                    string_literal_values(subset_assertions),
+                ) {
+                    values
+                        .iter()
+                        .all(|value| string_value_satisfies_schema(value, string_schema).unwrap_or(false))
+                } else if let (Some(superset_object), Some(subset_object)) =
+                    (object_branch(superset), object_branch(subset))
+                {
+                    self.object_schema_subsumes(superset_object, subset_object, seen_pairs)?
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+
+        seen_pairs.remove(&pair);
+        Ok(result)
     }
 }
 
@@ -964,40 +1150,6 @@ fn closed_object_variant_branch(schema: &Schema) -> Option<&ObjectSchema> {
     Some(object)
 }
 
-fn drop_subsumed_open_object_any_of_branches(branches: Vec<Schema>) -> Vec<Schema> {
-    let keep = branches
-        .iter()
-        .enumerate()
-        .map(|(index, branch)| {
-            let Some(branch_object) = object_branch(branch) else {
-                return true;
-            };
-
-            !branches.iter().enumerate().any(|(other_index, other_branch)| {
-                if index == other_index {
-                    return false;
-                }
-
-                let Some(other_object) = object_branch(other_branch) else {
-                    return false;
-                };
-
-                if !object_schema_subsumes(other_object, branch_object) {
-                    return false;
-                }
-
-                !object_schema_subsumes(branch_object, other_object) || other_index < index
-            })
-        })
-        .collect::<Vec<_>>();
-
-    branches
-        .into_iter()
-        .zip(keep)
-        .filter_map(|(branch, keep)| keep.then_some(branch))
-        .collect()
-}
-
 pub(super) fn open_object_any_of_covers_json_object(branches: &[Schema]) -> bool {
     if branches.len() < 2 {
         return false;
@@ -1058,47 +1210,79 @@ fn object_branch(schema: &Schema) -> Option<&ObjectSchema> {
     assertions.object.as_ref()
 }
 
-fn object_schema_subsumes(superset: &ObjectSchema, subset: &ObjectSchema) -> bool {
-    if !matches!(superset.additional_properties, AdditionalProperties::AllowAny)
-        || !superset.pattern_properties.is_empty()
-        || !subset.pattern_properties.is_empty()
-    {
-        return false;
-    }
-
-    if !superset
-        .required
-        .iter()
-        .all(|required| subset.required.contains(required))
-    {
-        return false;
-    }
-
-    if superset.min_properties > subset.min_properties {
-        return false;
-    }
-
-    if let Some(superset_max) = superset.max_properties {
-        let Some(subset_max) = subset.max_properties else {
-            return false;
-        };
-        if subset_max > superset_max {
-            return false;
-        }
-    }
-
-    superset.properties.iter().all(|property| {
-        property_schema_by_name(subset, &property.name)
-            .is_some_and(|actual| schemas_shape_equivalent(&property.schema, actual))
-    })
-}
-
 fn property_schema_by_name<'a>(object: &'a ObjectSchema, name: &str) -> Option<&'a Schema> {
     object
         .properties
         .iter()
         .find(|property| property.name == name)
         .map(|property| &property.schema)
+}
+
+fn schema_subsumption_key(schema: &Schema) -> ImportResult<String> {
+    match &schema.kind {
+        SchemaKind::Ref(pointer) => normalize_local_ref(pointer).map(|pointer| format!("ref:{pointer}")),
+        _ => Ok(format!("loc:{}", schema.location)),
+    }
+}
+
+fn pure_any_of_assertions(assertions: &SchemaAssertions) -> bool {
+    !assertions.any_of.is_empty()
+        && assertions.types.is_none()
+        && assertions.const_value.is_none()
+        && assertions.enum_values.is_none()
+        && assertions.object.is_none()
+        && assertions.array.is_none()
+        && assertions.string.is_none()
+        && assertions.number.is_none()
+        && assertions.one_of.is_empty()
+        && assertions.all_of.is_empty()
+        && assertions.not.is_none()
+}
+
+fn broad_string_assertions(assertions: &SchemaAssertions) -> Option<&super::ast::StringSchema> {
+    if assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || assertions.object.is_some()
+        || assertions.array.is_some()
+        || assertions.number.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+        || assertions.not.is_some()
+    {
+        return None;
+    }
+    if !assertions
+        .types
+        .as_ref()
+        .is_some_and(|types| types.iter().all(|schema_type| *schema_type == SchemaType::String))
+    {
+        return None;
+    }
+    assertions.string.as_ref()
+}
+
+fn string_literal_values(assertions: &SchemaAssertions) -> Option<Vec<&serde_json::Value>> {
+    if assertions.object.is_some()
+        || assertions.array.is_some()
+        || assertions.number.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+        || assertions.not.is_some()
+    {
+        return None;
+    }
+    if let Some(types) = &assertions.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::String)
+    {
+        return None;
+    }
+    if let Some(value) = &assertions.const_value {
+        return value.is_string().then_some(vec![value]);
+    }
+    let values = assertions.enum_values.as_ref()?;
+    values.iter().all(|value| value.is_string()).then_some(values.iter().collect())
 }
 
 fn schemas_shape_equivalent(left: &Schema, right: &Schema) -> bool {

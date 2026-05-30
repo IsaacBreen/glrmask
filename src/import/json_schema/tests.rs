@@ -3450,6 +3450,116 @@ fn anyof_drops_subsumed_open_object_branch_for_o83993_shape() {
 }
 
 #[test]
+fn anyof_drops_recursive_open_object_branches_subsumed_by_base_node() {
+    let recursive_node = json!({
+        "anyOf": [
+            {"$ref": "#/definitions/A"},
+            {"$ref": "#/definitions/B"},
+            {"$ref": "#/definitions/C"}
+        ]
+    });
+    let schema = json!({
+        "definitions": {
+            "Module": {
+                "type": "object",
+                "properties": {
+                    "n": {"type": "string"}
+                }
+            },
+            "A": {
+                "type": "object",
+                "properties": {
+                    "h": {
+                        "type": "array",
+                        "items": recursive_node.clone()
+                    },
+                    "f": {"type": "array"},
+                    "m": {"$ref": "#/definitions/Module"},
+                    "x": {"type": "array"}
+                }
+            },
+            "B": {
+                "type": "object",
+                "properties": {
+                    "h": {
+                        "type": "array",
+                        "items": recursive_node.clone()
+                    },
+                    "f": {"type": "array"},
+                    "m": {
+                        "type": "object",
+                        "properties": {
+                            "n": {"enum": ["k"], "type": "string"}
+                        }
+                    },
+                    "n": {"enum": ["r"], "type": "string"},
+                    "x": {"type": "array"}
+                }
+            },
+            "C": {
+                "type": "object",
+                "properties": {
+                    "h": {
+                        "type": "array",
+                        "items": recursive_node
+                    },
+                    "f": {"type": "array"},
+                    "m": {
+                        "type": "object",
+                        "properties": {
+                            "n": {"enum": ["k"], "type": "string"}
+                        }
+                    },
+                    "n": {"enum": ["r"], "type": "string"},
+                    "x": {"type": "array"}
+                }
+            }
+        },
+        "properties": {
+            "e": {
+                "anyOf": [
+                    {"$ref": "#/definitions/A"},
+                    {"$ref": "#/definitions/B"},
+                    {"$ref": "#/definitions/C"}
+                ]
+            }
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(!glrm.contains("\"r\""), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn anyof_does_not_drop_open_object_branch_that_widens_base_property() {
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"enum": ["A"], "type": "string"}
+                },
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                },
+                "additionalProperties": false
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("JSON_STRING"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn single_anyof_object_ref_with_sibling_properties_merges_before_lowering() {
     let schema = json!({
         "definitions": {
