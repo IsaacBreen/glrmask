@@ -25,6 +25,13 @@ impl<'a> Lowerer<'a> {
                 return Ok(self.bounded_homogeneous_array_terminal(item, schema.min_items, max));
             }
         }
+        if schema.prefix_items.is_empty()
+            && schema.min_items == 0
+            && schema.max_items.is_none()
+            && let Some(item) = self.lower_inline_bounded_array_string_item_expr(&schema.items)?
+        {
+            return Ok(self.unbounded_homogeneous_array_terminal(item));
+        }
 
         let body = if schema.prefix_items.is_empty() {
             let item = self.lower_schema(&schema.items)?;
@@ -136,6 +143,18 @@ impl<'a> Lowerer<'a> {
         };
 
         let rule_name = self.fresh_rule_name("bounded_scalar_array");
+        self.add_terminal_rule(&rule_name, seq(vec![lit("["), body, lit("]")]));
+        super::lower::r(&rule_name)
+    }
+
+    fn unbounded_homogeneous_array_terminal(&mut self, item: GrammarExpr) -> GrammarExpr {
+        let separator_item = seq(vec![self.item_separator_expr(), item.clone()]);
+        let body = GrammarExpr::Optional(Box::new(seq(vec![
+            item,
+            GrammarExpr::Optional(Box::new(GrammarExpr::RepeatOne(Box::new(separator_item)))),
+        ])));
+
+        let rule_name = self.fresh_rule_name("unbounded_scalar_array");
         self.add_terminal_rule(&rule_name, seq(vec![lit("["), body, lit("]")]));
         super::lower::r(&rule_name)
     }

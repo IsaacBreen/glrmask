@@ -1035,6 +1035,22 @@ fn large_bounded_pattern_string_arrays_do_not_use_terminal_rule() {
 }
 
 #[test]
+fn unbounded_plain_string_arrays_use_terminal_rule() {
+    let schema = json!({
+        "type": "array",
+        "items": {"type": "string"}
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("unbounded_scalar_array_"), "{glrm}");
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.name.contains("unbounded_scalar_array_") && rule.is_terminal
+    }), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn prefix_items_lower_with_no_tail() {
     let schema = json!({
         "type": "array",
