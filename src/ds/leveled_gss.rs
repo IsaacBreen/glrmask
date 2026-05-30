@@ -4453,4 +4453,53 @@ mod tests {
             vec![(vec![0_u32, 1, 17, 47, 74, 131, 96], acc)]
         );
     }
+
+    #[test]
+    fn generic_top_pure_shift_matches_selective_shared_prefix_shape() {
+        let acc = TestAcc(7);
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1, 17, 47, 74, 131], acc.clone()),
+            (vec![0_u32, 1, 17, 47, 74, 132], acc.clone()),
+            (vec![0_u32, 1, 17, 47, 74, 133], acc.clone()),
+        ]);
+
+        let shifted = gss.apply_top_pure_shifts([(131_u32, 96_u32, false)]);
+
+        assert_eq!(
+            shifted.to_stacks(),
+            vec![(vec![0_u32, 1, 17, 47, 74, 131, 96], acc)]
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_generic_top_pure_shift_shared_prefix_shape() {
+        let acc = TestAcc(7);
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1, 17, 47, 74, 131], acc.clone()),
+            (vec![0_u32, 1, 17, 47, 74, 132], acc.clone()),
+            (vec![0_u32, 1, 17, 47, 74, 133], acc),
+        ]);
+
+        let iterations = 100_000u32;
+        let start = std::time::Instant::now();
+        let mut shifted = None;
+        for _ in 0..iterations {
+            shifted = Some(std::hint::black_box(&gss).apply_top_pure_shifts(std::hint::black_box([
+                (131_u32, 96_u32, false),
+            ])));
+        }
+        let elapsed = start.elapsed();
+        let avg_ns = elapsed.as_nanos() / u128::from(iterations);
+        let shifted = shifted.unwrap();
+
+        println!(
+            "generic_top_pure_shift_shared_prefix_shape: avg={}ns iterations={}",
+            avg_ns, iterations
+        );
+        assert_eq!(
+            shifted.to_stacks(),
+            vec![(vec![0_u32, 1, 17, 47, 74, 131, 96], TestAcc(7))]
+        );
+    }
 }

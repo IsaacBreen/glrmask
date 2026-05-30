@@ -369,9 +369,26 @@ impl<'a> Lowerer<'a> {
             ))
         } else if let Some(rewritten) = self.try_rewrite_all_of_object_choice_target(target)? {
             Ok(rewritten)
+        } else if let Some(merged) = self.try_inline_object_like_all_of_target(target)? {
+            Ok(merged)
         } else {
             Ok(target.clone())
         }
+    }
+
+    fn try_inline_object_like_all_of_target(&self, target: &Schema) -> ImportResult<Option<Schema>> {
+        let SchemaKind::Assertions(assertions) = &target.kind else {
+            return Ok(None);
+        };
+        if assertions.all_of.is_empty() || assertions.has_value_assertions_without_combinators() {
+            return Ok(None);
+        }
+
+        let inlined = self.inline_refs_in_all_of_branch(target)?;
+        let SchemaKind::Assertions(inlined_assertions) = &inlined.kind else {
+            return Ok(None);
+        };
+        Ok(merge_all_of_object_like_schema(&inlined_assertions.all_of))
     }
 
     fn try_rewrite_all_of_object_choice_target(&self, target: &Schema) -> ImportResult<Option<Schema>> {
@@ -1588,7 +1605,7 @@ fn distribute_all_of_over_single_object_choice(
 }
 
 fn schema_is_object_like(schema: &Schema) -> bool {
-    plain_object_schema(schema).is_some() || is_vacuous_object_schema(schema)
+    object_like_schema(schema).is_some()
 }
 
 fn merge_all_of_object_like_schema(branches: &[Schema]) -> Option<Schema> {
@@ -1596,14 +1613,13 @@ fn merge_all_of_object_like_schema(branches: &[Schema]) -> Option<Schema> {
     let has_explicit_object_only_type = branches.iter().any(schema_has_explicit_object_only_type);
 
     for branch in branches {
-        if let Some(object) = plain_object_schema(branch) {
+        let object_like = object_like_schema(branch)?;
+        let SchemaKind::Assertions(assertions) = object_like.kind else {
+            return None;
+        };
+        if let Some(object) = assertions.object {
             objects.push(object.clone());
-            continue;
         }
-        if is_vacuous_object_schema(branch) {
-            continue;
-        }
-        return None;
     }
 
     if objects.is_empty() {
@@ -1631,6 +1647,51 @@ fn merge_all_of_object_like_schema(branches: &[Schema]) -> Option<Schema> {
             ..SchemaAssertions::default()
         },
     ))
+}
+
+fn object_like_schema(schema: &Schema) -> Option<Schema> {
+    if let Some(object) = plain_object_schema(schema) {
+        return Some(Schema::assertions(
+            schema.location.clone(),
+            SchemaAssertions {
+                types: schema_has_explicit_object_only_type(schema).then_some(vec![SchemaType::Object]),
+                object: Some(object.clone()),
+                ..SchemaAssertions::default()
+            },
+        ));
+    }
+    if is_vacuous_object_schema(schema) {
+        return Some(Schema::assertions(
+            schema.location.clone(),
+            SchemaAssertions {
+                types: Some(vec![SchemaType::Object]),
+                ..SchemaAssertions::default()
+            },
+        ));
+    }
+
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return None;
+    };
+    if assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || assertions.object.is_some()
+        || assertions.array.is_some()
+        || assertions.string.is_some()
+        || assertions.number.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || assertions.all_of.is_empty()
+    {
+        return None;
+    }
+    if let Some(types) = &assertions.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object)
+    {
+        return None;
+    }
+
+    merge_all_of_object_like_schema(&assertions.all_of)
 }
 
 fn merge_all_of_array_like_schema(branches: &[Schema]) -> Option<Schema> {

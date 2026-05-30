@@ -2442,6 +2442,84 @@ fn anyof_open_objects_with_shared_optional_property_does_not_collapse_to_json_ob
 }
 
 #[test]
+fn anyof_nested_object_allof_refs_factor_into_single_body() {
+    let schema = json!({
+        "type": "object",
+        "anyOf": [
+            {
+                "allOf": [
+                    {"$ref": "#/definitions/app"},
+                    {"required": ["mainClass"]}
+                ]
+            },
+            {
+                "allOf": [
+                    {"$ref": "#/definitions/app"},
+                    {"required": ["files"]}
+                ]
+            },
+            {
+                "allOf": [
+                    {"$ref": "#/definitions/base"},
+                    {
+                        "properties": {"type": {"const": "lib"}},
+                        "required": ["type"]
+                    }
+                ]
+            }
+        ],
+        "definitions": {
+            "base": {
+                "type": "object",
+                "properties": {
+                    "compilerOptions": {"$ref": "#/definitions/compilerOptions"},
+                    "files": {"type": "array", "items": {"type": "string"}},
+                    "extends": {"type": "string"}
+                }
+            },
+            "app": {
+                "allOf": [
+                    {"$ref": "#/definitions/base"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string"},
+                            "mainClass": {"type": "string"}
+                        }
+                    }
+                ]
+            },
+            "compilerOptions": {
+                "type": "object",
+                "properties": {
+                    "debug": {"type": "boolean"},
+                    "swf-version": {"type": "integer"},
+                    "target-player": {"type": "string"}
+                }
+            }
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
+    assert!(glrm.contains("nt start ::= \"{\" json_anyof_object_body"), "{glrm}");
+    assert!(
+        !glrm.lines().any(|line| {
+            line.starts_with("nt start ::=")
+                && line.contains("|")
+                && line.contains("json_closed_object_body")
+        }),
+        "{glrm}"
+    );
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"compilerOptions": {"debug": true, "swf-version": 9}, "mainClass": "Main"}"#
+    ));
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn pattern_map_anyof_open_objects_with_disjoint_optional_properties_collapses_value_to_json_object()
 {
     let schema = json!({

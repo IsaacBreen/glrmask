@@ -308,6 +308,31 @@ impl DenseMaskAcc {
         if let Some(cached) = cache.get(&key) {
             return cached.clone();
         }
+        if let Some(mask) = precomputed.get(&key.token_set) {
+            let mut any = false;
+            let mut out: Option<Vec<u64>> = None;
+            for i in 0..dense.len() {
+                let word = dense[i] & mask.get(i).copied().unwrap_or(0);
+                any |= word != 0;
+                if let Some(out) = out.as_mut() {
+                    out.push(word);
+                } else if word != dense[i] {
+                    let mut new_out = Vec::with_capacity(dense.len());
+                    new_out.extend_from_slice(&dense[..i]);
+                    new_out.push(word);
+                    out = Some(new_out);
+                }
+            }
+            let result = if !any {
+                None
+            } else if let Some(out) = out {
+                Some(out.into())
+            } else {
+                Some(Arc::clone(dense))
+            };
+            cache.insert(key, result.clone());
+            return result;
+        }
         let result = Self::intersect_dense_with_token_set(dense, token_set, precomputed);
         cache.insert(key, result.clone());
         result
@@ -388,6 +413,62 @@ impl DenseMaskAcc {
 
             Self::or_dense_and_token_set_into(dense, token_set, precomputed, merged);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DenseMaskAcc, DenseTokenMaskCache};
+    use range_set_blaze::RangeSetBlaze;
+    use rustc_hash::FxHashMap;
+    use std::sync::Arc;
+
+    fn precomputed_for(
+        token_set: &Arc<RangeSetBlaze<u32>>,
+        mask: Arc<[u64]>,
+    ) -> DenseTokenMaskCache {
+        let mut precomputed: FxHashMap<usize, Arc<[u64]>> = FxHashMap::default();
+        precomputed.insert(Arc::as_ptr(token_set) as usize, mask);
+        precomputed
+    }
+
+    #[test]
+    fn precomputed_dense_intersection_reuses_arc_when_unchanged() {
+        let dense: Arc<[u64]> = Arc::from([0b1011_u64, 0b0101]);
+        let token_set = Arc::new(RangeSetBlaze::from_iter([0_u32..=127]));
+        let precomputed = precomputed_for(&token_set, Arc::from([!0_u64, !0_u64]));
+
+        let mut cache = FxHashMap::default();
+        let intersected = DenseMaskAcc::intersect_dense_with_token_set_cached(
+            0,
+            &dense,
+            &token_set,
+            &precomputed,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert!(Arc::ptr_eq(&intersected, &dense));
+    }
+
+    #[test]
+    fn precomputed_dense_intersection_allocates_when_pruned() {
+        let dense: Arc<[u64]> = Arc::from([0b1011_u64, 0b0101]);
+        let token_set = Arc::new(RangeSetBlaze::from_iter([0_u32..=127]));
+        let precomputed = precomputed_for(&token_set, Arc::from([0b0011_u64, 0b0000]));
+
+        let mut cache = FxHashMap::default();
+        let intersected = DenseMaskAcc::intersect_dense_with_token_set_cached(
+            0,
+            &dense,
+            &token_set,
+            &precomputed,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert!(!Arc::ptr_eq(&intersected, &dense));
+        assert_eq!(&*intersected, &[0b0011_u64, 0b0000]);
     }
 }
 
