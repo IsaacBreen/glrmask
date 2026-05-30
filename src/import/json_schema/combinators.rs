@@ -7,7 +7,12 @@ use super::ast::{
     SchemaKind, SchemaType,
 };
 use super::error::ImportResult;
-use super::lower::{choice, never, normalize_local_ref, r, Lowerer, JSON_OBJECT_RULE, JSON_VALUE_RULE};
+use super::lower::{
+    choice, never, normalize_local_ref, r, Lowerer, JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE,
+    JSON_ADDITIONAL_KEY_COLON_SHARED_RULE, JSON_BOOL_RULE, JSON_INTEGER_RULE,
+    JSON_ITEM_SEPARATOR_RULE, JSON_KEY_SEPARATOR_RULE, JSON_NULL_RULE, JSON_NUMBER_RULE,
+    JSON_OBJECT_RULE, JSON_STRING_CHAR_RULE, JSON_STRING_RULE, JSON_VALUE_RULE,
+};
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_any_of(
@@ -188,6 +193,12 @@ impl<'a> Lowerer<'a> {
             .collect::<ImportResult<Vec<_>>>()?;
         if lowered.is_empty() {
             return Ok(r(JSON_VALUE_RULE));
+        }
+        if !lowered.iter().all(all_of_intersection_terminal_safe) {
+            // The generic grammar lowerer treats Intersect as terminal-ish. Parser-shaped
+            // object/array allOf operands can contain nonterminal refs or SeparatedSequence,
+            // so overapproximate them for build parity instead of emitting an invalid terminal.
+            return Ok(choice(lowered));
         }
         let first = lowered.remove(0);
         Ok(lowered.into_iter().fold(first, |left, right| GrammarExpr::Intersect {
@@ -465,6 +476,42 @@ impl<'a> Lowerer<'a> {
         }
 
         Ok(saw_ref_branch.then_some(merged).flatten())
+    }
+}
+
+fn all_of_intersection_terminal_safe(expr: &GrammarExpr) -> bool {
+    match expr {
+        GrammarExpr::Literal(_)
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte
+        | GrammarExpr::Epsilon => true,
+        GrammarExpr::Ref(name) => matches!(
+            name.as_str(),
+            JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE
+                | JSON_ADDITIONAL_KEY_COLON_SHARED_RULE
+                | JSON_BOOL_RULE
+                | JSON_INTEGER_RULE
+                | JSON_ITEM_SEPARATOR_RULE
+                | JSON_KEY_SEPARATOR_RULE
+                | JSON_NULL_RULE
+                | JSON_NUMBER_RULE
+                | JSON_STRING_CHAR_RULE
+                | JSON_STRING_RULE
+        ),
+        GrammarExpr::Grouped(inner)
+        | GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner) => all_of_intersection_terminal_safe(inner),
+        GrammarExpr::RepeatRange { expr, .. } => all_of_intersection_terminal_safe(expr),
+        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+            parts.iter().all(all_of_intersection_terminal_safe)
+        }
+        GrammarExpr::Intersect { expr, intersect } | GrammarExpr::Exclude { expr, exclude: intersect } => {
+            all_of_intersection_terminal_safe(expr) && all_of_intersection_terminal_safe(intersect)
+        }
+        GrammarExpr::SeparatedSequence { .. } | GrammarExpr::ExprNFA(_) => false,
     }
 }
 

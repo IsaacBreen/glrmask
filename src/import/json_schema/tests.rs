@@ -3030,6 +3030,65 @@ fn allof_ref_to_nested_object_oneof_with_siblings_lowers() {
 }
 
 #[test]
+fn unsafe_allof_object_ref_intersection_broadens_to_choice() {
+    let schema = json!({
+        "$defs": {
+            "base": {
+                "type": "object",
+                "properties": {
+                    "enabled": {"type": "boolean"}
+                },
+                "additionalProperties": false
+            }
+        },
+        "allOf": [
+            {"$ref": "#/$defs/base"},
+            {"type": "string"}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let expr = start_expr(&grammar);
+    assert!(matches!(expr, GrammarExpr::Choice(_)), "{expr:?}");
+    assert!(!contains_intersect(expr), "{expr:?}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn unsafe_allof_array_separated_sequence_broadens_to_choice() {
+    let schema = json!({
+        "allOf": [
+            {
+                "type": "array",
+                "items": {"type": "integer"}
+            },
+            {"type": "string"}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let expr = start_expr(&grammar);
+    assert!(matches!(expr, GrammarExpr::Choice(_)), "{expr:?}");
+    assert!(!contains_intersect_with_separated_sequence(expr), "{expr:?}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn terminal_safe_allof_keeps_intersection() {
+    let schema = json!({
+        "allOf": [
+            {"type": "number", "minimum": 0},
+            {"type": "number", "multipleOf": 0.25}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let expr = start_expr(&grammar);
+    assert!(contains_intersect(expr), "{expr:?}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn oneof_object_branches_with_root_type_object_and_required_anyof_lowers() {
     let schema = json!({
         "type": "object",
