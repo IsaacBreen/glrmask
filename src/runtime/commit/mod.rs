@@ -834,7 +834,20 @@ fn commit_bytes_fast_path(
 
     // The terminal and tokenizer end-state continuations are independent.
     // Preserve either branch if it produces viable parser state.
-    let advanced = advance_stacks_owned(&constraint.table, pruned_gss, terminal);
+    let advanced = if let Some(top_state) = pruned_gss.single_exclusive_top_value()
+        && let Some(action) = constraint.table.action(top_state, terminal)
+        && let Some(advanced) = apply_single_top_action_fast(
+            &constraint.table,
+            &pruned_gss,
+            top_state,
+            terminal,
+            action,
+        )
+    {
+        advanced
+    } else {
+        advance_stacks_owned(&constraint.table, pruned_gss, terminal)
+    };
     let mut produced_state = false;
     if !advanced.is_empty() {
         let advanced =
