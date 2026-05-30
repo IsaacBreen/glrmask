@@ -1400,6 +1400,8 @@ fn decoded_string_patterns_are_matched_against_json_string_bodies() {
     assert!(!property_name_matches_pattern("INTERVAL_TICK|INTERVAL_M1", "INTERVAL_M2").unwrap());
     assert!(property_name_matches_pattern(r"^(?:\S+\s+){0,19}\S+$", "Up to 24 hours π").unwrap());
     assert!(property_name_matches_pattern(r"^(?:\S+\s+){0,19}\S+$", "Up コ").unwrap());
+    assert!(property_name_matches_pattern(r"^[/][/.\w-]{0,254}$", "/cost_1").unwrap());
+    assert!(!property_name_matches_pattern(r"^[/][/.\w-]{0,254}$", "/cost space").unwrap());
 }
 
 #[test]

@@ -1269,7 +1269,8 @@ fn is_safe_raw_json_string_char(ch: char) -> bool {
 }
 
 pub(crate) fn property_name_matches_pattern(pattern: &str, property_name: &str) -> ImportResult<bool> {
-    Regex::new(pattern)
+    let ascii_pattern = preprocess_ascii_shorthand(pattern);
+    Regex::new(&ascii_pattern)
         .map(|regex| regex.is_match(property_name))
         .map_err(|error| SchemaImportError::new(format!("invalid patternProperties regex {pattern:?}: {error}")))
 }
