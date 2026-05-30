@@ -365,22 +365,58 @@ impl<'a> Lowerer<'a> {
         exclusive_group: Option<(&BTreeSet<String>, bool)>,
     ) -> ImportResult<GrammarExpr> {
         let normalized = self.object_with_required_synthetic_properties(schema)?;
+        if normalized
+            .max_properties
+            .is_some_and(|max_properties| max_properties < normalized.min_properties)
+        {
+            return Ok(never());
+        }
+        let mut max_property_group_exclusive = false;
+        let mut drop_optional_fixed_properties = false;
         if let Some(max_properties) = normalized.max_properties {
-            let fixed_closed_redundant = normalized.pattern_properties.is_empty()
-                && matches!(normalized.additional_properties, AdditionalProperties::Deny)
-                && max_properties >= normalized.properties.len();
+            let fixed_closed = normalized.pattern_properties.is_empty()
+                && matches!(normalized.additional_properties, AdditionalProperties::Deny);
+            if fixed_closed && max_properties < normalized.required.len() {
+                return Ok(never());
+            }
+            let fixed_closed_redundant = fixed_closed && max_properties >= normalized.properties.len();
+            let fixed_closed_optional_cap = fixed_closed
+                && max_properties < normalized.properties.len()
+                && any_required_names.is_none()
+                && exclusive_group.is_none();
             let pattern_map_candidate = normalized.properties.is_empty()
                 && normalized.required.is_empty()
                 && matches!(normalized.additional_properties, AdditionalProperties::Deny)
                 && normalized.pattern_properties.len() == 1;
-            if !fixed_closed_redundant && !pattern_map_candidate {
+            let open_dynamic_map_candidate = normalized.properties.is_empty()
+                && normalized.required.is_empty()
+                && !matches!(normalized.additional_properties, AdditionalProperties::Deny);
+            if fixed_closed_optional_cap {
+                match max_properties - normalized.required.len() {
+                    0 => drop_optional_fixed_properties = true,
+                    1 => max_property_group_exclusive = true,
+                    _ => {
+                        return Err(SchemaImportError::new(
+                            "maxProperties for closed fixed-property objects only supports zero or one optional property"
+                                .to_string(),
+                        ));
+                    }
+                }
+            } else if !fixed_closed_redundant && !pattern_map_candidate && !open_dynamic_map_candidate {
                 return Err(SchemaImportError::new(
-                    "maxProperties is only supported for bounded pattern maps or redundant closed fixed-property objects"
+                    "maxProperties is only supported for bounded maps, redundant closed fixed-property objects, or closed objects allowing at most one optional fixed property"
                         .to_string(),
                 ));
             }
         }
-        let min_property_group_required = if normalized.min_properties <= normalized.required.len() {
+        let extra_min_properties =
+            normalized.min_properties.saturating_sub(normalized.required.len());
+        let min_property_group_required = if extra_min_properties == 0 {
+            false
+        } else if normalized.properties.is_empty()
+            && normalized.required.is_empty()
+            && !matches!(normalized.additional_properties, AdditionalProperties::Deny)
+        {
             false
         } else if normalized.properties.is_empty()
             && normalized.required.is_empty()
@@ -388,18 +424,17 @@ impl<'a> Lowerer<'a> {
             && normalized.pattern_properties.len() == 1
         {
             false
-        } else if normalized.min_properties == 1
-            && normalized.required.is_empty()
+        } else if extra_min_properties == 1
             && matches!(normalized.additional_properties, AdditionalProperties::Deny)
             && normalized.pattern_properties.is_empty()
-            && !normalized.properties.is_empty()
+            && normalized.properties.len() > normalized.required.len()
             && any_required_names.is_none()
             && exclusive_group.is_none()
         {
             true
         } else {
             return Err(SchemaImportError::new(
-                "minProperties is only supported when it is redundant or requires at least one fixed property on a closed object"
+                "minProperties is only supported when it is redundant, requires one extra fixed property on a closed object, or requires dynamic map pairs"
                     .to_string(),
             ));
         };
@@ -411,6 +446,9 @@ impl<'a> Lowerer<'a> {
         let mut items = normalized
             .properties
             .iter()
+            .filter(|property| {
+                !drop_optional_fixed_properties || normalized.required.contains(&property.name)
+            })
             .map(|property| {
                 let required = normalized.required.contains(&property.name);
                 self.lower_property_item(
@@ -419,9 +457,10 @@ impl<'a> Lowerer<'a> {
                     required,
                     any_required_names
                         .is_some_and(|names| names.contains(&property.name))
-                        || min_property_group_required,
+                        || (min_property_group_required && !required),
                     exclusive_group
-                        .is_some_and(|(names, _)| names.contains(&property.name)),
+                        .is_some_and(|(names, _)| names.contains(&property.name))
+                        || (max_property_group_exclusive && !required),
                 )
             })
             .collect::<ImportResult<Vec<_>>>()?;
@@ -527,6 +566,18 @@ impl<'a> Lowerer<'a> {
         }
 
         if !tail_pairs.is_empty() {
+            if items.is_empty()
+                && (normalized.min_properties > 0 || normalized.max_properties.is_some())
+            {
+                let pair = choice(tail_pairs);
+                let body = self.dynamic_pair_list_body(
+                    pair,
+                    normalized.min_properties,
+                    normalized.max_properties,
+                );
+                return Ok(seq(vec![lit("{"), body, lit("}")]));
+            }
+
             let use_large_optional_open_object_prefix_chain = normalized.required.is_empty()
                 && any_required_names.is_none()
                 && exclusive_group.is_none()
@@ -595,6 +646,40 @@ impl<'a> Lowerer<'a> {
         };
 
         Ok(seq(vec![lit("{"), body, lit("}")]))
+    }
+
+    fn dynamic_pair_list_body(
+        &self,
+        pair: GrammarExpr,
+        min_properties: usize,
+        max_properties: Option<usize>,
+    ) -> GrammarExpr {
+        let separator_pair = seq(vec![self.item_separator_expr(), pair.clone()]);
+        match max_properties {
+            Some(0) => GrammarExpr::Epsilon,
+            Some(max_properties) => {
+                let tail = GrammarExpr::RepeatRange {
+                    expr: Box::new(separator_pair),
+                    min: min_properties.saturating_sub(1),
+                    max: max_properties - 1,
+                };
+                if min_properties == 0 {
+                    choice(vec![GrammarExpr::Epsilon, seq(vec![pair, tail])])
+                } else {
+                    seq(vec![pair, tail])
+                }
+            }
+            None => {
+                let required_tail = (0..min_properties.saturating_sub(1))
+                    .map(|_| separator_pair.clone())
+                    .collect::<Vec<_>>();
+                seq(vec![
+                    pair,
+                    seq(required_tail),
+                    GrammarExpr::Repeat(Box::new(separator_pair)),
+                ])
+            }
+        }
     }
 
     fn schema_has_huge_bounded_string(&self, schema: &Schema) -> bool {

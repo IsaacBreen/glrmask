@@ -265,6 +265,43 @@ fn contains_intersect(expr: &GrammarExpr) -> bool {
     }
 }
 
+fn contains_intersect_with_separated_sequence(expr: &GrammarExpr) -> bool {
+    match expr {
+        GrammarExpr::Intersect { expr, intersect } => {
+            contains_separated_sequence(expr)
+                || contains_separated_sequence(intersect)
+                || contains_intersect_with_separated_sequence(expr)
+                || contains_intersect_with_separated_sequence(intersect)
+        }
+        GrammarExpr::Grouped(inner)
+        | GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner) => contains_intersect_with_separated_sequence(inner),
+        GrammarExpr::RepeatRange { expr, .. } => contains_intersect_with_separated_sequence(expr),
+        GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
+            items.iter().any(contains_intersect_with_separated_sequence)
+        }
+        GrammarExpr::SeparatedSequence { items, separator, .. } => {
+            items
+                .iter()
+                .any(|(item, _)| contains_intersect_with_separated_sequence(item))
+                || contains_intersect_with_separated_sequence(separator)
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            contains_intersect_with_separated_sequence(expr)
+                || contains_intersect_with_separated_sequence(exclude)
+        }
+        GrammarExpr::Ref(_)
+        | GrammarExpr::Epsilon
+        | GrammarExpr::Literal(_)
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte
+        | GrammarExpr::ExprNFA(_) => false,
+    }
+}
+
 fn contains_ref_named(expr: &GrammarExpr, name: &str) -> bool {
     match expr {
         GrammarExpr::Ref(rule_name) => rule_name == name,
@@ -394,6 +431,95 @@ fn required_prefix_open_object_uses_pair_loop_body() {
         glrm.contains("json_required_prefix_open_object_pair_loop_body"),
         "{glrm}"
     );
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn open_additional_map_min_properties_requires_dynamic_pair() {
+    let schema = json!({
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": {"type": "string"}
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let GrammarExpr::Sequence(parts) = start_expr(&grammar) else {
+        panic!("expected object sequence: {:?}", start_expr(&grammar));
+    };
+    assert_eq!(parts.len(), 3);
+    assert!(!matches!(parts[1], GrammarExpr::Epsilon));
+    assert!(!matches!(parts[1], GrammarExpr::Optional(_)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn closed_fixed_object_min_properties_requires_one_optional_after_required() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "a": {"type": "string"},
+            "b": {"type": "string"},
+            "c": {"type": "string"},
+            "d": {"type": "string"}
+        },
+        "required": ["a", "b"],
+        "minProperties": 3,
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn closed_fixed_object_min_max_properties_exactly_one_optional() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "a": {"type": "string"},
+            "b": {"type": "string"}
+        },
+        "minProperties": 1,
+        "maxProperties": 1,
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn closed_fixed_object_max_properties_caps_optional_after_required() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "a": {"type": "string"},
+            "b": {"type": "string"}
+        },
+        "required": ["name"],
+        "maxProperties": 2,
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn open_additional_map_max_properties_emits_bounded_dynamic_body() {
+    let schema = json!({
+        "type": "object",
+        "maxProperties": 2,
+        "additionalProperties": {"type": "integer"}
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("{0,1}") || glrm.contains("?"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -1902,6 +2028,43 @@ fn integer_power_of_ten_multiple_lowers_to_regex() {
 }
 
 #[test]
+fn unbounded_integer_multiple_of_three_remains_unsupported() {
+    let schema = json!({"type": "integer", "multipleOf": 3});
+    let error = schema_to_named_grammar(&schema).unwrap_err();
+    assert!(error.to_string().contains("integer multipleOf=3 is unsupported"), "{error}");
+}
+
+#[test]
+fn lower_bounded_integer_multiple_of_twelve_remains_unsupported() {
+    let schema = json!({"type": "integer", "minimum": 0, "multipleOf": 12});
+    let error = schema_to_named_grammar(&schema).unwrap_err();
+    assert!(error.to_string().contains("integer multipleOf=12 is unsupported"), "{error}");
+}
+
+#[test]
+fn bounded_integer_multiple_of_sixteen_lowers_without_enumerating_large_range() {
+    let schema = json!({
+        "type": "integer",
+        "minimum": -2032,
+        "maximum": 2031,
+        "multipleOf": 16
+    });
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let GrammarExpr::Choice(alternatives) = start_expr(&grammar) else {
+        panic!("expected bounded multiple choice: {:?}", start_expr(&grammar));
+    };
+    assert_eq!(alternatives.len(), 254);
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn non_integer_integer_multiple_of_remains_unsupported() {
+    let schema = json!({"type": "integer", "multipleOf": 2.5});
+    let error = schema_to_named_grammar(&schema).unwrap_err();
+    assert!(error.to_string().contains("integer multipleOf=2.5 is unsupported"), "{error}");
+}
+
+#[test]
 fn finite_integer_range_multiple_lowers_to_literals() {
     let schema = json!({
         "type": "integer",
@@ -2471,6 +2634,90 @@ fn allof_merges_plain_object_branches() {
     assert!(glrm.contains("\\\"a\\\""), "{glrm}");
     assert!(glrm.contains("\\\"b\\\""), "{glrm}");
     lower(&grammar).unwrap();
+}
+
+#[test]
+fn allof_merges_array_ref_with_min_items_assertion() {
+    let schema = json!({
+        "definitions": {
+            "positionArray": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 1
+            }
+        },
+        "allOf": [
+            {"$ref": "#/definitions/positionArray"},
+            {"minItems": 2}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let expr = start_expr(&grammar);
+    assert!(!contains_intersect_with_separated_sequence(expr), "{expr:?}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn allof_merges_array_bounds_before_ref_branch() {
+    let schema = json!({
+        "definitions": {
+            "positionArray": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 1
+            }
+        },
+        "allOf": [
+            {"minItems": 2},
+            {"$ref": "#/definitions/positionArray"}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let expr = start_expr(&grammar);
+    assert!(!contains_intersect_with_separated_sequence(expr), "{expr:?}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn allof_array_min_max_items_merge_clamps_bounds() {
+    let schema = json!({
+        "allOf": [
+            {
+                "type": "array",
+                "items": {"type": "integer"},
+                "minItems": 1,
+                "maxItems": 5
+            },
+            {
+                "minItems": 3,
+                "maxItems": 4
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("{3,4}"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn allof_array_merge_preserves_non_array_type_union_guard() {
+    let schema = json!({
+        "allOf": [
+            {
+                "type": ["array", "string"],
+                "items": {"type": "number"}
+            },
+            {"minItems": 2}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let expr = start_expr(&grammar);
+    assert!(contains_intersect(expr), "{expr:?}");
 }
 
 #[test]

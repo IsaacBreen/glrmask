@@ -8,6 +8,7 @@ use super::error::{ImportResult, SchemaImportError};
 use super::lower::{choice, lit_bytes, never, r, Lowerer, JSON_INTEGER_RULE, JSON_NUMBER_RULE};
 
 const MAX_EXPLICIT_INTEGER_RANGE: i64 = 512;
+const MAX_EXPLICIT_INTEGER_MULTIPLES: i64 = 2048;
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_number(&mut self, schema: &NumberSchema) -> ImportResult<GrammarExpr> {
@@ -69,6 +70,9 @@ impl<'a> Lowerer<'a> {
                     .collect::<Vec<_>>();
                 return Ok(choice(alternatives));
             }
+            if let Some(expr) = bounded_integer_multiple_choice(lower, upper, schema.multiple_of) {
+                return Ok(expr);
+            }
         }
         if schema.multiple_of.is_none() && (lower.is_some() || upper.is_some()) {
             let regex = rx_int_range(lower, upper).map_err(SchemaImportError::new)?;
@@ -76,8 +80,15 @@ impl<'a> Lowerer<'a> {
         }
 
         if let Some(multiple) = schema.multiple_of {
-            if let Some(regex) = power_of_ten_multiple_regex(multiple) {
-                return Ok(GrammarExpr::RawRegex(regex));
+            if let Some(expr) = integer_multiple_expr(multiple) {
+                if lower.is_some() || upper.is_some() {
+                    let range_regex = rx_int_range(lower, upper).map_err(SchemaImportError::new)?;
+                    return Ok(GrammarExpr::Intersect {
+                        expr: Box::new(expr),
+                        intersect: Box::new(GrammarExpr::RawRegex(range_regex)),
+                    });
+                }
+                return Ok(expr);
             }
             return Err(SchemaImportError::new(format!(
                 "integer multipleOf={multiple} is unsupported without a small finite integer range"
@@ -118,6 +129,52 @@ fn integer_satisfies_multiple(value: i64, multiple: Option<f64>) -> bool {
     };
     let quotient = (value as f64) / multiple;
     (quotient - quotient.round()).abs() < 1e-9
+}
+
+fn bounded_integer_multiple_choice(
+    lower: i64,
+    upper: i64,
+    multiple: Option<f64>,
+) -> Option<GrammarExpr> {
+    let multiple = positive_integer_multiple_i64(multiple?)?;
+    let first = ceil_div_i64(lower, multiple).checked_mul(multiple)?;
+    if first > upper {
+        return Some(never());
+    }
+    let count = ((upper - first) / multiple) + 1;
+    if count > MAX_EXPLICIT_INTEGER_MULTIPLES {
+        return None;
+    }
+    let alternatives = (0..count)
+        .map(|index| {
+            let value = first + index * multiple;
+            lit_bytes(value.to_string().into_bytes())
+        })
+        .collect::<Vec<_>>();
+    Some(choice(alternatives))
+}
+
+fn ceil_div_i64(value: i64, divisor: i64) -> i64 {
+    let quotient = value / divisor;
+    let remainder = value % divisor;
+    if remainder > 0 { quotient + 1 } else { quotient }
+}
+
+fn integer_multiple_expr(multiple: f64) -> Option<GrammarExpr> {
+    power_of_ten_multiple_regex(multiple).map(GrammarExpr::RawRegex)
+}
+
+fn positive_integer_multiple_value(multiple: f64) -> Option<u64> {
+    if !multiple.is_finite() || multiple < 1.0 || multiple.fract() != 0.0 {
+        return None;
+    }
+    let value = multiple as u64;
+    if (value as f64) == multiple { Some(value) } else { None }
+}
+
+fn positive_integer_multiple_i64(multiple: f64) -> Option<i64> {
+    let value = positive_integer_multiple_value(multiple)?;
+    i64::try_from(value).ok()
 }
 
 fn power_of_ten_multiple_regex(multiple: f64) -> Option<String> {

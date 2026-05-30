@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use crate::import::ast::GrammarExpr;
 
 use super::ast::{
-    AdditionalProperties, ObjectSchema, PropertySchema, Schema, SchemaAssertions, SchemaKind,
-    SchemaType,
+    AdditionalProperties, ArraySchema, ObjectSchema, PropertySchema, Schema, SchemaAssertions,
+    SchemaKind, SchemaType,
 };
 use super::error::ImportResult;
 use super::lower::{choice, never, normalize_local_ref, r, Lowerer, JSON_OBJECT_RULE, JSON_VALUE_RULE};
@@ -148,6 +148,9 @@ impl<'a> Lowerer<'a> {
             return Ok(r(JSON_VALUE_RULE));
         }
         if let Some(merged) = merge_all_of_object_like_schema(&branches) {
+            return self.lower_schema(&merged);
+        }
+        if let Some(merged) = merge_all_of_array_like_schema(&branches) {
             return self.lower_schema(&merged);
         }
         if let Some(object) = try_merge_all_of_objects(&branches) {
@@ -1397,6 +1400,82 @@ fn merge_all_of_object_like_schema(branches: &[Schema]) -> Option<Schema> {
             ..SchemaAssertions::default()
         },
     ))
+}
+
+fn merge_all_of_array_like_schema(branches: &[Schema]) -> Option<Schema> {
+    let mut merged = None;
+    let mut pending_bounds = None;
+    let mut saw_array_shape = false;
+
+    for branch in branches {
+        let (array, constrains_to_array) = plain_array_schema(branch)?;
+        if array_is_bounds_only(array) {
+            if let Some(existing) = &mut pending_bounds {
+                merge_array_bounds(existing, array);
+            } else {
+                pending_bounds = Some(array.clone());
+            }
+            continue;
+        }
+
+        if !constrains_to_array || saw_array_shape {
+            return None;
+        }
+        merged = Some(array.clone());
+        saw_array_shape = true;
+    }
+
+    if let (Some(array), Some(bounds)) = (&mut merged, &pending_bounds) {
+        merge_array_bounds(array, bounds);
+    }
+
+    saw_array_shape.then(|| {
+        Schema::assertions(
+            "<merged-allOf-array-like>",
+            SchemaAssertions {
+                types: Some(vec![SchemaType::Array]),
+                array: merged,
+                ..SchemaAssertions::default()
+            },
+        )
+    })
+}
+
+fn plain_array_schema(schema: &Schema) -> Option<(&ArraySchema, bool)> {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return None;
+    };
+    if assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || assertions.object.is_some()
+        || assertions.string.is_some()
+        || assertions.number.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+    {
+        return None;
+    }
+    let constrains_to_array = match &assertions.types {
+        Some(types) if types.iter().all(|schema_type| *schema_type == SchemaType::Array) => true,
+        Some(_) => return None,
+        None => false,
+    };
+    Some((assertions.array.as_ref()?, constrains_to_array))
+}
+
+fn array_is_bounds_only(array: &ArraySchema) -> bool {
+    schemas_shape_equivalent(&array.items, &Schema::any("<implicit-array-items>"))
+        && array.prefix_items.is_empty()
+}
+
+fn merge_array_bounds(left: &mut ArraySchema, right: &ArraySchema) {
+    left.min_items = left.min_items.max(right.min_items);
+    left.max_items = match (left.max_items, right.max_items) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(max), None) | (None, Some(max)) => Some(max),
+        (None, None) => None,
+    };
 }
 
 
