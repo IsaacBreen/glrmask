@@ -90,9 +90,14 @@ impl<'a> Lowerer<'a> {
                 }
                 return Ok(expr);
             }
-            return Err(SchemaImportError::new(format!(
-                "integer multipleOf={multiple} is unsupported without a small finite integer range"
-            )));
+            if positive_integer_multiple_value(multiple).is_some() {
+                if lower.is_some() || upper.is_some() {
+                    let regex = rx_int_range(lower, upper).map_err(SchemaImportError::new)?;
+                    return Ok(GrammarExpr::RawRegex(regex));
+                }
+                return Ok(r(JSON_INTEGER_RULE));
+            }
+            return Err(SchemaImportError::new(format!("integer multipleOf={multiple} is unsupported")));
         }
 
         Ok(r(JSON_INTEGER_RULE))

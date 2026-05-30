@@ -1820,6 +1820,29 @@ fn unknown_metadata_keys_are_ignored() {
 }
 
 #[test]
+fn conditional_keywords_are_ignored_for_broad_lowering() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string"},
+            "payload": {"type": "string"}
+        },
+        "if": {
+            "properties": {"kind": {"const": "needs_payload"}}
+        },
+        "then": {
+            "required": ["payload"]
+        },
+        "else": {
+            "properties": {"payload": false}
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn oneof_lowers_as_choice() {
     let schema = json!({
         "oneOf": [
@@ -2064,17 +2087,22 @@ fn integer_power_of_ten_multiple_lowers_to_regex() {
 }
 
 #[test]
-fn unbounded_integer_multiple_of_three_remains_unsupported() {
+fn unbounded_integer_multiple_of_three_lowers_broadly() {
     let schema = json!({"type": "integer", "multipleOf": 3});
-    let error = schema_to_named_grammar(&schema).unwrap_err();
-    assert!(error.to_string().contains("integer multipleOf=3 is unsupported"), "{error}");
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(matches!(start_expr(&grammar), GrammarExpr::Ref(name) if name == "JSON_INTEGER"));
+    lower(&grammar).unwrap();
 }
 
 #[test]
-fn lower_bounded_integer_multiple_of_twelve_remains_unsupported() {
+fn lower_bounded_integer_multiple_of_twelve_lowers_to_range() {
     let schema = json!({"type": "integer", "minimum": 0, "multipleOf": 12});
-    let error = schema_to_named_grammar(&schema).unwrap_err();
-    assert!(error.to_string().contains("integer multipleOf=12 is unsupported"), "{error}");
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let GrammarExpr::RawRegex(regex) = start_expr(&grammar) else {
+        panic!("expected broad integer range regex: {:?}", start_expr(&grammar));
+    };
+    assert!(regex.contains("[1-9][0-9]"), "{regex}");
+    lower(&grammar).unwrap();
 }
 
 #[test]

@@ -344,9 +344,6 @@ fn is_unsupported_validation_key(key: &str) -> bool {
             | "dependencies"
             | "dependentRequired"
             | "dependentSchemas"
-            | "if"
-            | "then"
-            | "else"
             | "unevaluatedProperties"
             | "unevaluatedItems"
     )
