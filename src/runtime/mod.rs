@@ -7,6 +7,7 @@ pub mod mask_mapping;
 mod serde;
 mod state;
 mod token_space;
+pub(crate) use artifact::CommitTemplateDfas;
 pub use crate::compiler::glr::parser::{
 	AdvanceProfile,
 	AdvanceTrace,

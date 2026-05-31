@@ -7,15 +7,21 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Instant;
 
-use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::unweighted_u32::determinize::determinize;
 use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as minimize_dfa;
 use crate::automata::unweighted_u32::nfa::NFA;
-use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_negative_label, encode_positive_label};
-use crate::grammar::flat::TerminalID;
+use crate::automata::weighted::nwa::{NWA, NWAState};
+use crate::compiler::glr::labels::{
+    DEFAULT_LABEL,
+    encode_negative_label,
+    encode_positive_label,
+    is_negative_label,
+};
 use crate::compiler::stages::templates::characterize::{StackMatcher, TerminalCharacterization};
 use crate::ds::weight::Weight;
+use crate::grammar::flat::TerminalID;
+use crate::runtime::CommitTemplateDfas;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct TemplateCompileProfile {
@@ -188,9 +194,7 @@ fn dfa_to_nwa_skeleton(dfa: &UnweightedDfa) -> NWA {
     )
 }
 
-pub(crate) fn specialize_template_dfa_defaults_for_commit(
-    dfa: &UnweightedDfa,
-) -> UnweightedDfa {
+fn specialize_template_dfa_defaults_for_commit_determinized(dfa: &UnweightedDfa) -> UnweightedDfa {
     let mut nfa = NFA::new_empty();
     nfa.states = vec![Default::default(); dfa.states.len()];
     nfa.start_states = vec![dfa.start_state];
@@ -216,11 +220,227 @@ pub(crate) fn specialize_template_dfa_defaults_for_commit(
         }
     }
 
-    let determinized = determinize(&nfa);
+    determinize(&nfa)
+}
+
+pub(crate) fn specialize_template_dfa_defaults_for_commit(
+    dfa: &UnweightedDfa,
+) -> UnweightedDfa {
+    let determinized = specialize_template_dfa_defaults_for_commit_determinized(dfa);
     if skip_template_minimization_enabled() {
         determinized
     } else {
         minimize_dfa(&determinized)
+    }
+}
+
+pub(crate) fn specialize_template_dfa_defaults_for_commit_split_input(
+    dfa: &UnweightedDfa,
+) -> UnweightedDfa {
+    specialize_template_dfa_defaults_for_commit_determinized(dfa)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CommitTemplatePhase {
+    Pop,
+    PushEntry,
+    PushAfter,
+}
+
+fn ensure_pop_state(
+    old_state: u32,
+    old_dfa: &UnweightedDfa,
+    pop: &mut UnweightedDfa,
+    pop_to_read: &mut Vec<Option<u32>>,
+    pop_to_push: &mut Vec<Option<u32>>,
+    pop_map: &mut BTreeMap<u32, u32>,
+) -> u32 {
+    if let Some(&state) = pop_map.get(&old_state) {
+        return state;
+    }
+    let state = pop.add_state();
+    pop_to_read.resize(pop.states.len(), None);
+    pop_to_push.resize(pop.states.len(), None);
+    if let Some(old) = old_dfa.states.get(old_state as usize) {
+        pop.states[state as usize].is_accepting = old.is_accepting;
+    }
+    pop_map.insert(old_state, state);
+    state
+}
+
+fn ensure_push_state(
+    old_state: u32,
+    old_dfa: &UnweightedDfa,
+    push: &mut UnweightedDfa,
+    push_map: &mut BTreeMap<u32, u32>,
+) -> u32 {
+    if let Some(&state) = push_map.get(&old_state) {
+        return state;
+    }
+    let state = push.add_state();
+    if let Some(old) = old_dfa.states.get(old_state as usize) {
+        push.states[state as usize].is_accepting = old.is_accepting;
+    }
+    push_map.insert(old_state, state);
+    state
+}
+
+fn ensure_read_source_state(
+    old_state: u32,
+    read: &mut UnweightedDfa,
+    read_to_push: &mut Vec<Option<u32>>,
+    read_source_map: &mut BTreeMap<u32, u32>,
+) -> u32 {
+    if let Some(&state) = read_source_map.get(&old_state) {
+        return state;
+    }
+    let state = read.add_state();
+    read_to_push.resize(read.states.len(), None);
+    read_source_map.insert(old_state, state);
+    state
+}
+
+fn ensure_read_target_state(
+    old_state: u32,
+    read: &mut UnweightedDfa,
+    read_to_push: &mut Vec<Option<u32>>,
+    read_target_map: &mut BTreeMap<u32, u32>,
+) -> u32 {
+    if let Some(&state) = read_target_map.get(&old_state) {
+        return state;
+    }
+    let state = read.add_state();
+    read_to_push.resize(read.states.len(), None);
+    read_target_map.insert(old_state, state);
+    state
+}
+
+fn pure_same_label_push_target(dfa: &UnweightedDfa, old_state: u32, label: i32) -> Option<u32> {
+    let state = dfa.states.get(old_state as usize)?;
+    if state.is_accepting || state.transitions.len() != 1 {
+        return None;
+    }
+    let (&push_label, &target) = state.transitions.iter().next()?;
+    (push_label == encode_negative_label(label as u32)).then_some(target)
+}
+
+pub(crate) fn split_commit_template_dfas(dfa: &UnweightedDfa) -> CommitTemplateDfas {
+    let mut pop = UnweightedDfa::default();
+    let mut read = UnweightedDfa::default();
+    let mut push = UnweightedDfa::default();
+    let mut pop_to_read = Vec::new();
+    let mut pop_to_push = Vec::new();
+    let mut read_to_push = Vec::new();
+    let mut pop_map = BTreeMap::new();
+    let mut push_map = BTreeMap::new();
+    let mut read_source_map = BTreeMap::new();
+    let mut read_target_map = BTreeMap::new();
+
+    let start = ensure_pop_state(
+        dfa.start_state,
+        dfa,
+        &mut pop,
+        &mut pop_to_read,
+        &mut pop_to_push,
+        &mut pop_map,
+    );
+    pop.start_state = start;
+
+    let mut worklist = VecDeque::from([(dfa.start_state, CommitTemplatePhase::Pop)]);
+    let mut visited = BTreeSet::new();
+
+    while let Some((old_state, phase)) = worklist.pop_front() {
+        if !visited.insert((old_state, phase)) {
+            continue;
+        }
+        let Some(old) = dfa.states.get(old_state as usize) else {
+            continue;
+        };
+
+        match phase {
+            CommitTemplatePhase::Pop => {
+                let pop_state = ensure_pop_state(
+                    old_state,
+                    dfa,
+                    &mut pop,
+                    &mut pop_to_read,
+                    &mut pop_to_push,
+                    &mut pop_map,
+                );
+                for (&label, &target) in &old.transitions {
+                    if is_negative_label(label) {
+                        let push_state = ensure_push_state(old_state, dfa, &mut push, &mut push_map);
+                        pop_to_push[pop_state as usize] = Some(push_state);
+                        worklist.push_back((old_state, CommitTemplatePhase::PushEntry));
+                        continue;
+                    }
+
+                    if label != DEFAULT_LABEL
+                        && label >= 0
+                        && let Some(post_read_target) =
+                            pure_same_label_push_target(dfa, target, label)
+                    {
+                        let read_source = ensure_read_source_state(
+                            old_state,
+                            &mut read,
+                            &mut read_to_push,
+                            &mut read_source_map,
+                        );
+                        pop_to_read[pop_state as usize] = Some(read_source);
+                        let read_target = ensure_read_target_state(
+                            post_read_target,
+                            &mut read,
+                            &mut read_to_push,
+                            &mut read_target_map,
+                        );
+                        read.add_transition(read_source, label, read_target);
+                        let push_target =
+                            ensure_push_state(post_read_target, dfa, &mut push, &mut push_map);
+                        read_to_push[read_target as usize] = Some(push_target);
+                        worklist.push_back((post_read_target, CommitTemplatePhase::PushAfter));
+                        continue;
+                    }
+
+                    if label == DEFAULT_LABEL || label >= 0 {
+                        let target_state = ensure_pop_state(
+                            target,
+                            dfa,
+                            &mut pop,
+                            &mut pop_to_read,
+                            &mut pop_to_push,
+                            &mut pop_map,
+                        );
+                        pop.add_transition(pop_state, label, target_state);
+                        worklist.push_back((target, CommitTemplatePhase::Pop));
+                    }
+                }
+            }
+            CommitTemplatePhase::PushEntry | CommitTemplatePhase::PushAfter => {
+                let push_state = ensure_push_state(old_state, dfa, &mut push, &mut push_map);
+                for (&label, &target) in &old.transitions {
+                    if !is_negative_label(label) {
+                        if phase == CommitTemplatePhase::PushEntry {
+                            continue;
+                        }
+                        panic!(
+                            "commit template split saw pop/read label {label} after push at old state {old_state}"
+                        );
+                    }
+                    let target_state = ensure_push_state(target, dfa, &mut push, &mut push_map);
+                    push.add_transition(push_state, label, target_state);
+                    worklist.push_back((target, CommitTemplatePhase::PushAfter));
+                }
+            }
+        }
+    }
+
+    CommitTemplateDfas {
+        pop,
+        read,
+        push,
+        pop_to_read,
+        pop_to_push,
+        read_to_push,
     }
 }
 

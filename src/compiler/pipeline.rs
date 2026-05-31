@@ -29,7 +29,10 @@ use crate::compiler::stages::mapped_artifact::{
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals_profiled;
-use crate::compiler::stages::templates::compile_dfa::specialize_template_dfa_defaults_for_commit;
+use crate::compiler::stages::templates::compile_dfa::{
+    specialize_template_dfa_defaults_for_commit_split_input,
+    split_commit_template_dfas,
+};
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::{GrammarDef, Terminal};
@@ -518,8 +521,10 @@ fn compile_prepared_with_profile(
                     vec![None; analyzed_grammar.num_terminals as usize];
                 for (&terminal, dfa) in &templates.by_terminal {
                     if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
-                        let commit_dfa = specialize_template_dfa_defaults_for_commit(dfa);
-                        *slot = Some(Arc::new(commit_dfa));
+                        let commit_dfa =
+                            specialize_template_dfa_defaults_for_commit_split_input(dfa);
+                        let split_commit_dfas = split_commit_template_dfas(&commit_dfa);
+                        *slot = Some(Arc::new(split_commit_dfas));
                     }
                 }
                 if compile_profile_enabled() {

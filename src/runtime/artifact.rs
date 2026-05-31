@@ -28,7 +28,17 @@ pub(crate) type SeedStateDenseMasks = Vec<DenseWords>;
 pub(crate) type SeedStateBufMasks = Vec<Option<Box<[u32]>>>;
 pub(crate) type FastDwaTransitions = Vec<FxHashMap<i32, (u32, Weight)>>;
 pub(crate) type FastTokenizerTransitions = Vec<Box<[u32; 256]>>;
-pub(crate) type TemplateDfasByTerminal = Vec<Option<Arc<UnweightedDfa>>>;
+pub(crate) type TemplateDfasByTerminal = Vec<Option<Arc<CommitTemplateDfas>>>;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CommitTemplateDfas {
+    pub(crate) pop: UnweightedDfa,
+    pub(crate) read: UnweightedDfa,
+    pub(crate) push: UnweightedDfa,
+    pub(crate) pop_to_read: Vec<Option<u32>>,
+    pub(crate) pop_to_push: Vec<Option<u32>>,
+    pub(crate) read_to_push: Vec<Option<u32>>,
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Constraint {
