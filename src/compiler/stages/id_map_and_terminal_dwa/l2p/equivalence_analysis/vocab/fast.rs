@@ -2223,17 +2223,10 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     };
 
     let num_groups = dfa_ref.num_groups;
-    // Use all states in a single batch when feasible.  A single batch avoids
-    // repeated token sorting, trie walk reinitialisation, rayon sync points
-    // between batches, and redundant finish_token_signature iterations.
-    // Memory per rayon thread is bounded by the match_positions working set
-    // (batch_size * num_groups * 4 bytes).  With the 16 MB target, the worst
-    // case across an 8-thread pool is ~128 MB — fine for a one-shot compile.
-    let default_batch_size = {
-        let target_bytes = 16_000_000usize;
-        let per_state_bytes = num_groups.max(1) * std::mem::size_of::<u32>();
-        (target_bytes / per_state_bytes).clamp(500, 50_000)
-    };
+    // A 500-state default is empirically better for the TTFM tail than the
+    // older memory-target-derived large batch when combined with the no-unit
+    // GLR default; keep the env override for A/B.
+    let default_batch_size = 500usize;
     let batch_size = vocab_batch_size_override()
         .unwrap_or_else(|| num_initial_states.min(default_batch_size));
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
