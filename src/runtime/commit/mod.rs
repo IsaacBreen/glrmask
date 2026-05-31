@@ -1,4 +1,5 @@
 pub(crate) mod profile;
+mod template_advance;
 pub(crate) mod tokenizer_scan;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,6 +28,10 @@ use self::profile::{
     CommitProfile,
     PerAdvanceEntry,
 };
+use self::template_advance::{
+    advance_stacks_template_dfa,
+    advance_stacks_template_dfa_owned,
+};
 use self::tokenizer_scan::{execute_tokenizer_from_state_small, InitialCommitScan};
 
 type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
@@ -41,6 +46,87 @@ struct NormalizedMatch {
 }
 
 const SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH: usize = 256;
+static TEMPLATE_ADVANCE_ENABLED: OnceLock<bool> = OnceLock::new();
+static VALIDATE_TEMPLATE_ADVANCE_ENABLED: OnceLock<bool> = OnceLock::new();
+
+fn template_advance_enabled() -> bool {
+    *TEMPLATE_ADVANCE_ENABLED
+        .get_or_init(|| std::env::var_os("GLRMASK_DISABLE_TEMPLATE_DFA_ADVANCE").is_none())
+}
+
+fn validate_template_advance_enabled() -> bool {
+    *VALIDATE_TEMPLATE_ADVANCE_ENABLED
+        .get_or_init(|| std::env::var_os("GLRMASK_VALIDATE_TEMPLATE_DFA_ADVANCE").is_some())
+}
+
+fn advance_parser_stacks(
+    constraint: &Constraint,
+    stack: &ParserGSS,
+    terminal: u32,
+) -> ParserGSS {
+    if template_advance_enabled()
+        && let Some(template_advanced) = advance_stacks_template_dfa(constraint, stack, terminal)
+    {
+        if validate_template_advance_enabled() {
+            let table_advanced = advance_stacks(&constraint.table, stack, terminal);
+            assert_eq!(
+                template_advanced,
+                table_advanced,
+                "template-DFA advance mismatch for terminal {terminal}"
+            );
+        }
+        return template_advanced;
+    }
+
+    advance_stacks(&constraint.table, stack, terminal)
+}
+
+fn advance_parser_stacks_owned(
+    constraint: &Constraint,
+    stack: ParserGSS,
+    terminal: u32,
+) -> ParserGSS {
+    if template_advance_enabled()
+        && let Some(template_advanced) =
+            advance_stacks_template_dfa_owned(constraint, stack.clone(), terminal)
+    {
+        if validate_template_advance_enabled() {
+            let table_advanced = advance_stacks_owned(&constraint.table, stack, terminal);
+            assert_eq!(
+                template_advanced,
+                table_advanced,
+                "template-DFA advance mismatch for terminal {terminal}"
+            );
+        }
+        return template_advanced;
+    }
+
+    advance_stacks_owned(&constraint.table, stack, terminal)
+}
+
+fn advance_parser_stacks_profiled(
+    constraint: &Constraint,
+    stack: &ParserGSS,
+    terminal: u32,
+) -> (ParserGSS, AdvanceProfile) {
+    if template_advance_enabled()
+        && let Some(template_advanced) = advance_stacks_template_dfa(constraint, stack, terminal)
+    {
+        if validate_template_advance_enabled() {
+            let (table_advanced, table_profile) =
+                advance_stacks_profiled(&constraint.table, stack, terminal);
+            assert_eq!(
+                template_advanced,
+                table_advanced,
+                "template-DFA advance mismatch for terminal {terminal}"
+            );
+            return (template_advanced, table_profile);
+        }
+        return (template_advanced, AdvanceProfile::default());
+    }
+
+    advance_stacks_profiled(&constraint.table, stack, terminal)
+}
 
 /// Cache for `advance_stacks` results, keyed by (GSS pointer, terminal).
 /// Stores the key GSS alongside the result to keep its Arc alive and prevent
@@ -729,7 +815,7 @@ fn advance_terminal_match(
     let advanced = if let Some((_, cached)) = advance_result_cache.get(&advance_cache_key) {
         cached.clone()
     } else {
-        let advanced = advance_stacks(&constraint.table, gss_at_offset, terminal);
+        let advanced = advance_parser_stacks(constraint, gss_at_offset, terminal);
         advance_result_cache.insert(advance_cache_key, (gss_at_offset.clone(), advanced.clone()));
         advanced
     };
@@ -785,7 +871,7 @@ fn commit_bytes_fast_path(
 
     // Ultra-fast path: single Interface, empty accs, no end_state, pure shift.
     // Inlines the entire advance + prune + fuse to avoid all function call overhead.
-    if all_accs_empty {
+    if all_accs_empty && !template_advance_enabled() {
         if let Some(top_state) = gss.single_exclusive_top_value() {
             if let Some(action) = constraint.table.action(top_state, terminal) {
                 if let Some(shifted) =
@@ -843,7 +929,8 @@ fn commit_bytes_fast_path(
 
     // The terminal and tokenizer end-state continuations are independent.
     // Preserve either branch if it produces viable parser state.
-    let advanced = if let Some(top_state) = pruned_gss.single_exclusive_top_value()
+    let advanced = if !template_advance_enabled()
+        && let Some(top_state) = pruned_gss.single_exclusive_top_value()
         && let Some(action) = constraint.table.action(top_state, terminal)
         && let Some(advanced) = apply_single_top_action_fast(
             &constraint.table,
@@ -855,7 +942,7 @@ fn commit_bytes_fast_path(
     {
         advanced
     } else {
-        advance_stacks_owned(&constraint.table, pruned_gss, terminal)
+        advance_parser_stacks_owned(constraint, pruned_gss, terminal)
     };
     let mut produced_state = false;
     if !advanced.is_empty() {
@@ -938,7 +1025,8 @@ fn commit_bytes_full_width_fast_path(
         };
 
         if let Some(terminal) = terminal {
-            let advanced = if let Some(top_state) = pruned_gss.single_exclusive_top_value()
+            let advanced = if !template_advance_enabled()
+                && let Some(top_state) = pruned_gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
                 && let Some(advanced) =
                     apply_single_top_action_fast(
@@ -954,7 +1042,7 @@ fn commit_bytes_full_width_fast_path(
                 if !stack_may_advance_on(&constraint.table, &pruned_gss, terminal) {
                     return None;
                 }
-                advance_stacks(&constraint.table, &pruned_gss, terminal)
+                advance_parser_stacks(constraint, &pruned_gss, terminal)
             };
             if advanced.is_empty() {
                 continue;
@@ -1082,7 +1170,8 @@ fn commit_bytes_small_queue_fast_path(
                     continue;
                 }
 
-                let advanced = if let Some(top_state) = gss_at_offset.single_exclusive_top_value()
+                let advanced = if !template_advance_enabled()
+                    && let Some(top_state) = gss_at_offset.single_exclusive_top_value()
                     && let Some(action) = constraint.table.action(top_state, matched.terminal_id)
                     && let Some(advanced) = apply_single_top_action_fast(
                         &constraint.table,
@@ -1101,7 +1190,7 @@ fn commit_bytes_small_queue_fast_path(
                     ) {
                         continue;
                     }
-                    advance_stacks(&constraint.table, &gss_at_offset, matched.terminal_id)
+                    advance_parser_stacks(constraint, &gss_at_offset, matched.terminal_id)
                 };
                 let advanced = apply_future_terminal_disallow(
                     constraint,
@@ -1405,7 +1494,9 @@ fn commit_bytes_direct_linear_fast_path(
             }
             if let Some(action) = carried_action {
                 let apply_action_start = profile.as_ref().map(|_| std::time::Instant::now());
-                if let Some(stack) = carried_stack.as_mut() {
+                if !template_advance_enabled()
+                    && let Some(stack) = carried_stack.as_mut()
+                {
                     match action {
                         Action::Shift(target, is_replace) => {
                             if *is_replace {
@@ -1465,7 +1556,8 @@ fn commit_bytes_direct_linear_fast_path(
                 }
             }
             let advance_start = profile.as_ref().map(|_| std::time::Instant::now());
-            let advanced = if let Some(top_state) = gss.single_exclusive_top_value()
+            let advanced = if !template_advance_enabled()
+                && let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, step.terminal)
                 && let Some(advanced) =
                     apply_single_top_action_fast(
@@ -1480,7 +1572,7 @@ fn commit_bytes_direct_linear_fast_path(
             } else {
                 if let Some(profile) = profile.as_deref_mut() {
                     let (advanced, advance_profile) =
-                        advance_stacks_profiled(&constraint.table, &gss, step.terminal);
+                        advance_parser_stacks_profiled(constraint, &gss, step.terminal);
                     if advanced.is_empty() {
                         return None;
                     }
@@ -1491,7 +1583,7 @@ fn commit_bytes_direct_linear_fast_path(
                         bookkeeping_start.elapsed().as_nanos() as u64;
                     advanced
                 } else {
-                    let advanced = advance_stacks(&constraint.table, &gss, step.terminal);
+                    let advanced = advance_parser_stacks(constraint, &gss, step.terminal);
                     if advanced.is_empty() {
                         return None;
                     }
@@ -1643,7 +1735,7 @@ fn commit_bytes_fast_path_profiled(
     let all_accs_empty = no_end_state
         && gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
 
-    if all_accs_empty {
+    if all_accs_empty && !template_advance_enabled() {
         if let Some(top_state) = gss.single_exclusive_top_value() {
             if let Some(Action::Shift(target, is_replace)) = constraint.table.action(top_state, terminal) {
                 let advance_start = Instant::now();
@@ -1690,9 +1782,12 @@ fn commit_bytes_fast_path_profiled(
                 profile.fast_path_tokenizer_exec_ns = profile.exec_ns;
                 return Some(Ok(()));
             }
-            if let Some(Action::StackShifts(shifts)) = constraint.table.action(top_state, terminal) {
+            if !template_advance_enabled()
+                && let Some(Action::StackShifts(shifts)) = constraint.table.action(top_state, terminal)
+            {
                 let advance_start = Instant::now();
-                let (shifted, advance_profile) = advance_stacks_profiled(&constraint.table, gss, terminal);
+                let (shifted, advance_profile) =
+                    advance_parser_stacks_profiled(constraint, gss, terminal);
                 profile.fast_path_advance_ns = advance_start.elapsed().as_nanos() as u64;
                 profile.advance_core_ns = profile.fast_path_advance_ns;
                 profile.advance_ns = profile.fast_path_advance_ns;
@@ -1768,14 +1863,14 @@ fn commit_bytes_fast_path_profiled(
     let end_state_gss = end_state_to_keep.map(|_| pruned_gss.clone());
 
     let advance_start = Instant::now();
-    let advanced = advance_stacks_owned(&constraint.table, pruned_gss.clone(), terminal);
+    let advanced = advance_parser_stacks_owned(constraint, pruned_gss.clone(), terminal);
     profile.fast_path_advance_ns = advance_start.elapsed().as_nanos() as u64;
     profile.advance_core_ns = profile.fast_path_advance_ns;
     profile.n_advances = 1;
 
     if let Some(advances) = advances {
         let (after_for_entry, advance_profile) =
-            advance_stacks_profiled(&constraint.table, &pruned_gss, terminal);
+            advance_parser_stacks_profiled(constraint, &pruned_gss, terminal);
         profile.adv_summary_ns += record_per_advance_entry(
             advances,
             tokenizer_state,
@@ -2057,8 +2152,8 @@ fn commit_bytes_impl_profiled(
 
                                 let advance_core_start = Instant::now();
                                 let (advanced_before_disallow, advance_profile) =
-                                    advance_stacks_profiled(
-                                        &constraint.table,
+                                    advance_parser_stacks_profiled(
+                                        constraint,
                                         &gss_at_offset,
                                         matched.terminal_id,
                                     );
@@ -2250,7 +2345,11 @@ fn commit_bytes_impl_profiled(
 
                 let advance_core_start = Instant::now();
                 let (advanced_before_disallow, advance_profile) =
-                    advance_stacks_profiled(&constraint.table, &gss_at_offset, matched.terminal_id);
+                    advance_parser_stacks_profiled(
+                        constraint,
+                        &gss_at_offset,
+                        matched.terminal_id,
+                    );
                 let advance_core_elapsed = advance_core_start.elapsed().as_nanos() as u64;
                 profile.advance_core_ns += advance_core_elapsed;
                 apply_advance_profile(&mut profile, &advance_profile);
@@ -2436,7 +2535,8 @@ fn commit_bytes_linear_fast_path(
 
         if !ignored {
             let mut shifted_carried_stack = false;
-            if let Some(stack) = carried_stack.as_mut()
+            if !template_advance_enabled()
+                && let Some(stack) = carried_stack.as_mut()
                 && let Some(top_state) = stack.top().copied()
                 && let Some(Action::Shift(target, is_replace)) = constraint.table.action(top_state, terminal)
                 && exec_result.end_state.is_none_or(|end_state| {
@@ -2487,7 +2587,8 @@ fn commit_bytes_linear_fast_path(
                 gss = stack.into_gss();
             }
 
-            let fast_advanced = if let Some(top_state) = gss.single_exclusive_top_value()
+            let fast_advanced = if !template_advance_enabled()
+                && let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
             {
                 apply_single_top_action_fast(&constraint.table, &gss, top_state, terminal, action)
@@ -2498,7 +2599,7 @@ fn commit_bytes_linear_fast_path(
             let advanced = if let Some(advanced) = fast_advanced {
                 advanced
             } else {
-                let advanced = advance_stacks(&constraint.table, &gss, terminal);
+                let advanced = advance_parser_stacks(constraint, &gss, terminal);
                 if advanced.is_empty() {
                     return if offset > 0 {
                         LinearFastPathResult::Continue { gss, offset }
@@ -2624,7 +2725,8 @@ fn commit_bytes_linear_fast_path_profiled(
 
         if !ignored {
             let fast_start = Instant::now();
-            let fast_advanced = if let Some(top_state) = gss.single_exclusive_top_value()
+            let fast_advanced = if !template_advance_enabled()
+                && let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
                 && let Some(advanced) =
                     apply_single_top_action_fast(
@@ -2648,7 +2750,7 @@ fn commit_bytes_linear_fast_path_profiled(
                 } else {
                     let advance_start = Instant::now();
                     let (advanced, advance_profile) =
-                        advance_stacks_profiled(&constraint.table, &gss, terminal);
+                        advance_parser_stacks_profiled(constraint, &gss, terminal);
                     let advance_elapsed = advance_start.elapsed().as_nanos() as u64;
                     if advanced.is_empty() {
                         profile.advance_core_ns += advance_elapsed;

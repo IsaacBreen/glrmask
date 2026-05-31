@@ -4,6 +4,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::table::GLRTable;
 use crate::ds::weight::Weight;
@@ -27,6 +28,7 @@ pub(crate) type SeedStateDenseMasks = Vec<DenseWords>;
 pub(crate) type SeedStateBufMasks = Vec<Option<Box<[u32]>>>;
 pub(crate) type FastDwaTransitions = Vec<FxHashMap<i32, (u32, Weight)>>;
 pub(crate) type FastTokenizerTransitions = Vec<Box<[u32; 256]>>;
+pub(crate) type TemplateDfasByTerminal = Vec<Option<Arc<UnweightedDfa>>>;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Constraint {
@@ -47,6 +49,8 @@ pub struct Constraint {
     pub(crate) possible_matches: PossibleMatchesByTerminal,
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
+    #[serde(skip)]
+    pub(crate) template_dfas_by_terminal: TemplateDfasByTerminal,
     /// Original token -> final shared constraint-internal token id.
     ///
     /// This is not necessarily equal to the parser-DWA compaction vocab map

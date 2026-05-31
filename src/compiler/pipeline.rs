@@ -480,7 +480,10 @@ fn compile_prepared_with_profile(
             );
         let global_max_length_ms = elapsed_ms(global_max_length_started_at);
 
-        let (((mut terminal_dwa, mut terminal_phase_profile), cpm_result), (templates, templates_ms)) = rayon::join(
+        let (
+            ((mut terminal_dwa, mut terminal_phase_profile), cpm_result),
+            (templates, template_dfas_by_terminal, templates_ms),
+        ) = rayon::join(
             || {
                 rayon::join(
                     || {
@@ -510,6 +513,13 @@ fn compile_prepared_with_profile(
                     characterize_terminals_profiled(&table, &analyzed_grammar);
                 let (templates, template_profile) =
                     Templates::from_characterizations_profiled(&characterizations);
+                let mut template_dfas_by_terminal =
+                    vec![None; analyzed_grammar.num_terminals as usize];
+                for (&terminal, dfa) in &templates.by_terminal {
+                    if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
+                        *slot = Some(Arc::new(dfa.clone()));
+                    }
+                }
                 if compile_profile_enabled() {
                     eprintln!(
                         "[glrmask/profile][templates] terminals={} action_signature_classes={} action_quotient_hits={} max_action_signature_multiplicity={} characterization_signature_ms={:.3} characterization_ms={:.3} characterization_fanout_ms={:.3} characterization_validation_ms={:.3} characterization_total_ms={:.3} characterization_quotient_disabled={} unique_characterizations={} compiled_characterizations={} template_quotient_hits={} max_characterization_multiplicity={} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} template_fanout_ms={:.3} template_validation_ms={:.3} template_total_ms={:.3} template_wall_ms={:.3} template_minimize_skipped={} avg_nfa_states={:.2} avg_nfa_transitions={:.2} avg_premin_dfa_states={:.2} avg_premin_dfa_transitions={:.2} avg_dfa_states={:.2} avg_dfa_transitions={:.2} max_dfa_states={} max_dfa_transitions={}",
@@ -545,7 +555,11 @@ fn compile_prepared_with_profile(
                         template_profile.max_dfa_transitions,
                     );
                 }
-                (templates, elapsed_ms(templates_started_at))
+                (
+                    templates,
+                    template_dfas_by_terminal,
+                    elapsed_ms(templates_started_at),
+                )
             },
         );
         terminal_phase_profile.terminal_dwa_ms += flat_trans_ms;
@@ -755,6 +769,7 @@ fn compile_prepared_with_profile(
             internal_tsid_to_states: internal_ids.tokenizer_states.internal_to_originals_vecs(),
             original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),
             internal_token_to_tokens: internal_ids.vocab_tokens.internal_to_originals_vecs(),
+            template_dfas_by_terminal,
             eos_token_id: vocab.eos_token_id,
             json_u_prefix_token_id: None,
             json_escape_prefix_buf_mask: Box::new([]),
