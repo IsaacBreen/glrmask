@@ -902,34 +902,22 @@ fn additional_properties_factoring_uses_shared_key_colon_terminal() {
 }
 
 #[test]
-fn huge_shared_additional_exclusion_set_uses_shared_excluded_addback() {
+fn huge_shared_additional_exclusion_set_uses_expanded_literal_addback() {
     let mut properties = serde_json::Map::new();
     for index in 0..300 {
         properties.insert(format!("field_{index}"), json!({"type": "string"}));
     }
 
-    let schema = json!({
-        "type": "object",
-        "properties": {
-            "with_fixed_keys": {
-                "type": "object",
-                "properties": properties,
-                "additionalProperties": {"type": "string"}
-            },
-            "open_again": {
-                "type": "object",
-                "additionalProperties": {"type": "integer"}
-            }
-        },
-        "additionalProperties": false
-    });
+    let schema = serde_json::Value::Object(serde_json::Map::from_iter([
+        ("type".to_string(), json!("object")),
+        ("properties".to_string(), serde_json::Value::Object(properties)),
+        ("additionalProperties".to_string(), json!({"type": "string"})),
+    ]));
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"), "{glrm}");
-    assert!(glrm.contains("json_additional_excluded_key_colon_shared"), "{glrm}");
-    assert!(glrm.contains("JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED"), "{glrm}");
-    assert!(glrm.matches("\\\"field_0\\\": ").count() <= 5, "{glrm}");
+    assert!(!glrm.contains("json_additional_key_colon_local"), "{glrm}");
     lower(&grammar).unwrap();
 }
 

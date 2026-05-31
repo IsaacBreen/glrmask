@@ -28,6 +28,7 @@ pub(crate) const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE: &str =
     "JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED";
 pub(crate) const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE: &str =
     "json_additional_excluded_key_colon_shared";
+pub(crate) const MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS: usize = 256;
 const STRING_ENUM_REGEX_MIN_VALUES: usize = 64;
 const STRING_ENUM_REGEX_MIN_ENCODED_BYTES: usize = 1024;
 
@@ -50,7 +51,6 @@ pub(crate) struct Lowerer<'a> {
     pub(crate) shared_ap_patterns: Vec<String>,
     pub(crate) shared_ap_base_rule: Option<String>,
     pub(crate) shared_ap_excluded_rule: Option<String>,
-    pub(crate) shared_additional_key_colon_local_rules: BTreeMap<(Vec<String>, Vec<String>), String>,
     pub(crate) shared_ap_pattern_rules: BTreeMap<String, String>,
     pub(crate) shared_pattern_overlap_keys: BTreeMap<String, Vec<String>>,
     pub(crate) shared_pattern_overlap_literal_rules: BTreeMap<String, String>,
@@ -84,7 +84,6 @@ impl<'a> Lowerer<'a> {
             shared_ap_patterns,
             shared_ap_base_rule: None,
             shared_ap_excluded_rule: None,
-            shared_additional_key_colon_local_rules: BTreeMap::new(),
             shared_ap_pattern_rules: BTreeMap::new(),
             shared_pattern_overlap_keys: BTreeMap::new(),
             shared_pattern_overlap_literal_rules: BTreeMap::new(),
