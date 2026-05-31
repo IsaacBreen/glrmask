@@ -1272,9 +1272,10 @@ impl<'a> Lowerer<'a> {
 
                 let mut symbols = Vec::new();
                 if state.has_content {
-                    symbols.push(self.item_separator_expr());
+                    symbols.push(self.lower_literal_key_colon_with_prefix(b", ", key));
+                } else {
+                    symbols.push(self.lower_literal_key_colon(key));
                 }
-                symbols.push(self.lower_literal_key_colon(key));
                 symbols.push(value_expr);
                 Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, next_state_id);
             }
