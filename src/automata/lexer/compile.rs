@@ -961,6 +961,10 @@ impl Regex {
         self.dfa.num_states()
     }
 
+    pub fn num_transitions(&self) -> usize {
+        dfa_transition_count(&self.dfa)
+    }
+
     pub fn step(&self, state: u32, byte: u8) -> Option<u32> {
         self.dfa.step(state, byte)
     }
@@ -968,6 +972,13 @@ impl Regex {
     pub fn get_u8set(&self, state: u32) -> U8Set {
         self.dfa.get_u8set(state)
     }
+}
+
+fn dfa_transition_count(dfa: &DFA) -> usize {
+    dfa.states()
+        .iter()
+        .map(|state| state.transitions.len())
+        .sum()
 }
 
 impl Expr {
@@ -995,6 +1006,7 @@ fn compile_single_expr_dfa(expr: &Expr) -> DFA {
 }
 
 fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
+    let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
     let group_sets: Vec<U8Set> = plan
         .compiled_exprs
         .iter()
@@ -1030,7 +1042,26 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
         dfa
     };
 
-    if used_product_dfa { dfa } else { dfa.minimize() }
+    let pre_minimize_states = dfa.num_states();
+    let pre_minimize_transitions = dfa_transition_count(&dfa);
+    let final_dfa = if used_product_dfa {
+        dfa
+    } else {
+        dfa.minimize()
+    };
+    if profile_detail {
+        eprintln!(
+            "[glrmask/profile][tokenizer] combined groups={} visible_groups={} product_dfa={} pre_minimize_states={} pre_minimize_transitions={} final_states={} final_transitions={}",
+            plan.compiled_exprs.len(),
+            plan.visible_groups,
+            used_product_dfa,
+            pre_minimize_states,
+            pre_minimize_transitions,
+            final_dfa.num_states(),
+            dfa_transition_count(&final_dfa)
+        );
+    }
+    final_dfa
 }
 
 pub fn build_regex(exprs: &[Expr]) -> Regex {

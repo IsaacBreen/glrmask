@@ -335,10 +335,11 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
             let elapsed = elapsed_ms(started_at);
             let name = grammar.terminal_display_name(index as u32);
             eprintln!(
-                "[glrmask/profile][tokenizer] terminal id={} name={:?} states={} alone_ms={:.3}",
+                "[glrmask/profile][tokenizer] terminal id={} name={:?} final_states={} final_transitions={} alone_ms={:.3}",
                 index,
                 name,
                 regex.num_states(),
+                regex.num_transitions(),
                 elapsed
             );
         }
