@@ -29,7 +29,7 @@ pub(crate) const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE: &str =
 pub(crate) const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE: &str =
     "json_additional_excluded_key_colon_shared";
 pub(crate) const MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS: usize = 256;
-const STRING_ENUM_REGEX_MIN_VALUES: usize = 4;
+const STRING_ENUM_REGEX_MIN_VALUES: usize = 64;
 const STRING_ENUM_REGEX_MIN_ENCODED_BYTES: usize = 1024;
 
 pub(crate) fn lower_document(
@@ -267,6 +267,9 @@ impl<'a> Lowerer<'a> {
             } else {
                 values.iter().collect::<Vec<_>>()
             };
+            if let Some(expr) = factored_small_string_enum_expr(&values) {
+                return Ok(expr);
+            }
             return Ok(choice(values.into_iter().map(|value| self.lower_json_literal(value)).collect()));
         }
 
@@ -536,6 +539,27 @@ fn string_enum_regex(encoded_literals: &[String]) -> String {
             .collect::<Vec<_>>()
             .join("|")
     )
+}
+
+fn factored_small_string_enum_expr(values: &[&Value]) -> Option<GrammarExpr> {
+    if values.len() < 2 {
+        return None;
+    }
+
+    let mut suffixes = Vec::with_capacity(values.len());
+    for value in values {
+        let Value::String(text) = value else {
+            return None;
+        };
+        let encoded = serde_json::to_string(text).ok()?;
+        let bytes = encoded.as_bytes();
+        if bytes.first().copied() != Some(b'"') || bytes.len() < 2 {
+            return None;
+        }
+        suffixes.push(lit_bytes(bytes[1..].to_vec()));
+    }
+
+    Some(seq(vec![lit_bytes(vec![b'"']), choice(suffixes)]))
 }
 
 fn collect_shared_ap_exclusion_plan(document: &SchemaDocument) -> (BTreeSet<String>, Vec<String>) {

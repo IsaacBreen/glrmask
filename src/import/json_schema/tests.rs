@@ -2132,11 +2132,48 @@ fn large_string_enum_at_root_uses_raw_regex() {
 }
 
 #[test]
-fn small_string_enum_at_root_remains_choice() {
+fn small_string_enum_at_root_uses_factored_suffix_choice() {
     let schema = json!({"type": "string", "enum": ["red", "green", "blue"]});
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    let GrammarExpr::Sequence(parts) = start_expr(&grammar) else {
+        panic!("expected factored sequence: {:?}", start_expr(&grammar));
+    };
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0], GrammarExpr::Literal(b"\"".to_vec()));
+    let GrammarExpr::Choice(suffixes) = &parts[1] else {
+        panic!("expected suffix choice: {:?}", parts[1]);
+    };
+    assert_eq!(suffixes.len(), 3);
+    assert!(suffixes.contains(&GrammarExpr::Literal(b"red\"".to_vec())));
+    assert!(suffixes.contains(&GrammarExpr::Literal(b"green\"".to_vec())));
+    assert!(suffixes.contains(&GrammarExpr::Literal(b"blue\"".to_vec())));
+    assert!(!contains_literal_bytes(start_expr(&grammar), b"\"red\""), "{:?}", start_expr(&grammar));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn snowplow_style_string_enum_uses_factored_suffix_choice() {
+    let schema = json!({
+        "type": "string",
+        "enum": ["INVALID_SCHEMAVER", "INVALID_IGLUURI", "INVALID_DATA_PAYLOAD", "INVALID_SCHEMA"]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let GrammarExpr::Sequence(parts) = start_expr(&grammar) else {
+        panic!("expected factored sequence: {:?}", start_expr(&grammar));
+    };
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0], GrammarExpr::Literal(b"\"".to_vec()));
+    let GrammarExpr::Choice(suffixes) = &parts[1] else {
+        panic!("expected suffix choice: {:?}", parts[1]);
+    };
+    assert_eq!(suffixes.len(), 4);
+    assert!(suffixes.contains(&GrammarExpr::Literal(b"INVALID_SCHEMAVER\"".to_vec())));
+    assert!(suffixes.contains(&GrammarExpr::Literal(b"INVALID_IGLUURI\"".to_vec())));
+    assert!(suffixes.contains(&GrammarExpr::Literal(b"INVALID_DATA_PAYLOAD\"".to_vec())));
+    assert!(suffixes.contains(&GrammarExpr::Literal(b"INVALID_SCHEMA\"".to_vec())));
+    assert!(!contains_literal_bytes(start_expr(&grammar), b"\"INVALID_SCHEMAVER\""), "{:?}", start_expr(&grammar));
     lower(&grammar).unwrap();
 }
 
