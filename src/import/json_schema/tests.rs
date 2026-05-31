@@ -2469,6 +2469,57 @@ fn anyof_open_objects_with_disjoint_optional_properties_collapses_to_json_object
 }
 
 #[test]
+fn unconstrained_object_collapses_to_json_object() {
+    let schema = json!({
+        "type": "object"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(matches!(start_expr(&grammar), GrammarExpr::Ref(name) if name == "json_object"));
+    assert!(!glrm.contains("OBJ_ORD"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn empty_properties_object_collapses_to_json_object() {
+    let schema = json!({
+        "type": "object",
+        "properties": {}
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(matches!(start_expr(&grammar), GrammarExpr::Ref(name) if name == "json_object"));
+    assert!(!glrm.contains("OBJ_ORD"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn constrained_open_objects_do_not_collapse_to_json_object() {
+    for schema in [
+        json!({
+            "type": "object",
+            "additionalProperties": {"type": "integer"}
+        }),
+        json!({
+            "type": "object",
+            "maxProperties": 0
+        }),
+        json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"}
+            }
+        }),
+    ] {
+        let grammar = schema_to_named_grammar(&schema).unwrap();
+        assert!(!matches!(start_expr(&grammar), GrammarExpr::Ref(name) if name == "json_object"));
+        lower(&grammar).unwrap();
+    }
+}
+
+#[test]
 fn anyof_open_objects_with_shared_optional_property_does_not_collapse_to_json_object() {
     let schema = json!({
         "anyOf": [

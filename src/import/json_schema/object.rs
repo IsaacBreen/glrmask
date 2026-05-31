@@ -107,6 +107,15 @@ fn obvious_object_valued_property_count(schema: &ObjectSchema) -> usize {
         .count()
 }
 
+fn is_unconstrained_open_object_schema(schema: &ObjectSchema) -> bool {
+    schema.properties.is_empty()
+        && schema.required.is_empty()
+        && schema.min_properties == 0
+        && schema.max_properties.is_none()
+        && schema.pattern_properties.is_empty()
+        && matches!(schema.additional_properties, AdditionalProperties::AllowAny)
+}
+
 impl AnyOfFixedObjectVariant {
     fn len(&self) -> usize {
         self.items.len()
@@ -381,6 +390,12 @@ impl<'a> Lowerer<'a> {
         exclusive_group: Option<(&BTreeSet<String>, bool)>,
     ) -> ImportResult<GrammarExpr> {
         let normalized = self.object_with_required_synthetic_properties(schema)?;
+        if any_required_names.is_none()
+            && exclusive_group.is_none()
+            && is_unconstrained_open_object_schema(&normalized)
+        {
+            return Ok(r(JSON_OBJECT_RULE));
+        }
         if normalized
             .max_properties
             .is_some_and(|max_properties| max_properties < normalized.min_properties)
