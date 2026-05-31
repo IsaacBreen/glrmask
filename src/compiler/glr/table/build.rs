@@ -3,14 +3,25 @@ use super::*;
 use crate::ds::bitset::BitSet;
 
 const DISABLE_UNIT_REDUCTION_INLINING_ENV: &str = "GLRMASK_DISABLE_UNIT_REDUCTION_INLINING";
+const ENABLE_UNIT_REDUCTION_INLINING_ENV: &str = "GLRMASK_ENABLE_UNIT_REDUCTION_INLINING";
 
-fn unit_reduction_inlining_enabled() -> bool {
-    !std::env::var(DISABLE_UNIT_REDUCTION_INLINING_ENV)
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
         .map(|value| {
             let normalized = value.trim().to_ascii_lowercase();
             matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
         })
         .unwrap_or(false)
+}
+
+fn unit_reduction_inlining_enabled() -> bool {
+    if env_flag_enabled(DISABLE_UNIT_REDUCTION_INLINING_ENV) {
+        return false;
+    }
+
+    // The old unit-collapse pass is exact but expensive, so it is now opt-in
+    // for A/B and diagnostics.
+    env_flag_enabled(ENABLE_UNIT_REDUCTION_INLINING_ENV)
 }
 
 pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
