@@ -188,6 +188,42 @@ fn dfa_to_nwa_skeleton(dfa: &UnweightedDfa) -> NWA {
     )
 }
 
+pub(crate) fn specialize_template_dfa_defaults_for_commit(
+    dfa: &UnweightedDfa,
+) -> UnweightedDfa {
+    let mut nfa = NFA::new_empty();
+    nfa.states = vec![Default::default(); dfa.states.len()];
+    nfa.start_states = vec![dfa.start_state];
+
+    for (state_id, state) in dfa.states.iter().enumerate() {
+        let from = state_id as u32;
+        if state.is_accepting {
+            nfa.set_accepting(from);
+        }
+        for (&label, &target) in &state.transitions {
+            nfa.add_transition(from, label, target);
+        }
+        if let Some(&default_target) = state.transitions.get(&DEFAULT_LABEL) {
+            let positive_pop_labels: Vec<_> = state
+                .transitions
+                .keys()
+                .copied()
+                .filter(|&label| label != DEFAULT_LABEL && label >= 0)
+                .collect();
+            for label in positive_pop_labels {
+                nfa.add_transition(from, label, default_target);
+            }
+        }
+    }
+
+    let determinized = determinize(&nfa);
+    if skip_template_minimization_enabled() {
+        determinized
+    } else {
+        minimize_dfa(&determinized)
+    }
+}
+
 fn compile_template_with_profile(
     characterization: &TerminalCharacterization,
 ) -> (UnweightedDfa, NWA, TemplateCompilationSample) {
@@ -747,4 +783,3 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
 
     nfa
 }
-
