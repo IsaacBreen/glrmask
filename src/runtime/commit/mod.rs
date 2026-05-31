@@ -398,6 +398,15 @@ fn prune_single_initial_state_for_terminal(
     terminal: u32,
     end_state: Option<u32>,
 ) -> ParserGSS {
+    if end_state.is_none()
+        && gss.all_accs_satisfy(|td: &TerminalsDisallowed| {
+            td.get(&tokenizer_state)
+                .is_none_or(|disallowed| !disallowed.contains(&terminal))
+        })
+    {
+        return gss.apply(|_: &TerminalsDisallowed| TerminalsDisallowed::new());
+    }
+
     gss.apply_and_prune_no_promote(|terminals_disallowed: &TerminalsDisallowed| {
         if terminals_disallowed.is_empty() {
             return Some(TerminalsDisallowed::new());
