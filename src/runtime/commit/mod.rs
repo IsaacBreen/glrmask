@@ -109,9 +109,11 @@ fn advance_parser_stacks_profiled(
     stack: &ParserGSS,
     terminal: u32,
 ) -> (ParserGSS, AdvanceProfile) {
+    let template_start = std::time::Instant::now();
     if template_advance_enabled()
         && let Some(template_advanced) = advance_stacks_template_dfa(constraint, stack, terminal)
     {
+        let template_elapsed = template_start.elapsed().as_nanos() as u64;
         if validate_template_advance_enabled() {
             let (table_advanced, table_profile) =
                 advance_stacks_profiled(&constraint.table, stack, terminal);
@@ -122,7 +124,19 @@ fn advance_parser_stacks_profiled(
             );
             return (template_advanced, table_profile);
         }
-        return (template_advanced, AdvanceProfile::default());
+        return (
+            template_advanced,
+            AdvanceProfile {
+                total_ns: template_elapsed,
+                fast_path_ns: template_elapsed,
+                top_states: stack.peek_values().len() as u32,
+                gss_depth: stack.max_depth(),
+                vstack_len: stack
+                    .try_virtual_stack()
+                    .map_or(0, |vstack| vstack.len() as u32),
+                ..AdvanceProfile::default()
+            },
+        );
     }
 
     advance_stacks_profiled(&constraint.table, stack, terminal)
