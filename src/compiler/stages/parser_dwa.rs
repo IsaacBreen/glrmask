@@ -1,4 +1,4 @@
-use std::collections::{hash_map::Entry, BTreeMap, VecDeque};
+use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -16,6 +16,7 @@ use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::compile_profile_enabled;
 use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
+use crate::compiler::stages::templates::compile_bundle::{BundleShapeKey, BundleSkeleton};
 use crate::compiler::stages::templates::Templates;
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
@@ -222,6 +223,7 @@ struct ParserDwaComposeDetailProfile {
     total_branches: usize,
     productive_branches: usize,
     unique_bundles: usize,
+    unique_bundle_shapes: usize,
     accepting_bundles: usize,
     state_init_ms: f64,
     branch_walk_ms: f64,
@@ -237,6 +239,8 @@ struct ParserDwaComposeDetailProfile {
     memo_hits: usize,
     memo_misses: usize,
     bundle_cache_builds: usize,
+    bundle_shape_cache_hits: usize,
+    bundle_shape_cache_misses: usize,
     bundle_profile_result_dwa_states: usize,
     bundle_profile_result_dwa_transitions: usize,
     bundle_profile_result_nwa_states: usize,
@@ -282,6 +286,39 @@ fn bundle_signature(bundle: &TerminalBundle) -> BundleSignature {
         .iter()
         .map(|(&terminal, weight)| (terminal, weight.clone()))
         .collect()
+}
+
+fn bundle_shape_key(bundle: &TerminalBundle, templates: &Templates) -> BundleShapeKey {
+    let mut grouped = Vec::<(Weight, Vec<u32>)>::new();
+    for (&terminal, weight) in bundle {
+        if weight.is_empty() {
+            continue;
+        }
+        let Some(&template_id) = templates.template_id_by_terminal.get(terminal as usize) else {
+            continue;
+        };
+        if template_id == u32::MAX {
+            continue;
+        }
+        if let Some((_, template_ids)) = grouped
+            .iter_mut()
+            .find(|(existing_weight, _)| existing_weight == weight)
+        {
+            template_ids.push(template_id);
+        } else {
+            grouped.push((weight.clone(), vec![template_id]));
+        }
+    }
+
+    let mut key: BundleShapeKey = grouped
+        .into_iter()
+        .map(|(_, mut template_ids)| {
+            template_ids.sort_unstable();
+            template_ids
+        })
+        .collect();
+    key.sort_unstable();
+    key
 }
 
 fn terminal_template_has_acceptance(template: &NWA) -> bool {
@@ -1487,6 +1524,7 @@ fn append_branch_fragment(
     summaries: &StateSummaries,
     templates: &Templates,
     built_bundle_cache: &mut [Option<Arc<NWA>>],
+    bundle_shape_cache: &mut FxHashMap<BundleShapeKey, Arc<BundleSkeleton>>,
     bundle_id: usize,
     continuation_state: u32,
     compose_detail: Option<&mut ParserDwaComposeDetailProfile>,
@@ -1511,8 +1549,37 @@ fn append_branch_fragment(
     }
 
     if built_bundle_cache[bundle_id].is_none() {
+        let shape_key = templates.bundle_shape_key(bundle);
         if let Some(detail) = compose_detail {
-            let (bundle_nwa, bundle_profile) = templates.build_bundle_profiled(bundle);
+            let (bundle_nwa, bundle_profile) = if let Some(skeleton) = bundle_shape_cache.get(&shape_key) {
+                detail.bundle_shape_cache_hits += 1;
+                templates.instantiate_bundle_from_skeleton_profiled(bundle, skeleton.as_ref())
+            } else {
+                detail.bundle_shape_cache_misses += 1;
+                let (_, skeleton, skeleton_profile) = templates.build_bundle_skeleton_profiled(bundle);
+                let skeleton = Arc::new(skeleton);
+                bundle_shape_cache.insert(shape_key.clone(), Arc::clone(&skeleton));
+                let (bundle_nwa, mut bundle_profile) =
+                    templates.instantiate_bundle_from_skeleton_profiled(bundle, skeleton.as_ref());
+                bundle_profile.build_group_dfas_ms += skeleton_profile.build_group_dfas_ms;
+                bundle_profile.union_groups_ms += skeleton_profile.union_groups_ms;
+                bundle_profile.determinize_bundle_ms += skeleton_profile.determinize_bundle_ms;
+                bundle_profile.determinize_pop_state_ms += skeleton_profile.determinize_pop_state_ms;
+                bundle_profile.determinize_alive_groups_ms += skeleton_profile.determinize_alive_groups_ms;
+                bundle_profile.determinize_final_weight_ms += skeleton_profile.determinize_final_weight_ms;
+                bundle_profile.determinize_collect_labels_ms += skeleton_profile.determinize_collect_labels_ms;
+                bundle_profile.determinize_next_state_ms += skeleton_profile.determinize_next_state_ms;
+                bundle_profile.determinize_state_lookup_ms += skeleton_profile.determinize_state_lookup_ms;
+                bundle_profile.determinize_add_transition_ms += skeleton_profile.determinize_add_transition_ms;
+                bundle_profile.determinize_states_visited += skeleton_profile.determinize_states_visited;
+                bundle_profile.determinize_labels_processed += skeleton_profile.determinize_labels_processed;
+                bundle_profile.determinize_transitions_added += skeleton_profile.determinize_transitions_added;
+                bundle_profile.determinize_worklist_peak = bundle_profile
+                    .determinize_worklist_peak
+                    .max(skeleton_profile.determinize_worklist_peak);
+                bundle_profile.determinize_cache_entries += skeleton_profile.determinize_cache_entries;
+                (bundle_nwa, bundle_profile)
+            };
             detail.bundle_profile_total_ms += bundle_profile.total_ms;
             detail.bundle_profile_build_group_dfas_ms += bundle_profile.build_group_dfas_ms;
             detail.bundle_profile_union_groups_ms += bundle_profile.union_groups_ms;
@@ -1560,7 +1627,15 @@ fn append_branch_fragment(
             );
             built_bundle_cache[bundle_id] = Some(Arc::new(bundle_nwa));
         } else {
-            built_bundle_cache[bundle_id] = Some(Arc::new(templates.build_bundle(bundle)));
+            let bundle_nwa = if let Some(skeleton) = bundle_shape_cache.get(&shape_key) {
+                templates.instantiate_bundle_from_skeleton_profiled(bundle, skeleton.as_ref()).0
+            } else {
+                let (_, skeleton, _) = templates.build_bundle_skeleton_profiled(bundle);
+                let skeleton = Arc::new(skeleton);
+                bundle_shape_cache.insert(shape_key, Arc::clone(&skeleton));
+                templates.instantiate_bundle_from_skeleton_profiled(bundle, skeleton.as_ref()).0
+            };
+            built_bundle_cache[bundle_id] = Some(Arc::new(bundle_nwa));
         }
     }
     let bundle_nwa = built_bundle_cache[bundle_id]
@@ -1591,6 +1666,12 @@ fn build_parser_nwa_from_terminal_dwa(
         total_branches: states.iter().map(|state| state.branches.len()).sum(),
         productive_branches: 0,
         unique_bundles: summaries.unique_bundles.len(),
+        unique_bundle_shapes: summaries
+            .unique_bundles
+            .iter()
+            .map(|bundle| bundle_shape_key(bundle, &templates))
+            .collect::<BTreeSet<_>>()
+            .len(),
         accepting_bundles: summaries.bundle_accepts.iter().filter(|&&accepts| accepts).count(),
         ..ParserDwaComposeDetailProfile::default()
     };
@@ -1625,6 +1706,7 @@ fn build_parser_nwa_from_terminal_dwa(
     compose_detail.state_init_ms = elapsed_ms(state_init_started_at);
 
     let mut branch_fragment_memo: FxHashMap<(usize, u32), NwaBody> = FxHashMap::default();
+    let mut bundle_shape_cache: FxHashMap<BundleShapeKey, Arc<BundleSkeleton>> = FxHashMap::default();
     let mut used_multi_bundle = vec![false; summaries.unique_bundles.len()];
     for (state_id, state) in states.iter().enumerate() {
         if !productive[state_id] {
@@ -1710,6 +1792,7 @@ fn build_parser_nwa_from_terminal_dwa(
                     &summaries,
                     &templates,
                     &mut built_bundle_cache,
+                    &mut bundle_shape_cache,
                     branch.bundle_id,
                     target_continuation,
                     compose_detail_enabled.then_some(&mut compose_detail),
@@ -1740,12 +1823,13 @@ fn build_parser_nwa_from_terminal_dwa(
 
     if compose_detail_enabled {
         eprintln!(
-            "[glrmask/profile][parser_dwa_compose] total_states={} productive_states={} total_branches={} productive_branches={} unique_bundles={} accepting_bundles={} state_init_ms={:.3} branch_walk_ms={:.3} memo_hit_clone_ms={:.3} fragment_build_ms={:.3} epsilon_link_ms={:.3} memo_hits={} memo_misses={} bundle_cache_builds={} epsilon_edges_added={} fragment_start_states_total={}",
+            "[glrmask/profile][parser_dwa_compose] total_states={} productive_states={} total_branches={} productive_branches={} unique_bundles={} unique_bundle_shapes={} accepting_bundles={} state_init_ms={:.3} branch_walk_ms={:.3} memo_hit_clone_ms={:.3} fragment_build_ms={:.3} epsilon_link_ms={:.3} memo_hits={} memo_misses={} bundle_cache_builds={} epsilon_edges_added={} fragment_start_states_total={}",
             compose_detail.total_states,
             compose_detail.productive_states,
             compose_detail.total_branches,
             compose_detail.productive_branches,
             compose_detail.unique_bundles,
+            compose_detail.unique_bundle_shapes,
             compose_detail.accepting_bundles,
             compose_detail.state_init_ms,
             compose_detail.branch_walk_ms,
@@ -1759,8 +1843,10 @@ fn build_parser_nwa_from_terminal_dwa(
             compose_detail.fragment_start_states_total,
         );
         eprintln!(
-            "[glrmask/profile][parser_dwa_compose_bundles] bundle_cache_builds={} bundle_profile_total_ms={:.3} build_group_dfas_ms={:.3} union_groups_ms={:.3} determinize_bundle_ms={:.3} minimize_ms={:.3} dwa_to_nwa_ms={:.3} result_dwa_states_total={} result_dwa_transitions_total={} result_nwa_states_total={} result_nwa_transitions_total={}",
+            "[glrmask/profile][parser_dwa_compose_bundles] bundle_cache_builds={} bundle_shape_cache_hits={} bundle_shape_cache_misses={} bundle_profile_total_ms={:.3} build_group_dfas_ms={:.3} union_groups_ms={:.3} determinize_bundle_ms={:.3} minimize_ms={:.3} dwa_to_nwa_ms={:.3} result_dwa_states_total={} result_dwa_transitions_total={} result_nwa_states_total={} result_nwa_transitions_total={}",
             compose_detail.bundle_cache_builds,
+            compose_detail.bundle_shape_cache_hits,
+            compose_detail.bundle_shape_cache_misses,
             compose_detail.bundle_profile_total_ms,
             compose_detail.bundle_profile_build_group_dfas_ms,
             compose_detail.bundle_profile_union_groups_ms,

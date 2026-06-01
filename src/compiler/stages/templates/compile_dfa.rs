@@ -503,6 +503,7 @@ fn compile_template_with_profile_and_minimize(
 pub struct Templates {
     pub by_terminal: BTreeMap<TerminalID, UnweightedDfa>,
     pub by_terminal_nwa: BTreeMap<TerminalID, NWA>,
+    pub template_id_by_terminal: Vec<u32>,
 }
 
 impl Templates {
@@ -549,12 +550,17 @@ impl Templates {
 
         let mut by_terminal = BTreeMap::new();
         let mut by_terminal_nwa = BTreeMap::new();
+        let mut template_id_by_terminal = vec![u32::MAX; characterizations.keys().last().map_or(0, |terminal| *terminal as usize + 1)];
         let fanout_started_at = Instant::now();
-        for (terminals, dfa, skeleton, sample) in compiled {
+        for (template_id, (terminals, dfa, skeleton, sample)) in compiled.into_iter().enumerate() {
             profile.observe_compilation(&sample, terminals.len());
             for terminal in terminals {
                 by_terminal.insert(terminal, dfa.clone());
                 by_terminal_nwa.insert(terminal, skeleton.clone());
+                if terminal as usize >= template_id_by_terminal.len() {
+                    template_id_by_terminal.resize(terminal as usize + 1, u32::MAX);
+                }
+                template_id_by_terminal[terminal as usize] = template_id as u32;
             }
         }
         profile.fanout_ms = elapsed_ms(fanout_started_at);
@@ -572,6 +578,7 @@ impl Templates {
             Self {
                 by_terminal,
                 by_terminal_nwa,
+                template_id_by_terminal,
             },
             profile,
         )

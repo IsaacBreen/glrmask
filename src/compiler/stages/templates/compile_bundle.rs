@@ -21,6 +21,35 @@ type SubsetKey = SmallVec<[u64; 4]>;
 const SUBSET_BLOCK_BITS: usize = 8;
 const SUBSET_BLOCK_MASK: u64 = (1u64 << SUBSET_BLOCK_BITS) - 1;
 
+pub(crate) type BundleShapeKey = Vec<Vec<u32>>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct BundleSkeletonTransition {
+    pub(crate) label: i32,
+    pub(crate) target: u32,
+    pub(crate) group_ids: Box<[u32]>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct BundleSkeletonState {
+    pub(crate) final_group_ids: Box<[u32]>,
+    pub(crate) transitions: Box<[BundleSkeletonTransition]>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BundleSkeleton {
+    pub(crate) states: Box<[BundleSkeletonState]>,
+    pub(crate) start_state: u32,
+    pub(crate) group_lex_order: Box<[u32]>,
+}
+
+#[derive(Clone)]
+struct ShapeGroup {
+    lex_index: u32,
+    template_ids: Vec<u32>,
+    dfa: UnweightedDfa,
+}
+
 fn empty_bundle_nwa() -> NWA {
     let mut nwa = NWA::new(0, 0);
     let start_state = nwa.add_state();
@@ -313,6 +342,18 @@ fn count_nwa_transitions(nwa: &NWA) -> usize {
         .sum()
 }
 
+fn union_weights_by_group_ids(group_weights: &[Weight], group_ids: &[u32]) -> Weight {
+    match group_ids {
+        [] => Weight::empty(),
+        [group_id] => group_weights[*group_id as usize].clone(),
+        _ => Weight::union_all(
+            group_ids
+                .iter()
+                .map(|group_id| &group_weights[*group_id as usize]),
+        ),
+    }
+}
+
 impl Templates {
     fn build_single_terminal_bundle(
         &self,
@@ -406,6 +447,366 @@ impl Templates {
         }
         group_dfas.sort_by_cached_key(|(_, dfa)| dfa_order_key(dfa));
         group_dfas
+    }
+
+    fn build_shape_groups_profiled(
+        &self,
+        terminal_weights: &BTreeMap<TerminalID, Weight>,
+        profile: &mut BundleBuildProfile,
+    ) -> Vec<ShapeGroup> {
+        let weight_groups = self.group_terminals_by_weight(terminal_weights);
+        profile.weight_groups = weight_groups.len();
+        for weight in weight_groups.keys() {
+            profile.total_weight_outer_ranges += weight.outer_range_count();
+            if weight.single_compact_entry_parts().is_some() {
+                profile.single_entry_weights += 1;
+            }
+            if weight.single_tsid_shared_entry().is_some() {
+                profile.single_tsid_weights += 1;
+            }
+        }
+
+        let build_started_at = Instant::now();
+        let mut lex_groups = Vec::with_capacity(weight_groups.len());
+        for terminals in weight_groups.values() {
+            profile.nonempty_terminals += terminals.len();
+            profile.largest_weight_group = profile.largest_weight_group.max(terminals.len());
+
+            let mut template_ids = terminals
+                .iter()
+                .filter_map(|terminal| self.template_id_by_terminal.get(*terminal as usize).copied())
+                .filter(|template_id| *template_id != u32::MAX)
+                .collect::<Vec<_>>();
+            template_ids.sort_unstable();
+
+            let dfa = if terminals.len() == 1 {
+                profile.singleton_groups += 1;
+                self.by_terminal
+                    .get(&terminals[0])
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                profile.multi_terminal_groups += 1;
+                let group_started_at = Instant::now();
+                let merged = union_unweighted_dfas(
+                    terminals.iter().filter_map(|terminal| self.by_terminal.get(terminal)),
+                );
+                let group_ms = elapsed_ms(group_started_at);
+                profile.union_groups_ms += group_ms;
+                if group_ms > profile.slowest_group_ms {
+                    profile.slowest_group_ms = group_ms;
+                    profile.slowest_group_terminals = terminals.len();
+                    profile.slowest_group_dfa_states = merged.states.len();
+                    profile.slowest_group_dfa_transitions = count_unweighted_dfa_transitions(&merged);
+                }
+                merged
+            };
+
+            lex_groups.push((template_ids, dfa));
+        }
+        profile.build_group_dfas_ms = elapsed_ms(build_started_at);
+
+        let mut order: Vec<usize> = (0..lex_groups.len()).collect();
+        order.sort_by_cached_key(|&index| dfa_order_key(&lex_groups[index].1));
+
+        order
+            .into_iter()
+            .map(|index| {
+                let (template_ids, dfa) = lex_groups[index].clone();
+                ShapeGroup {
+                    lex_index: index as u32,
+                    template_ids,
+                    dfa,
+                }
+            })
+            .collect()
+    }
+
+    fn build_shape_groups(&self, terminal_weights: &BTreeMap<TerminalID, Weight>) -> Vec<ShapeGroup> {
+        let weight_groups = self.group_terminals_by_weight(terminal_weights);
+        let mut lex_groups = Vec::with_capacity(weight_groups.len());
+        for terminals in weight_groups.values() {
+            let mut template_ids = terminals
+                .iter()
+                .filter_map(|terminal| self.template_id_by_terminal.get(*terminal as usize).copied())
+                .filter(|template_id| *template_id != u32::MAX)
+                .collect::<Vec<_>>();
+            template_ids.sort_unstable();
+
+            let dfa = if terminals.len() == 1 {
+                self.by_terminal
+                    .get(&terminals[0])
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                union_unweighted_dfas(
+                    terminals.iter().filter_map(|terminal| self.by_terminal.get(terminal)),
+                )
+            };
+
+            lex_groups.push((template_ids, dfa));
+        }
+
+        let mut order: Vec<usize> = (0..lex_groups.len()).collect();
+        order.sort_by_cached_key(|&index| dfa_order_key(&lex_groups[index].1));
+        order
+            .into_iter()
+            .map(|index| {
+                let (template_ids, dfa) = lex_groups[index].clone();
+                ShapeGroup {
+                    lex_index: index as u32,
+                    template_ids,
+                    dfa,
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn bundle_shape_key(
+        &self,
+        terminal_weights: &BTreeMap<TerminalID, Weight>,
+    ) -> BundleShapeKey {
+        let mut key: BundleShapeKey = self
+            .build_shape_groups(terminal_weights)
+            .into_iter()
+            .map(|group| group.template_ids)
+            .collect();
+        key.sort_unstable();
+        key
+    }
+
+    fn build_bundle_skeleton_from_groups_profiled(
+        groups: &[ShapeGroup],
+    ) -> (BundleSkeleton, DeterminizeBundleProfile) {
+        let mut profile = DeterminizeBundleProfile::default();
+        if groups.is_empty() {
+            return (
+                BundleSkeleton {
+                    states: vec![BundleSkeletonState::default()].into_boxed_slice(),
+                    start_state: 0,
+                    group_lex_order: Box::default(),
+                },
+                profile,
+            );
+        }
+
+        let start_key: Vec<(u32, u32)> = groups
+            .iter()
+            .enumerate()
+            .map(|(group_id, group)| (group_id as u32, group.dfa.start_state))
+            .collect();
+
+        let mut state_map: FxHashMap<Vec<(u32, u32)>, u32> = FxHashMap::default();
+        let mut worklist: VecDeque<Vec<(u32, u32)>> = VecDeque::new();
+        let mut states = vec![BundleSkeletonState::default()];
+        state_map.insert(start_key.clone(), 0);
+        worklist.push_back(start_key);
+        profile.worklist_peak = 1;
+
+        let mut label_targets: BTreeMap<i32, Vec<(u32, u32)>> = BTreeMap::new();
+
+        while let Some(product_state) = worklist.pop_front() {
+            profile.states_visited += 1;
+            let state_started_at = Instant::now();
+            let state_id = state_map[&product_state] as usize;
+            profile.pop_state_ms += elapsed_ms(state_started_at);
+
+            let alive_started_at = Instant::now();
+            let _alive_groups = product_state.len();
+            profile.alive_groups_ms += elapsed_ms(alive_started_at);
+
+            let final_started_at = Instant::now();
+            let mut final_groups = Vec::new();
+            for &(group_id, dfa_state) in &product_state {
+                if groups[group_id as usize].dfa.states[dfa_state as usize].is_accepting {
+                    final_groups.push(group_id);
+                }
+            }
+            states[state_id].final_group_ids = final_groups.into_boxed_slice();
+            profile.final_weight_ms += elapsed_ms(final_started_at);
+
+            let labels_started_at = Instant::now();
+            label_targets.clear();
+            for &(group_id, dfa_state) in &product_state {
+                for (&label, &target) in &groups[group_id as usize].dfa.states[dfa_state as usize].transitions {
+                    label_targets.entry(label).or_default().push((group_id, target));
+                }
+            }
+            profile.collect_labels_ms += elapsed_ms(labels_started_at);
+            profile.labels_processed += label_targets.len();
+
+            let mut transitions = Vec::with_capacity(label_targets.len());
+            for (&label, next_state) in &label_targets {
+                let next_state_started_at = Instant::now();
+                let mut group_ids = next_state.iter().map(|(group_id, _)| *group_id).collect::<Vec<_>>();
+                group_ids.sort_unstable();
+                profile.next_state_ms += elapsed_ms(next_state_started_at);
+
+                let lookup_started_at = Instant::now();
+                let target = if let Some(&existing) = state_map.get(next_state) {
+                    existing
+                } else {
+                    let key = next_state.clone();
+                    let new_id = states.len() as u32;
+                    state_map.insert(key.clone(), new_id);
+                    worklist.push_back(key);
+                    profile.worklist_peak = profile.worklist_peak.max(worklist.len());
+                    states.push(BundleSkeletonState::default());
+                    new_id
+                };
+                profile.state_lookup_ms += elapsed_ms(lookup_started_at);
+
+                let add_transition_started_at = Instant::now();
+                transitions.push(BundleSkeletonTransition {
+                    label,
+                    target,
+                    group_ids: group_ids.into_boxed_slice(),
+                });
+                profile.add_transition_ms += elapsed_ms(add_transition_started_at);
+                profile.transitions_added += 1;
+            }
+            states[state_id].transitions = transitions.into_boxed_slice();
+        }
+        profile.cache_entries = state_map.len();
+
+        (
+            BundleSkeleton {
+                states: states.into_boxed_slice(),
+                start_state: 0,
+                group_lex_order: groups.iter().map(|group| group.lex_index).collect(),
+            },
+            profile,
+        )
+    }
+
+    pub(crate) fn build_bundle_skeleton_profiled(
+        &self,
+        terminal_weights: &BTreeMap<TerminalID, Weight>,
+    ) -> (BundleShapeKey, BundleSkeleton, BundleBuildProfile) {
+        let total_started_at = Instant::now();
+        let mut profile = BundleBuildProfile {
+            input_terminals: terminal_weights.len(),
+            ..BundleBuildProfile::default()
+        };
+
+        let groups = self.build_shape_groups_profiled(terminal_weights, &mut profile);
+        let mut shape_key: BundleShapeKey = groups.iter().map(|group| group.template_ids.clone()).collect();
+        shape_key.sort_unstable();
+
+        let determinize_started_at = Instant::now();
+        let (skeleton, determinize_profile) = Self::build_bundle_skeleton_from_groups_profiled(&groups);
+        profile.determinize_bundle_ms = elapsed_ms(determinize_started_at);
+        profile.determinize_pop_state_ms = determinize_profile.pop_state_ms;
+        profile.determinize_alive_groups_ms = determinize_profile.alive_groups_ms;
+        profile.determinize_final_weight_ms = determinize_profile.final_weight_ms;
+        profile.determinize_collect_labels_ms = determinize_profile.collect_labels_ms;
+        profile.determinize_next_state_ms = determinize_profile.next_state_ms;
+        profile.determinize_state_lookup_ms = determinize_profile.state_lookup_ms;
+        profile.determinize_add_transition_ms = determinize_profile.add_transition_ms;
+        profile.determinize_states_visited = determinize_profile.states_visited;
+        profile.determinize_labels_processed = determinize_profile.labels_processed;
+        profile.determinize_transitions_added = determinize_profile.transitions_added;
+        profile.determinize_worklist_peak = determinize_profile.worklist_peak;
+        profile.determinize_cache_entries = determinize_profile.cache_entries;
+
+        (shape_key, skeleton, profile)
+    }
+
+    fn ordered_group_weights_from_shape(
+        &self,
+        terminal_weights: &BTreeMap<TerminalID, Weight>,
+        skeleton: &BundleSkeleton,
+    ) -> Vec<Weight> {
+        let mut by_lex_group = self
+            .build_shape_groups(terminal_weights)
+            .into_iter()
+            .map(|group| {
+                let mut lex_weight = Weight::empty();
+                if let Some(weight) = terminal_weights
+                    .iter()
+                    .find_map(|(terminal, weight)| {
+                        let template_id = self.template_id_by_terminal.get(*terminal as usize).copied()?;
+                        (template_id != u32::MAX && group.template_ids.binary_search(&template_id).is_ok())
+                            .then(|| weight.clone())
+                    })
+                {
+                    lex_weight = weight;
+                }
+                (group.lex_index as usize, lex_weight)
+            })
+            .collect::<Vec<_>>();
+        by_lex_group.sort_by_key(|(lex_index, _)| *lex_index);
+        let lex_weights: Vec<Weight> = by_lex_group.into_iter().map(|(_, weight)| weight).collect();
+
+        skeleton
+            .group_lex_order
+            .iter()
+            .map(|lex_index| lex_weights[*lex_index as usize].clone())
+            .collect()
+    }
+
+    pub(crate) fn instantiate_bundle_from_skeleton_profiled(
+        &self,
+        terminal_weights: &BTreeMap<TerminalID, Weight>,
+        skeleton: &BundleSkeleton,
+    ) -> (NWA, BundleBuildProfile) {
+        let total_started_at = Instant::now();
+        let mut profile = BundleBuildProfile {
+            input_terminals: terminal_weights.len(),
+            ..BundleBuildProfile::default()
+        };
+        let group_weights = self.ordered_group_weights_from_shape(terminal_weights, skeleton);
+        profile.weight_groups = group_weights.len();
+        for weight in &group_weights {
+            profile.total_weight_outer_ranges += weight.outer_range_count();
+            if weight.single_compact_entry_parts().is_some() {
+                profile.single_entry_weights += 1;
+            }
+            if weight.single_tsid_shared_entry().is_some() {
+                profile.single_tsid_weights += 1;
+            }
+        }
+
+        let mut dwa = DWA::new(0, 0);
+        while dwa.states().len() < skeleton.states.len() {
+            dwa.add_state();
+        }
+        dwa.set_start_state(skeleton.start_state);
+
+        for (state_id, state) in skeleton.states.iter().enumerate() {
+            let final_weight = union_weights_by_group_ids(&group_weights, &state.final_group_ids);
+            if !final_weight.is_empty() {
+                dwa.set_final_weight(state_id as u32, final_weight);
+            }
+            for transition in state.transitions.iter() {
+                let edge_weight = union_weights_by_group_ids(&group_weights, &transition.group_ids);
+                if edge_weight.is_empty() {
+                    continue;
+                }
+                dwa.add_transition(state_id as u32, transition.label, transition.target, edge_weight);
+            }
+        }
+        profile.result_dwa_states = dwa.states().len();
+        profile.result_dwa_transitions = count_weighted_dwa_transitions(&dwa);
+
+        let minimize_started_at = Instant::now();
+        profile.minimize_skipped = !minimize_template_bundles_enabled();
+        let minimized = if profile.weight_groups > 1 && !profile.minimize_skipped {
+            minimize(&dwa)
+        } else {
+            dwa
+        };
+        profile.minimize_ms = elapsed_ms(minimize_started_at);
+        profile.result_dwa_states = minimized.states().len();
+        profile.result_dwa_transitions = count_weighted_dwa_transitions(&minimized);
+
+        let to_nwa_started_at = Instant::now();
+        let nwa = dwa_to_nwa(&minimized);
+        profile.dwa_to_nwa_ms = elapsed_ms(to_nwa_started_at);
+        profile.result_nwa_states = nwa.states().len();
+        profile.result_nwa_transitions = count_nwa_transitions(&nwa);
+        profile.total_ms = elapsed_ms(total_started_at);
+        (nwa, profile)
     }
 
     pub(crate) fn build_bundle_profiled(
