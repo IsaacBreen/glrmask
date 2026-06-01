@@ -83,6 +83,38 @@ fn one_of_can_normalize_mixed_local_refs(branches: &[Schema]) -> bool {
         })
 }
 
+fn schema_has_explicit_single_primitive_inline_type(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return false;
+    };
+
+    matches!(
+        assertions.types.as_deref(),
+        Some([SchemaType::String])
+            | Some([SchemaType::Number])
+            | Some([SchemaType::Integer])
+            | Some([SchemaType::Boolean])
+    ) && assertions.object.is_none()
+        && assertions.array.is_none()
+        && assertions.any_of.is_empty()
+        && assertions.one_of.is_empty()
+        && assertions.all_of.is_empty()
+}
+
+fn one_of_can_defer_local_ref_disjoint_family_proof(branches: &[Schema]) -> bool {
+    branches.len() > 1
+        && branches.iter().any(|branch| matches!(branch.kind, SchemaKind::Ref(_)))
+        && branches.iter().all(|branch| match &branch.kind {
+            SchemaKind::Ref(reference) => reference.starts_with('#'),
+            _ => {
+                schema_has_explicit_single_primitive_inline_type(branch)
+                    || schema_is_null_only_inline_branch(branch)
+                    || schema_is_object_shaped_inline_branch(branch)
+                    || schema_is_array_shaped_inline_branch(branch)
+            }
+        })
+}
+
 fn normalize_mixed_ref_one_of_branches(branches: &mut [Schema]) {
     for branch in branches {
         if matches!(branch.kind, SchemaKind::Ref(_)) {
@@ -342,10 +374,13 @@ fn load_assertions(object: &Map<String, Value>, location: &str) -> ImportResult<
     if one_of_mixes_ref_and_inline_branches(&assertions.one_of) {
         // Normalize the narrow safe subset where local $ref branches are mixed
         // with object-shaped, array-shaped, or null-only inline branches.
-        // Broader mixed cases, including primitive inline branches, remain
-        // rejected.
+        // Explicit primitive inline branches are only allowed through when
+        // lowering can later prove they are disjoint from resolved local refs.
         if one_of_can_normalize_mixed_local_refs(&assertions.one_of) {
             normalize_mixed_ref_one_of_branches(&mut assertions.one_of);
+        } else if one_of_can_defer_local_ref_disjoint_family_proof(&assertions.one_of) {
+            // Lowering has the resolved local-ref target map needed to prove
+            // this mixed local-ref disjoint-family subset safe.
         } else {
             return Err(SchemaImportError::at(
                 location,

@@ -2263,13 +2263,105 @@ fn oneof_mixed_ref_and_inline_primitive_still_errors() {
             }
         },
         "oneOf": [
+            {"type": "number"},
+            {"type": "integer"},
+            {"$ref": "#/definitions/input"}
+        ]
+    });
+
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("pairwise disjoint"), "{error}");
+}
+
+#[test]
+fn oneof_mixed_local_ref_object_targets_and_inline_primitives_lowers() {
+    let schema = json!({
+        "definitions": {
+            "features": {
+                "type": "object",
+                "additionalProperties": true
+            },
+            "reference": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"}
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }
+        },
+        "oneOf": [
+            {"type": "number"},
+            {"type": "string"},
+            {"$ref": "#/definitions/features"},
+            {"$ref": "#/definitions/reference"}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn oneof_mixed_local_ref_inline_primitives_and_array_lowers() {
+    let schema = json!({
+        "definitions": {
+            "features": {
+                "type": "object",
+                "additionalProperties": true
+            },
+            "reference": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"}
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }
+        },
+        "oneOf": [
+            {"type": "number"},
+            {"type": "string"},
+            {"$ref": "#/definitions/features"},
+            {"$ref": "#/definitions/reference"},
+            {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {"type": "number"},
+                        {"type": "string"},
+                        {"$ref": "#/definitions/features"},
+                        {"$ref": "#/definitions/reference"}
+                    ]
+                }
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn oneof_mixed_local_ref_and_inline_primitive_with_untyped_ref_target_errors() {
+    let schema = json!({
+        "definitions": {
+            "input": {
+                "properties": {
+                    "id": {"type": "string"}
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }
+        },
+        "oneOf": [
             {"type": "string"},
             {"$ref": "#/definitions/input"}
         ]
     });
 
     let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
-    assert!(error.contains("mixed $ref and inline"), "{error}");
+    assert!(error.contains("explicit object-only"), "{error}");
 }
 
 #[test]

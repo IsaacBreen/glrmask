@@ -6,7 +6,7 @@ use super::ast::{
     AdditionalProperties, ArraySchema, ObjectSchema, PropertySchema, Schema, SchemaAssertions,
     SchemaKind, SchemaType,
 };
-use super::error::ImportResult;
+use super::error::{ImportResult, SchemaImportError};
 use super::lower::{
     choice, never, normalize_local_ref, r, Lowerer, JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE,
     JSON_ADDITIONAL_KEY_COLON_SHARED_RULE, JSON_BOOL_RULE, JSON_INTEGER_RULE,
@@ -109,6 +109,7 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(crate) fn lower_one_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
+        self.validate_mixed_ref_disjoint_family_one_of(assertions)?;
         let siblings = sibling_assertion_schema(assertions);
         let alternatives = assertions
             .one_of
@@ -116,6 +117,70 @@ impl<'a> Lowerer<'a> {
             .map(|branch| self.lower_schema(&branch_with_siblings(branch.clone(), siblings.clone())))
             .collect::<ImportResult<Vec<_>>>()?;
         Ok(choice(alternatives))
+    }
+
+    fn validate_mixed_ref_disjoint_family_one_of(
+        &self,
+        assertions: &SchemaAssertions,
+    ) -> ImportResult<()> {
+        if assertions.one_of.len() <= 1 {
+            return Ok(());
+        }
+
+        let has_ref = assertions
+            .one_of
+            .iter()
+            .any(|branch| matches!(branch.kind, SchemaKind::Ref(_)));
+        if !has_ref {
+            return Ok(());
+        }
+
+        let mut primitive_types = Vec::new();
+        let mut saw_primitive_inline = false;
+        for branch in &assertions.one_of {
+            if matches!(branch.kind, SchemaKind::Ref(_)) {
+                continue;
+            }
+            match supported_inline_branch_family(branch) {
+                Some(InlineBranchFamily::Primitive(schema_type)) => {
+                    primitive_types.push(schema_type);
+                    saw_primitive_inline = true;
+                }
+                Some(InlineBranchFamily::Array)
+                | Some(InlineBranchFamily::Object)
+                | Some(InlineBranchFamily::Null) => {}
+                None => return Ok(()),
+            }
+        }
+        if !saw_primitive_inline {
+            return Ok(());
+        }
+
+        for branch in &assertions.one_of {
+            let SchemaKind::Ref(pointer) = &branch.kind else {
+                continue;
+            };
+            let target = self.resolve_ref_target(pointer)?;
+            if !schema_has_explicit_object_only_type(target) {
+                return Err(SchemaImportError::at(
+                    &branch.location,
+                    "oneOf primitive/ref support requires all $ref targets to be explicit object-only schemas",
+                ));
+            }
+        }
+
+        for idx in 0..primitive_types.len() {
+            for other_idx in idx + 1..primitive_types.len() {
+                if primitive_branch_types_overlap(primitive_types[idx], primitive_types[other_idx]) {
+                    return Err(SchemaImportError::at(
+                        &assertions.one_of[other_idx].location,
+                        "oneOf primitive/ref support requires primitive inline branches to be pairwise disjoint",
+                    ));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub(crate) fn lower_all_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
@@ -1600,6 +1665,69 @@ fn schema_has_explicit_object_only_type(schema: &Schema) -> bool {
         .types
         .as_ref()
         .is_some_and(|types| types.iter().all(|schema_type| *schema_type == SchemaType::Object))
+}
+
+fn primitive_inline_branch_type(schema: &Schema) -> Option<SchemaType> {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return None;
+    };
+
+    match assertions.types.as_deref() {
+        Some([schema_type @ SchemaType::String])
+        | Some([schema_type @ SchemaType::Number])
+        | Some([schema_type @ SchemaType::Integer])
+        | Some([schema_type @ SchemaType::Boolean]) => Some(*schema_type),
+        _ => None,
+    }
+}
+
+enum InlineBranchFamily {
+    Primitive(SchemaType),
+    Array,
+    Object,
+    Null,
+}
+
+fn supported_inline_branch_family(schema: &Schema) -> Option<InlineBranchFamily> {
+    if let Some(schema_type) = primitive_inline_branch_type(schema) {
+        return Some(InlineBranchFamily::Primitive(schema_type));
+    }
+    if schema_has_explicit_object_only_type(schema) {
+        return Some(InlineBranchFamily::Object);
+    }
+    if schema_has_explicit_array_only_type(schema) {
+        return Some(InlineBranchFamily::Array);
+    }
+    if schema_has_explicit_null_only_type(schema) {
+        return Some(InlineBranchFamily::Null);
+    }
+    None
+}
+
+fn schema_has_explicit_array_only_type(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return false;
+    };
+    assertions
+        .types
+        .as_ref()
+        .is_some_and(|types| types.iter().all(|schema_type| *schema_type == SchemaType::Array))
+}
+
+fn schema_has_explicit_null_only_type(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return false;
+    };
+    assertions
+        .types
+        .as_ref()
+        .is_some_and(|types| types.iter().all(|schema_type| *schema_type == SchemaType::Null))
+}
+
+fn primitive_branch_types_overlap(left: SchemaType, right: SchemaType) -> bool {
+    left == right
+        || matches!((left, right), (SchemaType::Number, SchemaType::Integer))
+        || matches!((left, right), (SchemaType::Integer, SchemaType::Number))
 }
 
 pub(crate) fn try_merge_all_of_objects(branches: &[Schema]) -> Option<ObjectSchema> {
