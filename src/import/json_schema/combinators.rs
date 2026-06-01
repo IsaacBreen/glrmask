@@ -348,9 +348,14 @@ impl<'a> Lowerer<'a> {
         {
             return self.lower_object_requiring_any_property(&object, &any_required_names);
         }
-        if let Some((kind, distributed)) = distribute_all_of_over_single_object_choice(&branches) {
+        if let Some((kind, distributed)) = self.distribute_all_of_over_single_object_choice(&branches)? {
             return match kind {
                 ChoiceKind::AnyOf => {
+                    if let Some(expr) =
+                        self.try_lower_closed_object_any_of_variants(&distributed, true)?
+                    {
+                        Ok(expr)
+                    } else
                     if let Some(expr) = self.try_lower_open_object_any_of_variants(&distributed)? {
                         Ok(expr)
                     } else {
@@ -592,7 +597,8 @@ impl<'a> Lowerer<'a> {
         branches = flatten_pure_all_of_branches(branches);
         branches = collapse_pure_single_choice_branches(branches);
 
-        let Some((kind, distributed)) = distribute_all_of_over_single_object_choice(&branches) else {
+        let Some((kind, distributed)) = self.distribute_all_of_over_single_object_choice(&branches)?
+        else {
             return Ok(None);
         };
         let alternatives = distributed
@@ -2101,51 +2107,97 @@ fn pure_choice_branch(schema: &Schema) -> Option<(ChoiceKind, &[Schema])> {
     }
 }
 
-fn distribute_all_of_over_single_object_choice(
-    branches: &[Schema],
-) -> Option<(ChoiceKind, Vec<Schema>)> {
-    let mut choice_branch = None;
-    for branch in branches {
-        if let Some((kind, alternatives)) = pure_choice_branch(branch) {
-            if choice_branch.is_some()
-                || alternatives
-                    .iter()
-                    .any(|alternative| !schema_is_object_like(alternative))
-            {
-                return None;
+impl<'a> Lowerer<'a> {
+    fn distribute_all_of_over_single_object_choice(
+        &self,
+        branches: &[Schema],
+    ) -> ImportResult<Option<(ChoiceKind, Vec<Schema>)>> {
+        let mut choice_branch = None;
+        for branch in branches {
+            if let Some((kind, alternatives)) = pure_choice_branch(branch) {
+                if choice_branch.is_some() {
+                    return Ok(None);
+                }
+                let mut distributed_alternatives = Vec::with_capacity(alternatives.len());
+                for alternative in alternatives {
+                    let Some(distributed) = self.object_like_distribution_schema(alternative)? else {
+                        return Ok(None);
+                    };
+                    distributed_alternatives.push(distributed);
+                }
+                choice_branch = Some((kind, distributed_alternatives));
+            } else if !self.schema_is_object_like_resolved(branch)? {
+                return Ok(None);
             }
-            choice_branch = Some((kind, alternatives));
-        } else if !schema_is_object_like(branch) {
-            return None;
         }
+
+        let Some((kind, alternatives)) = choice_branch else {
+            return Ok(None);
+        };
+        let object_siblings = branches
+            .iter()
+            .filter(|branch| pure_choice_branch(branch).is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+
+        Ok(Some((
+            kind,
+            alternatives
+                .into_iter()
+                .map(|alternative| {
+                    let mut all_of = Vec::with_capacity(object_siblings.len() + 1);
+                    all_of.push(alternative);
+                    all_of.extend(object_siblings.iter().cloned());
+                    Schema::assertions(
+                        "<distributed-allOf-anyOf>",
+                        SchemaAssertions { all_of, ..SchemaAssertions::default() },
+                    )
+                })
+                .collect(),
+        )))
     }
 
-    let (kind, alternatives) = choice_branch?;
-    let object_siblings = branches
-        .iter()
-        .filter(|branch| pure_choice_branch(branch).is_none())
-        .cloned()
-        .collect::<Vec<_>>();
+    fn object_like_distribution_schema(&self, schema: &Schema) -> ImportResult<Option<Schema>> {
+        self.object_like_distribution_schema_inner(schema, 0)
+    }
 
-    Some((
-        kind,
-        alternatives
-            .iter()
-            .map(|alternative| {
-                let mut all_of = Vec::with_capacity(object_siblings.len() + 1);
-                all_of.push(alternative.clone());
-                all_of.extend(object_siblings.iter().cloned());
-                Schema::assertions(
-                    "<distributed-allOf-anyOf>",
-                    SchemaAssertions { all_of, ..SchemaAssertions::default() },
-                )
-            })
-            .collect(),
-    ))
-}
+    fn object_like_distribution_schema_inner(
+        &self,
+        schema: &Schema,
+        ref_depth: usize,
+    ) -> ImportResult<Option<Schema>> {
+        if object_like_schema(schema).is_some() {
+            return Ok(Some(schema.clone()));
+        }
+        let SchemaKind::Ref(pointer) = &schema.kind else {
+            return Ok(None);
+        };
+        if ref_depth >= 4 {
+            return Ok(None);
+        }
+        self.object_like_distribution_schema_inner(self.resolve_ref_target(pointer)?, ref_depth + 1)
+    }
 
-fn schema_is_object_like(schema: &Schema) -> bool {
-    object_like_schema(schema).is_some()
+    fn schema_is_object_like_resolved(&self, schema: &Schema) -> ImportResult<bool> {
+        self.schema_is_object_like_resolved_inner(schema, 0)
+    }
+
+    fn schema_is_object_like_resolved_inner(
+        &self,
+        schema: &Schema,
+        ref_depth: usize,
+    ) -> ImportResult<bool> {
+        if object_like_schema(schema).is_some() {
+            return Ok(true);
+        }
+        let SchemaKind::Ref(pointer) = &schema.kind else {
+            return Ok(false);
+        };
+        if ref_depth >= 4 {
+            return Ok(false);
+        }
+        self.schema_is_object_like_resolved_inner(self.resolve_ref_target(pointer)?, ref_depth + 1)
+    }
 }
 
 fn merge_all_of_object_like_schema(branches: &[Schema]) -> Option<Schema> {

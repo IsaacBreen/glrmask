@@ -3324,6 +3324,53 @@ fn allof_anyof_required_properties_lowers_to_single_grouped_object() {
 }
 
 #[test]
+fn allof_anyof_ref_object_variants_distribute_through_common_object() {
+    let schema = json!({
+        "definitions": {
+            "alpha": {
+                "properties": {
+                    "kind": {"type": "string", "enum": ["alpha"]},
+                    "alpha": {"type": "string"}
+                },
+                "required": ["kind", "alpha"]
+            },
+            "beta": {
+                "properties": {
+                    "kind": {"type": "string", "enum": ["beta"]},
+                    "beta": {"type": "string"}
+                },
+                "required": ["kind", "beta"]
+            }
+        },
+        "type": "object",
+        "allOf": [
+            {
+                "properties": {
+                    "kind": {"enum": ["alpha", "beta"]},
+                    "common": {"type": "string"}
+                },
+                "required": ["kind"],
+                "additionalProperties": false
+            },
+            {
+                "anyOf": [
+                    {"$ref": "#/definitions/alpha"},
+                    {"$ref": "#/definitions/beta"}
+                ]
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
+    assert!(schema_accepts_bytes(&schema, br#"{"kind":"alpha","alpha":"x"}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"kind":"beta","beta":"x"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"kind":"alpha","beta":"x"}"#));
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn allof_oneof_required_properties_does_not_use_any_required_factoring() {
     let schema = json!({
         "type": "object",
