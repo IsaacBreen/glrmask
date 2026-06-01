@@ -59,11 +59,31 @@ struct ParserDwaDeterminizeDetail {
     closure_cache_misses: usize,
     intersection_scan_ms: f64,
     label_processing_ms: f64,
+    labels_processed: usize,
+    label_contribs_sum: usize,
+    label_contribs_max: usize,
+    contribution_sort_ms: f64,
+    edge_weight_union_ms: f64,
+    closure_key_ms: f64,
+    closure_lookup_ms: f64,
+    local_epsilon_closure_miss_ms: f64,
+    post_closure_subset_key_ms: f64,
+    subset_map_lookup_ms: f64,
+    add_transition_ms: f64,
     final_weight_states: usize,
     final_weight_entries: usize,
     final_weight_entries_max: usize,
     final_weight_signature_distinct: usize,
     final_weight_signature_hit_potential: usize,
+    final_grouping_ms: f64,
+    final_path_union_ms: f64,
+    final_intersection_ms: f64,
+    final_output_union_ms: f64,
+    union_cache_hits: usize,
+    union_cache_misses: usize,
+    union_cache_key_len_sum: usize,
+    union_cache_key_len_max: usize,
+    union_cache_ms: f64,
     fallback_labels_expanded: usize,
     fallback_contrib_entries_duplicated: usize,
 }
@@ -113,6 +133,30 @@ impl ParserDwaDeterminizeDetail {
             self.final_weight_signature_hit_potential,
             self.fallback_labels_expanded,
             self.fallback_contrib_entries_duplicated,
+        );
+        eprintln!(
+            "[glrmask/profile][parser_dwa_determinize_fine] name={} labels_processed={} label_contribs_sum={} label_contribs_max={} contribution_sort_ms={:.3} edge_weight_union_ms={:.3} closure_key_ms={:.3} closure_lookup_ms={:.3} local_epsilon_closure_miss_ms={:.3} post_closure_subset_key_ms={:.3} subset_map_lookup_ms={:.3} add_transition_ms={:.3} final_grouping_ms={:.3} final_path_union_ms={:.3} final_intersection_ms={:.3} final_output_union_ms={:.3} union_cache_hits={} union_cache_misses={} union_cache_key_len_sum={} union_cache_key_len_max={} union_cache_ms={:.3}",
+            name,
+            self.labels_processed,
+            self.label_contribs_sum,
+            self.label_contribs_max,
+            self.contribution_sort_ms,
+            self.edge_weight_union_ms,
+            self.closure_key_ms,
+            self.closure_lookup_ms,
+            self.local_epsilon_closure_miss_ms,
+            self.post_closure_subset_key_ms,
+            self.subset_map_lookup_ms,
+            self.add_transition_ms,
+            self.final_grouping_ms,
+            self.final_path_union_ms,
+            self.final_intersection_ms,
+            self.final_output_union_ms,
+            self.union_cache_hits,
+            self.union_cache_misses,
+            self.union_cache_key_len_sum,
+            self.union_cache_key_len_max,
+            self.union_cache_ms,
         );
     }
 }
@@ -547,6 +591,72 @@ fn determinize_with_supports(
         entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
     }
 
+      #[derive(Default)]
+      struct UnionAllCache {
+        entries: FxHashMap<Vec<usize>, Weight>,
+        profile_enabled: bool,
+        hits: usize,
+        misses: usize,
+        key_len_sum: usize,
+        key_len_max: usize,
+        total_ms: f64,
+    }
+
+    impl UnionAllCache {
+        fn record_elapsed(&mut self, started: Option<Instant>) {
+            if let Some(started) = started {
+                self.total_ms += elapsed_ms(started);
+            }
+        }
+
+        fn union_all<'a>(&mut self, weights: impl IntoIterator<Item = &'a Weight>) -> Weight {
+            let started = self.profile_enabled.then(Instant::now);
+            let mut meaningful = SmallVec::<[&Weight; 8]>::new();
+            for weight in weights {
+                if weight.is_full() {
+                    self.record_elapsed(started);
+                    return Weight::all();
+                }
+                if !weight.is_empty() {
+                    meaningful.push(weight);
+                }
+            }
+
+            if meaningful.is_empty() {
+                self.record_elapsed(started);
+                return Weight::empty();
+            }
+            if meaningful.len() == 1 {
+                self.record_elapsed(started);
+                return meaningful[0].clone();
+            }
+
+            let mut key: Vec<usize> = meaningful.iter().map(|weight| weight.ptr_key()).collect();
+            key.sort_unstable();
+            key.dedup();
+            self.key_len_sum += key.len();
+            self.key_len_max = self.key_len_max.max(key.len());
+
+            if key.len() == 1 {
+                self.record_elapsed(started);
+                return meaningful[0].clone();
+            }
+
+            if let Some(weight) = self.entries.get(&key) {
+                let weight = weight.clone();
+                self.hits += 1;
+                self.record_elapsed(started);
+                return weight;
+            }
+
+            self.misses += 1;
+            let weight = Weight::union_all(meaningful.into_iter());
+            self.entries.insert(key, weight.clone());
+            self.record_elapsed(started);
+            weight
+        }
+    }
+
     let num_nwa_states = nwa.states().len();
 
     // Use flat arrays for epsilon closure when NWA is small enough.
@@ -664,6 +774,10 @@ fn determinize_with_supports(
     let mut key_buf: Vec<(u32, usize)> = Vec::new();
     let mut detail =
         ParserDwaDeterminizeDetail::enabled().then(ParserDwaDeterminizeDetail::default);
+    let mut union_cache = UnionAllCache {
+        profile_enabled: detail.is_some(),
+        ..UnionAllCache::default()
+    };
 
     // Deferred final weight computation: store subset entries for each DWA state
     // and compute final weights in parallel after the main loop.
@@ -738,34 +852,74 @@ fn determinize_with_supports(
 
             debug_assert!(contribs.iter().all(|(_, weight)| !weight.is_empty()));
 
+            if let Some(detail) = detail.as_mut() {
+                detail.labels_processed += 1;
+                detail.label_contribs_sum += contribs.len();
+                detail.label_contribs_max = detail.label_contribs_max.max(contribs.len());
+            }
+            let sort_started = detail.as_ref().map(|_| Instant::now());
             contribs.sort_unstable_by_key(|(state_id, _)| *state_id);
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), sort_started) {
+                detail.contribution_sort_ms += elapsed_ms(started_at);
+            }
 
             if contribs.len() == 1 {
                 let (only_state, only_weight) = &contribs[0];
                 if nwa.states()[*only_state as usize].epsilons.is_empty() {
+                    let key_started = detail.as_ref().map(|_| Instant::now());
                     key_buf.clear();
                     key_buf.push((*only_state, only_weight.ptr_key()));
+                    if let (Some(detail), Some(started_at)) = (detail.as_mut(), key_started) {
+                        detail.post_closure_subset_key_ms += elapsed_ms(started_at);
+                    }
+                    let subset_lookup_started = detail.as_ref().map(|_| Instant::now());
                     let to_state = if let Some(existing) = subset_map.get(&key_buf).copied() {
+                        if let Some(detail) = detail.as_mut() {
+                            detail.subset_intern_hits += 1;
+                        }
                         existing
                     } else {
+                        if let Some(detail) = detail.as_mut() {
+                            detail.subset_intern_misses += 1;
+                        }
                         let new_state = dwa.add_state();
                         subset_map.insert(key_buf.clone(), new_state);
                         worklist.push_back(vec![(*only_state, only_weight.clone())]);
                         supports.push(vec![*only_state]);
                         new_state
                     };
+                    if let (Some(detail), Some(started_at)) =
+                        (detail.as_mut(), subset_lookup_started)
+                    {
+                        detail.subset_map_lookup_ms += elapsed_ms(started_at);
+                    }
+                    let add_transition_started = detail.as_ref().map(|_| Instant::now());
                     dwa.add_transition(from_state, label, to_state, only_weight.clone());
+                    if let (Some(detail), Some(started_at)) =
+                        (detail.as_mut(), add_transition_started)
+                    {
+                        detail.add_transition_ms += elapsed_ms(started_at);
+                    }
                     return;
                 }
             }
 
+            let closure_key_started = detail.as_ref().map(|_| Instant::now());
             pre_closure_key.clear();
             pre_closure_key.extend(contribs.iter().map(|(sid, w)| (*sid, w.ptr_key())));
             if let Some(detail) = detail.as_mut() {
                 detail.subset_key_constructions += 1;
             }
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_key_started) {
+                detail.closure_key_ms += elapsed_ms(started_at);
+            }
 
-            let cached = match closure_cache.entry(pre_closure_key.clone()) {
+            let closure_lookup_started = detail.as_ref().map(|_| Instant::now());
+            let closure_entry = closure_cache.entry(pre_closure_key.clone());
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_lookup_started) {
+                detail.closure_lookup_ms += elapsed_ms(started_at);
+            }
+            let cached = match closure_entry {
                 Entry::Occupied(entry) => {
                     if let Some(detail) = detail.as_mut() {
                         detail.closure_cache_hits += 1;
@@ -776,7 +930,14 @@ fn determinize_with_supports(
                     if let Some(detail) = detail.as_mut() {
                         detail.closure_cache_misses += 1;
                     }
-                    let edge_weight = Weight::union_all(contribs.iter().map(|(_, weight)| weight));
+                    let edge_weight_started = detail.as_ref().map(|_| Instant::now());
+                    let edge_weight =
+                        union_cache.union_all(contribs.iter().map(|(_, weight)| weight));
+                    if let (Some(detail), Some(started_at)) =
+                        (detail.as_mut(), edge_weight_started)
+                    {
+                        detail.edge_weight_union_ms += elapsed_ms(started_at);
+                    }
                     if edge_weight.is_empty() {
                         return;
                     }
@@ -784,12 +945,16 @@ fn determinize_with_supports(
                         .iter()
                         .map(|(state_id, weight)| (*state_id, weight.clone()))
                         .collect();
+                    let closure_started = detail.as_ref().map(|_| Instant::now());
                     local_epsilon_closure(
                         nwa,
                         &mut weight_by_state,
                         &mut closure_queue,
                         &mut target_subset,
                     );
+                    if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_started) {
+                        detail.local_epsilon_closure_miss_ms += elapsed_ms(started_at);
+                    }
                     if target_subset.is_empty() {
                         return;
                     }
@@ -806,11 +971,16 @@ fn determinize_with_supports(
                 }
             };
 
+            let subset_key_started = detail.as_ref().map(|_| Instant::now());
             key_buf.clear();
             key_buf.extend(cached.canon.iter().map(|(sid, w)| (*sid, w.ptr_key())));
             if let Some(detail) = detail.as_mut() {
                 detail.subset_key_constructions += 1;
             }
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), subset_key_started) {
+                detail.post_closure_subset_key_ms += elapsed_ms(started_at);
+            }
+            let subset_lookup_started = detail.as_ref().map(|_| Instant::now());
             let to_state = if let Some(existing) = subset_map.get(&key_buf).copied() {
                 if let Some(detail) = detail.as_mut() {
                     detail.subset_intern_hits += 1;
@@ -826,7 +996,14 @@ fn determinize_with_supports(
                 supports.push(cached.canon.iter().map(|(sid, _)| *sid).collect());
                 new_state
             };
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), subset_lookup_started) {
+                detail.subset_map_lookup_ms += elapsed_ms(started_at);
+            }
+            let add_transition_started = detail.as_ref().map(|_| Instant::now());
             dwa.add_transition(from_state, label, to_state, cached.edge_weight.clone());
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), add_transition_started) {
+                detail.add_transition_ms += elapsed_ms(started_at);
+            }
         };
 
         for label_idx in touched_dense_labels.drain(..) {
@@ -850,6 +1027,7 @@ fn determinize_with_supports(
     let mut final_signature_ids: FxHashMap<Vec<(usize, Vec<usize>)>, usize> = FxHashMap::default();
     let mut final_signature_groups: Vec<Vec<(Weight, SmallVec<[Weight; 4]>)>> = Vec::new();
     let mut final_jobs: Vec<(u32, usize)> = Vec::with_capacity(deferred_final_entries.len());
+    let final_grouping_started = detail.as_ref().map(|_| Instant::now());
     for (state_id, entries) in &deferred_final_entries {
         if let Some(detail) = detail.as_mut() {
             detail.final_weight_entries += entries.len();
@@ -897,6 +1075,9 @@ fn determinize_with_supports(
         };
         final_jobs.push((*state_id, signature_id));
     }
+    if let (Some(detail), Some(started_at)) = (detail.as_mut(), final_grouping_started) {
+        detail.final_grouping_ms += elapsed_ms(started_at);
+    }
     if let Some(detail) = detail.as_mut() {
         detail.final_weight_states = final_jobs.len();
         detail.final_weight_signature_distinct = final_signature_groups.len();
@@ -907,19 +1088,62 @@ fn determinize_with_supports(
     // Compute final weights in parallel once per distinct final-weight signature.
     {
         use rayon::prelude::*;
-        let final_weights_by_signature: Vec<Option<Weight>> = final_signature_groups
-            .par_iter()
-            .map(|final_groups| {
-                let final_contributions: SmallVec<[Weight; 4]> = final_groups
-                    .iter()
-                    .filter_map(|(final_w, path_weights)| {
-                        let pw_union = Weight::union_all(path_weights.iter());
-                        let contribution = pw_union.intersection(final_w);
-                        if contribution.is_empty() { None } else { Some(contribution) }
-                    })
-                    .collect();
-                let final_weight = Weight::union_all(final_contributions.iter());
-                if final_weight.is_empty() { None } else { Some(final_weight) }
+        let detail_enabled = detail.is_some();
+        let final_weights_by_signature: Vec<(SmallVec<[Weight; 4]>, f64, f64)> =
+            final_signature_groups
+                .par_iter()
+                .map(|final_groups| {
+                    let mut path_union_ms = 0.0;
+                    let mut intersection_ms = 0.0;
+                    let final_contributions: SmallVec<[Weight; 4]> = final_groups
+                        .iter()
+                        .filter_map(|(final_w, path_weights)| {
+                            let pw_union = if detail_enabled {
+                                let path_union_started = Instant::now();
+                                let pw_union = Weight::union_all(path_weights.iter());
+                                path_union_ms += elapsed_ms(path_union_started);
+                                pw_union
+                            } else {
+                                Weight::union_all(path_weights.iter())
+                            };
+                            let contribution = if detail_enabled {
+                                let intersection_started = Instant::now();
+                                let contribution = pw_union.intersection(final_w);
+                                intersection_ms += elapsed_ms(intersection_started);
+                                contribution
+                            } else {
+                                pw_union.intersection(final_w)
+                            };
+                            if contribution.is_empty() {
+                                None
+                            } else {
+                                Some(contribution)
+                            }
+                        })
+                        .collect();
+                    (final_contributions, path_union_ms, intersection_ms)
+                })
+                .collect();
+        let mut final_weights_by_signature = final_weights_by_signature;
+        let final_weights_by_signature: Vec<Option<Weight>> = final_weights_by_signature
+            .drain(..)
+            .map(|(final_contributions, path_union_ms, intersection_ms)| {
+                if let Some(detail) = detail.as_mut() {
+                    detail.final_path_union_ms += path_union_ms;
+                    detail.final_intersection_ms += intersection_ms;
+                }
+                let output_union_started = detail.as_ref().map(|_| Instant::now());
+                let final_weight = union_cache.union_all(final_contributions.iter());
+                if let (Some(detail), Some(started_at)) =
+                    (detail.as_mut(), output_union_started)
+                {
+                    detail.final_output_union_ms += elapsed_ms(started_at);
+                }
+                if final_weight.is_empty() {
+                    None
+                } else {
+                    Some(final_weight)
+                }
             })
             .collect();
         for (state_id, signature_id) in final_jobs {
@@ -927,6 +1151,14 @@ fn determinize_with_supports(
                 dwa.set_final_weight(state_id, weight.clone());
             }
         }
+    }
+
+    if let Some(detail) = detail.as_mut() {
+        detail.union_cache_hits = union_cache.hits;
+        detail.union_cache_misses = union_cache.misses;
+        detail.union_cache_key_len_sum = union_cache.key_len_sum;
+        detail.union_cache_key_len_max = union_cache.key_len_max;
+        detail.union_cache_ms = union_cache.total_ms;
     }
 
     if let Some(detail) = detail {
@@ -992,7 +1224,7 @@ fn determinize_parser_dwa_with_fallbacks(
             if let Some(detail) = detail.as_mut() {
                 detail.intersection_calls += 1;
             }
-            let contribution = path_weight.intersection(state_final);
+            let contribution = path_weight.intersection_uncached(state_final);
             if !contribution.is_empty() {
                 if let Some(detail) = detail.as_mut() {
                     detail.nonempty_intersections += 1;
@@ -1016,7 +1248,7 @@ fn determinize_parser_dwa_with_fallbacks(
                     detail.outgoing_transitions_scanned += 1;
                     detail.intersection_calls += 1;
                 }
-                let next_weight = path_weight.intersection(transition_weight);
+                let next_weight = path_weight.intersection_uncached(transition_weight);
                 if next_weight.is_empty() {
                     continue;
                 }
@@ -1045,7 +1277,7 @@ fn determinize_parser_dwa_with_fallbacks(
                 detail.outgoing_transitions_scanned += 1;
                 detail.intersection_calls += 1;
             }
-            let fallback_weight = path_weight.intersection(default_weight);
+            let fallback_weight = path_weight.intersection_uncached(default_weight);
             if fallback_weight.is_empty() {
                 continue;
             }
@@ -1701,12 +1933,11 @@ fn build_parser_nwa_from_terminal_dwa(
         }
     }
 
-    let mut built_bundle_cache: Vec<Option<Arc<NWA>>> = if compose_detail_enabled {
-        vec![None; summaries.unique_bundles.len()]
-    } else {
-        use rayon::prelude::*;
+    use rayon::prelude::*;
 
-        summaries
+    let mut built_bundle_cache: Vec<Option<Arc<NWA>>> = vec![None; summaries.unique_bundles.len()];
+    if !compose_detail_enabled {
+        built_bundle_cache = summaries
             .unique_bundles
             .par_iter()
             .enumerate()
@@ -1714,8 +1945,8 @@ fn build_parser_nwa_from_terminal_dwa(
                 used_multi_bundle[bundle_id]
                     .then(|| Arc::new(templates.build_bundle(bundle)))
             })
-            .collect()
-    };
+            .collect();
+    }
 
     let branch_walk_started_at = Instant::now();
     for (state_id, state) in states.iter().enumerate() {
