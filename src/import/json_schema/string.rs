@@ -45,6 +45,11 @@ impl<'a> Lowerer<'a> {
             || assertions.const_value.is_some()
             || assertions.object.is_some()
             || assertions.array.is_some()
+            || assertions.types.as_ref().is_some_and(|types| {
+                !types
+                    .iter()
+                    .all(|schema_type| *schema_type == super::ast::SchemaType::String)
+            })
             || !assertions.any_of.is_empty()
             || !assertions.one_of.is_empty()
             || !assertions.all_of.is_empty()

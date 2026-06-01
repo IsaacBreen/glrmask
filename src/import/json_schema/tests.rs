@@ -1051,6 +1051,23 @@ fn unbounded_plain_string_arrays_use_terminal_rule() {
 }
 
 #[test]
+fn unbounded_nullable_string_arrays_keep_null_item_alternative() {
+    let schema = json!({
+        "type": "array",
+        "items": {"type": ["string", "null"]}
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(!glrm.contains("unbounded_scalar_array_"), "{glrm}");
+    assert!(glrm.contains("JSON_STRING"), "{glrm}");
+    assert!(glrm.contains("JSON_NULL"), "{glrm}");
+    assert!(schema_accepts_bytes(&schema, br#"["a", null]"#));
+    assert!(!schema_accepts_bytes(&schema, br#"["a", true]"#));
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn prefix_items_lower_with_no_tail() {
     let schema = json!({
         "type": "array",
