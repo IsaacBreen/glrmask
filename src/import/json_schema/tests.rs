@@ -2351,6 +2351,28 @@ fn anyof_allows_sibling_assertions() {
 }
 
 #[test]
+fn anyof_pattern_with_sibling_string_type_does_not_broaden_to_json_string() {
+    let schema = json!({
+        "type": "string",
+        "anyOf": [
+            {"type": "string", "pattern": "^/x$"}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    let start_line = glrm
+        .lines()
+        .find(|line| line.starts_with("nt start ::="))
+        .unwrap_or_else(|| panic!("{glrm}"));
+    assert!(!start_line.contains("| JSON_STRING"), "{glrm}");
+    assert!(schema_accepts_bytes(&schema, br#""/x""#));
+    assert!(!schema_accepts_bytes(&schema, br#""""#));
+    assert!(!schema_accepts_bytes(&schema, br#""<""#));
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn anyof_required_property_object_factors_into_single_expr_nfa_body() {
     let schema = json!({
         "type": "object",

@@ -131,6 +131,7 @@ impl<'a> Lowerer<'a> {
         } else {
             return Ok(never());
         }
+        branches = drop_vacuous_string_branches(branches);
 
         if let Some(explicit_types) = explicit_all_of_type_intersection(&branches) {
             let explicit_types_vec = explicit_types.into_iter().collect::<Vec<_>>();
@@ -1863,6 +1864,58 @@ fn is_vacuous_object_schema(schema: &Schema) -> bool {
         && assertions.array.is_none()
         && assertions.string.is_none()
         && assertions.number.is_none()
+}
+
+fn drop_vacuous_string_branches(branches: Vec<Schema>) -> Vec<Schema> {
+    let has_non_vacuous_string_branch = branches
+        .iter()
+        .any(|branch| !is_vacuous_string_schema(branch) && schema_has_string_family(branch));
+    if !has_non_vacuous_string_branch {
+        return branches;
+    }
+    branches
+        .into_iter()
+        .filter(|branch| !is_vacuous_string_schema(branch))
+        .collect()
+}
+
+fn is_vacuous_string_schema(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return false;
+    };
+    if assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+        || assertions.not.is_some()
+    {
+        return false;
+    }
+    let Some(types) = &assertions.types else {
+        return false;
+    };
+    if !types.iter().all(|schema_type| *schema_type == SchemaType::String) {
+        return false;
+    }
+    assertions.object.is_none()
+        && assertions.array.is_none()
+        && option_strings_shape_equivalent(
+            assertions.string.as_ref(),
+            Some(&super::ast::StringSchema::default()),
+        )
+        && assertions.number.is_none()
+}
+
+fn schema_has_string_family(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return false;
+    };
+    assertions.string.is_some()
+        || assertions
+            .types
+            .as_ref()
+            .is_some_and(|types| types.iter().any(|schema_type| *schema_type == SchemaType::String))
 }
 
 fn merge_additional_properties(
