@@ -192,3 +192,77 @@ fn sp343_delete_only_subset_separator_wave_matches_cfa_oracle() {
     assert_eq!(commit_profile.adv_n_nondet_isolates, 0);
     assert_eq!(total_final_stack_count(&final_stacks), 1);
 }
+
+#[test]
+fn kb304_nullable_enum_bare_quote_false_negative_truth_table() {
+    // CFA `jsb/data/Kubernetes---kb_304_Normalized` reports this exact frontier:
+    // prefix `{"apiVersion":`, token id 22 / bytes `"` is semantically valid
+    // because it can begin the enum string value `"v1"` after optional JSON
+    // whitespace. Preserve the current glrmask split before proposing a fix.
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "apiVersion": {
+                "type": ["string", "null"],
+                "enum": ["v1"]
+            }
+        }
+    }"#;
+    let prefix = br#"{"apiVersion":"#;
+    let token_id = 22u32;
+    let token_bytes = b"\"";
+    let vocab = Vocab::new(vec![(token_id, token_bytes.to_vec())], None);
+    let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
+
+    let mut mask_state = constraint.start();
+    mask_state.commit_bytes(prefix).unwrap();
+    let mask_contains = token_allowed(&mask_state.mask(), token_id as usize);
+
+    let mut token_state = constraint.start();
+    token_state.commit_bytes(prefix).unwrap();
+    let commit_token_accepts = token_state.commit_token(token_id).is_ok();
+
+    let mut bytes_state = constraint.start();
+    bytes_state.commit_bytes(prefix).unwrap();
+    let commit_bytes_accepts = bytes_state.commit_bytes(token_bytes).is_ok();
+
+    let mut spaced_quote_state = constraint.start();
+    spaced_quote_state.commit_bytes(prefix).unwrap();
+    let commit_space_quote_accepts = spaced_quote_state.commit_bytes(b" \"").is_ok();
+
+    let mut full_value_state = constraint.start();
+    full_value_state.commit_bytes(prefix).unwrap();
+    let commit_full_no_space_accepts = full_value_state.commit_bytes(br#""v1""#).is_ok();
+
+    let mut full_value_with_space_state = constraint.start();
+    full_value_with_space_state.commit_bytes(prefix).unwrap();
+    let commit_full_with_space_accepts = full_value_with_space_state.commit_bytes(br#" "v1""#).is_ok();
+
+    eprintln!(
+        "kb304 truth table: mask_contains={mask_contains} commit_token_accepts={commit_token_accepts} commit_bytes_accepts={commit_bytes_accepts} commit_space_quote_accepts={commit_space_quote_accepts} commit_full_no_space_accepts={commit_full_no_space_accepts} commit_full_with_space_accepts={commit_full_with_space_accepts}",
+    );
+    assert!(
+        commit_space_quote_accepts,
+        "glrmask accepts the example-aligned whitespace+quote spelling while rejecting the bare quote spelling",
+    );
+    assert!(
+        !commit_bytes_accepts,
+        "current MRE expects the generated grammar to reject this semantically valid string-prefix token",
+    );
+    assert!(
+        !commit_full_no_space_accepts,
+        "current MRE expects the generated grammar to reject the no-space full enum value too",
+    );
+    assert!(
+        commit_full_with_space_accepts,
+        "spaced full enum value should remain accepted",
+    );
+    assert!(
+        !mask_contains,
+        "current MRE expects the observed false-negative mask split: mask={mask_contains} commit_token={commit_token_accepts} commit_bytes={commit_bytes_accepts}",
+    );
+    assert!(
+        !commit_token_accepts,
+        "current MRE expects token commit to match the false-negative mask result",
+    );
+}
