@@ -120,6 +120,11 @@ impl<'a> Lowerer<'a> {
         if let Some(object) = self.try_merge_singleton_string_discriminator_one_of_objects(&branches)? {
             return self.lower_object(&object);
         }
+        if let Some(object) =
+            self.try_merge_distributed_singleton_string_discriminator_one_of(&branches)?
+        {
+            return self.lower_object(&object);
+        }
         let alternatives = branches
             .iter()
             .map(|branch| self.lower_schema(branch))
@@ -154,6 +159,31 @@ impl<'a> Lowerer<'a> {
         }
 
         Ok(Some(merged))
+    }
+
+    fn try_merge_distributed_singleton_string_discriminator_one_of(
+        &self,
+        branches: &[Schema],
+    ) -> ImportResult<Option<ObjectSchema>> {
+        let branches = branches
+            .iter()
+            .map(|branch| {
+                let SchemaKind::Assertions(assertions) = &branch.kind else {
+                    return Ok(branch.clone());
+                };
+                if assertions.all_of.is_empty()
+                    || !assertions.clone_without_combinators().is_empty()
+                {
+                    return Ok(branch.clone());
+                }
+                Ok(merge_all_of_object_like_schema(&assertions.all_of)
+                    .unwrap_or_else(|| branch.clone()))
+            })
+            .collect::<ImportResult<Vec<_>>>()?;
+        if let Some(object) = try_merge_required_singleton_property_one_of_objects(&branches) {
+            return Ok(Some(object));
+        }
+        self.try_merge_singleton_string_discriminator_one_of_objects(&branches)
     }
 
     fn resolve_singleton_string_discriminator_one_of_object(
@@ -367,6 +397,13 @@ impl<'a> Lowerer<'a> {
                     }
                 }
                 ChoiceKind::OneOf => {
+                    if let Some(object) =
+                        self.try_merge_distributed_singleton_string_discriminator_one_of(
+                            &distributed,
+                        )?
+                    {
+                        return self.lower_object(&object);
+                    }
                     let alternatives = distributed
                         .iter()
                         .map(|branch| self.lower_schema(branch))
@@ -1665,7 +1702,7 @@ fn merge_singleton_string_discriminator_objects(
         return None;
     }
 
-    let mut merged = first.clone();
+    let mut merged = (*first).clone();
     merged.properties.clear();
     let mut discriminator_count = 0usize;
 
@@ -1691,6 +1728,97 @@ fn merge_singleton_string_discriminator_objects(
     }
 
     Some((merged, discriminator_count))
+}
+
+fn try_merge_required_singleton_property_one_of_objects(branches: &[Schema]) -> Option<ObjectSchema> {
+    let objects = branches
+        .iter()
+        .map(plain_object_schema)
+        .collect::<Option<Vec<_>>>()?;
+    let first = objects.first()?;
+    if !is_singleton_string_discriminator_object_candidate(first)
+        || objects.iter().skip(1).any(|object| {
+            !is_singleton_string_discriminator_object_candidate(object)
+                || !singleton_string_discriminator_object_metadata_matches(first, object)
+        })
+    {
+        return None;
+    }
+
+    let mut merged = (*first).clone();
+    let mut discriminator_idx = None;
+    let mut discriminator_literals = Vec::new();
+    for property_idx in 0..first.properties.len() {
+        let property_name = &first.properties[property_idx].name;
+        let property_schemas = objects
+            .iter()
+            .map(|object| &object.properties[property_idx].schema)
+            .collect::<Vec<_>>();
+        if first.required.contains(property_name) {
+            if let Some(literals) = property_schemas
+                .iter()
+                .map(|schema| extract_unconstrained_singleton_string_literal(schema))
+                .collect::<Option<Vec<_>>>()
+            {
+                if singleton_string_literals_are_distinct(&literals) {
+                    if discriminator_idx.replace(property_idx).is_some() {
+                        return None;
+                    }
+                    discriminator_literals = literals;
+                    continue;
+                }
+            }
+        }
+        let first_schema = property_schemas.first()?;
+        if !property_schemas
+            .iter()
+            .skip(1)
+            .all(|schema| schemas_shape_equivalent(first_schema, schema))
+        {
+            return None;
+        }
+    }
+
+    let discriminator_idx = discriminator_idx?;
+    let discriminator_property = &mut merged.properties[discriminator_idx];
+    discriminator_property.schema = Schema::assertions(
+        discriminator_property.schema.location.clone(),
+        SchemaAssertions {
+            types: Some(vec![SchemaType::String]),
+            enum_values: Some(discriminator_literals.into_iter().map(Value::String).collect()),
+            ..SchemaAssertions::default()
+        },
+    );
+    Some(merged)
+}
+
+fn extract_unconstrained_singleton_string_literal(schema: &Schema) -> Option<String> {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return None;
+    };
+    if assertions.object.is_some()
+        || assertions.array.is_some()
+        || assertions.string.is_some()
+        || assertions.number.is_some()
+        || assertions.not.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+    {
+        return None;
+    }
+    if let Some(types) = &assertions.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::String)
+    {
+        return None;
+    }
+    if let Some(Value::String(value)) = &assertions.const_value {
+        return Some(value.clone());
+    }
+    match assertions.enum_values.as_deref() {
+        Some([Value::String(value)]) => Some(value.clone()),
+        _ => None,
+    }
 }
 
 fn merge_singleton_string_discriminator_schemas(

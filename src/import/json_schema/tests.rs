@@ -1441,6 +1441,69 @@ fn unsupported_nonredundant_min_properties_broadens() {
 }
 
 #[test]
+fn allof_oneof_ref_objects_with_required_sibling_factors_common_object() {
+    let schema = json!({
+        "type": "object",
+        "required": ["type", "typeProperties"],
+        "allOf": [
+            {"$ref": "#/$defs/commonTableProperties"},
+            {
+                "oneOf": [
+                    {"$ref": "#/$defs/blobDataset"},
+                    {"$ref": "#/$defs/tableDataset"}
+                ]
+            }
+        ],
+        "$defs": {
+            "commonTableProperties": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string"},
+                    "structure": {
+                        "type": "array",
+                        "items": {"$ref": "#/$defs/dataElement"}
+                    }
+                }
+            },
+            "blobDataset": {
+                "type": "object",
+                "properties": {
+                    "type": {"enum": ["AzureBlob"]},
+                    "typeProperties": {"type": "object"}
+                }
+            },
+            "tableDataset": {
+                "type": "object",
+                "properties": {
+                    "type": {"enum": ["AzureTable"]},
+                    "typeProperties": {"type": "object"}
+                }
+            },
+            "dataElement": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                },
+                "additionalProperties": false
+            }
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    let start_rule = glrm
+        .lines()
+        .find(|line| line.starts_with("nt start ::="))
+        .expect("start rule should be present");
+    assert!(!start_rule.contains(" | "), "{glrm}");
+    assert!(glrm.contains("\\\"structure\\\""), "{glrm}");
+    assert!(glrm.contains("\\\"type\\\""), "{glrm}");
+    assert!(glrm.contains("AzureBlob"), "{glrm}");
+    assert!(glrm.contains("AzureTable"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn oversized_pattern_properties_overlap_check_broadens() {
     let schema = json!({
         "type": "object",
