@@ -58,6 +58,32 @@ impl ResolveNegativesView for NwaResolveView<'_> {
     }
 }
 
+impl ResolveNegativesView for NWA {
+    fn state_count(&self) -> usize {
+        self.states().len()
+    }
+
+    fn final_weight(&self, state: u32) -> Option<&Weight> {
+        self.states()
+            .get(state as usize)
+            .and_then(|entry| entry.final_weight.as_ref())
+    }
+
+    fn epsilons(&self, state: u32) -> &[(u32, Weight)] {
+        self.states()
+            .get(state as usize)
+            .map(|entry| entry.epsilons.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn transitions(&self, state: u32) -> &BTreeMap<i32, Vec<(u32, Weight)>> {
+        self.states()
+            .get(state as usize)
+            .map(|entry| &entry.transitions)
+            .expect("resolve_negatives state id out of range")
+    }
+}
+
 #[derive(Clone, Default)]
 enum SmallQueuedQueries {
     #[default]
@@ -180,13 +206,13 @@ struct PredEdge<'a> {
 }
 
 pub(crate) struct DerivedEpsilonEdge {
-    from: u32,
-    to: u32,
-    weight: Weight,
+    pub(crate) from: u32,
+    pub(crate) to: u32,
+    pub(crate) weight: Weight,
 }
 
 pub(crate) struct CancellationAnalysis {
-    derived_epsilons: Vec<DerivedEpsilonEdge>,
+    pub(crate) derived_epsilons: Vec<DerivedEpsilonEdge>,
 }
 
 pub(crate) struct FinalityPredecessorGraph<'a> {
@@ -195,11 +221,11 @@ pub(crate) struct FinalityPredecessorGraph<'a> {
 }
 
 pub(crate) struct FinalityAnalysis {
-    reachable_final_weights: Vec<Option<Weight>>,
+    pub(crate) reachable_final_weights: Vec<Option<Weight>>,
 }
 
 pub(crate) struct TerminalDefaultAnalysis {
-    terminal_states: Vec<bool>,
+    pub(crate) terminal_states: Vec<bool>,
 }
 
 #[derive(Clone)]
@@ -505,7 +531,7 @@ fn collect_non_empty_derived_epsilons(
     }
 }
 
-fn compute_cancellations_range_from_view<V: ResolveNegativesView>(
+pub(crate) fn compute_cancellations_range_from_view<V: ResolveNegativesView>(
     view: &V,
     range: std::ops::Range<u32>,
 ) -> CancellationAnalysis {
@@ -836,7 +862,7 @@ fn apply_finality_fixpoint_acyclic(
     }
 }
 
-fn compute_reachable_final_weights<V: ResolveNegativesView>(
+pub(crate) fn compute_reachable_final_weights<V: ResolveNegativesView>(
     view: &V,
 ) -> FinalityAnalysis {
     let n = view.state_count();
@@ -947,7 +973,7 @@ fn grow_terminal_state_set<V: ResolveNegativesView>(view: &V, terminal_states: &
     }
 }
 
-fn compute_terminal_default_analysis<V: ResolveNegativesView>(
+pub(crate) fn compute_terminal_default_analysis<V: ResolveNegativesView>(
     view: &V,
 ) -> TerminalDefaultAnalysis {
     let mut terminal_states: Vec<bool> = (0..view.state_count())

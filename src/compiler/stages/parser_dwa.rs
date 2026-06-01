@@ -15,7 +15,17 @@ use crate::compiler::glr::table::GLRTable;
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::compile_profile_enabled;
-use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
+use crate::compiler::stages::resolve_negatives::{
+    CancellationAnalysis,
+    FinalityAnalysis,
+    ResolveNegativesView,
+    TerminalDefaultAnalysis,
+    compute_cancellations_range,
+    compute_cancellations_range_from_view,
+    compute_reachable_final_weights,
+    compute_terminal_default_analysis,
+    resolve_negative_codes_in_nwa,
+};
 use crate::compiler::stages::templates::Templates;
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
@@ -59,11 +69,31 @@ struct ParserDwaDeterminizeDetail {
     closure_cache_misses: usize,
     intersection_scan_ms: f64,
     label_processing_ms: f64,
+    labels_processed: usize,
+    label_contribs_sum: usize,
+    label_contribs_max: usize,
+    contribution_sort_ms: f64,
+    edge_weight_union_ms: f64,
+    closure_key_ms: f64,
+    closure_lookup_ms: f64,
+    local_epsilon_closure_miss_ms: f64,
+    post_closure_subset_key_ms: f64,
+    subset_map_lookup_ms: f64,
+    add_transition_ms: f64,
     final_weight_states: usize,
     final_weight_entries: usize,
     final_weight_entries_max: usize,
     final_weight_signature_distinct: usize,
     final_weight_signature_hit_potential: usize,
+    final_grouping_ms: f64,
+    final_path_union_ms: f64,
+    final_intersection_ms: f64,
+    final_output_union_ms: f64,
+    union_cache_hits: usize,
+    union_cache_misses: usize,
+    union_cache_key_len_sum: usize,
+    union_cache_key_len_max: usize,
+    union_cache_ms: f64,
     fallback_labels_expanded: usize,
     fallback_contrib_entries_duplicated: usize,
 }
@@ -113,6 +143,30 @@ impl ParserDwaDeterminizeDetail {
             self.final_weight_signature_hit_potential,
             self.fallback_labels_expanded,
             self.fallback_contrib_entries_duplicated,
+        );
+        eprintln!(
+            "[glrmask/profile][parser_dwa_determinize_fine] name={} labels_processed={} label_contribs_sum={} label_contribs_max={} contribution_sort_ms={:.3} edge_weight_union_ms={:.3} closure_key_ms={:.3} closure_lookup_ms={:.3} local_epsilon_closure_miss_ms={:.3} post_closure_subset_key_ms={:.3} subset_map_lookup_ms={:.3} add_transition_ms={:.3} final_grouping_ms={:.3} final_path_union_ms={:.3} final_intersection_ms={:.3} final_output_union_ms={:.3} union_cache_hits={} union_cache_misses={} union_cache_key_len_sum={} union_cache_key_len_max={} union_cache_ms={:.3}",
+            name,
+            self.labels_processed,
+            self.label_contribs_sum,
+            self.label_contribs_max,
+            self.contribution_sort_ms,
+            self.edge_weight_union_ms,
+            self.closure_key_ms,
+            self.closure_lookup_ms,
+            self.local_epsilon_closure_miss_ms,
+            self.post_closure_subset_key_ms,
+            self.subset_map_lookup_ms,
+            self.add_transition_ms,
+            self.final_grouping_ms,
+            self.final_path_union_ms,
+            self.final_intersection_ms,
+            self.final_output_union_ms,
+            self.union_cache_hits,
+            self.union_cache_misses,
+            self.union_cache_key_len_sum,
+            self.union_cache_key_len_max,
+            self.union_cache_ms,
         );
     }
 }
@@ -176,6 +230,102 @@ struct StateSummaries {
     states: Vec<StateSummary>,
     unique_bundles: Vec<TerminalBundle>,
     bundle_accepts: Vec<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum LazyResolveNodeKey {
+    Continuation { td_state: u32 },
+    TemplateState {
+        terminal: TerminalID,
+        local_state: u32,
+        target_td_state: u32,
+        bundle_id: usize,
+    },
+    BundleState {
+        bundle_id: usize,
+        local_state: u32,
+        target_td_state: u32,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+struct LazyResolveNodeRecord {
+    final_weight: Option<Weight>,
+    epsilons: Vec<(u32, Weight)>,
+    transitions: BTreeMap<i32, Vec<(u32, Weight)>>,
+}
+
+#[derive(Debug, Clone)]
+struct LazyResolveGraph {
+    keys: Vec<LazyResolveNodeKey>,
+    records: Vec<LazyResolveNodeRecord>,
+    node_ids: FxHashMap<LazyResolveNodeKey, u32>,
+    continuation_nodes: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolveAnalysisStats {
+    state_count: usize,
+    cancellation_edges: usize,
+    reachable_final_states: usize,
+    terminal_states: usize,
+}
+
+impl LazyResolveGraph {
+    fn new(state_count: usize) -> Self {
+        Self {
+            keys: Vec::new(),
+            records: Vec::new(),
+            node_ids: FxHashMap::default(),
+            continuation_nodes: vec![u32::MAX; state_count],
+        }
+    }
+
+    fn intern_node(&mut self, key: LazyResolveNodeKey) -> u32 {
+        if let Some(&node_id) = self.node_ids.get(&key) {
+            return node_id;
+        }
+
+        let node_id = self.keys.len() as u32;
+        self.keys.push(key);
+        self.records.push(LazyResolveNodeRecord::default());
+        self.node_ids.insert(key, node_id);
+        node_id
+    }
+
+    fn continuation_node(&self, td_state: u32) -> u32 {
+        self.continuation_nodes
+            .get(td_state as usize)
+            .copied()
+            .expect("missing continuation slot")
+    }
+
+    fn node_id(&self, key: LazyResolveNodeKey) -> u32 {
+        *self.node_ids.get(&key).expect("missing lazy resolve node")
+    }
+}
+
+impl ResolveNegativesView for LazyResolveGraph {
+    fn state_count(&self) -> usize {
+        self.records.len()
+    }
+
+    fn final_weight(&self, state: u32) -> Option<&Weight> {
+        self.records
+            .get(state as usize)
+            .and_then(|record| record.final_weight.as_ref())
+    }
+
+    fn epsilons(&self, state: u32) -> &[(u32, Weight)] {
+        self.records
+            .get(state as usize)
+            .map(|record| record.epsilons.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn transitions(&self, state: u32) -> &BTreeMap<i32, Vec<(u32, Weight)>> {
+        &self.records[state as usize].transitions
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -259,6 +409,385 @@ fn parser_dwa_compose_detail_enabled() -> bool {
     std::env::var("GLRMASK_PROFILE_PARSER_DWA_COMPOSE_DETAIL")
         .map(|value| value == "1")
         .unwrap_or(false)
+}
+
+fn lazy_negative_parser_dwa_enabled() -> bool {
+    std::env::var("GLRMASK_LAZY_NEGATIVE_PARSER_DWA")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+fn ensure_lazy_template_fragment_nodes(
+    graph: &mut LazyResolveGraph,
+    template: &NWA,
+    terminal: TerminalID,
+    target_td_state: u32,
+    bundle_id: usize,
+) {
+    for local_state in 0..template.states().len() as u32 {
+        graph.intern_node(LazyResolveNodeKey::TemplateState {
+            terminal,
+            local_state,
+            target_td_state,
+            bundle_id,
+        });
+    }
+}
+
+fn ensure_lazy_bundle_fragment_nodes(
+    graph: &mut LazyResolveGraph,
+    bundle: &NWA,
+    bundle_id: usize,
+    target_td_state: u32,
+) {
+    for local_state in 0..bundle.states().len() as u32 {
+        graph.intern_node(LazyResolveNodeKey::BundleState {
+            bundle_id,
+            local_state,
+            target_td_state,
+        });
+    }
+}
+
+fn build_lazy_resolve_graph(
+    summaries: &StateSummaries,
+    productive: &[bool],
+    templates: &Templates,
+    built_bundle_cache: &mut [Option<Arc<NWA>>],
+) -> LazyResolveGraph {
+    let mut graph = LazyResolveGraph::new(summaries.states.len());
+
+    for (state_id, is_productive) in productive.iter().copied().enumerate() {
+        if !is_productive {
+            continue;
+        }
+        let node_id = graph.intern_node(LazyResolveNodeKey::Continuation {
+            td_state: state_id as u32,
+        });
+        graph.continuation_nodes[state_id] = node_id;
+    }
+
+    for (state_id, state) in summaries.states.iter().enumerate() {
+        if !productive.get(state_id).copied().unwrap_or(false) {
+            continue;
+        }
+
+        for branch in &state.branches {
+            let target_idx = branch.target as usize;
+            if !productive.get(target_idx).copied().unwrap_or(false)
+                || !summaries.bundle_accepts.get(branch.bundle_id).copied().unwrap_or(false)
+            {
+                continue;
+            }
+
+            let bundle = &summaries.unique_bundles[branch.bundle_id];
+            if bundle.len() == 1 {
+                let (&terminal, weight) = bundle.iter().next().expect("single-entry bundle");
+                if weight.is_empty() {
+                    continue;
+                }
+                if let Some(template) = templates.by_terminal_nwa.get(&terminal) {
+                    ensure_lazy_template_fragment_nodes(
+                        &mut graph,
+                        template,
+                        terminal,
+                        branch.target,
+                        branch.bundle_id,
+                    );
+                }
+                continue;
+            }
+
+            if built_bundle_cache[branch.bundle_id].is_none() {
+                built_bundle_cache[branch.bundle_id] = Some(Arc::new(templates.build_bundle(bundle)));
+            }
+            if let Some(bundle_nwa) = built_bundle_cache[branch.bundle_id].as_ref() {
+                ensure_lazy_bundle_fragment_nodes(
+                    &mut graph,
+                    bundle_nwa.as_ref(),
+                    branch.bundle_id,
+                    branch.target,
+                );
+            }
+        }
+    }
+
+    for node_id in 0..graph.keys.len() {
+        let key = graph.keys[node_id];
+        let mut record = LazyResolveNodeRecord::default();
+        match key {
+            LazyResolveNodeKey::Continuation { td_state } => {
+                let state = &summaries.states[td_state as usize];
+                record.final_weight = state.final_weight.clone();
+
+                for branch in &state.branches {
+                    let target_idx = branch.target as usize;
+                    if !productive.get(target_idx).copied().unwrap_or(false)
+                        || !summaries.bundle_accepts.get(branch.bundle_id).copied().unwrap_or(false)
+                    {
+                        continue;
+                    }
+
+                    let bundle = &summaries.unique_bundles[branch.bundle_id];
+                    if bundle.len() == 1 {
+                        let (&terminal, weight) = bundle.iter().next().expect("single-entry bundle");
+                        if weight.is_empty() {
+                            continue;
+                        }
+                        let Some(template) = templates.by_terminal_nwa.get(&terminal) else {
+                            continue;
+                        };
+                        for &start_state in template.start_states() {
+                            let target_node = graph.node_id(LazyResolveNodeKey::TemplateState {
+                                terminal,
+                                local_state: start_state,
+                                target_td_state: branch.target,
+                                bundle_id: branch.bundle_id,
+                            });
+                            record.epsilons.push((target_node, Weight::all()));
+                        }
+                    } else if let Some(bundle_nwa) = built_bundle_cache[branch.bundle_id].as_ref() {
+                        for &start_state in bundle_nwa.start_states() {
+                            let target_node = graph.node_id(LazyResolveNodeKey::BundleState {
+                                bundle_id: branch.bundle_id,
+                                local_state: start_state,
+                                target_td_state: branch.target,
+                            });
+                            record.epsilons.push((target_node, Weight::all()));
+                        }
+                    }
+                }
+            }
+            LazyResolveNodeKey::TemplateState {
+                terminal,
+                local_state,
+                target_td_state,
+                bundle_id,
+            } => {
+                let Some(template) = templates.by_terminal_nwa.get(&terminal) else {
+                    graph.records[node_id] = record;
+                    continue;
+                };
+                let Some(branch_weight) = summaries.unique_bundles[bundle_id].get(&terminal) else {
+                    graph.records[node_id] = record;
+                    continue;
+                };
+                let Some(state) = template.states().get(local_state as usize) else {
+                    graph.records[node_id] = record;
+                    continue;
+                };
+
+                for (target, _) in &state.epsilons {
+                    let target_node = graph.node_id(LazyResolveNodeKey::TemplateState {
+                        terminal,
+                        local_state: *target,
+                        target_td_state,
+                        bundle_id,
+                    });
+                    record.epsilons.push((target_node, branch_weight.clone()));
+                }
+                if state.final_weight.is_some() {
+                    record.epsilons.push((
+                        graph.continuation_node(target_td_state),
+                        branch_weight.clone(),
+                    ));
+                }
+
+                for (&label, targets) in &state.transitions {
+                    let edges = record.transitions.entry(label).or_default();
+                    for (target, _) in targets {
+                        let target_node = graph.node_id(LazyResolveNodeKey::TemplateState {
+                            terminal,
+                            local_state: *target,
+                            target_td_state,
+                            bundle_id,
+                        });
+                        edges.push((target_node, branch_weight.clone()));
+                    }
+                }
+            }
+            LazyResolveNodeKey::BundleState {
+                bundle_id,
+                local_state,
+                target_td_state,
+            } => {
+                let Some(bundle_nwa) = built_bundle_cache[bundle_id].as_ref() else {
+                    graph.records[node_id] = record;
+                    continue;
+                };
+                let Some(state) = bundle_nwa.states().get(local_state as usize) else {
+                    graph.records[node_id] = record;
+                    continue;
+                };
+
+                for (target, weight) in &state.epsilons {
+                    let target_node = graph.node_id(LazyResolveNodeKey::BundleState {
+                        bundle_id,
+                        local_state: *target,
+                        target_td_state,
+                    });
+                    record.epsilons.push((target_node, weight.clone()));
+                }
+                if let Some(final_weight) = state.final_weight.as_ref().filter(|weight| !weight.is_empty()) {
+                    record.epsilons.push((
+                        graph.continuation_node(target_td_state),
+                        final_weight.clone(),
+                    ));
+                }
+
+                for (&label, targets) in &state.transitions {
+                    let edges = record.transitions.entry(label).or_default();
+                    for (target, weight) in targets {
+                        let target_node = graph.node_id(LazyResolveNodeKey::BundleState {
+                            bundle_id,
+                            local_state: *target,
+                            target_td_state,
+                        });
+                        edges.push((target_node, weight.clone()));
+                    }
+                }
+            }
+        }
+
+        graph.records[node_id] = record;
+    }
+
+    graph
+}
+
+fn resolve_analysis_stats<V: ResolveNegativesView>(
+    view: &V,
+    cancellation: &CancellationAnalysis,
+    finality: &FinalityAnalysis,
+    terminal_defaults: &TerminalDefaultAnalysis,
+) -> ResolveAnalysisStats {
+    ResolveAnalysisStats {
+        state_count: view.state_count(),
+        cancellation_edges: cancellation.derived_epsilons.len(),
+        reachable_final_states: finality
+            .reachable_final_weights
+            .iter()
+            .filter(|entry| entry.is_some())
+            .count(),
+        terminal_states: terminal_defaults
+            .terminal_states
+            .iter()
+            .filter(|&&entry| entry)
+            .count(),
+    }
+}
+
+fn compare_cancellation_analyses(
+    materialized: &CancellationAnalysis,
+    lazy: &CancellationAnalysis,
+) -> Result<(), String> {
+    if materialized.derived_epsilons.len() != lazy.derived_epsilons.len() {
+        return Err(format!(
+            "cancellation edge count mismatch: materialized={} lazy={}",
+            materialized.derived_epsilons.len(),
+            lazy.derived_epsilons.len()
+        ));
+    }
+
+    let mut materialized_edges: Vec<(u32, u32, Weight)> = materialized
+        .derived_epsilons
+        .iter()
+        .map(|edge| (edge.from, edge.to, edge.weight.clone()))
+        .collect();
+    let mut lazy_edges: Vec<(u32, u32, Weight)> = lazy
+        .derived_epsilons
+        .iter()
+        .map(|edge| (edge.from, edge.to, edge.weight.clone()))
+        .collect();
+    materialized_edges.sort_by_key(|(from, to, _)| (*from, *to));
+    lazy_edges.sort_by_key(|(from, to, _)| (*from, *to));
+
+    for (index, (left, right)) in materialized_edges.iter().zip(&lazy_edges).enumerate() {
+        if left != right {
+            return Err(format!(
+                "cancellation edge mismatch at {}: materialized=({},{}) lazy=({},{})",
+                index,
+                left.0,
+                left.1,
+                right.0,
+                right.1,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn compare_finality_analyses(
+    materialized: &FinalityAnalysis,
+    lazy: &FinalityAnalysis,
+) -> Result<(), String> {
+    if materialized.reachable_final_weights != lazy.reachable_final_weights {
+        let mismatch = materialized
+            .reachable_final_weights
+            .iter()
+            .zip(&lazy.reachable_final_weights)
+            .position(|(left, right)| left != right)
+            .unwrap_or(usize::MAX);
+        return Err(format!("reachable final weight mismatch at state {}", mismatch));
+    }
+    Ok(())
+}
+
+fn compare_terminal_default_analyses(
+    materialized: &TerminalDefaultAnalysis,
+    lazy: &TerminalDefaultAnalysis,
+) -> Result<(), String> {
+    if materialized.terminal_states != lazy.terminal_states {
+        let mismatch = materialized
+            .terminal_states
+            .iter()
+            .zip(&lazy.terminal_states)
+            .position(|(left, right)| left != right)
+            .unwrap_or(usize::MAX);
+        return Err(format!("terminal-state mismatch at state {}", mismatch));
+    }
+    Ok(())
+}
+
+fn compare_lazy_resolve_analyses(materialized: &NWA, lazy: &LazyResolveGraph) -> Result<(), String> {
+    let materialized_cancellation = compute_cancellations_range(
+        materialized,
+        0..materialized.state_count() as u32,
+    );
+    let lazy_cancellation = compute_cancellations_range_from_view(lazy, 0..lazy.state_count() as u32);
+    let materialized_finality = compute_reachable_final_weights(materialized);
+    let lazy_finality = compute_reachable_final_weights(lazy);
+    let materialized_terminal = compute_terminal_default_analysis(materialized);
+    let lazy_terminal = compute_terminal_default_analysis(lazy);
+
+    let materialized_stats = resolve_analysis_stats(
+        materialized,
+        &materialized_cancellation,
+        &materialized_finality,
+        &materialized_terminal,
+    );
+    let lazy_stats = resolve_analysis_stats(
+        lazy,
+        &lazy_cancellation,
+        &lazy_finality,
+        &lazy_terminal,
+    );
+
+    compare_cancellation_analyses(&materialized_cancellation, &lazy_cancellation)
+        .and_then(|_| compare_finality_analyses(&materialized_finality, &lazy_finality))
+        .and_then(|_| compare_terminal_default_analyses(&materialized_terminal, &lazy_terminal))
+        .map_err(|err| {
+            format!(
+                "lazy resolve analysis mismatch: {} | materialized={:?} lazy={:?}",
+                err,
+                materialized_stats,
+                lazy_stats,
+            )
+        })
 }
 
 fn group_terminal_edges_by_target(
@@ -547,6 +1076,72 @@ fn determinize_with_supports(
         entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
     }
 
+    #[derive(Default)]
+    struct UnionAllCache {
+        entries: FxHashMap<Vec<usize>, Weight>,
+        profile_enabled: bool,
+        hits: usize,
+        misses: usize,
+        key_len_sum: usize,
+        key_len_max: usize,
+        total_ms: f64,
+    }
+
+    impl UnionAllCache {
+        fn record_elapsed(&mut self, started: Option<Instant>) {
+            if let Some(started) = started {
+                self.total_ms += elapsed_ms(started);
+            }
+        }
+
+        fn union_all<'a>(&mut self, weights: impl IntoIterator<Item = &'a Weight>) -> Weight {
+            let started = self.profile_enabled.then(Instant::now);
+            let mut meaningful = SmallVec::<[&Weight; 8]>::new();
+            for weight in weights {
+                if weight.is_full() {
+                    self.record_elapsed(started);
+                    return Weight::all();
+                }
+                if !weight.is_empty() {
+                    meaningful.push(weight);
+                }
+            }
+
+            if meaningful.is_empty() {
+                self.record_elapsed(started);
+                return Weight::empty();
+            }
+            if meaningful.len() == 1 {
+                self.record_elapsed(started);
+                return meaningful[0].clone();
+            }
+
+            let mut key: Vec<usize> = meaningful.iter().map(|weight| weight.ptr_key()).collect();
+            key.sort_unstable();
+            key.dedup();
+            self.key_len_sum += key.len();
+            self.key_len_max = self.key_len_max.max(key.len());
+
+            if key.len() == 1 {
+                self.record_elapsed(started);
+                return meaningful[0].clone();
+            }
+
+            if let Some(weight) = self.entries.get(&key) {
+                let weight = weight.clone();
+                self.hits += 1;
+                self.record_elapsed(started);
+                return weight;
+            }
+
+            self.misses += 1;
+            let weight = Weight::union_all(meaningful.into_iter());
+            self.entries.insert(key, weight.clone());
+            self.record_elapsed(started);
+            weight
+        }
+    }
+
     let num_nwa_states = nwa.states().len();
 
     // Use flat arrays for epsilon closure when NWA is small enough.
@@ -664,6 +1259,10 @@ fn determinize_with_supports(
     let mut key_buf: Vec<(u32, usize)> = Vec::new();
     let mut detail =
         ParserDwaDeterminizeDetail::enabled().then(ParserDwaDeterminizeDetail::default);
+    let mut union_cache = UnionAllCache {
+        profile_enabled: detail.is_some(),
+        ..UnionAllCache::default()
+    };
 
     // Deferred final weight computation: store subset entries for each DWA state
     // and compute final weights in parallel after the main loop.
@@ -738,34 +1337,74 @@ fn determinize_with_supports(
 
             debug_assert!(contribs.iter().all(|(_, weight)| !weight.is_empty()));
 
+            if let Some(detail) = detail.as_mut() {
+                detail.labels_processed += 1;
+                detail.label_contribs_sum += contribs.len();
+                detail.label_contribs_max = detail.label_contribs_max.max(contribs.len());
+            }
+            let sort_started = detail.as_ref().map(|_| Instant::now());
             contribs.sort_unstable_by_key(|(state_id, _)| *state_id);
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), sort_started) {
+                detail.contribution_sort_ms += elapsed_ms(started_at);
+            }
 
             if contribs.len() == 1 {
                 let (only_state, only_weight) = &contribs[0];
                 if nwa.states()[*only_state as usize].epsilons.is_empty() {
+                    let key_started = detail.as_ref().map(|_| Instant::now());
                     key_buf.clear();
                     key_buf.push((*only_state, only_weight.ptr_key()));
+                    if let (Some(detail), Some(started_at)) = (detail.as_mut(), key_started) {
+                        detail.post_closure_subset_key_ms += elapsed_ms(started_at);
+                    }
+                    let subset_lookup_started = detail.as_ref().map(|_| Instant::now());
                     let to_state = if let Some(existing) = subset_map.get(&key_buf).copied() {
+                        if let Some(detail) = detail.as_mut() {
+                            detail.subset_intern_hits += 1;
+                        }
                         existing
                     } else {
+                        if let Some(detail) = detail.as_mut() {
+                            detail.subset_intern_misses += 1;
+                        }
                         let new_state = dwa.add_state();
                         subset_map.insert(key_buf.clone(), new_state);
                         worklist.push_back(vec![(*only_state, only_weight.clone())]);
                         supports.push(vec![*only_state]);
                         new_state
                     };
+                    if let (Some(detail), Some(started_at)) =
+                        (detail.as_mut(), subset_lookup_started)
+                    {
+                        detail.subset_map_lookup_ms += elapsed_ms(started_at);
+                    }
+                    let add_transition_started = detail.as_ref().map(|_| Instant::now());
                     dwa.add_transition(from_state, label, to_state, only_weight.clone());
+                    if let (Some(detail), Some(started_at)) =
+                        (detail.as_mut(), add_transition_started)
+                    {
+                        detail.add_transition_ms += elapsed_ms(started_at);
+                    }
                     return;
                 }
             }
 
+            let closure_key_started = detail.as_ref().map(|_| Instant::now());
             pre_closure_key.clear();
             pre_closure_key.extend(contribs.iter().map(|(sid, w)| (*sid, w.ptr_key())));
             if let Some(detail) = detail.as_mut() {
                 detail.subset_key_constructions += 1;
             }
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_key_started) {
+                detail.closure_key_ms += elapsed_ms(started_at);
+            }
 
-            let cached = match closure_cache.entry(pre_closure_key.clone()) {
+            let closure_lookup_started = detail.as_ref().map(|_| Instant::now());
+            let closure_entry = closure_cache.entry(pre_closure_key.clone());
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_lookup_started) {
+                detail.closure_lookup_ms += elapsed_ms(started_at);
+            }
+            let cached = match closure_entry {
                 Entry::Occupied(entry) => {
                     if let Some(detail) = detail.as_mut() {
                         detail.closure_cache_hits += 1;
@@ -776,7 +1415,14 @@ fn determinize_with_supports(
                     if let Some(detail) = detail.as_mut() {
                         detail.closure_cache_misses += 1;
                     }
-                    let edge_weight = Weight::union_all(contribs.iter().map(|(_, weight)| weight));
+                    let edge_weight_started = detail.as_ref().map(|_| Instant::now());
+                    let edge_weight =
+                        union_cache.union_all(contribs.iter().map(|(_, weight)| weight));
+                    if let (Some(detail), Some(started_at)) =
+                        (detail.as_mut(), edge_weight_started)
+                    {
+                        detail.edge_weight_union_ms += elapsed_ms(started_at);
+                    }
                     if edge_weight.is_empty() {
                         return;
                     }
@@ -784,12 +1430,16 @@ fn determinize_with_supports(
                         .iter()
                         .map(|(state_id, weight)| (*state_id, weight.clone()))
                         .collect();
+                    let closure_started = detail.as_ref().map(|_| Instant::now());
                     local_epsilon_closure(
                         nwa,
                         &mut weight_by_state,
                         &mut closure_queue,
                         &mut target_subset,
                     );
+                    if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_started) {
+                        detail.local_epsilon_closure_miss_ms += elapsed_ms(started_at);
+                    }
                     if target_subset.is_empty() {
                         return;
                     }
@@ -806,11 +1456,16 @@ fn determinize_with_supports(
                 }
             };
 
+            let subset_key_started = detail.as_ref().map(|_| Instant::now());
             key_buf.clear();
             key_buf.extend(cached.canon.iter().map(|(sid, w)| (*sid, w.ptr_key())));
             if let Some(detail) = detail.as_mut() {
                 detail.subset_key_constructions += 1;
             }
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), subset_key_started) {
+                detail.post_closure_subset_key_ms += elapsed_ms(started_at);
+            }
+            let subset_lookup_started = detail.as_ref().map(|_| Instant::now());
             let to_state = if let Some(existing) = subset_map.get(&key_buf).copied() {
                 if let Some(detail) = detail.as_mut() {
                     detail.subset_intern_hits += 1;
@@ -826,7 +1481,14 @@ fn determinize_with_supports(
                 supports.push(cached.canon.iter().map(|(sid, _)| *sid).collect());
                 new_state
             };
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), subset_lookup_started) {
+                detail.subset_map_lookup_ms += elapsed_ms(started_at);
+            }
+            let add_transition_started = detail.as_ref().map(|_| Instant::now());
             dwa.add_transition(from_state, label, to_state, cached.edge_weight.clone());
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), add_transition_started) {
+                detail.add_transition_ms += elapsed_ms(started_at);
+            }
         };
 
         for label_idx in touched_dense_labels.drain(..) {
@@ -850,6 +1512,7 @@ fn determinize_with_supports(
     let mut final_signature_ids: FxHashMap<Vec<(usize, Vec<usize>)>, usize> = FxHashMap::default();
     let mut final_signature_groups: Vec<Vec<(Weight, SmallVec<[Weight; 4]>)>> = Vec::new();
     let mut final_jobs: Vec<(u32, usize)> = Vec::with_capacity(deferred_final_entries.len());
+    let final_grouping_started = detail.as_ref().map(|_| Instant::now());
     for (state_id, entries) in &deferred_final_entries {
         if let Some(detail) = detail.as_mut() {
             detail.final_weight_entries += entries.len();
@@ -897,6 +1560,9 @@ fn determinize_with_supports(
         };
         final_jobs.push((*state_id, signature_id));
     }
+    if let (Some(detail), Some(started_at)) = (detail.as_mut(), final_grouping_started) {
+        detail.final_grouping_ms += elapsed_ms(started_at);
+    }
     if let Some(detail) = detail.as_mut() {
         detail.final_weight_states = final_jobs.len();
         detail.final_weight_signature_distinct = final_signature_groups.len();
@@ -907,19 +1573,62 @@ fn determinize_with_supports(
     // Compute final weights in parallel once per distinct final-weight signature.
     {
         use rayon::prelude::*;
-        let final_weights_by_signature: Vec<Option<Weight>> = final_signature_groups
-            .par_iter()
-            .map(|final_groups| {
-                let final_contributions: SmallVec<[Weight; 4]> = final_groups
-                    .iter()
-                    .filter_map(|(final_w, path_weights)| {
-                        let pw_union = Weight::union_all(path_weights.iter());
-                        let contribution = pw_union.intersection(final_w);
-                        if contribution.is_empty() { None } else { Some(contribution) }
-                    })
-                    .collect();
-                let final_weight = Weight::union_all(final_contributions.iter());
-                if final_weight.is_empty() { None } else { Some(final_weight) }
+        let detail_enabled = detail.is_some();
+        let final_weights_by_signature: Vec<(SmallVec<[Weight; 4]>, f64, f64)> =
+            final_signature_groups
+                .par_iter()
+                .map(|final_groups| {
+                    let mut path_union_ms = 0.0;
+                    let mut intersection_ms = 0.0;
+                    let final_contributions: SmallVec<[Weight; 4]> = final_groups
+                        .iter()
+                        .filter_map(|(final_w, path_weights)| {
+                            let pw_union = if detail_enabled {
+                                let path_union_started = Instant::now();
+                                let pw_union = Weight::union_all(path_weights.iter());
+                                path_union_ms += elapsed_ms(path_union_started);
+                                pw_union
+                            } else {
+                                Weight::union_all(path_weights.iter())
+                            };
+                            let contribution = if detail_enabled {
+                                let intersection_started = Instant::now();
+                                let contribution = pw_union.intersection(final_w);
+                                intersection_ms += elapsed_ms(intersection_started);
+                                contribution
+                            } else {
+                                pw_union.intersection(final_w)
+                            };
+                            if contribution.is_empty() {
+                                None
+                            } else {
+                                Some(contribution)
+                            }
+                        })
+                        .collect();
+                    (final_contributions, path_union_ms, intersection_ms)
+                })
+                .collect();
+        let mut final_weights_by_signature = final_weights_by_signature;
+        let final_weights_by_signature: Vec<Option<Weight>> = final_weights_by_signature
+            .drain(..)
+            .map(|(final_contributions, path_union_ms, intersection_ms)| {
+                if let Some(detail) = detail.as_mut() {
+                    detail.final_path_union_ms += path_union_ms;
+                    detail.final_intersection_ms += intersection_ms;
+                }
+                let output_union_started = detail.as_ref().map(|_| Instant::now());
+                let final_weight = union_cache.union_all(final_contributions.iter());
+                if let (Some(detail), Some(started_at)) =
+                    (detail.as_mut(), output_union_started)
+                {
+                    detail.final_output_union_ms += elapsed_ms(started_at);
+                }
+                if final_weight.is_empty() {
+                    None
+                } else {
+                    Some(final_weight)
+                }
             })
             .collect();
         for (state_id, signature_id) in final_jobs {
@@ -927,6 +1636,14 @@ fn determinize_with_supports(
                 dwa.set_final_weight(state_id, weight.clone());
             }
         }
+    }
+
+    if let Some(detail) = detail.as_mut() {
+        detail.union_cache_hits = union_cache.hits;
+        detail.union_cache_misses = union_cache.misses;
+        detail.union_cache_key_len_sum = union_cache.key_len_sum;
+        detail.union_cache_key_len_max = union_cache.key_len_max;
+        detail.union_cache_ms = union_cache.total_ms;
     }
 
     if let Some(detail) = detail {
@@ -1701,12 +2418,11 @@ fn build_parser_nwa_from_terminal_dwa(
         }
     }
 
-    let mut built_bundle_cache: Vec<Option<Arc<NWA>>> = if compose_detail_enabled {
-        vec![None; summaries.unique_bundles.len()]
-    } else {
-        use rayon::prelude::*;
+    use rayon::prelude::*;
 
-        summaries
+    let mut built_bundle_cache: Vec<Option<Arc<NWA>>> = vec![None; summaries.unique_bundles.len()];
+    if !compose_detail_enabled {
+        built_bundle_cache = summaries
             .unique_bundles
             .par_iter()
             .enumerate()
@@ -1714,8 +2430,8 @@ fn build_parser_nwa_from_terminal_dwa(
                 used_multi_bundle[bundle_id]
                     .then(|| Arc::new(templates.build_bundle(bundle)))
             })
-            .collect()
-    };
+            .collect();
+    }
 
     let branch_walk_started_at = Instant::now();
     for (state_id, state) in states.iter().enumerate() {
@@ -1792,6 +2508,20 @@ fn build_parser_nwa_from_terminal_dwa(
     let start = continuation_states[terminal_dwa.start_state() as usize];
     debug_assert_ne!(start, u32::MAX);
     arena.set_start_states(vec![start]);
+
+    if lazy_negative_parser_dwa_enabled() {
+        let lazy_graph = build_lazy_resolve_graph(
+            &summaries,
+            &productive,
+            &templates,
+            &mut built_bundle_cache,
+        );
+        if let Err(report) = compare_lazy_resolve_analyses(&arena, &lazy_graph) {
+            eprintln!("[glrmask/lazy_negative_compare] {}", report);
+            panic!("lazy negative parser-DWA analysis mismatch");
+        }
+    }
+
     let compose_state_ms = elapsed_ms(graph_started_at);
 
     if compose_detail_enabled {
