@@ -116,6 +116,52 @@ fn schema_size_preflight_rejects_over_budget_schema() {
 }
 
 #[test]
+fn schema_size_preflight_raised_max_nodes_allows_schema() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _allow_large = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_ALLOW_LARGE");
+
+    let mut properties = serde_json::Map::new();
+    for index in 0..16 {
+        properties.insert(format!("field_{index}"), json!({"type": "string"}));
+    }
+    let schema = json!({
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": false
+    });
+
+    {
+        let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", "20");
+        let err =
+            schema_to_named_grammar(&schema).expect_err("schema should exceed the lower budget");
+        assert!(err.to_string().contains("limit=20"), "{err}");
+    }
+
+    let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", "128");
+    schema_to_named_grammar(&schema).expect("raised node limit should allow schema");
+}
+
+#[test]
+fn schema_size_preflight_falsey_allow_large_does_not_bypass_budget() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _allow_large = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_ALLOW_LARGE", "0");
+    let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", "1");
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"}
+        }
+    });
+
+    let err = schema_to_named_grammar(&schema)
+        .expect_err("falsey allow-large value should not bypass budget");
+    let message = err.to_string();
+    assert!(message.contains("schema too large"), "{message}");
+    assert!(message.contains("limit=1"), "{message}");
+}
+
+#[test]
 fn schema_size_preflight_allow_large_override_bypasses_budget() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _allow_large = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_ALLOW_LARGE", "1");
@@ -129,6 +175,26 @@ fn schema_size_preflight_allow_large_override_bypasses_budget() {
     });
 
     schema_to_named_grammar(&schema).expect("allow-large override should bypass size budget");
+}
+
+#[test]
+fn schema_size_preflight_invalid_max_nodes_reports_env_var() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _allow_large = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_ALLOW_LARGE");
+
+    for value in ["not-a-number", "0"] {
+        let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", value);
+        let schema = json!({"type": "string"});
+
+        let err = schema_to_named_grammar(&schema)
+            .expect_err("invalid node limit should reject before loading");
+        let message = err.to_string();
+        assert!(
+            message.contains("GLRMASK_JSON_SCHEMA_MAX_NODES"),
+            "{message}"
+        );
+        assert!(message.contains("positive integer"), "{message}");
+    }
 }
 
 fn contains_separated_sequence(expr: &GrammarExpr) -> bool {
