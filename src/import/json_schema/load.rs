@@ -249,7 +249,13 @@ fn validate_unsupported_conditionals_in_schema_positions(
         }
     }
 
-    for schema_key in ["additionalProperties", "not", "contains", "propertyNames"] {
+    for schema_key in [
+        "additionalProperties",
+        "additionalItems",
+        "not",
+        "contains",
+        "propertyNames",
+    ] {
         if let Some(child) = object.get(schema_key) {
             let child_location = format!("{location}/{}", escape_pointer_segment(schema_key));
             validate_unsupported_conditionals_in_schema_positions(child, &child_location)?;

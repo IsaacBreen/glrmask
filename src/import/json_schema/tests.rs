@@ -2153,6 +2153,46 @@ fn conditional_keywords_precede_definition_unique_items() {
 }
 
 #[test]
+fn conditional_preflight_ignores_annotation_objects() {
+    let schema = json!({
+        "type": "object",
+        "default": {"if": 1, "then": 2},
+        "examples": [{"if": 1, "then": 2}],
+        "properties": {
+            "x": {
+                "type": "string",
+                "default": {"if": 1, "then": 2}
+            }
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn conditional_preflight_checks_additional_items_before_definitions_unique_items() {
+    let schema = json!({
+        "definitions": {
+            "bad": {"type": "array", "uniqueItems": true}
+        },
+        "type": "array",
+        "items": [{"type": "string"}],
+        "additionalItems": {
+            "if": {"properties": {"kind": {"const": "x"}}},
+            "then": {"type": "string"}
+        }
+    });
+
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(
+        error.contains("#/additionalItems: Unimplemented keys: [\"if\", \"then\"]"),
+        "{error}"
+    );
+    assert!(!error.contains("uniqueItems"), "{error}");
+}
+
+#[test]
 fn unique_items_still_errors_without_conditional() {
     let schema = json!({"type": "array", "uniqueItems": true});
 
