@@ -8,6 +8,7 @@ use crate::grammar_ir::ast::GrammarExpr;
 use crate::grammar_ir::flat::{NonterminalID, Rule, Symbol};
 use crate::GlrMaskError;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RepeatTreeShape {
     Balanced,
     Left,
@@ -77,6 +78,9 @@ pub(super) fn range_repeat_split(min: usize, max: usize, shape: RepeatTreeShape)
 }
 
 pub(super) fn highest_power_of_two_le(n: usize) -> usize {
+    debug_assert!(n > 0);
+    1usize << ((usize::BITS - 1 - n.leading_zeros()) as usize)
+}
 
 impl super::Lowerer {
     pub(super) fn repeat_exact_nonterminal(

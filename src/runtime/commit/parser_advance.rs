@@ -41,7 +41,7 @@ pub(super) fn advance_parser_stacks(
     advance_stacks(&constraint.table, stack, terminal)
 }
 
-pub(super) pub(super) fn advance_parser_stacks_owned(
+pub(super) fn advance_parser_stacks_owned(
     constraint: &Constraint,
     stack: ParserGSS,
     terminal: u32,
@@ -64,7 +64,7 @@ pub(super) pub(super) fn advance_parser_stacks_owned(
     advance_stacks_owned(&constraint.table, stack, terminal)
 }
 
-pub(super) pub(super) fn advance_parser_stacks_profiled(
+pub(super) fn advance_parser_stacks_profiled(
     constraint: &Constraint,
     stack: &ParserGSS,
     terminal: u32,

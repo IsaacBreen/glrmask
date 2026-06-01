@@ -169,7 +169,6 @@ impl<'a> ConstraintState<'a> {
         }
     }
 }
-}
 
 fn is_token_set(mask: &[u32], token_id: u32) -> bool {
     let word_index = token_id as usize / 32;

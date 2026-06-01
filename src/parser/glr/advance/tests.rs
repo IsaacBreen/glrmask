@@ -357,18 +357,3 @@ mod tests {
     }
 }
 
-/// Precise predicate for whether this parser stack can advance on any terminal in
-/// `terminals`.
-///
-/// Returns `true` if and only if at least one current parser path can definitely
-/// advance on one of the given terminals. Returns `false` if no current parser
-/// path can advance on any of them.
-///
-/// Ordinary actions are applicable from the top state/action row. In particular,
-/// LR(1) reduce lookaheads are precise: if a row has a reduce action for one of
-/// these terminals, that reduce is a valid parser transition for that lookahead
-/// under the table invariants; it does not require an additional lower-stack
-/// guard check here. `GuardedStackShifts` also have lower-stack predicates, so
-/// they must evaluate their guards against the current GSS before this predicate
-/// can return `true`.
-///

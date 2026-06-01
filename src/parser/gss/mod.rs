@@ -1,6 +1,6 @@
 use im::{HashMap as IHashMap, OrdMap};
 use smallvec::{SmallVec, smallvec};
-use super::stack_vecs::dispatch::DynStackVec;
+use crate::ds::stack_vecs::dispatch::DynStackVec;
 use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::sync::{Arc, OnceLock};

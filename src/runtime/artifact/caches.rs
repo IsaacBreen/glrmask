@@ -14,7 +14,12 @@ use rustc_hash::FxHashMap;
 
 use crate::grammar::flat::TerminalID;
 use crate::runtime::bitmask_ops::{copy_dense_buf, or_dense_buf, or_sparse_buf_entries};
-use crate::runtime::token_space::final_mask_mapping::FinalMaskMapping;
+use crate::runtime::artifact::dense::empty_dense_words;
+use crate::runtime::token_space::final_mask_mapping::{
+    DenseToBufProfileStats,
+    FinalMaskMapping,
+};
+use crate::sets::weight::Weight;
 
 use super::cache_types::{
     DenseWeightBufMaskCache,

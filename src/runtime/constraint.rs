@@ -2,7 +2,10 @@ use crate::parser::glr::table::TableAmbiguity;
 use crate::grammar::flat::TerminalID;
 
 pub use super::artifact::Constraint;
-pub(crate) use super::mask_mapping::{DeltaReplayProfileStats, DenseToBufProfileStats};
+pub(crate) use super::token_space::final_mask_mapping::{
+    DeltaReplayProfileStats,
+    DenseToBufProfileStats,
+};
 use super::bitmask_ops::{
     andnot_dense_buf,
     andnot_sparse_buf_entries,
@@ -350,7 +353,7 @@ impl Constraint {
         }
     }
 
-    fn or_full_internal_word_run_to_buf(
+    pub(crate) fn or_full_internal_word_run_to_buf(
         &self,
         mut wi: usize,
         end: usize,
@@ -580,7 +583,7 @@ impl Constraint {
     }
 
     #[inline(always)]
-    fn or_internal_token_to_buf_fast(
+    pub(crate) fn or_internal_token_to_buf_fast(
         &self,
         internal_token: usize,
         buf: &mut [u32],

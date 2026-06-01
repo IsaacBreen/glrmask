@@ -184,6 +184,7 @@ impl NamedGrammar {
 
         NamedGrammar { rules, start: self.start.clone(), ignore: self.ignore.clone() }
     }
+}
 
 
 impl NamedGrammar {

@@ -8,13 +8,13 @@ use super::prelude::*;
 use super::collector::{IntervalCanMatchMap, TerminalRangeGroup, TrieClassBuildResult};
 use super::terminal_sequences::CanMatchComputer;
 
-fn group_scan_relation_vocab_validation_enabled() -> bool {
+pub(super) fn group_scan_relation_vocab_validation_enabled() -> bool {
     std::env::var("GLRMASK_VALIDATE_GROUP_SCAN_RELATION_VOCAB")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
 
-fn group_scan_relation_vocab_legacy_enabled() -> bool {
+pub(super) fn group_scan_relation_vocab_legacy_enabled() -> bool {
     std::env::var("GLRMASK_SCAN_RELATION_USE_LEGACY_VOCAB_SWEEP")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)

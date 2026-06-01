@@ -84,7 +84,7 @@ fn lower_factored_named_grammar(
     }
 
     let ast_lower_started_at = emit_import_phase_start("ast_lower");
-    let grammar = ast::lower(&factored);
+    let grammar = crate::grammar_ir::lower::lower(&factored);
     emit_import_phase_end("ast_lower", ast_lower_started_at);
     emit_import_phase_end("lower_factored_named_grammar", lower_started_at);
     grammar

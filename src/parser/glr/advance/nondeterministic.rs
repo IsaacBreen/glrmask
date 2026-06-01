@@ -109,14 +109,3 @@ fn advance_nondeterministically(
     }
 }
 
-/// Standard LR reduce loop for the deterministic case.
-///
-/// When the GSS frontier is a single linear chain (no ambiguity), the GSS
-/// degenerates to an ordinary flat parse stack. This applies the textbook
-/// LR reduce loop directly: inspect the top state's action, pop |rhs|
-/// symbols, push the goto target, repeat - until a non-reduce action is
-/// reached or the chain becomes ambiguous.
-///
-/// If this deterministic pass ends in a pure shift, it performs that shift
-/// itself and returns true to signal that the parser step is finished.
-/// Otherwise it mutates `gss` and returns false so the caller can continue

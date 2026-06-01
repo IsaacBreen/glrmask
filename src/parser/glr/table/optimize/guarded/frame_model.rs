@@ -1,9 +1,11 @@
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct StackEffectFrame {
     pop: u32,
     pushes: Vec<u32>,
     guards: Vec<StackShiftGuard>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ReduceFrameResult {
     Dead,
     Frames {

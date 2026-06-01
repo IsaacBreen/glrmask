@@ -1,5 +1,6 @@
 #![deny(warnings)]
 #![allow(dead_code)]
+#![allow(unused_imports)]
 #![allow(unused_variables)]
 
 //! `glrmask`: grammar-constrained token masking for language-model decoding.

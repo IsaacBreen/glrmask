@@ -12,7 +12,7 @@ use crate::grammar::flat::TerminalID;
 use crate::runtime::CommitTemplateDfas;
 use crate::runtime::constraint::Constraint;
 
-pub(super) fn advance_stacks_template_dfa(
+pub(crate) fn advance_stacks_template_dfa(
     constraint: &Constraint,
     stack: &ParserGSS,
     terminal: TerminalID,
@@ -24,7 +24,7 @@ pub(super) fn advance_stacks_template_dfa(
     Some(advance_with_template(dfa, stack.clone()))
 }
 
-pub(super) fn advance_stacks_template_dfa_owned(
+pub(crate) fn advance_stacks_template_dfa_owned(
     constraint: &Constraint,
     stack: ParserGSS,
     terminal: TerminalID,

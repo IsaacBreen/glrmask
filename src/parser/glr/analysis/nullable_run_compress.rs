@@ -438,8 +438,3 @@ pub(crate) fn inline_null_productions(rules: &[Rule], num_nt: u32) -> Vec<Rule> 
     result
 }
 
-/// Eliminate hidden left recursion.
-///
-/// Hidden left recursion occurs when `A → β B …` where every symbol in
-/// `β` is nullable and `B` is in an indirect left-recursive cycle with `A`.
-/// We add shortened rules with the nullable prefix removed, exposing the

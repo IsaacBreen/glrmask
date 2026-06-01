@@ -1,3 +1,4 @@
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ActionSig {
     Shift(u32, bool),
     StackShifts(Vec<(u32, Vec<u32>)>),

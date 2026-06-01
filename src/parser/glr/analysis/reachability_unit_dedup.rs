@@ -639,8 +639,3 @@ pub(crate) fn merge_identical_nonterminals(
 // right recursion, and exposes hidden left recursion until the grammar stops
 // changing, then runs the final epsilon-elimination and unreachable pruning.
 
-/// Run the full grammar normalization pipeline (in place).
-///
-/// Mutates `rules` so that they satisfy the characterization
-/// preconditions (no nullable NTs, no right recursion, no indirect LR).
-/// `start` is used only for unreachable-production pruning and is never

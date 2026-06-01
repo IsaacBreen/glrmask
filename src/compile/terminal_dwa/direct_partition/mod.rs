@@ -430,7 +430,7 @@ pub(crate) fn build_direct_partition_terminal_dwa(
 
     let num_terminals = grammar.num_terminals as u32;
     let dwa_started_at = Instant::now();
-    let (dwa, terminal_profile) = build_direct_partition_terminal_dwa(
+    let (dwa, terminal_profile) = build_direct_partition_terminal_dwa_core(
         tokenizer,
         vocab_order.as_ref(),
         &mut id_map,
@@ -1222,7 +1222,7 @@ fn append_direct_partition_signature_profile_run(profile: &mut Vec<(u32, u32, u3
     profile.push((sig_id, token_id, token_id));
 }
 
-fn build_direct_partition_terminal_dwa(
+fn build_direct_partition_terminal_dwa_core(
     tokenizer: &Tokenizer,
     vocab_order: &DirectPartitionIdentityVocabOrder,
     id_map: &mut InternalIdMap,

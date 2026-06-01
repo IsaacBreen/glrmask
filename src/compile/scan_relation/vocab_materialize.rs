@@ -10,11 +10,13 @@ use super::prelude::*;
 use super::collector::IntervalCanMatchMap;
 use super::legacy_materialize::{
     build_legacy_scan_relation_vocab_and_weights_from_interval_maps,
-    group_scan_relation_vocab_legacy_enabled,
-    group_scan_relation_vocab_validation_enabled,
     validate_group_scan_relation_vocab_outputs,
 };
 use super::ordered_vocab::{range_set_from_sorted_ids, range_set_from_u128_mask, OrderedVocab};
+use super::root_collect::{
+    group_scan_relation_vocab_legacy_enabled,
+    group_scan_relation_vocab_validation_enabled,
+};
 use super::types::*;
 
 pub(super) fn used_state_class_ids(state_classes: &[u32]) -> Vec<u32> {

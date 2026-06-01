@@ -12,6 +12,8 @@ use super::ordered_vocab::{
     emit_ordered_vocab_cache_profile,
     get_ordered_vocab_trie_artifacts,
     get_ordered_vocab_trie_artifacts_for_vocab,
+    OrderedVocabCacheProfile,
+    OrderedVocabTrieArtifacts,
 };
 use super::root_collect::{
     collect_sparse_root_can_match,

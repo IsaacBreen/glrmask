@@ -28,7 +28,7 @@ pub(crate) fn build_grammar_analysis(
 ) -> GrammarAnalysisOutput {
     let analysis_started_at = Instant::now();
     let (
-        (mut tokenizer, tokenizer_build_ms),
+        (tokenizer, tokenizer_build_ms),
         (
             analyzed_grammar,
             analyze_grammar_ms,

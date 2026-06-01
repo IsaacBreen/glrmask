@@ -6,6 +6,7 @@
 //! the terminals in that branch, weighted by the Terminal-DWA edge masks, with
 //! template finals redirected to the branch continuation.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -21,7 +22,7 @@ use super::profiling::{
     elapsed_ms, emit_parser_bundle_profile, emit_parser_dwa_compose_profiles,
     parser_dwa_compose_detail_enabled, ParserDwaComposeDetailProfile, ParserNwaBuildProfile,
 };
-use super::terminal_projection::{build_state_summaries, compute_productive_terminal_states};
+use super::terminal_projection::build_state_summaries;
 use super::types::StateSummaries;
 
 fn dwa_to_nwa(dwa: &DWA) -> NWA {

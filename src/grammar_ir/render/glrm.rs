@@ -254,5 +254,3 @@ fn escape_regex_for_slash(pat: &str) -> String {
 // ============================================================
 // Parser
 // ============================================================
-
-/// Parse a GLRM-format string into a [`NamedGrammar`].

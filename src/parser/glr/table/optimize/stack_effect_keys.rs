@@ -1,3 +1,4 @@
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum StackEffectActionKey {
     Shift(u32, bool),
     StackShifts(Vec<StackShift>),

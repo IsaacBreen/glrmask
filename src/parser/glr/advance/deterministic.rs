@@ -105,17 +105,3 @@ fn advance_deterministically(
     false
 }
 
-/// Precise predicate for whether this parser stack can advance on `token`.
-///
-/// Returns `true` if and only if at least one current parser path can definitely
-/// advance on the given terminal. Returns `false` if no current parser path can
-/// advance.
-///
-/// Ordinary actions (for example shifts and reduces) are applicable from the top
-/// state/action row. In particular, LR(1) reduce lookaheads are precise: if the
-/// row has a reduce action for this terminal, that reduce is a valid parser
-/// transition for the lookahead under the table invariants; it does not require
-/// an additional lower-stack guard check here. `GuardedStackShifts` also have
-/// lower-stack predicates, so they must evaluate their guards against the current
-/// GSS before this predicate can return `true`.
-///

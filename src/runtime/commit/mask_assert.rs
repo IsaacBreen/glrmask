@@ -67,5 +67,3 @@ pub(super) fn assert_mask_commit_equivalence(
         commit_succeeded,
     );
 }
-
-#[inline]

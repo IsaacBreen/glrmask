@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use super::{choice_or_single, sequence_or_single};
 use crate::GlrMaskError;
 use crate::grammar::flat::GrammarDef;
-use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower};
+use crate::grammar_ir::lower::lower;
+use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule};
 use crate::grammar::factoring::factor_named_grammar;
 
 #[derive(Debug, Clone, PartialEq)]

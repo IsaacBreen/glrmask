@@ -8,6 +8,7 @@
 use super::prelude::*;
 use super::types::*;
 
+#[derive(Debug)]
 pub(super) struct OrderedVocab {
     pub(super) original_slot_count: usize,
     pub(super) ordered_to_originals: Vec<Vec<u32>>,
@@ -438,5 +439,3 @@ pub(super) fn range_set_from_u128_mask(mask: u128) -> RangeSetBlaze<u32> {
 
     RangeSetBlaze::from_iter(ranges)
 }
-
-#[inline]
