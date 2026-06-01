@@ -190,6 +190,44 @@ struct CachedClosure {
     edge_weight: Weight,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum LazyNodeKey {
+    Materialized(u32),
+    TemplateState {
+        terminal: TerminalID,
+        local_state: u32,
+        target_continuation_state: u32,
+        branch_weight_key: usize,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct LazySingleTerminalBranch {
+    terminal: TerminalID,
+    weight: Weight,
+    target_continuation_state: u32,
+}
+
+#[derive(Debug, Clone)]
+struct LazySingleTerminalGraph {
+    materialized_nwa: NWA,
+    lazy_single_by_materialized_state: Vec<Vec<LazySingleTerminalBranch>>,
+    resolved_templates: FxHashMap<TerminalID, Arc<NWA>>,
+    branch_weights: FxHashMap<usize, Weight>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedLazyClosure {
+    canon: Vec<(LazyNodeKey, Weight)>,
+    edge_weight: Weight,
+}
+
+#[derive(Debug, Clone)]
+struct DeterminizedLazyDwaWithSupports {
+    dwa: DWA,
+    supports: Vec<Vec<LazyNodeKey>>,
+}
+
 fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
 }
@@ -258,6 +296,15 @@ struct ParserDwaComposeDetailProfile {
 fn parser_dwa_compose_detail_enabled() -> bool {
     std::env::var("GLRMASK_PROFILE_PARSER_DWA_COMPOSE_DETAIL")
         .map(|value| value == "1")
+        .unwrap_or(false)
+}
+
+fn lazy_parser_dwa_single_terminal_enabled() -> bool {
+    std::env::var("GLRMASK_LAZY_PARSER_DWA_SINGLE_TERMINAL")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
         .unwrap_or(false)
 }
 
@@ -477,6 +524,363 @@ fn build_possible_outgoing_ids_by_state(
             }
         })
         .collect()
+}
+
+fn build_possible_outgoing_ids_by_lazy_state(
+    graph: &LazySingleTerminalGraph,
+    state_supports: &[Vec<LazyNodeKey>],
+    num_parser_states: u32,
+) -> Vec<PossibleOutgoingIds> {
+    enum OutgoingIds {
+        Empty,
+        All,
+        Some(Vec<u32>),
+    }
+
+    fn node_outgoing_ids(
+        graph: &LazySingleTerminalGraph,
+        node: LazyNodeKey,
+        num_parser_states: u32,
+    ) -> OutgoingIds {
+        match node {
+            LazyNodeKey::Materialized(state_id) => {
+                let Some(state) = graph.materialized_nwa.states().get(state_id as usize) else {
+                    return OutgoingIds::Empty;
+                };
+                let mut ids = Vec::new();
+                for &label in state.transitions.keys() {
+                    if label == DEFAULT_LABEL {
+                        return OutgoingIds::All;
+                    }
+                    if let Some(parser_state_id) = parser_state_label(label, num_parser_states) {
+                        ids.push(parser_state_id);
+                    }
+                }
+                if ids.is_empty() {
+                    OutgoingIds::Empty
+                } else {
+                    OutgoingIds::Some(ids)
+                }
+            }
+            LazyNodeKey::TemplateState { terminal, local_state, .. } => {
+                let Some(template) = graph.resolved_templates.get(&terminal) else {
+                    return OutgoingIds::Empty;
+                };
+                let Some(state) = template.states().get(local_state as usize) else {
+                    return OutgoingIds::Empty;
+                };
+                let mut ids = Vec::new();
+                for &label in state.transitions.keys() {
+                    if label == DEFAULT_LABEL {
+                        return OutgoingIds::All;
+                    }
+                    if let Some(parser_state_id) = parser_state_label(label, num_parser_states) {
+                        ids.push(parser_state_id);
+                    }
+                }
+                if ids.is_empty() {
+                    OutgoingIds::Empty
+                } else {
+                    OutgoingIds::Some(ids)
+                }
+            }
+        }
+    }
+
+    let num_parser_states = num_parser_states as usize;
+    let all_parser_states = BitSet::all(num_parser_states);
+
+    state_supports
+        .iter()
+        .map(|support| {
+            let mut ids = BitSet::new(num_parser_states);
+            for &node in support {
+                match node_outgoing_ids(graph, node, num_parser_states as u32) {
+                    OutgoingIds::Empty => {}
+                    OutgoingIds::All => return PossibleOutgoingIds::All,
+                    OutgoingIds::Some(node_ids) => {
+                        for parser_state_id in node_ids {
+                            ids.set(parser_state_id as usize);
+                        }
+                        if ids == all_parser_states {
+                            return PossibleOutgoingIds::All;
+                        }
+                    }
+                }
+            }
+
+            if ids.is_empty() {
+                PossibleOutgoingIds::Empty
+            } else if ids == all_parser_states {
+                PossibleOutgoingIds::All
+            } else {
+                PossibleOutgoingIds::Some(ids)
+            }
+        })
+        .collect()
+}
+
+fn lazy_add_target_contribution(
+    contribs: &mut Vec<(LazyNodeKey, Weight)>,
+    target: LazyNodeKey,
+    add: Weight,
+) {
+    if add.is_empty() {
+        return;
+    }
+
+    if let Some((_, existing)) = contribs
+        .iter_mut()
+        .find(|(existing_target, _)| *existing_target == target)
+    {
+        *existing = existing.union(&add);
+    } else {
+        contribs.push((target, add));
+    }
+}
+
+fn lazy_node_successors(
+    graph: &LazySingleTerminalGraph,
+    node: LazyNodeKey,
+) -> (Option<Weight>, Vec<(LazyNodeKey, Weight)>, Vec<(i32, LazyNodeKey, Weight)>) {
+    match node {
+        LazyNodeKey::Materialized(state_id) => {
+            let Some(state) = graph.materialized_nwa.states().get(state_id as usize) else {
+                return (None, Vec::new(), Vec::new());
+            };
+            let mut epsilons = Vec::with_capacity(
+                state.epsilons.len()
+                    + graph
+                        .lazy_single_by_materialized_state
+                        .get(state_id as usize)
+                        .map(|branches| branches.len())
+                        .unwrap_or(0),
+            );
+            for (target, weight) in &state.epsilons {
+                epsilons.push((LazyNodeKey::Materialized(*target), weight.clone()));
+            }
+            if let Some(branches) = graph.lazy_single_by_materialized_state.get(state_id as usize) {
+                for branch in branches {
+                    let Some(template) = graph.resolved_templates.get(&branch.terminal) else {
+                        continue;
+                    };
+                    let branch_weight_key = branch.weight.ptr_key();
+                    for &start_state in template.start_states() {
+                        epsilons.push((
+                            LazyNodeKey::TemplateState {
+                                terminal: branch.terminal,
+                                local_state: start_state,
+                                target_continuation_state: branch.target_continuation_state,
+                                branch_weight_key,
+                            },
+                            Weight::all(),
+                        ));
+                    }
+                }
+            }
+            let transitions = state
+                .transitions
+                .iter()
+                .flat_map(|(&label, targets)| {
+                    targets.iter().map(move |(target, weight)| {
+                        (label, LazyNodeKey::Materialized(*target), weight.clone())
+                    })
+                })
+                .collect();
+            (state.final_weight.clone(), epsilons, transitions)
+        }
+        LazyNodeKey::TemplateState {
+            terminal,
+            local_state,
+            target_continuation_state,
+            branch_weight_key,
+        } => {
+            let Some(template) = graph.resolved_templates.get(&terminal) else {
+                return (None, Vec::new(), Vec::new());
+            };
+            let Some(branch_weight) = graph.branch_weights.get(&branch_weight_key) else {
+                return (None, Vec::new(), Vec::new());
+            };
+            let Some(state) = template.states().get(local_state as usize) else {
+                return (None, Vec::new(), Vec::new());
+            };
+
+            let mut epsilons = Vec::with_capacity(
+                state.epsilons.len() + usize::from(state.final_weight.is_some()),
+            );
+            for (target, _) in &state.epsilons {
+                epsilons.push((
+                    LazyNodeKey::TemplateState {
+                        terminal,
+                        local_state: *target,
+                        target_continuation_state,
+                        branch_weight_key,
+                    },
+                    branch_weight.clone(),
+                ));
+            }
+            if state.final_weight.is_some() {
+                epsilons.push((
+                    LazyNodeKey::Materialized(target_continuation_state),
+                    branch_weight.clone(),
+                ));
+            }
+
+            let mut transitions = Vec::new();
+            for (&label, targets) in &state.transitions {
+                for (target, _) in targets {
+                    transitions.push((
+                        label,
+                        LazyNodeKey::TemplateState {
+                            terminal,
+                            local_state: *target,
+                            target_continuation_state,
+                            branch_weight_key,
+                        },
+                        branch_weight.clone(),
+                    ));
+                }
+            }
+            (None, epsilons, transitions)
+        }
+    }
+}
+
+fn lazy_epsilon_closure(
+    graph: &LazySingleTerminalGraph,
+    seed: &mut FxHashMap<LazyNodeKey, Weight>,
+) {
+    let mut queue: VecDeque<LazyNodeKey> = seed.keys().copied().collect();
+    while let Some(node) = queue.pop_front() {
+        let Some(current_weight) = seed.get(&node).cloned() else {
+            continue;
+        };
+        let (_, epsilons, _) = lazy_node_successors(graph, node);
+        for (target, edge_weight) in epsilons {
+            let contribution = current_weight.intersection(&edge_weight);
+            if contribution.is_empty() {
+                continue;
+            }
+            if let Some(existing) = seed.get(&target) {
+                if !contribution.is_subset(existing) {
+                    seed.insert(target, existing.union(&contribution));
+                    queue.push_back(target);
+                }
+            } else {
+                seed.insert(target, contribution);
+                queue.push_back(target);
+            }
+        }
+    }
+}
+
+fn determinize_lazy_single_terminal_graph_with_supports(
+    graph: &LazySingleTerminalGraph,
+) -> DeterminizedLazyDwaWithSupports {
+    fn subset_key(entries: &[(LazyNodeKey, Weight)]) -> Vec<(LazyNodeKey, usize)> {
+        entries
+            .iter()
+            .map(|(node, weight)| (*node, weight.ptr_key()))
+            .collect()
+    }
+
+    let mut dwa = DWA::new(0, 0);
+    let mut supports = vec![Vec::new()];
+    let mut subset_map: FxHashMap<Vec<(LazyNodeKey, usize)>, u32> = FxHashMap::default();
+    let mut worklist: VecDeque<Vec<(LazyNodeKey, Weight)>> = VecDeque::new();
+    let mut closure_cache: FxHashMap<Vec<(LazyNodeKey, usize)>, CachedLazyClosure> =
+        FxHashMap::default();
+    let mut key_buf: Vec<(LazyNodeKey, usize)> = Vec::new();
+
+    let mut start_subset = FxHashMap::default();
+    for &state_id in graph.materialized_nwa.start_states() {
+        start_subset.insert(LazyNodeKey::Materialized(state_id), Weight::all());
+    }
+    lazy_epsilon_closure(graph, &mut start_subset);
+    if start_subset.is_empty() {
+        return DeterminizedLazyDwaWithSupports { dwa, supports };
+    }
+
+    let mut canon_buf: Vec<(LazyNodeKey, Weight)> = start_subset.into_iter().collect();
+    canon_buf.sort_unstable_by_key(|(node, _)| *node);
+    supports[0] = canon_buf.iter().map(|(node, _)| *node).collect();
+    subset_map.insert(subset_key(&canon_buf), dwa.start_state());
+    worklist.push_back(canon_buf.clone());
+
+    while let Some(subset_entries) = worklist.pop_front() {
+        let from_state = subset_map[&subset_key(&subset_entries)];
+
+        let final_weights: Vec<Weight> = subset_entries
+            .iter()
+            .filter_map(|(node, path_weight)| {
+                let (final_weight, _, _) = lazy_node_successors(graph, *node);
+                final_weight.map(|weight| path_weight.intersection(&weight))
+            })
+            .filter(|weight| !weight.is_empty())
+            .collect();
+        let final_weight = Weight::union_all(final_weights.iter());
+        if !final_weight.is_empty() {
+            dwa.set_final_weight(from_state, final_weight);
+        }
+
+        let mut raw_targets: FxHashMap<i32, Vec<(LazyNodeKey, Weight)>> = FxHashMap::default();
+        for (node, path_weight) in &subset_entries {
+            let (_, _, transitions) = lazy_node_successors(graph, *node);
+            for (label, target, edge_weight) in transitions {
+                let next_weight = path_weight.intersection(&edge_weight);
+                if next_weight.is_empty() {
+                    continue;
+                }
+                lazy_add_target_contribution(raw_targets.entry(label).or_default(), target, next_weight);
+            }
+        }
+
+        for (label, mut contribs) in raw_targets {
+            if contribs.is_empty() {
+                continue;
+            }
+
+            contribs.sort_unstable_by_key(|(node, _)| *node);
+            let edge_weight = Weight::union_all(contribs.iter().map(|(_, weight)| weight));
+            if edge_weight.is_empty() {
+                continue;
+            }
+
+            key_buf.clear();
+            key_buf.extend(contribs.iter().map(|(node, weight)| (*node, weight.ptr_key())));
+            let cached = match closure_cache.entry(key_buf.clone()) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let mut target_subset: FxHashMap<LazyNodeKey, Weight> =
+                        contribs.into_iter().collect();
+                    lazy_epsilon_closure(graph, &mut target_subset);
+                    let mut canon: Vec<(LazyNodeKey, Weight)> = target_subset
+                        .into_iter()
+                        .filter(|(_, weight)| !weight.is_empty())
+                        .collect();
+                    canon.sort_unstable_by_key(|(node, _)| *node);
+                    entry.insert(CachedLazyClosure {
+                        canon,
+                        edge_weight: edge_weight.clone(),
+                    })
+                }
+            };
+
+            let subset_key = subset_key(&cached.canon);
+            let to_state = if let Some(existing) = subset_map.get(&subset_key).copied() {
+                existing
+            } else {
+                let new_state = dwa.add_state();
+                subset_map.insert(subset_key, new_state);
+                supports.push(cached.canon.iter().map(|(node, _)| *node).collect());
+                worklist.push_back(cached.canon.clone());
+                new_state
+            };
+            dwa.add_transition(from_state, label, to_state, cached.edge_weight.clone());
+        }
+    }
+
+    DeterminizedLazyDwaWithSupports { dwa, supports }
 }
 
 fn local_epsilon_closure(
@@ -1629,6 +2033,161 @@ fn append_branch_fragment(
     ))
 }
 
+fn build_lazy_single_terminal_graph_from_terminal_dwa(
+    terminal_dwa: &DWA,
+    grammar: &AnalyzedGrammar,
+    templates: Templates,
+) -> Option<(LazySingleTerminalGraph, ParserNwaBuildProfile)> {
+    let total_started_at = Instant::now();
+    let state_prep_started_at = Instant::now();
+    let summaries = build_state_summaries(terminal_dwa, grammar, &templates);
+    let productive = compute_productive_terminal_states(&summaries);
+    let state_prep_ms = elapsed_ms(state_prep_started_at);
+    let states = &summaries.states;
+
+    if !productive
+        .get(terminal_dwa.start_state() as usize)
+        .copied()
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let graph_started_at = Instant::now();
+    let mut arena = NWA::new(0, 0);
+    let mut continuation_states = vec![u32::MAX; states.len()];
+
+    for (state_id, state) in states.iter().enumerate() {
+        if !productive[state_id] {
+            continue;
+        }
+        let continuation_state = arena.add_state();
+        continuation_states[state_id] = continuation_state;
+        if let Some(final_weight) = state
+            .final_weight
+            .as_ref()
+            .filter(|weight| !weight.is_empty())
+        {
+            arena.set_final_weight(continuation_state, final_weight.clone());
+        }
+    }
+
+    let mut lazy_single_by_materialized_state = vec![Vec::new(); arena.states().len()];
+    let mut branch_weights: FxHashMap<usize, Weight> = FxHashMap::default();
+    let mut branch_fragment_memo: FxHashMap<(usize, u32), NwaBody> = FxHashMap::default();
+
+    let mut used_multi_bundle = vec![false; summaries.unique_bundles.len()];
+    for (state_id, state) in states.iter().enumerate() {
+        if !productive[state_id] {
+            continue;
+        }
+        for branch in &state.branches {
+            let target_idx = branch.target as usize;
+            if productive.get(target_idx).copied().unwrap_or(false)
+                && summaries.bundle_accepts.get(branch.bundle_id).copied().unwrap_or(false)
+                && summaries.unique_bundles[branch.bundle_id].len() > 1
+            {
+                used_multi_bundle[branch.bundle_id] = true;
+            }
+        }
+    }
+
+    let mut built_bundle_cache: Vec<Option<Arc<NWA>>> = summaries
+        .unique_bundles
+        .iter()
+        .enumerate()
+        .map(|(bundle_id, bundle)| used_multi_bundle[bundle_id].then(|| Arc::new(templates.build_bundle(bundle))))
+        .collect();
+
+    for (state_id, state) in states.iter().enumerate() {
+        if !productive[state_id] {
+            continue;
+        }
+        let from = continuation_states[state_id];
+        for branch in &state.branches {
+            let target_idx = branch.target as usize;
+            if !productive.get(target_idx).copied().unwrap_or(false)
+                || !summaries.bundle_accepts.get(branch.bundle_id).copied().unwrap_or(false)
+            {
+                continue;
+            }
+
+            let bundle = &summaries.unique_bundles[branch.bundle_id];
+            if bundle.len() == 1 {
+                let (&terminal, weight) = bundle.iter().next().expect("len checked");
+                if !weight.is_empty() {
+                    let weight_key = weight.ptr_key();
+                    branch_weights.entry(weight_key).or_insert_with(|| weight.clone());
+                    lazy_single_by_materialized_state[from as usize].push(LazySingleTerminalBranch {
+                        terminal,
+                        weight: weight.clone(),
+                        target_continuation_state: continuation_states[target_idx],
+                    });
+                }
+                continue;
+            }
+
+            let target_continuation = continuation_states[target_idx];
+            let fragment_key = (branch.bundle_id, branch.target);
+            let fragment = if let Some(existing) = branch_fragment_memo.get(&fragment_key) {
+                existing.clone()
+            } else {
+                let Some(body) = append_branch_fragment(
+                    &mut arena,
+                    &summaries,
+                    &templates,
+                    &mut built_bundle_cache,
+                    branch.bundle_id,
+                    target_continuation,
+                    None,
+                ) else {
+                    continue;
+                };
+                branch_fragment_memo.insert(fragment_key, body.clone());
+                body
+            };
+
+            for start in fragment.start_states {
+                arena.add_epsilon(from, start, Weight::all());
+            }
+        }
+    }
+
+    let start = continuation_states[terminal_dwa.start_state() as usize];
+    debug_assert_ne!(start, u32::MAX);
+    arena.set_start_states(vec![start]);
+    resolve_negative_codes_in_nwa(&mut arena);
+
+    let mut resolved_templates: FxHashMap<TerminalID, Arc<NWA>> = FxHashMap::default();
+    for branches in &lazy_single_by_materialized_state {
+        for branch in branches {
+            resolved_templates.entry(branch.terminal).or_insert_with(|| {
+                let mut resolved = templates
+                    .by_terminal_nwa
+                    .get(&branch.terminal)
+                    .cloned()
+                    .unwrap_or_else(|| NWA::new(0, 0));
+                resolve_negative_codes_in_nwa(&mut resolved);
+                Arc::new(resolved)
+            });
+        }
+    }
+
+    Some((
+        LazySingleTerminalGraph {
+            materialized_nwa: arena,
+            lazy_single_by_materialized_state,
+            resolved_templates,
+            branch_weights,
+        },
+        ParserNwaBuildProfile {
+            state_prep_ms,
+            compose_state_ms: elapsed_ms(graph_started_at),
+            parser_nwa_build_ms: elapsed_ms(total_started_at),
+        },
+    ))
+}
+
 fn build_parser_nwa_from_terminal_dwa(
     terminal_dwa: &DWA,
     grammar: &AnalyzedGrammar,
@@ -1840,6 +2399,129 @@ fn build_parser_nwa_from_terminal_dwa(
     ))
 }
 
+fn build_parser_dwa_lazy_single_terminal_with_precomputed_templates(
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+    terminal_dwa: &DWA,
+    templates: Templates,
+) -> DWA {
+    let total_started_at = Instant::now();
+    let minimize_skipped = false;
+    let profiling_enabled = compile_profile_enabled();
+    let (terminal_dwa_transition_count, terminal_dwa_interned_ranges) = if profiling_enabled {
+        let stats = terminal_dwa.stats();
+        (stats.transitions, stats.interned_ranges)
+    } else {
+        (0, 0)
+    };
+
+    let Some((graph, parser_nwa_profile)) =
+        build_lazy_single_terminal_graph_from_terminal_dwa(terminal_dwa, grammar, templates)
+    else {
+        if profiling_enabled {
+            eprintln!(
+                "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} parser_nwa_built=false pre_minimize_states=0 pre_minimize_transitions=0 post_minimize_states=0 post_minimize_transitions=0 minimize_skipped={} state_prep_ms=0.000 compose_state_ms=0.000 parser_nwa_build_ms=0.000 resolve_negative_ms=0.000 support_determinize_ms=0.000 possible_outgoing_ms=0.000 default_opt_ms=0.000 subtract_final_ms=0.000 fallback_determinize_ms=0.000 minimize_ms=0.000 total_ms={:.3}",
+                terminal_dwa.states().len(),
+                terminal_dwa_transition_count,
+                terminal_dwa_interned_ranges,
+                minimize_skipped,
+                elapsed_ms(total_started_at),
+            );
+        }
+        return DWA::new(0, 0);
+    };
+
+    let support_determinize_started_at = Instant::now();
+    let determinized = determinize_lazy_single_terminal_graph_with_supports(&graph);
+    let support_determinize_ms = elapsed_ms(support_determinize_started_at);
+    let mut parser_dwa_pre_minimize = determinized.dwa;
+
+    let possible_outgoing_started_at = Instant::now();
+    let possible_by_state = build_possible_outgoing_ids_by_lazy_state(
+        &graph,
+        &determinized.supports,
+        table.num_states,
+    );
+    let possible_outgoing_ms = elapsed_ms(possible_outgoing_started_at);
+
+    let default_opt_started_at = Instant::now();
+    optimize_parser_dwa_defaults(
+        &mut parser_dwa_pre_minimize,
+        &possible_by_state,
+        table.num_states,
+    );
+    let default_opt_ms = elapsed_ms(default_opt_started_at);
+
+    let subtract_final_started_at = Instant::now();
+    subtract_final_weights_from_outgoing_dwa(&mut parser_dwa_pre_minimize);
+    let subtract_final_ms = elapsed_ms(subtract_final_started_at);
+
+    let fallback_determinize_started_at = Instant::now();
+    parser_dwa_pre_minimize = determinize_parser_dwa_with_fallbacks(
+        &parser_dwa_pre_minimize,
+        &possible_by_state,
+        table.num_states,
+    );
+    let fallback_determinize_ms = elapsed_ms(fallback_determinize_started_at);
+
+    let pre_minimize_state_count = parser_dwa_pre_minimize.states().len();
+    let pre_minimize_transition_count = parser_dwa_pre_minimize.num_transitions();
+    let minimize_skipped = should_skip_parser_dwa_minimization(
+        pre_minimize_state_count,
+        pre_minimize_transition_count,
+    );
+    let (minimized, minimize_ms, post_minimize_state_count, post_minimize_transition_count) =
+        if minimize_skipped {
+            (
+                parser_dwa_pre_minimize,
+                0.0,
+                pre_minimize_state_count,
+                pre_minimize_transition_count,
+            )
+        } else {
+            let minimize_started_at = Instant::now();
+            let minimized = minimize(&parser_dwa_pre_minimize);
+            let minimize_ms = elapsed_ms(minimize_started_at);
+            let post_minimize_state_count = minimized.states().len();
+            let post_minimize_transition_count = minimized.num_transitions();
+            (
+                minimized,
+                minimize_ms,
+                post_minimize_state_count,
+                post_minimize_transition_count,
+            )
+        };
+
+    if profiling_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} parser_nwa_states={} parser_nwa_start_states={} pre_minimize_states={} pre_minimize_transitions={} post_minimize_states={} post_minimize_transitions={} minimize_skipped={} state_prep_ms={:.3} compose_state_ms={:.3} parser_nwa_build_ms={:.3} resolve_negative_ms={:.3} support_determinize_ms={:.3} possible_outgoing_ms={:.3} default_opt_ms={:.3} subtract_final_ms={:.3} fallback_determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+            terminal_dwa.states().len(),
+            terminal_dwa_transition_count,
+            terminal_dwa_interned_ranges,
+            graph.materialized_nwa.states().len(),
+            graph.materialized_nwa.start_states().len(),
+            pre_minimize_state_count,
+            pre_minimize_transition_count,
+            post_minimize_state_count,
+            post_minimize_transition_count,
+            minimize_skipped,
+            parser_nwa_profile.state_prep_ms,
+            parser_nwa_profile.compose_state_ms,
+            parser_nwa_profile.parser_nwa_build_ms,
+            0.0,
+            support_determinize_ms,
+            possible_outgoing_ms,
+            default_opt_ms,
+            subtract_final_ms,
+            fallback_determinize_ms,
+            minimize_ms,
+            elapsed_ms(total_started_at),
+        );
+    }
+
+    minimized
+}
+
 pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
@@ -1848,6 +2530,15 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     _vocab: &Vocab,
     _id_map: &InternalIdMap,
 ) -> DWA {
+    if lazy_parser_dwa_single_terminal_enabled() {
+        return build_parser_dwa_lazy_single_terminal_with_precomputed_templates(
+            table,
+            grammar,
+            terminal_dwa,
+            templates,
+        );
+    }
+
     let total_started_at = Instant::now();
     let minimize_skipped = false;
     let profiling_enabled = compile_profile_enabled();
