@@ -2,7 +2,7 @@ use super::accumulator::TerminalsDisallowed;
 use super::analysis::EOF;
 use super::table::{
     Action,
-    AdmissionMode,
+    AdmissionPolicy,
     GLRTable,
     GuardedShiftCellIndex,
     GuardedStackShift,
@@ -1729,8 +1729,8 @@ fn advance_deterministically(
 /// `may_advance` name sounds like a speculative approximation, but this is an
 /// exact applicability predicate.
 pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
-    if table.admission_mode == AdmissionMode::LacSimulation {
-        return lac_may_advance_on(table, stack, token);
+    if table.admission_policy == AdmissionPolicy::ExactSimulation {
+        return exact_admission_may_advance_on(table, stack, token);
     }
 
     for state in stack.peek_values() {
@@ -1753,12 +1753,12 @@ pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: T
     false
 }
 
-fn lac_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
+fn exact_admission_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
     let mut queue = VecDeque::<ParserGSS>::new();
     let mut visited = FxHashSet::<Vec<Vec<u32>>>::default();
 
     for state in stack.peek_values() {
-        lac_enqueue_frontier(stack.isolate(Some(state)), &mut queue, &mut visited);
+        exact_admission_enqueue_frontier(stack.isolate(Some(state)), &mut queue, &mut visited);
     }
 
     while let Some(frontier) = queue.pop_front() {
@@ -1783,7 +1783,7 @@ fn lac_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) ->
                     }
                 }
                 Action::Reduce(nt, len) => {
-                    lac_enqueue_reduce(
+                    exact_admission_enqueue_reduce(
                         table,
                         &isolated,
                         *nt,
@@ -1804,7 +1804,7 @@ fn lac_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) ->
                         return true;
                     }
                     for &(nt, len) in reduces {
-                        lac_enqueue_reduce(
+                        exact_admission_enqueue_reduce(
                             table,
                             &isolated,
                             nt,
@@ -1826,7 +1826,7 @@ fn lac_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) ->
     false
 }
 
-fn lac_enqueue_reduce(
+fn exact_admission_enqueue_reduce(
     table: &GLRTable,
     isolated: &ParserGSS,
     nt: u32,
@@ -1840,11 +1840,11 @@ fn lac_enqueue_reduce(
         } else {
             base.push(target)
         };
-        lac_enqueue_frontier(next, queue, visited);
+        exact_admission_enqueue_frontier(next, queue, visited);
     }
 }
 
-fn lac_enqueue_frontier(
+fn exact_admission_enqueue_frontier(
     frontier: ParserGSS,
     queue: &mut VecDeque<ParserGSS>,
     visited: &mut FxHashSet<Vec<Vec<u32>>>,
@@ -1895,7 +1895,7 @@ mod tests {
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::table::testing::build_test_table;
     use crate::compiler::glr::table::{
-        Action, AdmissionMode, GuardedStackShift, StackShift, StackShiftGuard,
+        Action, AdmissionPolicy, GuardedStackShift, StackShift, StackShiftGuard,
     };
     use crate::ds::bitset::BitSet;
 
@@ -2108,7 +2108,7 @@ mod tests {
     }
 
     #[test]
-    fn lac_admission_rejects_union_reduce_with_no_real_goto() {
+    fn exact_admission_rejects_union_reduce_with_no_real_goto() {
         let token = 0;
         let nt = 0;
         let mut table = build_test_table(
@@ -2117,7 +2117,7 @@ mod tests {
             &[&[], &[], &[(token, Action::Reduce(nt, 1))]],
             &[&[], &[], &[]],
         );
-        table.admission_mode = AdmissionMode::LacSimulation;
+        table.admission_policy = AdmissionPolicy::ExactSimulation;
 
         let stack = ParserGSS::from_single_stack(vec![0, 2], TerminalsDisallowed::new());
 
@@ -2125,7 +2125,7 @@ mod tests {
     }
 
     #[test]
-    fn lac_admission_accepts_reduce_goto_then_shift_path() {
+    fn exact_admission_accepts_reduce_goto_then_shift_path() {
         let token = 0;
         let nt = 0;
         let mut table = build_test_table(
@@ -2140,7 +2140,7 @@ mod tests {
             ],
             &[&[(nt, (3, false))], &[], &[], &[], &[]],
         );
-        table.admission_mode = AdmissionMode::LacSimulation;
+        table.admission_policy = AdmissionPolicy::ExactSimulation;
 
         let stack = ParserGSS::from_single_stack(vec![0, 2], TerminalsDisallowed::new());
 
@@ -2148,7 +2148,7 @@ mod tests {
     }
 
     #[test]
-    fn lac_admission_any_uses_same_exactness_as_single_terminal() {
+    fn exact_admission_any_uses_same_exactness_as_single_terminal() {
         let token = 0;
         let nt = 0;
         let mut table = build_test_table(
@@ -2163,7 +2163,7 @@ mod tests {
             ],
             &[&[(nt, (3, false))], &[], &[], &[], &[]],
         );
-        table.admission_mode = AdmissionMode::LacSimulation;
+        table.admission_policy = AdmissionPolicy::ExactSimulation;
         let stack = ParserGSS::from_single_stack(vec![0, 2], TerminalsDisallowed::new());
 
         let mut terminals = BitSet::new(3);
@@ -2333,7 +2333,7 @@ pub(crate) fn stack_may_advance_on_any(
     stack: &ParserGSS,
     terminals: &BitSet,
 ) -> bool {
-    if table.admission_mode == AdmissionMode::LacSimulation {
+    if table.admission_policy == AdmissionPolicy::ExactSimulation {
         for bit in 0..terminals.len() {
             if !terminals.contains(bit) {
                 continue;
