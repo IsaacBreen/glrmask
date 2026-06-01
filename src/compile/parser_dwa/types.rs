@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use smallvec::SmallVec;
 
 use crate::automata::weighted::dwa::DWA;
-use crate::ds::weight::Weight;
+use crate::sets::weight::Weight;
 use crate::grammar::flat::TerminalID;
 
 /// A finite weighted set of terminals that all enter the same Terminal-DWA
@@ -96,5 +96,5 @@ pub(crate) struct CachedClosure {
 pub(crate) enum PossibleOutgoingIds {
     Empty,
     All,
-    Some(crate::ds::bitset::BitSet),
+    Some(crate::sets::bitset::BitSet),
 }

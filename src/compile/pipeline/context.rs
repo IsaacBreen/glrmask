@@ -17,10 +17,10 @@ use crate::compile::terminal_dwa::classify::SharedClassifyCache;
 use crate::compile::terminal_dwa::types::TerminalColoring;
 use crate::parser::glr::analysis::AnalyzedGrammar;
 use crate::parser::glr::table::GLRTable;
-use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
-use crate::compiler::stages::mapped_artifact::MappedArtifact;
-use crate::compiler::stages::templates::Templates;
-use crate::ds::bitset::BitSet;
+use crate::compile::id_space::{InternalIdMap, ManyToOneIdMap};
+use crate::compile::mapped_artifact::MappedArtifact;
+use crate::compile::template_dfa::Templates;
+use crate::sets::bitset::BitSet;
 use crate::grammar::flat::GrammarDef;
 use crate::runtime::TemplateDfasByTerminal;
 

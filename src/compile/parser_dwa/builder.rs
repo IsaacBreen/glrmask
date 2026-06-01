@@ -19,9 +19,9 @@ use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
 use crate::parser::glr::analysis::AnalyzedGrammar;
 use crate::parser::glr::table::GLRTable;
-use crate::compiler::stages::equiv_types::InternalIdMap;
+use crate::compile::id_space::InternalIdMap;
 use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
-use crate::compiler::stages::templates::Templates;
+use crate::compile::template_dfa::Templates;
 use crate::compile::terminal_dwa::types::compile_profile_enabled;
 
 use super::compose_nwa::build_parser_nwa_from_terminal_dwa;

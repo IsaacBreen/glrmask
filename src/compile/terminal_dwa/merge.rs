@@ -13,9 +13,9 @@ use range_set_blaze::RangeSetBlaze;
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::NWA;
-use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
-use crate::compiler::stages::mapped_artifact::MappedArtifact;
-use crate::ds::weight::Weight;
+use crate::compile::id_space::{InternalIdMap, ManyToOneIdMap};
+use crate::compile::mapped_artifact::MappedArtifact;
+use crate::sets::weight::Weight;
 
 use super::types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile, compile_profile_enabled};
 
@@ -659,7 +659,7 @@ fn remap_weight_general(
         return weight.clone();
     };
 
-    use crate::ds::weight::{finalize_weight_map, shared_rangeset};
+    use crate::sets::weight::{finalize_weight_map, shared_rangeset};
 
     // Cache remapped token sets by Arc pointer.
     let mut token_cache = HashMap::<usize, Arc<RangeSetBlaze<u32>>>::new();

@@ -6,8 +6,8 @@
 
 use std::sync::Arc;
 
-use crate::ds::leveled_gss::{LeveledGSS, Merge};
-use crate::ds::weight::Weight;
+use crate::parser::gss::{LeveledGSS, Merge};
+use crate::sets::weight::Weight;
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;

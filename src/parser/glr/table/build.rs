@@ -1,7 +1,7 @@
 use super::*;
 use super::options::table_options_from_env;
 
-use crate::ds::bitset::BitSet;
+use crate::sets::bitset::BitSet;
 
 pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     let t0 = std::time::Instant::now();

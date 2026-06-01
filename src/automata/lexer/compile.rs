@@ -436,8 +436,8 @@ fn build_bounded_repeat_dfa(expr: &Expr, min: usize, max: usize) -> Option<DFA> 
     for copies_done in 0..=max {
         for (state_id, state) in base_states.iter().enumerate() {
             let mapped_state = (copies_done * base_state_count + state_id) as u32;
-            let mut finalizers = crate::ds::bitset::BitSet::new(1);
-            let mut future = crate::ds::bitset::BitSet::new(1);
+            let mut finalizers = crate::sets::bitset::BitSet::new(1);
+            let mut future = crate::sets::bitset::BitSet::new(1);
             if state_id == 0 && copies_done >= min {
                 finalizers.set(0);
             }
@@ -530,8 +530,8 @@ fn build_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
         for (state_id, state) in base_states.iter().enumerate() {
             let mapped_state = (copies_done * base_state_count + state_id) as u32;
             // No finalizers on repeat states — only the suffix chain end finalizes.
-            let finalizers = crate::ds::bitset::BitSet::new(1);
-            let mut future = crate::ds::bitset::BitSet::new(1);
+            let finalizers = crate::sets::bitset::BitSet::new(1);
+            let mut future = crate::sets::bitset::BitSet::new(1);
 
             let is_accepting_pos = state_id == 0 && copies_done >= min;
             if copies_done < max || is_accepting_pos {
@@ -575,11 +575,11 @@ fn build_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
         let suffix_state = (repeat_state_count + i) as u32;
         if i + 1 < suffix_len {
             let next_suffix = (repeat_state_count + i + 1) as u32;
-            let mut future = crate::ds::bitset::BitSet::new(1);
+            let mut future = crate::sets::bitset::BitSet::new(1);
             future.set(0);
             dfa.overwrite_state_metadata(
                 suffix_state,
-                crate::ds::bitset::BitSet::new(1),
+                crate::sets::bitset::BitSet::new(1),
                 future,
             );
             dfa.set_transitions_from_sorted_entries(
@@ -588,12 +588,12 @@ fn build_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
             );
         } else {
             // Last suffix state: finalizer, no transitions, no future.
-            let mut finalizers = crate::ds::bitset::BitSet::new(1);
+            let mut finalizers = crate::sets::bitset::BitSet::new(1);
             finalizers.set(0);
             dfa.overwrite_state_metadata(
                 suffix_state,
                 finalizers,
-                crate::ds::bitset::BitSet::new(1),
+                crate::sets::bitset::BitSet::new(1),
             );
         }
     }
@@ -1572,7 +1572,7 @@ mod tests {
     use super::compile_product_component_dfa_direct;
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::tokenizer::Tokenizer;
-    use crate::ds::u8set::U8Set;
+    use crate::sets::byte_set::U8Set;
     use std::sync::Arc;
 
     fn byte_expr(byte: u8) -> Expr {

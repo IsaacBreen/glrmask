@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+use crate::compile::id_space::ManyToOneIdMap;
 
 use super::identity_state_map;
 use super::max_length::{self, MaxLengthMode};

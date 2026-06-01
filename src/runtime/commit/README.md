@@ -30,7 +30,7 @@ level:
 - `single_top.rs`: single-top parser-stack effect shortcuts.
 - `terminal_advance.rs`: cached terminal-advance helper for queue processing.
 - `parser_advance.rs`: dispatch between template-DFA stack effects and reference GLR advance.
-- `template_advance.rs`: template-DFA execution machinery.
+- template-DFA execution lives in `runtime/template_dfa/advance.rs`; Commit only chooses whether to use it.
 - `tokenizer_scan.rs`: primitive tokenizer scan bridge.
 - `token_lookup.rs`: original-vocabulary token id to byte-string lookup.
 - `mask_assert.rs`: optional Mask/Commit equivalence assertion.

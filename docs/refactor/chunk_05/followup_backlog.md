@@ -6,7 +6,7 @@ wait until later chunks.
 ## High priority
 
 1. **Move template construction out of historical `compiler::stages`.**
-   Parser DWA still imports `crate::compiler::stages::templates::Templates`.
+   Parser DWA still imports `crate::compile::template_dfa::Templates`.
    That is acceptable for this chunk because templates are their own planned
    subsystem.  Later, move them to `src/compile/template_dfa/` or
    `src/compile/stack_effect/`.

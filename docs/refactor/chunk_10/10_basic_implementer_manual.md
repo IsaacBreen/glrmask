@@ -82,7 +82,7 @@ mod bitmask_ops;
 mod commit;
 mod constraint;
 mod mask;
-pub mod mask_mapping;
+mod token_space;
 mod state;
 ```
 

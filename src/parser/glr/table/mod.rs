@@ -4,7 +4,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use super::analysis::{AnalyzedGrammar, EOF};
-use crate::ds::bitset::BitSet;
+use crate::sets::bitset::BitSet;
 use crate::grammar::flat::{NonterminalID, Rule, Symbol, TerminalID};
 
 mod action;

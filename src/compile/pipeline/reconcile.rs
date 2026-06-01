@@ -19,13 +19,13 @@ use crate::compile::pipeline::context::{
     ReconciledArtifacts,
     TerminalAndScanOutput,
 };
-use crate::compiler::stages::templates::Templates;
+use crate::compile::template_dfa::Templates;
 use crate::compile::pipeline::counts::{
     interned_range_count_for_artifact,
     joint_interned_range_count_for_artifacts,
 };
 use crate::compile::profiling::{CompilePhaseProfile, compile_profile_enabled, elapsed_ms};
-use crate::compiler::stages::mapped_artifact::MappedArtifact;
+use crate::compile::mapped_artifact::MappedArtifact;
 
 /// Reconcile Terminal DWA, Parser DWA, and scan relation into one internal ID space.
 pub(crate) fn reconcile_and_build_parser_dwa(

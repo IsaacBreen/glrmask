@@ -1,0 +1,11 @@
+src/runtime/artifact/README.md
+src/runtime/artifact/accessors.rs
+src/runtime/artifact/cache_types.rs
+src/runtime/artifact/caches.rs
+src/runtime/artifact/compiled.rs
+src/runtime/artifact/dense.rs
+src/runtime/artifact/finalize.rs
+src/runtime/artifact/mod.rs
+src/runtime/artifact/serialization.rs
+src/runtime/artifact/templates.rs
+src/runtime/artifact/token_space.rs

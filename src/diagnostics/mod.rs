@@ -7,3 +7,4 @@
 
 pub mod cache;
 pub mod frontend;
+pub(crate) mod logging;

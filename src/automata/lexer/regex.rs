@@ -5,7 +5,7 @@
 //! compiler module (`compiler::compile`).
 
 use crate::automata::regex::Expr;
-use crate::ds::u8set::U8Set;
+use crate::sets::byte_set::U8Set;
 
 fn choice_or_single(mut options: Vec<Expr>) -> Expr {
     if options.len() == 1 {

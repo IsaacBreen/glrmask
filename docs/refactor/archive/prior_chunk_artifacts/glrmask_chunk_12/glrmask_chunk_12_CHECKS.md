@@ -1,0 +1,28 @@
+# Chunk 12 static checks
+
+- expected `src/runtime/commit/api.rs`: PASS
+- expected `src/runtime/commit/acceptance.rs`: PASS
+- expected `src/runtime/commit/fast_path.rs`: PASS
+- expected `src/runtime/commit/general.rs`: PASS
+- expected `src/runtime/commit/initial_scan.rs`: PASS
+- expected `src/runtime/commit/profiled.rs`: PASS
+- expected `src/runtime/commit/pruning.rs`: PASS
+- expected `src/runtime/commit/queue.rs`: PASS
+- expected `src/runtime/commit/single_top.rs`: PASS
+- expected `src/runtime/commit/terminal_advance.rs`: PASS
+- expected `src/runtime/commit/types.rs`: PASS
+- `src/runtime/commit/mod.rs` line count: 76
+- `src/runtime/commit/mod.rs` under 120 lines: PASS
+- naive brace balance for commit rust files: PASS
+- stale `mask_game` absent in commit sources: PASS
+- stale `end_state_may_advance` absent in commit sources: PASS
+- `commit_bytes_impl` owned by `general.rs`: PASS
+- `commit_bytes_impl_profiled` owned by `profiled.rs`: PASS
+- `commit_bytes_fast_path` owned by `fast_path.rs`: PASS
+- `prune_initial_states` owned by `pruning.rs`: PASS
+- `collect_unique_actionable_matches` owned by `acceptance.rs`: PASS
+- `advance_terminal_match` owned by `terminal_advance.rs`: PASS
+- `apply_single_top_action_fast` owned by `single_top.rs`: PASS
+- chunk 12 docs count: 40
+- chunk 12 docs count >= 30: PASS
+- commit README mentions transition relation: PASS

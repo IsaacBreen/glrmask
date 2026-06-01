@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::ds::bitset::BitSet;
-use crate::ds::u8set::U8Set;
+use crate::sets::bitset::BitSet;
+use crate::sets::byte_set::U8Set;
 use crate::Vocab;
 
 use super::types::TerminalPathLength;

@@ -14,7 +14,7 @@ use crate::parser::glr::advance::{
 use crate::runtime::constraint::Constraint;
 
 use super::options::{template_advance_enabled, validate_template_advance_enabled};
-use super::template_advance::{
+use crate::runtime::template_dfa::advance::{
     advance_stacks_template_dfa,
     advance_stacks_template_dfa_owned,
 };

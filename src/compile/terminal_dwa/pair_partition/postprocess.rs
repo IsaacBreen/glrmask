@@ -13,8 +13,8 @@ use crate::grammar::flat::TerminalID;
 use super::equivalence_analysis::disallowed_follows::{
     build_disallowed_follow_dfa, normalize_disallowed_follows,
 };
-use crate::ds::bitset::BitSet;
-use crate::ds::weight::Weight;
+use crate::sets::bitset::BitSet;
+use crate::sets::weight::Weight;
 
 // ─── Canonicalize ────────────────────────────────────────────────────────────
 

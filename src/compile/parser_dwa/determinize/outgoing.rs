@@ -6,7 +6,7 @@
 
 use crate::automata::weighted::nwa::NWA;
 use crate::parser::glr::labels::DEFAULT_LABEL;
-use crate::ds::bitset::BitSet;
+use crate::sets::bitset::BitSet;
 
 use super::super::labels::parser_state_label;
 use super::super::types::PossibleOutgoingIds;

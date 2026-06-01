@@ -7,15 +7,15 @@
 
 /// Clear stale weak references from the global weight interners.
 pub fn clear_stale_weights() {
-    crate::ds::weight::clear_stale_weights();
+    crate::sets::weight::clear_stale_weights();
 }
 
 /// Clear all global weight interners.
 pub fn clear_weight_interners() {
-    crate::ds::weight::clear_weight_interners();
+    crate::sets::weight::clear_weight_interners();
 }
 
 /// Clear cached weight operations such as unions/intersections.
 pub fn clear_weight_op_caches() {
-    crate::ds::weight::clear_weight_op_caches();
+    crate::sets::weight::clear_weight_op_caches();
 }

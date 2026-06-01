@@ -25,7 +25,6 @@ mod pruning;
 pub(crate) mod profile;
 mod queue;
 mod single_top;
-mod template_advance;
 mod terminal_advance;
 pub(crate) mod tokenizer_scan;
 mod token_lookup;

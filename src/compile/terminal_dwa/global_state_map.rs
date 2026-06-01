@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+use crate::compile::id_space::ManyToOneIdMap;
 use crate::compile::terminal_dwa::options;
 use crate::compile::terminal_dwa::pair_partition::equivalence_analysis::state_equivalence::{
     resolve_global_pipeline_config,

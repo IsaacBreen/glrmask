@@ -4,9 +4,9 @@ use std::collections::VecDeque;
 
 use rustc_hash::FxHashMap;
 
-use crate::ds::bitset::BitSet;
+use crate::sets::bitset::BitSet;
 use crate::ds::compressed_state_set::{CompressedStateSet, SparseStateSet};
-use crate::ds::u8set::U8Set;
+use crate::sets::byte_set::U8Set;
 
 use super::dfa::DFA;
 use super::nfa::{CompactNFA, NFA};

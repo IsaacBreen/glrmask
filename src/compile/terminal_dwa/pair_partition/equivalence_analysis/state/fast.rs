@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rayon::prelude::*;
 
 use super::super::compat::TokenizerView;
-use crate::ds::bitset::BitSet;
+use crate::sets::bitset::BitSet;
 
 /// The result of state equivalence analysis: sets of state IDs that behave identically.
 pub type StateEquivalenceResult = BTreeSet<BTreeSet<usize>>;

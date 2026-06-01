@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::ds::char_transitions::CharTransitions;
-use crate::ds::bitset::BitSet;
-use crate::ds::u8set::U8Set;
+use crate::sets::bitset::BitSet;
+use crate::sets::byte_set::U8Set;
 
 pub type GroupId = u32;
 pub const DEAD: u32 = u32::MAX;

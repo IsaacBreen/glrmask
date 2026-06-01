@@ -8,8 +8,8 @@ use super::table::{
     StackShift,
     StackShiftGuard,
 };
-use crate::ds::bitset::BitSet;
-use crate::ds::leveled_gss::{LeveledGSS, VirtualStack};
+use crate::sets::bitset::BitSet;
+use crate::parser::gss::{LeveledGSS, VirtualStack};
 use crate::grammar::flat::TerminalID;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;

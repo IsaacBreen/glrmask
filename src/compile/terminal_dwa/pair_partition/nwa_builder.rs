@@ -14,10 +14,10 @@ use crate::automata::lexer::tokenizer::{Tokenizer, TokenizerMatch};
 use crate::automata::weighted::nwa::NWA;
 use crate::grammar::flat::TerminalID;
 use crate::compile::scan_relation::terminal_sequences::CanMatchComputer;
-use crate::compiler::stages::equiv_types::InternalIdMap;
-use crate::ds::u8set::U8Set;
+use crate::compile::id_space::InternalIdMap;
+use crate::sets::byte_set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
-use crate::ds::weight::Weight;
+use crate::sets::weight::Weight;
 
 use crate::compile::terminal_dwa::types::{
     ColorId, TerminalColoring, TerminalDwaBuildProfile, TerminalPathLength,

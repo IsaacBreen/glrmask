@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::automata::dfa::DFA;
 use crate::automata::regex::Expr;
-use crate::compiler::stages::equiv_types::ManyToOneIdMap;
-use crate::ds::bitset::BitSet;
+use crate::compile::id_space::ManyToOneIdMap;
+use crate::sets::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use range_set_blaze::RangeSetBlaze;
 
-use crate::ds::weight::Weight;
+use crate::sets::weight::Weight;
 use crate::grammar::flat::TerminalID;
 use crate::parser::glr::accumulator::TerminalsDisallowed;
 use crate::parser::glr::advance::ParserGSS;

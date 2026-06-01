@@ -11,7 +11,7 @@ mod tests {
     use crate::parser::glr::accumulator::TerminalsDisallowed;
     use crate::parser::glr::table::testing::build_test_table;
     use crate::parser::glr::table::{Action, GuardedStackShift, StackShift, StackShiftGuard};
-    use crate::ds::bitset::BitSet;
+    use crate::sets::bitset::BitSet;
 
     #[test]
     fn advance_stacks_matches_reduce_fanout_collapse_fast_path() {

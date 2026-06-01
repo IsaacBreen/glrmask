@@ -40,10 +40,10 @@ mod prelude {
         FlatDfa, FlatDfaState, TokenizerView,
     };
     pub(super) use crate::compile::terminal_dwa::pair_partition::equivalence_analysis::vocab::fast as vocab_equivalence_analysis;
-    pub(super) use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap, MappedArtifact};
-    pub(super) use crate::ds::bitset::BitSet;
+    pub(super) use crate::compile::id_space::{InternalIdMap, ManyToOneIdMap, MappedArtifact};
+    pub(super) use crate::sets::bitset::BitSet;
     pub(super) use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
-    pub(super) use crate::ds::weight::{shared_rangeset, Weight};
+    pub(super) use crate::sets::weight::{shared_rangeset, Weight};
     pub(super) use crate::grammar::flat::TerminalID;
     pub(super) use crate::vocab::VocabDerivedArtifact;
     pub(super) use crate::Vocab;

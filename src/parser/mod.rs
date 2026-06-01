@@ -7,3 +7,4 @@
 //! themselves one of the paper's named compiled automata.
 
 pub(crate) mod glr;
+pub(crate) mod gss;

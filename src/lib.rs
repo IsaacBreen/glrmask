@@ -19,15 +19,18 @@ pub mod diagnostics;
 
 pub(crate) mod automata;
 pub(crate) mod compile;
+pub(crate) mod config;
 pub(crate) mod compiler;
 pub(crate) mod ds;
 mod error;
 pub(crate) mod grammar;
 pub(crate) mod grammar_ir;
 pub(crate) mod import;
+pub(crate) mod invariants;
 pub(crate) mod parser;
 pub(crate) mod runtime;
 pub(crate) mod scan;
+pub(crate) mod sets;
 mod vocab;
 
 #[doc(inline)]

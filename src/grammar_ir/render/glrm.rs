@@ -5,7 +5,7 @@
 
 use crate::grammar_ir::ast::{GrammarExpr, NamedGrammar};
 use crate::grammar_ir::expr_nfa::ExprNFA;
-use crate::automata::unweighted_u32::dfa::Label;
+use crate::automata::unweighted::dfa::Label;
 
 pub fn to_glrm(grammar: &NamedGrammar) -> String {
     let mut out = String::new();

@@ -9,9 +9,9 @@ use std::time::Instant;
 
 use crate::compile::pipeline::context::{GrammarAnalysisOutput, TemplateOutput};
 use crate::compile::profiling::{CompilePhaseProfile, elapsed_ms, emit_template_profile_summary};
-use crate::compiler::stages::templates::Templates;
-use crate::compiler::stages::templates::characterize::characterize_terminals_profiled;
-use crate::compiler::stages::templates::compile_dfa::{
+use crate::compile::template_dfa::Templates;
+use crate::compile::template_dfa::characterize::characterize_terminals_profiled;
+use crate::compile::template_dfa::compile_dfa::{
     specialize_template_dfa_defaults_for_commit_split_input,
     split_commit_template_dfas,
 };

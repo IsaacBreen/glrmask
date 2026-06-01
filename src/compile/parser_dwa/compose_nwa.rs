@@ -14,8 +14,8 @@ use rustc_hash::FxHashMap;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::parser::glr::analysis::AnalyzedGrammar;
-use crate::compiler::stages::templates::Templates;
-use crate::ds::weight::Weight;
+use crate::compile::template_dfa::Templates;
+use crate::sets::weight::Weight;
 
 use super::profiling::{
     elapsed_ms, emit_parser_bundle_profile, emit_parser_dwa_compose_profiles,

@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 
 use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::parser::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
-use crate::ds::weight::Weight;
+use crate::sets::weight::Weight;
 
 type QueryKey = (u32, i32);
 type CancellationTask = (u32, u32, i32);

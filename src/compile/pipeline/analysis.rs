@@ -17,7 +17,7 @@ use crate::compile::terminal_dwa::grammar_helpers::{
 use crate::compile::tokenizer::build_tokenizer;
 use crate::parser::glr::analysis::AnalyzedGrammar;
 use crate::parser::glr::table::GLRTable;
-use crate::ds::bitset::BitSet;
+use crate::sets::bitset::BitSet;
 use crate::grammar::flat::GrammarDef;
 
 /// Build tokenizer, analyzed grammar, GLR table, terminal colors, and disallowed follows.

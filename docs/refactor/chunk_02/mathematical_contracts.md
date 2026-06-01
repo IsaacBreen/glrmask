@@ -165,7 +165,7 @@ Implementation consequence:
 - Runtime commit code belongs under `runtime::commit`.
 - Template advance code remains under `runtime::commit/template_advance.rs` for
   now, because its runtime role is commit acceleration.
-- Compile-time template construction can remain under `compiler::stages::templates`
+- Compile-time template construction can remain under `compile::template_dfa`
   until a later chunk gives template DFAs their own paper-level compile home.
 
 ## 7. Token quotient contract

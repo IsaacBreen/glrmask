@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use crate::automata::unweighted_u32::dfa::{DFA, Label};
-use crate::ds::bitset::BitSet;
+use crate::automata::unweighted::dfa::{DFA, Label};
+use crate::sets::bitset::BitSet;
 
 pub(crate) fn normalize_disallowed_follows(
     num_groups: usize,

@@ -14,7 +14,7 @@ use rayon::prelude::*;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::parser::glr::analysis::AnalyzedGrammar;
-use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap, MappedArtifact};
+use crate::compile::id_space::{InternalIdMap, ManyToOneIdMap, MappedArtifact};
 use crate::compile::terminal_dwa::classify;
 use crate::compile::terminal_dwa::direct_partition;
 use crate::compile::terminal_dwa::global_state_map;
@@ -28,7 +28,7 @@ use crate::compile::terminal_dwa::types::{
     TerminalDwaPhaseProfile,
 };
 use crate::compile::terminal_dwa::vocab_partition;
-use crate::ds::bitset::BitSet;
+use crate::sets::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 

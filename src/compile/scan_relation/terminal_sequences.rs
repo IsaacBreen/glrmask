@@ -7,7 +7,7 @@ use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::grammar::flat::TerminalID;
-use crate::ds::u8set::U8Set;
+use crate::sets::byte_set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 
 type CanMatchMap = FxHashMap<TerminalID, RangeSetBlaze<u32>>;

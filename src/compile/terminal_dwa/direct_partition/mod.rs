@@ -312,10 +312,10 @@ impl<'a> Eq for LazyRanges<'a> {}
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::parser::glr::analysis::AnalyzedGrammar;
-use crate::compiler::stages::mapped_artifact::MappedArtifact;
-use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use crate::compile::mapped_artifact::MappedArtifact;
+use crate::compile::id_space::{InternalIdMap, ManyToOneIdMap};
 use crate::compile::terminal_dwa::types::LocalIdMapTerminalDwa;
-use crate::ds::weight::{shared_rangeset, Weight};
+use crate::sets::weight::{shared_rangeset, Weight};
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 

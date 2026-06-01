@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::automata::lexer::ast::Expr;
 use crate::automata::lexer::regex::parse_regex;
-use crate::ds::u8set::U8Set;
+use crate::sets::byte_set::U8Set;
 use crate::grammar_ir::ast::{GrammarExpr, NamedGrammar};
 use crate::grammar_ir::flat::Rule;
 use crate::grammar_ir::render::lark::u8set_to_class_def;

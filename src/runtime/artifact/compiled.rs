@@ -18,7 +18,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::grammar::flat::TerminalID;
 use crate::parser::glr::table::GLRTable;
-use crate::runtime::mask_mapping::FinalMaskMapping;
+use crate::runtime::token_space::final_mask_mapping::FinalMaskMapping;
 
 use super::cache_types::{
     DenseWeightBufMaskCache,

@@ -2,7 +2,7 @@ use rayon::prelude::*;
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+use crate::compile::id_space::ManyToOneIdMap;
 
 use super::build_state_map_from_subset_representatives;
 use super::super::compat::TokenizerView;

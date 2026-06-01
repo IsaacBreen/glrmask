@@ -10,9 +10,9 @@
 
 use rustc_hash::FxHashMap;
 
-use crate::ds::weight::Weight;
+use crate::sets::weight::Weight;
 use crate::grammar::flat::TerminalID;
-use crate::runtime::mask_mapping::FinalMaskMapping;
+use crate::runtime::token_space::final_mask_mapping::FinalMaskMapping;
 
 use super::dense::{empty_dense_words, DenseWords};
 

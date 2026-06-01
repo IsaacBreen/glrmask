@@ -15,8 +15,9 @@ mod bitmask_ops;
 mod commit;
 mod constraint;
 mod mask;
-pub mod mask_mapping;
+mod token_space;
 mod state;
+mod template_dfa;
 
 pub(crate) use artifact::{CommitTemplateDfas, CompiledArtifactParts, TemplateDfasByTerminal};
 pub use crate::parser::glr::advance::{
@@ -30,5 +31,5 @@ pub use crate::parser::glr::advance::{
 pub use commit::profile::{CommitProfile, GssProfileSummary, PerAdvanceEntry};
 pub use constraint::Constraint;
 pub use mask::profile::MaskProfile;
-pub use mask_mapping::FinalMaskMapping;
+pub use token_space::final_mask_mapping::FinalMaskMapping;
 pub use state::ConstraintState;

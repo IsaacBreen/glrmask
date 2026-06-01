@@ -8,7 +8,7 @@
 //! made explicit.
 
 use super::*;
-use crate::ds::bitset::BitSet;
+use crate::sets::bitset::BitSet;
 use rustc_hash::FxHasher;
 use super::options::table_options_from_env;
 use std::hash::{Hash, Hasher};

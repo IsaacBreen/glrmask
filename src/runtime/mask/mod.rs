@@ -18,7 +18,7 @@ pub(crate) mod queue;
 use crate::parser::glr::accumulator::TerminalsDisallowed;
 use crate::parser::glr::labels::{encode_positive_label, DEFAULT_LABEL};
 use crate::runtime::constraint::DenseToBufProfileStats;
-use crate::ds::weight::Weight;
+use crate::sets::weight::Weight;
 use crate::runtime::state::{ConstraintState, MaskCacheData};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;

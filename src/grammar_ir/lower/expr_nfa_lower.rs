@@ -4,7 +4,7 @@
 //! turns each automaton state into a nonterminal and each labeled transition into
 //! a production.
 
-use crate::automata::unweighted_u32::dfa::DFA;
+use crate::automata::unweighted::dfa::DFA;
 use crate::grammar_ir::expr_nfa::ExprNFA;
 use crate::grammar_ir::flat::{NonterminalID, Rule, Symbol};
 use crate::GlrMaskError;

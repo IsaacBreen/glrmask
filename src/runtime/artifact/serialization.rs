@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use super::Constraint;
 
-const SERIALIZATION_FORMAT_VERSION: u32 = 1;
-const SERIALIZATION_MAGIC: &str = "glrmask.constraint";
+pub(crate) const SERIALIZATION_FORMAT_VERSION: u32 = 1;
+pub(crate) const SERIALIZATION_MAGIC: &str = "glrmask.constraint";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SerializedArtifactEnvelope {

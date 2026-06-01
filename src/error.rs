@@ -1,3 +1,5 @@
+//! Crate-wide public error categories.
+
 use thiserror::Error as ThisError;
 
 #[derive(ThisError, Debug)]
@@ -10,6 +12,9 @@ pub enum Error {
 
     #[error("Serialization error: {0}")]
     Serialization(String),
+
+    #[error("Internal invariant violation: {0}")]
+    InternalInvariant(String),
 }
 
 pub type GlrMaskError = Error;

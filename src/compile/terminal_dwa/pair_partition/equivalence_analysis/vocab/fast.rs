@@ -14,8 +14,8 @@ use std::hash::{BuildHasher, Hasher};
 use std::time::Instant;
 
 use super::super::disallowed_follows::normalize_disallowed_follows;
-use crate::ds::bitset::BitSet;
-use crate::ds::u8set::U8Set;
+use crate::sets::bitset::BitSet;
+use crate::sets::byte_set::U8Set;
 use crate::compile::terminal_dwa::types::compile_profile_enabled;
 
 pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;

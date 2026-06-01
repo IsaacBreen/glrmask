@@ -7,7 +7,7 @@
 
 use std::time::Instant;
 
-use crate::compiler::stages::templates::BundleBuildProfile;
+use crate::compile::template_dfa::BundleBuildProfile;
 
 pub(crate) fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0

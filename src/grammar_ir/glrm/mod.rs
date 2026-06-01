@@ -7,8 +7,8 @@ pub use crate::grammar_ir::render::glrm::to_glrm;
 
 use std::collections::HashMap;
 
-use crate::automata::unweighted_u32::dfa::Label;
-use crate::automata::unweighted_u32::nfa::NFA;
+use crate::automata::unweighted::dfa::Label;
+use crate::automata::unweighted::nfa::NFA;
 use crate::grammar_ir::ast::{GrammarExpr, NamedGrammar, NamedRule};
 use crate::grammar_ir::expr_nfa::ExprNFA;
 use crate::GlrMaskError;

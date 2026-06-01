@@ -1,10 +1,10 @@
 //! Weight-size accounting helpers for compile artifact reconciliation.
 
-use crate::compiler::stages::mapped_artifact::{
+use crate::compile::mapped_artifact::{
     WeightRefs,
     count_interned_ranges_for_weights,
 };
-use crate::ds::weight::Weight;
+use crate::sets::weight::Weight;
 
 pub(crate) fn interned_range_count_for_weight_refs(weight_refs: &[&Weight]) -> usize {
     let counts = count_interned_ranges_for_weights(weight_refs.iter().copied());

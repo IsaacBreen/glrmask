@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use rustc_hash::FxHashSet;
 
-use crate::ds::u8set::U8Set;
+use crate::sets::byte_set::U8Set;
 
 use super::dfa::GroupId;
 

@@ -14,7 +14,7 @@ use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compile::scan_relation::profile::{elapsed_ms, profile_summary_enabled, CanMatchProfile};
-use crate::ds::u8set::U8Set;
+use crate::sets::byte_set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::grammar::flat::TerminalID;
 

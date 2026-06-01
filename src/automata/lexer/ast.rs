@@ -11,7 +11,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::dfa::DFA;
-use crate::ds::u8set::U8Set;
+use crate::sets::byte_set::U8Set;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Expr {

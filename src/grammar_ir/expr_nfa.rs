@@ -2,10 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use crate::automata::unweighted_u32::dfa::{DFA, Label};
-use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic;
-use crate::automata::unweighted_u32::minimize_cyclic::minimize_cyclic;
-use crate::automata::unweighted_u32::nfa::NFA;
+use crate::automata::unweighted::dfa::{DFA, Label};
+use crate::automata::unweighted::minimize_acyclic::minimize_acyclic;
+use crate::automata::unweighted::minimize_cyclic::minimize_cyclic;
+use crate::automata::unweighted::nfa::NFA;
 
 use crate::grammar_ir::ast::GrammarExpr;
 

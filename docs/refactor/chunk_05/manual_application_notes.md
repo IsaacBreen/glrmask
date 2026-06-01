@@ -109,9 +109,9 @@ Imports currently present:
 - `use crate::automata::weighted::minimize::minimize;`
 - `use crate::compiler::glr::analysis::AnalyzedGrammar;`
 - `use crate::compiler::glr::table::GLRTable;`
-- `use crate::compiler::stages::equiv_types::InternalIdMap;`
+- `use crate::compile::id_space::InternalIdMap;`
 - `use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;`
-- `use crate::compiler::stages::templates::Templates;`
+- `use crate::compile::template_dfa::Templates;`
 - `use crate::compile::terminal_dwa::types::compile_profile_enabled;`
 - `use super::compose_nwa::build_parser_nwa_from_terminal_dwa;`
 - `use super::determinize::{`
@@ -132,8 +132,8 @@ Imports currently present:
 - `use crate::automata::weighted::dwa::DWA;`
 - `use crate::automata::weighted::nwa::{NWA, NwaBody};`
 - `use crate::compiler::glr::analysis::AnalyzedGrammar;`
-- `use crate::compiler::stages::templates::Templates;`
-- `use crate::ds::weight::Weight;`
+- `use crate::compile::template_dfa::Templates;`
+- `use crate::sets::weight::Weight;`
 - `use super::profiling::{`
 - `use super::terminal_projection::{build_state_summaries, compute_productive_terminal_states};`
 - `use super::types::StateSummaries;`
@@ -151,8 +151,8 @@ Imports currently present:
 - `use crate::automata::weighted::dwa::DWA;`
 - `use crate::automata::weighted::nwa::NWA;`
 - `use crate::compiler::glr::labels::DEFAULT_LABEL;`
-- `use crate::ds::bitset::BitSet;`
-- `use crate::ds::weight::Weight;`
+- `use crate::sets::bitset::BitSet;`
+- `use crate::sets::weight::Weight;`
 - `use super::labels::parser_state_label;`
 - `use super::types::{`
 
@@ -184,8 +184,8 @@ Imports currently present:
 - `use std::collections::btree_map;`
 - `use crate::automata::weighted::dwa::DWA;`
 - `use crate::compiler::glr::labels::DEFAULT_LABEL;`
-- `use crate::ds::bitset::BitSet;`
-- `use crate::ds::weight::Weight;`
+- `use crate::sets::bitset::BitSet;`
+- `use crate::sets::weight::Weight;`
 - `use super::labels::parser_state_label;`
 - `use super::types::PossibleOutgoingIds;`
 
@@ -206,7 +206,7 @@ Expected line count now: 220.
 Imports currently present:
 
 - `use std::time::Instant;`
-- `use crate::compiler::stages::templates::BundleBuildProfile;`
+- `use crate::compile::template_dfa::BundleBuildProfile;`
 
 Possible later compile-pass cleanup: remove any unused imports after the structural refactor sequence is finished.
 
@@ -220,8 +220,8 @@ Imports currently present:
 - `use crate::automata::weighted::dwa::DWA;`
 - `use crate::automata::weighted::nwa::NWA;`
 - `use crate::compiler::glr::analysis::AnalyzedGrammar;`
-- `use crate::compiler::stages::templates::Templates;`
-- `use crate::ds::weight::Weight;`
+- `use crate::compile::template_dfa::Templates;`
+- `use crate::sets::weight::Weight;`
 - `use crate::grammar::flat::TerminalID;`
 - `use super::types::{Branch, BundleSignature, StateSummaries, StateSummary, TerminalBundle};`
 
@@ -235,7 +235,7 @@ Imports currently present:
 - `use std::collections::BTreeMap;`
 - `use smallvec::SmallVec;`
 - `use crate::automata::weighted::dwa::DWA;`
-- `use crate::ds::weight::Weight;`
+- `use crate::sets::weight::Weight;`
 - `use crate::grammar::flat::TerminalID;`
 
 Possible later compile-pass cleanup: remove any unused imports after the structural refactor sequence is finished.

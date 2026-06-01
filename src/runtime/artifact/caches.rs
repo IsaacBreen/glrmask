@@ -14,7 +14,7 @@ use rustc_hash::FxHashMap;
 
 use crate::grammar::flat::TerminalID;
 use crate::runtime::bitmask_ops::{copy_dense_buf, or_dense_buf, or_sparse_buf_entries};
-use crate::runtime::mask_mapping::FinalMaskMapping;
+use crate::runtime::token_space::final_mask_mapping::FinalMaskMapping;
 
 use super::cache_types::{
     DenseWeightBufMaskCache,
@@ -790,7 +790,7 @@ impl Constraint {
     }
 
     fn compute_fast_transitions(&self) -> FastDwaTransitions {
-        let build = |state: &crate::automata::weighted_u32::dwa::DWAState| {
+        let build = |state: &crate::automata::weighted::dwa::DWAState| {
                 state
                     .transitions
                     .iter()

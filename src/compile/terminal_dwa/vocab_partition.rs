@@ -20,7 +20,7 @@ use crate::compile::terminal_dwa::options::{
     VocabPartitionScheme,
 };
 use crate::compile::terminal_dwa::types::compile_profile_enabled;
-use crate::ds::bitset::BitSet;
+use crate::sets::bitset::BitSet;
 use crate::Vocab;
 
 #[derive(Debug)]

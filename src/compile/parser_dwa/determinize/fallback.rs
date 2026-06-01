@@ -11,7 +11,7 @@ use rustc_hash::FxHashMap;
 
 use crate::automata::weighted::dwa::DWA;
 use crate::parser::glr::labels::DEFAULT_LABEL;
-use crate::ds::weight::Weight;
+use crate::sets::weight::Weight;
 
 use super::super::types::{
     add_target_contribution, extend_target_contribs, PossibleOutgoingIds, TargetContribs,

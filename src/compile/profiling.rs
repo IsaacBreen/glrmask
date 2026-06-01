@@ -8,8 +8,8 @@
 //! from grammar/vocabulary inputs to a runtime artifact plus a report.
 
 use crate::compile::options::env_flag_enabled;
-use crate::compiler::stages::templates::characterize::TerminalCharacterizationProfile;
-use crate::compiler::stages::templates::compile_dfa::TemplateCompileProfile;
+use crate::compile::template_dfa::characterize::TerminalCharacterizationProfile;
+use crate::compile::template_dfa::compile_dfa::TemplateCompileProfile;
 use std::time::Instant;
 
 /// Return whether compile-summary profiling is enabled by the environment.

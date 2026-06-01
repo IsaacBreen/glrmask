@@ -22,11 +22,14 @@
 //! generic `stages` bucket.
 
 pub(crate) mod options;
+pub(crate) mod id_space;
+pub(crate) mod mapped_artifact;
 pub(crate) mod parser_dwa;
 pub(crate) mod pipeline;
 pub(crate) mod profiling;
 pub(crate) mod scan_relation;
 pub(crate) mod terminal_dwa;
+pub(crate) mod template_dfa;
 pub(crate) mod thread_pool;
 pub(crate) mod tokenizer;
 

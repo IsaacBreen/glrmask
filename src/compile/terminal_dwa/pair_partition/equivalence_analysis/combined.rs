@@ -4,11 +4,11 @@ use std::time::Instant;
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use crate::compile::id_space::{InternalIdMap, ManyToOneIdMap};
 use super::state_equivalence::{
     resolve_pair_partition_pipeline_config, run_state_equivalence_pipeline, StateEquivalenceScope,
 };
-use crate::ds::bitset::BitSet;
+use crate::sets::bitset::BitSet;
 use super::compat::TokenizerView;
 use super::disallowed_follows::normalize_disallowed_follows;
 use super::shared::{

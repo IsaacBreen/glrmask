@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use rustc_hash::FxHashMap;
 
 use crate::automata::weighted::nwa::NWA;
-use crate::ds::weight::Weight;
+use crate::sets::weight::Weight;
 
 pub(super) fn local_epsilon_closure(
     nwa: &NWA,

@@ -1,0 +1,82 @@
+# Environment variable inventory
+
+- `GLRMASK_PROFILE_TOKENIZER_DETAIL` in `src/automata/lexer/compile.rs:1009` — `let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();`
+- `GLRMASK_PROFILE_TOKENIZER_DETAIL` in `src/automata/lexer/compile.rs:1263` — `let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();`
+- `GLRMASK_PROFILE_DETERMINIZE` in `src/automata/weighted/determinize.rs:56` — `let profile = std::env::var("GLRMASK_PROFILE_DETERMINIZE").map(|v| v == "1").unwrap_or(false);`
+- `GLRMASK_PROFILE_COMPILE` in `src/automata/weighted/minimize_acyclic.rs:21` — `std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()`
+- `GLRMASK_PROFILE_COMPILE_SUMMARY` in `src/automata/weighted/minimize_acyclic.rs:22` — `|| std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()`
+- `GLRMASK_PROFILE_TOKENIZER_DETAIL` in `src/compile/options.rs:36` — `std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some()`
+- `GLRMASK_DWA_CAN_MATCH_MODE` in `src/compile/options.rs:92` — `match std::env::var("GLRMASK_DWA_CAN_MATCH_MODE")`
+- `GLRMASK_PARSER_DWA_CAN_MATCH_COMPACTION` in `src/compile/options.rs:93` — `.or_else(|_| std::env::var("GLRMASK_PARSER_DWA_CAN_MATCH_COMPACTION"))`
+- `GLRMASK_COMPILE_THREADS` in `src/compile/options.rs:134` — `if let Some(value) = std::env::var("GLRMASK_COMPILE_THREADS")`
+- `RAYON_NUM_THREADS` in `src/compile/options.rs:142` — `if std::env::var_os("RAYON_NUM_THREADS").is_some() {`
+- `GLRMASK_SKIP_PARSER_DWA_MINIMIZE` in `src/compile/parser_dwa/options.rs:33` — `std::env::var("GLRMASK_SKIP_PARSER_DWA_MINIMIZE")`
+- `GLRMASK_PROFILE_PARSER_DWA_COMPOSE_DETAIL` in `src/compile/parser_dwa/profiling.rs:17` — `std::env::var("GLRMASK_PROFILE_PARSER_DWA_COMPOSE_DETAIL")`
+- `GLRMASK_SCAN_RELATION_DENSE_SEGMENT_CACHE_MIN_ENTRIES` in `src/compile/scan_relation/collector.rs:293` — `std::env::var("GLRMASK_SCAN_RELATION_DENSE_SEGMENT_CACHE_MIN_ENTRIES")`
+- `GLRMASK_SCAN_RELATION_ROOT_PARALLEL_DEPTH` in `src/compile/scan_relation/collector.rs:706` — `let parallel_depth = std::env::var("GLRMASK_SCAN_RELATION_ROOT_PARALLEL_DEPTH").ok().and_then(|v| v.parse::<u8>().ok()).unwrap_or(5);`
+- `GLRMASK_SCAN_RELATION_PARALLEL_MIN_ACTIVE_STATES` in `src/compile/scan_relation/collector.rs:707` — `let parallel_min_active = std::env::var("GLRMASK_SCAN_RELATION_PARALLEL_MIN_ACTIVE_STATES")`
+- `GLRMASK_PROFILE_COMPILE` in `src/compile/scan_relation/compute.rs:66` — `if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()`
+- `GLRMASK_PROFILE_COMPILE_SUMMARY` in `src/compile/scan_relation/compute.rs:67` — `|| std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()`
+- `GLRMASK_PROFILE_COMPILE` in `src/compile/scan_relation/compute.rs:116` — `if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some() || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {`
+- `GLRMASK_PROFILE_COMPILE_SUMMARY` in `src/compile/scan_relation/compute.rs:116` — `if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some() || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {`
+- `GLRMASK_SCAN_RELATION_VOCAB_EQUIV_NAIVE` in `src/compile/scan_relation/compute.rs:137` — `let use_naive = std::env::var("GLRMASK_SCAN_RELATION_VOCAB_EQUIV_NAIVE")`
+- `GLRMASK_PROFILE_COMPILE` in `src/compile/scan_relation/compute.rs:149` — `if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()`
+- `GLRMASK_PROFILE_COMPILE_SUMMARY` in `src/compile/scan_relation/compute.rs:150` — `|| std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()`
+- `GLRMASK_PROFILE_SCAN_RELATION_VOCAB_DETAIL` in `src/compile/scan_relation/legacy_materialize.rs:257` — `if std::env::var_os("GLRMASK_PROFILE_SCAN_RELATION_VOCAB_DETAIL").is_some() {`
+- `GLRMASK_SCAN_RELATION_ORDERED_VOCAB_CACHE` in `src/compile/scan_relation/ordered_vocab.rs:113` — `std::env::var("GLRMASK_SCAN_RELATION_ORDERED_VOCAB_CACHE")`
+- `GLRMASK_SCAN_RELATION_ORDERED_VOCAB_CACHE_CAPACITY` in `src/compile/scan_relation/ordered_vocab.rs:125` — `std::env::var("GLRMASK_SCAN_RELATION_ORDERED_VOCAB_CACHE_CAPACITY")`
+- `GLRMASK_PROFILE_COMPILE` in `src/compile/scan_relation/ordered_vocab.rs:221` — `std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()`
+- `GLRMASK_PROFILE_COMPILE_SUMMARY` in `src/compile/scan_relation/ordered_vocab.rs:222` — `|| std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()`
+- `GLRMASK_VALIDATE_GROUP_SCAN_RELATION_VOCAB` in `src/compile/scan_relation/root_collect.rs:12` — `std::env::var("GLRMASK_VALIDATE_GROUP_SCAN_RELATION_VOCAB")`
+- `GLRMASK_SCAN_RELATION_USE_LEGACY_VOCAB_SWEEP` in `src/compile/scan_relation/root_collect.rs:18` — `std::env::var("GLRMASK_SCAN_RELATION_USE_LEGACY_VOCAB_SWEEP")`
+- `GLRMASK_SCAN_RELATION_SPARSE_ROOT_COLLECT` in `src/compile/scan_relation/root_collect.rs:24` — `std::env::var("GLRMASK_SCAN_RELATION_SPARSE_ROOT_COLLECT")`
+- `GLRMASK_SCAN_RELATION_SPARSE_ROOT_MAX_STATES` in `src/compile/scan_relation/root_collect.rs:30` — `std::env::var("GLRMASK_SCAN_RELATION_SPARSE_ROOT_MAX_STATES")`
+- `GLRMASK_SCAN_RELATION_SPARSE_ROOT_MAX_TERMINALS` in `src/compile/scan_relation/root_collect.rs:37` — `std::env::var("GLRMASK_SCAN_RELATION_SPARSE_ROOT_MAX_TERMINALS")`
+- `GLRMASK_SCAN_RELATION_VOCAB_EQUIV` in `src/compile/scan_relation/vocab_equivalence.rs:13` — `std::env::var("GLRMASK_SCAN_RELATION_VOCAB_EQUIV")`
+- `GLRMASK_PROFILE_SCAN_RELATION_VOCAB_DETAIL` in `src/compile/scan_relation/vocab_materialize.rs:246` — `let scan_relation_vocab_detail_enabled = std::env::var("GLRMASK_PROFILE_SCAN_RELATION_VOCAB_DETAIL")`
+- `GLRMASK_SKIP_MAX_LENGTH_PARTITIONS` in `src/compile/terminal_dwa/direct_partition/mod.rs:84` — `std::env::var("GLRMASK_SKIP_MAX_LENGTH_PARTITIONS")`
+- `GLRMASK_SKIP_DIRECT_PARTITION_MAX_LENGTH_PARTITIONS` in `src/compile/terminal_dwa/direct_partition/mod.rs:107` — `std::env::var("GLRMASK_SKIP_DIRECT_PARTITION_MAX_LENGTH_PARTITIONS")`
+- `GLRMASK_DIRECT_PARTITION_MAX_LENGTH_MIN_STATES` in `src/compile/terminal_dwa/direct_partition/mod.rs:126` — `std::env::var("GLRMASK_DIRECT_PARTITION_MAX_LENGTH_MIN_STATES")`
+- `GLRMASK_DIRECT_PARTITION_FAST_PROJECTED_ID_MAP` in `src/compile/terminal_dwa/direct_partition/mod.rs:148` — `std::env::var("GLRMASK_DIRECT_PARTITION_FAST_PROJECTED_ID_MAP")`
+- `GLRMASK_DIRECT_PARTITION_FAST_PROJECTED_ID_MAP_MAX_TSIDS` in `src/compile/terminal_dwa/direct_partition/mod.rs:160` — `std::env::var("GLRMASK_DIRECT_PARTITION_FAST_PROJECTED_ID_MAP_MAX_TSIDS")`
+- `GLRMASK_COMPACT_DIRECT_PARTITION_TERMINAL_DWA` in `src/compile/terminal_dwa/direct_partition/mod.rs:328` — `std::env::var("GLRMASK_COMPACT_DIRECT_PARTITION_TERMINAL_DWA")`
+- `GLRMASK_MINIMIZE_MERGED_TERMINAL_DWA` in `src/compile/terminal_dwa/merge.rs:25` — `std::env::var("GLRMASK_MINIMIZE_MERGED_TERMINAL_DWA")`
+- `GLRMASK_COMPACT_MERGED_TERMINAL_DWA` in `src/compile/terminal_dwa/merge.rs:37` — `std::env::var("GLRMASK_COMPACT_MERGED_TERMINAL_DWA")`
+- `GLRMASK_PARTITION_SCHEME` in `src/compile/terminal_dwa/options.rs:41` — `match std::env::var("GLRMASK_PARTITION_SCHEME").as_deref() {`
+- `GLRMASK_PAIR_PARTITION_COST_FN` in `src/compile/terminal_dwa/options.rs:52` — `match std::env::var("GLRMASK_PAIR_PARTITION_COST_FN").as_deref() {`
+- `GLRMASK_PAIR_PARTITION_COST_OBJECTIVE` in `src/compile/terminal_dwa/options.rs:64` — `match std::env::var("GLRMASK_PAIR_PARTITION_COST_OBJECTIVE").as_deref() {`
+- `GLRMASK_PAIR_PARTITION_COST_PARTITIONS` in `src/compile/terminal_dwa/options.rs:74` — `std::env::var("GLRMASK_PAIR_PARTITION_COST_PARTITIONS")`
+- `GLRMASK_PAIR_PARTITION_AUTO_SECOND_LARGEST_LIMIT` in `src/compile/terminal_dwa/options.rs:82` — `std::env::var("GLRMASK_PAIR_PARTITION_AUTO_SECOND_LARGEST_LIMIT")`
+- `GLRMASK_PAIR_PARTITION_AUTO_MAX_ESTIMATED_TERMINALS` in `src/compile/terminal_dwa/options.rs:90` — `std::env::var("GLRMASK_PAIR_PARTITION_AUTO_MAX_ESTIMATED_TERMINALS")`
+- `GLRMASK_PAIR_PARTITION_AUTO_MIN_ESTIMATED_TERMINALS` in `src/compile/terminal_dwa/options.rs:98` — `std::env::var("GLRMASK_PAIR_PARTITION_AUTO_MIN_ESTIMATED_TERMINALS")`
+- `GLRMASK_PAIR_PARTITION_AUTO_MIN_GRAMMAR_TERMINALS` in `src/compile/terminal_dwa/options.rs:105` — `std::env::var("GLRMASK_PAIR_PARTITION_AUTO_MIN_GRAMMAR_TERMINALS")`
+- `GLRMASK_USE_GLOBAL_MAX_LENGTH` in `src/compile/terminal_dwa/options.rs:113` — `*OVERRIDE.get_or_init(|| std::env::var("GLRMASK_USE_GLOBAL_MAX_LENGTH").ok().map(|value| parse_truthy(&value)))`
+- `GLRMASK_SKIP_MAX_LENGTH_PARTITIONS` in `src/compile/terminal_dwa/pair_partition/equivalence_analysis/combined.rs:253` — `std::env::var("GLRMASK_SKIP_MAX_LENGTH_PARTITIONS")`
+- `STATE_EQUIV_EARLY_STOP` in `src/compile/terminal_dwa/pair_partition/equivalence_analysis/state/fast.rs:595` — `std::env::var("STATE_EQUIV_EARLY_STOP")`
+- `GLRMASK_MAX_LENGTH_REFINE_MODE` in `src/compile/terminal_dwa/pair_partition/equivalence_analysis/state/max_length.rs:29` — `*MODE.get_or_init(|| match std::env::var("GLRMASK_MAX_LENGTH_REFINE_MODE") {`
+- `GLRMASK_STATE_EQUIV_PASSES` in `src/compile/terminal_dwa/pair_partition/equivalence_analysis/state_equivalence/pipeline.rs:74` — `std::env::var("GLRMASK_STATE_EQUIV_PASSES")`
+- `GLRMASK_VOCAB_EQUIV_BATCH_SIZE` in `src/compile/terminal_dwa/pair_partition/equivalence_analysis/vocab/fast.rs:262` — `std::env::var("GLRMASK_VOCAB_EQUIV_BATCH_SIZE")`
+- `GLRMASK_VOCAB_VERIFY_TOKEN_PAIR` in `src/compile/terminal_dwa/pair_partition/equivalence_analysis/vocab/fast.rs:269` — `let value = std::env::var("GLRMASK_VOCAB_VERIFY_TOKEN_PAIR").ok()?;`
+- `GLRMASK_PAIR_PARTITION_PROJECT_INITIAL_STATE_MAP` in `src/compile/terminal_dwa/pair_partition/mod.rs:149` — `std::env::var("GLRMASK_PAIR_PARTITION_PROJECT_INITIAL_STATE_MAP")`
+- `GLRMASK_FORCE_ALL_PAIR_PARTITION` in `src/compile/terminal_dwa/partition.rs:55` — `let force_all_pair_partition = std::env::var("GLRMASK_FORCE_ALL_PAIR_PARTITION").map_or(false, |v| v == "1");`
+- `GLRMASK_PROFILE_COMPILE` in `src/compiler/grammar/transforms.rs:23` — `std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()`
+- `GLRMASK_PROFILE_COMPILE_SUMMARY` in `src/compiler/grammar/transforms.rs:24` — `|| std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()`
+- `GLRMASK_MAX_RUNTIME_REDUCTION_LEN` in `src/compiler/grammar/transforms.rs:762` — `let max_reduction_len = std::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN")`
+- `STACKVEC` in `src/ds/stack_vecs/dispatch.rs:19` — `match std::env::var("STACKVEC").as_deref() {`
+- `GLRMASK_REPEAT_TREE_SHAPE` in `src/grammar_ir/lower/repeat.rs:23` — `match std::env::var("GLRMASK_REPEAT_TREE_SHAPE").ok().as_deref() {`
+- `GLRMASK_RIGHT_REPEAT_RANGE_FRONT_BUCKET` in `src/grammar_ir/lower/repeat.rs:40` — `std::env::var("GLRMASK_RIGHT_REPEAT_RANGE_FRONT_BUCKET")`
+- `GLRMASK_LEFT_REPEAT_RANGE_BACK_BUCKET` in `src/grammar_ir/lower/repeat.rs:47` — `std::env::var("GLRMASK_LEFT_REPEAT_RANGE_BACK_BUCKET")`
+- `GLRMASK_ORDERED_OBJECT_SHAPE` in `src/grammar_ir/lower/separated_sequence.rs:15` — `match std::env::var("GLRMASK_ORDERED_OBJECT_SHAPE")`
+- `GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS` in `src/import/json_schema/options.rs:151` — `match std::env::var("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS") {`
+- `GLRMASK_PROFILE_COMPILE` in `src/parser/glr/analysis/options.rs:8` — `std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()`
+- `GLRMASK_PROFILE_COMPILE_SUMMARY` in `src/parser/glr/analysis/options.rs:9` — `|| std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()`
+- `GLRMASK_PROFILE_COMPILE` in `src/parser/glr/table/options.rs:66` — `profile_table_build: std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()`
+- `GLRMASK_PROFILE_COMPILE_SUMMARY` in `src/parser/glr/table/options.rs:67` — `|| std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some(),`
+- `PUSH_MODE` in `src/parser/gss/mod.rs:1428` — `match std::env::var("PUSH_MODE").as_deref() {`
+- `GLRMASK_PROFILE_COMPILE` in `src/runtime/artifact/caches.rs:36` — `let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()`
+- `GLRMASK_PROFILE_COMPILE_SUMMARY` in `src/runtime/artifact/caches.rs:37` — `|| std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();`
+- `GLRMASK_ASSERT_COMMIT_TOKEN_MASK_EQUIVALENCE` in `src/runtime/commit/mask_assert.rs:18` — `std::env::var("GLRMASK_ASSERT_COMMIT_TOKEN_MASK_EQUIVALENCE")`
+- `GLRMASK_DISABLE_TEMPLATE_DFA_ADVANCE` in `src/runtime/commit/options.rs:15` — `.get_or_init(|| std::env::var_os("GLRMASK_DISABLE_TEMPLATE_DFA_ADVANCE").is_none())`
+- `GLRMASK_VALIDATE_TEMPLATE_DFA_ADVANCE` in `src/runtime/commit/options.rs:20` — `.get_or_init(|| std::env::var_os("GLRMASK_VALIDATE_TEMPLATE_DFA_ADVANCE").is_some())`
+- `GLRMASK_PROFILE_MASK_FAST_CONVERSION_FILE` in `src/runtime/mask/profile.rs:82` — `let Ok(path) = std::env::var("GLRMASK_PROFILE_MASK_FAST_CONVERSION_FILE") else {`
+- `GLRMASK_MASK_QUEUE_MODE` in `src/runtime/mask/queue.rs:24` — `*MODE.get_or_init(|| match std::env::var("GLRMASK_MASK_QUEUE_MODE") {`

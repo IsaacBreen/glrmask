@@ -26,11 +26,11 @@ use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::NWA;
 use crate::parser::glr::analysis::AnalyzedGrammar;
 use crate::compile::scan_relation::terminal_sequences::CanMatchComputer;
-use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use crate::compile::id_space::{InternalIdMap, ManyToOneIdMap};
 use crate::compile::terminal_dwa::types::LocalIdMapTerminalDwa;
-use crate::ds::bitset::BitSet;
+use crate::sets::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
-use crate::ds::weight::Weight;
+use crate::sets::weight::Weight;
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 use rustc_hash::FxHashMap;
@@ -542,7 +542,7 @@ pub(crate) fn build_pair_partition_terminal_dwa(
             // Signal early-None via a sentinel. Build a dummy DWA;
             // outer code will observe `early_none=true` and return.
             (
-                crate::automata::weighted_u32::dwa::DWA::new(0, 0),
+                crate::automata::weighted::dwa::DWA::new(0, 0),
                 0.0,
                 0.0,
                 0.0,
@@ -560,8 +560,8 @@ pub(crate) fn build_pair_partition_terminal_dwa(
                 0usize,
                 0usize,
                 0usize,
-                crate::automata::weighted_u32::dwa::DWA::new(0, 0).stats(),
-                crate::automata::weighted_u32::dwa::DWA::new(0, 0).stats(),
+                crate::automata::weighted::dwa::DWA::new(0, 0).stats(),
+                crate::automata::weighted::dwa::DWA::new(0, 0).stats(),
                 true,
             )
         } else {

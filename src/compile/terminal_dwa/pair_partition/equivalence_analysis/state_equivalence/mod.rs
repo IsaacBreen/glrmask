@@ -1,4 +1,4 @@
-use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+use crate::compile::id_space::ManyToOneIdMap;
 
 pub(crate) mod max_length;
 pub(crate) mod pipeline;

@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
 
-use crate::ds::leveled_gss::Merge;
+use crate::parser::gss::Merge;
 
 /// Accumulator stored in the GSS.  Wraps the underlying BTreeMap in an Arc
 /// so that Clone is O(1) (reference-count increment) instead of O(n).

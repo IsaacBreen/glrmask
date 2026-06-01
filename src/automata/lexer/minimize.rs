@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::ds::bitset::BitSet;
+use crate::sets::bitset::BitSet;
 use crate::ds::char_transitions::CharTransitions;
 
 use super::dfa::DFA;

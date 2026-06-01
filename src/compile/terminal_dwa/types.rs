@@ -1,7 +1,7 @@
 //! Shared types used across the terminal DWA build pipeline.
 
 use crate::automata::weighted::dwa::DWA;
-use crate::compiler::stages::equiv_types::InternalIdMap;
+use crate::compile::id_space::InternalIdMap;
 use crate::grammar::flat::TerminalID;
 
 /// Color identifier (index into graph-coloring partition).

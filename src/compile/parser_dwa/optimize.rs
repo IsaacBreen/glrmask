@@ -9,8 +9,8 @@ use std::collections::btree_map;
 
 use crate::automata::weighted::dwa::DWA;
 use crate::parser::glr::labels::DEFAULT_LABEL;
-use crate::ds::bitset::BitSet;
-use crate::ds::weight::Weight;
+use crate::sets::bitset::BitSet;
+use crate::sets::weight::Weight;
 
 use super::labels::parser_state_label;
 use super::types::PossibleOutgoingIds;

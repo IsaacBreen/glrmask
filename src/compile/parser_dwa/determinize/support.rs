@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::nwa::NWA;
 use crate::parser::glr::labels::DEFAULT_LABEL;
-use crate::ds::weight::Weight;
+use crate::sets::weight::Weight;
 
 use super::epsilon::local_epsilon_closure;
 use super::super::types::{

@@ -4,7 +4,7 @@
 //! diagnostics. It must not allocate terminal ids, create productions, or perform
 //! lowering.
 
-use crate::ds::u8set::U8Set;
+use crate::sets::byte_set::U8Set;
 use crate::grammar_ir::ast::{GrammarExpr, NamedGrammar};
 
 /// Render a named grammar in a Lark-like human-readable format.

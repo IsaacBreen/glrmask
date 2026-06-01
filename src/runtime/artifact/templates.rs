@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
+use crate::automata::unweighted::dfa::DFA as UnweightedDfa;
 
 /// Template DFA triple for one grammar terminal.
 #[derive(Debug, Clone, Default)]

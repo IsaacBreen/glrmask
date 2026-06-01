@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
-use crate::ds::bitset::BitSet;
+use crate::sets::bitset::BitSet;
 use crate::grammar::flat::{GrammarDef, NonterminalID, Rule, Symbol, TerminalID};
 
 pub const EOF: TerminalID = u32::MAX;
