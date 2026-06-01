@@ -23,6 +23,7 @@ pub(crate) const JSON_INTEGER_RULE: &str = "JSON_INTEGER";
 pub(crate) const JSON_NUMBER_RULE: &str = "JSON_NUMBER";
 pub(crate) const JSON_BOOL_RULE: &str = "JSON_BOOL";
 pub(crate) const JSON_NULL_RULE: &str = "JSON_NULL";
+pub(crate) const JSON_SEPARATOR_WS_REGEX: &str = r#"[ \t\r\n]*"#;
 pub(crate) const JSON_ADDITIONAL_KEY_COLON_SHARED_RULE: &str = "JSON_ADDITIONAL_KEY_COLON_SHARED";
 pub(crate) const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE: &str =
     "JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED";
@@ -185,7 +186,7 @@ impl<'a> Lowerer<'a> {
 
     fn separator_regex(&self, separator: &str) -> String {
         match separator {
-            "," | ":" => format!("(?:{separator} )"),
+            "," | ":" => format!("(?:{separator}{JSON_SEPARATOR_WS_REGEX})"),
             _ => format!("(?:{separator})"),
         }
     }

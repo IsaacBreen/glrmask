@@ -198,7 +198,7 @@ fn kb304_nullable_enum_bare_quote_false_negative_truth_table() {
     // CFA `jsb/data/Kubernetes---kb_304_Normalized` reports this exact frontier:
     // prefix `{"apiVersion":`, token id 22 / bytes `"` is semantically valid
     // because it can begin the enum string value `"v1"` after optional JSON
-    // whitespace. Preserve the current glrmask split before proposing a fix.
+    // whitespace.
     let schema = r#"{
         "type": "object",
         "properties": {
@@ -243,26 +243,14 @@ fn kb304_nullable_enum_bare_quote_false_negative_truth_table() {
     );
     assert!(
         commit_space_quote_accepts,
-        "glrmask accepts the example-aligned whitespace+quote spelling while rejecting the bare quote spelling",
+        "spaced string-start token should remain accepted",
     );
-    assert!(
-        !commit_bytes_accepts,
-        "current MRE expects the generated grammar to reject this semantically valid string-prefix token",
-    );
-    assert!(
-        !commit_full_no_space_accepts,
-        "current MRE expects the generated grammar to reject the no-space full enum value too",
-    );
+    assert!(commit_bytes_accepts);
+    assert!(commit_full_no_space_accepts);
     assert!(
         commit_full_with_space_accepts,
         "spaced full enum value should remain accepted",
     );
-    assert!(
-        !mask_contains,
-        "current MRE expects the observed false-negative mask split: mask={mask_contains} commit_token={commit_token_accepts} commit_bytes={commit_bytes_accepts}",
-    );
-    assert!(
-        !commit_token_accepts,
-        "current MRE expects token commit to match the false-negative mask result",
-    );
+    assert!(mask_contains);
+    assert!(commit_token_accepts);
 }

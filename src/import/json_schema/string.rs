@@ -12,7 +12,8 @@ use super::lower::{
     choice, lit, lit_bytes, never, r, seq, Lowerer,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE, JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
-    JSON_STRING_CHAR_RULE, JSON_STRING_RULE, MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS,
+    JSON_SEPARATOR_WS_REGEX, JSON_STRING_CHAR_RULE, JSON_STRING_RULE,
+    MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS,
 };
 
 impl<'a> Lowerer<'a> {
@@ -364,11 +365,15 @@ impl<'a> Lowerer<'a> {
         key: &str,
     ) -> GrammarExpr {
         let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
-        let mut bytes = Vec::with_capacity(prefix.len() + encoded.len() + 2);
-        bytes.extend_from_slice(prefix);
-        bytes.extend_from_slice(encoded.as_bytes());
-        bytes.extend_from_slice(b": ");
-        lit_bytes(bytes)
+        let key = lit_bytes(encoded.as_bytes().to_vec());
+        let key_colon = seq(vec![key, self.key_separator_expr()]);
+        if prefix.is_empty() {
+            key_colon
+        } else if prefix == b", " {
+            seq(vec![self.item_separator_expr(), key_colon])
+        } else {
+            seq(vec![lit_bytes(prefix.to_vec()), key_colon])
+        }
     }
 
     fn lower_pattern_key_colon_expr(&mut self, pattern: &str) -> ImportResult<GrammarExpr> {
@@ -909,7 +914,7 @@ fn recognized_string_format_body_regex(format: Option<&str>) -> Option<&'static 
 
 fn pattern_key_colon_regex(pattern: &str) -> ImportResult<String> {
     let body = string_pattern_as_body_regex(pattern)?;
-    Ok(format!(r#""{body}"(?:: )"#))
+    Ok(format!(r#""{body}":{JSON_SEPARATOR_WS_REGEX}"#))
 }
 
 fn strip_outer_captures(mut hir: Hir) -> Hir {

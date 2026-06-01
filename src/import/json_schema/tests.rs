@@ -563,7 +563,7 @@ fn required_property_covered_by_pattern_properties_is_synthesized() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("\\\"line1\\\": "), "{glrm}");
+    assert!(glrm.contains("\\\"line1\\\""), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -581,7 +581,7 @@ fn required_property_matching_multiple_patterns_applies_all_pattern_schemas() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("\\\"line1\\\": "), "{glrm}");
+    assert!(glrm.contains("\\\"line1\\\""), "{glrm}");
     assert!(glrm.contains("ok"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -599,7 +599,7 @@ fn required_property_not_covered_by_closed_object_lowers_to_empty_language() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("\\\"missing\\\": "), "{glrm}");
+    assert!(glrm.contains("\\\"missing\\\""), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -619,7 +619,7 @@ fn fixed_property_still_intersects_matching_pattern_property() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("\\\"line1\\\": "), "{glrm}");
+    assert!(glrm.contains("\\\"line1\\\""), "{glrm}");
     assert!(glrm.contains("ok"), "{glrm}");
     lower(&grammar).unwrap();
 }
@@ -951,8 +951,8 @@ fn shared_additional_excluded_key_skips_closed_object_keys() {
         .find(|rule| rule.name == "json_additional_excluded_key_colon_shared")
         .expect("shared excluded-key rule exists");
 
-    assert!(contains_literal_bytes(&excluded_rule.expr, b"\"open_only\": "));
-    assert!(!contains_literal_bytes(&excluded_rule.expr, b"\"closed_only\": "));
+    assert!(contains_literal_bytes(&excluded_rule.expr, b"\"open_only\""));
+    assert!(!contains_literal_bytes(&excluded_rule.expr, b"\"closed_only\""));
 
     lower(&grammar).unwrap();
 }
@@ -1695,8 +1695,8 @@ fn object_nonterminals_reference_terminalized_key_and_string_patterns() {
     );
 
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("\\\"last_modification\\\": "), "{glrm}");
-    assert!(!glrm.contains("\\\"last_modification\\\" JSON_KEY_SEPARATOR"), "{glrm}");
+    assert!(glrm.contains("\\\"last_modification\\\""), "{glrm}");
+    assert!(glrm.contains("\\\"last_modification\\\" JSON_KEY_SEPARATOR"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -1716,12 +1716,12 @@ fn overlapping_literal_and_pattern_keys_still_lower_with_shared_factoring() {
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"), "{glrm}");
-    assert!(glrm.contains("\\\"x-name\\\": "), "{glrm}");
+    assert!(glrm.contains("\\\"x-name\\\""), "{glrm}");
     lower(&grammar).unwrap();
 }
 
 #[test]
-fn json_separators_are_canonical_space_separated() {
+fn json_separators_accept_optional_json_whitespace() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -1731,10 +1731,48 @@ fn json_separators_are_canonical_space_separated() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("(?:, )") || glrm.contains("\", \""), "{glrm}");
-    assert!(glrm.contains("(?:: )") || glrm.contains("\": \""), "{glrm}");
-    assert!(!glrm.contains("[ \\t\\n\\r]*"), "{glrm}");
+    assert!(glrm.contains("(?:,[ \\t\\r\\n]*)"), "{glrm}");
+    assert!(glrm.contains("(?::[ \\t\\r\\n]*)"), "{glrm}");
     lower(&grammar).unwrap();
+}
+
+#[test]
+fn fixed_property_accepts_no_space_key_separator() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"}
+        },
+        "additionalProperties": false
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#"{"id":"x"}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"id": "x"}"#));
+}
+
+#[test]
+fn pattern_property_accepts_no_space_key_separator() {
+    let schema = json!({
+        "type": "object",
+        "patternProperties": {
+            "^x": {"type": "integer"}
+        },
+        "additionalProperties": false
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#"{"x1":1}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"x1": 1}"#));
+}
+
+#[test]
+fn additional_property_accepts_no_space_key_separator() {
+    let schema = json!({
+        "type": "object",
+        "additionalProperties": {"type": "boolean"}
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#"{"flag":true}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"flag": true}"#));
 }
 
 #[test]
@@ -2131,7 +2169,8 @@ fn object_const_uses_json_separator_rules() {
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let expr = start_expr(&grammar);
 
-    assert!(contains_literal_bytes(expr, b"\"$data\": "), "{expr:?}");
+    assert!(contains_literal_bytes(expr, b"\"$data\""), "{expr:?}");
+    assert!(contains_ref_named(expr, "JSON_KEY_SEPARATOR"), "{expr:?}");
     assert!(contains_ref_named(expr, "JSON_ITEM_SEPARATOR"), "{expr:?}");
     lower(&grammar).unwrap();
 }
