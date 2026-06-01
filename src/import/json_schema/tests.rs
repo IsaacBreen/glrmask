@@ -2086,7 +2086,7 @@ fn unknown_metadata_keys_are_ignored() {
 }
 
 #[test]
-fn conditional_keywords_are_ignored_for_broad_lowering() {
+fn conditional_keywords_error_for_broad_lowering() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -2104,8 +2104,61 @@ fn conditional_keywords_are_ignored_for_broad_lowering() {
         }
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("#: Unimplemented keys"), "{error}");
+    assert!(error.contains("if"), "{error}");
+    assert!(error.contains("then"), "{error}");
+    assert!(error.contains("else"), "{error}");
+}
+
+#[test]
+fn conditional_keywords_precede_nested_unique_items_in_then() {
+    let schema = json!({
+        "allOf": [{
+            "if": {"properties": {"type": {"const": "theme"}}},
+            "then": {
+                "properties": {
+                    "regions_hidden": {"type": "array", "uniqueItems": true}
+                }
+            }
+        }]
+    });
+
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(
+        error.contains("#/allOf/0: Unimplemented keys: [\"if\", \"then\"]"),
+        "{error}"
+    );
+    assert!(!error.contains("uniqueItems"), "{error}");
+}
+
+#[test]
+fn conditional_keywords_precede_definition_unique_items() {
+    let schema = json!({
+        "definitions": {
+            "bad": {"type": "array", "uniqueItems": true}
+        },
+        "allOf": [{
+            "if": {"properties": {"kind": {"const": "x"}}},
+            "then": {"required": ["kind"]}
+        }]
+    });
+
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(
+        error.contains("#/allOf/0: Unimplemented keys: [\"if\", \"then\"]"),
+        "{error}"
+    );
+    assert!(!error.contains("uniqueItems"), "{error}");
+}
+
+#[test]
+fn unique_items_still_errors_without_conditional() {
+    let schema = json!({"type": "array", "uniqueItems": true});
+
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("#: Unimplemented keys"), "{error}");
+    assert!(error.contains("uniqueItems"), "{error}");
 }
 
 #[test]

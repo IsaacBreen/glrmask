@@ -160,6 +160,8 @@ fn local_id_alias(object: &Map<String, Value>, location: &str) -> Option<String>
 }
 
 pub(crate) fn load_document(root: &Value) -> ImportResult<SchemaDocument> {
+    validate_unsupported_conditionals_in_schema_positions(root, "#")?;
+
     let mut definitions = Vec::new();
     collect_definitions(root, "#", &mut definitions)?;
     let mut ref_targets = Vec::new();
@@ -193,6 +195,100 @@ pub(crate) fn load_document(root: &Value) -> ImportResult<SchemaDocument> {
         definitions,
         ref_targets,
     })
+}
+
+fn validate_unsupported_conditionals_in_schema_positions(
+    value: &Value,
+    location: &str,
+) -> ImportResult<()> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+
+    let unsupported = ["if", "then", "else"]
+        .into_iter()
+        .filter(|key| object.contains_key(*key))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if !unsupported.is_empty() {
+        return Err(SchemaImportError::at(
+            location,
+            format!("Unimplemented keys: {unsupported:?}"),
+        ));
+    }
+
+    for map_key in ["properties", "patternProperties"] {
+        let child_location = format!("{location}/{}", escape_pointer_segment(map_key));
+        if let Some(children) = object.get(map_key).and_then(Value::as_object) {
+            for (name, schema_value) in children {
+                let schema_location = format!(
+                    "{child_location}/{}",
+                    escape_pointer_segment(name)
+                );
+                validate_unsupported_conditionals_in_schema_positions(
+                    schema_value,
+                    &schema_location,
+                )?;
+            }
+        }
+    }
+
+    for defs_key in ["$defs", "definitions"] {
+        let child_location = format!("{location}/{}", escape_pointer_segment(defs_key));
+        if let Some(children) = object.get(defs_key).and_then(Value::as_object) {
+            for (name, schema_value) in children {
+                let schema_location = format!(
+                    "{child_location}/{}",
+                    escape_pointer_segment(name)
+                );
+                validate_unsupported_conditionals_in_schema_positions(
+                    schema_value,
+                    &schema_location,
+                )?;
+            }
+        }
+    }
+
+    for schema_key in ["additionalProperties", "not", "contains", "propertyNames"] {
+        if let Some(child) = object.get(schema_key) {
+            let child_location = format!("{location}/{}", escape_pointer_segment(schema_key));
+            validate_unsupported_conditionals_in_schema_positions(child, &child_location)?;
+        }
+    }
+
+    if let Some(items) = object.get("items") {
+        let child_location = format!("{location}/items");
+        match items {
+            Value::Array(children) => {
+                for (index, schema_value) in children.iter().enumerate() {
+                    let schema_location = format!("{child_location}/{index}");
+                    validate_unsupported_conditionals_in_schema_positions(
+                        schema_value,
+                        &schema_location,
+                    )?;
+                }
+            }
+            Value::Bool(_) | Value::Object(_) => {
+                validate_unsupported_conditionals_in_schema_positions(items, &child_location)?;
+            }
+            _ => {}
+        }
+    }
+
+    for array_key in ["prefixItems", "anyOf", "oneOf", "allOf"] {
+        let child_location = format!("{location}/{}", escape_pointer_segment(array_key));
+        if let Some(children) = object.get(array_key).and_then(Value::as_array) {
+            for (index, schema_value) in children.iter().enumerate() {
+                let schema_location = format!("{child_location}/{index}");
+                validate_unsupported_conditionals_in_schema_positions(
+                    schema_value,
+                    &schema_location,
+                )?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn collect_definitions(
@@ -423,7 +519,10 @@ fn validate_supported_keys(object: &Map<String, Value>, location: &str) -> Impor
 fn is_unsupported_validation_key(key: &str) -> bool {
     matches!(
         key,
-        "uniqueItems"
+        "if"
+            | "then"
+            | "else"
+            | "uniqueItems"
             | "contains"
             | "minContains"
             | "maxContains"
