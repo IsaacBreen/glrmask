@@ -1114,6 +1114,7 @@ fn bounded_object_arrays_use_exprnfa_rule() {
     assert!(grammar.rules.iter().any(|rule| {
         rule.name.contains("bounded_array_") && matches!(rule.expr, GrammarExpr::ExprNFA(_))
     }), "{glrm}");
+    assert_eq!(count_rules_with_prefix(&grammar, "array_item_"), 0);
     lower(&grammar).unwrap();
 }
 
@@ -1170,6 +1171,33 @@ fn unbounded_plain_string_arrays_use_terminal_rule() {
     assert!(grammar.rules.iter().any(|rule| {
         rule.name.contains("unbounded_scalar_array_") && rule.is_terminal
     }), "{glrm}");
+    assert_eq!(count_rules_with_prefix(&grammar, "array_item_"), 0);
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn unbounded_object_ref_arrays_extract_item_rule() {
+    let schema = json!({
+        "$defs": {
+            "dataElement": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                },
+                "additionalProperties": false
+            }
+        },
+        "type": "array",
+        "items": {"$ref": "#/$defs/dataElement"}
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert_eq!(count_rules_with_prefix(&grammar, "array_item_"), 1, "{glrm}");
+    assert!(glrm.contains("array_item_"), "{glrm}");
+    assert!(schema_accepts_bytes(&schema, br#"[]"#));
+    assert!(schema_accepts_bytes(&schema, br#"[{"name": "x"}]"#));
+    assert!(!schema_accepts_bytes(&schema, br#"[{"extra": "x"}]"#));
     lower(&grammar).unwrap();
 }
 
