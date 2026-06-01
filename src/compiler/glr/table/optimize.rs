@@ -14,6 +14,17 @@ const RECOGNIZER_SUFFIX_QUOTIENT_MAX_ALTS_ENV: &str =
 const RECOGNIZER_SUFFIX_QUOTIENT_MAX_WIDTH_ENV: &str =
     "GLRMASK_RECOGNIZER_SUFFIX_QUOTIENT_MAX_WIDTH";
 const MAX_GUARDED_STACK_EFFECTS_ENV: &str = "GLRMASK_MAX_GUARDED_STACK_EFFECTS";
+const UNIT_INLINE_WORK_MAX_WALL_MS_ENV: &str = "GLRMASK_UNIT_REDUCTION_INLINE_MAX_MS";
+const UNIT_INLINE_WORK_MAX_ITERATIONS_ENV: &str = "GLRMASK_UNIT_REDUCTION_INLINE_MAX_ITERATIONS";
+const UNIT_INLINE_WORK_MAX_CELLS_ENV: &str = "GLRMASK_UNIT_REDUCTION_INLINE_MAX_CELLS";
+const UNIT_INLINE_WORK_MAX_SYNTHETIC_STATES_ENV: &str =
+    "GLRMASK_UNIT_REDUCTION_INLINE_MAX_SYNTHETIC_STATES";
+const UNIT_INLINE_WORK_MAX_STACK_EFFECT_VISITS_ENV: &str = "GLRMASK_UNIT_REDUCTION_INLINE_MAX_STACK_VISITS";
+const DEFAULT_UNIT_INLINE_WORK_MAX_WALL_MS: u128 = 5_000;
+const DEFAULT_UNIT_INLINE_WORK_MAX_ITERATIONS: usize = 64;
+const DEFAULT_UNIT_INLINE_WORK_MAX_CELLS: usize = 2_000_000;
+const DEFAULT_UNIT_INLINE_WORK_MAX_SYNTHETIC_STATES: usize = 4_096;
+const DEFAULT_UNIT_INLINE_WORK_MAX_STACK_EFFECT_VISITS: usize = 100_000;
 
 fn stack_shift_predecessor_canonicalization_enabled() -> bool {
     !env_flag_enabled(DISABLE_STACK_SHIFT_PREDECESSOR_CANONICALIZATION_ENV, false)
@@ -27,6 +38,14 @@ fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(default)
+}
+
+fn env_u128(name: &str, default: u128) -> u128 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u128>().ok())
         .filter(|&value| value > 0)
         .unwrap_or(default)
 }
@@ -78,6 +97,126 @@ struct StackEffectVisitKey {
 struct StackEffectResult {
     effects: Vec<GuardedStackShift>,
     origin_dependent: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct UnitReductionInliningReport {
+    pub(super) aborted: bool,
+    pub(super) reason: Option<&'static str>,
+    pub(super) iterations: usize,
+    pub(super) cells: usize,
+    pub(super) synthetic_states: usize,
+    pub(super) stack_effect_visits: usize,
+    pub(super) elapsed_ms: f64,
+}
+
+struct UnitInlineBudget {
+    started_at: std::time::Instant,
+    max_ms: u128,
+    max_iterations: usize,
+    max_cells: usize,
+    max_synthetic_states: usize,
+    max_stack_effect_visits: usize,
+    iterations: usize,
+    cells: usize,
+    synthetic_states: usize,
+    stack_effect_visits: usize,
+    abort_reason: Option<&'static str>,
+}
+
+impl UnitInlineBudget {
+    fn from_env() -> Self {
+        Self {
+            started_at: std::time::Instant::now(),
+            max_ms: env_u128(UNIT_INLINE_WORK_MAX_WALL_MS_ENV, DEFAULT_UNIT_INLINE_WORK_MAX_WALL_MS),
+            max_iterations: env_usize(
+                UNIT_INLINE_WORK_MAX_ITERATIONS_ENV,
+                DEFAULT_UNIT_INLINE_WORK_MAX_ITERATIONS,
+            ),
+            max_cells: env_usize(UNIT_INLINE_WORK_MAX_CELLS_ENV, DEFAULT_UNIT_INLINE_WORK_MAX_CELLS),
+            max_synthetic_states: env_usize(
+                UNIT_INLINE_WORK_MAX_SYNTHETIC_STATES_ENV,
+                DEFAULT_UNIT_INLINE_WORK_MAX_SYNTHETIC_STATES,
+            ),
+            max_stack_effect_visits: env_usize(
+                UNIT_INLINE_WORK_MAX_STACK_EFFECT_VISITS_ENV,
+                DEFAULT_UNIT_INLINE_WORK_MAX_STACK_EFFECT_VISITS,
+            ),
+            iterations: 0,
+            cells: 0,
+            synthetic_states: 0,
+            stack_effect_visits: 0,
+            abort_reason: None,
+        }
+    }
+
+    fn report(&self) -> UnitReductionInliningReport {
+        UnitReductionInliningReport {
+            aborted: self.abort_reason.is_some(),
+            reason: self.abort_reason,
+            iterations: self.iterations,
+            cells: self.cells,
+            synthetic_states: self.synthetic_states,
+            stack_effect_visits: self.stack_effect_visits,
+            elapsed_ms: self.started_at.elapsed().as_secs_f64() * 1000.0,
+        }
+    }
+
+    fn abort(&mut self, reason: &'static str) {
+        if self.abort_reason.is_none() {
+            self.abort_reason = Some(reason);
+        }
+    }
+
+    fn check_elapsed(&mut self) -> bool {
+        if self.abort_reason.is_some() {
+            return false;
+        }
+        if self.started_at.elapsed().as_millis() > self.max_ms {
+            self.abort("elapsed_ms");
+            return false;
+        }
+        true
+    }
+
+    fn record_iteration(&mut self) -> bool {
+        self.iterations += 1;
+        if self.iterations > self.max_iterations {
+            self.abort("iterations");
+            return false;
+        }
+        self.check_elapsed()
+    }
+
+    fn record_cell(&mut self) -> bool {
+        self.cells += 1;
+        if self.cells > self.max_cells {
+            self.abort("cells");
+            return false;
+        }
+        self.check_elapsed()
+    }
+
+    fn record_synthetic_state(&mut self) -> bool {
+        self.synthetic_states += 1;
+        if self.synthetic_states > self.max_synthetic_states {
+            self.abort("synthetic_states");
+            return false;
+        }
+        self.check_elapsed()
+    }
+
+    fn record_stack_effect_visit(&mut self) -> bool {
+        self.stack_effect_visits += 1;
+        if self.stack_effect_visits > self.max_stack_effect_visits {
+            self.abort("stack_effect_visits");
+            return false;
+        }
+        if self.stack_effect_visits & 0x3ff == 0 {
+            return self.check_elapsed();
+        }
+        self.abort_reason.is_none()
+    }
 }
 
 impl GLRTable {
@@ -276,7 +415,46 @@ impl GLRTable {
     /// merged state whose row is the union of its constituents' rows. This
     /// keeps the parser representation unchanged: every action cell still has
     /// at most one shift slot, but that shift target may be a merged state.
-    pub(super) fn collapse_sr_unit_reductions_with_compatible_gotos(&mut self) {
+    pub(super) fn collapse_sr_unit_reductions_with_compatible_gotos(
+        &mut self,
+    ) -> UnitReductionInliningReport {
+        let original = self.clone();
+        let mut work = original.clone();
+        let mut budget = UnitInlineBudget::from_env();
+        work.collapse_sr_unit_reductions_with_compatible_gotos_inner(&mut budget);
+        let report = budget.report();
+        if report.aborted {
+            *self = original;
+        } else {
+            *self = work;
+        }
+        if report.aborted
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][unit_reduction_inlining] outcome={} reason={} iterations={} cells={} synthetic_states={} stack_effect_visits={} elapsed_ms={:.3} max_ms={} max_iterations={} max_cells={} max_synthetic_states={} max_stack_effect_visits={}",
+                if report.aborted { "aborted" } else { "committed" },
+                report.reason.unwrap_or("none"),
+                report.iterations,
+                report.cells,
+                report.synthetic_states,
+                report.stack_effect_visits,
+                report.elapsed_ms,
+                budget.max_ms,
+                budget.max_iterations,
+                budget.max_cells,
+                budget.max_synthetic_states,
+                budget.max_stack_effect_visits,
+            );
+        }
+        report
+    }
+
+    fn collapse_sr_unit_reductions_with_compatible_gotos_inner(
+        &mut self,
+        budget: &mut UnitInlineBudget,
+    ) {
         let original_num_states = self.num_states;
         let mut constituent_sets: Vec<BTreeSet<u32>> = (0..self.num_states)
             .map(|state| BTreeSet::from([state]))
@@ -288,6 +466,9 @@ impl GLRTable {
         let mut dirty_original_states: BTreeSet<u32> = BTreeSet::new();
 
         loop {
+            if !budget.record_iteration() {
+                break;
+            }
             if !dirty_original_states.is_empty() {
                 refresh_merged_states_depending_on(
                     self,
@@ -296,7 +477,11 @@ impl GLRTable {
                     &mut subset_to_state,
                     &mut failed_subsets,
                     &dirty_original_states,
+                    budget,
                 );
+                if budget.abort_reason.is_some() {
+                    break;
+                }
                 dirty_original_states.clear();
             }
 
@@ -315,6 +500,9 @@ impl GLRTable {
             for state in 0..nstates {
                 let tids: Vec<TerminalID> = self.action[state].keys().collect();
                 for tid in tids {
+                    if !budget.record_cell() {
+                        break;
+                    }
                     let Some(action) = self.action[state].get(&tid).cloned() else {
                         continue;
                     };
@@ -330,9 +518,13 @@ impl GLRTable {
                         &mut states_at_depth_cache,
                         &mut subset_to_state,
                         &mut failed_subsets,
+                        budget,
                     ) else {
                         continue;
                     };
+                    if budget.abort_reason.is_some() {
+                        break;
+                    }
 
                     match update {
                         Some(CellUpdate::Set(new_action)) if new_action != action => {
@@ -344,9 +536,12 @@ impl GLRTable {
                         _ => {}
                     }
                 }
+                if budget.abort_reason.is_some() {
+                    break;
+                }
             }
 
-            if pending_updates.is_empty() {
+            if pending_updates.is_empty() || budget.abort_reason.is_some() {
                 break;
             }
 
@@ -1494,6 +1689,7 @@ fn merge_shift_into_pending(
     constituent_sets: &mut Vec<BTreeSet<u32>>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
+    budget: &mut UnitInlineBudget,
 ) -> Result<(), ()> {
     match pending.shift {
         None => {
@@ -1514,6 +1710,7 @@ fn merge_shift_into_pending(
                 constituent_sets,
                 subset_to_state,
                 failed_subsets,
+                budget,
             )?;
             pending.shift = Some((merged_target, replace));
             Ok(())
@@ -1528,6 +1725,7 @@ fn merge_action_into_pending(
     constituent_sets: &mut Vec<BTreeSet<u32>>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
+    budget: &mut UnitInlineBudget,
 ) -> Result<(), ()> {
     match action {
         Action::Shift(target, replace) => merge_shift_into_pending(
@@ -1538,6 +1736,7 @@ fn merge_action_into_pending(
             constituent_sets,
             subset_to_state,
             failed_subsets,
+            budget,
         ),
         Action::StackShifts(_) => Err(()),
         Action::GuardedStackShifts(_) => Err(()),
@@ -1559,6 +1758,7 @@ fn merge_action_into_pending(
                     constituent_sets,
                     subset_to_state,
                     failed_subsets,
+                    budget,
                 )?;
             }
             for &(nt, len) in reduces {
@@ -1582,6 +1782,7 @@ fn build_merged_action_row(
     constituent_sets: &mut Vec<BTreeSet<u32>>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
+    budget: &mut UnitInlineBudget,
 ) -> Result<ActionRow, ()> {
     let mut terminals = BTreeSet::new();
     for &state in subset {
@@ -1592,6 +1793,9 @@ fn build_merged_action_row(
 
     let mut row = ActionRow::default();
     for tid in terminals {
+        if !budget.record_cell() {
+            return Err(());
+        }
         let mut pending = PendingAction::default();
         for &state in subset {
             if let Some(action) = table.action[state as usize].get(&tid).cloned() {
@@ -1602,6 +1806,7 @@ fn build_merged_action_row(
                     constituent_sets,
                     subset_to_state,
                     failed_subsets,
+                    budget,
                 )?;
             }
         }
@@ -1619,6 +1824,7 @@ fn build_merged_goto_row(
     constituent_sets: &mut Vec<BTreeSet<u32>>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
+    budget: &mut UnitInlineBudget,
 ) -> Result<GotoRow, ()> {
     let mut nts = BTreeSet::new();
     for &state in subset {
@@ -1629,6 +1835,9 @@ fn build_merged_goto_row(
 
     let mut row = GotoRow::default();
     for nt in nts {
+        if !budget.record_cell() {
+            return Err(());
+        }
         let mut replace: Option<bool> = None;
         let mut target_subset = BTreeSet::new();
         let mut saw_target = false;
@@ -1655,6 +1864,7 @@ fn build_merged_goto_row(
             constituent_sets,
             subset_to_state,
             failed_subsets,
+            budget,
         )?;
         row.insert(nt, (merged_target, replace.unwrap()));
     }
@@ -1691,6 +1901,7 @@ fn ensure_subset_state(
     constituent_sets: &mut Vec<BTreeSet<u32>>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
+    budget: &mut UnitInlineBudget,
 ) -> Result<u32, ()> {
     debug_assert!(!subset.is_empty());
     if subset.len() == 1 {
@@ -1705,6 +1916,9 @@ fn ensure_subset_state(
         return Err(());
     }
 
+    if !budget.record_synthetic_state() {
+        return Err(());
+    }
     let had_advance_rows = table.advance.len() == table.num_states as usize;
     let advance_row = had_advance_rows.then(|| union_advance_rows(table, subset));
 
@@ -1725,6 +1939,7 @@ fn ensure_subset_state(
             constituent_sets,
             subset_to_state,
             failed_subsets,
+            budget,
         )?;
         let goto_row = build_merged_goto_row(
             table,
@@ -1732,6 +1947,7 @@ fn ensure_subset_state(
             constituent_sets,
             subset_to_state,
             failed_subsets,
+            budget,
         )?;
         Ok::<_, ()>((action_row, goto_row))
     })();
@@ -1764,9 +1980,13 @@ fn refresh_merged_states_depending_on(
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
     dirty_original_states: &BTreeSet<u32>,
+    budget: &mut UnitInlineBudget,
 ) {
     let mut state = original_num_states as usize;
     while state < table.num_states as usize {
+        if !budget.check_elapsed() {
+            break;
+        }
         // Merged-state rows depend only on their flattened original
         // constituents, so only subsets intersecting changed original rows
         // need to be rebuilt.
@@ -1783,6 +2003,7 @@ fn refresh_merged_states_depending_on(
                 constituent_sets,
                 subset_to_state,
                 failed_subsets,
+                budget,
             )?;
             let goto_row = build_merged_goto_row(
                 table,
@@ -1790,6 +2011,7 @@ fn refresh_merged_states_depending_on(
                 constituent_sets,
                 subset_to_state,
                 failed_subsets,
+                budget,
             )?;
             Ok::<_, ()>((action_row, goto_row))
         })();
@@ -1863,6 +2085,7 @@ fn states_at_depth(
     origin_state: u32,
     depth: u32,
     cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
+    budget: &mut UnitInlineBudget,
 ) -> Option<BTreeSet<u32>> {
     if let Some(cached) = cache.get(&(origin_state, depth)) {
         return cached.clone();
@@ -1870,6 +2093,9 @@ fn states_at_depth(
 
     let mut states = BTreeSet::from([origin_state]);
     for _ in 0..depth {
+        if !budget.record_stack_effect_visit() {
+            return None;
+        }
         let mut next = BTreeSet::new();
         for state in states {
             next.extend(predecessors.get(state as usize)?.iter().copied());
@@ -1976,6 +2202,7 @@ fn apply_reduce_to_frame(
     nt: NonterminalID,
     len: u32,
     states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
+    budget: &mut UnitInlineBudget,
 ) -> Option<ReduceFrameResult> {
     pop_frame(&mut frame, len);
 
@@ -1984,7 +2211,13 @@ fn apply_reduce_to_frame(
         BTreeSet::from([state])
     } else {
         origin_dependent = true;
-        states_at_depth(predecessors, origin_state, frame.pop, states_at_depth_cache)?
+        states_at_depth(
+            predecessors,
+            origin_state,
+            frame.pop,
+            states_at_depth_cache,
+            budget,
+        )?
     };
 
     let guard_pop = frame.pop;
@@ -2073,7 +2306,11 @@ fn stack_effects_for_action(
     states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
     visiting: &mut FxHashSet<StackEffectVisitKey>,
     memo: &mut FxHashMap<StackEffectKey, Option<StackEffectResult>>,
+    budget: &mut UnitInlineBudget,
 ) -> Option<StackEffectResult> {
+    if !budget.record_stack_effect_visit() {
+        return None;
+    }
     let memo_key = StackEffectKey {
         origin_state,
         state,
@@ -2130,6 +2367,7 @@ fn stack_effects_for_action(
                     *nt,
                     *len,
                     states_at_depth_cache,
+                    budget,
                 )? {
                     ReduceFrameResult::Dead => {
                         return Some(StackEffectResult {
@@ -2163,6 +2401,7 @@ fn stack_effects_for_action(
                         states_at_depth_cache,
                         visiting,
                         memo,
+                        budget,
                     )?;
                     origin_dependent |= next_result.origin_dependent;
                     out.extend(next_result.effects);
@@ -2185,6 +2424,7 @@ fn stack_effects_for_action(
                         states_at_depth_cache,
                         visiting,
                         memo,
+                        budget,
                     )?;
                     origin_dependent |= shift_result.origin_dependent;
                     out.extend(shift_result.effects);
@@ -2202,6 +2442,7 @@ fn stack_effects_for_action(
                         states_at_depth_cache,
                         visiting,
                         memo,
+                        budget,
                     )?;
                     origin_dependent |= reduce_result.origin_dependent;
                     out.extend(reduce_result.effects);
@@ -2272,6 +2513,7 @@ fn try_inline_action_to_stack_shifts(
     action: &Action,
     stack_effect_memo: &mut FxHashMap<StackEffectKey, Option<StackEffectResult>>,
     states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
+    budget: &mut UnitInlineBudget,
 ) -> Option<Action> {
     let has_reductions = match action {
         Action::Reduce(..) => true,
@@ -2301,6 +2543,7 @@ fn try_inline_action_to_stack_shifts(
         states_at_depth_cache,
         &mut FxHashSet::default(),
         stack_effect_memo,
+        budget,
     )?;
     let effects = result.effects;
     if result.origin_dependent
@@ -2389,6 +2632,36 @@ fn stack_shift_action(mut shifts: Vec<StackShift>) -> Option<Action> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var(name).ok();
+            unsafe {
+                std::env::set_var(name, value);
+            }
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(previous) = &self.previous {
+                    std::env::set_var(self.name, previous);
+                } else {
+                    std::env::remove_var(self.name);
+                }
+            }
+        }
+    }
 
     fn table_with_stack_shifts(
         shifts: Vec<StackShift>,
@@ -2424,6 +2697,50 @@ mod tests {
             Action::StackShifts(shifts) => shifts.clone(),
             action => panic!("expected stack shifts, got {action:?}"),
         }
+    }
+
+    #[test]
+    fn unit_reduction_inlining_budget_abort_keeps_original_table() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::set(UNIT_INLINE_WORK_MAX_STACK_EFFECT_VISITS_ENV, "1");
+
+        let mut action = vec![ActionRow::default(); 5];
+        action[2].insert(
+            0,
+            Action::Split {
+                shift: Some((4, false)),
+                reduces: vec![(10, 1)],
+                accept: false,
+            },
+        );
+        action[3].insert(0, Action::Shift(4, false));
+
+        let mut goto = vec![GotoRow::default(); 5];
+        goto[1].insert(10, (3, true));
+
+        let mut table = GLRTable {
+            action,
+            goto,
+            num_states: 5,
+            num_terminals: 1,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            advance: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+            guarded_shift_index: Vec::new(),
+        };
+        let original_action = format!("{:?}", table.action);
+        let original_goto = format!("{:?}", table.goto);
+        let original_num_states = table.num_states;
+
+        let report = table.collapse_sr_unit_reductions_with_compatible_gotos();
+
+        assert!(report.aborted);
+        assert_eq!(report.reason, Some("stack_effect_visits"));
+        assert_eq!(table.num_states, original_num_states);
+        assert_eq!(format!("{:?}", table.action), original_action);
+        assert_eq!(format!("{:?}", table.goto), original_goto);
     }
 
     #[test]
@@ -2639,6 +2956,7 @@ mod tests {
 
         let mut predecessors = vec![BTreeSet::new(); 6];
         predecessors[5] = BTreeSet::from([1, 2]);
+        let mut budget = UnitInlineBudget::from_env();
 
         let result = apply_reduce_to_frame(
             &table,
@@ -2652,6 +2970,7 @@ mod tests {
             10,
             1,
             &mut FxHashMap::default(),
+            &mut budget,
         );
 
         let Some(ReduceFrameResult::Frames { frames, origin_dependent }) = result else {
@@ -2693,6 +3012,7 @@ mod tests {
 
         let mut predecessors = vec![BTreeSet::new(); 6];
         predecessors[5] = BTreeSet::from([1, 2]);
+        let mut budget = UnitInlineBudget::from_env();
 
         let result = apply_reduce_to_frame(
             &table,
@@ -2706,6 +3026,7 @@ mod tests {
             10,
             1,
             &mut FxHashMap::default(),
+            &mut budget,
         );
 
         let Some(ReduceFrameResult::Frames { frames, origin_dependent }) = result else {
@@ -2754,6 +3075,7 @@ mod tests {
         };
         let mut predecessors = vec![BTreeSet::new(); 5];
         predecessors[2].insert(1);
+        let mut budget = UnitInlineBudget::from_env();
 
         let action = table.action(2, 0).expect("expected split action");
         let result = try_inline_action_to_stack_shifts(
@@ -2764,6 +3086,7 @@ mod tests {
             action,
             &mut FxHashMap::default(),
             &mut FxHashMap::default(),
+            &mut budget,
         );
 
         let Some(Action::StackShifts(shifts)) = result else {
@@ -2814,6 +3137,7 @@ mod tests {
         };
         let mut predecessors = vec![BTreeSet::new(); 6];
         predecessors[2].insert(1);
+        let mut budget = UnitInlineBudget::from_env();
 
         let action = table.action(2, 0).expect("expected split action");
         let result = try_inline_action_to_stack_shifts(
@@ -2824,6 +3148,7 @@ mod tests {
             action,
             &mut FxHashMap::default(),
             &mut FxHashMap::default(),
+            &mut budget,
         );
 
         let Some(Action::StackShifts(shifts)) = result else {
@@ -2869,6 +3194,7 @@ mod tests {
         };
         let mut predecessors = vec![BTreeSet::new(); 9];
         predecessors[2].extend([1, 6]);
+        let mut budget = UnitInlineBudget::from_env();
 
         let action = table.action(2, 0).expect("expected reduce action");
         let result = try_inline_action_to_stack_shifts(
@@ -2879,6 +3205,7 @@ mod tests {
             action,
             &mut FxHashMap::default(),
             &mut FxHashMap::default(),
+            &mut budget,
         );
 
         let Some(Action::GuardedStackShifts(shifts)) = result else {
@@ -3116,6 +3443,7 @@ fn try_inline_unit_reductions_for_cell(
     states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
+    budget: &mut UnitInlineBudget,
 ) -> Result<Option<CellUpdate>, ()> {
     if let Some(action) = try_inline_action_to_stack_shifts(
         table,
@@ -3125,6 +3453,7 @@ fn try_inline_unit_reductions_for_cell(
         action,
         stack_effect_memo,
         states_at_depth_cache,
+        budget,
     ) {
         return Ok(Some(CellUpdate::Set(action)));
     }
@@ -3150,6 +3479,7 @@ fn try_inline_unit_reductions_for_cell(
         subset_to_state,
         failed_subsets,
         &mut visiting,
+        budget,
     )
 }
 
@@ -3163,7 +3493,11 @@ fn try_inline_unit_reductions_for_cell_inner(
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
     visiting: &mut BTreeSet<(u32, TerminalID)>,
+    budget: &mut UnitInlineBudget,
 ) -> Result<Option<CellUpdate>, ()> {
+    if !budget.record_stack_effect_visit() {
+        return Err(());
+    }
     if !visiting.insert((state, tid)) {
         return Ok(None);
     }
@@ -3219,6 +3553,7 @@ fn try_inline_unit_reductions_for_cell_inner(
                     subset_to_state,
                     failed_subsets,
                     visiting,
+                    budget,
                 )? {
                     Some(CellUpdate::Set(action)) => Some(action),
                     Some(CellUpdate::Remove) => None,
@@ -3237,6 +3572,7 @@ fn try_inline_unit_reductions_for_cell_inner(
                     constituent_sets,
                     subset_to_state,
                     failed_subsets,
+                    budget,
                 )?;
                 changed = true;
             }

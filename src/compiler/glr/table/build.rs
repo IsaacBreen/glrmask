@@ -38,8 +38,12 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     table.rebuild_advance_rows_from_actions();
     let unit_collapse_enabled = unit_reduction_inlining_enabled();
     let collapse_started_at = std::time::Instant::now();
+    let unit_collapse_report = if unit_collapse_enabled {
+        Some(table.collapse_sr_unit_reductions_with_compatible_gotos())
+    } else {
+        None
+    };
     if unit_collapse_enabled {
-        table.collapse_sr_unit_reductions_with_compatible_gotos();
         // Unit-collapse may append synthetic merged states. Preserve the
         // captured admission semantics for existing rows while backfilling the
         // new synthetic rows from their current action support.
@@ -87,12 +91,19 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
     {
         eprintln!(
-            "[glrmask/profile][glr_table] lr1_item_sets_ms={:.3} ielr_ms={:.3} pre_merge_states={} post_merge_states={} unit_collapse={} merge_ms={:.3} merge_identical1_ms={:.3} unit_collapse_ms={:.3} prune_ms={:.3} merge_identical2_ms={:.3} stack_shift_canon_ms={:.3}",
+            "[glrmask/profile][glr_table] lr1_item_sets_ms={:.3} ielr_ms={:.3} pre_merge_states={} post_merge_states={} unit_collapse={} unit_collapse_aborted={} unit_collapse_reason={} merge_ms={:.3} merge_identical1_ms={:.3} unit_collapse_ms={:.3} prune_ms={:.3} merge_identical2_ms={:.3} stack_shift_canon_ms={:.3}",
             lr1_ms,
             ielr_ms,
             pre_merge_states,
             table.num_states,
             unit_collapse_enabled,
+            unit_collapse_report
+                .as_ref()
+                .is_some_and(|report| report.aborted),
+            unit_collapse_report
+                .as_ref()
+                .and_then(|report| report.reason)
+                .unwrap_or("none"),
             merge_ms,
             merge_identical1_ms,
             unit_collapse_ms,
