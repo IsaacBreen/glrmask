@@ -74,6 +74,63 @@ fn exact_subtraction_lowering_env_var_defaults_true_and_accepts_falsey_values() 
     assert!(lower_exact_subtractions_enabled());
 }
 
+#[test]
+fn schema_size_preflight_allows_below_budget_schema() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _allow_large = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_ALLOW_LARGE");
+    let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", "64");
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"}
+        },
+        "required": ["id"],
+        "additionalProperties": false
+    });
+
+    schema_to_named_grammar(&schema).expect("small schema should pass size preflight");
+}
+
+#[test]
+fn schema_size_preflight_rejects_over_budget_schema() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _allow_large = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_ALLOW_LARGE");
+    let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", "20");
+
+    let mut properties = serde_json::Map::new();
+    for index in 0..16 {
+        properties.insert(format!("field_{index}"), json!({"type": "string"}));
+    }
+    let schema = json!({
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": false
+    });
+
+    let err = schema_to_named_grammar(&schema).expect_err("oversized schema should be rejected");
+    let message = err.to_string();
+    assert!(message.contains("schema too large"), "{message}");
+    assert!(message.contains("nodes="), "{message}");
+    assert!(message.contains("limit=20"), "{message}");
+}
+
+#[test]
+fn schema_size_preflight_allow_large_override_bypasses_budget() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _allow_large = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_ALLOW_LARGE", "1");
+    let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", "1");
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"}
+        }
+    });
+
+    schema_to_named_grammar(&schema).expect("allow-large override should bypass size budget");
+}
+
 fn contains_separated_sequence(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::SeparatedSequence { .. } => true,

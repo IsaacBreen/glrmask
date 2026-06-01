@@ -7,6 +7,7 @@ mod load;
 mod lower;
 mod number;
 mod object;
+mod preflight;
 mod string;
 
 #[cfg(test)]
@@ -34,6 +35,7 @@ use self::lower::lower_document;
 /// is not forced to carry partially-understood JSON values.
 pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskError> {
     let config = JsonSchemaConfig::from_env();
+    preflight::check_schema_size(schema).map_err(GlrMaskError::from)?;
     let document = load_document(schema).map_err(GlrMaskError::from)?;
     lower_document(&document, config).map_err(GlrMaskError::from)
 }
