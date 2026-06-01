@@ -16,6 +16,13 @@ Do not change stabilization knobs for TBM evidence. In particular, do not set or
 
 Do not use `GLRMASK_ALLOW_EXTRA_KEYWORDS` to decide paired `glrmask_native` versus `llguidance_native` build success or failure. First run the default command and record the exact default failure. Only use `GLRMASK_ALLOW_EXTRA_KEYWORDS` for a narrow diagnostic after that failure is understood, and label the result diagnostic-only with the env var recorded in notes/artifacts.
 
+Paired-framework asymmetry takes priority over TBM and build-time work. Before optimizing a slow glrmask TBM/build case
+from a CFA paired artifact, check whether `llguidance_native` built the same problem under default settings. If
+`llguidance_native` fails fast while `glrmask_native` builds slowly, times out, or produces TBMs, do not optimize those
+glrmask timings first. Treat the case as a build-result parity issue: decide whether glrmask should reject the same
+unsupported feature quickly, or explicitly mark the run as glrmask-only capability/performance if the human asked for
+that. Only optimize TBM after confirming both frameworks are intended to build the problem.
+
 Default optimization target:
 - Unless the human explicitly asks for runtime optimization, prefer fixing TBM
   issues on the compilation side. In JSON-schema cases, focus first on the JSON
