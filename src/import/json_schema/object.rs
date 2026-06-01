@@ -26,6 +26,7 @@ const SNOWPLOW_UNSTRUCT_EVENT_PATTERN: &str = "^unstruct_event_.*";
 const SNOWPLOW_KEY_TRIE_PREFIX_SPLIT_BYTES: usize = 1;
 
 struct ObjectItem {
+    key: String,
     pair: GrammarExpr,
     separator_pair: GrammarExpr,
     required: bool,
@@ -34,6 +35,7 @@ struct ObjectItem {
 }
 
 const ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES: usize = 4096;
+const PROPERTY_DEPENDENCY_MAX_FIXED_PROPERTIES: usize = 12;
 
 struct AnyOfFixedObjectItem {
     key: String,
@@ -547,6 +549,29 @@ impl<'a> Lowerer<'a> {
                     ]))
                 }
             };
+            if !normalized.property_dependencies.is_empty() {
+                if any_required_names.is_some()
+                    || exclusive_group.is_some()
+                    || min_property_group_required
+                    || max_property_group_exclusive
+                    || drop_optional_fixed_properties
+                {
+                    return Err(SchemaImportError::new(
+                        "property dependencies are not supported with grouped object constraints"
+                            .to_string(),
+                    ));
+                }
+                if !matches!(normalized.additional_properties, AdditionalProperties::Deny) {
+                    return Err(SchemaImportError::new(
+                        "property dependencies are only supported for fixed-property objects"
+                            .to_string(),
+                    ));
+                }
+                return self.lower_fixed_object_body_exprnfa_with_property_dependencies(
+                    &items,
+                    &normalized.property_dependencies,
+                );
+            }
             if use_large_optional_open_object_prefix_chain {
                 if let Some(tail_pair_expr) = tail_pair {
                     return self.lower_large_optional_open_object_fused_prefix_chain(&items, tail_pair_expr);
@@ -685,6 +710,7 @@ impl<'a> Lowerer<'a> {
 
             let pair = GrammarExpr::RepeatOne(Box::new(choice(tail_pairs)));
             items.push(ObjectItem {
+                key: String::new(),
                 separator_pair: seq(vec![self.item_separator_expr(), pair.clone()]),
                 pair,
                 required: false,
@@ -957,6 +983,108 @@ impl<'a> Lowerer<'a> {
                         tail_state,
                     );
                 }
+            }
+        }
+
+        let rule_name = self.fresh_rule_name("json_closed_object_body");
+        let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
+        self.add_nonterminal_rule(&rule_name, body);
+
+        Ok(seq(vec![lit("{"), r(&rule_name), lit("}")]))
+    }
+
+    fn lower_fixed_object_body_exprnfa_with_property_dependencies(
+        &mut self,
+        items: &[ObjectItem],
+        property_dependencies: &BTreeMap<String, BTreeSet<String>>,
+    ) -> ImportResult<GrammarExpr> {
+        if items.len() > PROPERTY_DEPENDENCY_MAX_FIXED_PROPERTIES {
+            return Err(SchemaImportError::new(format!(
+                "property dependencies support at most {PROPERTY_DEPENDENCY_MAX_FIXED_PROPERTIES} fixed properties"
+            )));
+        }
+
+        let mut key_indexes = BTreeMap::new();
+        let mut item_symbols = Vec::with_capacity(items.len());
+        let mut required_mask = 0u64;
+        for (index, item) in items.iter().enumerate() {
+            key_indexes.insert(item.key.as_str(), index);
+            item_symbols.push(Self::split_object_pair_symbols(&item.pair)?);
+            if item.required {
+                required_mask |= 1u64 << index;
+            }
+        }
+
+        let mut dependency_masks = vec![0u64; items.len()];
+        let mut impossible_trigger_mask = 0u64;
+        for (trigger, dependents) in property_dependencies {
+            let Some(&trigger_index) = key_indexes.get(trigger.as_str()) else {
+                continue;
+            };
+            for dependent in dependents {
+                if let Some(&dependent_index) = key_indexes.get(dependent.as_str()) {
+                    dependency_masks[trigger_index] |= 1u64 << dependent_index;
+                } else {
+                    impossible_trigger_mask |= 1u64 << trigger_index;
+                }
+            }
+        }
+
+        let accepts = |seen_mask: u64| {
+            if (seen_mask & required_mask) != required_mask {
+                return false;
+            }
+            if seen_mask & impossible_trigger_mask != 0 {
+                return false;
+            }
+            dependency_masks.iter().enumerate().all(|(index, dependency_mask)| {
+                seen_mask & (1u64 << index) == 0 || (seen_mask & dependency_mask) == *dependency_mask
+            })
+        };
+
+        let mut builder = ExprNfaBuilder::new();
+        let mut state_ids = BTreeMap::<(u64, bool), u32>::new();
+        let mut queue = VecDeque::<(u64, bool)>::new();
+        state_ids.insert((0, false), builder.start_state());
+        queue.push_back((0, false));
+
+        while let Some((seen_mask, has_content)) = queue.pop_front() {
+            if state_ids.len() > ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES {
+                return Err(SchemaImportError::new(
+                    "property dependencies object body state limit exceeded".to_string(),
+                ));
+            }
+
+            let state_id = state_ids[&(seen_mask, has_content)];
+            if accepts(seen_mask) {
+                builder.set_accepting(state_id);
+            }
+
+            for (index, symbols) in item_symbols.iter().enumerate() {
+                let item_bit = 1u64 << index;
+                if seen_mask & item_bit != 0 {
+                    continue;
+                }
+                let next_state = (seen_mask | item_bit, true);
+                let next_state_id = if let Some(&existing) = state_ids.get(&next_state) {
+                    existing
+                } else {
+                    let id = builder.add_state();
+                    state_ids.insert(next_state, id);
+                    queue.push_back(next_state);
+                    id
+                };
+                let mut transition_symbols = Vec::new();
+                if has_content {
+                    transition_symbols.push(self.item_separator_expr());
+                }
+                transition_symbols.extend(symbols.iter().cloned());
+                Self::add_expr_nfa_symbol_path(
+                    &mut builder,
+                    state_id,
+                    transition_symbols,
+                    next_state_id,
+                );
             }
         }
 
@@ -2477,6 +2605,7 @@ impl<'a> Lowerer<'a> {
         }
         let value = self.lower_object_property_value_schema(&effective_schema)?;
         Ok(ObjectItem {
+            key: property.name.clone(),
             pair: seq(vec![key, value.clone()]),
             separator_pair: seq(vec![separator_key, value]),
             required,

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
@@ -111,6 +111,7 @@ pub(crate) enum SchemaType {
 pub(crate) struct ObjectSchema {
     pub(crate) properties: Vec<PropertySchema>,
     pub(crate) required: BTreeSet<String>,
+    pub(crate) property_dependencies: BTreeMap<String, BTreeSet<String>>,
     pub(crate) min_properties: usize,
     pub(crate) max_properties: Option<usize>,
     pub(crate) pattern_properties: Vec<PatternPropertySchema>,
@@ -123,6 +124,7 @@ impl Default for ObjectSchema {
         Self {
             properties: Vec::new(),
             required: BTreeSet::new(),
+            property_dependencies: BTreeMap::new(),
             min_properties: 0,
             max_properties: None,
             pattern_properties: Vec::new(),

@@ -427,8 +427,6 @@ fn is_unsupported_validation_key(key: &str) -> bool {
             | "contains"
             | "minContains"
             | "maxContains"
-            | "dependencies"
-            | "dependentRequired"
             | "dependentSchemas"
             | "unevaluatedProperties"
             | "unevaluatedItems"
@@ -582,6 +580,9 @@ fn load_object_keywords(
         }
     }
 
+    load_legacy_dependencies(object, location, &mut schema)?;
+    load_dependent_required(object, location, &mut schema)?;
+
     if let Some(pattern_properties) = object.get("patternProperties") {
         let Some(pattern_properties) = pattern_properties.as_object() else {
             return Err(SchemaImportError::at(location, "patternProperties must be an object"));
@@ -612,6 +613,89 @@ fn load_object_keywords(
     schema.max_properties = read_usize_keyword(object, "maxProperties", location)?;
 
     Ok(schema)
+}
+
+fn insert_property_dependency(
+    schema: &mut ObjectSchema,
+    trigger: &str,
+    dependent: String,
+) {
+    schema
+        .property_dependencies
+        .entry(trigger.to_string())
+        .or_default()
+        .insert(dependent);
+}
+
+fn load_property_dependency_array(
+    value: &Value,
+    location: &str,
+    schema: &mut ObjectSchema,
+    trigger: &str,
+) -> ImportResult<()> {
+    let Some(dependents) = value.as_array() else {
+        return Err(SchemaImportError::at(location, "property dependency must be an array"));
+    };
+    for (index, dependent) in dependents.iter().enumerate() {
+        let Some(dependent) = dependent.as_str() else {
+            return Err(SchemaImportError::at(
+                location,
+                format!("property dependency[{index}] must be a string"),
+            ));
+        };
+        insert_property_dependency(schema, trigger, dependent.to_string());
+    }
+    Ok(())
+}
+
+fn load_legacy_dependencies(
+    object: &Map<String, Value>,
+    location: &str,
+    schema: &mut ObjectSchema,
+) -> ImportResult<()> {
+    let Some(dependencies) = object.get("dependencies") else {
+        return Ok(());
+    };
+    let Some(dependencies) = dependencies.as_object() else {
+        return Err(SchemaImportError::at(location, "dependencies must be an object"));
+    };
+    for (trigger, dependency) in dependencies {
+        let dependency_location =
+            format!("{location}/dependencies/{}", escape_pointer_segment(trigger));
+        if dependency.is_array() {
+            load_property_dependency_array(dependency, &dependency_location, schema, trigger)?;
+        } else if dependency.is_object() || dependency.is_boolean() {
+            return Err(SchemaImportError::at(
+                &dependency_location,
+                "schema dependencies are not supported",
+            ));
+        } else {
+            return Err(SchemaImportError::at(
+                &dependency_location,
+                "dependencies entries must be arrays or schemas",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn load_dependent_required(
+    object: &Map<String, Value>,
+    location: &str,
+    schema: &mut ObjectSchema,
+) -> ImportResult<()> {
+    let Some(dependent_required) = object.get("dependentRequired") else {
+        return Ok(());
+    };
+    let Some(dependent_required) = dependent_required.as_object() else {
+        return Err(SchemaImportError::at(location, "dependentRequired must be an object"));
+    };
+    for (trigger, dependency) in dependent_required {
+        let dependency_location =
+            format!("{location}/dependentRequired/{}", escape_pointer_segment(trigger));
+        load_property_dependency_array(dependency, &dependency_location, schema, trigger)?;
+    }
+    Ok(())
 }
 
 fn load_array_keywords(

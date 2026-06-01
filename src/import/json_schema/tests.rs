@@ -2530,6 +2530,143 @@ fn property_names_fixed_literal_key_outside_pattern_errors() {
 }
 
 #[test]
+fn dependencies_property_array_requires_dependents() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "vendor": {"type": "string"},
+            "model": {"type": "string"}
+        },
+        "dependencies": {
+            "vendor": ["model"]
+        },
+        "additionalProperties": false
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#"{}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"model":"m"}"#));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"vendor":"v","model":"m"}"#
+    ));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"model":"m","vendor":"v"}"#
+    ));
+    assert!(!schema_accepts_bytes(&schema, br#"{"vendor":"v"}"#));
+}
+
+#[test]
+fn dependent_required_requires_dependents() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "favoriteTopic": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}}
+        },
+        "dependentRequired": {
+            "favoriteTopic": ["tags"]
+        },
+        "additionalProperties": false
+    });
+
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"favoriteTopic":"rust","tags":["parser"]}"#
+    ));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#"{"favoriteTopic":"rust"}"#
+    ));
+}
+
+#[test]
+fn dependencies_multiple_and_bidirectional() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "siteId": {"type": "string"},
+            "pageId": {"type": "string"},
+            "formatId": {"type": "string"}
+        },
+        "dependencies": {
+            "siteId": ["pageId", "formatId"],
+            "pageId": ["siteId", "formatId"],
+            "formatId": ["siteId", "pageId"]
+        },
+        "additionalProperties": false
+    });
+
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"formatId":"f","siteId":"s","pageId":"p"}"#
+    ));
+    assert!(schema_accepts_bytes(&schema, br#"{}"#));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#"{"siteId":"s","pageId":"p"}"#
+    ));
+    assert!(!schema_accepts_bytes(&schema, br#"{"formatId":"f"}"#));
+}
+
+#[test]
+fn dependencies_unknown_dependent_in_closed_object_rejects_trigger() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "vendor": {"type": "string"}
+        },
+        "dependencies": {
+            "vendor": ["model"]
+        },
+        "additionalProperties": false
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#"{}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"vendor":"v"}"#));
+}
+
+#[test]
+fn dependencies_schema_value_still_errors() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "siteId": {"type": "string"},
+            "pageId": {"type": "string"}
+        },
+        "dependencies": {
+            "siteId": {"required": ["pageId"]}
+        },
+        "additionalProperties": false
+    });
+
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(
+        error.contains("schema dependencies are not supported"),
+        "{error}"
+    );
+}
+
+#[test]
+fn dependent_schemas_still_errors() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "siteId": {"type": "string"},
+            "pageId": {"type": "string"}
+        },
+        "dependentSchemas": {
+            "siteId": {"required": ["pageId"]}
+        },
+        "additionalProperties": false
+    });
+
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("Unimplemented keys"), "{error}");
+    assert!(error.contains("dependentSchemas"), "{error}");
+}
+
+#[test]
 fn enum_and_const_lower_to_exact_json_literals() {
     let schema = json!({"enum": [null, true, "ready", 7]});
     let grammar = schema_to_named_grammar(&schema).unwrap();

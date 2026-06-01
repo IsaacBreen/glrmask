@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::import::ast::GrammarExpr;
 
@@ -1134,6 +1134,7 @@ fn try_factor_closed_object_variant_any_of(
         ObjectSchema {
             properties: merged_properties,
             required: BTreeSet::new(),
+            property_dependencies: BTreeMap::new(),
             min_properties: 0,
             max_properties: None,
             pattern_properties: Vec::new(),
@@ -1187,6 +1188,7 @@ fn try_factor_mutually_exclusive_property_not_any_of(
         ObjectSchema {
             properties,
             required: BTreeSet::new(),
+            property_dependencies: BTreeMap::new(),
             min_properties: 0,
             max_properties: None,
             pattern_properties: Vec::new(),
@@ -1508,6 +1510,7 @@ fn option_objects_shape_equivalent(left: Option<&ObjectSchema>, right: Option<&O
 fn object_schemas_shape_equivalent(left: &ObjectSchema, right: &ObjectSchema) -> bool {
     additional_properties_shape_equivalent(&left.additional_properties, &right.additional_properties)
         && left.required == right.required
+        && left.property_dependencies == right.property_dependencies
         && left.min_properties == right.min_properties
         && left.max_properties == right.max_properties
         && left.pattern_properties.len() == right.pattern_properties.len()
@@ -2011,6 +2014,13 @@ fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSchema 
 
     for required in &right.required {
         merged.required.insert(required.clone());
+    }
+    for (trigger, dependents) in &right.property_dependencies {
+        merged
+            .property_dependencies
+            .entry(trigger.clone())
+            .or_default()
+            .extend(dependents.iter().cloned());
     }
 
     for property in &right.properties {
