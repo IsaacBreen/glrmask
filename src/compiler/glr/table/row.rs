@@ -619,7 +619,7 @@ pub(crate) type GotoRow = SparseRow<NonterminalID, (u32, bool)>;
 #[cfg(test)]
 mod tests {
     use super::{ActionRow, SparseRow};
-    use crate::compiler::glr::table::{Action, GLRTable};
+    use crate::compiler::glr::table::{Action, AdmissionMode, GLRTable};
 
     fn shift(target: u32) -> Action {
         Action::Shift(target, false)
@@ -714,6 +714,7 @@ mod tests {
             num_rules: 0,
             rules: Vec::new(),
             nonterminal_display_names: Vec::new(),
+            admission_mode: AdmissionMode::RowExact,
             advance: Vec::new(),
             forwarded_shifts: Default::default(),
             guarded_shift_index: Vec::new(),
