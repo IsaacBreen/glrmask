@@ -1,0 +1,24 @@
+# Chunk 10 runtime artifact LOC report
+
+- `src/runtime/artifact/accessors.rs`: 109 lines
+- `src/runtime/artifact/cache_types.rs`: 125 lines
+- `src/runtime/artifact/caches.rs`: 1296 lines
+- `src/runtime/artifact/compiled.rs`: 298 lines
+- `src/runtime/artifact/dense.rs`: 16 lines
+- `src/runtime/artifact/finalize.rs`: 20 lines
+- `src/runtime/artifact/mod.rs`: 30 lines
+- `src/runtime/artifact/serialization.rs`: 88 lines
+- `src/runtime/artifact/templates.rs`: 24 lines
+- `src/runtime/artifact/token_space.rs`: 156 lines
+- `src/runtime/bitmask_ops.rs`: 114 lines
+- `src/runtime/commit/mod.rs`: 3368 lines
+- `src/runtime/commit/profile.rs`: 143 lines
+- `src/runtime/commit/template_advance.rs`: 321 lines
+- `src/runtime/commit/tokenizer_scan.rs`: 32 lines
+- `src/runtime/constraint.rs`: 928 lines
+- `src/runtime/mask/mod.rs`: 1892 lines
+- `src/runtime/mask/profile.rs`: 336 lines
+- `src/runtime/mask/queue.rs`: 302 lines
+- `src/runtime/mask_mapping.rs`: 1673 lines
+- `src/runtime/mod.rs`: 22 lines
+- `src/runtime/state.rs`: 345 lines

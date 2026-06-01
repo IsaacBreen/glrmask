@@ -2,23 +2,51 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+//! `glrmask`: grammar-constrained token masking for language-model decoding.
+//!
+//! The publication-facing API is intentionally small.  A [`Vocab`] describes the
+//! tokenizer byte vocabulary; a [`Constraint`] compiles a grammar against that
+//! vocabulary; a [`ConstraintState`] alternates **Mask** and **Commit** during
+//! generation.
+//!
+//! Implementation details such as Terminal DWA construction, Parser DWA
+//! construction, template DFAs, GLR tables, and compact token-space maps are kept
+//! behind crate-private modules.  Diagnostic entry points live under
+//! [`diagnostics`] rather than at the root.
+
+pub mod api;
+pub mod diagnostics;
+
 pub(crate) mod automata;
+pub(crate) mod compile;
 pub(crate) mod compiler;
 pub(crate) mod ds;
 mod error;
 pub(crate) mod grammar;
+pub(crate) mod grammar_ir;
 pub(crate) mod import;
+pub(crate) mod parser;
 pub(crate) mod runtime;
+pub(crate) mod scan;
 mod vocab;
 
-pub use ds::weight::{
-    clear_stale_weights,
-    clear_weight_interners,
-    clear_weight_op_caches,
+#[doc(inline)]
+pub use api::{
+    CompileOptions,
+    Constraint,
+    ConstraintState,
+    Error,
+    GlrMaskError,
+    Result,
+    RuntimeOptions,
+    State,
+    TableAmbiguity,
+    TableAmbiguityKind,
+    Vocab,
 };
-pub use error::{Error, GlrMaskError, Result};
-pub use compiler::glr::table::{TableAmbiguity, TableAmbiguityKind};
-pub use runtime::{
+
+#[doc(inline)]
+pub use api::profiles::{
     AdvanceProfile,
     AdvanceTrace,
     AdvanceTraceGoto,
@@ -26,44 +54,16 @@ pub use runtime::{
     AdvanceTraceStep,
     AdvanceTraceWave,
     CommitProfile,
-    Constraint,
-    ConstraintState,
-    FinalMaskMapping,
     GssProfileSummary,
     MaskProfile,
     PerAdvanceEntry,
 };
-pub use vocab::Vocab;
 
-/// Compile a Constraint from a serialized GrammarDef JSON + vocab.
-/// This runs the full compile pipeline (equivalence analysis, terminal DWA, parser DWA).
-pub fn compile_grammar_def_json(grammar_def_json: &str, vocab: &Vocab) -> Result<Constraint> {
-    let gdef: grammar::flat::GrammarDef = serde_json::from_str(grammar_def_json)
-        .map_err(|e| GlrMaskError::GrammarParse(format!("invalid GrammarDef JSON: {e}")))?;
-    Ok(compiler::compile_owned(gdef, vocab))
-}
-
-/// Populate compile-time artifacts that are pure functions of the vocabulary.
-///
-/// This intentionally does not compile any grammar/schema-dependent artifact.
-pub fn prepare_vocab_for_compile(vocab: &Vocab) {
-    compiler::compile::prepare_vocab_for_compile(vocab);
-}
-
-/// Dump the imported JSON Schema grammar in GLRM format.
-pub fn dump_json_schema_grammar_glrm(schema_json: &str) -> Result<String> {
-    let schema: serde_json::Value = serde_json::from_str(schema_json)
-        .map_err(|e| GlrMaskError::GrammarParse(format!("invalid JSON: {e}")))?;
-    let named = import::json_schema::schema_to_named_grammar(&schema)?;
-    let mut factored = grammar::factoring::factor_named_grammar(named);
-    if import::json_schema::simplify_grammar_enabled() {
-        grammar::named_simplify::simplify_named_grammar(&mut factored);
-    }
-    if import::json_schema::lower_exact_subtractions_enabled() {
-        grammar::exact_subtraction_lowering::lower_exact_subtractions(&mut factored)?;
-    }
-    if import::json_schema::promote_literal_choices_enabled() {
-        grammar::terminal_choice_promotion::promote_choice_terminals_exact(&mut factored, false);
-    }
-    Ok(grammar::glrm::to_glrm(&factored))
-}
+// Compatibility shims for existing tests and benchmark harnesses.  New code
+// should prefer `glrmask::diagnostics::frontend::*`.
+#[doc(hidden)]
+pub use diagnostics::frontend::{
+    compile_grammar_def_json,
+    dump_json_schema_grammar_glrm,
+    prepare_vocab_for_compile,
+};

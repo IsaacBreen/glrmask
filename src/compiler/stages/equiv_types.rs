@@ -2,7 +2,7 @@
 //!
 //! `ManyToOneIdMap` and `InternalIdMap` are pure data types that represent
 //! equivalence-class mappings.  The analysis that *produces* them lives in
-//! `id_map_and_terminal_dwa::l2p::equivalence_analysis`.
+//! `terminal_dwa::pair_partition::equivalence_analysis`.
 
 #[derive(Debug, Clone)]
 pub struct ManyToOneIdMap {

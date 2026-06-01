@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 
-use crate::compiler::glr::accumulator::TerminalsDisallowed;
-use crate::compiler::glr::labels::{
+use crate::parser::glr::accumulator::TerminalsDisallowed;
+use crate::parser::glr::labels::{
     DEFAULT_LABEL,
     is_negative_label,
     negative_to_positive_label,
 };
-use crate::compiler::glr::parser::ParserGSS;
+use crate::parser::glr::advance::ParserGSS;
 use crate::ds::leveled_gss::VirtualStack;
 use crate::grammar::flat::TerminalID;
 use crate::runtime::CommitTemplateDfas;
@@ -47,7 +47,10 @@ fn advance_with_template(template: &CommitTemplateDfas, stack: ParserGSS) -> Par
     if let Some(vstack) = stack.try_virtual_stack()
         && let Some(advanced) = advance_virtual_stack_single_path(template, vstack)
     {
-        return advanced;
+        return match advanced {
+            SinglePathResult::Unchanged => stack,
+            SinglePathResult::Advanced(gss) => gss,
+        };
     }
 
     let mut output = ParserGSS::empty();
@@ -162,10 +165,15 @@ enum SingleChoice {
     Push(u32, Option<u32>),
 }
 
+enum SinglePathResult {
+    Unchanged,
+    Advanced(ParserGSS),
+}
+
 fn advance_virtual_stack_single_path(
     template: &CommitTemplateDfas,
     mut stack: VirtualStack<u32, TerminalsDisallowed>,
-) -> Option<ParserGSS> {
+) -> Option<SinglePathResult> {
     let mut phase = Phase::Pop;
     let mut state_id = template.pop.start_state;
     let total_states = template
@@ -176,6 +184,7 @@ fn advance_virtual_stack_single_path(
         .saturating_add(template.push.states.len());
     let max_steps = total_states.saturating_mul(2).saturating_add(8);
     let mut steps = 0usize;
+    let mut mutated = false;
 
     loop {
         let mut choice = None;
@@ -267,11 +276,14 @@ fn advance_virtual_stack_single_path(
         }
 
         if choices == 0 {
-            return Some(if accepting {
-                stack.into_gss()
-            } else {
-                ParserGSS::empty()
-            });
+            if accepting {
+                return Some(if mutated {
+                    SinglePathResult::Advanced(stack.into_gss())
+                } else {
+                    SinglePathResult::Unchanged
+                });
+            }
+            return Some(SinglePathResult::Advanced(ParserGSS::empty()));
         }
         if accepting || choices > 1 {
             return None;
@@ -280,8 +292,9 @@ fn advance_virtual_stack_single_path(
         match choice.expect("single applicable split template transition") {
             SingleChoice::Pop(target) => {
                 if stack.pop(1) != 0 {
-                    return Some(ParserGSS::empty());
+                    return Some(SinglePathResult::Advanced(ParserGSS::empty()));
                 }
+                mutated = true;
                 phase = Phase::Pop;
                 state_id = target;
             }
@@ -292,6 +305,7 @@ fn advance_virtual_stack_single_path(
             SingleChoice::Push(target, pushed) => {
                 if let Some(pushed) = pushed {
                     stack.push(pushed);
+                    mutated = true;
                 }
                 phase = Phase::Push;
                 state_id = target;

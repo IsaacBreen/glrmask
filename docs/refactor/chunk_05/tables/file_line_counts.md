@@ -1,0 +1,16 @@
+| file | lines |
+| --- | ---: |
+| `builder.rs` | 218 |
+| `compose_nwa.rs` | 367 |
+| `determinize/epsilon.rs` | 73 |
+| `determinize/fallback.rs` | 211 |
+| `determinize/mod.rs` | 18 |
+| `determinize/outgoing.rs` | 99 |
+| `determinize/support.rs` | 322 |
+| `labels.rs` | 14 |
+| `mod.rs` | 64 |
+| `optimize.rs` | 252 |
+| `options.rs` | 55 |
+| `profiling.rs` | 220 |
+| `terminal_projection.rs` | 157 |
+| `types.rs` | 100 |

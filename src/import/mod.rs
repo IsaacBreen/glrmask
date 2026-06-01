@@ -1,11 +1,11 @@
-pub use crate::grammar::ast as ast;
+pub use crate::grammar_ir::ast as ast;
 pub mod ebnf;
 pub mod json_schema;
 pub mod lark;
 pub mod numeric_range;
 
-use crate::compiler::compile::{compile_owned_profiled, compile_profile_enabled, emit_compile_profile_summary};
-use crate::compiler::compile_owned;
+use crate::compile::pipeline::{compile_owned, compile_owned_profiled};
+use crate::compile::profiling::{compile_profile_enabled, emit_compile_profile_summary};
 use crate::grammar::exact_subtraction_lowering::lower_exact_subtractions;
 use crate::grammar::factoring::factor_named_grammar;
 use crate::grammar::flat::GrammarDef;
@@ -126,19 +126,70 @@ fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast::NamedGram
 }
 
 impl Constraint {
+    /// Compile an EBNF grammar into a decoding constraint.
+    ///
+    /// The EBNF frontend lowers the source to the crate's grammar IR and then
+    /// runs the same compile pipeline as every other frontend: grammar
+    /// normalization, tokenizer analysis, Terminal DWA construction, Parser DWA
+    /// construction, and runtime-artifact finalization.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let vocab = glrmask::Vocab::new(vec![(0, b"hello".to_vec())], None);
+    /// let constraint = glrmask::Constraint::from_ebnf("start = "hello";", &vocab)?;
+    /// let state = constraint.start();
+    /// let mask = state.mask();
+    /// # Ok::<(), glrmask::Error>(())
+    /// ```
     pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         compile_from_source(ebnf, vocab, "ebnf", ebnf::parse_ebnf_to_named)
     }
 
+    /// Compile a Lark grammar into a decoding constraint.
+    ///
+    /// Lark is treated as a source-language frontend.  After parsing, the
+    /// resulting named grammar is factored and lowered to the same grammar IR
+    /// used by EBNF, JSON Schema, and GLRM.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let vocab = glrmask::Vocab::new(vec![(0, b"a".to_vec())], None);
+    /// let constraint = glrmask::Constraint::from_lark("start: "a"", &vocab)?;
+    /// # Ok::<(), glrmask::Error>(())
+    /// ```
     pub fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         compile_from_source(lark, vocab, "lark", lark::parse_lark_to_named)
     }
 
+    /// Compile a JSON Schema into a decoding constraint.
+    ///
+    /// The JSON Schema frontend first translates the schema into a named grammar
+    /// over JSON bytes and terminals.  Schema-specific simplifications happen
+    /// before the generic compile pipeline; runtime masking is then identical to
+    /// every other frontend.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let vocab = glrmask::Vocab::new(vec![
+    ///     (0, b"{"x":".to_vec()),
+    ///     (1, b"1}".to_vec()),
+    /// ], None);
+    /// let schema = r#"{"type":"object","properties":{"x":{"type":"integer"}},"required":["x"]}"#;
+    /// let constraint = glrmask::Constraint::from_json_schema(schema, &vocab)?;
+    /// # Ok::<(), glrmask::Error>(())
+    /// ```
     pub fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         compile_from_source(schema, vocab, "json_schema", parse_json_schema_to_named)
     }
 
-    /// Load a grammar from the GLRM format (see [`crate::grammar::glrm`]).
+    /// Compile a grammar from the internal GLRM text format.
+    ///
+    /// GLRM is the closest frontend to the lowered grammar IR and is useful for
+    /// tests, minimized examples, and paper/debugging artifacts.  Public users
+    /// normally prefer EBNF, Lark, or JSON Schema.
     pub fn from_glrm_grammar(glrm: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         compile_from_source(glrm, vocab, "glrm", crate::grammar::glrm::from_glrm)
     }

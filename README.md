@@ -1,80 +1,73 @@
 # glrmask
 
-`glrmask` compiles grammars into immutable decoding constraints for tokenized LLM
-generation. A compiled `Constraint` can produce token masks, accept committed
-tokens incrementally, and serialize to bytes.
+glrmask is a Rust crate for grammar-constrained token masking during large language model decoding. It compiles a grammar and vocabulary once, then answers repeated masking and commit queries during generation.
 
-## Supported Inputs
+The implementation is organized around the paper vocabulary:
 
-- EBNF
-- Lark
+- **Terminal DWA**: maps completed terminal sequences to lexer-state/token pairs.
+- **Parser DWA**: maps parser stack prefixes to the lexer-state/token pairs that remain valid.
+- **Mask**: walks active parser stacks through the Parser DWA and combines the encountered weights into a vocabulary mask.
+- **Commit**: scans generated token bytes, completes terminals, and advances the GLR parser state.
+- **Template DFA**: accelerates commit-time handling of repeated grammar templates where applicable.
+
+This repository is being prepared for publication. The public API is intentionally small: users construct a `Vocab`, compile a `Constraint`, start a `ConstraintState`, then alternate between mask generation and committing accepted model output.
+
+## Status
+
+This snapshot is in cleanup. The first publication baseline establishes the repository shell, package metadata, documentation skeleton, Python binding location, and ignore rules. Deeper module restructuring is intentionally deferred to later chunks.
+
+## Supported grammar sources
+
+The current codebase contains frontends for:
+
 - JSON Schema
+- Lark grammars
+- EBNF grammars
+- the internal GLRM grammar format
 
-## Quick Start
+The exact supported subset of each frontend should be documented before release, especially JSON Schema behavior around objects, strings, numeric constraints, and regular expressions.
+
+## Rust quickstart
 
 ```rust
 use glrmask::{Constraint, Vocab};
 
-fn token_allowed(mask: &[u32], token_id: usize) -> bool {
-    let word = token_id / 32;
-    word < mask.len() && ((mask[word] >> (token_id % 32)) & 1) != 0
-}
+# fn main() -> glrmask::Result<()> {
+let vocab = Vocab::from_tokens(vec!["{".into(), "}".into()]);
+let schema = r#"{"type":"object"}"#;
+let constraint = Constraint::from_json_schema(schema, &vocab)?;
+let mut state = constraint.start();
 
-fn main() {
-    let vocab = Vocab::new(
-        vec![
-            (0, b"hello".to_vec()),
-            (1, b" ".to_vec()),
-            (2, b"world".to_vec()),
-        ],
-        None,
-    );
-
-    let constraint = Constraint::from_ebnf(
-        r#"start ::= "hello" " " "world""#,
-        &vocab,
-    )
-    .unwrap();
-
-    let mut state = constraint.start();
-    assert!(token_allowed(&state.mask(), 0));
-
-    state.commit_token(0).unwrap();
-    assert!(token_allowed(&state.mask(), 1));
-
-    state.commit_token(1).unwrap();
-    assert!(token_allowed(&state.mask(), 2));
-
-    state.commit_token(2).unwrap();
-    assert!(state.is_finished());
-}
+let mask = state.mask();
+# Ok(())
+# }
 ```
 
-## Serialization
+The quickstart above is documentation-only at this stage. It should be verified and replaced with a compiling example once the source tree has been refactored and the test suite is restored.
 
-Compiled constraints can be cached and reloaded without recompilation.
+## Python bindings
 
-```rust
-let bytes = constraint.save();
-let restored = Constraint::load(&bytes).unwrap();
-assert_eq!(constraint.mask_len(), restored.mask_len());
-```
-
-## State Helpers
-
-- `state.mask()` returns the packed token bitmask.
-- `state.commit_token(token_id)` advances with one token.
-- `state.commit_tokens(&token_ids)` advances with a token slice.
-- `state.commit_bytes(bytes)` advances with raw bytes.
-- `state.force()` returns the currently forced token IDs.
-
-## Examples
+Python bindings live under `bindings/python` and build through maturin. The package name remains `glrmask` for continuity while the Rust crate is cleaned up.
 
 ```bash
-cargo run --example ebnf
-cargo run --example json_schema
+cd bindings/python
+maturin develop
 ```
+
+## Documentation map
+
+- `docs/architecture.md`: module map and how it corresponds to the paper.
+- `docs/api_boundary.md`: public facade, diagnostics boundary, and token-space compatibility aliases.
+- `docs/paper_mapping.md`: paper term to code module/type/function mapping.
+- `docs/configuration.md`: compile/runtime options, profiling flags, and legacy environment variables.
+- `docs/json_schema_support.md`: supported JSON Schema subset and known limitations.
+- `docs/serialization.md`: serialized artifact format and compatibility policy.
+- `docs/performance.md`: benchmark methodology and reproducibility notes.
+
+## Development policy
+
+Normal library API calls should not print to stdout/stderr. Diagnostics should be returned through profile structs or explicit options. Generated caches, local vocab dumps, macOS metadata, and benchmark output must not be committed.
 
 ## License
 
-MIT OR Apache-2.0
+This repository is prepared with dual MIT/Apache-2.0 licensing. Confirm that this is the intended publication license before release.

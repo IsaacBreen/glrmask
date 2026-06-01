@@ -30,7 +30,7 @@ use std::sync::{Arc, Weak};
 //    If many Weights will be stored or queried together, arrange numeric IDs
 //    so that each Weight's inner sets/maps form FEWER TOTAL RANGES.
 //    The target is NOT "small max ID"; it is fewer ranges across the relevant
-//    weights. In DWA/id-map/possible-matches-style code this means:
+//    weights. In DWA/id-map/CanMatch-style code this means:
 //    - Group IDs that co-occur in the same token sets into contiguous ranges.
 //    - Recompact parser-state and terminal IDs jointly with token vocab IDs
 //      when the weights are built together.
@@ -47,7 +47,7 @@ use std::sync::{Arc, Weak};
 //    collection of 101 weights, its static cost is roughly that weight plus the
 //    1 other unique weight, plus their shared inner rangesets. Do not multiply by 100.
 //
-//    Static complexity model for DWA / possible-matches recompaction:
+//    Static complexity model for DWA / CanMatch recompaction:
 //    - For a unique Weight, count its unique outer key ranges, plus the ranges
 //      in each unique interned inner RangeSetBlaze (counted once per unique
 //      inner set, not once per reference).

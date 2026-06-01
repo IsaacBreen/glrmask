@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
-use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::glr::table::{Action, GLRTable, GuardedStackShift, StackShiftGuard};
+use crate::parser::glr::analysis::AnalyzedGrammar;
+use crate::parser::glr::table::{Action, GLRTable, GuardedStackShift, StackShiftGuard};
 use crate::grammar::flat::{NonterminalID, TerminalID};
 
 type NtAdjacency = BTreeMap<NonterminalID, BTreeSet<NonterminalID>>;

@@ -1,0 +1,121 @@
+//! Flat compiler grammar.
+//!
+//! This is the post-lowering grammar consumed by GLR/table construction.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::automata::regex::Expr;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GrammarDef {
+    pub rules: Vec<Rule>,
+    pub start: NonterminalID,
+    pub terminals: Vec<Terminal>,
+    #[serde(default)]
+    pub nonterminal_names: BTreeMap<NonterminalID, String>,
+    #[serde(default)]
+    pub terminal_names: BTreeMap<TerminalID, String>,
+    #[serde(default)]
+    pub ignore_terminal: Option<TerminalID>,
+}
+
+pub type NonterminalID = u32;
+
+pub type TerminalID = u32;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Rule {
+    pub lhs: NonterminalID,
+    pub rhs: Vec<Symbol>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Symbol {
+    Terminal(TerminalID),
+    Nonterminal(NonterminalID),
+}
+
+impl std::fmt::Display for Symbol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Symbol::Terminal(id) => write!(f, "T{}", id),
+            Symbol::Nonterminal(id) => write!(f, "N{}", id),
+        }
+    }
+}
+
+impl Symbol {
+    fn nonterminal_id(&self) -> Option<NonterminalID> {
+        match self {
+            Symbol::Nonterminal(nonterminal) => Some(*nonterminal),
+            Symbol::Terminal(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Terminal {
+    /// An exact byte sequence (e.g., a keyword or punctuation).
+    Literal { id: TerminalID, bytes: Vec<u8> },
+    /// A regex pattern string (e.g., `[a-z]+` or `\\d`).
+    Pattern { id: TerminalID, pattern: String, utf8: bool },
+    /// A pre-parsed regex expression.
+    Expr { id: TerminalID, expr: Expr },
+}
+
+impl Rule {
+    fn nonterminal_ids(&self) -> impl Iterator<Item = NonterminalID> + '_ {
+        std::iter::once(self.lhs).chain(self.rhs.iter().filter_map(Symbol::nonterminal_id))
+    }
+}
+
+impl Terminal {
+    /// Return the terminal's numeric ID.
+    pub fn id(&self) -> TerminalID {
+        match self {
+            Terminal::Literal { id, .. } => *id,
+            Terminal::Pattern { id, .. } => *id,
+            Terminal::Expr { id, .. } => *id,
+        }
+    }
+
+    /// Return a display name for the terminal.
+    pub fn name(&self) -> String {
+        match self {
+            Terminal::Literal { bytes, .. } => String::from_utf8_lossy(bytes).into_owned(),
+            Terminal::Pattern { pattern, .. } => pattern.clone(),
+            Terminal::Expr { expr, .. } => format!("{:?}", expr),
+        }
+    }
+}
+
+impl GrammarDef {
+    pub fn num_terminals(&self) -> u32 {
+        self.terminals.len() as u32
+    }
+
+    pub fn num_nonterminals(&self) -> u32 {
+        self.rules
+            .iter()
+            .flat_map(|rule| rule.nonterminal_ids())
+            .max()
+            .map(|id| id + 1)
+            .unwrap_or(0)
+    }
+
+    pub fn terminal_display_name(&self, terminal: TerminalID) -> String {
+        self.terminal_names
+            .get(&terminal)
+            .cloned()
+            .or_else(|| self.terminal_by_id(terminal).map(Terminal::name))
+            .unwrap_or_else(|| format!("T{terminal}"))
+    }
+
+    fn terminal_by_id(&self, terminal: TerminalID) -> Option<&Terminal> {
+        self.terminals
+            .iter()
+            .find(|terminal_def| terminal_def.id() == terminal)
+    }
+}

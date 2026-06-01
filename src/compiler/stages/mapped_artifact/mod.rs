@@ -4,7 +4,7 @@ mod compaction;
 mod reconcile;
 
 use crate::automata::weighted_u32::dwa::DWA;
-use crate::compiler::constraint_possible_matches::RuntimePossibleMatchesByTerminal;
+use crate::compile::scan_relation::RuntimeCanMatchByTerminal;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::ds::weight::Weight;
 
@@ -43,7 +43,7 @@ impl WeightRefs for DWA {
     }
 }
 
-impl WeightRefs for RuntimePossibleMatchesByTerminal {
+impl WeightRefs for RuntimeCanMatchByTerminal {
     fn weight_refs(&self) -> Vec<&Weight> {
         self.values().collect()
     }

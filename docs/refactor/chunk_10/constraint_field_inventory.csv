@@ -1,0 +1,54 @@
+field,type,classification,reason
+parser_dwa,DWA,semantic/serialized,part of compiled grammar/lexer/parser/token-space artifact
+table,GLRTable,semantic/serialized,part of compiled grammar/lexer/parser/token-space artifact
+terminal_display_names,Vec<String>,semantic/serialized,part of compiled grammar/lexer/parser/token-space artifact
+tokenizer,Tokenizer,semantic/serialized,part of compiled grammar/lexer/parser/token-space artifact
+ignore_terminal,Option<TerminalID>,semantic/serialized,part of compiled grammar/lexer/parser/token-space artifact
+can_match,CanMatchByTerminal,semantic/serialized,part of compiled grammar/lexer/parser/token-space artifact
+state_to_internal_tsid,Vec<u32>,semantic/serialized,part of compiled grammar/lexer/parser/token-space artifact
+internal_tsid_to_states,Vec<Vec<u32>>,semantic/serialized,part of compiled grammar/lexer/parser/token-space artifact
+template_dfas_by_terminal,TemplateDfasByTerminal,semantic/serialized,part of compiled grammar/lexer/parser/token-space artifact
+original_token_to_internal,Vec<u32>,semantic/serialized,part of compiled grammar/lexer/parser/token-space artifact
+internal_token_to_tokens,Vec<Vec<u32>>,semantic/serialized,part of compiled grammar/lexer/parser/token-space artifact
+eos_token_id,Option<u32>,semantic/serialized,part of compiled grammar/lexer/parser/token-space artifact
+json_u_prefix_token_id,Option<u32>,semantic/serialized,part of compiled grammar/lexer/parser/token-space artifact
+json_escape_prefix_buf_mask,Box<[u32]>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+token_bytes,"Arc<BTreeMap<u32, Vec<u8>>>",semantic/serialized,part of compiled grammar/lexer/parser/token-space artifact
+internal_token_bytes,"BTreeMap<u32, Vec<u8>>",semantic/serialized,part of compiled grammar/lexer/parser/token-space artifact
+token_bytes_dense,Vec<Option<Box<[u8]>>>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+internal_token_buf_masks,Vec<InternalTokenBufMasks>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+word_group_buf_masks,Vec<Box<[u32]>>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+pair_word_group_buf_masks,Vec<Box<[u32]>>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+quad_word_group_buf_masks,Vec<Box<[u32]>>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+super_word_group_buf_masks,Vec<Box<[u32]>>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+mega_word_group_buf_masks,Vec<Box<[u32]>>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+giga_word_group_buf_masks,Vec<Box<[u32]>>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+word_group_sparse_masks,Vec<InternalTokenBufMasks>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+word_group_prefix_buf_masks,Vec<Box<[u32]>>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+word_group_sparse_prefix_entries,Vec<usize>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+quad_group_sparse_masks,Vec<InternalTokenBufMasks>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+byte_group_sparse_masks,Vec<InternalTokenBufMasks>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+word_group_sparse_total_entries,usize,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+word_group_sparse_max_entries,usize,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+all_tokens_buf_mask,Box<[u32]>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+internal_token_dense_words,usize,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+weight_token_dense_masks,DenseWeightMaskCache,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+weight_token_buf_masks,DenseWeightBufMaskCache,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+weight_token_sparse_buf_masks,SparseWeightBufMaskCache,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+seed_terminal_dense,SeedTerminalDenseMasks,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+seed_state_dense,SeedStateDenseMasks,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+seed_state_by_dense_hash,"FxHashMap<u64, Vec<usize>>",derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+seed_state_buf_masks,SeedStateBufMasks,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+seed_universe_dense,DenseWords,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+dwa_fast_transitions,FastDwaTransitions,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+tokenizer_fast_transitions,FastTokenizerTransitions,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+heavy_token_dense_masks,Vec<Option<Box<[u32]>>>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+internal_token_buf_flat,"Box<[(u16, u32)]>",derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+internal_token_buf_offsets,Box<[u32]>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+total_internal_buf_cost,usize,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+heavy_token_indices,Vec<usize>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+heavy_total_cost,usize,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+light_avg_cost_x256,usize,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+internal_token_buf_op_costs,Vec<usize>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+word_group_buf_op_costs,Vec<usize>,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only
+final_mask_mapping,FinalMaskMapping,derived runtime cache,rebuildable from semantic artifact after compile/load; serde-skip or cache-only

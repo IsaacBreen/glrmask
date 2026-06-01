@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::automata::regex::Expr;
 use crate::automata::lexer::regex::parse_regex;
-use crate::compiler::glr::analysis::{merge_identical_nonterminals, normalize_grammar};
+use crate::parser::glr::analysis::{merge_identical_nonterminals, normalize_grammar};
 use crate::grammar::flat::{GrammarDef, NonterminalID, Terminal};
 use crate::grammar::flat::{Rule, Symbol, TerminalID};
 

@@ -12,7 +12,7 @@ use crate::automata::unweighted_u32::determinize::determinize;
 use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as minimize_dfa;
 use crate::automata::unweighted_u32::nfa::NFA;
 use crate::automata::weighted::nwa::{NWA, NWAState};
-use crate::compiler::glr::labels::{
+use crate::parser::glr::labels::{
     DEFAULT_LABEL,
     encode_negative_label,
     encode_positive_label,

@@ -447,7 +447,7 @@ impl Tokenizer {
         }
 
         if transitions_pruned {
-            // Downstream L1/L2P composition treats the returned map as an
+            // Downstream Terminal-DWA partition composition treats the returned map as an
             // original-state map. Minimizing a byte-pruned DFA can merge
             // continuation states that must stay distinct for whole-token
             // signatures, so keep the filtered DFA and an identity map.

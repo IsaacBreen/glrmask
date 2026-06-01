@@ -1,5 +1,5 @@
-use crate::compiler::glr::parser::AdvanceProfile;
-use crate::compiler::glr::table::Action;
+use crate::parser::glr::advance::AdvanceProfile;
+use crate::parser::glr::table::Action;
 use crate::ds::leveled_gss::LeveledGSSSummary;
 
 use super::ParserGSS;

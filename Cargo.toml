@@ -2,50 +2,57 @@
 name = "glrmask"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Grammar-constrained token masking for large language model decoding"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/IsaacBreen/gsg"
 readme = "README.md"
-documentation = "https://docs.rs/glrmask"
-repository = "https://github.com/IsaacBreen/grammars2024"
-keywords = ["grammar", "llm", "decoding", "parser", "json-schema"]
+keywords = ["llm", "grammar", "decoding", "automata", "json-schema"]
 categories = ["algorithms", "parsing"]
-exclude = [".benchmarks/**", ".cache/**", "glrmask-runtime/**", "python/**", "scripts/**", "target/**"]
+include = [
+    "Cargo.toml",
+    "README.md",
+    "LICENSE*",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "docs/**",
+    "src/**",
+    "examples/**",
+    "benches/**",
+]
+exclude = [
+    "__MACOSX/**",
+    "**/.DS_Store",
+    ".cache/**",
+    "bindings/python/.cache/**",
+    "target/**",
+]
 
-[features]
-default = []
+[lib]
+name = "glrmask"
+path = "src/lib.rs"
+
+[workspace]
+resolver = "2"
+members = ["bindings/python"]
 
 [dependencies]
-rustc-hash = "1"
 ahash = "0.8"
-smallvec = "1"
-im = "15"
-range-set-blaze = "0.3.0"
-hashbrown = "0.15"
-once_cell = "1"
-
-serde = { version = "1", features = ["derive", "rc"] }
 bincode = "1"
-serde_json = { version = "1", features = ["preserve_order"] }
+dashmap = "6"
+hashbrown = "0.15"
+im = "15"
+once_cell = "1"
+rand = "0.8"
+range-set-blaze = "0.3"
+rayon = "1"
 regex = "1"
 regex-syntax = "0.8"
-
-rayon = "1"
-dashmap = "6"
-rand = "0.8"
+rustc-hash = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smallvec = "1"
 thiserror = "1"
 
 [dev-dependencies]
 criterion = "0.5"
-pretty_assertions = "1"
-
-[[bench]]
-name = "cfa_sweep_schema_build_single_threaded"
-harness = false
-
-[[bench]]
-name = "cfa_sweep_schema_build_multithreaded"
-harness = false
-
-[[bench]]
-name = "bounded_string_array_close"
-harness = false

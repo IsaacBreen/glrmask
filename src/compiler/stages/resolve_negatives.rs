@@ -8,7 +8,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use crate::automata::weighted::nwa::{NWA, NWAState};
-use crate::compiler::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
+use crate::parser::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
 use crate::ds::weight::Weight;
 
 type QueryKey = (u32, i32);
