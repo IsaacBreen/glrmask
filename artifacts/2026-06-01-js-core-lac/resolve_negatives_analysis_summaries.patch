@@ -1,0 +1,207 @@
+diff --git a/src/compiler/stages/resolve_negatives.rs b/src/compiler/stages/resolve_negatives.rs
+index d65db4b62..bb065f820 100644
+--- a/src/compiler/stages/resolve_negatives.rs
++++ b/src/compiler/stages/resolve_negatives.rs
+@@ -179,6 +179,29 @@ struct PredEdge<'a> {
+     weight: &'a Weight,
+ }
+ 
++pub(crate) struct DerivedEpsilonEdge {
++    from: u32,
++    to: u32,
++    weight: Weight,
++}
++
++pub(crate) struct CancellationAnalysis {
++    derived_epsilons: Vec<DerivedEpsilonEdge>,
++}
++
++pub(crate) struct FinalityPredecessorGraph<'a> {
++    preds: Vec<Vec<PredEdge<'a>>>,
++    outdegree: Vec<usize>,
++}
++
++pub(crate) struct FinalityAnalysis {
++    reachable_final_weights: Vec<Option<Weight>>,
++}
++
++pub(crate) struct TerminalDefaultAnalysis {
++    terminal_states: Vec<bool>,
++}
++
+ #[derive(Clone)]
+ struct GuardedFinalWeight {
+     weight: Weight,
+@@ -459,7 +482,7 @@ fn extend_derived_epsilons(
+ 
+ fn collect_non_empty_derived_epsilons(
+     derived_epsilons: DerivedEpsilons,
+-) -> Vec<(u32, u32, Weight)> {
++) -> CancellationAnalysis {
+     let mut result = Vec::new();
+ 
+     for (from_state, targets) in derived_epsilons.into_iter().enumerate() {
+@@ -468,25 +491,31 @@ fn collect_non_empty_derived_epsilons(
+         };
+         for (to_state, weight) in targets {
+             if !weight.is_empty() {
+-                result.push((from_state as u32, to_state, weight));
++                result.push(DerivedEpsilonEdge {
++                    from: from_state as u32,
++                    to: to_state,
++                    weight,
++                });
+             }
+         }
+     }
+ 
+-    result
++    CancellationAnalysis {
++        derived_epsilons: result,
++    }
+ }
+ 
+ fn compute_cancellations_range_from_view<V: ResolveNegativesView>(
+     view: &V,
+     range: std::ops::Range<u32>,
+-) -> Vec<(u32, u32, Weight)> {
++) -> CancellationAnalysis {
+     compute_cancellations_range_inner(view, range, None)
+ }
+ 
+ pub(crate) fn compute_cancellations_range(
+     nwa: &NWA,
+     range: std::ops::Range<u32>,
+-) -> Vec<(u32, u32, Weight)> {
++) -> CancellationAnalysis {
+     let view = NwaResolveView { nwa };
+     compute_cancellations_range_from_view(&view, range)
+ }
+@@ -495,10 +524,12 @@ fn compute_cancellations_range_inner<V: ResolveNegativesView>(
+     view: &V,
+     range: std::ops::Range<u32>,
+     foreign_derived: Option<&DerivedEpsilons>,
+-) -> Vec<(u32, u32, Weight)> {
++) -> CancellationAnalysis {
+     let state_count = view.state_count() as u32;
+     if state_count == 0 {
+-        return Vec::new();
++        return CancellationAnalysis {
++            derived_epsilons: Vec::new(),
++        };
+     }
+ 
+     let mut query_weights: QueryWeights = vec![None; state_count as usize];
+@@ -625,8 +656,8 @@ fn compute_cancellations_range_inner<V: ResolveNegativesView>(
+ }
+ 
+ pub(crate) fn apply_cancellations_range(nwa: &mut NWA, range: std::ops::Range<u32>) {
+-    for (from, to, weight) in compute_cancellations_range(nwa, range) {
+-        nwa.add_epsilon(from, to, weight);
++    for edge in compute_cancellations_range(nwa, range).derived_epsilons {
++        nwa.add_epsilon(edge.from, edge.to, edge.weight);
+     }
+ }
+ 
+@@ -636,7 +667,7 @@ fn is_live_finality_edge(target_state: u32, weight: &Weight, state_count: usize)
+ 
+ fn build_finality_preds_and_outdegree<'a, V: ResolveNegativesView>(
+     view: &'a V,
+-) -> (Vec<Vec<PredEdge<'a>>>, Vec<usize>) {
++) -> FinalityPredecessorGraph<'a> {
+     let state_count = view.state_count();
+     let mut preds = vec![Vec::<PredEdge<'a>>::new(); state_count];
+     let mut outdegree = vec![0usize; state_count];
+@@ -671,7 +702,7 @@ fn build_finality_preds_and_outdegree<'a, V: ResolveNegativesView>(
+         }
+     }
+ 
+-    (preds, outdegree)
++    FinalityPredecessorGraph { preds, outdegree }
+ }
+ 
+ fn build_finality_reverse_topo_order(
+@@ -807,12 +838,14 @@ fn apply_finality_fixpoint_acyclic(
+ 
+ fn compute_reachable_final_weights<V: ResolveNegativesView>(
+     view: &V,
+-) -> Vec<Option<GuardedFinalWeight>> {
++) -> FinalityAnalysis {
+     let n = view.state_count();
+     if n == 0 {
+-        return Vec::new();
++        return FinalityAnalysis {
++            reachable_final_weights: Vec::new(),
++        };
+     }
+-    let (preds, outdegree) = build_finality_preds_and_outdegree(view);
++    let FinalityPredecessorGraph { preds, outdegree } = build_finality_preds_and_outdegree(view);
+     let reverse_topo_order = build_finality_reverse_topo_order(&preds, outdegree);
+     let mut reachable_final_weights = collect_initial_final_weights(view);
+ 
+@@ -826,15 +859,27 @@ fn compute_reachable_final_weights<V: ResolveNegativesView>(
+         apply_finality_fixpoint_worklist(n, &preds, &mut reachable_final_weights);
+     }
+ 
+-    reachable_final_weights
++    FinalityAnalysis {
++        reachable_final_weights: reachable_final_weights
++            .into_iter()
++            .map(|entry| entry.map(|guarded| guarded.weight))
++            .collect(),
++    }
+ }
+ 
+ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
+-    let reachable_final_weights = {
++    let analysis = {
+         let view = NwaResolveView { nwa };
+         compute_reachable_final_weights(&view)
+     };
+-    write_final_weights(nwa, reachable_final_weights);
++    write_final_weights(
++        nwa,
++        analysis
++            .reachable_final_weights
++            .into_iter()
++            .map(|entry| entry.and_then(GuardedFinalWeight::initial))
++            .collect(),
++    );
+ }
+ 
+ pub(crate) fn remove_negative_transitions(nwa: &mut NWA) {
+@@ -902,7 +947,9 @@ fn grow_terminal_state_set<V: ResolveNegativesView>(view: &V, terminal_states: &
+     }
+ }
+ 
+-fn compute_terminal_state_set<V: ResolveNegativesView>(view: &V) -> Vec<bool> {
++fn compute_terminal_default_analysis<V: ResolveNegativesView>(
++    view: &V,
++) -> TerminalDefaultAnalysis {
+     let mut terminal_states: Vec<bool> = (0..view.state_count())
+         .map(|state| {
+             is_terminal_shape_candidate(view, state as u32)
+@@ -911,7 +958,7 @@ fn compute_terminal_state_set<V: ResolveNegativesView>(view: &V) -> Vec<bool> {
+         .collect();
+ 
+     grow_terminal_state_set(view, &mut terminal_states);
+-    terminal_states
++    TerminalDefaultAnalysis { terminal_states }
+ }
+ 
+ fn prune_terminal_default_targets(nwa: &mut NWA, terminal_states: &[bool]) {
+@@ -933,11 +980,11 @@ fn prune_terminal_default_targets(nwa: &mut NWA, terminal_states: &[bool]) {
+ }
+ 
+ pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
+-    let terminal_states = {
++    let analysis = {
+         let view = NwaResolveView { nwa };
+-        compute_terminal_state_set(&view)
++        compute_terminal_default_analysis(&view)
+     };
+-    prune_terminal_default_targets(nwa, &terminal_states);
++    prune_terminal_default_targets(nwa, &analysis.terminal_states);
+ }
+ 
+ pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
