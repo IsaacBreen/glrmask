@@ -110,6 +110,19 @@ Use stabilized results for decisions.
 Discrepancy work starts with local oracle classification.
 
 - Stop broad adjudication once the requested number of unhandled cases is found.
+- Always inspect the actual discrepancy tuple before assigning blame:
+  schema/problem, example prefix bytes, disputed token bytes, and framework
+  votes. Decide from the JSON Schema and generated grammar whether that token
+  should be able to come next. Treat framework outputs and any ground-truth
+  checker as evidence, not authority; the checker can be wrong.
+- `make example-specific PROBLEM=<problem> ...` should produce enough detail to
+  see the disputed token bytes and per-framework votes. If it does not, fix the
+  CFA sweep/extract/report path before relying on broad classifications.
+- For JSON Schema cases, reason directly from the schema location implied by the
+  prefix: object key vs property value, required/optional property, string
+  constraints (`enum`, `const`, `pattern`, `format`, length), array/object start,
+  and allowed whitespace. A classification rule is acceptable only when this
+  direct schema+prefix+token reasoning supports it.
 - For each representative case, compare `mask`, `commit_token`, and
   `commit_bytes` for the exact prefix/token.
 - If all glrmask layers agree with each other, suspect importer/schema semantics
