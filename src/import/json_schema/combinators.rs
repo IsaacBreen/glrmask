@@ -194,6 +194,11 @@ impl<'a> Lowerer<'a> {
         if let Some(object) = self.try_merge_all_of_single_ref_object_branches(&branches)? {
             return self.lower_object(&object);
         }
+        if let Some((object, any_required_names)) =
+            self.try_factor_all_of_required_property_any_of(&branches)?
+        {
+            return self.lower_object_requiring_any_property(&object, &any_required_names);
+        }
         if let Some((kind, distributed)) = distribute_all_of_over_single_object_choice(&branches) {
             return match kind {
                 ChoiceKind::AnyOf => {
@@ -523,6 +528,53 @@ impl<'a> Lowerer<'a> {
         }
 
         Ok(saw_ref_branch.then_some(merged).flatten())
+    }
+
+    fn try_factor_all_of_required_property_any_of(
+        &self,
+        branches: &[Schema],
+    ) -> ImportResult<Option<(ObjectSchema, BTreeSet<String>)>> {
+        let mut merged: Option<ObjectSchema> = None;
+        let mut any_required_names: Option<BTreeSet<String>> = None;
+
+        for branch in branches {
+            if let Some(names) = required_property_any_of_names(branch) {
+                if any_required_names.replace(names).is_some() {
+                    return Ok(None);
+                }
+                continue;
+            }
+
+            let Some(object) = self.object_branch_resolved(branch)? else {
+                return Ok(None);
+            };
+            merged = Some(match merged {
+                Some(current) => merge_two_objects(&current, object),
+                None => object.clone(),
+            });
+        }
+
+        let (object, any_required_names) = match (merged, any_required_names) {
+            (Some(object), Some(any_required_names)) => (object, any_required_names),
+            _ => return Ok(None),
+        };
+        if !object.pattern_properties.is_empty() || object.properties.is_empty() {
+            return Ok(None);
+        }
+
+        let fixed_property_names = object
+            .properties
+            .iter()
+            .map(|property| property.name.clone())
+            .collect::<BTreeSet<_>>();
+        if any_required_names
+            .iter()
+            .any(|name| !fixed_property_names.contains(name))
+        {
+            return Ok(None);
+        }
+
+        Ok(Some((object, any_required_names)))
     }
 
     fn drop_subsumed_open_object_any_of_branches(
@@ -902,6 +954,24 @@ fn try_factor_required_property_any_of(
     }
 
     Some((object, any_required_names))
+}
+
+fn required_property_any_of_names(schema: &Schema) -> Option<BTreeSet<String>> {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return None;
+    };
+    if !pure_any_of_assertions(assertions) {
+        return None;
+    }
+
+    let mut names = BTreeSet::new();
+    for branch in &assertions.any_of {
+        let required_name = single_required_object_branch_name(branch)?;
+        if !names.insert(required_name.to_string()) {
+            return None;
+        }
+    }
+    Some(names)
 }
 
 fn try_factor_closed_object_variant_any_of(

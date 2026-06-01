@@ -2195,7 +2195,63 @@ fn oneof_ref_and_null_is_supported() {
 }
 
 #[test]
-fn oneof_mixed_ref_and_inline_errors() {
+fn oneof_mixed_local_ref_and_inline_object_lowers() {
+    let schema = json!({
+        "definitions": {
+            "input": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"}
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }
+        },
+        "oneOf": [
+            {"$ref": "#/definitions/input"},
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn oneof_mixed_local_ref_and_inline_array_lowers() {
+    let schema = json!({
+        "$defs": {
+            "tool": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }
+        },
+        "oneOf": [
+            {
+                "type": "array",
+                "items": {"$ref": "#/$defs/tool"}
+            },
+            {"$ref": "#/$defs/tool"}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn oneof_mixed_ref_and_inline_primitive_still_errors() {
     let schema = json!({
         "definitions": {
             "input": {
@@ -2554,6 +2610,86 @@ fn anyof_required_property_object_factors_into_single_expr_nfa_body() {
     assert!(!matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
     assert_eq!(count_rules_with_prefix(&grammar, "json_closed_object_body"), 1);
     assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn allof_anyof_required_properties_lowers_to_single_grouped_object() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "resultPath": {"type": "string"},
+            "deviceTags": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string"},
+                        "value": {"type": "string"}
+                    },
+                    "required": ["key", "value"],
+                    "additionalProperties": false
+                }
+            },
+            "deviceIds": {
+                "type": "array",
+                "items": {"type": "string"}
+            }
+        },
+        "required": ["resultPath"],
+        "additionalProperties": false,
+        "allOf": [
+            {
+                "anyOf": [
+                    {"required": ["deviceTags"]},
+                    {"required": ["deviceIds"]}
+                ]
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    assert_eq!(count_rules_with_prefix(&grammar, "json_closed_object_body"), 2);
+    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 0);
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"resultPath":"x","deviceTags":[{"key":"k","value":"v"}]}"#
+    ));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"resultPath":"x","deviceIds":["d1"]}"#
+    ));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"resultPath":"x","deviceTags":[],"deviceIds":["d1"]}"#
+    ));
+    assert!(!schema_accepts_bytes(&schema, br#"{"resultPath":"x"}"#));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn allof_oneof_required_properties_does_not_use_any_required_factoring() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "a": {"type": "boolean"},
+            "b": {"type": "boolean"}
+        },
+        "additionalProperties": false,
+        "allOf": [
+            {
+                "oneOf": [
+                    {"required": ["a"]},
+                    {"required": ["b"]}
+                ]
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
+    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 0);
     lower(&grammar).unwrap();
 }
 

@@ -54,6 +54,50 @@ fn schema_is_null_only_inline_branch(schema: &Schema) -> bool {
         && assertions.all_of.is_empty()
 }
 
+fn schema_is_object_shaped_inline_branch(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return false;
+    };
+
+    assertions.object.is_some()
+}
+
+fn schema_is_array_shaped_inline_branch(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return false;
+    };
+
+    assertions.array.is_some()
+}
+
+fn one_of_can_normalize_mixed_local_refs(branches: &[Schema]) -> bool {
+    branches.len() > 1
+        && branches.iter().any(|branch| matches!(branch.kind, SchemaKind::Ref(_)))
+        && branches.iter().all(|branch| match &branch.kind {
+            SchemaKind::Ref(reference) => reference.starts_with('#'),
+            _ => {
+                schema_is_null_only_inline_branch(branch)
+                    || schema_is_object_shaped_inline_branch(branch)
+                    || schema_is_array_shaped_inline_branch(branch)
+            }
+        })
+}
+
+fn normalize_mixed_ref_one_of_branches(branches: &mut [Schema]) {
+    for branch in branches {
+        if matches!(branch.kind, SchemaKind::Ref(_)) {
+            let wrapped_ref = branch.clone();
+            *branch = Schema::assertions(
+                format!("{}/<mixed-ref-oneof>", branch.location),
+                SchemaAssertions {
+                    all_of: vec![wrapped_ref],
+                    ..SchemaAssertions::default()
+                },
+            );
+        }
+    }
+}
+
 fn collect_all_ref_pointers(value: &Value, refs: &mut std::collections::BTreeSet<String>) {
     if let Some(obj) = value.as_object() {
         if let Some(r) = obj.get("$ref").and_then(Value::as_str) {
@@ -296,10 +340,18 @@ fn load_assertions(object: &Map<String, Value>, location: &str) -> ImportResult<
     assertions.any_of = load_schema_array(object, "anyOf", location)?;
     assertions.one_of = load_schema_array(object, "oneOf", location)?;
     if one_of_mixes_ref_and_inline_branches(&assertions.one_of) {
-        return Err(SchemaImportError::at(
-            location,
-            "oneOf constraints with mixed $ref and inline branches are not supported",
-        ));
+        // Normalize the narrow safe subset where local $ref branches are mixed
+        // with object-shaped, array-shaped, or null-only inline branches.
+        // Broader mixed cases, including primitive inline branches, remain
+        // rejected.
+        if one_of_can_normalize_mixed_local_refs(&assertions.one_of) {
+            normalize_mixed_ref_one_of_branches(&mut assertions.one_of);
+        } else {
+            return Err(SchemaImportError::at(
+                location,
+                "oneOf constraints with mixed $ref and inline branches are not supported",
+            ));
+        }
     }
     assertions.all_of = load_schema_array(object, "allOf", location)?;
     assertions.not = load_schema_member(object, "not", location)?;
