@@ -12,6 +12,13 @@ integrity rules when the temporary skill asks for TBM evidence.
 
 Use only stabilized timings for decisions: compare per-step values after cross-run per-step minimum stabilization, not raw single-pass sweep spikes.
 
+For JSON/TBM fixes, `scripts.profile_step` is diagnostic evidence only. The
+counted validation must go through the normal CFA/Makefile path, usually focused
+`make example-specific` for the exact problem, with the isolated `_glrmask`
+import path verified before the run. Do not report a JSON/TBM fix as validated
+from `profile_step` alone; use it to diagnose the hot step, then confirm with
+the focused CFA artifact and record that artifact path.
+
 Do not change stabilization knobs for TBM evidence. In particular, do not set or lower `TIMING_RUNS`, min-run thresholds, build runs, framework selection, seeds, sample counts, discrepancy budgets, or related defaults unless the human explicitly requests that exact override in the current turn. The default CFA/Makefile settings intentionally choose appropriate timing counts per framework; overriding them can make glrmask under-stabilized or make llguidance time out. Any artifact produced with non-default stabilization knobs is diagnostic only and must not be used for before/after or threshold decisions.
 
 Do not use `GLRMASK_ALLOW_EXTRA_KEYWORDS` to decide paired `glrmask_native` versus `llguidance_native` build success or failure. First run the default command and record the exact default failure. Only use `GLRMASK_ALLOW_EXTRA_KEYWORDS` for a narrow diagnostic after that failure is understood, and label the result diagnostic-only with the env var recorded in notes/artifacts.
