@@ -2435,6 +2435,216 @@ fn oneof_mixed_local_ref_inline_primitives_and_array_lowers() {
     lower(&grammar).unwrap();
 }
 
+fn nested_config_align_oneof_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "oneOf": [
+            {"$ref": "#/definitions/left"},
+            {"$ref": "#/definitions/center"},
+            {"$ref": "#/definitions/right"}
+        ],
+        "required": ["config"],
+        "properties": {
+            "config": {
+                "type": "object",
+                "required": ["align"],
+                "properties": {
+                    "align": {"type": "string"}
+                },
+                "additionalProperties": false
+            }
+        },
+        "additionalProperties": false,
+        "definitions": {
+            "left": {
+                "type": "object",
+                "required": ["config"],
+                "properties": {
+                    "config": {
+                        "type": "object",
+                        "required": ["align"],
+                        "properties": {
+                            "align": {"type": "string", "enum": ["left"]}
+                        },
+                        "additionalProperties": false
+                    }
+                },
+                "additionalProperties": false
+            },
+            "center": {
+                "type": "object",
+                "required": ["config"],
+                "properties": {
+                    "config": {
+                        "type": "object",
+                        "required": ["align"],
+                        "properties": {
+                            "align": {"type": "string", "enum": ["center"]}
+                        },
+                        "additionalProperties": false
+                    }
+                },
+                "additionalProperties": false
+            },
+            "right": {
+                "type": "object",
+                "required": ["config"],
+                "properties": {
+                    "config": {
+                        "type": "object",
+                        "required": ["align"],
+                        "properties": {
+                            "align": {"type": "string", "enum": ["right"]}
+                        },
+                        "additionalProperties": false
+                    }
+                },
+                "additionalProperties": false
+            }
+        }
+    })
+}
+
+fn nested_config_align_oneof_with_shared_content_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "oneOf": [
+            {"$ref": "#/definitions/left"},
+            {"$ref": "#/definitions/center"},
+            {"$ref": "#/definitions/right"}
+        ],
+        "required": ["config", "content"],
+        "properties": {
+            "config": {
+                "type": "object",
+                "properties": {
+                    "align": {"type": "string"}
+                },
+                "required": ["align"]
+            },
+            "content": {
+                "type": "object",
+                "properties": {
+                    "heading": {"type": "string"},
+                    "body": {"type": "string"},
+                    "badge": {
+                        "type": "object",
+                        "properties": {
+                            "config": {
+                                "type": "object",
+                                "properties": {
+                                    "size": {"type": "string", "enum": ["small", "large"]},
+                                    "type": {"type": "string", "enum": ["highlight", "lowlight"]}
+                                },
+                                "required": ["size", "type"]
+                            },
+                            "content": {
+                                "type": "object",
+                                "properties": {
+                                    "text": {"type": "string"}
+                                },
+                                "required": ["text"]
+                            }
+                        },
+                        "required": ["config", "content"]
+                    },
+                    "image": {
+                        "type": "object",
+                        "properties": {
+                            "vp1": {"type": "string"},
+                            "vp2": {"type": "string"},
+                            "vp3": {"type": "string"},
+                            "vp4": {"type": "string"},
+                            "vp5": {"type": "string"},
+                            "vp6": {"type": "string"},
+                            "alt": {"type": "string"}
+                        },
+                        "required": ["vp1", "vp2", "vp3", "vp4", "vp5", "vp6", "alt"]
+                    }
+                },
+                "required": ["heading", "body", "image"]
+            }
+        },
+        "definitions": {
+            "left": {
+                "properties": {
+                    "config": {
+                        "type": "object",
+                        "properties": {
+                            "align": {"type": "string", "enum": ["left"]}
+                        },
+                        "required": ["align"]
+                    }
+                },
+                "required": ["config"]
+            },
+            "center": {
+                "properties": {
+                    "config": {
+                        "type": "object",
+                        "properties": {
+                            "align": {"type": "string", "enum": ["center"]}
+                        },
+                        "required": ["align"]
+                    }
+                },
+                "required": ["config"]
+            },
+            "right": {
+                "properties": {
+                    "config": {
+                        "type": "object",
+                        "properties": {
+                            "align": {"type": "string", "enum": ["right"]}
+                        },
+                        "required": ["align"]
+                    }
+                },
+                "required": ["config"]
+            }
+        }
+    })
+}
+
+#[test]
+fn oneof_nested_config_align_enum_ref_branches_accept_and_reject() {
+    let schema = nested_config_align_oneof_schema();
+
+    assert!(schema_accepts_bytes(&schema, br#"{"config":{"align":"left"}}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"config":{"align":"center"}}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"config":{"align":"right"}}"#));
+
+    assert!(!schema_accepts_bytes(&schema, br#"{}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"config":{}}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"config":{"align":"top"}}"#));
+}
+
+#[test]
+fn oneof_nested_config_align_enum_ref_branches_use_object_fast_path() {
+    let schema = nested_config_align_oneof_schema();
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let expr = start_expr(&grammar);
+    assert!(!matches!(expr, GrammarExpr::Choice(_)), "{expr:?}");
+    let glrm = to_glrm(&grammar);
+    let start_line = glrm
+        .lines()
+        .find(|line| line.starts_with("nt start ::= "))
+        .unwrap_or("<missing start line>");
+    assert_eq!(start_line, "nt start ::= \"{\" json_closed_object_body_1 \"}\";");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn oneof_nested_config_align_enum_ref_branches_with_shared_content_use_object_fast_path() {
+    let schema = nested_config_align_oneof_with_shared_content_schema();
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let expr = start_expr(&grammar);
+    assert!(!matches!(expr, GrammarExpr::Choice(_)), "{expr:?}");
+    lower(&grammar).unwrap();
+}
+
 #[test]
 fn oneof_mixed_local_ref_and_inline_primitive_with_untyped_ref_target_errors() {
     let schema = json!({

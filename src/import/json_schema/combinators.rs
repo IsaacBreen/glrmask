@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::import::ast::GrammarExpr;
+use serde_json::Value;
 
 use super::ast::{
     AdditionalProperties, ArraySchema, ObjectSchema, PropertySchema, Schema, SchemaAssertions,
@@ -111,12 +112,95 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn lower_one_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
         self.validate_mixed_ref_disjoint_family_one_of(assertions)?;
         let siblings = sibling_assertion_schema(assertions);
-        let alternatives = assertions
+        let branches = assertions
             .one_of
             .iter()
-            .map(|branch| self.lower_schema(&branch_with_siblings(branch.clone(), siblings.clone())))
+            .map(|branch| branch_with_siblings(branch.clone(), siblings.clone()))
+            .collect::<Vec<_>>();
+        if let Some(object) = self.try_merge_singleton_string_discriminator_one_of_objects(&branches)? {
+            return self.lower_object(&object);
+        }
+        let alternatives = branches
+            .iter()
+            .map(|branch| self.lower_schema(branch))
             .collect::<ImportResult<Vec<_>>>()?;
         Ok(choice(alternatives))
+    }
+
+    fn try_merge_singleton_string_discriminator_one_of_objects(
+        &self,
+        branches: &[Schema],
+    ) -> ImportResult<Option<ObjectSchema>> {
+        if branches.len() < 2 {
+            return Ok(None);
+        }
+
+        let inlined_branches = self.inline_all_of_refs(branches)?;
+        let mut objects = Vec::with_capacity(inlined_branches.len());
+        for branch in &inlined_branches {
+            let Some(object) = self.resolve_singleton_string_discriminator_one_of_object(branch)? else {
+                return Ok(None);
+            };
+            objects.push(object);
+        }
+
+        let Some((merged, discriminator_count)) =
+            merge_singleton_string_discriminator_objects(&objects, true)
+        else {
+            return Ok(None);
+        };
+        if discriminator_count != 1 {
+            return Ok(None);
+        }
+
+        Ok(Some(merged))
+    }
+
+    fn resolve_singleton_string_discriminator_one_of_object(
+        &self,
+        branch: &Schema,
+    ) -> ImportResult<Option<ObjectSchema>> {
+        match &branch.kind {
+            SchemaKind::Ref(pointer) => self
+                .resolve_singleton_string_discriminator_one_of_object(self.resolve_ref_target(pointer)?),
+            SchemaKind::Assertions(assertions) => {
+                if assertions.const_value.is_some()
+                    || assertions.enum_values.is_some()
+                    || assertions.array.is_some()
+                    || assertions.string.is_some()
+                    || assertions.number.is_some()
+                    || assertions.not.is_some()
+                    || !assertions.any_of.is_empty()
+                    || !assertions.one_of.is_empty()
+                {
+                    return Ok(None);
+                }
+                if let Some(types) = &assertions.types
+                    && !types.iter().all(|schema_type| *schema_type == SchemaType::Object)
+                {
+                    return Ok(None);
+                }
+                let object = if !assertions.all_of.is_empty() {
+                    if assertions.object.is_some() {
+                        return Ok(None);
+                    }
+                    match try_merge_all_of_objects(&assertions.all_of) {
+                        Some(object) => object,
+                        None => return Ok(None),
+                    }
+                } else {
+                    match &assertions.object {
+                        Some(object) => object.clone(),
+                        None => return Ok(None),
+                    }
+                };
+                if !is_singleton_string_discriminator_object_candidate(&object) {
+                    return Ok(None);
+                }
+                Ok(Some(object))
+            }
+            _ => Ok(None),
+        }
     }
 
     fn validate_mixed_ref_disjoint_family_one_of(
@@ -1529,6 +1613,230 @@ fn object_schemas_shape_equivalent(left: &ObjectSchema, right: &ObjectSchema) ->
             .all(|(left, right)| {
                 left.name == right.name && schemas_shape_equivalent(&left.schema, &right.schema)
             })
+}
+
+fn is_singleton_string_discriminator_object_candidate(object: &ObjectSchema) -> bool {
+    object.pattern_properties.is_empty()
+        && object.property_dependencies.is_empty()
+        && object.property_names.is_none()
+        && object.min_properties == 0
+        && object.max_properties.is_none()
+        && object.required.iter().all(|name| object.properties.iter().any(|property| property.name == *name))
+}
+
+fn singleton_string_discriminator_object_metadata_matches(
+    left: &ObjectSchema,
+    right: &ObjectSchema,
+) -> bool {
+    additional_properties_shape_equivalent(&left.additional_properties, &right.additional_properties)
+        && left.required == right.required
+        && left.property_dependencies == right.property_dependencies
+        && left.min_properties == right.min_properties
+        && left.max_properties == right.max_properties
+        && left.pattern_properties.is_empty()
+        && right.pattern_properties.is_empty()
+        && left.property_names.is_none()
+        && right.property_names.is_none()
+        && left.properties.len() == right.properties.len()
+        && left
+            .properties
+            .iter()
+            .zip(&right.properties)
+            .all(|(left, right)| left.name == right.name)
+}
+
+fn merge_singleton_string_discriminator_objects(
+    objects: &[ObjectSchema],
+    required_path: bool,
+) -> Option<(ObjectSchema, usize)> {
+    let first = objects.first()?;
+    if !is_singleton_string_discriminator_object_candidate(first)
+        || objects.iter().skip(1).any(|object| {
+            !is_singleton_string_discriminator_object_candidate(object)
+                || !singleton_string_discriminator_object_metadata_matches(first, object)
+        })
+    {
+        return None;
+    }
+
+    let mut merged = first.clone();
+    merged.properties.clear();
+    let mut discriminator_count = 0usize;
+
+    for property_idx in 0..first.properties.len() {
+        let property_name = first.properties[property_idx].name.clone();
+        let property_schemas = objects
+            .iter()
+            .map(|object| &object.properties[property_idx].schema)
+            .collect::<Vec<_>>();
+        let (merged_schema, property_discriminator_count) =
+            merge_singleton_string_discriminator_schemas(
+                &property_schemas,
+                required_path && first.required.contains(&property_name),
+            )?;
+        discriminator_count += property_discriminator_count;
+        if discriminator_count > 1 {
+            return None;
+        }
+        merged.properties.push(PropertySchema {
+            name: property_name,
+            schema: merged_schema,
+        });
+    }
+
+    Some((merged, discriminator_count))
+}
+
+fn merge_singleton_string_discriminator_schemas(
+    schemas: &[&Schema],
+    required_path: bool,
+) -> Option<(Schema, usize)> {
+    let first = schemas.first()?;
+    if schemas
+        .iter()
+        .skip(1)
+        .all(|schema| schemas_shape_equivalent(first, schema))
+    {
+        return Some(((*first).clone(), 0));
+    }
+
+    if required_path {
+        let literals = schemas
+            .iter()
+            .map(|schema| extract_singleton_string_literal(schema))
+            .collect::<Option<Vec<_>>>();
+        if let Some(literals) = literals
+            && singleton_string_literals_are_distinct(&literals)
+        {
+            return Some((
+                Schema::assertions(
+                    first.location.clone(),
+                    SchemaAssertions {
+                        types: Some(vec![SchemaType::String]),
+                        enum_values: Some(literals.into_iter().map(Value::String).collect()),
+                        ..SchemaAssertions::default()
+                    },
+                ),
+                1,
+            ));
+        }
+    }
+
+    let child_objects = schemas
+        .iter()
+        .map(|schema| singleton_string_discriminator_child_object(schema))
+        .collect::<Option<Vec<_>>>();
+    let child_objects = child_objects?;
+    let (merged_object, discriminator_count) =
+        merge_singleton_string_discriminator_objects(&child_objects, required_path)?;
+    Some((
+        Schema::assertions(
+            first.location.clone(),
+            SchemaAssertions {
+                types: Some(vec![SchemaType::Object]),
+                object: Some(merged_object),
+                ..SchemaAssertions::default()
+            },
+        ),
+        discriminator_count,
+    ))
+}
+
+fn extract_singleton_string_literal(schema: &Schema) -> Option<String> {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return None;
+    };
+    if !assertions.all_of.is_empty() {
+        let mut literal = None;
+        for branch in &assertions.all_of {
+            if let Some(branch_literal) = extract_singleton_string_literal(branch) {
+                match &literal {
+                    Some(existing) if existing != &branch_literal => return None,
+                    Some(_) => {}
+                    None => literal = Some(branch_literal),
+                }
+                continue;
+            }
+            if !is_vacuous_string_schema(branch) {
+                return None;
+            }
+        }
+        return literal;
+    }
+    if assertions.object.is_some()
+        || assertions.array.is_some()
+        || assertions.number.is_some()
+        || assertions.not.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+    {
+        return None;
+    }
+    if let Some(types) = &assertions.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::String)
+    {
+        return None;
+    }
+    if !option_strings_shape_equivalent(
+        assertions.string.as_ref(),
+        Some(&super::ast::StringSchema::default()),
+    ) {
+        return None;
+    }
+    if let Some(Value::String(value)) = &assertions.const_value {
+        return Some(value.clone());
+    }
+    match assertions.enum_values.as_deref() {
+        Some([Value::String(value)]) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn singleton_string_literals_are_distinct(literals: &[String]) -> bool {
+    let mut seen = BTreeSet::new();
+    literals.iter().all(|literal| seen.insert(literal.clone()))
+}
+
+fn singleton_string_discriminator_child_object(schema: &Schema) -> Option<ObjectSchema> {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return None;
+    };
+    if !assertions.all_of.is_empty() {
+        if assertions.const_value.is_some()
+            || assertions.enum_values.is_some()
+            || assertions.array.is_some()
+            || assertions.string.is_some()
+            || assertions.number.is_some()
+            || assertions.not.is_some()
+            || !assertions.any_of.is_empty()
+            || !assertions.one_of.is_empty()
+            || assertions.object.is_some()
+        {
+            return None;
+        }
+        let object = try_merge_all_of_objects(&assertions.all_of)?;
+        return is_singleton_string_discriminator_object_candidate(&object).then_some(object);
+    }
+    if assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || assertions.array.is_some()
+        || assertions.string.is_some()
+        || assertions.number.is_some()
+        || assertions.not.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+    {
+        return None;
+    }
+    if let Some(types) = &assertions.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object)
+    {
+        return None;
+    }
+    let object = assertions.object.as_ref()?;
+    is_singleton_string_discriminator_object_candidate(object).then(|| object.clone())
 }
 
 fn additional_properties_shape_equivalent(
