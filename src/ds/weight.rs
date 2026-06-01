@@ -281,6 +281,42 @@ fn shared_token_union(left: &SharedTokenSet, right: &SharedTokenSet) -> SharedTo
     }
 }
 
+fn shared_token_union_many(tokens: &[SharedTokenSet]) -> Option<SharedTokenSet> {
+    match tokens.len() {
+        0 => None,
+        1 => Some(Arc::clone(&tokens[0])),
+        2 => Some(shared_token_union(&tokens[0], &tokens[1])),
+        _ => {
+            let mut ranges = Vec::<(u32, u32)>::new();
+            for token_set in tokens {
+                ranges.extend(
+                    token_set
+                        .ranges()
+                        .map(|range| (*range.start(), *range.end())),
+                );
+            }
+            if ranges.is_empty() {
+                return None;
+            }
+            ranges.sort_unstable();
+
+            let mut merged = Vec::with_capacity(ranges.len());
+            let mut current = ranges[0];
+            for (start, end) in ranges.into_iter().skip(1) {
+                if start <= current.1.saturating_add(1) {
+                    current.1 = current.1.max(end);
+                } else {
+                    merged.push(current.0..=current.1);
+                    current = (start, end);
+                }
+            }
+            merged.push(current.0..=current.1);
+
+            Some(shared_rangeset(RangeSetBlaze::from_iter(merged)))
+        }
+    }
+}
+
 fn shared_token_intersection(
     left: &SharedTokenSet,
     right: &SharedTokenSet,
@@ -289,9 +325,15 @@ fn shared_token_intersection(
         Some(Arc::clone(left))
     } else if right.as_ref().is_subset(left.as_ref()) {
         Some(Arc::clone(right))
+    } else if let Some(existing) =
+        lookup_memoized_token_set_op(TokenSetOpKind::Intersection, left, right)
+    {
+        (!existing.is_empty()).then_some(existing)
     } else {
         let overlap = left.as_ref() & right.as_ref();
-        (!overlap.is_empty()).then(|| shared_rangeset(overlap))
+        let result = shared_rangeset(overlap);
+        store_memoized_token_set_op(TokenSetOpKind::Intersection, left, right, &result);
+        (!result.is_empty()).then_some(result)
     }
 }
 
@@ -357,6 +399,7 @@ enum WeightOpKind {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum TokenSetOpKind {
     Union,
+    Intersection,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -967,6 +1010,8 @@ fn union_all_multiway(weights: &[&Weight]) -> Weight {
 
     let mut builder = CompactRangeBuilder::new();
     let mut scan_start = 0usize;
+    let mut active_tokens = Vec::<SharedTokenSet>::new();
+    let mut token_union_cache: FxHashMap<Vec<usize>, SharedTokenSet> = FxHashMap::default();
 
     for window in boundaries.windows(2) {
         let interval_start = window[0] as u32;
@@ -978,20 +1023,41 @@ fn union_all_multiway(weights: &[&Weight]) -> Weight {
         }
 
         // Collect all token sets active in this interval
-        let mut merged_tokens: Option<SharedTokenSet> = None;
+        active_tokens.clear();
         for entry in &all_entries[scan_start..] {
             if entry.start > interval_start {
                 break;
             }
             if entry.start <= interval_start && entry.end >= interval_end {
-                merged_tokens = Some(match merged_tokens {
-                    Some(existing) => shared_token_union(&existing, &entry.tokens),
-                    None => Arc::clone(&entry.tokens),
-                });
+                active_tokens.push(Arc::clone(&entry.tokens));
             }
         }
 
-        if let Some(tokens) = merged_tokens {
+        active_tokens.sort_unstable_by_key(|tokens| Arc::as_ptr(tokens) as usize);
+        active_tokens.dedup_by_key(|tokens| Arc::as_ptr(tokens) as usize);
+
+        let tokens = match active_tokens.len() {
+            0 => None,
+            1 => Some(Arc::clone(&active_tokens[0])),
+            2 => Some(shared_token_union(&active_tokens[0], &active_tokens[1])),
+            _ => {
+                let key: Vec<usize> = active_tokens
+                    .iter()
+                    .map(|tokens| Arc::as_ptr(tokens) as usize)
+                    .collect();
+                if let Some(cached) = token_union_cache.get(&key) {
+                    Some(Arc::clone(cached))
+                } else {
+                    let tokens = shared_token_union_many(&active_tokens);
+                    if let Some(tokens) = &tokens {
+                        token_union_cache.insert(key, Arc::clone(tokens));
+                    }
+                    tokens
+                }
+            }
+        };
+
+        if let Some(tokens) = tokens {
             builder.push(interval_start, interval_end, tokens);
         } else {
             builder.flush();
@@ -1182,19 +1248,57 @@ fn intersect_weights(left: &Weight, right: &Weight) -> Weight {
     let mut right_entry = right_iter.next();
 
     let mut builder = CompactRangeBuilder::new();
+    let mut same_as_left = true;
+    let mut same_as_right = true;
 
-    while let (Some((left_range, left_tokens)), Some((right_range, right_tokens))) = (left_entry, right_entry) {
+    loop {
+        let (left_range, left_tokens, right_range, right_tokens) = match (left_entry, right_entry)
+        {
+            (Some((left_range, left_tokens)), Some((right_range, right_tokens))) => {
+                (left_range, left_tokens, right_range, right_tokens)
+            }
+            (Some(_), None) => {
+                same_as_left = false;
+                break;
+            }
+            (None, Some(_)) => {
+                same_as_right = false;
+                break;
+            }
+            (None, None) => break,
+        };
         let start = (*left_range.start()).max(*right_range.start());
         let end = (*left_range.end()).min(*right_range.end());
+        let left_start = *left_range.start();
+        let left_end = *left_range.end();
+        let right_start = *right_range.start();
+        let right_end = *right_range.end();
 
         if start <= end {
-            if let Some(tokens) = shared_token_intersection(left_tokens, right_tokens) {
-                builder.push(start, end, tokens);
+            if start != left_start || end != left_end {
+                same_as_left = false;
             }
+            if start != right_start || end != right_end {
+                same_as_right = false;
+            }
+            if let Some(tokens) = shared_token_intersection(left_tokens, right_tokens) {
+                if !Arc::ptr_eq(&tokens, left_tokens) {
+                    same_as_left = false;
+                }
+                if !Arc::ptr_eq(&tokens, right_tokens) {
+                    same_as_right = false;
+                }
+                builder.push(start, end, tokens);
+            } else {
+                same_as_left = false;
+                same_as_right = false;
+            }
+        } else if left_end < right_start {
+            same_as_left = false;
+        } else if right_end < left_start {
+            same_as_right = false;
         }
 
-        let left_end = *left_range.end();
-        let right_end = *right_range.end();
         if left_end <= right_end {
             left_entry = left_iter.next();
         } else {
@@ -1207,7 +1311,13 @@ fn intersect_weights(left: &Weight, right: &Weight) -> Weight {
         }
     }
 
-    builder.finish()
+    if same_as_left {
+        left.clone()
+    } else if same_as_right {
+        right.clone()
+    } else {
+        builder.finish()
+    }
 }
 
 fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight) -> Weight {
@@ -1455,16 +1565,37 @@ impl Weight {
             return self.clone();
         }
         with_memoized_weight_op(WeightOpKind::Intersection, self, other, || {
-            if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other)) {
-                combine_single_entries(&left, &right, intersect_token_sets)
-            } else if let Some(single) = single_compact_entry(self) {
-                intersect_single_entry_with_weight(&single, other)
-            } else if let Some(single) = single_compact_entry(other) {
-                intersect_single_entry_with_weight(&single, self)
-            } else {
-                intersect_weights(self, other)
-            }
+            self.intersection_uncached_impl(other)
         })
+    }
+
+    pub(crate) fn intersection_uncached(&self, other: &Self) -> Self {
+        if self.is_empty() || other.is_empty() {
+            return Self::empty();
+        }
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return self.clone(); // Same weight → intersection is itself
+        }
+        if self.is_full() {
+            return other.clone();
+        }
+        if other.is_full() {
+            return self.clone();
+        }
+        self.intersection_uncached_impl(other)
+    }
+
+    fn intersection_uncached_impl(&self, other: &Self) -> Self {
+        if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other))
+        {
+            combine_single_entries(&left, &right, intersect_token_sets)
+        } else if let Some(single) = single_compact_entry(self) {
+            intersect_single_entry_with_weight(&single, other)
+        } else if let Some(single) = single_compact_entry(other) {
+            intersect_single_entry_with_weight(&single, self)
+        } else {
+            intersect_weights(self, other)
+        }
     }
 
     pub fn difference(&self, other: &Self) -> Self {
