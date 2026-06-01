@@ -2481,6 +2481,58 @@ fn anyof_required_property_factoring_falls_back_for_nontrivial_branch() {
 }
 
 #[test]
+fn object_typed_anyof_branches_do_not_emit_generic_json_object_fallback() {
+    let schema = json!({
+        "type": "object",
+        "definitions": {
+            "a": {
+                "type": "object",
+                "properties": {
+                    "dpp_version": {"type": "integer", "minimum": 1, "maximum": 1},
+                    "file_version": {"type": "integer", "minimum": 1},
+                    "parent_id": {"type": ["string", "null"]}
+                },
+                "additionalProperties": false,
+                "anyOf": [
+                    {"properties": {"parent_id": {"type": "null"}}, "required": ["parent_id"]},
+                    {"properties": {"parent_id": {"type": "string"}}, "required": ["parent_id"]}
+                ]
+            },
+            "b": {
+                "properties": {
+                    "dpp_version": {"type": "integer", "minimum": 1, "maximum": 1},
+                    "file_version": {"type": "integer", "minimum": 1}
+                },
+                "required": ["dpp_version", "file_version"],
+                "additionalProperties": false
+            }
+        },
+        "oneOf": [
+            {"$ref": "#/definitions/a"},
+            {"$ref": "#/definitions/b"}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    let start_line = glrm
+        .lines()
+        .find(|line| line.starts_with("nt start ::="))
+        .unwrap_or_else(|| panic!("{glrm}"));
+    assert!(!start_line.contains("| json_object"), "{glrm}");
+    assert!(!start_line.contains("JSON_STRING"), "{glrm}");
+    assert!(!start_line.contains("JSON_NUMBER"), "{glrm}");
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"parent_id": null, "dpp_version": 1, "file_version": 1}"#
+    ));
+    assert!(schema_accepts_bytes(&schema, br#"{"dpp_version": 1, "file_version": 1}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"x": 1}"#));
+    assert!(!schema_accepts_bytes(&schema, br#""not an object""#));
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn anyof_open_objects_with_disjoint_optional_properties_collapses_to_json_object() {
     let schema = json!({
         "anyOf": [

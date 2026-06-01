@@ -41,12 +41,19 @@ impl<'a> Lowerer<'a> {
         } else {
             branches.clone()
         };
+        let suppress_untyped_non_object_alts = has_ref_branch
+            || assertions.types.as_ref().is_some_and(|types| {
+                types.iter().all(|schema_type| *schema_type == SchemaType::Object)
+            });
         if open_object_any_of_covers_json_object(&factoring_branches) {
             return Ok(r(JSON_OBJECT_RULE));
         }
         let factoring_branches = self.drop_subsumed_open_object_any_of_branches(factoring_branches)?;
         if let Some(expr) =
-            self.try_lower_closed_object_any_of_variants(&factoring_branches, has_ref_branch)?
+            self.try_lower_closed_object_any_of_variants(
+                &factoring_branches,
+                suppress_untyped_non_object_alts,
+            )?
         {
             return Ok(expr);
         }
@@ -122,6 +129,27 @@ impl<'a> Lowerer<'a> {
             branches.push(Schema::assertions("<allOf-siblings>", siblings));
         }
         branches = self.inline_all_of_refs(&branches)?;
+        if let [left, right] = branches.as_slice() {
+            if is_vacuous_object_schema(left)
+                && let Some(branch) = push_object_only_type_into_branch(right)
+            {
+                return self.lower_schema(&branch);
+            }
+            if is_vacuous_object_schema(right)
+                && let Some(branch) = push_object_only_type_into_branch(left)
+            {
+                return self.lower_schema(&branch);
+            }
+        }
+        if branches.len() > 1 && branches.iter().any(schema_has_explicit_object_only_type) {
+            branches.retain(|branch| !is_vacuous_object_schema(branch));
+            if branches.is_empty() {
+                return Ok(r(JSON_OBJECT_RULE));
+            }
+            if branches.len() == 1 {
+                return self.lower_schema(&branches[0]);
+            }
+        }
         branches = flatten_pure_all_of_branches(branches);
         branches = self.inline_all_of_refs(&branches)?;
         branches = collapse_pure_single_choice_branches(branches);
