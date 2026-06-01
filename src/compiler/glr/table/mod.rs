@@ -55,6 +55,7 @@ impl Default for AdmissionPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GlrTableConstruction {
     LegacyRowBisim,
+    Lalr,
     ExperimentalCoreMerged,
 }
 
