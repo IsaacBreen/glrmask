@@ -89,6 +89,11 @@ Use stabilized results for decisions.
 - For JSON-schema workloads, inspect importer-emitted grammar and table/action
   shape before runtime edits. Runtime fast paths that reduce counters but worsen
   stabilized timings must be reverted.
+- Assume the glrmask runtime has already been heavily optimized. For remaining
+  JSON-schema TBM issues, prefer identifying ambiguity in the generated grammar,
+  tying it to the exact schema/importer construct, and reducing that ambiguity in
+  the importer. Treat runtime edits as a last resort after emitted-grammar and
+  table/action evidence rule out importer-shape fixes.
 
 ## Discrepancies
 

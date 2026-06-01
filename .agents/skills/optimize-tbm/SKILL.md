@@ -24,6 +24,12 @@ unsupported feature quickly, or explicitly mark the run as glrmask-only capabili
 that. Only optimize TBM after confirming both frameworks are intended to build the problem.
 
 Default optimization target:
+- Assume the runtime is already heavily optimized. For remaining JSON-schema TBM
+  failures, expect meaningful wins to come primarily from finding ambiguity in
+  the generated grammar, pinning it to the exact schema/importer construct, and
+  changing JSON-schema lowering to avoid that ambiguity. Do not start with
+  runtime fast paths unless importer-generated ambiguity has been ruled out with
+  emitted-grammar and table/action evidence.
 - Unless the human explicitly asks for runtime optimization, prefer fixing TBM
   issues on the compilation side. In JSON-schema cases, focus first on the JSON
   importer and schema lowering: emitted grammar shape, object/property factoring,
