@@ -2,6 +2,7 @@ use super::accumulator::TerminalsDisallowed;
 use super::analysis::EOF;
 use super::table::{
     Action,
+    AdmissionMode,
     GLRTable,
     GuardedShiftCellIndex,
     GuardedStackShift,
@@ -11,8 +12,9 @@ use super::table::{
 use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::{LeveledGSS, VirtualStack};
 use crate::grammar::flat::TerminalID;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
+use std::collections::VecDeque;
 use std::sync::OnceLock;
 
 mod profile;
@@ -1727,6 +1729,10 @@ fn advance_deterministically(
 /// `may_advance` name sounds like a speculative approximation, but this is an
 /// exact applicability predicate.
 pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
+    if table.admission_mode == AdmissionMode::LacSimulation {
+        return lac_may_advance_on(table, stack, token);
+    }
+
     for state in stack.peek_values() {
         if !table.advance_row_allows(state, token) {
             continue;
@@ -1745,6 +1751,117 @@ pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: T
     }
 
     false
+}
+
+fn lac_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
+    let mut queue = VecDeque::<ParserGSS>::new();
+    let mut visited = FxHashSet::<Vec<Vec<u32>>>::default();
+
+    for state in stack.peek_values() {
+        lac_enqueue_frontier(stack.isolate(Some(state)), &mut queue, &mut visited);
+    }
+
+    while let Some(frontier) = queue.pop_front() {
+        for source_state in frontier.peek_values() {
+            if !table.advance_row_allows(source_state, token) {
+                continue;
+            }
+            let isolated = frontier.isolate(Some(source_state));
+            let Some(action) = table.action(source_state, token) else {
+                continue;
+            };
+            match action {
+                Action::Shift(..) => return true,
+                Action::StackShifts(shifts) => {
+                    if !apply_stack_shifts(isolated.clone(), shifts).is_empty() {
+                        return true;
+                    }
+                }
+                Action::GuardedStackShifts(shifts) => {
+                    if stack_may_apply_guarded_shifts(&isolated, shifts) {
+                        return true;
+                    }
+                }
+                Action::Reduce(nt, len) => {
+                    lac_enqueue_reduce(
+                        table,
+                        &isolated,
+                        *nt,
+                        *len as usize,
+                        &mut queue,
+                        &mut visited,
+                    );
+                }
+                Action::Split {
+                    shift,
+                    reduces,
+                    accept,
+                } => {
+                    if *accept && token == EOF {
+                        return true;
+                    }
+                    if shift.is_some() {
+                        return true;
+                    }
+                    for &(nt, len) in reduces {
+                        lac_enqueue_reduce(
+                            table,
+                            &isolated,
+                            nt,
+                            len as usize,
+                            &mut queue,
+                            &mut visited,
+                        );
+                    }
+                }
+                Action::Accept => {
+                    if token == EOF {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
+fn lac_enqueue_reduce(
+    table: &GLRTable,
+    isolated: &ParserGSS,
+    nt: u32,
+    rhs_len: usize,
+    queue: &mut VecDeque<ParserGSS>,
+    visited: &mut FxHashSet<Vec<Vec<u32>>>,
+) {
+    for (base, target, is_replace) in reduce_branches_from_isolated(table, isolated, nt, rhs_len) {
+        let next = if is_replace {
+            base.popn(1).push(target)
+        } else {
+            base.push(target)
+        };
+        lac_enqueue_frontier(next, queue, visited);
+    }
+}
+
+fn lac_enqueue_frontier(
+    frontier: ParserGSS,
+    queue: &mut VecDeque<ParserGSS>,
+    visited: &mut FxHashSet<Vec<Vec<u32>>>,
+) {
+    if frontier.is_empty() {
+        return;
+    }
+    let mut key: Vec<Vec<u32>> = frontier
+        .to_stacks()
+        .into_iter()
+        .map(|(stack, _)| stack)
+        .collect();
+    key.sort();
+    key.dedup();
+    if visited.insert(key) {
+        queue.push_back(frontier);
+    }
 }
 
 fn stack_may_apply_guarded_shifts(stack: &ParserGSS, shifts: &[GuardedStackShift]) -> bool {
@@ -1777,7 +1894,9 @@ mod tests {
     };
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::table::testing::build_test_table;
-    use crate::compiler::glr::table::{Action, GuardedStackShift, StackShift, StackShiftGuard};
+    use crate::compiler::glr::table::{
+        Action, AdmissionMode, GuardedStackShift, StackShift, StackShiftGuard,
+    };
     use crate::ds::bitset::BitSet;
 
     #[test]
@@ -1989,6 +2108,73 @@ mod tests {
     }
 
     #[test]
+    fn lac_admission_rejects_union_reduce_with_no_real_goto() {
+        let token = 0;
+        let nt = 0;
+        let mut table = build_test_table(
+            3,
+            1,
+            &[&[], &[], &[(token, Action::Reduce(nt, 1))]],
+            &[&[], &[], &[]],
+        );
+        table.admission_mode = AdmissionMode::LacSimulation;
+
+        let stack = ParserGSS::from_single_stack(vec![0, 2], TerminalsDisallowed::new());
+
+        assert!(!stack_may_advance_on(&table, &stack, token));
+    }
+
+    #[test]
+    fn lac_admission_accepts_reduce_goto_then_shift_path() {
+        let token = 0;
+        let nt = 0;
+        let mut table = build_test_table(
+            5,
+            1,
+            &[
+                &[],
+                &[],
+                &[(token, Action::Reduce(nt, 1))],
+                &[(token, Action::Shift(4, false))],
+                &[],
+            ],
+            &[&[(nt, (3, false))], &[], &[], &[], &[]],
+        );
+        table.admission_mode = AdmissionMode::LacSimulation;
+
+        let stack = ParserGSS::from_single_stack(vec![0, 2], TerminalsDisallowed::new());
+
+        assert!(stack_may_advance_on(&table, &stack, token));
+    }
+
+    #[test]
+    fn lac_admission_any_uses_same_exactness_as_single_terminal() {
+        let token = 0;
+        let nt = 0;
+        let mut table = build_test_table(
+            5,
+            2,
+            &[
+                &[],
+                &[],
+                &[(token, Action::Reduce(nt, 1))],
+                &[(token, Action::Shift(4, false))],
+                &[],
+            ],
+            &[&[(nt, (3, false))], &[], &[], &[], &[]],
+        );
+        table.admission_mode = AdmissionMode::LacSimulation;
+        let stack = ParserGSS::from_single_stack(vec![0, 2], TerminalsDisallowed::new());
+
+        let mut terminals = BitSet::new(3);
+        terminals.set(token as usize);
+        assert_eq!(
+            stack_may_advance_on(&table, &stack, token),
+            stack_may_advance_on_any(&table, &stack, &terminals)
+        );
+    }
+
+    #[test]
     fn advance_stacks_materializes_single_concrete_path_for_split() {
         let token = 0;
         let nt = 0;
@@ -2147,6 +2333,23 @@ pub(crate) fn stack_may_advance_on_any(
     stack: &ParserGSS,
     terminals: &BitSet,
 ) -> bool {
+    if table.admission_mode == AdmissionMode::LacSimulation {
+        for bit in 0..terminals.len() {
+            if !terminals.contains(bit) {
+                continue;
+            }
+            let terminal = if bit == table.num_terminals as usize {
+                EOF
+            } else {
+                bit as TerminalID
+            };
+            if stack_may_advance_on(table, stack, terminal) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     let top_states = stack.peek_values();
     let mut guarded_terminals = SmallVec::<[TerminalID; 8]>::new();
 

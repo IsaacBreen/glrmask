@@ -38,6 +38,18 @@ pub struct GuardedShiftCellIndex {
     pub unguarded_indices: Box<[u32]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AdmissionMode {
+    RowExact,
+    LacSimulation,
+}
+
+impl Default for AdmissionMode {
+    fn default() -> Self {
+        Self::RowExact
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GLRTable {
     pub action: Vec<ActionRow>,
@@ -48,6 +60,8 @@ pub struct GLRTable {
     pub rules: Vec<Rule>,
     #[serde(default)]
     pub nonterminal_display_names: Vec<String>,
+    #[serde(default)]
+    pub admission_mode: AdmissionMode,
     /// Terminal support used by cheap admission/mask queries.
     ///
     /// `action` is the optimized execution table. Some execution actions are
@@ -490,8 +504,8 @@ impl GLRTable {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    use super::{Action, GLRTable};
     use super::row::{ActionRow, GotoRow};
+    use super::{Action, AdmissionMode, GLRTable};
     use crate::grammar::flat::{NonterminalID, TerminalID};
 
     pub(crate) fn build_test_table(
@@ -516,6 +530,7 @@ pub(crate) mod testing {
             num_rules: 0,
             rules: Vec::new(),
             nonterminal_display_names: Vec::new(),
+            admission_mode: AdmissionMode::RowExact,
             advance,
             forwarded_shifts: Default::default(),
             guarded_shift_index: Vec::new(),

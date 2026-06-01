@@ -431,6 +431,9 @@ fn compile_prepared_with_profile(
                 let table_started_at = Instant::now();
                 let table = GLRTable::build(&analyzed_grammar);
                 let glr_table_ms = elapsed_ms(table_started_at);
+                if std::env::var_os("GLRMASK_STOP_AFTER_GLR_TABLE").is_some() {
+                    panic!("[glrmask] stopped after GLR table build by GLRMASK_STOP_AFTER_GLR_TABLE");
+                }
 
                 let terminal_coloring_started_at = Instant::now();
                 let terminal_coloring = compute_terminal_coloring(&table);
