@@ -1,9 +1,9 @@
 use crate::grammar::expr_nfa::ExprNfaBuilder;
 use crate::import::ast::GrammarExpr;
 
-use super::ast::{ArraySchema, Schema, SchemaKind};
+use super::ast::{ArraySchema, SchemaKind};
 use super::error::ImportResult;
-use super::lower::{choice, lit, never, r, seq, Lowerer};
+use super::lower::{choice, lit, never, seq, Lowerer};
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_array(&mut self, schema: &ArraySchema) -> ImportResult<GrammarExpr> {
@@ -34,12 +34,7 @@ impl<'a> Lowerer<'a> {
         }
 
         let body = if schema.prefix_items.is_empty() {
-            let mut item = self.lower_schema(&schema.items)?;
-            if schema.max_items.is_none()
-                && self.should_extract_homogeneous_array_item(&schema.items)?
-            {
-                item = self.extract_array_item_rule(item);
-            }
+            let item = self.lower_schema(&schema.items)?;
             self.array_body(item, schema.min_items, schema.max_items)
         } else {
             self.lower_tuple_array_body(schema)?
@@ -162,26 +157,6 @@ impl<'a> Lowerer<'a> {
         let rule_name = self.fresh_rule_name("unbounded_scalar_array");
         self.add_terminal_rule(&rule_name, seq(vec![lit("["), body, lit("]")]));
         super::lower::r(&rule_name)
-    }
-
-    fn should_extract_homogeneous_array_item(&self, schema: &Schema) -> ImportResult<bool> {
-        match &schema.kind {
-            SchemaKind::Assertions(assertions) => Ok(assertions.object.is_some()),
-            SchemaKind::Ref(pointer) => {
-                let target = self.resolve_ref_target(pointer)?;
-                Ok(matches!(
-                    &target.kind,
-                    SchemaKind::Assertions(assertions) if assertions.object.is_some()
-                ))
-            }
-            SchemaKind::Any | SchemaKind::Never => Ok(false),
-        }
-    }
-
-    fn extract_array_item_rule(&mut self, item: GrammarExpr) -> GrammarExpr {
-        let rule_name = self.fresh_rule_name("array_item");
-        self.add_nonterminal_rule(&rule_name, item);
-        r(&rule_name)
     }
 
     fn lower_tuple_array_body(&mut self, schema: &ArraySchema) -> ImportResult<GrammarExpr> {
