@@ -1504,6 +1504,124 @@ fn allof_oneof_ref_objects_with_required_sibling_factors_common_object() {
 }
 
 #[test]
+fn oneof_ref_allof_shared_prefix_variants_use_exact_object_variant_body() {
+    let schema = json!({
+        "type": "object",
+        "oneOf": [
+            {"$ref": "#/$defs/plate"},
+            {"$ref": "#/$defs/tipbox"}
+        ],
+        "$defs": {
+            "item": {
+                "type": "object",
+                "required": ["id", "name"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "name": {"type": "string"}
+                }
+            },
+            "plate": {
+                "allOf": [
+                    {"$ref": "#/$defs/item"},
+                    {
+                        "properties": {
+                            "kind": {"const": "plate"},
+                            "residual_volume": {"type": "number"}
+                        },
+                        "required": ["kind", "residual_volume"]
+                    }
+                ]
+            },
+            "tipbox": {
+                "allOf": [
+                    {"$ref": "#/$defs/item"},
+                    {
+                        "properties": {
+                            "kind": {"const": "tipbox"},
+                            "missing_tips": {
+                                "type": "array",
+                                "items": {"type": "string"}
+                            }
+                        },
+                        "required": ["kind"]
+                    }
+                ]
+            }
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    let start_rule = glrm
+        .lines()
+        .find(|line| line.starts_with("nt start ::="))
+        .expect("start rule should be present");
+    assert!(!start_rule.contains(" | "), "{glrm}");
+    assert!(glrm.contains("\\\"kind\\\""), "{glrm}");
+    assert!(glrm.contains("plate"), "{glrm}");
+    assert!(glrm.contains("tipbox"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn oneof_ref_allof_shared_prefix_variants_fall_back_for_mismatched_prefix() {
+    let schema = json!({
+        "type": "object",
+        "oneOf": [
+            {"$ref": "#/$defs/plate"},
+            {"$ref": "#/$defs/tipbox"}
+        ],
+        "$defs": {
+            "itemA": {
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string"}
+                }
+            },
+            "itemB": {
+                "type": "object",
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "number"}
+                }
+            },
+            "plate": {
+                "allOf": [
+                    {"$ref": "#/$defs/itemA"},
+                    {
+                        "properties": {
+                            "kind": {"const": "plate"}
+                        },
+                        "required": ["kind"]
+                    }
+                ]
+            },
+            "tipbox": {
+                "allOf": [
+                    {"$ref": "#/$defs/itemB"},
+                    {
+                        "properties": {
+                            "kind": {"const": "tipbox"}
+                        },
+                        "required": ["kind"]
+                    }
+                ]
+            }
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    let start_rule = glrm
+        .lines()
+        .find(|line| line.starts_with("nt start ::="))
+        .expect("start rule should be present");
+    assert!(start_rule.contains(" | "), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn oversized_pattern_properties_overlap_check_broadens() {
     let schema = json!({
         "type": "object",

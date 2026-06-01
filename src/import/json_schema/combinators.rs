@@ -125,6 +125,11 @@ impl<'a> Lowerer<'a> {
         {
             return self.lower_object(&object);
         }
+        if let Some(expr) =
+            self.try_lower_branch_internal_singleton_string_discriminator_one_of(&branches)?
+        {
+            return Ok(expr);
+        }
         let alternatives = branches
             .iter()
             .map(|branch| self.lower_schema(branch))
@@ -184,6 +189,139 @@ impl<'a> Lowerer<'a> {
             return Ok(Some(object));
         }
         self.try_merge_singleton_string_discriminator_one_of_objects(&branches)
+    }
+
+    fn try_lower_branch_internal_singleton_string_discriminator_one_of(
+        &mut self,
+        branches: &[Schema],
+    ) -> ImportResult<Option<GrammarExpr>> {
+        let Some(branches) =
+            self.branch_internal_singleton_string_discriminator_one_of_branches(branches)?
+        else {
+            return Ok(None);
+        };
+        self.try_lower_open_object_any_of_variants(&branches)
+    }
+
+    fn branch_internal_singleton_string_discriminator_one_of_branches(
+        &self,
+        branches: &[Schema],
+    ) -> ImportResult<Option<Vec<Schema>>> {
+        if branches.len() < 2 {
+            return Ok(None);
+        }
+
+        let mut shared_schema = None;
+        let mut discriminator_name = None;
+        let mut discriminator_literals = Vec::with_capacity(branches.len());
+        let mut lowered_branches = Vec::with_capacity(branches.len());
+
+        for branch in branches {
+            let Some(all_of) = self.resolve_pure_two_part_all_of(branch)? else {
+                return Ok(None);
+            };
+            let Some(shared) = self.object_like_distribution_schema(&all_of[0])? else {
+                return Ok(None);
+            };
+            let Some(variant) = self.object_like_distribution_schema(&all_of[1])? else {
+                return Ok(None);
+            };
+            let Some(variant_object) = plain_object_schema(&variant) else {
+                return Ok(None);
+            };
+            let Some((branch_discriminator_name, branch_discriminator_literal)) =
+                required_singleton_string_discriminator_property(variant_object)
+            else {
+                return Ok(None);
+            };
+
+            if let Some(expected) = &shared_schema {
+                if !schemas_shape_equivalent(expected, &shared) {
+                    return Ok(None);
+                }
+            } else {
+                shared_schema = Some(shared.clone());
+            }
+
+            if let Some(expected) = &discriminator_name {
+                if expected != &branch_discriminator_name {
+                    return Ok(None);
+                }
+            } else {
+                discriminator_name = Some(branch_discriminator_name);
+            }
+
+            discriminator_literals.push(branch_discriminator_literal);
+            if merge_all_of_object_like_schema(&[shared.clone(), variant.clone()]).is_none() {
+                return Ok(None);
+            }
+            lowered_branches.push(Schema::assertions(
+                "<branch-internal-oneOf-object-variant>",
+                SchemaAssertions {
+                    all_of: vec![shared, variant],
+                    ..SchemaAssertions::default()
+                },
+            ));
+        }
+
+        if !singleton_string_literals_are_distinct(&discriminator_literals) {
+            return Ok(None);
+        }
+
+        Ok(Some(lowered_branches))
+    }
+
+    fn resolve_pure_two_part_all_of(&self, schema: &Schema) -> ImportResult<Option<Vec<Schema>>> {
+        self.resolve_pure_two_part_all_of_inner(schema, 0)
+    }
+
+    fn resolve_pure_two_part_all_of_inner(
+        &self,
+        schema: &Schema,
+        ref_depth: usize,
+    ) -> ImportResult<Option<Vec<Schema>>> {
+        if let SchemaKind::Ref(pointer) = &schema.kind {
+            if ref_depth >= 4 {
+                return Ok(None);
+            }
+            return self.resolve_pure_two_part_all_of_inner(
+                self.resolve_ref_target(pointer)?,
+                ref_depth + 1,
+            );
+        }
+
+        let SchemaKind::Assertions(assertions) = &schema.kind else {
+            return Ok(None);
+        };
+        if assertions.const_value.is_some()
+            || assertions.enum_values.is_some()
+            || assertions.object.is_some()
+            || assertions.array.is_some()
+            || assertions.string.is_some()
+            || assertions.number.is_some()
+            || !assertions.any_of.is_empty()
+            || !assertions.one_of.is_empty()
+            || assertions.not.is_some()
+        {
+            return Ok(None);
+        }
+        if let Some(types) = &assertions.types
+            && !types.iter().all(|schema_type| *schema_type == SchemaType::Object)
+        {
+            return Ok(None);
+        }
+        if assertions.all_of.len() == 2 {
+            if is_vacuous_object_schema(&assertions.all_of[0]) {
+                return self.resolve_pure_two_part_all_of_inner(&assertions.all_of[1], ref_depth);
+            }
+            if is_vacuous_object_schema(&assertions.all_of[1]) {
+                return self.resolve_pure_two_part_all_of_inner(&assertions.all_of[0], ref_depth);
+            }
+        }
+        if assertions.all_of.len() != 2 {
+            return Ok(None);
+        }
+        Ok(Some(assertions.all_of.clone()))
     }
 
     fn resolve_singleton_string_discriminator_one_of_object(
@@ -1790,6 +1928,29 @@ fn try_merge_required_singleton_property_one_of_objects(branches: &[Schema]) -> 
         },
     );
     Some(merged)
+}
+
+fn required_singleton_string_discriminator_property(object: &ObjectSchema) -> Option<(String, String)> {
+    if !is_singleton_string_discriminator_object_candidate(object) {
+        return None;
+    }
+
+    let mut discriminator = None;
+    for property in &object.properties {
+        if !object.required.contains(&property.name) {
+            continue;
+        }
+        let Some(literal) = extract_unconstrained_singleton_string_literal(&property.schema) else {
+            continue;
+        };
+        if discriminator
+            .replace((property.name.clone(), literal))
+            .is_some()
+        {
+            return None;
+        }
+    }
+    discriminator
 }
 
 fn extract_unconstrained_singleton_string_literal(schema: &Schema) -> Option<String> {
