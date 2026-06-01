@@ -18,6 +18,84 @@ struct EnvVarGuard {
     original: Option<OsString>,
 }
 
+fn object_constrained_allof_with_nested_oneof_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["_elements"],
+        "properties": {
+            "_elements": {
+                "type": "array",
+                "items": {
+                    "anyOf": [
+                        {"$ref": "#/definitions/file"},
+                        {"$ref": "#/definitions/file_remote_dir"}
+                    ]
+                }
+            }
+        },
+        "definitions": {
+            "file_common": {
+                "type": "object",
+                "required": ["name", "type"],
+                "properties": {
+                    "name": {"type": "string"}
+                }
+            },
+            "file": {
+                "allOf": [
+                    {"$ref": "#/definitions/file_common"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "user": {"type": "string", "minLength": 1},
+                            "group": {"type": "string", "minLength": 1}
+                        },
+                        "oneOf": [
+                            {"$ref": "#/definitions/file_file"},
+                            {"$ref": "#/definitions/file_dir"},
+                            {"$ref": "#/definitions/file_link"}
+                        ]
+                    }
+                ]
+            },
+            "file_file": {
+                "type": "object",
+                "properties": {
+                    "type": {"enum": ["file"]},
+                    "size": {"type": "integer", "minimum": 0},
+                    "mode": {"type": "string", "pattern": "^[0-7]{3,4}$"}
+                }
+            },
+            "file_dir": {
+                "type": "object",
+                "properties": {
+                    "type": {"enum": ["dir"]},
+                    "size": {"type": "integer", "minimum": 0},
+                    "mode": {"type": "string", "pattern": "^[0-4]?[0-7]{3}$"},
+                    "files": {"type": "integer", "minimum": 0}
+                }
+            },
+            "file_link": {
+                "type": "object",
+                "properties": {
+                    "type": {"enum": ["link"]}
+                }
+            },
+            "file_remote_dir": {
+                "allOf": [
+                    {"$ref": "#/definitions/file_common"},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {"enum": ["remote_dir"]}
+                        }
+                    }
+                ]
+            }
+        }
+    })
+}
+
 impl EnvVarGuard {
     fn set(key: &'static str, value: &str) -> Self {
         let original = env::var_os(key);
@@ -2823,6 +2901,55 @@ fn oneof_nested_config_align_enum_ref_branches_with_shared_content_use_object_fa
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let expr = start_expr(&grammar);
     assert!(!matches!(expr, GrammarExpr::Choice(_)), "{expr:?}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn object_constrained_allof_with_nested_oneof_accepts_order_insensitive_common_properties() {
+    let schema = object_constrained_allof_with_nested_oneof_schema();
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"_elements":[{"name":"example.txt","user":"user1","group":"group1","type":"file","size":1024,"mode":"644"}]}"#,
+    ));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"_elements":[{"name":"example.txt","type":"file","user":"user1","group":"group1","size":1024,"mode":"644"}]}"#,
+    ));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"_elements":[{"name":"example_remote_dir","type":"remote_dir"}]}"#,
+    ));
+
+    assert!(count_rules_with_prefix(&grammar, "json_closed_object_body") <= 5, "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn object_constrained_allof_with_nested_oneof_keeps_mismatched_common_property_fallback() {
+    let mut schema = object_constrained_allof_with_nested_oneof_schema();
+    schema["definitions"]["file_file"]["properties"]["name"] = json!({"type": "number"});
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+
+    assert!(!glrm.contains("json_anyof_object_body"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn object_constrained_allof_with_nested_oneof_unsupported_pattern_falls_back() {
+    let mut schema = object_constrained_allof_with_nested_oneof_schema();
+    schema["definitions"]["file"]["allOf"][1]["patternProperties"] =
+        json!({"^x-": {"type": "string"}});
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+
+    assert!(!glrm.contains("json_anyof_object_body"), "{glrm}");
     lower(&grammar).unwrap();
 }
 

@@ -511,6 +511,32 @@ impl<'a> Lowerer<'a> {
         if let Some(object) = self.try_merge_all_of_single_ref_object_branches(&branches)? {
             return self.lower_object(&object);
         }
+        if let Some((kind, distributed)) =
+            self.distribute_all_of_over_nested_object_choice(&branches)?
+        {
+            match kind {
+                ChoiceKind::AnyOf => {
+                    if let Some(expr) = self.try_lower_closed_object_any_of_variants(&distributed, true)? {
+                        return Ok(expr);
+                    }
+                    if let Some(expr) = self.try_lower_open_object_any_of_variants(&distributed)? {
+                        return Ok(expr);
+                    }
+                }
+                ChoiceKind::OneOf => {
+                    if distributed_one_of_objects_have_singleton_discriminator(&distributed) {
+                        if let Some(expr) =
+                            self.try_lower_unordered_open_object_any_of_variants(&distributed)?
+                        {
+                            return Ok(expr);
+                        }
+                        if let Some(expr) = self.try_lower_open_object_any_of_variants(&distributed)? {
+                            return Ok(expr);
+                        }
+                    }
+                }
+            }
+        }
         if let Some((object, any_required_names)) =
             self.try_factor_all_of_required_property_any_of(&branches)?
         {
@@ -2396,7 +2422,106 @@ fn pure_choice_branch(schema: &Schema) -> Option<(ChoiceKind, &[Schema])> {
     }
 }
 
+fn object_branch_with_single_choice(schema: &Schema) -> Option<(ChoiceKind, Schema, &[Schema])> {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return None;
+    };
+    if assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || assertions.array.is_some()
+        || assertions.string.is_some()
+        || assertions.number.is_some()
+        || !assertions.all_of.is_empty()
+        || assertions.not.is_some()
+    {
+        return None;
+    }
+    if let Some(types) = &assertions.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object)
+    {
+        return None;
+    }
+    let object = assertions.object.clone()?;
+    if !object.pattern_properties.is_empty()
+        || !object.property_dependencies.is_empty()
+        || object.property_names.is_some()
+    {
+        return None;
+    }
+    let kind_and_alternatives = match (assertions.any_of.is_empty(), assertions.one_of.is_empty()) {
+        (false, true) => (ChoiceKind::AnyOf, assertions.any_of.as_slice()),
+        (true, false) => (ChoiceKind::OneOf, assertions.one_of.as_slice()),
+        _ => return None,
+    };
+    let sibling = Schema::assertions(
+        "<nested-object-choice-sibling>",
+        SchemaAssertions {
+            types: assertions.types.clone(),
+            object: Some(object),
+            ..SchemaAssertions::default()
+        },
+    );
+    Some((kind_and_alternatives.0, sibling, kind_and_alternatives.1))
+}
+
 impl<'a> Lowerer<'a> {
+    fn distribute_all_of_over_nested_object_choice(
+        &self,
+        branches: &[Schema],
+    ) -> ImportResult<Option<(ChoiceKind, Vec<Schema>)>> {
+        let mut choice_branch = None;
+        for branch in branches {
+            if let Some((kind, object_sibling, alternatives)) = object_branch_with_single_choice(branch)
+            {
+                if choice_branch.is_some() {
+                    return Ok(None);
+                }
+                choice_branch = Some((kind, object_sibling, alternatives.to_vec()));
+            } else if !self.schema_is_object_like_resolved(branch)? {
+                return Ok(None);
+            }
+        }
+
+        let Some((kind, object_sibling, alternatives)) = choice_branch else {
+            return Ok(None);
+        };
+        let mut object_siblings = Vec::new();
+        for branch in branches
+            .iter()
+            .filter(|branch| object_branch_with_single_choice(branch).is_none())
+        {
+            let Some(sibling) = self.object_like_distribution_schema(branch)? else {
+                return Ok(None);
+            };
+            object_siblings.push(sibling);
+        }
+
+        let mut distributed = Vec::with_capacity(alternatives.len());
+        for alternative in alternatives {
+            let Some(alternative) = self.object_like_distribution_schema(&alternative)? else {
+                return Ok(None);
+            };
+            let mut all_of = Vec::with_capacity(object_siblings.len() + 2);
+            all_of.extend(object_siblings.iter().cloned());
+            all_of.push(object_sibling.clone());
+            all_of.push(alternative);
+            if !object_like_all_of_properties_are_compatible(&all_of)
+                || merge_all_of_object_like_schema(&all_of).is_none()
+            {
+                return Ok(None);
+            }
+            distributed.push(Schema::assertions(
+                "<distributed-allOf-nested-object-choice>",
+                SchemaAssertions {
+                    all_of,
+                    ..SchemaAssertions::default()
+                },
+            ));
+        }
+
+        Ok(Some((kind, distributed)))
+    }
+
     fn distribute_all_of_over_single_object_choice(
         &self,
         branches: &[Schema],
@@ -2528,6 +2653,80 @@ fn merge_all_of_object_like_schema(branches: &[Schema]) -> Option<Schema> {
             ..SchemaAssertions::default()
         },
     ))
+}
+
+fn object_like_all_of_properties_are_compatible(branches: &[Schema]) -> bool {
+    let mut properties: BTreeMap<String, Schema> = BTreeMap::new();
+    let mut additional_properties = None;
+
+    for branch in branches {
+        let Some(object_like) = object_like_schema(branch) else {
+            return false;
+        };
+        let SchemaKind::Assertions(assertions) = &object_like.kind else {
+            return false;
+        };
+        let Some(object) = &assertions.object else {
+            continue;
+        };
+        if !object.pattern_properties.is_empty()
+            || !object.property_dependencies.is_empty()
+            || object.property_names.is_some()
+        {
+            return false;
+        }
+        if let Some(existing) = &additional_properties {
+            if !additional_properties_shape_equivalent(existing, &object.additional_properties) {
+                return false;
+            }
+        } else {
+            additional_properties = Some(object.additional_properties.clone());
+        }
+        for property in &object.properties {
+            if let Some(existing) = properties.get(&property.name) {
+                if !schemas_shape_equivalent(existing, &property.schema) {
+                    return false;
+                }
+            } else {
+                properties.insert(property.name.clone(), property.schema.clone());
+            }
+        }
+    }
+
+    true
+}
+
+fn distributed_one_of_objects_have_singleton_discriminator(branches: &[Schema]) -> bool {
+    let mut discriminator_name = None;
+    let mut discriminator_literals = Vec::with_capacity(branches.len());
+
+    for branch in branches {
+        let SchemaKind::Assertions(assertions) = &branch.kind else {
+            return false;
+        };
+        if !assertions.clone_without_combinators().is_empty() {
+            return false;
+        }
+        let Some(merged) = merge_all_of_object_like_schema(&assertions.all_of) else {
+            return false;
+        };
+        let Some(object) = plain_object_schema(&merged) else {
+            return false;
+        };
+        let Some((name, literal)) = required_singleton_string_discriminator_property(object) else {
+            return false;
+        };
+        if let Some(expected) = &discriminator_name {
+            if expected != &name {
+                return false;
+            }
+        } else {
+            discriminator_name = Some(name);
+        }
+        discriminator_literals.push(literal);
+    }
+
+    discriminator_name.is_some() && singleton_string_literals_are_distinct(&discriminator_literals)
 }
 
 fn object_like_schema(schema: &Schema) -> Option<Schema> {

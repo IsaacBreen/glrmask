@@ -13,7 +13,7 @@ use super::combinators::{
 };
 use super::error::{ImportResult, SchemaImportError};
 use super::lower::{
-    choice, lit, never, r, seq, Lowerer, JSON_ARRAY_RULE, JSON_BOOL_RULE,
+    choice, lit, lit_bytes, never, r, seq, Lowerer, JSON_ARRAY_RULE, JSON_BOOL_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
     JSON_ADDITIONAL_KEY_COLON_SHARED_RULE, JSON_NULL_RULE,
     JSON_NUMBER_RULE, JSON_OBJECT_RULE, JSON_STRING_RULE, JSON_VALUE_RULE,
@@ -101,6 +101,13 @@ struct AnyOfObjectState {
     has_content: bool,
     phase: AnyOfObjectPhase,
     shadow_owner: ShadowOwnerState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct AnyOfObjectUnorderedState {
+    variant_idx: u16,
+    seen_mask: u64,
+    has_content: bool,
 }
 
 fn is_obviously_object_valued_property(schema: &Schema) -> bool {
@@ -289,6 +296,32 @@ impl<'a> Lowerer<'a> {
         }
 
         self.lower_open_any_of_object_variants_expr_nfa(
+            &variants,
+            include_untyped_non_object_alts,
+        )
+    }
+
+    pub(crate) fn try_lower_unordered_open_object_any_of_variants(
+        &mut self,
+        branches: &[Schema],
+    ) -> ImportResult<Option<GrammarExpr>> {
+        if branches.len() < 2 {
+            return Ok(None);
+        }
+
+        let mut variants = Vec::with_capacity(branches.len());
+        let mut include_untyped_non_object_alts = false;
+        for branch in branches {
+            let Some((variant, branch_requires_untyped_non_object_alts)) =
+                self.collect_open_any_of_object_variant(branch)?
+            else {
+                return Ok(None);
+            };
+            include_untyped_non_object_alts |= branch_requires_untyped_non_object_alts;
+            variants.push(variant);
+        }
+
+        self.lower_unordered_open_any_of_object_variants_expr_nfa(
             &variants,
             include_untyped_non_object_alts,
         )
@@ -2185,6 +2218,154 @@ impl<'a> Lowerer<'a> {
         Ok(Some(object_expr))
     }
 
+    fn lower_unordered_open_any_of_object_variants_expr_nfa(
+        &mut self,
+        variants: &[AnyOfObjectVariant],
+        include_untyped_non_object_alts: bool,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        if variants.is_empty()
+            || variants
+                .iter()
+                .any(|variant| {
+                    variant.items.len() > 63
+                        || !variant.pattern_pairs.is_empty()
+                        || !variant.pattern_keys.is_empty()
+                })
+        {
+            return Ok(None);
+        }
+
+        let item_symbols = variants
+            .iter()
+            .map(|variant| {
+                variant
+                    .items
+                    .iter()
+                    .map(|item| {
+                        Ok((
+                            item.key.clone(),
+                            item.required,
+                            [
+                                self.lower_literal_key_colon(&item.key),
+                                item.value_identity
+                                    .as_deref()
+                                    .and_then(singleton_string_identity_literal_expr)
+                                    .unwrap_or_else(|| item.value_expr.clone()),
+                            ],
+                        ))
+                    })
+                    .collect::<ImportResult<Vec<_>>>()
+            })
+            .collect::<ImportResult<Vec<_>>>()?;
+        let required_masks = item_symbols
+            .iter()
+            .map(|items| {
+                items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, (_, required, _))| required.then_some(1u64 << idx))
+                    .fold(0u64, |mask, bit| mask | bit)
+            })
+            .collect::<Vec<_>>();
+
+        let mut builder = ExprNfaBuilder::new();
+        let accept = builder.add_state();
+        builder.set_accepting(accept);
+        let mut state_ids = BTreeMap::<AnyOfObjectUnorderedState, u32>::new();
+        let mut queue = VecDeque::<AnyOfObjectUnorderedState>::new();
+        for (variant_idx, _) in variants.iter().enumerate() {
+            let state = AnyOfObjectUnorderedState {
+                variant_idx: variant_idx as u16,
+                seen_mask: 0,
+                has_content: false,
+            };
+            let state_id = builder.add_state();
+            builder.add_epsilon(builder.start_state(), state_id);
+            state_ids.insert(state, state_id);
+            queue.push_back(state);
+        }
+
+        while let Some(state) = queue.pop_front() {
+            if state_ids.len() > ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES {
+                return Ok(None);
+            }
+
+            let state_id = state_ids[&state];
+            let variant_idx = state.variant_idx as usize;
+            let variant = &variants[variant_idx];
+            if (state.seen_mask & required_masks[variant_idx]) == required_masks[variant_idx] {
+                builder.add_epsilon(state_id, accept);
+            }
+
+            for (item_idx, (_, _, symbols)) in item_symbols[variant_idx].iter().enumerate() {
+                let item_bit = 1u64 << item_idx;
+                if state.seen_mask & item_bit != 0 {
+                    continue;
+                }
+                let next_state = AnyOfObjectUnorderedState {
+                    variant_idx: state.variant_idx,
+                    seen_mask: state.seen_mask | item_bit,
+                    has_content: true,
+                };
+                let next_state_id =
+                    unordered_open_any_of_state_id(&mut builder, &mut state_ids, &mut queue, next_state);
+                let mut transition_symbols = Vec::new();
+                if state.has_content {
+                    transition_symbols.push(self.item_separator_expr());
+                }
+                transition_symbols.extend(symbols.iter().cloned());
+                Self::add_expr_nfa_symbol_path(
+                    &mut builder,
+                    state_id,
+                    transition_symbols,
+                    next_state_id,
+                );
+            }
+
+            if let Some(additional_value_expr) = &variant.additional_value_expr {
+                let next_state = AnyOfObjectUnorderedState {
+                    variant_idx: state.variant_idx,
+                    seen_mask: state.seen_mask,
+                    has_content: true,
+                };
+                let next_state_id =
+                    unordered_open_any_of_state_id(&mut builder, &mut state_ids, &mut queue, next_state);
+                let mut transition_symbols = Vec::new();
+                if state.has_content {
+                    transition_symbols.push(self.item_separator_expr());
+                }
+                transition_symbols.push(
+                    self.lower_additional_key_colon(&variant.fixed_keys, &variant.pattern_keys)?,
+                );
+                transition_symbols.push(additional_value_expr.clone());
+                Self::add_expr_nfa_symbol_path(
+                    &mut builder,
+                    state_id,
+                    transition_symbols,
+                    next_state_id,
+                );
+            }
+        }
+
+        let rule_name = self.fresh_rule_name("json_anyof_object_body");
+        let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
+        self.add_nonterminal_rule(&rule_name, body);
+
+        let object_expr = seq(vec![lit("{"), r(&rule_name), lit("}")]);
+        if include_untyped_non_object_alts {
+            return Ok(Some(choice(vec![
+                object_expr,
+                r(JSON_ARRAY_RULE),
+                r(JSON_STRING_RULE),
+                r(JSON_NUMBER_RULE),
+                r(JSON_BOOL_RULE),
+                r(JSON_NULL_RULE),
+            ])));
+        }
+
+        Ok(Some(object_expr))
+    }
+
     fn lower_fixed_object_body_exprnfa_without_group(
         &mut self,
         items: &[ObjectItem],
@@ -3004,8 +3185,39 @@ impl<'a> Lowerer<'a> {
 fn exact_property_value_identity(schema: &Schema) -> Option<String> {
     match &schema.kind {
         SchemaKind::Ref(pointer) => Some(format!("ref:{pointer}")),
+        SchemaKind::Assertions(assertions) => {
+            let literal = match assertions.enum_values.as_deref() {
+                Some([serde_json::Value::String(value)]) => Some(value),
+                _ => None,
+            }?;
+            if assertions.const_value.is_none()
+                && assertions.object.is_none()
+                && assertions.array.is_none()
+                && assertions.string.is_none()
+                && assertions.number.is_none()
+                && assertions.not.is_none()
+                && assertions.any_of.is_empty()
+                && assertions.one_of.is_empty()
+                && assertions.all_of.is_empty()
+                && assertions.types.as_ref().is_none_or(|types| {
+                    types.iter().all(|schema_type| *schema_type == SchemaType::String)
+                })
+            {
+                Some(format!(
+                    "string:{}",
+                    serde_json::to_string(literal).unwrap_or_else(|_| "\"\"".to_string())
+                ))
+            } else {
+                None
+            }
+        }
         _ => None,
     }
+}
+
+fn singleton_string_identity_literal_expr(identity: &str) -> Option<GrammarExpr> {
+    let encoded = identity.strip_prefix("string:")?;
+    Some(lit_bytes(encoded.as_bytes().to_vec()))
 }
 
 fn plain_object_schema_for_closed_any_of(schema: &Schema) -> Option<&ObjectSchema> {
@@ -3090,6 +3302,22 @@ fn merged_closed_any_of_state_id(
     } else {
         let id = builder.add_state();
         state_ids.insert(state.clone(), id);
+        queue.push_back(state);
+        id
+    }
+}
+
+fn unordered_open_any_of_state_id(
+    builder: &mut ExprNfaBuilder,
+    state_ids: &mut BTreeMap<AnyOfObjectUnorderedState, u32>,
+    queue: &mut VecDeque<AnyOfObjectUnorderedState>,
+    state: AnyOfObjectUnorderedState,
+) -> u32 {
+    if let Some(&existing) = state_ids.get(&state) {
+        existing
+    } else {
+        let id = builder.add_state();
+        state_ids.insert(state, id);
         queue.push_back(state);
         id
     }
