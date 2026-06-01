@@ -114,6 +114,7 @@ pub(crate) struct ObjectSchema {
     pub(crate) min_properties: usize,
     pub(crate) max_properties: Option<usize>,
     pub(crate) pattern_properties: Vec<PatternPropertySchema>,
+    pub(crate) property_names: Option<Schema>,
     pub(crate) additional_properties: AdditionalProperties,
 }
 
@@ -125,6 +126,7 @@ impl Default for ObjectSchema {
             min_properties: 0,
             max_properties: None,
             pattern_properties: Vec::new(),
+            property_names: None,
             additional_properties: AdditionalProperties::AllowAny,
         }
     }

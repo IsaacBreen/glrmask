@@ -2407,6 +2407,129 @@ fn anyof_property_not_mutual_exclusion_lowers_as_exclusive_group() {
 }
 
 #[test]
+fn property_names_inline_pattern_lowers() {
+    let schema = json!({
+        "type": "object",
+        "propertyNames": {
+            "pattern": "^[a-z]+$"
+        },
+        "additionalProperties": {
+            "type": "string"
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#"{"name":"ok"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"Name":"ok"}"#));
+}
+
+#[test]
+fn property_names_local_ref_pattern_lowers() {
+    let schema = json!({
+        "$defs": {
+            "token": {
+                "type": "string",
+                "pattern": "^[-_a-zA-Z0-9]+$"
+            }
+        },
+        "type": "object",
+        "properties": {
+            "networks": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "string"
+                },
+                "propertyNames": {
+                    "$ref": "#/$defs/token"
+                }
+            }
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#"{"networks":{"prod_1":"ok"}}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"networks":{"prod-1!":"ok"}}"#));
+}
+
+#[test]
+fn property_names_pattern_applies_to_additional_properties_keys() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"}
+        },
+        "propertyNames": {
+            "pattern": "^[a-z]+$"
+        },
+        "additionalProperties": {
+            "type": "string"
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#"{"name":"ok","alias":"ok"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"name":"ok","Alias":"ok"}"#));
+}
+
+#[test]
+fn property_names_non_pattern_schema_still_errors() {
+    let schema = json!({
+        "type": "object",
+        "propertyNames": {
+            "type": "string"
+        },
+        "additionalProperties": {
+            "type": "string"
+        }
+    });
+
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("string pattern schemas"), "{error}");
+}
+
+#[test]
+fn property_names_local_ref_without_explicit_string_pattern_still_errors() {
+    let schema = json!({
+        "$defs": {
+            "token": {
+                "type": "string"
+            }
+        },
+        "type": "object",
+        "propertyNames": {
+            "$ref": "#/$defs/token"
+        },
+        "additionalProperties": {
+            "type": "string"
+        }
+    });
+
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("string pattern schemas"), "{error}");
+}
+
+#[test]
+fn property_names_fixed_literal_key_outside_pattern_errors() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "Bad-Key": {"type": "string"}
+        },
+        "propertyNames": {
+            "pattern": "^[a-z]+$"
+        },
+        "additionalProperties": false
+    });
+
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("does not allow fixed property"), "{error}");
+}
+
+#[test]
 fn enum_and_const_lower_to_exact_json_literals() {
     let schema = json!({"enum": [null, true, "ready", 7]});
     let grammar = schema_to_named_grammar(&schema).unwrap();

@@ -390,6 +390,7 @@ impl<'a> Lowerer<'a> {
         exclusive_group: Option<(&BTreeSet<String>, bool)>,
     ) -> ImportResult<GrammarExpr> {
         let normalized = self.object_with_required_synthetic_properties(schema)?;
+        let property_name_pattern = self.resolve_property_names_pattern(&normalized)?;
         if any_required_names.is_none()
             && exclusive_group.is_none()
             && is_unconstrained_open_object_schema(&normalized)
@@ -469,6 +470,15 @@ impl<'a> Lowerer<'a> {
             .iter()
             .map(|property| property.name.clone())
             .collect::<BTreeSet<_>>();
+        if let Some(pattern) = &property_name_pattern {
+            for key in &fixed_names {
+                if !property_name_matches_pattern(pattern, key)? {
+                    return Err(SchemaImportError::new(format!(
+                        "propertyNames pattern {pattern:?} does not allow fixed property {key:?}"
+                    )));
+                }
+            }
+        }
         let mut items = normalized
             .properties
             .iter()
@@ -518,13 +528,21 @@ impl<'a> Lowerer<'a> {
             let tail_pair = match &normalized.additional_properties {
                 AdditionalProperties::Deny => None,
                 AdditionalProperties::AllowAny => Some(seq(vec![
-                    self.lower_additional_key_colon(&fixed_names, &[])?,
+                    self.lower_object_additional_key_colon(
+                        &fixed_names,
+                        &[],
+                        property_name_pattern.as_deref(),
+                    )?,
                     r(JSON_VALUE_RULE),
                 ])),
                 AdditionalProperties::Schema(value_schema) => {
                     let value = self.lower_schema(value_schema)?;
                     Some(seq(vec![
-                        self.lower_additional_key_colon(&fixed_names, &[])?,
+                        self.lower_object_additional_key_colon(
+                            &fixed_names,
+                            &[],
+                            property_name_pattern.as_deref(),
+                        )?,
                         value,
                     ]))
                 }
@@ -549,6 +567,12 @@ impl<'a> Lowerer<'a> {
             return Err(SchemaImportError::new(
                 "grouped anyOf object factoring requires fixed object properties without patternProperties"
                     .to_string(),
+            ));
+        }
+
+        if property_name_pattern.is_some() && !normalized.pattern_properties.is_empty() {
+            return Err(SchemaImportError::new(
+                "propertyNames is only supported without patternProperties".to_string(),
             ));
         }
 
@@ -577,7 +601,11 @@ impl<'a> Lowerer<'a> {
         match &normalized.additional_properties {
             AdditionalProperties::AllowAny => {
                 tail_pairs.push(seq(vec![
-                    self.lower_additional_key_colon(&fixed_names, &pattern_keys)?,
+                    self.lower_object_additional_key_colon(
+                        &fixed_names,
+                        &pattern_keys,
+                        property_name_pattern.as_deref(),
+                    )?,
                     r(JSON_VALUE_RULE),
                 ]));
             }
@@ -585,7 +613,11 @@ impl<'a> Lowerer<'a> {
             AdditionalProperties::Schema(value_schema) => {
                 let value = self.lower_schema(value_schema)?;
                 tail_pairs.push(seq(vec![
-                    self.lower_additional_key_colon(&fixed_names, &pattern_keys)?,
+                    self.lower_object_additional_key_colon(
+                        &fixed_names,
+                        &pattern_keys,
+                        property_name_pattern.as_deref(),
+                    )?,
                     value,
                 ]));
             }
@@ -2493,6 +2525,95 @@ impl<'a> Lowerer<'a> {
             ]));
         }
         self.lower_schema(schema)
+    }
+
+    fn resolve_property_names_pattern(
+        &self,
+        schema: &ObjectSchema,
+    ) -> ImportResult<Option<String>> {
+        let Some(property_names) = &schema.property_names else {
+            return Ok(None);
+        };
+
+        let resolved = match &property_names.kind {
+            SchemaKind::Ref(pointer) => self.resolve_ref_target(pointer)?,
+            _ => property_names,
+        };
+        let SchemaKind::Assertions(assertions) = &resolved.kind else {
+            return Err(SchemaImportError::at(
+                &resolved.location,
+                "propertyNames is only supported for inline/local-ref string pattern schemas",
+            ));
+        };
+
+        if assertions.const_value.is_some()
+            || assertions.enum_values.is_some()
+            || assertions.object.is_some()
+            || assertions.array.is_some()
+            || assertions.number.is_some()
+            || !assertions.any_of.is_empty()
+            || !assertions.one_of.is_empty()
+            || !assertions.all_of.is_empty()
+            || assertions.not.is_some()
+        {
+            return Err(SchemaImportError::at(
+                &resolved.location,
+                "propertyNames is only supported for inline/local-ref string pattern schemas",
+            ));
+        }
+        if let Some(types) = &assertions.types
+            && !types.iter().all(|schema_type| *schema_type == SchemaType::String)
+        {
+            return Err(SchemaImportError::at(
+                &resolved.location,
+                "propertyNames is only supported for inline/local-ref string pattern schemas",
+            ));
+        }
+
+        let Some(string) = &assertions.string else {
+            return Err(SchemaImportError::at(
+                &resolved.location,
+                "propertyNames is only supported for inline/local-ref string pattern schemas",
+            ));
+        };
+        if string.min_length != 0 || string.max_length.is_some() || string.format.is_some() {
+            return Err(SchemaImportError::at(
+                &resolved.location,
+                "propertyNames is only supported for inline/local-ref string pattern schemas",
+            ));
+        }
+
+        let Some(pattern) = &string.pattern else {
+            return Err(SchemaImportError::at(
+                &resolved.location,
+                "propertyNames is only supported for inline/local-ref string pattern schemas",
+            ));
+        };
+        Ok(Some(pattern.clone()))
+    }
+
+    fn lower_object_additional_key_colon(
+        &mut self,
+        fixed_keys: &BTreeSet<String>,
+        local_patterns: &[String],
+        property_name_pattern: Option<&str>,
+    ) -> ImportResult<GrammarExpr> {
+        let Some(pattern) = property_name_pattern else {
+            return self.lower_additional_key_colon(fixed_keys, local_patterns);
+        };
+
+        let mut expr = self.lower_pattern_key_colon_terminal(pattern)?;
+        if !fixed_keys.is_empty() {
+            let excluded = fixed_keys
+                .iter()
+                .map(|key| self.lower_literal_key_colon(key))
+                .collect::<Vec<_>>();
+            expr = GrammarExpr::Exclude {
+                expr: Box::new(expr),
+                exclude: Box::new(choice(excluded)),
+            };
+        }
+        Ok(expr)
     }
 
     fn object_with_required_synthetic_properties(

@@ -423,8 +423,7 @@ fn validate_supported_keys(object: &Map<String, Value>, location: &str) -> Impor
 fn is_unsupported_validation_key(key: &str) -> bool {
     matches!(
         key,
-        "propertyNames"
-            | "uniqueItems"
+        "uniqueItems"
             | "contains"
             | "minContains"
             | "maxContains"
@@ -518,6 +517,7 @@ fn should_load_object_assertion(object: &Map<String, Value>, types: Option<&[Sch
             "properties",
             "required",
             "patternProperties",
+            "propertyNames",
             "additionalProperties",
             "minProperties",
         ]
@@ -594,6 +594,8 @@ fn load_object_keywords(
             });
         }
     }
+
+    schema.property_names = load_schema_member(object, "propertyNames", location)?;
 
     if let Some(additional) = object.get("additionalProperties") {
         schema.additional_properties = match additional {
