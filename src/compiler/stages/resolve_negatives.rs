@@ -1,13 +1,13 @@
 //! Resolve negative parser-state labels in weighted NWAs.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
-use crate::automata::weighted::nwa::{NWA, NWAState};
+use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
 use crate::ds::weight::Weight;
 
@@ -17,6 +17,46 @@ type QueryWeights = Vec<Option<FxHashMap<QueryKey, Weight>>>;
 type QueuedQueries = Vec<SmallQueuedQueries>;
 type DerivedEpsilons = Vec<Option<FxHashMap<u32, Weight>>>;
 type SubsetMemo = FxHashMap<(usize, usize), bool>;
+
+pub(crate) trait ResolveNegativesView {
+    fn state_count(&self) -> usize;
+    fn final_weight(&self, state: u32) -> Option<&Weight>;
+    fn epsilons(&self, state: u32) -> &[(u32, Weight)];
+    fn transitions(&self, state: u32) -> &BTreeMap<i32, Vec<(u32, Weight)>>;
+}
+
+struct NwaResolveView<'a> {
+    nwa: &'a NWA,
+}
+
+impl ResolveNegativesView for NwaResolveView<'_> {
+    fn state_count(&self) -> usize {
+        self.nwa.states().len()
+    }
+
+    fn final_weight(&self, state: u32) -> Option<&Weight> {
+        self.nwa
+            .states()
+            .get(state as usize)
+            .and_then(|entry| entry.final_weight.as_ref())
+    }
+
+    fn epsilons(&self, state: u32) -> &[(u32, Weight)] {
+        self.nwa
+            .states()
+            .get(state as usize)
+            .map(|entry| entry.epsilons.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn transitions(&self, state: u32) -> &BTreeMap<i32, Vec<(u32, Weight)>> {
+        self.nwa
+            .states()
+            .get(state as usize)
+            .map(|entry| &entry.transitions)
+            .expect("resolve_negatives state id out of range")
+    }
+}
 
 #[derive(Clone, Default)]
 enum SmallQueuedQueries {
@@ -436,19 +476,27 @@ fn collect_non_empty_derived_epsilons(
     result
 }
 
+fn compute_cancellations_range_from_view<V: ResolveNegativesView>(
+    view: &V,
+    range: std::ops::Range<u32>,
+) -> Vec<(u32, u32, Weight)> {
+    compute_cancellations_range_inner(view, range, None)
+}
+
 pub(crate) fn compute_cancellations_range(
     nwa: &NWA,
     range: std::ops::Range<u32>,
 ) -> Vec<(u32, u32, Weight)> {
-    compute_cancellations_range_inner(nwa, range, None)
+    let view = NwaResolveView { nwa };
+    compute_cancellations_range_from_view(&view, range)
 }
 
-fn compute_cancellations_range_inner(
-    nwa: &NWA,
+fn compute_cancellations_range_inner<V: ResolveNegativesView>(
+    view: &V,
     range: std::ops::Range<u32>,
     foreign_derived: Option<&DerivedEpsilons>,
 ) -> Vec<(u32, u32, Weight)> {
-    let state_count = nwa.states().len() as u32;
+    let state_count = view.state_count() as u32;
     if state_count == 0 {
         return Vec::new();
     }
@@ -464,7 +512,7 @@ fn compute_cancellations_range_inner(
             continue;
         }
 
-        for (&label, targets) in nwa.states()[source_state as usize].transitions.range(..0) {
+        for (&label, targets) in view.transitions(source_state).range(..0) {
             let positive_label = negative_to_positive_label(label);
 
             for (target_state, weight) in targets {
@@ -509,10 +557,7 @@ fn compute_cancellations_range_inner(
             foreign_derived,
         );
 
-        if let Some(positive_targets) = nwa.states()[current_state as usize]
-            .transitions
-            .get(&positive_label)
-        {
+        if let Some(positive_targets) = view.transitions(current_state).get(&positive_label) {
             for (target_state, edge_weight) in positive_targets {
                 if *target_state < state_count {
                     extend_derived_epsilons(
@@ -531,10 +576,7 @@ fn compute_cancellations_range_inner(
             }
         }
 
-        if let Some(default_targets) = nwa.states()[current_state as usize]
-            .transitions
-            .get(&DEFAULT_LABEL)
-        {
+        if let Some(default_targets) = view.transitions(current_state).get(&DEFAULT_LABEL) {
             for (target_state, edge_weight) in default_targets {
                 if *target_state < state_count {
                     extend_derived_epsilons(
@@ -553,7 +595,7 @@ fn compute_cancellations_range_inner(
             }
         }
 
-        for (target_state, epsilon_weight) in &nwa.states()[current_state as usize].epsilons {
+        for (target_state, epsilon_weight) in view.epsilons(current_state) {
             if *target_state >= state_count {
                 continue;
             }
@@ -592,13 +634,15 @@ fn is_live_finality_edge(target_state: u32, weight: &Weight, state_count: usize)
     (target_state as usize) < state_count && !weight.is_empty()
 }
 
-fn build_finality_preds_and_outdegree<'a>(nwa: &'a NWA) -> (Vec<Vec<PredEdge<'a>>>, Vec<usize>) {
-    let state_count = nwa.states().len();
+fn build_finality_preds_and_outdegree<'a, V: ResolveNegativesView>(
+    view: &'a V,
+) -> (Vec<Vec<PredEdge<'a>>>, Vec<usize>) {
+    let state_count = view.state_count();
     let mut preds = vec![Vec::<PredEdge<'a>>::new(); state_count];
     let mut outdegree = vec![0usize; state_count];
 
-    for (from_state, state) in nwa.states().iter().enumerate() {
-        for (target_state, weight) in &state.epsilons {
+    for from_state in 0..state_count {
+        for (target_state, weight) in view.epsilons(from_state as u32) {
             if !is_live_finality_edge(*target_state, weight, state_count) {
                 continue;
             }
@@ -609,7 +653,7 @@ fn build_finality_preds_and_outdegree<'a>(nwa: &'a NWA) -> (Vec<Vec<PredEdge<'a>
             outdegree[from_state] += 1;
         }
 
-        for (&label, targets) in &state.transitions {
+        for (&label, targets) in view.transitions(from_state as u32) {
             if label != DEFAULT_LABEL && !is_negative_label(label) {
                 continue;
             }
@@ -657,13 +701,13 @@ fn build_finality_reverse_topo_order(
     (reverse_topo_order.len() == state_count).then_some(reverse_topo_order)
 }
 
-fn collect_initial_final_weights(nwa: &NWA) -> Vec<Option<GuardedFinalWeight>> {
-    nwa.states()
-        .iter()
+fn collect_initial_final_weights<V: ResolveNegativesView>(
+    view: &V,
+) -> Vec<Option<GuardedFinalWeight>> {
+    (0..view.state_count())
         .map(|state| {
-            state
-                .final_weight
-                .clone()
+            view.final_weight(state as u32)
+                .cloned()
                 .and_then(GuardedFinalWeight::initial)
         })
         .collect()
@@ -698,13 +742,12 @@ fn propagate_final_weights_to_predecessors(
 }
 
 fn apply_finality_fixpoint_worklist(
-    nwa: &NWA,
+    state_count: usize,
     preds: &[Vec<PredEdge<'_>>],
     reachable_final_weights: &mut [Option<GuardedFinalWeight>],
 ) {
-    let n = nwa.states().len();
     let mut worklist = VecDeque::<usize>::new();
-    let mut queued = vec![false; n];
+    let mut queued = vec![false; state_count];
 
     for (state_id, final_weight) in reachable_final_weights.iter().enumerate() {
         if final_weight.is_some() {
@@ -762,14 +805,16 @@ fn apply_finality_fixpoint_acyclic(
     }
 }
 
-pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
-    let n = nwa.states().len();
+fn compute_reachable_final_weights<V: ResolveNegativesView>(
+    view: &V,
+) -> Vec<Option<GuardedFinalWeight>> {
+    let n = view.state_count();
     if n == 0 {
-        return;
+        return Vec::new();
     }
-    let (preds, outdegree) = build_finality_preds_and_outdegree(nwa);
+    let (preds, outdegree) = build_finality_preds_and_outdegree(view);
     let reverse_topo_order = build_finality_reverse_topo_order(&preds, outdegree);
-    let mut reachable_final_weights = collect_initial_final_weights(nwa);
+    let mut reachable_final_weights = collect_initial_final_weights(view);
 
     if let Some(reverse_topo_order) = reverse_topo_order.as_deref() {
         apply_finality_fixpoint_acyclic(
@@ -778,9 +823,17 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
             reverse_topo_order,
         );
     } else {
-        apply_finality_fixpoint_worklist(nwa, &preds, &mut reachable_final_weights);
+        apply_finality_fixpoint_worklist(n, &preds, &mut reachable_final_weights);
     }
 
+    reachable_final_weights
+}
+
+pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
+    let reachable_final_weights = {
+        let view = NwaResolveView { nwa };
+        compute_reachable_final_weights(&view)
+    };
     write_final_weights(nwa, reachable_final_weights);
 }
 
@@ -790,29 +843,33 @@ pub(crate) fn remove_negative_transitions(nwa: &mut NWA) {
     }
 }
 
-fn has_live_final_weight(state: &NWAState) -> bool {
-    state.final_weight.as_ref().is_some_and(|weight| !weight.is_empty())
+fn has_live_final_weight<V: ResolveNegativesView>(view: &V, state: u32) -> bool {
+    view.final_weight(state)
+        .is_some_and(|weight| !weight.is_empty())
 }
 
-fn has_non_default_transitions(state: &NWAState) -> bool {
-    state
-        .transitions
+fn has_non_default_transitions<V: ResolveNegativesView>(view: &V, state: u32) -> bool {
+    view.transitions(state)
         .iter()
         .any(|(label, targets)| *label != DEFAULT_LABEL && !targets.is_empty())
 }
 
-fn is_terminal_shape_candidate(state: &NWAState) -> bool {
-    !has_non_default_transitions(state)
-        && state.epsilons.is_empty()
-        && has_live_final_weight(state)
+fn is_terminal_shape_candidate<V: ResolveNegativesView>(view: &V, state: u32) -> bool {
+    !has_non_default_transitions(view, state)
+        && view.epsilons(state).is_empty()
+        && has_live_final_weight(view, state)
 }
 
-fn default_targets_are_terminal_and_redundant(state: &NWAState, terminal_states: &[bool]) -> bool {
-    let Some(final_weight) = state.final_weight.as_ref().filter(|weight| !weight.is_empty()) else {
+fn default_targets_are_terminal_and_redundant<V: ResolveNegativesView>(
+    view: &V,
+    state: u32,
+    terminal_states: &[bool],
+) -> bool {
+    let Some(final_weight) = view.final_weight(state).filter(|weight| !weight.is_empty()) else {
         return false;
     };
 
-    match state.transitions.get(&DEFAULT_LABEL) {
+    match view.transitions(state).get(&DEFAULT_LABEL) {
         None => true,
         Some(targets) => targets.iter().all(|(target, _)| {
             terminal_states
@@ -823,15 +880,17 @@ fn default_targets_are_terminal_and_redundant(state: &NWAState, terminal_states:
     }
 }
 
-fn grow_terminal_state_set(nwa: &NWA, terminal_states: &mut [bool]) {
+fn grow_terminal_state_set<V: ResolveNegativesView>(view: &V, terminal_states: &mut [bool]) {
     loop {
         let mut changed = false;
-        for (state_id, state) in nwa.states().iter().enumerate() {
-            if terminal_states[state_id] || !is_terminal_shape_candidate(state) {
+        for state_id in 0..view.state_count() {
+            if terminal_states[state_id]
+                || !is_terminal_shape_candidate(view, state_id as u32)
+            {
                 continue;
             }
 
-            if default_targets_are_terminal_and_redundant(state, terminal_states) {
+            if default_targets_are_terminal_and_redundant(view, state_id as u32, terminal_states) {
                 terminal_states[state_id] = true;
                 changed = true;
             }
@@ -841,6 +900,18 @@ fn grow_terminal_state_set(nwa: &NWA, terminal_states: &mut [bool]) {
             break;
         }
     }
+}
+
+fn compute_terminal_state_set<V: ResolveNegativesView>(view: &V) -> Vec<bool> {
+    let mut terminal_states: Vec<bool> = (0..view.state_count())
+        .map(|state| {
+            is_terminal_shape_candidate(view, state as u32)
+                && !view.transitions(state as u32).contains_key(&DEFAULT_LABEL)
+        })
+        .collect();
+
+    grow_terminal_state_set(view, &mut terminal_states);
+    terminal_states
 }
 
 fn prune_terminal_default_targets(nwa: &mut NWA, terminal_states: &[bool]) {
@@ -862,13 +933,10 @@ fn prune_terminal_default_targets(nwa: &mut NWA, terminal_states: &[bool]) {
 }
 
 pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
-    let mut terminal_states: Vec<bool> = nwa
-        .states()
-        .iter()
-        .map(|state| is_terminal_shape_candidate(state) && !state.transitions.contains_key(&DEFAULT_LABEL))
-        .collect();
-
-    grow_terminal_state_set(nwa, &mut terminal_states);
+    let terminal_states = {
+        let view = NwaResolveView { nwa };
+        compute_terminal_state_set(&view)
+    };
     prune_terminal_default_targets(nwa, &terminal_states);
 }
 
