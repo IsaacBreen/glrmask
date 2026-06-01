@@ -59,6 +59,11 @@ struct ParserDwaDeterminizeDetail {
     closure_cache_misses: usize,
     intersection_scan_ms: f64,
     label_processing_ms: f64,
+    final_weight_states: usize,
+    final_weight_entries: usize,
+    final_weight_entries_max: usize,
+    final_weight_signature_distinct: usize,
+    final_weight_signature_hit_potential: usize,
     fallback_labels_expanded: usize,
     fallback_contrib_entries_duplicated: usize,
 }
@@ -82,7 +87,7 @@ impl ParserDwaDeterminizeDetail {
 
     fn emit(&self, name: &str) {
         eprintln!(
-            "[glrmask/profile][parser_dwa_determinize_detail] name={} states_processed={} outgoing_transitions_scanned={} intersection_calls={} nonempty_intersections={} target_contribution_pushes={} target_contribution_merges={} target_contrib_len_before_sum={} target_contrib_len_after_sum={} target_contrib_len_before_max={} target_contrib_len_after_max={} subset_key_constructions={} subset_intern_hits={} subset_intern_misses={} closure_cache_hits={} closure_cache_misses={} intersection_scan_ms={:.3} label_processing_ms={:.3} fallback_labels_expanded={} fallback_contrib_entries_duplicated={}",
+            "[glrmask/profile][parser_dwa_determinize_detail] name={} states_processed={} outgoing_transitions_scanned={} intersection_calls={} nonempty_intersections={} target_contribution_pushes={} target_contribution_merges={} target_contrib_len_before_sum={} target_contrib_len_after_sum={} target_contrib_len_before_max={} target_contrib_len_after_max={} subset_key_constructions={} subset_intern_hits={} subset_intern_misses={} closure_cache_hits={} closure_cache_misses={} intersection_scan_ms={:.3} label_processing_ms={:.3} final_weight_states={} final_weight_entries={} final_weight_entries_max={} final_weight_signature_distinct={} final_weight_signature_hit_potential={} fallback_labels_expanded={} fallback_contrib_entries_duplicated={}",
             name,
             self.states_processed,
             self.outgoing_transitions_scanned,
@@ -101,6 +106,11 @@ impl ParserDwaDeterminizeDetail {
             self.closure_cache_misses,
             self.intersection_scan_ms,
             self.label_processing_ms,
+            self.final_weight_states,
+            self.final_weight_entries,
+            self.final_weight_entries_max,
+            self.final_weight_signature_distinct,
+            self.final_weight_signature_hit_potential,
             self.fallback_labels_expanded,
             self.fallback_contrib_entries_duplicated,
         );
@@ -837,39 +847,85 @@ fn determinize_with_supports(
         }
     }
 
-    // Compute final weights in parallel using rayon.
+    let mut final_signature_ids: FxHashMap<Vec<(usize, Vec<usize>)>, usize> = FxHashMap::default();
+    let mut final_signature_groups: Vec<Vec<(Weight, SmallVec<[Weight; 4]>)>> = Vec::new();
+    let mut final_jobs: Vec<(u32, usize)> = Vec::with_capacity(deferred_final_entries.len());
+    for (state_id, entries) in &deferred_final_entries {
+        if let Some(detail) = detail.as_mut() {
+            detail.final_weight_entries += entries.len();
+            detail.final_weight_entries_max = detail.final_weight_entries_max.max(entries.len());
+        }
+
+        let mut groups: Vec<(usize, Weight, SmallVec<[Weight; 4]>)> = Vec::new();
+        for (nwa_state_id, path_weight) in entries {
+            if let Some(state_final) = nwa.states()[*nwa_state_id as usize].final_weight.as_ref() {
+                let final_key = state_final.ptr_key();
+                if let Some((_, _, path_weights)) = groups
+                    .iter_mut()
+                    .find(|(existing_final_key, _, _)| *existing_final_key == final_key)
+                {
+                    path_weights.push(path_weight.clone());
+                } else {
+                    let mut path_weights = SmallVec::new();
+                    path_weights.push(path_weight.clone());
+                    groups.push((final_key, state_final.clone(), path_weights));
+                }
+            }
+        }
+        groups.sort_unstable_by_key(|(final_key, _, _)| *final_key);
+        let mut signature: Vec<(usize, Vec<usize>)> = Vec::with_capacity(groups.len());
+        for (final_key, _, path_weights) in &mut groups {
+            path_weights.sort_unstable_by_key(|weight| weight.ptr_key());
+            path_weights.dedup_by_key(|weight| weight.ptr_key());
+            signature.push((
+                *final_key,
+                path_weights.iter().map(|weight| weight.ptr_key()).collect(),
+            ));
+        }
+        let signature_id = match final_signature_ids.entry(signature) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) => {
+                let signature_id = final_signature_groups.len();
+                let owned_groups = groups
+                    .into_iter()
+                    .map(|(_, state_final, path_weights)| (state_final, path_weights))
+                    .collect();
+                final_signature_groups.push(owned_groups);
+                entry.insert(signature_id);
+                signature_id
+            }
+        };
+        final_jobs.push((*state_id, signature_id));
+    }
+    if let Some(detail) = detail.as_mut() {
+        detail.final_weight_states = final_jobs.len();
+        detail.final_weight_signature_distinct = final_signature_groups.len();
+        detail.final_weight_signature_hit_potential =
+            final_jobs.len().saturating_sub(final_signature_groups.len());
+    }
+
+    // Compute final weights in parallel once per distinct final-weight signature.
     {
         use rayon::prelude::*;
-        let final_weights: Vec<(u32, Weight)> = deferred_final_entries
+        let final_weights_by_signature: Vec<Option<Weight>> = final_signature_groups
             .par_iter()
-            .filter_map(|(state_id, entries)| {
-                // Group by final weight pointer to leverage distributivity.
-                let mut final_groups: SmallVec<[(usize, &Weight, SmallVec<[&Weight; 4]>); 4]> = SmallVec::new();
-                for (nwa_state_id, path_weight) in entries {
-                    if let Some(state_final) = nwa.states()[*nwa_state_id as usize].final_weight.as_ref() {
-                        let key = state_final.ptr_key();
-                        if let Some(group) = final_groups.iter_mut().find(|(k, _, _)| *k == key) {
-                            group.2.push(path_weight);
-                        } else {
-                            let mut pws = SmallVec::new();
-                            pws.push(path_weight);
-                            final_groups.push((key, state_final, pws));
-                        }
-                    }
-                }
-                let final_contributions: SmallVec<[Weight; 4]> = final_groups.into_iter()
-                    .filter_map(|(_, final_w, path_weights)| {
-                        let pw_union = Weight::union_all(path_weights.into_iter());
+            .map(|final_groups| {
+                let final_contributions: SmallVec<[Weight; 4]> = final_groups
+                    .iter()
+                    .filter_map(|(final_w, path_weights)| {
+                        let pw_union = Weight::union_all(path_weights.iter());
                         let contribution = pw_union.intersection(final_w);
                         if contribution.is_empty() { None } else { Some(contribution) }
                     })
                     .collect();
                 let final_weight = Weight::union_all(final_contributions.iter());
-                if final_weight.is_empty() { None } else { Some((*state_id, final_weight)) }
+                if final_weight.is_empty() { None } else { Some(final_weight) }
             })
             .collect();
-        for (state_id, weight) in final_weights {
-            dwa.set_final_weight(state_id, weight);
+        for (state_id, signature_id) in final_jobs {
+            if let Some(weight) = &final_weights_by_signature[signature_id] {
+                dwa.set_final_weight(state_id, weight.clone());
+            }
         }
     }
 
