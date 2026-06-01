@@ -48,15 +48,25 @@ Paired-framework asymmetry outranks timing work.
   build-result parity issue.
 - If one native framework builds and the other fails, the case is not a valid
   paired timing/discrepancy comparison until the asymmetry is understood.
-- Prefer CFA paired-run handling that avoids unnecessary peer builds after a
-  fast failure, or a glrmask-side fast fail for known unsupported features. Do
-  not make `llguidance_native` more permissive to hide asymmetry.
+- Do not hide asymmetry in CFA by skipping a peer build or suppressing a
+  successful backend after the other backend fails. Preserve independent backend
+  build outcomes in reports; fix parity in backend behavior.
+- Before aligning to `llguidance_native`, inspect the local llguidance source
+  clone for the actual rejection rule. The repo is typically at
+  `/Users/isaacbreen/Projects2/downloads/repos/llguidance-guidance-ai`; for
+  JSON-schema `schema too large`, start at `parser/src/json/shared_context.rs`.
+- Prefer a glrmask-side fast fail for known unsupported features or comparable
+  schema-size/complexity preflight only after confirming the corresponding
+  llguidance rule from source. Do not make `llguidance_native` more permissive
+  to hide asymmetry.
 - Record whether the issue is a true capability gap, an unsupported-feature
   parity bug, a schema-size parity bug, or an intentional glrmask-only
   capability measurement.
 
 For timeout-vs-fail cases such as llguidance `schema too large`, the timeout is
-not the primary bug. The priority is to fail or suppress quickly in paired mode.
+not the primary bug. The priority is glrmask backend behavior that either
+rejects quickly with comparable semantics or genuinely builds within budget; CFA
+must not erase the mismatch by paired-mode suppression.
 
 ## Build Timeouts
 

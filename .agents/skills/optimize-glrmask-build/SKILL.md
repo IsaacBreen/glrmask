@@ -19,7 +19,10 @@ evidence.
 - Paired-framework asymmetry takes priority over build-time optimization. Before optimizing a glrmask build timeout or
   slow build from CFA paired runs, check the `llguidance_native` result for the same problem. If `llguidance_native`
   fails fast and `glrmask_native` times out or spends substantial time building, do not treat the glrmask timeout as the
-  primary bug. First decide whether `glrmask_native` should reject the same unsupported schema feature quickly. Only
+  primary bug. Inspect the local llguidance source clone before choosing a glrmask response; it is typically at
+  `/Users/isaacbreen/Projects2/downloads/repos/llguidance-guidance-ai`, and JSON-schema `schema too large` logic starts
+  at `parser/src/json/shared_context.rs`. First decide whether `glrmask_native` should reject with comparable backend
+  semantics, such as an unsupported-feature or schema-size preflight. Only
   optimize build time after confirming both frameworks are meant to build the problem, or after the human explicitly asks
   for glrmask-only capability/performance on schemas llguidance refuses.
 - For L2P terminal-DWA construction, state equivalence and vocab equivalence analysis must always run fully.
@@ -39,8 +42,8 @@ evidence.
 - For paired CFA work, classify build outcomes before profiling. A case where `glrmask_native` times out and
   `llguidance_native` reports an unsupported schema, `schema too large`, unknown format, unsupported keyword, or similar
   fast failure is an asymmetric build-result issue, not a build-performance issue. Fix or document the asymmetry first.
-- For CFA comparisons between `glrmask_native` and `llguidance_native`, build availability is a paired contract. A problem is not comparable if one native framework builds and the other fails or times out. The sweep intentionally suppresses a successful paired native build after the peer fails and records the real time under `suppressed_build_seconds`; reconstruct underlying asymmetry from `paired native build failure` plus `suppressed_build_seconds` when triaging.
-- Do not make `llguidance_native` more permissive just to match glrmask. For paired comparisons, make `glrmask_native` fail fast on schema features that default `llguidance_native` refuses, unless the investigation explicitly opts into glrmask-only capability measurement with `GLRMASK_ALLOW_EXTRA_KEYWORDS=1` or similar. Do not blanket-reject every `oneOf`: some `oneOf` schemas build under default `llguidance_native`. Use exact preflight evidence or a narrow known-unsupported shape before adding a glrmask-side rejection. Unsupported formats such as `uri-reference` are currently safe to reject statically because default `llguidance_native` reports them as unknown formats.
+- For CFA comparisons between `glrmask_native` and `llguidance_native`, build outcomes must remain independent and honest. Do not skip a glrmask build because llguidance failed, and do not post-process a successful peer into a synthetic paired failure. Such harness suppression hides the backend asymmetry the user wants measured.
+- Do not make `llguidance_native` more permissive just to match glrmask. For paired comparisons, make `glrmask_native` fail fast on schema features or size/complexity classes that default `llguidance_native` refuses, unless the investigation explicitly opts into glrmask-only capability measurement with `GLRMASK_ALLOW_EXTRA_KEYWORDS=1` or similar. Do not blanket-reject every `oneOf`: some `oneOf` schemas build under default `llguidance_native`. Use exact preflight evidence from the local llguidance source or a narrow known-unsupported shape before adding a glrmask-side rejection. Unsupported formats such as `uri-reference` are currently safe to reject statically only after confirming default `llguidance_native` reports them as unknown formats.
 - After any Rust or Python extension change in `/Users/isaacbreen/Projects2/glrmask2`, run `make ffi-release` there, then restart the CFA `GlrmaskWorkerPool`, or measurements may use stale installed code.
 - For timeout schemas, use short capped probes first (10s, then at most 30s unless the user asks otherwise). Treat a small schema that exceeds those caps as a compiler bug to localize, not as a reason to add an importer shortcut for that schema's pattern text.
 
