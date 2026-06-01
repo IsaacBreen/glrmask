@@ -3,9 +3,6 @@ use super::*;
 use crate::ds::bitset::BitSet;
 
 const DISABLE_UNIT_REDUCTION_INLINING_ENV: &str = "GLRMASK_DISABLE_UNIT_REDUCTION_INLINING";
-const ENABLE_UNIT_REDUCTION_INLINING_ENV: &str = "GLRMASK_ENABLE_UNIT_REDUCTION_INLINING";
-const UNIT_REDUCTION_INLINING_MAX_TERMINALS_ENV: &str =
-    "GLRMASK_UNIT_REDUCTION_INLINING_MAX_TERMINALS";
 
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
@@ -16,25 +13,8 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn unit_reduction_inlining_max_terminals() -> usize {
-    std::env::var(UNIT_REDUCTION_INLINING_MAX_TERMINALS_ENV)
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(150)
-}
-
-fn unit_reduction_inlining_enabled(grammar: &AnalyzedGrammar) -> bool {
-    if env_flag_enabled(DISABLE_UNIT_REDUCTION_INLINING_ENV) {
-        return false;
-    }
-
-    if env_flag_enabled(ENABLE_UNIT_REDUCTION_INLINING_ENV) {
-        return true;
-    }
-
-    // Unit-collapse is exact but expensive on large generated schemas. Keep it
-    // for small grammars where it materially reduces parser/GSS TBM tails.
-    (grammar.num_terminals as usize) <= unit_reduction_inlining_max_terminals()
+fn unit_reduction_inlining_enabled() -> bool {
+    !env_flag_enabled(DISABLE_UNIT_REDUCTION_INLINING_ENV)
 }
 
 pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
@@ -56,7 +36,7 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     // row support before that lowering so runtime `may_advance` stays a pure
     // row-presence query.
     table.rebuild_advance_rows_from_actions();
-    let unit_collapse_enabled = unit_reduction_inlining_enabled(grammar);
+    let unit_collapse_enabled = unit_reduction_inlining_enabled();
     let collapse_started_at = std::time::Instant::now();
     if unit_collapse_enabled {
         table.collapse_sr_unit_reductions_with_compatible_gotos();
