@@ -4024,6 +4024,91 @@ fn anyof_closed_object_variants_with_shared_required_prefix_use_exact_variant_nf
 }
 
 #[test]
+fn anyof_closed_object_variants_share_identical_common_ref_property_transition() {
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "common": {"$ref": "#/$defs/commonValue"},
+                    "kind": {"const": "left"},
+                    "left": {"type": "string"}
+                },
+                "required": ["kind", "left"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "common": {"$ref": "#/$defs/commonValue"},
+                    "kind": {"const": "right"},
+                    "right": {"type": "number"}
+                },
+                "required": ["kind", "right"],
+                "additionalProperties": false
+            }
+        ],
+        "$defs": {
+            "commonValue": {
+                "type": "object",
+                "additionalProperties": {}
+            }
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
+    assert_eq!(glrm.matches("\\\"common\\\"").count(), 1, "{glrm}");
+    assert!(!glrm.contains("-- schema_ref_1"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn anyof_closed_object_variants_do_not_share_mismatched_common_ref_property_transition() {
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "common": {"$ref": "#/$defs/commonObject"},
+                    "kind": {"const": "left"},
+                    "left": {"type": "string"}
+                },
+                "required": ["kind", "left"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "common": {"$ref": "#/$defs/commonString"},
+                    "kind": {"const": "right"},
+                    "right": {"type": "number"}
+                },
+                "required": ["kind", "right"],
+                "additionalProperties": false
+            }
+        ],
+        "$defs": {
+            "commonObject": {
+                "type": "object",
+                "additionalProperties": {}
+            },
+            "commonString": {
+                "type": "string"
+            }
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
+    assert_eq!(glrm.matches("\\\"common\\\"").count(), 1, "{glrm}");
+    assert!(glrm.contains("-- schema_ref_1"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn anyof_untyped_closed_object_variants_keep_non_object_alternatives() {
     let schema = json!({
         "anyOf": [

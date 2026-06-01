@@ -8,7 +8,8 @@ use super::ast::{
     PropertySchema, Schema, SchemaAssertions, SchemaKind, SchemaType,
 };
 use super::combinators::{
-    all_of_schema, open_object_any_of_covers_json_object, try_merge_all_of_objects,
+    all_of_schema, merge_two_objects, open_object_any_of_covers_json_object,
+    try_merge_all_of_objects,
 };
 use super::error::{ImportResult, SchemaImportError};
 use super::lower::{
@@ -40,6 +41,7 @@ const PROPERTY_DEPENDENCY_MAX_FIXED_PROPERTIES: usize = 12;
 struct AnyOfFixedObjectItem {
     key: String,
     value_expr: GrammarExpr,
+    value_identity: Option<String>,
     required: bool,
 }
 
@@ -59,6 +61,18 @@ struct AnyOfObjectVariant {
 struct AnyOfFixedObjectState {
     variant_idx: u16,
     cursor: u16,
+    has_content: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct AnyOfFixedObjectCursor {
+    variant_idx: u16,
+    cursor: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct AnyOfFixedObjectMergedState {
+    cursors: Vec<AnyOfFixedObjectCursor>,
     has_content: bool,
 }
 
@@ -154,6 +168,10 @@ impl AnyOfFixedObjectVariant {
             .iter()
             .find(|item| item.key == key)
             .map(|item| item.value_expr.clone())
+    }
+
+    fn item_for_key(&self, key: &str) -> Option<&AnyOfFixedObjectItem> {
+        self.items.iter().find(|item| item.key == key)
     }
 }
 
@@ -1099,6 +1117,22 @@ impl<'a> Lowerer<'a> {
         &mut self,
         branch: &Schema,
     ) -> ImportResult<Option<(AnyOfFixedObjectVariant, bool)>> {
+        self.collect_closed_any_of_object_variant_inner(branch, 0)
+    }
+
+    fn collect_closed_any_of_object_variant_inner(
+        &mut self,
+        branch: &Schema,
+        ref_depth: usize,
+    ) -> ImportResult<Option<(AnyOfFixedObjectVariant, bool)>> {
+        if let SchemaKind::Ref(pointer) = &branch.kind {
+            if ref_depth >= 4 {
+                return Ok(None);
+            }
+            let target = self.resolve_ref_target(pointer)?.clone();
+            return self.collect_closed_any_of_object_variant_inner(&target, ref_depth + 1);
+        }
+
         let SchemaKind::Assertions(assertions) = &branch.kind else {
             return Ok(None);
         };
@@ -1127,7 +1161,8 @@ impl<'a> Lowerer<'a> {
             }) {
                 return Ok(None);
             }
-            merged_object = match try_merge_all_of_objects(&assertions.all_of) {
+            merged_object = match self.try_merge_all_of_objects_resolving_refs(&assertions.all_of)?
+            {
                 Some(object) => object,
                 None => return Ok(None),
             };
@@ -1164,6 +1199,7 @@ impl<'a> Lowerer<'a> {
             items.push(AnyOfFixedObjectItem {
                 key: property.name.clone(),
                 value_expr: self.lower_schema(&property.schema)?,
+                value_identity: exact_property_value_identity(&property.schema),
                 required: object.required.contains(&property.name),
             });
         }
@@ -1172,6 +1208,36 @@ impl<'a> Lowerer<'a> {
             AnyOfFixedObjectVariant { items },
             include_untyped_non_object_alts,
         )))
+    }
+
+    fn try_merge_all_of_objects_resolving_refs(
+        &self,
+        branches: &[Schema],
+    ) -> ImportResult<Option<ObjectSchema>> {
+        let mut objects = Vec::with_capacity(branches.len());
+        for branch in branches {
+            if let Some(object) = plain_object_schema_for_closed_any_of(branch) {
+                objects.push(object.clone());
+                continue;
+            }
+            let SchemaKind::Ref(pointer) = &branch.kind else {
+                return Ok(None);
+            };
+            let Some(object) = plain_object_schema_for_closed_any_of(self.resolve_ref_target(pointer)?)
+            else {
+                return Ok(None);
+            };
+            objects.push(object.clone());
+        }
+
+        let mut merged = objects.into_iter();
+        let Some(mut object) = merged.next() else {
+            return Ok(None);
+        };
+        for next in merged {
+            object = merge_two_objects(&object, &next);
+        }
+        Ok(Some(object))
     }
 
     fn collect_open_any_of_object_variant(
@@ -1262,6 +1328,7 @@ impl<'a> Lowerer<'a> {
             items.push(AnyOfFixedObjectItem {
                 key: property.name.clone(),
                 value_expr: self.lower_schema(&effective_schema)?,
+                value_identity: exact_property_value_identity(&effective_schema),
                 required: normalized.required.contains(&property.name),
             });
         }
@@ -1392,6 +1459,12 @@ impl<'a> Lowerer<'a> {
         if variants.is_empty() {
             return Ok(None);
         }
+        if let Some(expr) = self.try_lower_common_property_closed_any_of_object_variants_expr_nfa(
+            variants,
+            include_untyped_non_object_alts,
+        )? {
+            return Ok(Some(expr));
+        }
 
         let mut builder = ExprNfaBuilder::new();
         let accept = builder.add_state();
@@ -1453,6 +1526,139 @@ impl<'a> Lowerer<'a> {
                 }
                 symbols.push(value_expr);
                 Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, next_state_id);
+            }
+        }
+
+        let rule_name = self.fresh_rule_name("json_anyof_object_body");
+        let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
+        self.add_nonterminal_rule(&rule_name, body);
+
+        let object_expr = seq(vec![lit("{"), r(&rule_name), lit("}")]);
+        if include_untyped_non_object_alts {
+            return Ok(Some(choice(vec![
+                object_expr,
+                r(JSON_ARRAY_RULE),
+                r(JSON_STRING_RULE),
+                r(JSON_NUMBER_RULE),
+                r(JSON_BOOL_RULE),
+                r(JSON_NULL_RULE),
+            ])));
+        }
+
+        Ok(Some(object_expr))
+    }
+
+    fn try_lower_common_property_closed_any_of_object_variants_expr_nfa(
+        &mut self,
+        variants: &[AnyOfFixedObjectVariant],
+        include_untyped_non_object_alts: bool,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        if variants.len() < 2 || !closed_any_of_variants_have_shareable_property(variants) {
+            return Ok(None);
+        }
+
+        let mut builder = ExprNfaBuilder::new();
+        let accept = builder.add_state();
+        builder.set_accepting(accept);
+        let initial = AnyOfFixedObjectMergedState {
+            cursors: (0..variants.len())
+                .map(|variant_idx| AnyOfFixedObjectCursor {
+                    variant_idx: variant_idx as u16,
+                    cursor: 0,
+                })
+                .collect(),
+            has_content: false,
+        };
+        let start = builder.add_state();
+        builder.add_epsilon(builder.start_state(), start);
+
+        let mut state_ids = BTreeMap::<AnyOfFixedObjectMergedState, u32>::new();
+        let mut queue = VecDeque::<AnyOfFixedObjectMergedState>::new();
+        state_ids.insert(initial.clone(), start);
+        queue.push_back(initial);
+
+        while let Some(state) = queue.pop_front() {
+            if state_ids.len() > ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES {
+                return Ok(None);
+            }
+
+            let state_id = state_ids[&state];
+            if state.cursors.iter().any(|cursor| {
+                variants[cursor.variant_idx as usize].close_allowed(cursor.cursor as usize)
+            }) {
+                builder.add_epsilon(state_id, accept);
+            }
+
+            let mut legal_keys = BTreeSet::new();
+            for cursor in &state.cursors {
+                let variant = &variants[cursor.variant_idx as usize];
+                for key in variant.legal_next_keys(cursor.cursor as usize) {
+                    legal_keys.insert(key.to_owned());
+                }
+            }
+
+            for key in legal_keys {
+                if let Some((value_expr, next_cursors)) =
+                    shared_closed_any_of_key_transition(variants, &state.cursors, &key)
+                {
+                    let next_state = AnyOfFixedObjectMergedState {
+                        cursors: next_cursors,
+                        has_content: true,
+                    };
+                    let next_state_id = merged_closed_any_of_state_id(
+                        &mut builder,
+                        &mut state_ids,
+                        &mut queue,
+                        next_state,
+                    );
+                    let key_expr = if state.has_content {
+                        self.lower_literal_key_colon_with_prefix(b", ", &key)
+                    } else {
+                        self.lower_literal_key_colon(&key)
+                    };
+                    Self::add_expr_nfa_symbol_path(
+                        &mut builder,
+                        state_id,
+                        vec![key_expr, value_expr],
+                        next_state_id,
+                    );
+                    continue;
+                }
+
+                for cursor in &state.cursors {
+                    let variant = &variants[cursor.variant_idx as usize];
+                    let Some(next_cursor) = variant.advance_cursor(cursor.cursor as usize, &key)
+                    else {
+                        continue;
+                    };
+                    let Some(value_expr) = variant.value_expr_for_key(&key) else {
+                        continue;
+                    };
+                    let next_state = AnyOfFixedObjectMergedState {
+                        cursors: vec![AnyOfFixedObjectCursor {
+                            variant_idx: cursor.variant_idx,
+                            cursor: next_cursor as u16,
+                        }],
+                        has_content: true,
+                    };
+                    let next_state_id = merged_closed_any_of_state_id(
+                        &mut builder,
+                        &mut state_ids,
+                        &mut queue,
+                        next_state,
+                    );
+                    let key_expr = if state.has_content {
+                        self.lower_literal_key_colon_with_prefix(b", ", &key)
+                    } else {
+                        self.lower_literal_key_colon(&key)
+                    };
+                    Self::add_expr_nfa_symbol_path(
+                        &mut builder,
+                        state_id,
+                        vec![key_expr, value_expr],
+                        next_state_id,
+                    );
+                }
             }
         }
 
@@ -2792,6 +2998,100 @@ impl<'a> Lowerer<'a> {
         }
 
         Ok(normalized)
+    }
+}
+
+fn exact_property_value_identity(schema: &Schema) -> Option<String> {
+    match &schema.kind {
+        SchemaKind::Ref(pointer) => Some(format!("ref:{pointer}")),
+        _ => None,
+    }
+}
+
+fn plain_object_schema_for_closed_any_of(schema: &Schema) -> Option<&ObjectSchema> {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return None;
+    };
+    if assertions.const_value.is_some()
+        || assertions.enum_values.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+    {
+        return None;
+    }
+    if let Some(types) = &assertions.types
+        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object)
+    {
+        return None;
+    }
+    assertions.object.as_ref()
+}
+
+fn closed_any_of_variants_have_shareable_property(variants: &[AnyOfFixedObjectVariant]) -> bool {
+    let Some(first) = variants.first() else {
+        return false;
+    };
+    first.items.iter().any(|first_item| {
+        let Some(identity) = first_item.value_identity.as_ref() else {
+            return false;
+        };
+        variants.iter().skip(1).all(|variant| {
+            variant
+                .item_for_key(&first_item.key)
+                .and_then(|item| item.value_identity.as_ref())
+                .is_some_and(|candidate| candidate == identity)
+        })
+    })
+}
+
+fn shared_closed_any_of_key_transition(
+    variants: &[AnyOfFixedObjectVariant],
+    cursors: &[AnyOfFixedObjectCursor],
+    key: &str,
+) -> Option<(GrammarExpr, Vec<AnyOfFixedObjectCursor>)> {
+    let mut identity = None;
+    let mut value_expr = None;
+    let mut next_cursors = Vec::with_capacity(cursors.len());
+
+    for cursor in cursors {
+        let variant = &variants[cursor.variant_idx as usize];
+        let next_cursor = variant.advance_cursor(cursor.cursor as usize, key)?;
+        let item = variant.item_for_key(key)?;
+        let item_identity = item.value_identity.as_ref()?;
+        if let Some(expected) = identity {
+            if expected != item_identity {
+                return None;
+            }
+        } else {
+            identity = Some(item_identity);
+            value_expr = Some(item.value_expr.clone());
+        }
+        next_cursors.push(AnyOfFixedObjectCursor {
+            variant_idx: cursor.variant_idx,
+            cursor: next_cursor as u16,
+        });
+    }
+
+    if next_cursors.len() < 2 {
+        return None;
+    }
+    Some((value_expr?, next_cursors))
+}
+
+fn merged_closed_any_of_state_id(
+    builder: &mut ExprNfaBuilder,
+    state_ids: &mut BTreeMap<AnyOfFixedObjectMergedState, u32>,
+    queue: &mut VecDeque<AnyOfFixedObjectMergedState>,
+    state: AnyOfFixedObjectMergedState,
+) -> u32 {
+    if let Some(&existing) = state_ids.get(&state) {
+        existing
+    } else {
+        let id = builder.add_state();
+        state_ids.insert(state.clone(), id);
+        queue.push_back(state);
+        id
     }
 }
 

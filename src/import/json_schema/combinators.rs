@@ -2652,7 +2652,7 @@ fn merge_array_bounds(left: &mut ArraySchema, right: &ArraySchema) {
 }
 
 
-fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSchema {
+pub(crate) fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSchema {
     let mut merged = left.clone();
     merged.min_properties = merged.min_properties.max(right.min_properties);
     merged.max_properties = match (merged.max_properties, right.max_properties) {
