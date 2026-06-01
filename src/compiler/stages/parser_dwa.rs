@@ -10,7 +10,7 @@ use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::glr::labels::DEFAULT_LABEL;
+use crate::compiler::glr::labels::{DEFAULT_LABEL, is_negative_label};
 use crate::compiler::glr::table::GLRTable;
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::InternalIdMap;
@@ -258,9 +258,17 @@ struct LazyResolveNodeRecord {
 #[derive(Debug, Clone)]
 struct LazyResolveGraph {
     keys: Vec<LazyResolveNodeKey>,
+    start_states: Vec<u32>,
     records: Vec<LazyResolveNodeRecord>,
     node_ids: FxHashMap<LazyResolveNodeKey, u32>,
     continuation_nodes: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct LazyResolvedGraph {
+    keys: Vec<LazyResolveNodeKey>,
+    start_states: Vec<u32>,
+    records: Vec<LazyResolveNodeRecord>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -271,10 +279,15 @@ struct ResolveAnalysisStats {
     terminal_states: usize,
 }
 
+trait DeterminizeView: ResolveNegativesView {
+    fn start_states(&self) -> &[u32];
+}
+
 impl LazyResolveGraph {
     fn new(state_count: usize) -> Self {
         Self {
             keys: Vec::new(),
+            start_states: Vec::new(),
             records: Vec::new(),
             node_ids: FxHashMap::default(),
             continuation_nodes: vec![u32::MAX; state_count],
@@ -325,6 +338,41 @@ impl ResolveNegativesView for LazyResolveGraph {
 
     fn transitions(&self, state: u32) -> &BTreeMap<i32, Vec<(u32, Weight)>> {
         &self.records[state as usize].transitions
+    }
+}
+
+impl DeterminizeView for NWA {
+    fn start_states(&self) -> &[u32] {
+        self.start_states()
+    }
+}
+
+impl ResolveNegativesView for LazyResolvedGraph {
+    fn state_count(&self) -> usize {
+        self.records.len()
+    }
+
+    fn final_weight(&self, state: u32) -> Option<&Weight> {
+        self.records
+            .get(state as usize)
+            .and_then(|record| record.final_weight.as_ref())
+    }
+
+    fn epsilons(&self, state: u32) -> &[(u32, Weight)] {
+        self.records
+            .get(state as usize)
+            .map(|record| record.epsilons.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn transitions(&self, state: u32) -> &BTreeMap<i32, Vec<(u32, Weight)>> {
+        &self.records[state as usize].transitions
+    }
+}
+
+impl DeterminizeView for LazyResolvedGraph {
+    fn start_states(&self) -> &[u32] {
+        &self.start_states
     }
 }
 
@@ -420,6 +468,74 @@ fn lazy_negative_parser_dwa_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn lazy_negative_debug_enabled() -> bool {
+    std::env::var("GLRMASK_LAZY_NEGATIVE_DEBUG")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+fn possible_outgoing_summary(entry: &PossibleOutgoingIds) -> String {
+    match entry {
+        PossibleOutgoingIds::Empty => "Empty".to_string(),
+        PossibleOutgoingIds::All => "All".to_string(),
+        PossibleOutgoingIds::Some(bitset) => {
+            let ids: Vec<usize> = bitset.iter().collect();
+            format!("Some{:?}", ids)
+        }
+    }
+}
+
+fn dwa_state_transition_summary(dwa: &DWA, state_id: u32) -> Vec<(i32, u32, usize)> {
+    let Some(state) = dwa.states().get(state_id as usize) else {
+        return Vec::new();
+    };
+    let mut summary: Vec<(i32, u32, usize)> = state
+        .transitions
+        .iter()
+        .map(|(&label, (target, weight))| (label, *target, weight.ptr_key()))
+        .collect();
+    summary.sort_unstable();
+    summary
+}
+
+fn dwa_state_support_summary(
+    dwa: &DWA,
+    supports: &[Vec<u32>],
+    state_id: u32,
+) -> Option<(Option<usize>, Vec<u32>, Vec<(i32, u32, usize)>)> {
+    let state = dwa.states().get(state_id as usize)?;
+    Some((
+        state.final_weight.as_ref().map(|weight| weight.ptr_key()),
+        supports.get(state_id as usize).cloned().unwrap_or_default(),
+        dwa_state_transition_summary(dwa, state_id),
+    ))
+}
+
+fn support_entry_final_summary(
+    supports: &[Vec<u32>],
+    state_id: u32,
+    materialized: &NWA,
+    lazy: &LazyResolvedGraph,
+) -> Option<Vec<(u32, Option<usize>, Option<usize>, Option<LazyResolveNodeKey>)>> {
+    let entries = supports.get(state_id as usize)?;
+    Some(
+        entries
+            .iter()
+            .map(|entry| {
+                (
+                    *entry,
+                    materialized.final_weight(*entry).map(|weight| weight.ptr_key()),
+                    lazy.final_weight(*entry).map(|weight| weight.ptr_key()),
+                    lazy.keys.get(*entry as usize).copied(),
+                )
+            })
+            .collect(),
+    )
+}
+
 fn ensure_lazy_template_fragment_nodes(
     graph: &mut LazyResolveGraph,
     template: &NWA,
@@ -457,6 +573,7 @@ fn build_lazy_resolve_graph(
     productive: &[bool],
     templates: &Templates,
     built_bundle_cache: &mut [Option<Arc<NWA>>],
+    start_td_state: u32,
 ) -> LazyResolveGraph {
     let mut graph = LazyResolveGraph::new(summaries.states.len());
 
@@ -469,6 +586,7 @@ fn build_lazy_resolve_graph(
         });
         graph.continuation_nodes[state_id] = node_id;
     }
+    graph.start_states = vec![graph.continuation_node(start_td_state)];
 
     for (state_id, state) in summaries.states.iter().enumerate() {
         if !productive.get(state_id).copied().unwrap_or(false) {
@@ -656,6 +774,71 @@ fn build_lazy_resolve_graph(
     }
 
     graph
+}
+
+fn build_lazy_resolved_graph(raw: &LazyResolveGraph) -> LazyResolvedGraph {
+    let cancellation = compute_cancellations_range_from_view(raw, 0..raw.state_count() as u32);
+    let mut resolved = LazyResolvedGraph {
+        keys: raw.keys.clone(),
+        start_states: raw.start_states.clone(),
+        records: raw.records.clone(),
+    };
+    let mut derived_eps_by_source = vec![Vec::<(u32, Weight)>::new(); raw.state_count()];
+    for edge in cancellation.derived_epsilons {
+        derived_eps_by_source[edge.from as usize].push((edge.to, edge.weight));
+    }
+
+    for (state_id, record) in resolved.records.iter_mut().enumerate() {
+        record
+            .epsilons
+            .extend(derived_eps_by_source[state_id].iter().cloned());
+    }
+
+    let finality = compute_reachable_final_weights(&resolved);
+    for (state_id, record) in resolved.records.iter_mut().enumerate() {
+        let final_weight = finality.reachable_final_weights[state_id].clone();
+        record.final_weight = final_weight.clone();
+
+        record.transitions.retain(|label, _| !is_negative_label(*label));
+    }
+
+    let terminal_defaults = compute_terminal_default_analysis(&resolved);
+
+    for (state_id, record) in resolved.records.iter_mut().enumerate() {
+
+        let mut transitions = BTreeMap::<i32, Vec<(u32, Weight)>>::new();
+        for (&label, targets) in &record.transitions {
+            let filtered_targets: Vec<(u32, Weight)> = if label == DEFAULT_LABEL {
+                targets
+                    .iter()
+                    .filter(|(target, edge_weight)| {
+                        if !terminal_defaults
+                            .terminal_states
+                            .get(*target as usize)
+                            .copied()
+                            .unwrap_or(false)
+                        {
+                            return true;
+                        }
+                        let Some(state_final_weight) = record.final_weight.as_ref() else {
+                            return true;
+                        };
+                        !edge_weight.is_subset(state_final_weight)
+                    })
+                    .cloned()
+                    .collect()
+            } else {
+                targets.clone()
+            };
+
+            if !filtered_targets.is_empty() {
+                transitions.insert(label, filtered_targets);
+            }
+        }
+        record.transitions = transitions;
+    }
+
+            resolved
 }
 
 fn resolve_analysis_stats<V: ResolveNegativesView>(
@@ -922,8 +1105,8 @@ enum PossibleOutgoingIds {
     Some(BitSet),
 }
 
-fn build_possible_outgoing_ids_by_state(
-    parser_nwa: &NWA,
+fn build_possible_outgoing_ids_by_view<V: ResolveNegativesView>(
+    view: &V,
     state_supports: &[Vec<u32>],
     num_parser_states: u32,
 ) -> Vec<PossibleOutgoingIds> {
@@ -935,12 +1118,10 @@ fn build_possible_outgoing_ids_by_state(
 
     let num_parser_states = num_parser_states as usize;
     let all_parser_states = BitSet::all(num_parser_states);
-    let state_outgoing_ids: Vec<OutgoingIds> = parser_nwa
-        .states()
-        .iter()
-        .map(|state| {
+    let state_outgoing_ids: Vec<OutgoingIds> = (0..view.state_count())
+        .map(|state_id| {
             let mut ids = Vec::new();
-            for &label in state.transitions.keys() {
+            for &label in view.transitions(state_id as u32).keys() {
                 if label == DEFAULT_LABEL {
                     return OutgoingIds::All;
                 }
@@ -1008,8 +1189,16 @@ fn build_possible_outgoing_ids_by_state(
         .collect()
 }
 
-fn local_epsilon_closure(
-    nwa: &NWA,
+fn build_possible_outgoing_ids_by_state(
+    parser_nwa: &NWA,
+    state_supports: &[Vec<u32>],
+    num_parser_states: u32,
+) -> Vec<PossibleOutgoingIds> {
+    build_possible_outgoing_ids_by_view(parser_nwa, state_supports, num_parser_states)
+}
+
+fn local_epsilon_closure<V: ResolveNegativesView>(
+    view: &V,
     weight_by_state: &mut Vec<Option<Weight>>,
     closure_queue: &mut VecDeque<u32>,
     seed: &mut FxHashMap<u32, Weight>,
@@ -1022,24 +1211,19 @@ fn local_epsilon_closure(
     }
     if seed.len() == 1 {
         let state_id = seed_states[0];
-        if let Some(state) = nwa.states().get(state_id as usize) {
-            if state.epsilons.is_empty() {
-                closure_queue.clear();
-                for &s in &seed_states {
-                    weight_by_state[s as usize] = None;
-                }
-                return;
+        if view.epsilons(state_id).is_empty() {
+            closure_queue.clear();
+            for &s in &seed_states {
+                weight_by_state[s as usize] = None;
             }
+            return;
         }
     }
     while let Some(state_id) = closure_queue.pop_front() {
         let Some(current_weight) = weight_by_state[state_id as usize].clone() else {
             continue;
         };
-        let Some(state) = nwa.states().get(state_id as usize) else {
-            continue;
-        };
-        for (target, edge_weight) in &state.epsilons {
+        for (target, edge_weight) in view.epsilons(state_id) {
             let contribution = current_weight.intersection(edge_weight);
             if contribution.is_empty() {
                 continue;
@@ -1068,8 +1252,8 @@ fn local_epsilon_closure(
     }
 }
 
-fn determinize_with_supports(
-    nwa: &NWA,
+fn determinize_with_supports_from_view<V: DeterminizeView>(
+    view: &V,
     dense_positive_label_limit: Option<u32>,
 ) -> DeterminizedDwaWithSupports {
     fn subset_key(entries: &[(u32, Weight)]) -> Vec<(u32, usize)> {
@@ -1142,7 +1326,7 @@ fn determinize_with_supports(
         }
     }
 
-    let num_nwa_states = nwa.states().len();
+    let num_nwa_states = view.state_count();
 
     // Use flat arrays for epsilon closure when NWA is small enough.
     // weight_by_state[i] = Some(weight) means state i is in the closure.
@@ -1166,15 +1350,13 @@ fn determinize_with_supports(
         // Fast path: single seed with no epsilons.
         if seed.len() == 1 {
             let state_id = seed_states[0];
-            if let Some(state) = nwa.states().get(state_id as usize) {
-                if state.epsilons.is_empty() {
-                    // Clean up and return early — seed is already populated.
-                    closure_queue.clear();
-                    for &s in &seed_states {
-                        weight_by_state[s as usize] = None;
-                    }
-                    return;
+            if view.epsilons(state_id).is_empty() {
+                // Clean up and return early — seed is already populated.
+                closure_queue.clear();
+                for &s in &seed_states {
+                    weight_by_state[s as usize] = None;
                 }
+                return;
             }
         }
 
@@ -1182,10 +1364,7 @@ fn determinize_with_supports(
             let Some(current_weight) = weight_by_state[state_id as usize].clone() else {
                 continue;
             };
-            let Some(state) = nwa.states().get(state_id as usize) else {
-                continue;
-            };
-            for (target, edge_weight) in &state.epsilons {
+            for (target, edge_weight) in view.epsilons(state_id) {
                 let contribution = current_weight.intersection(edge_weight);
                 if contribution.is_empty() {
                     continue;
@@ -1229,7 +1408,7 @@ fn determinize_with_supports(
     let mut supports = vec![Vec::new()];
 
     let mut start_subset = FxHashMap::default();
-    for &state_id in nwa.start_states() {
+    for &state_id in view.start_states() {
         let existing = start_subset.get(&state_id).cloned().unwrap_or_else(Weight::empty);
         start_subset.insert(state_id, existing.union(&Weight::all()));
     }
@@ -1278,7 +1457,7 @@ fn determinize_with_supports(
         // Save subset entries for deferred parallel final weight computation.
         // Only save entries whose NWA states have final weights.
         let has_finals: Vec<(u32, Weight)> = subset_entries.iter()
-            .filter(|(nwa_state_id, _)| nwa.states()[*nwa_state_id as usize].final_weight.is_some())
+            .filter(|(state_id, _)| view.final_weight(*state_id).is_some())
             .map(|(id, w)| (*id, w.clone()))
             .collect();
         if !has_finals.is_empty() {
@@ -1286,8 +1465,7 @@ fn determinize_with_supports(
         }
         let scan_started = detail.as_ref().map(|_| Instant::now());
         for (nwa_state_id, path_weight) in &subset_entries {
-            let state = &nwa.states()[*nwa_state_id as usize];
-            for (&label, targets) in &state.transitions {
+            for (&label, targets) in view.transitions(*nwa_state_id) {
                 for (target, transition_weight) in targets {
                     if let Some(detail) = detail.as_mut() {
                         detail.outgoing_transitions_scanned += 1;
@@ -1350,7 +1528,7 @@ fn determinize_with_supports(
 
             if contribs.len() == 1 {
                 let (only_state, only_weight) = &contribs[0];
-                if nwa.states()[*only_state as usize].epsilons.is_empty() {
+                if view.epsilons(*only_state).is_empty() {
                     let key_started = detail.as_ref().map(|_| Instant::now());
                     key_buf.clear();
                     key_buf.push((*only_state, only_weight.ptr_key()));
@@ -1432,7 +1610,7 @@ fn determinize_with_supports(
                         .collect();
                     let closure_started = detail.as_ref().map(|_| Instant::now());
                     local_epsilon_closure(
-                        nwa,
+                        view,
                         &mut weight_by_state,
                         &mut closure_queue,
                         &mut target_subset,
@@ -1521,7 +1699,7 @@ fn determinize_with_supports(
 
         let mut groups: Vec<(usize, Weight, SmallVec<[Weight; 4]>)> = Vec::new();
         for (nwa_state_id, path_weight) in entries {
-            if let Some(state_final) = nwa.states()[*nwa_state_id as usize].final_weight.as_ref() {
+            if let Some(state_final) = view.final_weight(*nwa_state_id) {
                 let final_key = state_final.ptr_key();
                 if let Some((_, _, path_weights)) = groups
                     .iter_mut()
@@ -1651,6 +1829,13 @@ fn determinize_with_supports(
     }
 
     DeterminizedDwaWithSupports { dwa, supports }
+}
+
+fn determinize_with_supports(
+    nwa: &NWA,
+    dense_positive_label_limit: Option<u32>,
+) -> DeterminizedDwaWithSupports {
+    determinize_with_supports_from_view(nwa, dense_positive_label_limit)
 }
 
 fn determinize_parser_dwa_with_fallbacks(
@@ -2350,7 +2535,7 @@ fn build_parser_nwa_from_terminal_dwa(
     terminal_dwa: &DWA,
     grammar: &AnalyzedGrammar,
     templates: Templates,
-) -> Option<(NWA, ParserNwaBuildProfile)> {
+) -> Option<(NWA, ParserNwaBuildProfile, Option<LazyResolveGraph>)> {
     let total_started_at = Instant::now();
     let state_prep_started_at = Instant::now();
     let summaries = build_state_summaries(terminal_dwa, grammar, &templates);
@@ -2509,18 +2694,22 @@ fn build_parser_nwa_from_terminal_dwa(
     debug_assert_ne!(start, u32::MAX);
     arena.set_start_states(vec![start]);
 
-    if lazy_negative_parser_dwa_enabled() {
+    let lazy_graph = if lazy_negative_parser_dwa_enabled() {
         let lazy_graph = build_lazy_resolve_graph(
             &summaries,
             &productive,
             &templates,
             &mut built_bundle_cache,
+            terminal_dwa.start_state(),
         );
         if let Err(report) = compare_lazy_resolve_analyses(&arena, &lazy_graph) {
             eprintln!("[glrmask/lazy_negative_compare] {}", report);
             panic!("lazy negative parser-DWA analysis mismatch");
         }
-    }
+        Some(lazy_graph)
+    } else {
+        None
+    };
 
     let compose_state_ms = elapsed_ms(graph_started_at);
 
@@ -2567,6 +2756,7 @@ fn build_parser_nwa_from_terminal_dwa(
             compose_state_ms,
             parser_nwa_build_ms: elapsed_ms(total_started_at),
         },
+        lazy_graph,
     ))
 }
 
@@ -2587,7 +2777,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     } else {
         (0, 0)
     };
-    let Some((mut parser_nwa, parser_nwa_profile)) = build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates) else {
+    let Some((mut parser_nwa, parser_nwa_profile, lazy_graph)) = build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates) else {
         if profiling_enabled {
             eprintln!(
                 "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} parser_nwa_built=false pre_minimize_states=0 pre_minimize_transitions=0 post_minimize_states=0 post_minimize_transitions=0 minimize_skipped={} state_prep_ms=0.000 compose_state_ms=0.000 parser_nwa_build_ms=0.000 resolve_negative_ms=0.000 support_determinize_ms=0.000 possible_outgoing_ms=0.000 default_opt_ms=0.000 subtract_final_ms=0.000 fallback_determinize_ms=0.000 minimize_ms=0.000 total_ms={:.3}",
@@ -2606,17 +2796,121 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let resolve_negative_ms = elapsed_ms(resolve_negative_started_at);
 
     let support_determinize_started_at = Instant::now();
-    let determinized = determinize_with_supports(&parser_nwa, Some(table.num_states));
+    let determinized = if let Some(lazy_graph) = lazy_graph.as_ref() {
+        let lazy_resolved_graph = build_lazy_resolved_graph(lazy_graph);
+        let lazy_determinized = determinize_with_supports_from_view(&lazy_resolved_graph, Some(table.num_states));
+
+        if lazy_negative_debug_enabled() {
+            let materialized_determinized = determinize_with_supports(&parser_nwa, Some(table.num_states));
+            let materialized_possible = build_possible_outgoing_ids_by_state(
+                &parser_nwa,
+                &materialized_determinized.supports,
+                table.num_states,
+            );
+            let lazy_possible = build_possible_outgoing_ids_by_view(
+                &lazy_resolved_graph,
+                &lazy_determinized.supports,
+                table.num_states,
+            );
+            eprintln!(
+                "[glrmask/lazy_negative_debug] start_possible materialized={} lazy={}",
+                possible_outgoing_summary(&materialized_possible[materialized_determinized.dwa.start_state() as usize]),
+                possible_outgoing_summary(&lazy_possible[lazy_determinized.dwa.start_state() as usize]),
+            );
+            eprintln!(
+                "[glrmask/lazy_negative_debug] start_determinized materialized={:?} lazy={:?}",
+                dwa_state_transition_summary(&materialized_determinized.dwa, materialized_determinized.dwa.start_state()),
+                dwa_state_transition_summary(&lazy_determinized.dwa, lazy_determinized.dwa.start_state()),
+            );
+            for state_id in [1_u32, 4_u32, 106_u32] {
+                eprintln!(
+                    "[glrmask/lazy_negative_debug] determinized_state {} materialized={:?} lazy={:?}",
+                    state_id,
+                    dwa_state_support_summary(
+                        &materialized_determinized.dwa,
+                        &materialized_determinized.supports,
+                        state_id,
+                    ),
+                    dwa_state_support_summary(
+                        &lazy_determinized.dwa,
+                        &lazy_determinized.supports,
+                        state_id,
+                    ),
+                );
+                if state_id == 1 || state_id == 4 {
+                    eprintln!(
+                        "[glrmask/lazy_negative_debug] determinized_state_entries {} {:?}",
+                        state_id,
+                        support_entry_final_summary(
+                            &lazy_determinized.supports,
+                            state_id,
+                            &parser_nwa,
+                            &lazy_resolved_graph,
+                        ),
+                    );
+                }
+            }
+        }
+
+        lazy_determinized
+    } else {
+        determinize_with_supports(&parser_nwa, Some(table.num_states))
+    };
     let support_determinize_ms = elapsed_ms(support_determinize_started_at);
     let mut parser_dwa_pre_minimize = determinized.dwa;
 
     let possible_outgoing_started_at = Instant::now();
-    let possible_by_state = build_possible_outgoing_ids_by_state(
-        &parser_nwa,
-        &determinized.supports,
-        table.num_states,
-    );
+    let possible_by_state = if let Some(lazy_graph) = lazy_graph.as_ref() {
+        let lazy_resolved_graph = build_lazy_resolved_graph(lazy_graph);
+        build_possible_outgoing_ids_by_view(
+            &lazy_resolved_graph,
+            &determinized.supports,
+            table.num_states,
+        )
+    } else {
+        build_possible_outgoing_ids_by_state(
+            &parser_nwa,
+            &determinized.supports,
+            table.num_states,
+        )
+    };
     let possible_outgoing_ms = elapsed_ms(possible_outgoing_started_at);
+
+    if lazy_graph.is_some() && lazy_negative_debug_enabled() {
+        let materialized_determinized = determinize_with_supports(&parser_nwa, Some(table.num_states));
+        let materialized_possible = build_possible_outgoing_ids_by_state(
+            &parser_nwa,
+            &materialized_determinized.supports,
+            table.num_states,
+        );
+        let mut materialized_post = materialized_determinized.dwa.clone();
+        optimize_parser_dwa_defaults(
+            &mut materialized_post,
+            &materialized_possible,
+            table.num_states,
+        );
+        subtract_final_weights_from_outgoing_dwa(&mut materialized_post);
+        materialized_post = determinize_parser_dwa_with_fallbacks(
+            &materialized_post,
+            &materialized_possible,
+            table.num_states,
+        );
+
+        let mut lazy_post = parser_dwa_pre_minimize.clone();
+        optimize_parser_dwa_defaults(&mut lazy_post, &possible_by_state, table.num_states);
+        subtract_final_weights_from_outgoing_dwa(&mut lazy_post);
+        lazy_post = determinize_parser_dwa_with_fallbacks(
+            &lazy_post,
+            &possible_by_state,
+            table.num_states,
+        );
+
+        eprintln!(
+            "[glrmask/lazy_negative_debug] start_post_fallback materialized={:?} lazy={:?}",
+            dwa_state_transition_summary(&materialized_post, materialized_post.start_state()),
+            dwa_state_transition_summary(&lazy_post, lazy_post.start_state()),
+        );
+    }
 
     let default_opt_started_at = Instant::now();
     optimize_parser_dwa_defaults(
