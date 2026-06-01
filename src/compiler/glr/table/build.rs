@@ -5,15 +5,11 @@ use crate::ds::bitset::BitSet;
 const DISABLE_UNIT_REDUCTION_INLINING_ENV: &str = "GLRMASK_DISABLE_UNIT_REDUCTION_INLINING";
 const GLR_TABLE_CONSTRUCTION_ENV: &str = "GLRMASK_GLR_TABLE_CONSTRUCTION";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GlrTableConstruction {
-    LegacyRowBisim,
-    CoreLac,
-}
-
 fn glr_table_construction() -> GlrTableConstruction {
     match std::env::var(GLR_TABLE_CONSTRUCTION_ENV) {
-        Ok(value) if value.trim().eq_ignore_ascii_case("core-lac") => GlrTableConstruction::CoreLac,
+        Ok(value) if value.trim().eq_ignore_ascii_case("core-lac") => {
+            GlrTableConstruction::ExperimentalCoreMerged
+        }
         _ => GlrTableConstruction::LegacyRowBisim,
     }
 }
@@ -39,13 +35,15 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     let t1 = std::time::Instant::now();
     let construction = glr_table_construction();
     let mut table = match construction {
-        GlrTableConstruction::LegacyRowBisim => build_ielr_table(grammar, &item_sets, &transitions),
-        GlrTableConstruction::CoreLac => {
-            build_core_lac_table(grammar, &item_sets, &transitions)
-                .expect("GLRMASK_GLR_TABLE_CONSTRUCTION=core-lac could not build a compatible compact core LAC table")
+        GlrTableConstruction::LegacyRowBisim => build_legacy_row_bisim_table(grammar, &item_sets, &transitions),
+        GlrTableConstruction::ExperimentalCoreMerged => {
+            build_experimental_core_merged_table(grammar, &item_sets, &transitions).expect(
+                "GLRMASK_GLR_TABLE_CONSTRUCTION=core-lac could not build a compatible experimental core-merged table",
+            )
         }
     };
-    let ielr_ms = t1.elapsed().as_secs_f64() * 1000.0;
+    table.construction = construction;
+    let construction_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
     let pre_merge_states = table.num_states;
     let t2 = std::time::Instant::now();
@@ -94,7 +92,7 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     let recog_ms = t3.elapsed().as_secs_f64() * 1000.0;
     let _ = (
         lr1_ms,
-        ielr_ms,
+        construction_ms,
         pre_merge_states,
         merge_ms,
         merge_identical1_ms,
@@ -115,10 +113,10 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
     {
         eprintln!(
-            "[glrmask/profile][glr_table] construction={:?} lr1_item_sets_ms={:.3} ielr_ms={:.3} pre_merge_states={} post_merge_states={} unit_collapse={} unit_collapse_aborted={} unit_collapse_reason={} merge_ms={:.3} merge_identical1_ms={:.3} unit_collapse_ms={:.3} prune_ms={:.3} merge_identical2_ms={:.3} stack_shift_canon_ms={:.3}",
+            "[glrmask/profile][glr_table] construction={:?} lr1_item_sets_ms={:.3} construction_ms={:.3} pre_merge_states={} post_merge_states={} unit_collapse={} unit_collapse_aborted={} unit_collapse_reason={} merge_ms={:.3} merge_identical1_ms={:.3} unit_collapse_ms={:.3} prune_ms={:.3} merge_identical2_ms={:.3} stack_shift_canon_ms={:.3}",
             construction,
             lr1_ms,
-            ielr_ms,
+            construction_ms,
             pre_merge_states,
             table.num_states,
             unit_collapse_enabled,
@@ -288,7 +286,8 @@ fn finish_table(
         num_rules: grammar.rules.len() as u32,
         rules: grammar.rules.clone(),
         nonterminal_display_names: grammar.nonterminal_display_names.clone(),
-        admission_mode: AdmissionMode::RowExact,
+        construction: GlrTableConstruction::LegacyRowBisim,
+        admission_policy: AdmissionPolicy::RowPresenceExact,
         advance: Vec::new(),
         forwarded_shifts,
         guarded_shift_index: Vec::new(),
@@ -1042,7 +1041,7 @@ fn build_lr1_table(
     finish_table(grammar, pending, goto, forwarded_shifts)
 }
 
-// IELR-style merge.
+// Legacy row-bisimulation merge over canonical LR(1) item sets.
 
 fn lr1_core_key(items: &LR1ItemSet) -> Vec<Item> {
     let mut core = BTreeSet::new();
@@ -1052,21 +1051,22 @@ fn lr1_core_key(items: &LR1ItemSet) -> Vec<Item> {
     core.into_iter().collect()
 }
 
-fn build_core_lac_table(
+fn build_experimental_core_merged_table(
     grammar: &AnalyzedGrammar,
     item_sets: &[LR1ItemSet],
     transitions: &[BTreeMap<Symbol, (u32, bool, bool)>],
 ) -> Option<GLRTable> {
     let canonical = build_lr1_table(grammar, item_sets, transitions);
     let core_keys = item_sets.iter().map(lr1_core_key).collect::<Vec<_>>();
-    let partition = refine_core_lac_partition(&canonical, &core_keys);
-    let mut table = union_core_lac_rows(canonical, &partition)?;
-    table.admission_mode = AdmissionMode::LacSimulation;
+    let partition = refine_experimental_core_partition(&canonical, &core_keys);
+    let mut table = union_experimental_core_rows(canonical, &partition)?;
+    table.construction = GlrTableConstruction::ExperimentalCoreMerged;
+    table.admission_policy = AdmissionPolicy::ExactSimulation;
     table.rebuild_advance_rows_from_actions();
     Some(table)
 }
 
-fn refine_core_lac_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<u32> {
+fn refine_experimental_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<u32> {
     let mut class_by_core: BTreeMap<Vec<Item>, u32> = BTreeMap::new();
     let mut partition = Vec::with_capacity(core_keys.len());
     for key in core_keys {
@@ -1075,10 +1075,10 @@ fn refine_core_lac_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<u
     }
 
     loop {
-        let mut sig_to_class: BTreeMap<CoreLacCompatibilitySig, u32> = BTreeMap::new();
+        let mut sig_to_class: BTreeMap<ExperimentalCoreCompatibilitySig, u32> = BTreeMap::new();
         let mut next_partition = Vec::with_capacity(partition.len());
         for state in 0..table.num_states as usize {
-            let sig = CoreLacCompatibilitySig::new(table, state, partition[state], &partition);
+            let sig = ExperimentalCoreCompatibilitySig::new(table, state, partition[state], &partition);
             let next = sig_to_class.len() as u32;
             next_partition.push(*sig_to_class.entry(sig).or_insert(next));
         }
@@ -1090,13 +1090,13 @@ fn refine_core_lac_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<u
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct CoreLacCompatibilitySig {
+struct ExperimentalCoreCompatibilitySig {
     core_class: u32,
     shifts: Vec<(TerminalID, u32, bool, bool)>,
     gotos: Vec<(NonterminalID, u32, bool)>,
 }
 
-impl CoreLacCompatibilitySig {
+impl ExperimentalCoreCompatibilitySig {
     fn new(table: &GLRTable, state: usize, core_class: u32, partition: &[u32]) -> Self {
         let mut shifts = Vec::new();
         for (terminal, action) in &table.action[state] {
@@ -1136,7 +1136,7 @@ fn action_shift(action: &Action) -> Option<(u32, bool)> {
     }
 }
 
-fn union_core_lac_rows(table: GLRTable, partition: &[u32]) -> Option<GLRTable> {
+fn union_experimental_core_rows(table: GLRTable, partition: &[u32]) -> Option<GLRTable> {
     let nstates = table.num_states as usize;
     let ngroups = partition.iter().copied().max().map(|x| x + 1).unwrap_or(0) as usize;
 
@@ -1194,7 +1194,8 @@ fn union_core_lac_rows(table: GLRTable, partition: &[u32]) -> Option<GLRTable> {
         num_rules: table.num_rules,
         rules: table.rules,
         nonterminal_display_names: table.nonterminal_display_names,
-        admission_mode: table.admission_mode,
+        construction: table.construction,
+        admission_policy: table.admission_policy,
         advance: Vec::new(),
         forwarded_shifts,
         guarded_shift_index: Vec::new(),
@@ -1230,7 +1231,7 @@ fn add_remapped_action_to_pending(
     Some(())
 }
 
-fn build_ielr_table(
+fn build_legacy_row_bisim_table(
     grammar: &AnalyzedGrammar,
     item_sets: &[LR1ItemSet],
     transitions: &[BTreeMap<Symbol, (u32, bool, bool)>],

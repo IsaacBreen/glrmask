@@ -39,14 +39,28 @@ pub struct GuardedShiftCellIndex {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum AdmissionMode {
-    RowExact,
-    LacSimulation,
+pub enum AdmissionPolicy {
+    /// Cheap row-presence admission is exact for this table.
+    RowPresenceExact,
+    /// Dynamically simulate reductions/gotos before admitting a terminal.
+    ExactSimulation,
 }
 
-impl Default for AdmissionMode {
+impl Default for AdmissionPolicy {
     fn default() -> Self {
-        Self::RowExact
+        Self::RowPresenceExact
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum GlrTableConstruction {
+    LegacyRowBisim,
+    ExperimentalCoreMerged,
+}
+
+impl Default for GlrTableConstruction {
+    fn default() -> Self {
+        Self::LegacyRowBisim
     }
 }
 
@@ -61,7 +75,9 @@ pub struct GLRTable {
     #[serde(default)]
     pub nonterminal_display_names: Vec<String>,
     #[serde(default)]
-    pub admission_mode: AdmissionMode,
+    pub construction: GlrTableConstruction,
+    #[serde(default)]
+    pub admission_policy: AdmissionPolicy,
     /// Terminal support used by cheap admission/mask queries.
     ///
     /// `action` is the optimized execution table. Some execution actions are
@@ -505,7 +521,7 @@ impl GLRTable {
 #[cfg(test)]
 pub(crate) mod testing {
     use super::row::{ActionRow, GotoRow};
-    use super::{Action, AdmissionMode, GLRTable};
+    use super::{Action, AdmissionPolicy, GlrTableConstruction, GLRTable};
     use crate::grammar::flat::{NonterminalID, TerminalID};
 
     pub(crate) fn build_test_table(
@@ -530,7 +546,8 @@ pub(crate) mod testing {
             num_rules: 0,
             rules: Vec::new(),
             nonterminal_display_names: Vec::new(),
-            admission_mode: AdmissionMode::RowExact,
+            construction: GlrTableConstruction::LegacyRowBisim,
+            admission_policy: AdmissionPolicy::RowPresenceExact,
             advance,
             forwarded_shifts: Default::default(),
             guarded_shift_index: Vec::new(),
