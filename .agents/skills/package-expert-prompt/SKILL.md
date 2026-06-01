@@ -54,12 +54,18 @@ Tell the expert that their returned artifact should itself be a zip containing:
 - A Markdown document explaining the solution in full, including the reasoning,
   invariants, correctness argument, complexity or performance implications, and
   validation plan.
-- Code for the solution, either as one or more patch files or as full modified
-  files.
+- For implementation tasks, a complete working implementation as the primary
+  deliverable: one or more patch files or full modified files that can be
+  applied to the included codebase. Do not ask merely for a plan, blueprint, or
+  pseudocode when the user wants code. Pseudocode is acceptable only as
+  supplementary explanation or when the user explicitly asks for design only.
+- Tests and validation commands needed to prove the implementation.
 
 The expert's returned zip should not include unrelated or unmodified files. If
-there are multiple viable solutions, ask the expert to include each one as a
-separate option with tradeoffs and enough code or patch detail to implement it.
+there are multiple viable solutions, ask the expert to choose and implement the
+recommended one as a concrete patch, then describe other options as tradeoffs.
+Do not accept "enough code detail to implement it" as the target for coding
+tasks; require actual patch files or full modified source files.
 
 For Rust codebase questions, prefer including:
 
@@ -80,8 +86,10 @@ Include:
 - The concrete problem or design question.
 - The files or modules likely to matter.
 - Current assumptions and known constraints.
-- What the expert should deliver, such as critique, algorithm proposal, bug
-  diagnosis, or review checklist.
+- What the expert should deliver. For coding tasks, this must say "return a
+  complete implementation patch" and list expected tests. Ask for critique,
+  algorithm proposals, bug diagnosis, or review checklists only when the user
+  asked for analysis rather than implementation.
 - Any non-goals or approaches already rejected.
 
 Also instruct the expert to think mathematically: define the objects involved,
