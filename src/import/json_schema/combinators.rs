@@ -666,7 +666,7 @@ impl<'a> Lowerer<'a> {
         Ok(current)
     }
 
-    fn schema_transitively_refs_pointer(
+    pub(crate) fn schema_transitively_refs_pointer(
         &self,
         schema: &Schema,
         wanted: &str,

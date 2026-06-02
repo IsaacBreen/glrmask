@@ -13,7 +13,8 @@ use super::combinators::{
 };
 use super::error::{ImportResult, SchemaImportError};
 use super::lower::{
-    choice, lit, lit_bytes, never, r, seq, Lowerer, JSON_ARRAY_RULE, JSON_BOOL_RULE,
+    choice, lit, lit_bytes, never, normalize_local_ref, r, seq, Lowerer, JSON_ARRAY_RULE,
+    JSON_BOOL_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
     JSON_ADDITIONAL_KEY_COLON_SHARED_RULE, JSON_NULL_RULE,
     JSON_NUMBER_RULE, JSON_OBJECT_RULE, JSON_STRING_RULE, JSON_VALUE_RULE,
@@ -255,6 +256,9 @@ impl<'a> Lowerer<'a> {
         if branches.len() < 2 {
             return Ok(None);
         }
+        if self.has_duplicate_recursive_ref_branches(branches)? {
+            return Ok(None);
+        }
 
         let mut variants = Vec::with_capacity(branches.len());
         let mut include_untyped_non_object_alts = false;
@@ -282,6 +286,9 @@ impl<'a> Lowerer<'a> {
         if branches.len() < 2 {
             return Ok(None);
         }
+        if self.has_duplicate_recursive_ref_branches(branches)? {
+            return Ok(None);
+        }
 
         let mut variants = Vec::with_capacity(branches.len());
         let mut include_untyped_non_object_alts = false;
@@ -299,6 +306,24 @@ impl<'a> Lowerer<'a> {
             &variants,
             include_untyped_non_object_alts,
         )
+    }
+
+    fn has_duplicate_recursive_ref_branches(&self, branches: &[Schema]) -> ImportResult<bool> {
+        let mut seen = BTreeSet::new();
+        for branch in branches {
+            let SchemaKind::Ref(pointer) = &branch.kind else {
+                continue;
+            };
+            let normalized = normalize_local_ref(pointer)?;
+            if seen.insert(normalized.clone()) {
+                continue;
+            }
+            let target = self.resolve_ref_target(pointer)?;
+            if self.schema_transitively_refs_pointer(target, &normalized, &mut BTreeSet::new())? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub(crate) fn try_lower_unordered_open_object_any_of_variants(
