@@ -256,6 +256,9 @@ impl<'a> Lowerer<'a> {
         if branches.len() < 2 {
             return Ok(None);
         }
+        if self.has_recursive_ref_branch(branches)? {
+            return Ok(None);
+        }
         if self.has_duplicate_recursive_ref_branches(branches)? {
             return Ok(None);
         }
@@ -284,6 +287,9 @@ impl<'a> Lowerer<'a> {
         branches: &[Schema],
     ) -> ImportResult<Option<GrammarExpr>> {
         if branches.len() < 2 {
+            return Ok(None);
+        }
+        if self.has_recursive_ref_branch(branches)? {
             return Ok(None);
         }
         if self.has_duplicate_recursive_ref_branches(branches)? {
@@ -320,6 +326,20 @@ impl<'a> Lowerer<'a> {
             }
             let target = self.resolve_ref_target(pointer)?;
             if self.schema_transitively_refs_pointer(target, &normalized, &mut BTreeSet::new())? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn has_recursive_ref_branch(&self, branches: &[Schema]) -> ImportResult<bool> {
+        for branch in branches {
+            let normalized = match &branch.kind {
+                SchemaKind::Ref(pointer) => normalize_local_ref(pointer)?,
+                _ if branch.location.starts_with('#') => normalize_local_ref(&branch.location)?,
+                _ => continue,
+            };
+            if self.schema_transitively_refs_pointer(branch, &normalized, &mut BTreeSet::new())? {
                 return Ok(true);
             }
         }
