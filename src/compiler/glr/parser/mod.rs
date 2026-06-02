@@ -1826,6 +1826,269 @@ fn exact_admission_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: Te
     false
 }
 
+fn exact_admission_may_advance_on_any(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    terminals: &BitSet,
+) -> bool {
+    if terminals.is_empty() {
+        return false;
+    }
+
+    let mut queue = VecDeque::<(ParserGSS, BitSet)>::new();
+    let mut visited = FxHashMap::<Vec<Vec<u32>>, BitSet>::default();
+
+    for state in stack.peek_values() {
+        exact_admission_enqueue_frontier_any(
+            stack.isolate(Some(state)),
+            terminals,
+            &mut queue,
+            &mut visited,
+        );
+    }
+
+    while let Some((frontier, frontier_terminals)) = queue.pop_front() {
+        for source_state in frontier.peek_values() {
+            if !table.advance_row_intersects(source_state, &frontier_terminals) {
+                continue;
+            }
+
+            let isolated = frontier.isolate(Some(source_state));
+            let mut pending_reduces = SmallVec::<[(u32, u32, BitSet); 8]>::new();
+
+            if exact_admission_for_each_matching_action(
+                table,
+                source_state,
+                &frontier_terminals,
+                |terminal, terminal_bit, action| {
+                    exact_admission_process_action_any(
+                        &isolated,
+                        terminal,
+                        terminal_bit,
+                        action,
+                        frontier_terminals.len(),
+                        &mut pending_reduces,
+                    )
+                },
+            ) {
+                return true;
+            }
+
+            for (nt, len, reduce_terminals) in pending_reduces {
+                exact_admission_enqueue_reduce_any(
+                    table,
+                    &isolated,
+                    nt,
+                    len as usize,
+                    &reduce_terminals,
+                    &mut queue,
+                    &mut visited,
+                );
+            }
+        }
+    }
+
+    false
+}
+
+fn exact_admission_for_each_matching_action(
+    table: &GLRTable,
+    state: u32,
+    terminals: &BitSet,
+    mut f: impl FnMut(TerminalID, usize, &Action) -> bool,
+) -> bool {
+    let Some(row) = table.action.get(state as usize) else {
+        return false;
+    };
+
+    let active_count = terminals.count_ones();
+    if active_count == 0 {
+        return false;
+    }
+
+    if row.len() <= active_count {
+        for (terminal, action) in row {
+            let Some(bit) = exact_admission_terminal_bit(table, terminal, terminals.len()) else {
+                continue;
+            };
+            if !terminals.contains(bit) || !table.advance_row_allows(state, terminal) {
+                continue;
+            }
+            if f(terminal, bit, action) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    for bit in terminals.iter_ones() {
+        let Some(terminal) = exact_admission_terminal_from_bit(table, bit) else {
+            continue;
+        };
+        if !table.advance_row_allows(state, terminal) {
+            continue;
+        }
+        if let Some(action) = table.action(state, terminal)
+            && f(terminal, bit, action)
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn exact_admission_process_action_any(
+    isolated: &ParserGSS,
+    terminal: TerminalID,
+    terminal_bit: usize,
+    action: &Action,
+    terminals_len: usize,
+    pending_reduces: &mut SmallVec<[(u32, u32, BitSet); 8]>,
+) -> bool {
+    match action {
+        Action::Shift(..) => true,
+        Action::StackShifts(shifts) => {
+            !apply_stack_shifts(isolated.clone(), shifts).is_empty()
+        }
+        Action::GuardedStackShifts(shifts) => stack_may_apply_guarded_shifts(isolated, shifts),
+        Action::Reduce(nt, len) => {
+            exact_admission_add_pending_reduce(
+                pending_reduces,
+                *nt,
+                *len,
+                terminal_bit,
+                terminals_len,
+            );
+            false
+        }
+        Action::Split {
+            shift,
+            reduces,
+            accept,
+        } => {
+            if *accept && terminal == EOF {
+                return true;
+            }
+            if shift.is_some() {
+                return true;
+            }
+            for &(nt, len) in reduces {
+                exact_admission_add_pending_reduce(
+                    pending_reduces,
+                    nt,
+                    len,
+                    terminal_bit,
+                    terminals_len,
+                );
+            }
+            false
+        }
+        Action::Accept => terminal == EOF,
+    }
+}
+
+fn exact_admission_add_pending_reduce(
+    pending_reduces: &mut SmallVec<[(u32, u32, BitSet); 8]>,
+    nt: u32,
+    rhs_len: u32,
+    terminal_bit: usize,
+    terminals_len: usize,
+) {
+    if let Some((_, _, terminals)) = pending_reduces
+        .iter_mut()
+        .find(|(pending_nt, pending_len, _)| *pending_nt == nt && *pending_len == rhs_len)
+    {
+        terminals.set(terminal_bit);
+        return;
+    }
+
+    let mut terminals = BitSet::new(terminals_len);
+    terminals.set(terminal_bit);
+    pending_reduces.push((nt, rhs_len, terminals));
+}
+
+fn exact_admission_enqueue_reduce_any(
+    table: &GLRTable,
+    isolated: &ParserGSS,
+    nt: u32,
+    rhs_len: usize,
+    terminals: &BitSet,
+    queue: &mut VecDeque<(ParserGSS, BitSet)>,
+    visited: &mut FxHashMap<Vec<Vec<u32>>, BitSet>,
+) {
+    for (base, target, is_replace) in
+        reduce_branches_from_isolated(table, isolated, nt, rhs_len)
+    {
+        let next = if is_replace {
+            base.popn(1).push(target)
+        } else {
+            base.push(target)
+        };
+        exact_admission_enqueue_frontier_any(next, terminals, queue, visited);
+    }
+}
+
+fn exact_admission_enqueue_frontier_any(
+    frontier: ParserGSS,
+    terminals: &BitSet,
+    queue: &mut VecDeque<(ParserGSS, BitSet)>,
+    visited: &mut FxHashMap<Vec<Vec<u32>>, BitSet>,
+) {
+    if frontier.is_empty() || terminals.is_empty() {
+        return;
+    }
+
+    let mut key: Vec<Vec<u32>> = frontier
+        .to_stacks()
+        .into_iter()
+        .map(|(stack, _)| stack)
+        .collect();
+    key.sort();
+    key.dedup();
+
+    let new_terminals = if let Some(seen) = visited.get_mut(&key) {
+        let delta = terminals.difference(seen);
+        if delta.is_empty() {
+            return;
+        }
+        seen.union_with(&delta);
+        delta
+    } else {
+        visited.insert(key, terminals.clone());
+        terminals.clone()
+    };
+
+    queue.push_back((frontier, new_terminals));
+}
+
+#[inline]
+fn exact_admission_terminal_bit(
+    table: &GLRTable,
+    terminal: TerminalID,
+    terminals_len: usize,
+) -> Option<usize> {
+    let bit = if terminal == EOF {
+        table.num_terminals as usize
+    } else if terminal < table.num_terminals {
+        terminal as usize
+    } else {
+        return None;
+    };
+    (bit < terminals_len).then_some(bit)
+}
+
+#[inline]
+fn exact_admission_terminal_from_bit(table: &GLRTable, bit: usize) -> Option<TerminalID> {
+    if bit == table.num_terminals as usize {
+        Some(EOF)
+    } else if bit < table.num_terminals as usize {
+        Some(bit as TerminalID)
+    } else {
+        None
+    }
+}
+
 fn exact_admission_enqueue_reduce(
     table: &GLRTable,
     isolated: &ParserGSS,
@@ -1834,7 +2097,9 @@ fn exact_admission_enqueue_reduce(
     queue: &mut VecDeque<ParserGSS>,
     visited: &mut FxHashSet<Vec<Vec<u32>>>,
 ) {
-    for (base, target, is_replace) in reduce_branches_from_isolated(table, isolated, nt, rhs_len) {
+    for (base, target, is_replace) in
+        reduce_branches_from_isolated(table, isolated, nt, rhs_len)
+    {
         let next = if is_replace {
             base.popn(1).push(target)
         } else {
@@ -1893,9 +2158,10 @@ mod tests {
         try_advance_pop1_reduce_plus_stackshift_wave,
     };
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
+    use crate::compiler::glr::analysis::EOF;
     use crate::compiler::glr::table::testing::build_test_table;
     use crate::compiler::glr::table::{
-        Action, AdmissionPolicy, GuardedStackShift, StackShift, StackShiftGuard,
+        Action, AdmissionPolicy, GLRTable, GuardedStackShift, StackShift, StackShiftGuard,
     };
     use crate::ds::bitset::BitSet;
 
@@ -2174,6 +2440,145 @@ mod tests {
         );
     }
 
+    fn assert_exact_any_matches_disjunction(
+        table: &GLRTable,
+        stack: &ParserGSS,
+        terminals: &BitSet,
+    ) {
+        let disjunction = terminals.iter_ones().any(|bit| match bit {
+            bit if bit == table.num_terminals as usize => stack_may_advance_on(table, stack, EOF),
+            bit if bit < table.num_terminals as usize => {
+                stack_may_advance_on(table, stack, bit as u32)
+            }
+            _ => false,
+        });
+
+        assert_eq!(
+            stack_may_advance_on_any(table, stack, terminals),
+            disjunction
+        );
+    }
+
+    #[test]
+    fn exact_admission_any_does_not_mix_lookahead_reductions() {
+        let reduce_token = 0;
+        let shift_token = 1;
+        let nt = 0;
+        let mut table = build_test_table(
+            5,
+            2,
+            &[
+                &[],
+                &[],
+                &[(reduce_token, Action::Reduce(nt, 1))],
+                &[(shift_token, Action::Shift(4, false))],
+                &[],
+            ],
+            &[&[(nt, (3, false))], &[], &[], &[], &[]],
+        );
+        table.admission_policy = AdmissionPolicy::ExactSimulation;
+
+        let stack = ParserGSS::from_single_stack(vec![0, 2], TerminalsDisallowed::new());
+        let mut terminals = BitSet::new(3);
+        terminals.set(reduce_token as usize);
+        terminals.set(shift_token as usize);
+
+        assert!(!stack_may_advance_on(&table, &stack, reduce_token));
+        assert!(!stack_may_advance_on(&table, &stack, shift_token));
+        assert_exact_any_matches_disjunction(&table, &stack, &terminals);
+        assert!(!stack_may_advance_on_any(&table, &stack, &terminals));
+    }
+
+    #[test]
+    fn exact_admission_any_batches_reduce_frontier_by_terminal_set() {
+        let token_a = 0;
+        let token_b = 1;
+        let nt = 0;
+        let mut table = build_test_table(
+            5,
+            2,
+            &[
+                &[],
+                &[],
+                &[
+                    (token_a, Action::Reduce(nt, 1)),
+                    (token_b, Action::Reduce(nt, 1)),
+                ],
+                &[(token_b, Action::Shift(4, false))],
+                &[],
+            ],
+            &[&[(nt, (3, false))], &[], &[], &[], &[]],
+        );
+        table.admission_policy = AdmissionPolicy::ExactSimulation;
+
+        let stack = ParserGSS::from_single_stack(vec![0, 2], TerminalsDisallowed::new());
+        let mut terminals = BitSet::new(3);
+        terminals.set(token_a as usize);
+        terminals.set(token_b as usize);
+
+        assert!(!stack_may_advance_on(&table, &stack, token_a));
+        assert!(stack_may_advance_on(&table, &stack, token_b));
+        assert_exact_any_matches_disjunction(&table, &stack, &terminals);
+        assert!(stack_may_advance_on_any(&table, &stack, &terminals));
+    }
+
+    #[test]
+    fn exact_admission_any_preserves_guarded_shift_checks() {
+        let token = 0;
+        let other_token = 1;
+        let mut table = build_test_table(
+            3,
+            2,
+            &[
+                &[],
+                &[],
+                &[(
+                    token,
+                    Action::GuardedStackShifts(vec![GuardedStackShift {
+                        guards: vec![StackShiftGuard {
+                            pop: 1,
+                            states: vec![0],
+                        }],
+                        pop: 2,
+                        pushes: vec![7],
+                    }]),
+                )],
+            ],
+            &[&[], &[], &[]],
+        );
+        table.admission_policy = AdmissionPolicy::ExactSimulation;
+
+        let mut terminals = BitSet::new(3);
+        terminals.set(token as usize);
+        terminals.set(other_token as usize);
+
+        let rejected = ParserGSS::from_single_stack(vec![1, 2], TerminalsDisallowed::new());
+        assert_exact_any_matches_disjunction(&table, &rejected, &terminals);
+        assert!(!stack_may_advance_on_any(&table, &rejected, &terminals));
+
+        let accepted = ParserGSS::from_single_stack(vec![0, 2], TerminalsDisallowed::new());
+        assert_exact_any_matches_disjunction(&table, &accepted, &terminals);
+        assert!(stack_may_advance_on_any(&table, &accepted, &terminals));
+    }
+
+    #[test]
+    fn exact_admission_any_handles_eof_acceptance() {
+        let token = 0;
+        let mut table = build_test_table(1, 1, &[&[(EOF, Action::Accept)]], &[&[]]);
+        table.admission_policy = AdmissionPolicy::ExactSimulation;
+        let stack = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+
+        let mut non_eof = BitSet::new(2);
+        non_eof.set(token as usize);
+        assert_exact_any_matches_disjunction(&table, &stack, &non_eof);
+        assert!(!stack_may_advance_on_any(&table, &stack, &non_eof));
+
+        let mut eof = BitSet::new(2);
+        eof.set(table.num_terminals as usize);
+        assert_exact_any_matches_disjunction(&table, &stack, &eof);
+        assert!(stack_may_advance_on_any(&table, &stack, &eof));
+    }
+
     #[test]
     fn advance_stacks_materializes_single_concrete_path_for_split() {
         let token = 0;
@@ -2334,20 +2739,7 @@ pub(crate) fn stack_may_advance_on_any(
     terminals: &BitSet,
 ) -> bool {
     if table.admission_policy == AdmissionPolicy::ExactSimulation {
-        for bit in 0..terminals.len() {
-            if !terminals.contains(bit) {
-                continue;
-            }
-            let terminal = if bit == table.num_terminals as usize {
-                EOF
-            } else {
-                bit as TerminalID
-            };
-            if stack_may_advance_on(table, stack, terminal) {
-                return true;
-            }
-        }
-        return false;
+        return exact_admission_may_advance_on_any(table, stack, terminals);
     }
 
     let top_states = stack.peek_values();
