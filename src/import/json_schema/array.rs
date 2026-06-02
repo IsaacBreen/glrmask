@@ -83,16 +83,13 @@ impl<'a> Lowerer<'a> {
         max: usize,
     ) -> GrammarExpr {
         let mut builder = ExprNfaBuilder::new();
-        let open_state = builder.add_state();
         let accept_state = builder.add_state();
         let mut item_states = Vec::with_capacity(max + 1);
-        item_states.push(open_state);
+        item_states.push(builder.start_state());
         for _ in 0..max {
             item_states.push(builder.add_state());
         }
         builder.set_accepting(accept_state);
-
-        builder.add_transition(builder.start_state(), lit("["), open_state);
 
         for &state in item_states.iter().skip(min) {
             builder.add_transition(state, lit("]"), accept_state);
@@ -112,7 +109,7 @@ impl<'a> Lowerer<'a> {
             &rule_name,
             GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized())),
         );
-        super::lower::r(&rule_name)
+        seq(vec![lit("["), super::lower::r(&rule_name)])
     }
 
     fn bounded_homogeneous_array_terminal(

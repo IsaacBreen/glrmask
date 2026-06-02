@@ -3036,6 +3036,23 @@ impl<'a> Lowerer<'a> {
             }
         }
         let value = self.lower_object_property_value_schema(&effective_schema)?;
+        let (key, separator_key, value) = if let Some(rest) =
+            Self::strip_leading_literal_byte(value.clone(), b'[')
+        {
+            (
+                self.lower_literal_key_colon_with_prefix_and_suffix(b"", &property.name, b'['),
+                self.lower_literal_key_colon_with_prefix_and_suffix(b", ", &property.name, b'['),
+                rest,
+            )
+        } else if let Some(rest) = Self::strip_leading_literal_byte(value.clone(), b'{') {
+            (
+                self.lower_literal_key_colon_with_prefix_and_suffix(b"", &property.name, b'{'),
+                self.lower_literal_key_colon_with_prefix_and_suffix(b", ", &property.name, b'{'),
+                rest,
+            )
+        } else {
+            (key, separator_key, value)
+        };
         Ok(ObjectItem {
             key: property.name.clone(),
             pair: seq(vec![key, value.clone()]),
@@ -3044,6 +3061,32 @@ impl<'a> Lowerer<'a> {
             satisfies_any_group,
             exclusive_group,
         })
+    }
+
+    fn strip_leading_literal_byte(expr: GrammarExpr, byte: u8) -> Option<GrammarExpr> {
+        match expr {
+            GrammarExpr::Literal(bytes) => {
+                let rest = bytes.strip_prefix(&[byte])?;
+                if rest.is_empty() {
+                    Some(GrammarExpr::Epsilon)
+                } else {
+                    Some(lit_bytes(rest.to_vec()))
+                }
+            }
+            GrammarExpr::Sequence(mut parts) => {
+                let GrammarExpr::Literal(bytes) = parts.first()? else {
+                    return None;
+                };
+                let rest = bytes.strip_prefix(&[byte])?.to_vec();
+                if rest.is_empty() {
+                    parts.remove(0);
+                } else {
+                    parts[0] = lit_bytes(rest);
+                }
+                Some(seq(parts))
+            }
+            _ => None,
+        }
     }
 
     fn lower_object_property_value_schema(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {

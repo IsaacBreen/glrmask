@@ -866,6 +866,34 @@ fn large_optional_open_object_uses_fused_prefix_chain_rules() {
 }
 
 #[test]
+fn object_property_array_opener_fuses_into_key_terminal() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    }
+                }
+            }
+        },
+        "required": ["items"],
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("/\"items\":[ \\t\\r\\n]*\\[/"), "{glrm}");
+    assert!(!glrm.contains(r#""\"items\"" JSON_KEY_SEPARATOR"#), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn large_optional_open_object_allow_any_scalars_uses_expr_nfa_body() {
     let mut properties = serde_json::Map::new();
     for index in 0..16 {
