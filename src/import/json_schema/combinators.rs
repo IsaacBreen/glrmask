@@ -58,6 +58,12 @@ impl<'a> Lowerer<'a> {
         {
             return Ok(expr);
         }
+        if let Some(expr) = self.try_lower_mixed_closed_object_any_of_variants(
+            &factoring_branches,
+            suppress_untyped_non_object_alts,
+        )? {
+            return Ok(expr);
+        }
         if let Some(expr) = self.try_lower_open_object_any_of_variants(&factoring_branches)? {
             return Ok(expr);
         }
@@ -107,6 +113,46 @@ impl<'a> Lowerer<'a> {
         }
         let sibling_schema = Schema::assertions("<single-anyOf-siblings>", siblings);
         Ok(try_merge_all_of_objects(&[branch, sibling_schema]))
+    }
+
+    fn try_lower_mixed_closed_object_any_of_variants(
+        &mut self,
+        branches: &[Schema],
+        suppress_untyped_non_object_alts: bool,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        let mut object_candidate_branches = Vec::new();
+        let mut non_object_branches = Vec::new();
+
+        for branch in branches {
+            if schema_has_explicit_non_object_only_type(branch) {
+                non_object_branches.push(branch.clone());
+            } else {
+                object_candidate_branches.push(branch.clone());
+            }
+        }
+
+        if non_object_branches.is_empty()
+            || object_candidate_branches.len() < 2
+            || object_candidate_branches
+                .iter()
+                .any(|branch| !schema_has_explicit_object_only_type(branch))
+        {
+            return Ok(None);
+        }
+
+        let Some(object_expr) = self.try_lower_closed_object_any_of_variants(
+            &object_candidate_branches,
+            suppress_untyped_non_object_alts,
+        )? else {
+            return Ok(None);
+        };
+
+        let mut alternatives = Vec::with_capacity(1 + non_object_branches.len());
+        alternatives.push(object_expr);
+        for branch in &non_object_branches {
+            alternatives.push(self.lower_schema(branch)?);
+        }
+        Ok(Some(choice(alternatives)))
     }
 
     pub(crate) fn lower_one_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
@@ -2299,6 +2345,15 @@ fn schema_has_explicit_object_only_type(schema: &Schema) -> bool {
         .types
         .as_ref()
         .is_some_and(|types| types.iter().all(|schema_type| *schema_type == SchemaType::Object))
+}
+
+fn schema_has_explicit_non_object_only_type(schema: &Schema) -> bool {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return false;
+    };
+    assertions.types.as_ref().is_some_and(|types| {
+        !types.is_empty() && types.iter().all(|schema_type| *schema_type != SchemaType::Object)
+    })
 }
 
 fn primitive_inline_branch_type(schema: &Schema) -> Option<SchemaType> {

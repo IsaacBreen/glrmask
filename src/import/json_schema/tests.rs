@@ -4338,6 +4338,53 @@ fn anyof_explicit_object_variants_do_not_add_non_object_alternatives() {
 }
 
 #[test]
+fn mixed_anyof_closed_object_variants_with_string_alt_use_variant_nfa() {
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "headless": {"type": "boolean"},
+                    "name": {"type": "string", "enum": ["chrome"]}
+                },
+                "required": ["headless", "name"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "headless": {"type": "boolean"},
+                    "name": {"type": "string", "enum": ["firefox"]}
+                },
+                "required": ["headless", "name"],
+                "additionalProperties": false
+            },
+            {
+                "type": "string"
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    let start = start_expr(&grammar);
+    let GrammarExpr::Choice(alternatives) = start else {
+        panic!("expected start choice, got {start:?}");
+    };
+    assert_eq!(alternatives.len(), 2, "{start:?}");
+    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
+    assert!(glrm.contains("json_anyof_object_body"), "{glrm}");
+    assert!(glrm.contains("JSON_STRING"), "{glrm}");
+
+    assert!(schema_accepts_bytes(&schema, br#"{"headless":true,"name":"chrome"}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"headless":true,"name":"firefox"}"#));
+    assert!(schema_accepts_bytes(&schema, br#""browser-name-string""#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"headless":true,"name":"safari"}"#));
+
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn untyped_plain_object_assertions_keep_non_object_alternatives() {
     let schema = json!({
         "properties": {
