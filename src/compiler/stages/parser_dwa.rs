@@ -809,7 +809,8 @@ fn determinize_with_supports(
                         detail.outgoing_transitions_scanned += 1;
                         detail.intersection_calls += 1;
                     }
-                    let next_weight = intersection_cache.intersection(path_weight, transition_weight);
+                    let next_weight =
+                        intersection_cache.intersection(path_weight, transition_weight);
                     if next_weight.is_empty() {
                         continue;
                     }
@@ -1250,7 +1251,8 @@ fn determinize_parser_dwa_with_fallbacks(
                     detail.outgoing_transitions_scanned += 1;
                     detail.intersection_calls += 1;
                 }
-                let next_weight = intersection_cache.intersection(path_weight, transition_weight);
+                let next_weight =
+                    intersection_cache.intersection(path_weight, transition_weight);
                 if next_weight.is_empty() {
                     continue;
                 }

@@ -604,6 +604,20 @@ fn scoped_commutative_weight_pair_key(left: &Weight, right: &Weight) -> (usize, 
     }
 }
 
+#[inline]
+fn ordered_commutative_weight_pair<'a>(
+    left: &'a Weight,
+    right: &'a Weight,
+) -> ((usize, usize), &'a Weight, &'a Weight) {
+    let left_key = left.ptr_key();
+    let right_key = right.ptr_key();
+    if left_key <= right_key {
+        ((left_key, right_key), left, right)
+    } else {
+        ((right_key, left_key), right, left)
+    }
+}
+
 impl WeightOpKey {
     fn new(kind: WeightOpKind, left: usize, right: usize) -> Self {
         match kind {
@@ -659,6 +673,52 @@ struct TokenSetOpMemoEntry {
 /// that every thread's thread-local memo detects the invalidation on next access.
 static WEIGHT_OP_MEMO_GENERATION: AtomicU64 = AtomicU64::new(0);
 static WEIGHT_HASH_MEMO_GENERATION: AtomicU64 = AtomicU64::new(0);
+const PUBLIC_WEIGHT_INTERSECTION_CACHE_CAP: usize = 262_144;
+
+struct PublicWeightIntersectionMemoEntry {
+    left: Weight,
+    right: Weight,
+    result: Weight,
+}
+
+#[derive(Default)]
+struct PublicWeightIntersectionMemo {
+    results: FxHashMap<(usize, usize), PublicWeightIntersectionMemoEntry>,
+    generation: u64,
+}
+
+impl PublicWeightIntersectionMemo {
+    fn clear_all(&mut self) {
+        self.results.clear();
+    }
+
+    fn lookup(&mut self, left: &Weight, right: &Weight) -> Option<Weight> {
+        let (key, ordered_left, ordered_right) = ordered_commutative_weight_pair(left, right);
+        let entry = self.results.get(&key)?;
+        if Arc::ptr_eq(&entry.left.0, &ordered_left.0)
+            && Arc::ptr_eq(&entry.right.0, &ordered_right.0)
+        {
+            return Some(entry.result.clone());
+        }
+        self.results.remove(&key);
+        None
+    }
+
+    fn store(&mut self, left: &Weight, right: &Weight, result: &Weight) {
+        if self.results.len() >= PUBLIC_WEIGHT_INTERSECTION_CACHE_CAP {
+            self.clear_all();
+        }
+        let (key, ordered_left, ordered_right) = ordered_commutative_weight_pair(left, right);
+        self.results.insert(
+            key,
+            PublicWeightIntersectionMemoEntry {
+                left: ordered_left.clone(),
+                right: ordered_right.clone(),
+                result: result.clone(),
+            },
+        );
+    }
+}
 
 #[derive(Default)]
 struct WeightOpMemo {
@@ -743,8 +803,27 @@ thread_local! {
     static WEIGHT_OP_MEMO: RefCell<WeightOpMemo> = RefCell::new(WeightOpMemo::default());
 }
 
+thread_local! {
+    static PUBLIC_WEIGHT_INTERSECTION_MEMO: RefCell<PublicWeightIntersectionMemo> =
+        RefCell::new(PublicWeightIntersectionMemo::default());
+}
+
 fn with_weight_op_memo<R>(f: impl FnOnce(&mut WeightOpMemo) -> R) -> R {
     WEIGHT_OP_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        let current_gen = WEIGHT_OP_MEMO_GENERATION.load(Ordering::Acquire);
+        if memo.generation != current_gen {
+            memo.clear_all();
+            memo.generation = current_gen;
+        }
+        f(&mut memo)
+    })
+}
+
+fn with_public_weight_intersection_memo<R>(
+    f: impl FnOnce(&mut PublicWeightIntersectionMemo) -> R,
+) -> R {
+    PUBLIC_WEIGHT_INTERSECTION_MEMO.with(|memo| {
         let mut memo = memo.borrow_mut();
         let current_gen = WEIGHT_OP_MEMO_GENERATION.load(Ordering::Acquire);
         if memo.generation != current_gen {
@@ -847,12 +926,14 @@ pub fn clear_stale_weights() {
     interner_clear_stale();
 }
 
-/// Clear all live entries from the global weight/token-set interners.
+/// Clear all live entries from the global weight/token-set interners and
+/// invalidate memoized weight-operation caches that may retain those weights.
 ///
 /// This is mainly useful for benchmarks that need to prevent interner reuse
 /// from contaminating repeated compile measurements.
 pub fn clear_weight_interners() {
     interner_clear_all();
+    clear_weight_op_caches();
 }
 
 /// Clear weight-operation and structural-hash memo caches on **all** threads.
@@ -1755,9 +1836,15 @@ impl Weight {
         if other.is_full() {
             return self.clone();
         }
-        with_memoized_weight_op(WeightOpKind::Intersection, self, other, || {
-            self.intersection_uncached_impl(other)
-        })
+
+        let existing = with_public_weight_intersection_memo(|memo| memo.lookup(self, other));
+        if let Some(existing) = existing {
+            return existing;
+        }
+
+        let result = self.intersection_uncached_impl(other);
+        with_public_weight_intersection_memo(|memo| memo.store(self, other, &result));
+        result
     }
 
     pub(crate) fn intersection_uncached(&self, other: &Self) -> Self {
