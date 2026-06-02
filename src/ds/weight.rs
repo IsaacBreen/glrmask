@@ -2124,6 +2124,64 @@ impl PartialEq for Weight {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn weight_for_tsid(tsid: u32, ranges: &[(u32, u32)]) -> Weight {
+        let token_set = rangeset_from_ranges(ranges.iter().map(|(start, end)| *start..=*end));
+        Weight::from_token_set_for_tsid(tsid, token_set)
+    }
+
+    #[test]
+    fn scoped_weight_bulk_ops_union_all_identities() {
+        let mut cache = ScopedWeightOpCache::default();
+
+        assert_eq!(cache.union_all(std::iter::empty::<&Weight>()), Weight::empty());
+        assert_eq!(cache.union_all([&Weight::empty()]), Weight::empty());
+        assert_eq!(cache.union_all([&Weight::all()]), Weight::all());
+    }
+
+    #[test]
+    fn scoped_weight_bulk_ops_union_all_matches_sequential_union() {
+        let left = weight_for_tsid(1, &[(1, 3), (7, 8)]);
+        let middle = weight_for_tsid(1, &[(2, 6)]);
+        let right = weight_for_tsid(2, &[(10, 12)]);
+        let weights = [&left, &middle, &right, &Weight::empty()];
+
+        let mut cache = ScopedWeightOpCache::default();
+        let bulk = cache.union_all(weights);
+
+        let sequential = left.union(&middle).union(&right).union(&Weight::empty());
+        assert_eq!(bulk, sequential);
+    }
+
+    #[test]
+    fn scoped_weight_bulk_ops_difference_many_identities() {
+        let base = weight_for_tsid(3, &[(4, 9)]);
+        let mut cache = ScopedWeightOpCache::default();
+
+        assert_eq!(cache.difference_many(&base, std::iter::empty::<&Weight>()), base);
+        assert_eq!(cache.difference_many(&base, [&base]), Weight::empty());
+    }
+
+    #[test]
+    fn scoped_weight_bulk_ops_difference_many_matches_sequential_difference() {
+        let base = Weight::union_all([
+            &weight_for_tsid(1, &[(1, 5), (8, 10)]),
+            &weight_for_tsid(2, &[(20, 24)]),
+        ]);
+        let subtract_left = weight_for_tsid(1, &[(2, 3), (9, 12)]);
+        let subtract_right = weight_for_tsid(2, &[(21, 22)]);
+
+        let mut cache = ScopedWeightOpCache::default();
+        let bulk = cache.difference_many(&base, [&subtract_left, &subtract_right]);
+
+        let sequential = base.difference(&subtract_left).difference(&subtract_right);
+        assert_eq!(bulk, sequential);
+    }
+}
+
 impl Eq for Weight {}
 
 impl super::leveled_gss::Merge for Weight {
