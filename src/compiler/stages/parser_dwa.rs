@@ -18,7 +18,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::types::compile_profile_ena
 use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::stages::templates::Templates;
 use crate::ds::bitset::BitSet;
-use crate::ds::weight::Weight;
+use crate::ds::weight::{ScopedWeightIntersectionCache, Weight};
 
 type TerminalBundle = BTreeMap<TerminalID, Weight>;
 type BundleSignature = Vec<(TerminalID, Weight)>;
@@ -159,43 +159,6 @@ impl ParserDwaDeterminizeDetail {
             self.union_cache_ms,
         );
     }
-}
-
-#[inline]
-fn normalized_weight_pair_key(left: &Weight, right: &Weight) -> (usize, usize) {
-    let left_key = left.ptr_key();
-    let right_key = right.ptr_key();
-    if left_key <= right_key {
-        (left_key, right_key)
-    } else {
-        (right_key, left_key)
-    }
-}
-
-#[inline]
-fn cached_intersection_uncached(
-    cache: &mut FxHashMap<(usize, usize), Weight>,
-    left: &Weight,
-    right: &Weight,
-) -> Weight {
-    if left.is_empty() || right.is_empty() {
-        return Weight::empty();
-    }
-    if left.is_full() {
-        return right.clone();
-    }
-    if right.is_full() {
-        return left.clone();
-    }
-
-    let key = normalized_weight_pair_key(left, right);
-    if let Some(existing) = cache.get(&key) {
-        return existing.clone();
-    }
-
-    let value = left.intersection_uncached(right);
-    cache.insert(key, value.clone());
-    value
 }
 
 #[inline]
@@ -806,7 +769,7 @@ fn determinize_with_supports(
     let mut touched_dense_labels: Vec<usize> = Vec::new();
     let mut dense_label_touched: Vec<bool> = vec![false; dense_label_limit];
     let mut default_touched = false;
-    let mut intersection_cache: FxHashMap<(usize, usize), Weight> = FxHashMap::default();
+    let mut intersection_cache = ScopedWeightIntersectionCache::default();
     // Memoize local epsilon-closure outputs keyed by pre-closure weighted subsets.
     let mut closure_cache: FxHashMap<Vec<(u32, usize)>, CachedClosure> = FxHashMap::default();
     let mut key_buf: Vec<(u32, usize)> = Vec::new();
@@ -846,11 +809,7 @@ fn determinize_with_supports(
                         detail.outgoing_transitions_scanned += 1;
                         detail.intersection_calls += 1;
                     }
-                    let next_weight = cached_intersection_uncached(
-                        &mut intersection_cache,
-                        path_weight,
-                        transition_weight,
-                    );
+                    let next_weight = intersection_cache.intersection(path_weight, transition_weight);
                     if next_weight.is_empty() {
                         continue;
                     }
@@ -1244,7 +1203,7 @@ fn determinize_parser_dwa_with_fallbacks(
     let mut dense_label_touched: Vec<bool> = vec![false; dense_label_limit];
     let mut default_touched = false;
     let mut dense_default_all_raw_targets: TargetContribs = TargetContribs::new();
-    let mut intersection_cache: FxHashMap<(usize, usize), Weight> = FxHashMap::default();
+    let mut intersection_cache = ScopedWeightIntersectionCache::default();
     let mut key_buf: Vec<(u32, usize)> = Vec::new();
     let mut final_contributions: Vec<Weight> = Vec::new();
     let mut detail =
@@ -1267,11 +1226,7 @@ fn determinize_parser_dwa_with_fallbacks(
             if let Some(detail) = detail.as_mut() {
                 detail.intersection_calls += 1;
             }
-            let contribution = cached_intersection_uncached(
-                &mut intersection_cache,
-                path_weight,
-                state_final,
-            );
+            let contribution = intersection_cache.intersection(path_weight, state_final);
             if !contribution.is_empty() {
                 if let Some(detail) = detail.as_mut() {
                     detail.nonempty_intersections += 1;
@@ -1295,11 +1250,7 @@ fn determinize_parser_dwa_with_fallbacks(
                     detail.outgoing_transitions_scanned += 1;
                     detail.intersection_calls += 1;
                 }
-                let next_weight = cached_intersection_uncached(
-                    &mut intersection_cache,
-                    path_weight,
-                    transition_weight,
-                );
+                let next_weight = intersection_cache.intersection(path_weight, transition_weight);
                 if next_weight.is_empty() {
                     continue;
                 }
@@ -1328,11 +1279,7 @@ fn determinize_parser_dwa_with_fallbacks(
                 detail.outgoing_transitions_scanned += 1;
                 detail.intersection_calls += 1;
             }
-            let fallback_weight = cached_intersection_uncached(
-                &mut intersection_cache,
-                path_weight,
-                default_weight,
-            );
+            let fallback_weight = intersection_cache.intersection(path_weight, default_weight);
             if fallback_weight.is_empty() {
                 continue;
             }

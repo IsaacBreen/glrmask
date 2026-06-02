@@ -88,6 +88,37 @@ use std::sync::{Arc, Weak};
 #[derive(Debug, Clone)]
 pub struct Weight(pub Arc<WeightMap>);
 
+#[derive(Default)]
+pub struct ScopedWeightIntersectionCache {
+    entries: FxHashMap<(usize, usize), Weight>,
+}
+
+impl ScopedWeightIntersectionCache {
+    pub fn intersection(&mut self, left: &Weight, right: &Weight) -> Weight {
+        if left.is_empty() || right.is_empty() {
+            return Weight::empty();
+        }
+        if Arc::ptr_eq(&left.0, &right.0) {
+            return left.clone();
+        }
+        if left.is_full() {
+            return right.clone();
+        }
+        if right.is_full() {
+            return left.clone();
+        }
+
+        let key = scoped_weight_pair_key(left, right);
+        if let Some(existing) = self.entries.get(&key) {
+            return existing.clone();
+        }
+
+        let value = left.intersection_uncached(right);
+        self.entries.insert(key, value.clone());
+        value
+    }
+}
+
 pub(crate) type SharedTokenSet = Arc<RangeSetBlaze<u32>>;
 type WeightMap = RangeMapBlaze<u32, SharedTokenSet>;
 
@@ -414,6 +445,17 @@ struct TokenSetOpKey {
     kind: TokenSetOpKind,
     left: usize,
     right: usize,
+}
+
+#[inline]
+fn scoped_weight_pair_key(left: &Weight, right: &Weight) -> (usize, usize) {
+    let left_key = left.ptr_key();
+    let right_key = right.ptr_key();
+    if left_key <= right_key {
+        (left_key, right_key)
+    } else {
+        (right_key, left_key)
+    }
 }
 
 impl WeightOpKey {
