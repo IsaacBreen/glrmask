@@ -200,6 +200,69 @@ impl ScopedWeightOpCache {
             }
         }
     }
+
+    pub fn union_all<'a>(&mut self, weights: impl IntoIterator<Item = &'a Weight>) -> Weight {
+        let mut meaningful = SmallVec::<[&Weight; 8]>::new();
+        for weight in weights {
+            if weight.is_full() {
+                return Weight::all();
+            }
+            if weight.is_empty() {
+                continue;
+            }
+            meaningful.push(weight);
+        }
+
+        match meaningful.len() {
+            0 => Weight::empty(),
+            1 => meaningful[0].clone(),
+            _ if meaningful.len() > 4 => {
+                meaningful.sort_unstable_by_key(|weight| weight.ptr_key());
+                meaningful.dedup_by_key(|weight| weight.ptr_key());
+                if meaningful.len() == 1 {
+                    meaningful[0].clone()
+                } else if let Some(result) = union_all_single_tsid_entries(&meaningful) {
+                    result
+                } else if meaningful.len() > 4 {
+                    union_all_multiway(&meaningful)
+                } else {
+                    let mut iter = meaningful.into_iter();
+                    let mut acc = iter.next().unwrap().clone();
+                    for weight in iter {
+                        acc = self.union(&acc, weight);
+                    }
+                    acc
+                }
+            }
+            _ => {
+                if let Some(result) = union_all_single_tsid_entries(&meaningful) {
+                    result
+                } else {
+                    let mut iter = meaningful.into_iter();
+                    let mut acc = iter.next().unwrap().clone();
+                    for weight in iter {
+                        acc = self.union(&acc, weight);
+                    }
+                    acc
+                }
+            }
+        }
+    }
+
+    pub fn difference_many<'a>(
+        &mut self,
+        base: &Weight,
+        subtracts: impl IntoIterator<Item = &'a Weight>,
+    ) -> Weight {
+        let mut acc = base.clone();
+        for weight in subtracts {
+            acc = self.difference(&acc, weight);
+            if acc.is_empty() {
+                return acc;
+            }
+        }
+        acc
+    }
 }
 
 pub(crate) type SharedTokenSet = Arc<RangeSetBlaze<u32>>;
