@@ -4,6 +4,9 @@ use crate::ds::bitset::BitSet;
 
 const DISABLE_UNIT_REDUCTION_INLINING_ENV: &str = "GLRMASK_DISABLE_UNIT_REDUCTION_INLINING";
 const GLR_TABLE_CONSTRUCTION_ENV: &str = "GLRMASK_GLR_TABLE_CONSTRUCTION";
+const UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES_ENV: &str =
+    "GLRMASK_UNIT_REDUCTION_INLINE_MAX_PRE_MERGE_STATES";
+const DEFAULT_UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES: u32 = 20_000;
 
 fn glr_table_construction() -> GlrTableConstruction {
     match std::env::var(GLR_TABLE_CONSTRUCTION_ENV) {
@@ -28,6 +31,17 @@ fn env_flag_enabled(name: &str) -> bool {
 
 fn unit_reduction_inlining_enabled() -> bool {
     !env_flag_enabled(DISABLE_UNIT_REDUCTION_INLINING_ENV)
+}
+
+fn unit_reduction_inlining_max_pre_merge_states() -> Option<u32> {
+    match std::env::var(UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES_ENV) {
+        Ok(value) => match value.trim().parse::<u32>() {
+            Ok(0) => None,
+            Ok(parsed) => Some(parsed),
+            Err(_) => Some(DEFAULT_UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES),
+        },
+        Err(_) => Some(DEFAULT_UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES),
+    }
 }
 
 pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
@@ -64,8 +78,18 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     // row support before that lowering so runtime `may_advance` stays a pure
     // row-presence query.
     table.rebuild_advance_rows_from_actions();
-    let unit_collapse_enabled =
-        construction == GlrTableConstruction::LegacyRowBisim && unit_reduction_inlining_enabled();
+    let unit_collapse_skip_reason = if construction != GlrTableConstruction::LegacyRowBisim {
+        "construction"
+    } else if !unit_reduction_inlining_enabled() {
+        "disabled"
+    } else if unit_reduction_inlining_max_pre_merge_states()
+        .is_some_and(|max_pre_merge_states| pre_merge_states > max_pre_merge_states)
+    {
+        "pre_merge_states"
+    } else {
+        "none"
+    };
+    let unit_collapse_enabled = unit_collapse_skip_reason == "none";
     let collapse_started_at = std::time::Instant::now();
     let unit_collapse_report = if unit_collapse_enabled {
         Some(table.collapse_sr_unit_reductions_with_compatible_gotos())
@@ -121,7 +145,7 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
     {
         eprintln!(
-            "[glrmask/profile][glr_table] construction={:?} lr1_item_sets_ms={:.3} construction_ms={:.3} pre_merge_states={} post_merge_states={} unit_collapse={} unit_collapse_aborted={} unit_collapse_reason={} merge_ms={:.3} merge_identical1_ms={:.3} unit_collapse_ms={:.3} prune_ms={:.3} merge_identical2_ms={:.3} stack_shift_canon_ms={:.3}",
+            "[glrmask/profile][glr_table] construction={:?} lr1_item_sets_ms={:.3} construction_ms={:.3} pre_merge_states={} post_merge_states={} unit_collapse={} unit_collapse_aborted={} unit_collapse_reason={} unit_collapse_skip_reason={} merge_ms={:.3} merge_identical1_ms={:.3} unit_collapse_ms={:.3} prune_ms={:.3} merge_identical2_ms={:.3} stack_shift_canon_ms={:.3}",
             construction,
             lr1_ms,
             construction_ms,
@@ -135,6 +159,7 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
                 .as_ref()
                 .and_then(|report| report.reason)
                 .unwrap_or("none"),
+            unit_collapse_skip_reason,
             merge_ms,
             merge_identical1_ms,
             unit_collapse_ms,
