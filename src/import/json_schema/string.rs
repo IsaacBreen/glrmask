@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use regex::Regex;
+use regex::{Regex, escape as regex_escape};
 use regex_syntax::hir::{Class, Hir, HirKind, Literal, Look, Repetition};
 use regex_syntax::Parser;
 
@@ -365,12 +365,17 @@ impl<'a> Lowerer<'a> {
         key: &str,
     ) -> GrammarExpr {
         let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+        if prefix == b", " {
+            return GrammarExpr::RawRegex(format!(
+                r#",{JSON_SEPARATOR_WS_REGEX}{}:{JSON_SEPARATOR_WS_REGEX}"#,
+                regex_escape(&encoded)
+            ));
+        }
+
         let key = lit_bytes(encoded.as_bytes().to_vec());
         let key_colon = seq(vec![key, self.key_separator_expr()]);
         if prefix.is_empty() {
             key_colon
-        } else if prefix == b", " {
-            seq(vec![self.item_separator_expr(), key_colon])
         } else {
             seq(vec![lit_bytes(prefix.to_vec()), key_colon])
         }

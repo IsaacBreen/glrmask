@@ -1125,31 +1125,39 @@ fn commit_bytes_small_queue_fast_path(
     state: &mut BTreeMap<u32, ParserGSS>,
     bytes: &[u8],
 ) -> Option<Result<(), String>> {
-    if bytes.len() > 8 || state.len() > 2 {
-        return None;
-    }
-    if state.len() > 1 && state_has_nonempty_accumulators(state) {
-        return None;
-    }
+      if bytes.len() > 8 || state.len() > 2 {
+          return None;
+      }
 
-    let mut processing_queue: Vec<SmallVec<[(u32, ParserGSS); 4]>> =
-        (0..=bytes.len()).map(|_| SmallVec::new()).collect();
+      let mut processing_queue: Vec<SmallVec<[(u32, ParserGSS); 4]>> =
+          (0..=bytes.len()).map(|_| SmallVec::new()).collect();
     for (&tokenizer_state, gss) in state.iter() {
         processing_queue[0].push((tokenizer_state, gss.clone()));
     }
 
     let mut pending_state = ParserStatesByTokenizer::default();
-    let mut offset = 0usize;
-    while offset <= bytes.len() {
-        if processing_queue[offset].is_empty() {
-            offset += 1;
-            continue;
-        }
+      let mut offset = 0usize;
+      while offset <= bytes.len() {
+          if processing_queue[offset].is_empty() {
+              offset += 1;
+              continue;
+          }
 
-        let states_to_process = std::mem::take(&mut processing_queue[offset]);
-        for (tokenizer_state, mut gss_at_offset) in states_to_process {
-            let exec_result =
-                execute_tokenizer_from_state_small(constraint, &bytes[offset..], tokenizer_state);
+          let states_to_process = std::mem::take(&mut processing_queue[offset]);
+          let initial_tokenizer_state = constraint.tokenizer.initial_state();
+          let mut initial_gss_at_offset: Option<ParserGSS> = None;
+          for (tokenizer_state, gss) in &states_to_process {
+              if *tokenizer_state != initial_tokenizer_state {
+                  continue;
+              }
+              initial_gss_at_offset = Some(match initial_gss_at_offset.take() {
+                  Some(existing) => existing.merge(gss),
+                  None => gss.clone(),
+              });
+          }
+          for (tokenizer_state, mut gss_at_offset) in states_to_process {
+              let exec_result =
+                  execute_tokenizer_from_state_small(constraint, &bytes[offset..], tokenizer_state);
 
             if offset == 0
                 && !gss_at_offset.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
@@ -1181,27 +1189,34 @@ fn commit_bytes_small_queue_fast_path(
                     return None;
                 }
 
-                if matched.ignored {
-                    if new_offset == bytes.len() {
-                        merge_parser_state(
-                            &mut pending_state,
-                            constraint.tokenizer.initial_state(),
-                            gss_at_offset.clone(),
-                        );
-                    } else {
-                        merge_small_parser_state(
-                            &mut processing_queue[new_offset],
-                            constraint.tokenizer.initial_state(),
-                            gss_at_offset.clone(),
-                        );
-                    }
-                    continue;
-                }
+                  if matched.ignored {
+                      if new_offset == bytes.len() {
+                          merge_parser_state(
+                              &mut pending_state,
+                              initial_tokenizer_state,
+                              gss_at_offset.clone(),
+                          );
+                      } else {
+                          merge_small_parser_state(
+                              &mut processing_queue[new_offset],
+                              initial_tokenizer_state,
+                              gss_at_offset.clone(),
+                          );
+                      }
+                      continue;
+                  }
 
-                let advanced = if !template_advance_enabled()
-                    && let Some(top_state) = gss_at_offset.single_exclusive_top_value()
-                    && let Some(action) = constraint.table.action(top_state, matched.terminal_id)
-                    && let Some(advanced) = apply_single_top_action_fast(
+                  let advanced = if tokenizer_state != initial_tokenizer_state
+                      && let Some(existing_initial_gss) = initial_gss_at_offset.as_ref()
+                      && existing_initial_gss.all_accs_satisfy(|td: &TerminalsDisallowed| {
+                          td.get(&tokenizer_state)
+                              .is_some_and(|disallowed| disallowed.contains(&matched.terminal_id))
+                      }) {
+                      existing_initial_gss.clone()
+                  } else if !template_advance_enabled()
+                      && let Some(top_state) = gss_at_offset.single_exclusive_top_value()
+                      && let Some(action) = constraint.table.action(top_state, matched.terminal_id)
+                      && let Some(advanced) = apply_single_top_action_fast(
                         &constraint.table,
                         &gss_at_offset,
                         top_state,
@@ -1238,19 +1253,19 @@ fn commit_bytes_small_queue_fast_path(
                     continue;
                 }
                 emitted_terminal_outputs.push((new_offset, advanced.clone()));
-                if new_offset == bytes.len() {
-                    merge_parser_state(
-                        &mut pending_state,
-                        constraint.tokenizer.initial_state(),
-                        advanced,
-                    );
-                } else {
-                    merge_small_parser_state(
-                        &mut processing_queue[new_offset],
-                        constraint.tokenizer.initial_state(),
-                        advanced,
-                    );
-                }
+                  if new_offset == bytes.len() {
+                      merge_parser_state(
+                          &mut pending_state,
+                          initial_tokenizer_state,
+                          advanced,
+                      );
+                  } else {
+                      merge_small_parser_state(
+                          &mut processing_queue[new_offset],
+                          initial_tokenizer_state,
+                          advanced,
+                      );
+                  }
             }
 
             if let Some(end_state) = exec_result.end_state {

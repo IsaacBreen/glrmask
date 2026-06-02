@@ -861,7 +861,7 @@ fn large_optional_open_object_uses_fused_prefix_chain_rules() {
     let glrm = to_glrm(&grammar);
     assert!(count_rules_with_prefix(&grammar, "json_open_object_prefix") > 0);
     assert_eq!(count_rules_with_prefix(&grammar, "json_closed_object_body"), 0);
-    assert!(glrm.contains("\", \\\"k1\\\": \" JSON_STRING"), "{glrm}");
+    assert!(glrm.contains(r#"/,[ \t\r\n]*"k1":[ \t\r\n]*/ JSON_STRING"#), "{glrm}");
     lower(&grammar).unwrap();
 }
 
