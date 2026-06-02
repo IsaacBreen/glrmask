@@ -643,6 +643,27 @@ fn apply_single_top_action_fast(
                 }
                 return Some(branch.into_gss());
             }
+            if let Some(stack) = gss.try_virtual_stack()
+                && let Some(first) = shifts.first()
+                && !first.pushes.is_empty()
+                && shifts
+                    .iter()
+                    .all(|shift| shift.pop == first.pop && !shift.pushes.is_empty())
+                && let Some(shifted) = stack.into_gss_after_popping_and_pushing_branches(
+                    first.pop as usize,
+                    shifts.iter().map(|shift| shift.pushes.as_slice()),
+                )
+            {
+                return Some(shifted);
+            }
+            if let Some(shifted) = gss.apply_stack_effects_to_single_concrete_path(
+                shifts
+                    .iter()
+                    .map(|shift| (shift.pop as usize, shift.pushes.as_slice())),
+                SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH,
+            ) {
+                return Some(shifted);
+            }
             if let Some(first) = shifts.first()
                 && shifts
                     .iter()
@@ -664,14 +685,6 @@ fn apply_single_top_action_fast(
                     shifts.iter().map(|shift| shift.pushes.as_slice()),
                 )
             {
-                return Some(shifted);
-            }
-            if let Some(shifted) = gss.apply_stack_effects_to_single_concrete_path(
-                shifts
-                    .iter()
-                    .map(|shift| (shift.pop as usize, shift.pushes.as_slice())),
-                SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH,
-            ) {
                 return Some(shifted);
             }
 
@@ -998,7 +1011,7 @@ fn commit_bytes_full_width_fast_path(
     if state.len() > 2 {
         return None;
     }
-    if state.len() > 1 && state_has_nonempty_accumulators(state) {
+    if state.len() > 1 && bytes.len() > 4 && state_has_nonempty_accumulators(state) {
         return None;
     }
 
@@ -1160,6 +1173,7 @@ fn commit_bytes_small_queue_fast_path(
                 &exec_result.matches,
                 None,
             );
+            let mut emitted_terminal_outputs = SmallVec::<[(usize, ParserGSS); 4]>::new();
 
             for matched in normalized_matches {
                 let new_offset = offset + matched.width;
@@ -1215,6 +1229,15 @@ fn commit_bytes_small_queue_fast_path(
                 if advanced.is_empty() {
                     continue;
                 }
+                if emitted_terminal_outputs
+                    .iter()
+                    .any(|(emitted_offset, emitted_gss)| {
+                        *emitted_offset == new_offset && emitted_gss == &advanced
+                    })
+                {
+                    continue;
+                }
+                emitted_terminal_outputs.push((new_offset, advanced.clone()));
                 if new_offset == bytes.len() {
                     merge_parser_state(
                         &mut pending_state,
