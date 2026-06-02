@@ -18,7 +18,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::types::compile_profile_ena
 use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::stages::templates::Templates;
 use crate::ds::bitset::BitSet;
-use crate::ds::weight::{ScopedWeightIntersectionCache, Weight};
+use crate::ds::weight::{ScopedWeightOpCache, Weight};
 
 type TerminalBundle = BTreeMap<TerminalID, Weight>;
 type BundleSignature = Vec<(TerminalID, Weight)>;
@@ -769,7 +769,7 @@ fn determinize_with_supports(
     let mut touched_dense_labels: Vec<usize> = Vec::new();
     let mut dense_label_touched: Vec<bool> = vec![false; dense_label_limit];
     let mut default_touched = false;
-    let mut intersection_cache = ScopedWeightIntersectionCache::default();
+    let mut intersection_cache = ScopedWeightOpCache::default();
     // Memoize local epsilon-closure outputs keyed by pre-closure weighted subsets.
     let mut closure_cache: FxHashMap<Vec<(u32, usize)>, CachedClosure> = FxHashMap::default();
     let mut key_buf: Vec<(u32, usize)> = Vec::new();
@@ -1203,7 +1203,7 @@ fn determinize_parser_dwa_with_fallbacks(
     let mut dense_label_touched: Vec<bool> = vec![false; dense_label_limit];
     let mut default_touched = false;
     let mut dense_default_all_raw_targets: TargetContribs = TargetContribs::new();
-    let mut intersection_cache = ScopedWeightIntersectionCache::default();
+    let mut intersection_cache = ScopedWeightOpCache::default();
     let mut key_buf: Vec<(u32, usize)> = Vec::new();
     let mut final_contributions: Vec<Weight> = Vec::new();
     let mut detail =

@@ -89,11 +89,37 @@ use std::sync::{Arc, Weak};
 pub struct Weight(pub Arc<WeightMap>);
 
 #[derive(Default)]
-pub struct ScopedWeightIntersectionCache {
-    entries: FxHashMap<(usize, usize), Weight>,
+pub struct ScopedWeightOpCache {
+    union_entries: FxHashMap<(usize, usize), Weight>,
+    intersection_entries: FxHashMap<(usize, usize), Weight>,
+    difference_entries: FxHashMap<(usize, usize), Weight>,
 }
 
-impl ScopedWeightIntersectionCache {
+impl ScopedWeightOpCache {
+    pub fn union(&mut self, left: &Weight, right: &Weight) -> Weight {
+        if left.is_full() || right.is_full() {
+            return Weight::all();
+        }
+        if left.is_empty() {
+            return right.clone();
+        }
+        if right.is_empty() {
+            return left.clone();
+        }
+        if Arc::ptr_eq(&left.0, &right.0) {
+            return left.clone();
+        }
+
+        let key = scoped_commutative_weight_pair_key(left, right);
+        if let Some(existing) = self.union_entries.get(&key) {
+            return existing.clone();
+        }
+
+        let value = left.union_uncached(right);
+        self.union_entries.insert(key, value.clone());
+        value
+    }
+
     pub fn intersection(&mut self, left: &Weight, right: &Weight) -> Weight {
         if left.is_empty() || right.is_empty() {
             return Weight::empty();
@@ -108,14 +134,71 @@ impl ScopedWeightIntersectionCache {
             return left.clone();
         }
 
-        let key = scoped_weight_pair_key(left, right);
-        if let Some(existing) = self.entries.get(&key) {
+        let key = scoped_commutative_weight_pair_key(left, right);
+        if let Some(existing) = self.intersection_entries.get(&key) {
             return existing.clone();
         }
 
         let value = left.intersection_uncached(right);
-        self.entries.insert(key, value.clone());
+        self.intersection_entries.insert(key, value.clone());
         value
+    }
+
+    pub fn difference(&mut self, left: &Weight, right: &Weight) -> Weight {
+        if left.is_empty() || right.is_full() {
+            return Weight::empty();
+        }
+        if right.is_empty() {
+            return left.clone();
+        }
+        if Arc::ptr_eq(&left.0, &right.0) {
+            return Weight::empty();
+        }
+        if left.is_full() {
+            return Weight::all();
+        }
+
+        let key = (left.ptr_key(), right.ptr_key());
+        if let Some(existing) = self.difference_entries.get(&key) {
+            return existing.clone();
+        }
+
+        let value = left.difference_uncached(right);
+        self.difference_entries.insert(key, value.clone());
+        value
+    }
+
+    /// Scoped bulk intersection with mathematical identity semantics.
+    /// An empty input intersects to `Weight::all()`.
+    pub fn intersection_all<'a>(&mut self, weights: impl IntoIterator<Item = &'a Weight>) -> Weight {
+        let mut meaningful = SmallVec::<[&Weight; 8]>::new();
+        for weight in weights {
+            if weight.is_empty() {
+                return Weight::empty();
+            }
+            if weight.is_full() {
+                continue;
+            }
+            meaningful.push(weight);
+        }
+
+        match meaningful.len() {
+            0 => Weight::all(),
+            1 => meaningful[0].clone(),
+            _ => {
+                meaningful.sort_unstable_by_key(|weight| weight.ptr_key());
+                meaningful.dedup_by_key(|weight| weight.ptr_key());
+                let mut iter = meaningful.into_iter();
+                let mut acc = iter.next().unwrap().clone();
+                for weight in iter {
+                    acc = self.intersection(&acc, weight);
+                    if acc.is_empty() {
+                        return acc;
+                    }
+                }
+                acc
+            }
+        }
     }
 }
 
@@ -448,7 +531,7 @@ struct TokenSetOpKey {
 }
 
 #[inline]
-fn scoped_weight_pair_key(left: &Weight, right: &Weight) -> (usize, usize) {
+fn scoped_commutative_weight_pair_key(left: &Weight, right: &Weight) -> (usize, usize) {
     let left_key = left.ptr_key();
     let right_key = right.ptr_key();
     if left_key <= right_key {
@@ -1527,21 +1610,24 @@ impl Weight {
         if let Some(existing) = lookup_memoized_weight_op(WeightOpKind::Union, self, other) {
             return existing;
         }
+        let result = self.union_uncached(other);
+        store_memoized_weight_op(WeightOpKind::Union, self, other, &result);
+        result
+    }
+
+    fn union_uncached(&self, other: &Self) -> Self {
         if let Some(result) = union_disjoint_tsid_ranges(self, other) {
-            store_memoized_weight_op(WeightOpKind::Union, self, other, &result);
             return result;
         }
 
         let left_single = single_compact_entry(self);
         let right_single = single_compact_entry(other);
 
-        let result = if let (Some(left), Some(right)) = (&left_single, &right_single) {
+        if let (Some(left), Some(right)) = (&left_single, &right_single) {
             combine_single_entries(&left, &right, union_token_sets)
         } else {
             union_compact_entries(self, other)
-        };
-        store_memoized_weight_op(WeightOpKind::Union, self, other, &result);
-        result
+        }
     }
 
     pub fn union_all<'a>(weights: impl IntoIterator<Item = &'a Self>) -> Self {
@@ -1657,9 +1743,11 @@ impl Weight {
             // which returns empty() as a no-op sentinel instead.
             return Self::all();
         }
-        with_memoized_weight_op(WeightOpKind::Difference, self, other, || {
-            combine_compact_entries(self, other, difference_token_sets)
-        })
+        with_memoized_weight_op(WeightOpKind::Difference, self, other, || self.difference_uncached(other))
+    }
+
+    fn difference_uncached(&self, other: &Self) -> Self {
+        combine_compact_entries(self, other, difference_token_sets)
     }
 
     pub fn complement(&self) -> Self {
