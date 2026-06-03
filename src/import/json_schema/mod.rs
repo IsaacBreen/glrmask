@@ -67,6 +67,20 @@ pub(crate) fn lower_exact_subtractions_enabled() -> bool {
     }
 }
 
+/// Fold additional-property excluded-key add-backs into the shared terminal
+/// instead of emitting one parser alternative per excluded key. Default OFF
+/// (retains the capped expanded-addback behaviour). Enable with
+/// GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK=1 (or true/yes/on).
+pub(crate) fn share_additional_addback_choices_enabled() -> bool {
+    match env::var("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK") {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
 /// Literal-choice promotion was an optimization knob in the old importer.  The
 /// simple importer leaves choices as written.
 pub(crate) fn promote_literal_choices_enabled() -> bool {

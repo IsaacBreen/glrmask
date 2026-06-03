@@ -1,5 +1,5 @@
 use serde_json::json;
-use std::{env, ffi::OsString, sync::Mutex};
+use std::{env, ffi::OsString, process::Command, sync::Mutex};
 
 use super::ast::StringSchema;
 use super::lower_exact_subtractions_enabled;
@@ -1202,6 +1202,52 @@ fn huge_shared_additional_exclusion_set_uses_expanded_literal_addback() {
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"), "{glrm}");
     assert!(!glrm.contains("json_additional_key_colon_local"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn huge_shared_additional_exclusion_set_uses_shared_addback_when_enabled() {
+    if env::var_os("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK_CHILD").is_none() {
+        let status = Command::new(env::current_exe().unwrap())
+            .arg("--nocapture")
+            .arg("huge_shared_additional_exclusion_set_uses_shared_addback_when_enabled")
+            .env("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK_CHILD", "1")
+            .env("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+
+    let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK", "1");
+
+    let mut properties = serde_json::Map::new();
+    for index in 0..300 {
+        properties.insert(format!("field_{index}"), json!({"type": "string"}));
+    }
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "with_fixed_keys": {
+                "type": "object",
+                "properties": properties,
+                "additionalProperties": {"type": "string"}
+            },
+            "open_again": {
+                "type": "object",
+                "additionalProperties": {"type": "integer"}
+            }
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"), "{glrm}");
+    assert!(glrm.contains("json_additional_excluded_key_colon_shared"), "{glrm}");
+    assert!(glrm.contains("JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED"), "{glrm}");
+    assert!(glrm.matches("\\\"field_0\\\": ").count() <= 5, "{glrm}");
     lower(&grammar).unwrap();
 }
 

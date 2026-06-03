@@ -480,6 +480,43 @@ impl<'a> Lowerer<'a> {
         Ok(choice(alternatives))
     }
 
+    fn pattern_key_colon_shared_addback_alternatives(
+        &mut self,
+        pattern: &str,
+    ) -> ImportResult<Vec<GrammarExpr>> {
+        let global_overlaps = self.pattern_overlapping_literal_keys(pattern)?;
+        let key_colon = GrammarExpr::RawRegex(pattern_key_colon_regex(pattern)?);
+        let pattern_expr = if global_overlaps.is_empty() {
+            key_colon
+        } else {
+            GrammarExpr::Exclude {
+                expr: Box::new(key_colon),
+                exclude: Box::new(choice(
+                    global_overlaps
+                        .iter()
+                        .map(|key| self.lower_literal_key_colon(key))
+                        .collect::<Vec<_>>(),
+                )),
+            }
+        };
+
+        Ok(vec![pattern_expr])
+    }
+
+    fn pattern_key_colon_local_exclusion_alternatives(
+        &mut self,
+        pattern: &str,
+    ) -> ImportResult<Vec<GrammarExpr>> {
+        let global_overlaps = self.pattern_overlapping_literal_keys(pattern)?;
+        let mut alternatives = self.pattern_key_colon_shared_addback_alternatives(pattern)?;
+        alternatives.extend(
+            global_overlaps
+                .iter()
+                .map(|key| self.lower_literal_key_colon(key)),
+        );
+        Ok(alternatives)
+    }
+
     pub(crate) fn lower_pattern_key_colon_terminal(
         &mut self,
         pattern: &str,
@@ -614,6 +651,10 @@ impl<'a> Lowerer<'a> {
         fixed_keys: &BTreeSet<String>,
         local_patterns: &[String],
     ) -> ImportResult<GrammarExpr> {
+        if super::share_additional_addback_choices_enabled() {
+            return self.lower_additional_key_colon_shared(fixed_keys, local_patterns);
+        }
+
         if !self.use_shared_additional_key_colon() {
             return self.lower_additional_key_colon_expanded_addback(fixed_keys, local_patterns);
         }
@@ -649,6 +690,45 @@ impl<'a> Lowerer<'a> {
         }
 
         Ok(choice(alternatives))
+    }
+
+    fn lower_additional_key_colon_shared(
+        &mut self,
+        fixed_keys: &BTreeSet<String>,
+        local_patterns: &[String],
+    ) -> ImportResult<GrammarExpr> {
+        let cache_key = (
+            fixed_keys.iter().cloned().collect::<Vec<_>>(),
+            local_patterns.to_vec(),
+        );
+        if let Some(rule_name) = self.shared_additional_key_colon_local_rules.get(&cache_key) {
+            return Ok(r(rule_name));
+        }
+
+        let base = self.shared_additional_key_colon_base()?;
+        let excluded_addback = self.shared_additional_excluded_key_colon()?;
+        let mut local_exclusions = fixed_keys
+            .iter()
+            .map(|key| self.lower_literal_key_colon(key))
+            .collect::<Vec<_>>();
+        for pattern in local_patterns {
+            local_exclusions.extend(self.pattern_key_colon_local_exclusion_alternatives(pattern)?);
+        }
+
+        let addback = if local_exclusions.is_empty() {
+            excluded_addback
+        } else {
+            GrammarExpr::Exclude {
+                expr: Box::new(excluded_addback),
+                exclude: Box::new(choice(local_exclusions)),
+            }
+        };
+
+        let name = self.fresh_rule_name("json_additional_key_colon_local");
+        self.add_nonterminal_rule(&name, choice(vec![base, addback]));
+        self.shared_additional_key_colon_local_rules
+            .insert(cache_key, name.clone());
+        Ok(r(&name))
     }
 
     fn use_shared_additional_key_colon(&self) -> bool {
@@ -717,17 +797,41 @@ impl<'a> Lowerer<'a> {
             return Ok(r(rule_name));
         }
 
+        if !super::share_additional_addback_choices_enabled() {
+            let mut excluded = Vec::new();
+            for key in self.shared_ap_literal_keys.clone() {
+                excluded.push(self.lower_literal_key_colon(&key));
+            }
+            for pattern in self.shared_ap_patterns.clone() {
+                excluded.push(self.pattern_key_colon_full_language(&pattern)?);
+            }
+
+            let expr = choice(excluded);
+            self.add_nonterminal_rule(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE, expr.clone());
+            self.add_internal_terminal_rule(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE, expr);
+            self.shared_ap_excluded_rule =
+                Some(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE.to_string());
+            return Ok(r(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE));
+        }
+
         let mut excluded = Vec::new();
+        let mut terminal_excluded = Vec::new();
         for key in self.shared_ap_literal_keys.clone() {
-            excluded.push(self.lower_literal_key_colon(&key));
+            let literal = self.lower_literal_key_colon(&key);
+            excluded.push(literal.clone());
+            terminal_excluded.push(literal);
         }
         for pattern in self.shared_ap_patterns.clone() {
-            excluded.push(self.pattern_key_colon_full_language(&pattern)?);
+            excluded.extend(self.pattern_key_colon_shared_addback_alternatives(&pattern)?);
+            terminal_excluded.push(GrammarExpr::RawRegex(pattern_key_colon_regex(&pattern)?));
         }
 
         let expr = choice(excluded);
         self.add_nonterminal_rule(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE, expr.clone());
-        self.add_internal_terminal_rule(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE, expr);
+        self.add_internal_terminal_rule(
+            JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE,
+            choice(terminal_excluded),
+        );
         self.shared_ap_excluded_rule =
             Some(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE.to_string());
         Ok(r(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE))
