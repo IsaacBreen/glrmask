@@ -191,7 +191,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    fn json_string_char_regex(&self) -> String {
+    pub(crate) fn json_string_char_regex(&self) -> String {
         r#"[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt]"#.to_string()
     }
 
