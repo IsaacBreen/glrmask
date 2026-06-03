@@ -925,10 +925,8 @@ fn object_property_nullable_string_value_fuses_string_branch_into_key_terminal()
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("/\"name\":[ \\t\\r\\n]*\""), "{glrm}");
-    assert!(
-        glrm.contains(r#"("\"name\"" JSON_KEY_SEPARATOR) JSON_NULL"#),
-        "{glrm}"
-    );
+    assert!(glrm.contains("/\"name\":[ \\t\\r\\n]*null/"), "{glrm}");
+    assert!(!glrm.contains(r#""\"name\"" JSON_KEY_SEPARATOR"#), "{glrm}");
     lower(&grammar).unwrap();
 }
 

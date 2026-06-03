@@ -3037,24 +3037,63 @@ impl<'a> Lowerer<'a> {
         }
         let value = self.lower_object_property_value_schema(&effective_schema)?;
         if let Some(non_string_value) = Self::without_json_string_branch(value.clone()) {
+            let (non_string_value, has_null_branch) =
+                if let Some(non_string_value) = non_string_value {
+                    if let Some(non_null_value) =
+                        Self::without_ref_branch(non_string_value.clone(), JSON_NULL_RULE)
+                    {
+                        (non_null_value, true)
+                    } else {
+                        (Some(non_string_value), false)
+                    }
+                } else {
+                    (None, false)
+                };
             let string_key =
                 self.lower_literal_key_colon_with_prefix_and_json_string(b"", &property.name);
             let separator_string_key =
                 self.lower_literal_key_colon_with_prefix_and_json_string(b", ", &property.name);
+            let null_key = self.lower_literal_key_colon_with_prefix_and_literal_value(
+                b"",
+                &property.name,
+                b"null",
+            );
+            let separator_null_key = self.lower_literal_key_colon_with_prefix_and_literal_value(
+                b", ",
+                &property.name,
+                b"null",
+            );
             let pair = if let Some(non_string_value) = non_string_value.clone() {
+                let mut alternatives = vec![string_key];
+                if has_null_branch {
+                    alternatives.push(null_key);
+                }
+                alternatives.push(seq(vec![key, non_string_value]));
                 seq(vec![
-                    choice(vec![string_key, seq(vec![key, non_string_value])]),
+                    choice(alternatives),
+                    GrammarExpr::Epsilon,
+                ])
+            } else if has_null_branch {
+                seq(vec![
+                    choice(vec![string_key, null_key]),
                     GrammarExpr::Epsilon,
                 ])
             } else {
                 seq(vec![string_key, GrammarExpr::Epsilon])
             };
             let separator_pair = if let Some(non_string_value) = non_string_value {
+                let mut alternatives = vec![separator_string_key];
+                if has_null_branch {
+                    alternatives.push(separator_null_key);
+                }
+                alternatives.push(seq(vec![separator_key, non_string_value]));
                 seq(vec![
-                    choice(vec![
-                        separator_string_key,
-                        seq(vec![separator_key, non_string_value]),
-                    ]),
+                    choice(alternatives),
+                    GrammarExpr::Epsilon,
+                ])
+            } else if has_null_branch {
+                seq(vec![
+                    choice(vec![separator_string_key, separator_null_key]),
                     GrammarExpr::Epsilon,
                 ])
             } else {
