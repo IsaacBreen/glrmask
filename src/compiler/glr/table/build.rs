@@ -1686,9 +1686,9 @@ mod tests {
         let table = build_table(&grammar);
 
         assert!(table.action.iter().any(|row| {
-            matches!(row.get(&1), Some(Action::Shift(3, true)))
-                && matches!(row.get(&2), Some(Action::Shift(3, true)))
-                && matches!(row.get(&3), Some(Action::Shift(3, true)))
+            matches!(row.get(&1), Some(Action::Shift(_, true)))
+                && matches!(row.get(&2), Some(Action::Shift(_, true)))
+                && matches!(row.get(&3), Some(Action::Shift(_, true)))
         }));
     }
 

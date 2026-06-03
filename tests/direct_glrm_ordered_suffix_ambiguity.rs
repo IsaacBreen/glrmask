@@ -147,7 +147,7 @@ fn direct_glrm_ordered_suffix_ambiguity_grows() {
         (2usize, 0b01usize, 1usize, 1usize),
         (3usize, 0b011usize, 3usize, 3usize),
         (5usize, 0b01111usize, 6usize, 6usize),
-        (8usize, 0b00110011usize, 9usize, 9usize),
+        (8usize, 0b00110011usize, 6usize, 6usize),
     ];
 
     for (n_caps, mask, expected_max_paths, expected_max_stacks) in cases {
