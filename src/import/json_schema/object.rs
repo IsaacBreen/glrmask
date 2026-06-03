@@ -3069,6 +3069,45 @@ impl<'a> Lowerer<'a> {
                 exclusive_group,
             });
         }
+        if let Some(non_null_value) = Self::without_ref_branch(value.clone(), JSON_NULL_RULE) {
+            let null_key = self.lower_literal_key_colon_with_prefix_and_literal_value(
+                b"",
+                &property.name,
+                b"null",
+            );
+            let separator_null_key = self.lower_literal_key_colon_with_prefix_and_literal_value(
+                b", ",
+                &property.name,
+                b"null",
+            );
+            let pair = if let Some(non_null_value) = non_null_value.clone() {
+                seq(vec![
+                    choice(vec![null_key, seq(vec![key, non_null_value])]),
+                    GrammarExpr::Epsilon,
+                ])
+            } else {
+                seq(vec![null_key, GrammarExpr::Epsilon])
+            };
+            let separator_pair = if let Some(non_null_value) = non_null_value {
+                seq(vec![
+                    choice(vec![
+                        separator_null_key,
+                        seq(vec![separator_key, non_null_value]),
+                    ]),
+                    GrammarExpr::Epsilon,
+                ])
+            } else {
+                seq(vec![separator_null_key, GrammarExpr::Epsilon])
+            };
+            return Ok(ObjectItem {
+                key: property.name.clone(),
+                pair,
+                separator_pair,
+                required,
+                satisfies_any_group,
+                exclusive_group,
+            });
+        }
         let (key, separator_key, value) = if let Some(rest) =
             Self::strip_leading_literal_byte(value.clone(), b'[')
         {
@@ -3097,13 +3136,17 @@ impl<'a> Lowerer<'a> {
     }
 
     fn without_json_string_branch(expr: GrammarExpr) -> Option<Option<GrammarExpr>> {
+        Self::without_ref_branch(expr, JSON_STRING_RULE)
+    }
+
+    fn without_ref_branch(expr: GrammarExpr, branch_rule: &str) -> Option<Option<GrammarExpr>> {
         match expr {
-            GrammarExpr::Ref(name) if name == JSON_STRING_RULE => Some(None),
+            GrammarExpr::Ref(name) if name == branch_rule => Some(None),
             GrammarExpr::Choice(alternatives) => {
                 let original_len = alternatives.len();
                 let alternatives = alternatives
                     .into_iter()
-                    .filter(|expr| !matches!(expr, GrammarExpr::Ref(name) if name == JSON_STRING_RULE))
+                    .filter(|expr| !matches!(expr, GrammarExpr::Ref(name) if name == branch_rule))
                     .collect::<Vec<_>>();
                 if alternatives.len() == original_len {
                     None

@@ -439,6 +439,35 @@ impl<'a> Lowerer<'a> {
         ])
     }
 
+    pub(crate) fn lower_literal_key_colon_with_prefix_and_literal_value(
+        &mut self,
+        prefix: &[u8],
+        key: &str,
+        value: &[u8],
+    ) -> GrammarExpr {
+        let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+        let value_regex = regex_escape(&String::from_utf8_lossy(value));
+        if prefix == b", " {
+            return GrammarExpr::RawRegex(format!(
+                r#",{JSON_SEPARATOR_WS_REGEX}{}:{JSON_SEPARATOR_WS_REGEX}{}"#,
+                regex_escape(&encoded),
+                value_regex
+            ));
+        }
+        if prefix.is_empty() {
+            return GrammarExpr::RawRegex(format!(
+                r#"{}:{JSON_SEPARATOR_WS_REGEX}{}"#,
+                regex_escape(&encoded),
+                value_regex
+            ));
+        }
+
+        seq(vec![
+            lit_bytes(prefix.to_vec()),
+            self.lower_literal_key_colon_with_prefix_and_literal_value(b"", key, value),
+        ])
+    }
+
     fn lower_pattern_key_colon_expr(&mut self, pattern: &str) -> ImportResult<GrammarExpr> {
         Ok(GrammarExpr::RawRegex(pattern_key_colon_regex(pattern)?))
     }

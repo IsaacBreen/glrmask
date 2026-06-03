@@ -933,6 +933,24 @@ fn object_property_nullable_string_value_fuses_string_branch_into_key_terminal()
 }
 
 #[test]
+fn object_property_null_value_fuses_into_key_terminal() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "null"}
+        },
+        "required": ["name"],
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("/\"name\":[ \\t\\r\\n]*null/"), "{glrm}");
+    assert!(!glrm.contains(r#""\"name\"" JSON_KEY_SEPARATOR"#), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn large_optional_open_object_allow_any_scalars_uses_expr_nfa_body() {
     let mut properties = serde_json::Map::new();
     for index in 0..16 {
