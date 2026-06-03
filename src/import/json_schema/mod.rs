@@ -68,16 +68,19 @@ pub(crate) fn lower_exact_subtractions_enabled() -> bool {
 }
 
 /// Fold additional-property excluded-key add-backs into the shared terminal
-/// instead of emitting one parser alternative per excluded key. Default OFF
-/// (retains the capped expanded-addback behaviour). Enable with
-/// GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK=1 (or true/yes/on).
+/// instead of emitting one parser alternative per excluded key. Default ON.
+/// Disable with GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK=0 (or false/no/off/empty).
 pub(crate) fn share_additional_addback_choices_enabled() -> bool {
     match env::var("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK") {
-        Ok(value) => matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        ),
-        Err(_) => false,
+        Ok(value) => {
+            let trimmed = value.trim();
+            !trimmed.is_empty()
+                && !matches!(
+                    trimmed.to_ascii_lowercase().as_str(),
+                    "0" | "false" | "no" | "off"
+                )
+        }
+        Err(_) => true,
     }
 }
 

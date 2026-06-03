@@ -1186,7 +1186,21 @@ fn additional_properties_factoring_uses_shared_key_colon_terminal() {
 }
 
 #[test]
-fn huge_shared_additional_exclusion_set_uses_expanded_literal_addback() {
+fn huge_shared_additional_exclusion_set_uses_expanded_literal_addback_when_disabled() {
+    if env::var_os("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK_CHILD").is_none() {
+        let status = Command::new(env::current_exe().unwrap())
+            .arg("--nocapture")
+            .arg("huge_shared_additional_exclusion_set_uses_expanded_literal_addback_when_disabled")
+            .env("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK_CHILD", "1")
+            .env("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK", "0")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+
+    let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK", "0");
+
     let mut properties = serde_json::Map::new();
     for index in 0..300 {
         properties.insert(format!("field_{index}"), json!({"type": "string"}));
@@ -1206,20 +1220,20 @@ fn huge_shared_additional_exclusion_set_uses_expanded_literal_addback() {
 }
 
 #[test]
-fn huge_shared_additional_exclusion_set_uses_shared_addback_when_enabled() {
+fn huge_shared_additional_exclusion_set_uses_shared_addback_by_default() {
     if env::var_os("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK_CHILD").is_none() {
         let status = Command::new(env::current_exe().unwrap())
             .arg("--nocapture")
-            .arg("huge_shared_additional_exclusion_set_uses_shared_addback_when_enabled")
+            .arg("huge_shared_additional_exclusion_set_uses_shared_addback_by_default")
             .env("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK_CHILD", "1")
-            .env("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK", "1")
+            .env_remove("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK")
             .status()
             .unwrap();
         assert!(status.success());
         return;
     }
 
-    let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK", "1");
+    let _guard = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK");
 
     let mut properties = serde_json::Map::new();
     for index in 0..300 {
