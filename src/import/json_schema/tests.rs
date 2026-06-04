@@ -343,6 +343,14 @@ fn byte_vocab() -> Vocab {
     Vocab::new(entries, Some(256))
 }
 
+fn mask_contains(mask: &[u32], token_id: u32) -> bool {
+    let word = token_id as usize / 32;
+    let bit = token_id as usize % 32;
+    mask.get(word)
+        .map(|slot| (*slot & (1u32 << bit)) != 0)
+        .unwrap_or(false)
+}
+
 fn schema_accepts_bytes(schema: &serde_json::Value, input: &[u8]) -> bool {
     let grammar = schema_to_named_grammar(schema).expect("schema should import");
     let lowered = lower(&grammar).expect("schema grammar should lower");
@@ -359,6 +367,44 @@ fn parser_path_count_after_bytes(schema: &serde_json::Value, input: &[u8], limit
     state.commit_bytes(input).expect("input should be accepted");
     assert!(state.is_complete(), "input should finish the schema");
     state.parser_path_count(limit)
+}
+
+
+#[test]
+fn json_string_accepts_escaped_solidus() {
+    let schema = json!({"type": "string"});
+    assert!(schema_accepts_bytes(&schema, br#""\/""#));
+}
+
+#[test]
+fn patterned_string_accepts_escaped_solidus_for_decoded_slash() {
+    let schema = json!({"type": "string", "pattern": "^/$"});
+    assert!(schema_accepts_bytes(&schema, br#""\/""#));
+    assert!(schema_accepts_bytes(&schema, br#""/""#));
+}
+
+#[test]
+fn mask_does_not_enable_json_u_by_runtime_patch() {
+    let schema = json!({"type": "string", "pattern": r#"^[\w\.-_]+$"#});
+    let grammar = schema_to_named_grammar(&schema).expect("schema should import");
+    let lowered = lower(&grammar).expect("schema grammar should lower");
+
+    let json_u_token = 257u32;
+    let json_backslash_token = 258u32;
+    let mut entries = (0u32..=255)
+        .map(|byte| (byte, vec![byte as u8]))
+        .collect::<Vec<_>>();
+    entries.push((256, b"<|endoftext|>".to_vec()));
+    entries.push((json_u_token, b"\\u".to_vec()));
+    entries.push((json_backslash_token, b"\\\\".to_vec()));
+    let vocab = Vocab::new(entries, Some(256));
+    let constraint = crate::compiler::compile_owned(lowered, &vocab);
+    let mut state = constraint.start();
+    state.commit_bytes(br#"""#).expect("opening quote should be accepted");
+
+    let mask = state.mask();
+    assert!(mask_contains(&mask, json_backslash_token), r#"\\ should be grammar-admissible"#);
+    assert!(!mask_contains(&mask, json_u_token), r#"\u must not be enabled outside the grammar"#);
 }
 
 fn contains_exclude(expr: &GrammarExpr) -> bool {

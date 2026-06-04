@@ -699,33 +699,6 @@ fn update_eos_mask(buf: &mut [u32], eos_token_id: Option<u32>, is_complete: bool
     }
 }
 
-fn set_token_bit(buf: &mut [u32], token_id: u32) {
-    let word = token_id as usize / 32;
-    let bit = token_id as usize % 32;
-    if let Some(slot) = buf.get_mut(word) {
-        *slot |= 1u32 << bit;
-    }
-}
-
-fn is_token_bit_set(buf: &[u32], token_id: u32) -> bool {
-    let word = token_id as usize / 32;
-    let bit = token_id as usize % 32;
-    buf.get(word)
-        .map(|slot| (*slot & (1u32 << bit)) != 0)
-        .unwrap_or(false)
-}
-
-fn for_each_set_token_bit(buf: &[u32], mut f: impl FnMut(u32)) {
-    for (word_index, &word) in buf.iter().enumerate() {
-        let mut remaining = word;
-        while remaining != 0 {
-            let bit = remaining.trailing_zeros();
-            f((word_index as u32) * 32 + bit);
-            remaining &= remaining - 1;
-        }
-    }
-}
-
 fn eos_mask_bit(buf: &[u32], eos_token_id: Option<u32>) -> bool {
     let Some(eos_token_id) = eos_token_id else {
         return false;
@@ -738,24 +711,6 @@ fn eos_mask_bit(buf: &[u32], eos_token_id: Option<u32>) -> bool {
 }
 
 impl<'a> ConstraintState<'a> {
-    fn maybe_enable_json_u_prefix_token(&self, buf: &mut [u32]) {
-        let Some(token_id) = self.constraint.json_u_prefix_token_id else {
-            return;
-        };
-        if is_token_bit_set(buf, token_id) {
-            return;
-        }
-
-        let has_json_escape_prefix = buf
-            .iter()
-            .zip(self.constraint.json_escape_prefix_buf_mask.iter())
-            .any(|(mask_word, escape_word)| (*mask_word & *escape_word) != 0);
-
-        if has_json_escape_prefix {
-            set_token_bit(buf, token_id);
-        }
-    }
-
     fn try_fill_mask_single_path_direct(&self, buf: &mut [u32]) -> bool {
         if mask_inner_profile_enabled() || mask_delta_profile_enabled() {
             return false;
@@ -886,7 +841,6 @@ impl<'a> ConstraintState<'a> {
         }
 
         update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
-        self.maybe_enable_json_u_prefix_token(buf);
 
         if direct_buf_dirty {
             self.store_mask_cache_reuse_dense(buf);
@@ -1612,8 +1566,6 @@ impl<'a> ConstraintState<'a> {
                 profile.finalize_eos_ns += elapsed_ns(start);
             }
         }
-
-        self.maybe_enable_json_u_prefix_token(buf);
 
         let cache_start = profile.as_ref().map(|_| Instant::now());
         if can_use_merged_cache {

@@ -75,10 +75,6 @@ pub struct Constraint {
     #[serde(default)]
     pub(crate) internal_token_to_tokens: Vec<Vec<u32>>,
     pub(crate) eos_token_id: Option<u32>,
-    #[serde(default)]
-    pub(crate) json_u_prefix_token_id: Option<u32>,
-    #[serde(skip)]
-    pub(crate) json_escape_prefix_buf_mask: Box<[u32]>,
     pub(crate) token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
     #[serde(default)]
     pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,
