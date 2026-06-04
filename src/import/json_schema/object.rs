@@ -3240,6 +3240,9 @@ impl<'a> Lowerer<'a> {
         {
             return self.lower_schema(schema);
         }
+        if self.llguidance_compat_enabled() {
+            return self.lower_schema(schema);
+        }
         if let Some(number) = &assertions.number
             && assertions.string.is_none()
         {
