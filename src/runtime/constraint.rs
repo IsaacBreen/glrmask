@@ -1516,6 +1516,8 @@ impl Constraint {
         state: u32,
         mask: &mut [u64],
         flat_transitions: &[Box<[u32; 256]>],
+        terminal_states: &[bool],
+        node_reachable_dense: &FxHashMap<usize, Vec<u64>>,
     ) {
         if node.has_token() {
             let id = node.token_id();
@@ -1527,6 +1529,7 @@ impl Constraint {
         }
         for (segment, child) in node.iter_children() {
             let mut current_state = state;
+            let mut terminal_hit = false;
             let mut blocked = false;
             for &byte in segment {
                 let next = flat_transitions[current_state as usize][byte as usize];
@@ -1534,10 +1537,24 @@ impl Constraint {
                     blocked = true;
                     break;
                 }
+                if terminal_states[next as usize] {
+                    terminal_hit = true;
+                    break;
+                }
                 current_state = next;
             }
-            if !blocked {
-                Self::walk_seed_trie(child, current_state, mask, flat_transitions);
+            if blocked {
+                continue;
+            }
+            if terminal_hit {
+                let child_ptr = child as *const _ as usize;
+                if let Some(child_dense) = node_reachable_dense.get(&child_ptr) {
+                    for i in 0..mask.len() {
+                        mask[i] |= child_dense[i];
+                    }
+                }
+            } else {
+                Self::walk_seed_trie(child, current_state, mask, flat_transitions, terminal_states, node_reachable_dense);
             }
         }
     }
@@ -1602,6 +1619,8 @@ impl Constraint {
                 start_state,
                 &mut mask,
                 flat_transitions,
+                &terminal_states,
+                &node_reachable_dense,
             );
             Arc::from(mask.into_boxed_slice())
         };
