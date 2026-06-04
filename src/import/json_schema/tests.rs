@@ -384,6 +384,13 @@ fn patterned_string_accepts_escaped_solidus_for_decoded_slash() {
 }
 
 #[test]
+fn patterned_string_class_accepts_escaped_solidus_for_decoded_slash() {
+    let schema = json!({"type": "string", "pattern": "^[ab/]$"});
+    assert!(schema_accepts_bytes(&schema, br#""\/""#));
+    assert!(schema_accepts_bytes(&schema, br#""/""#));
+}
+
+#[test]
 fn mask_does_not_enable_json_u_by_runtime_patch() {
     let schema = json!({"type": "string", "pattern": r#"^[\w\.-_]+$"#});
     let grammar = schema_to_named_grammar(&schema).expect("schema should import");
