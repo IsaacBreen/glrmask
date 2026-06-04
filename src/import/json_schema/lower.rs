@@ -234,13 +234,6 @@ impl<'a> Lowerer<'a> {
             .ok_or_else(|| SchemaImportError::new(format!("unsupported or unresolved local $ref {pointer:?}")))
     }
 
-    pub(crate) fn llguidance_compat_enabled(&self) -> bool {
-        std::env::var_os("GLRMASK_LLGUIDANCE_COMPAT").is_some_and(|value| {
-            let value = value.to_string_lossy();
-            !value.is_empty() && value != "0"
-        })
-    }
-
     fn lower_assertions(
         &mut self,
         schema: &Schema,
@@ -286,9 +279,6 @@ impl<'a> Lowerer<'a> {
         if assertions.types.is_none() {
             let inferred = self.inferred_constrained_types(assertions);
             if inferred.len() == 1 {
-                if self.llguidance_compat_enabled() {
-                    return self.lower_for_type(inferred[0], assertions);
-                }
                 return self.lower_untyped_single_family_assertions(inferred[0], assertions);
             }
         }
