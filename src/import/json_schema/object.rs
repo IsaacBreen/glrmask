@@ -3035,6 +3035,15 @@ impl<'a> Lowerer<'a> {
                 effective_schema = all_of_schema(effective_schema, pattern_schema);
             }
         }
+        if let Some(item) = self.lower_string_property_item(
+            &property.name,
+            &effective_schema,
+            required,
+            satisfies_any_group,
+            exclusive_group,
+        )? {
+            return Ok(item);
+        }
         let value = self.lower_object_property_value_schema(&effective_schema)?;
         if let Some(non_string_value) = Self::without_json_string_branch(value.clone()) {
             let (non_string_value, has_null_branch) =
@@ -3225,6 +3234,88 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn lower_string_property_item(
+        &mut self,
+        key_name: &str,
+        schema: &Schema,
+        required: bool,
+        satisfies_any_group: bool,
+        exclusive_group: bool,
+    ) -> ImportResult<Option<ObjectItem>> {
+        let SchemaKind::Assertions(assertions) = &schema.kind else {
+            return Ok(None);
+        };
+        if assertions.const_value.is_some()
+            || assertions.enum_values.is_some()
+            || assertions.object.is_some()
+            || assertions.array.is_some()
+            || assertions.number.is_some()
+            || !assertions.any_of.is_empty()
+            || !assertions.one_of.is_empty()
+            || !assertions.all_of.is_empty()
+            || assertions.not.is_some()
+        {
+            return Ok(None);
+        }
+        let Some(string) = assertions.string.as_ref() else {
+            return Ok(None);
+        };
+
+        let string_only = assertions.types.as_ref().is_some_and(|types| {
+            types.iter().all(|schema_type| *schema_type == SchemaType::String)
+        });
+        let untyped = assertions.types.is_none();
+        let allow_non_string_fallbacks = untyped && !self.llguidance_compat_enabled();
+        if !string_only && !untyped {
+            return Ok(None);
+        }
+
+        let string_pair = self.lower_literal_key_colon_with_prefix_and_string_schema(
+            b"",
+            key_name,
+            string,
+        )?;
+        let separator_string_pair = self.lower_literal_key_colon_with_prefix_and_string_schema(
+            b", ",
+            key_name,
+            string,
+        )?;
+
+        let (pair, separator_pair) = if allow_non_string_fallbacks {
+            let non_string_value = choice(vec![
+                r(JSON_OBJECT_RULE),
+                r(JSON_ARRAY_RULE),
+                r(JSON_NUMBER_RULE),
+                r(JSON_BOOL_RULE),
+                r(JSON_NULL_RULE),
+            ]);
+            (
+                choice(vec![
+                    string_pair,
+                    seq(vec![self.lower_literal_key_colon(key_name), non_string_value.clone()]),
+                ]),
+                choice(vec![
+                    separator_string_pair,
+                    seq(vec![
+                        self.lower_literal_key_colon_with_prefix(b", ", key_name),
+                        non_string_value,
+                    ]),
+                ]),
+            )
+        } else {
+            (string_pair, separator_string_pair)
+        };
+
+        Ok(Some(ObjectItem {
+            key: key_name.to_string(),
+            pair,
+            separator_pair,
+            required,
+            satisfies_any_group,
+            exclusive_group,
+        }))
+    }
+
     fn lower_object_property_value_schema(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {
         let SchemaKind::Assertions(assertions) = &schema.kind else {
             return self.lower_schema(schema);
@@ -3238,6 +3329,9 @@ impl<'a> Lowerer<'a> {
             || !assertions.one_of.is_empty()
             || !assertions.all_of.is_empty()
         {
+            return self.lower_schema(schema);
+        }
+        if self.llguidance_compat_enabled() {
             return self.lower_schema(schema);
         }
         if let Some(number) = &assertions.number

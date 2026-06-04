@@ -64,6 +64,10 @@ pub(crate) struct Lowerer<'a> {
 }
 
 impl<'a> Lowerer<'a> {
+    pub(crate) fn llguidance_compat_enabled(&self) -> bool {
+        self.config.llguidance_compat
+    }
+
     fn new(document: &'a SchemaDocument, config: JsonSchemaConfig) -> Self {
         let (shared_ap_literal_keys, shared_ap_patterns) = collect_shared_ap_exclusion_plan(document);
         let mut definition_by_pointer = BTreeMap::new();
@@ -279,6 +283,9 @@ impl<'a> Lowerer<'a> {
         if assertions.types.is_none() {
             let inferred = self.inferred_constrained_types(assertions);
             if inferred.len() == 1 {
+                if self.llguidance_compat_enabled() {
+                    return self.lower_for_type(inferred[0], assertions);
+                }
                 return self.lower_untyped_single_family_assertions(inferred[0], assertions);
             }
         }

@@ -358,6 +358,25 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    pub(crate) fn lower_literal_key_colon_with_prefix_and_string_schema(
+        &mut self,
+        prefix: &[u8],
+        key: &str,
+        schema: &StringSchema,
+    ) -> ImportResult<GrammarExpr> {
+        let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+        let mut literal_prefix = Vec::new();
+        literal_prefix.extend_from_slice(prefix);
+        literal_prefix.extend_from_slice(encoded.as_bytes());
+        literal_prefix.extend_from_slice(b": ");
+
+        let value = self.lower_constrained_string_terminal_expr(schema)?;
+        let expr = prepend_literal_prefix_to_expr(literal_prefix, value);
+        let name = self.fresh_rule_name("json_property_string_value");
+        self.add_terminal_rule(&name, expr);
+        Ok(r(&name))
+    }
+
     pub(crate) fn lower_string_literal(&mut self, text: &str) -> GrammarExpr {
         let encoded = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
         let body_and_close = encoded
@@ -1473,6 +1492,43 @@ fn escape_regex_class_char(ch: char) -> String {
         ']' => r"\]".to_string(),
         '^' => r"\^".to_string(),
         _ => regex::escape(&ch.to_string()),
+    }
+}
+
+fn prepend_literal_prefix_to_expr(prefix: Vec<u8>, expr: GrammarExpr) -> GrammarExpr {
+    if prefix.is_empty() {
+        return expr;
+    }
+    match expr {
+        GrammarExpr::Literal(mut bytes) => {
+            let mut merged = prefix;
+            merged.append(&mut bytes);
+            lit_bytes(merged)
+        }
+        GrammarExpr::RawRegex(regex) => GrammarExpr::RawRegex(format!(
+            "{}{}",
+            regex::escape(&String::from_utf8_lossy(&prefix)),
+            regex
+        )),
+        GrammarExpr::Sequence(mut parts) => {
+            if let Some(first) = parts.first_mut()
+                && let GrammarExpr::Literal(bytes) = first
+            {
+                let mut merged = prefix;
+                merged.append(bytes);
+                *bytes = merged;
+                return seq(parts);
+            }
+            let mut prefixed = Vec::with_capacity(parts.len() + 1);
+            prefixed.push(lit_bytes(prefix));
+            prefixed.extend(parts);
+            seq(prefixed)
+        }
+        GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+            expr: Box::new(prepend_literal_prefix_to_expr(prefix.clone(), *expr)),
+            intersect: Box::new(prepend_literal_prefix_to_expr(prefix, *intersect)),
+        },
+        other => seq(vec![lit_bytes(prefix), other]),
     }
 }
 

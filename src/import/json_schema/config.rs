@@ -4,6 +4,7 @@
 /// They affect grammar shape, not schema meaning.
 #[derive(Debug, Clone)]
 pub(crate) struct JsonSchemaConfig {
+    pub(crate) llguidance_compat: bool,
     pub(crate) repeat_chunk_size: usize,
     pub(crate) terminalize_bounded_string_max: usize,
     pub(crate) value_merging: MergeFamily,
@@ -35,6 +36,7 @@ impl Default for JsonSchemaConfig {
         let split_open_merge_close = QuoteMerge { merge_open: false, merge_close: true };
         let merge_open_split_close = QuoteMerge { merge_open: true, merge_close: false };
         Self {
+            llguidance_compat: false,
             // Sticky: do not change this default to tune TBM. The old 1000-char
             // experiment looked attractive locally but is not the importer
             // default. This warning itself should never be removed in the future.
@@ -62,6 +64,8 @@ impl Default for JsonSchemaConfig {
 impl JsonSchemaConfig {
     pub(crate) fn from_env() -> Self {
         let mut config = Self::default();
+        config.llguidance_compat = read_bool("GLRMASK_LLGUIDANCE_COMPAT")
+            .unwrap_or(config.llguidance_compat);
         config.repeat_chunk_size = read_usize("GLRMASK_JSON_SCHEMA_REPEAT_CHUNK")
             .unwrap_or(config.repeat_chunk_size)
             .max(1);

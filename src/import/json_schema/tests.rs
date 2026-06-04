@@ -343,6 +343,31 @@ fn byte_vocab() -> Vocab {
     Vocab::new(entries, Some(256))
 }
 
+fn schema_mask_allows_token_after_prefix(
+    schema: &serde_json::Value,
+    prefix: &[u8],
+    token_id: u32,
+    token_bytes: &[u8],
+) -> bool {
+    let mut entries = (0u32..=255)
+        .map(|byte| (byte, vec![byte as u8]))
+        .collect::<Vec<_>>();
+    entries.push((256, b"<|endoftext|>".to_vec()));
+    entries.push((token_id, token_bytes.to_vec()));
+    let vocab = Vocab::new(entries, Some(256));
+    let grammar = schema_to_named_grammar(schema).expect("schema should import");
+    let lowered = lower(&grammar).expect("schema grammar should lower");
+    let constraint = crate::compiler::compile_owned(lowered, &vocab);
+    let mut state = constraint.start();
+    state.commit_bytes(prefix).expect("prefix should be accepted");
+    let mask = state.mask();
+    let word = token_id as usize / 32;
+    let bit = token_id as usize % 32;
+    mask.get(word)
+        .map(|slot| (*slot & (1u32 << bit)) != 0)
+        .unwrap_or(false)
+}
+
 fn mask_contains(mask: &[u32], token_id: u32) -> bool {
     let word = token_id as usize / 32;
     let bit = token_id as usize % 32;
@@ -357,6 +382,88 @@ fn schema_accepts_bytes(schema: &serde_json::Value, input: &[u8]) -> bool {
     let constraint = crate::compiler::compile_owned(lowered, &byte_vocab());
     let mut state = constraint.start();
     state.commit_bytes(input).is_ok() && state.is_complete()
+}
+
+#[test]
+fn llguidance_compat_treats_untyped_format_as_typed_string() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let schema = json!({"format": "uri"});
+
+    {
+        let _guard = EnvVarGuard::unset("GLRMASK_LLGUIDANCE_COMPAT");
+        assert!(schema_accepts_bytes(&schema, br#"true"#));
+        assert!(schema_accepts_bytes(&schema, br#""https://example.com""#));
+    }
+
+    {
+        let _guard = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
+        assert!(!schema_accepts_bytes(&schema, br#"true"#));
+        assert!(schema_accepts_bytes(&schema, br#""https://example.com""#));
+    }
+}
+
+#[test]
+fn llguidance_compat_treats_untyped_property_format_as_typed_string() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let schema = json!({
+        "type": "object",
+        "required": ["uri"],
+        "properties": {
+            "uri": {"format": "uri"}
+        },
+        "additionalProperties": false
+    });
+
+    {
+        let _guard = EnvVarGuard::unset("GLRMASK_LLGUIDANCE_COMPAT");
+        assert!(schema_accepts_bytes(&schema, br#"{"uri": true}"#));
+        assert!(schema_accepts_bytes(&schema, br#"{"uri": "https://example.com"}"#));
+    }
+
+    {
+        let _guard = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
+        assert!(!schema_accepts_bytes(&schema, br#"{"uri": true}"#));
+        assert!(!schema_mask_allows_token_after_prefix(
+            &schema,
+            br#"{"uri":"#,
+            300,
+            b" t",
+        ));
+        assert!(schema_accepts_bytes(&schema, br#"{"uri": "https://example.com"}"#));
+    }
+}
+
+#[test]
+fn llguidance_compat_treats_untyped_property_pattern_as_typed_string() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let schema = json!({
+        "type": "object",
+        "required": ["cur"],
+        "properties": {
+            "cur": {"pattern": "^[A-Z]{3}$"}
+        },
+        "additionalProperties": false
+    });
+
+    {
+        let _guard = EnvVarGuard::unset("GLRMASK_LLGUIDANCE_COMPAT");
+        assert!(schema_accepts_bytes(&schema, br#"{"cur": true}"#));
+        assert!(schema_accepts_bytes(&schema, br#"{"cur": "USD"}"#));
+        assert!(!schema_accepts_bytes(&schema, br#"{"cur": "/"}"#));
+    }
+
+    {
+        let _guard = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
+        assert!(!schema_accepts_bytes(&schema, br#"{"cur": true}"#));
+        assert!(!schema_mask_allows_token_after_prefix(
+            &schema,
+            br#"{"cur":"#,
+            300,
+            b" \"/",
+        ));
+        assert!(schema_accepts_bytes(&schema, br#"{"cur": "USD"}"#));
+        assert!(!schema_accepts_bytes(&schema, br#"{"cur": "/"}"#));
+    }
 }
 
 fn parser_path_count_after_bytes(schema: &serde_json::Value, input: &[u8], limit: usize) -> usize {
