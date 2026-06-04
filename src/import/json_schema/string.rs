@@ -90,6 +90,25 @@ impl<'a> Lowerer<'a> {
         &mut self,
         schema: &StringSchema,
     ) -> ImportResult<GrammarExpr> {
+        if schema.pattern.is_none()
+            && let Some(format_body_regex) =
+                recognized_string_format_body_regex_for_lowering(schema.format.as_deref())
+        {
+            // Recognized JSON Schema formats are already emitted as JSON-string
+            // body regexes. Do not build a generic JSON string terminal and then
+            // intersect it with the format terminal: for trivial timestamp
+            // schemas that intersection dominates compile time. The recognized
+            // format bodies below contain only raw JSON-safe ASCII, so the
+            // quoted terminal is already a valid JSON string spelling.
+            //
+            // As with the previous format-lowering policy, sibling min/max
+            // bounds are intentionally not preserved here. Keeping them creates
+            // the same timeout class as patterned-string length intersections.
+            return Ok(GrammarExpr::RawRegex(quoted_string_body_regex(
+                format_body_regex,
+            )));
+        }
+
         let mut expr = if let Some(pattern) = &schema.pattern {
             // NOTE: Pattern strength intentionally does NOT preserve sibling
             // minLength/maxLength inside terminalized string lowering.
@@ -101,19 +120,11 @@ impl<'a> Lowerer<'a> {
                 &string_pattern_as_body_regex(pattern)?,
             ))
         } else {
-            let preserve_length_bounds = recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_none();
-            let body = if preserve_length_bounds {
-                self.string_body_for_length(schema.min_length, schema.max_length)
-            } else {
-                // NOTE: Recognized format lowering intentionally does NOT preserve
-                // sibling min/max length bounds inside the terminalized envelope.
-                // Keeping a large bounded JSON string body alongside the format
-                // intersection recreates the same timeout class we already avoid
-                // for patterned strings. This invariant is intentional and this
-                // comment should NEVER EVER be removed.
-                self.string_body_for_length(0, None)
-            };
-            seq(vec![lit("\""), body, lit("\"")])
+            seq(vec![
+                lit("\""),
+                self.string_body_for_length(schema.min_length, schema.max_length),
+                lit("\""),
+            ])
         };
         let mut constraints = Vec::new();
 
