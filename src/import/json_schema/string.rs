@@ -22,7 +22,7 @@ impl<'a> Lowerer<'a> {
             !self.should_split_bounded_string(schema.min_length, max_length)
         });
         let has_recognized_format = schema.pattern.is_none()
-            && recognized_string_format_body_regex(schema.format.as_deref()).is_some();
+            && recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_some();
         if schema.pattern.is_some()
             || has_recognized_format
             || ((schema.min_length != 0 || schema.max_length.is_some()) && should_terminalize_length)
@@ -70,7 +70,7 @@ impl<'a> Lowerer<'a> {
             ))));
         }
 
-        if let Some(format_body_regex) = recognized_string_format_body_regex(string.format.as_deref()) {
+        if let Some(format_body_regex) = recognized_string_format_body_regex_for_lowering(string.format.as_deref()) {
             if string.min_length != 0 || string.max_length.is_some() {
                 return Ok(None);
             }
@@ -101,7 +101,7 @@ impl<'a> Lowerer<'a> {
                 &string_pattern_as_body_regex(pattern)?,
             ))
         } else {
-            let preserve_length_bounds = recognized_string_format_body_regex(schema.format.as_deref()).is_none();
+            let preserve_length_bounds = recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_none();
             let body = if preserve_length_bounds {
                 self.string_body_for_length(schema.min_length, schema.max_length)
             } else {
@@ -117,7 +117,7 @@ impl<'a> Lowerer<'a> {
         };
         let mut constraints = Vec::new();
 
-        if let Some(format_body_regex) = recognized_string_format_body_regex(schema.format.as_deref()) {
+        if let Some(format_body_regex) = recognized_string_format_body_regex_for_lowering(schema.format.as_deref()) {
             constraints.push(quoted_string_body_regex(format_body_regex));
         }
 
@@ -1081,6 +1081,23 @@ fn quoted_string_body_regex(body_regex: &str) -> String {
 
 const DATE_FORMAT_BODY_REGEX: &str = r#"(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))|(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)-02-29)"#;
 const DATE_TIME_FORMAT_BODY_REGEX: &str = r#"(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))|(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)-02-29)[Tt]([01][0-9]|2[0-3]):[0-5][0-9]:([0-5][0-9]|60)(\.[0-9]+)?([Zz]|[+-]([01][0-9]|2[0-3]):[0-5][0-9])"#;
+
+// The strict calendar-valid date/date-time regexes above are useful for
+// literal-value validation, but compiling them into the tokenizer is expensive
+// enough that single-field timestamp schemas can spend seconds in build.  For
+// constrained decoding we use a structurally valid RFC3339-ish envelope and
+// leave exact month/day/leap-year filtering to string_value_satisfies_schema().
+const DATE_FORMAT_LOWERING_BODY_REGEX: &str =
+    r#"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"#;
+const DATE_TIME_FORMAT_LOWERING_BODY_REGEX: &str = r#"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:(?:[0-5][0-9]|60)(?:\.[0-9]+)?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"#;
+
+fn recognized_string_format_body_regex_for_lowering(format: Option<&str>) -> Option<&'static str> {
+    match format {
+        Some("date-time") => Some(DATE_TIME_FORMAT_LOWERING_BODY_REGEX),
+        Some("date") => Some(DATE_FORMAT_LOWERING_BODY_REGEX),
+        _ => recognized_string_format_body_regex(format),
+    }
+}
 
 fn recognized_string_format_body_regex(format: Option<&str>) -> Option<&'static str> {
     match format {

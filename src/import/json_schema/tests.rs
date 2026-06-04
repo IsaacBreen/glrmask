@@ -2132,8 +2132,8 @@ fn date_format_lowers_to_constrained_terminal() {
     assert!(!contains_ref_named(start_expr(&grammar), "JSON_STRING"));
 
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("0[13578]"), "{glrm}");
-    assert!(glrm.contains("02-(?:0[1-9]|1[0-9]|2[0-8])"), "{glrm}");
+    assert!(glrm.contains("0[1-9]|1[0-2]"), "{glrm}");
+    assert!(glrm.contains("0[1-9]|[12][0-9]|3[01]"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
