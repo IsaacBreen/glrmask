@@ -4,7 +4,7 @@ use std::{env, ffi::OsString, process::Command, sync::Mutex};
 use super::ast::StringSchema;
 use super::lower_exact_subtractions_enabled;
 use super::schema_to_named_grammar;
-use super::string::{property_name_matches_pattern, string_value_satisfies_schema};
+use super::string::{property_name_matches_pattern, string_value_satisfies_schema, GLRMASK_LLGUIDANCE_COMPAT_ENV};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguityKind};
 use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar};
@@ -372,12 +372,16 @@ fn parser_path_count_after_bytes(schema: &serde_json::Value, input: &[u8], limit
 
 #[test]
 fn json_string_accepts_escaped_solidus() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
     let schema = json!({"type": "string"});
     assert!(schema_accepts_bytes(&schema, br#""\/""#));
 }
 
 #[test]
 fn patterned_string_accepts_escaped_solidus_for_decoded_slash() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
     let schema = json!({"type": "string", "pattern": "^/$"});
     assert!(schema_accepts_bytes(&schema, br#""\/""#));
     assert!(schema_accepts_bytes(&schema, br#""/""#));
@@ -385,8 +389,28 @@ fn patterned_string_accepts_escaped_solidus_for_decoded_slash() {
 
 #[test]
 fn patterned_string_class_accepts_escaped_solidus_for_decoded_slash() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
     let schema = json!({"type": "string", "pattern": "^[ab/]$"});
     assert!(schema_accepts_bytes(&schema, br#""\/""#));
+    assert!(schema_accepts_bytes(&schema, br#""/""#));
+}
+
+#[test]
+fn llguidance_compat_rejects_escaped_solidus() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({"type": "string"});
+    assert!(!schema_accepts_bytes(&schema, br#""\/""#));
+    assert!(schema_accepts_bytes(&schema, br#""/""#));
+}
+
+#[test]
+fn llguidance_compat_rejects_patterned_escaped_solidus() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({"type": "string", "pattern": "^/$"});
+    assert!(!schema_accepts_bytes(&schema, br#""\/""#));
     assert!(schema_accepts_bytes(&schema, br#""/""#));
 }
 

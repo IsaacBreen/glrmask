@@ -1448,7 +1448,34 @@ fn escape_regex_class_char(ch: char) -> String {
     }
 }
 
+pub(crate) const GLRMASK_LLGUIDANCE_COMPAT_ENV: &str = "GLRMASK_LLGUIDANCE_COMPAT";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JsonStringCompatMode {
+    JsonSchema,
+    LlGuidanceNative,
+}
+
+fn llguidance_compat_enabled_from_env() -> bool {
+    std::env::var_os(GLRMASK_LLGUIDANCE_COMPAT_ENV).is_some_and(|value| {
+        let value = value.to_string_lossy();
+        !value.is_empty() && value != "0"
+    })
+}
+
+fn json_string_compat_mode() -> JsonStringCompatMode {
+    if llguidance_compat_enabled_from_env() {
+        JsonStringCompatMode::LlGuidanceNative
+    } else {
+        JsonStringCompatMode::JsonSchema
+    }
+}
+
 fn json_body_char_regex_for_decoded_char(ch: char) -> String {
+    json_body_char_regex_for_decoded_char_in_mode(ch, json_string_compat_mode())
+}
+
+fn json_body_char_regex_for_decoded_char_in_mode(ch: char, mode: JsonStringCompatMode) -> String {
     let decoded = ch.to_string();
     let encoded = serde_json::to_string(&decoded).unwrap_or_else(|_| "\"\"".to_string());
     let body = encoded
@@ -1456,7 +1483,7 @@ fn json_body_char_regex_for_decoded_char(ch: char) -> String {
         .and_then(|text| text.strip_suffix('"'))
         .unwrap_or("");
     let canonical = regex::escape(body);
-    if ch == '/' {
+    if ch == '/' && mode == JsonStringCompatMode::JsonSchema {
         format!(r#"(?:{}|\\/)"#, canonical)
     } else {
         canonical
@@ -1464,7 +1491,18 @@ fn json_body_char_regex_for_decoded_char(ch: char) -> String {
 }
 
 pub(crate) fn json_string_body_char_regex() -> &'static str {
-    r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bfnrt])"#
+    json_string_body_char_regex_in_mode(json_string_compat_mode())
+}
+
+fn json_string_body_char_regex_in_mode(mode: JsonStringCompatMode) -> &'static str {
+    match mode {
+        JsonStringCompatMode::JsonSchema => {
+            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bfnrt])"#
+        }
+        JsonStringCompatMode::LlGuidanceNative => {
+            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt])"#
+        }
+    }
 }
 
 fn json_string_body_non_ascii_non_whitespace_regex() -> &'static str {
@@ -1472,7 +1510,18 @@ fn json_string_body_non_ascii_non_whitespace_regex() -> &'static str {
 }
 
 fn json_string_body_dot_regex() -> &'static str {
-    r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bft])"#
+    json_string_body_dot_regex_in_mode(json_string_compat_mode())
+}
+
+fn json_string_body_dot_regex_in_mode(mode: JsonStringCompatMode) -> &'static str {
+    match mode {
+        JsonStringCompatMode::JsonSchema => {
+            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bft])"#
+        }
+        JsonStringCompatMode::LlGuidanceNative => {
+            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bft])"#
+        }
+    }
 }
 
 fn is_safe_raw_json_string_char(ch: char) -> bool {
