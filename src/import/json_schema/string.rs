@@ -86,6 +86,69 @@ impl<'a> Lowerer<'a> {
         Ok(Some(self.lower_string_expr(string)?))
     }
 
+    pub(crate) fn lower_readable_pattern_string(
+        &mut self,
+        schema: &super::ast::Schema,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        let super::ast::SchemaKind::Assertions(assertions) = &schema.kind else {
+            return Ok(None);
+        };
+        if assertions.const_value.is_some()
+            || assertions.enum_values.is_some()
+            || assertions.object.is_some()
+            || assertions.array.is_some()
+            || assertions.number.is_some()
+            || assertions.not.is_some()
+            || !assertions.any_of.is_empty()
+            || !assertions.one_of.is_empty()
+            || !assertions.all_of.is_empty()
+            || assertions.types.as_ref().is_some_and(|types| {
+                !types
+                    .iter()
+                    .all(|schema_type| *schema_type == super::ast::SchemaType::String)
+            })
+        {
+            return Ok(None);
+        }
+        let Some(string) = &assertions.string else {
+            return Ok(None);
+        };
+        if string.min_length != 0 || string.max_length.is_some() || string.format.is_some() {
+            return Ok(None);
+        }
+        let Some(pattern) = &string.pattern else {
+            return Ok(None);
+        };
+        self.lower_readable_pattern_string_from_pattern(pattern).map(Some)
+    }
+
+    fn lower_readable_pattern_string_from_pattern(
+        &mut self,
+        pattern: &str,
+    ) -> ImportResult<GrammarExpr> {
+        let Some((body, anchored_start, anchored_end)) = string_pattern_as_readable_body_parts(pattern)? else {
+            return Ok(GrammarExpr::RawRegex(quoted_string_body_regex(
+                &string_pattern_as_body_regex(pattern)?,
+            )));
+        };
+        let body_name = self.fresh_rule_name("json_string_pattern_body");
+        self.add_terminal_rule(&body_name, GrammarExpr::RawRegex(body));
+
+        let mut parts = vec![lit("\"")];
+        if !anchored_start {
+            parts.push(GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))));
+        }
+        parts.push(r(&body_name));
+        if !anchored_end {
+            parts.push(GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))));
+        }
+        parts.push(lit("\""));
+
+        let name = self.fresh_rule_name("json_string_constrained");
+        self.add_nonterminal_rule(&name, seq(parts));
+        Ok(r(&name))
+    }
+
     fn lower_constrained_string_terminal_expr(
         &mut self,
         schema: &StringSchema,
@@ -810,6 +873,13 @@ impl<'a> Lowerer<'a> {
             .map(|key| self.lower_literal_key_colon(key))
             .collect::<Vec<_>>();
 
+        if self.shared_ap_patterns.is_empty()
+            && fixed_keys.len() >= self.shared_ap_literal_keys.len()
+            && self.shared_ap_literal_keys.iter().all(|key| fixed_keys.contains(key))
+        {
+            return Ok(base);
+        }
+
         let addback = if local_exclusions.is_empty() {
             excluded_addback
         } else {
@@ -986,6 +1056,51 @@ impl<'a> Lowerer<'a> {
             remaining -= take;
         }
         seq(parts)
+    }
+}
+
+fn string_pattern_as_readable_body_parts(pattern: &str) -> ImportResult<Option<(String, bool, bool)>> {
+    let pattern = preprocess_ascii_shorthand(pattern);
+    let hir = Parser::new()
+        .parse(&pattern)
+        .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")))?;
+    match hir.kind() {
+        HirKind::Alternation(parts) => {
+            let alternatives = parts
+                .iter()
+                .cloned()
+                .map(lower_string_pattern_branch_parts)
+                .collect::<ImportResult<Vec<_>>>()?;
+            let Some((_, anchored_start, anchored_end)) = alternatives.first() else {
+                return Ok(Some((String::new(), false, false)));
+            };
+            if alternatives
+                .iter()
+                .any(|(_, branch_start, branch_end)| {
+                    branch_start != anchored_start || branch_end != anchored_end
+                })
+            {
+                return Ok(None);
+            }
+            let lowered = alternatives
+                .iter()
+                .map(|(lowered, _, _)| lowered.as_str())
+                .collect::<Vec<_>>();
+            Ok(Some((
+                format!("(?:{})", lowered.join("|")),
+                *anchored_start,
+                *anchored_end,
+            )))
+        }
+        HirKind::Capture(capture) => {
+            let (lowered, anchored_start, anchored_end) =
+                lower_string_pattern_branch_parts((*capture.sub).clone())?;
+            Ok(Some((lowered, anchored_start, anchored_end)))
+        }
+        _ => {
+            let (lowered, anchored_start, anchored_end) = lower_string_pattern_branch_parts(hir)?;
+            Ok(Some((lowered, anchored_start, anchored_end)))
+        }
     }
 }
 

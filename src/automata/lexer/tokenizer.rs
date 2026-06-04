@@ -146,6 +146,10 @@ impl Tokenizer {
         self.dfa.num_states() as u32
     }
 
+    pub(crate) fn num_forced_minimized_states(&self) -> usize {
+        self.dfa.minimize().num_states()
+    }
+
     pub(crate) fn execute_from_state_all_widths(
         &self,
         input: &[u8],

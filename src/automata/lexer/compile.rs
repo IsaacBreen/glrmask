@@ -96,15 +96,111 @@ struct ExclusionCompilePlan {
     exclusions: BTreeMap<u32, BTreeSet<u32>>,
     intersections: BTreeMap<u32, BTreeSet<u32>>,
     visible_groups: usize,
+    profile_labels: Option<Vec<ProductComponentProfileLabel>>,
 }
 
-fn build_exclusion_compile_plan(exprs: &[Expr]) -> ExclusionCompilePlan {
+struct ProductComponentProfileLabel {
+    name: String,
+    origin: &'static str,
+    shared: bool,
+}
+
+struct ProductGrowthTrieNode {
+    children: HashMap<u32, usize>,
+}
+
+impl ProductGrowthTrieNode {
+    fn new() -> Self {
+        Self {
+            children: HashMap::new(),
+        }
+    }
+}
+
+struct ProductGrowthRecorder {
+    nodes: Vec<ProductGrowthTrieNode>,
+    prefix_counts: Vec<usize>,
+    dense_states: Vec<u32>,
+}
+
+impl ProductGrowthRecorder {
+    fn new(num_groups: usize) -> Self {
+        Self {
+            nodes: vec![ProductGrowthTrieNode::new()],
+            prefix_counts: vec![0; num_groups],
+            dense_states: vec![0; num_groups],
+        }
+    }
+
+    fn record(&mut self, num_groups: usize, state_tuple: &ProductStateTuple) {
+        self.dense_states.fill(0);
+        for &(group_id, state) in state_tuple {
+            let group_index = group_id as usize;
+            if group_index < num_groups {
+                self.dense_states[group_index] = state.saturating_add(1);
+            }
+        }
+
+        let mut node_index = 0usize;
+        for (depth, &state) in self.dense_states.iter().enumerate() {
+            let next_index = if let Some(&existing) = self.nodes[node_index].children.get(&state) {
+                existing
+            } else {
+                let new_index = self.nodes.len();
+                self.nodes.push(ProductGrowthTrieNode::new());
+                self.nodes[node_index].children.insert(state, new_index);
+                self.prefix_counts[depth] += 1;
+                new_index
+            };
+            node_index = next_index;
+        }
+    }
+
+    fn prefix_counts(&self) -> &[usize] {
+        &self.prefix_counts
+    }
+}
+
+fn expr_is_shared(expr: &Expr) -> bool {
+    match expr {
+        Expr::Shared(_) => true,
+        Expr::Exclude { expr, exclude } => expr_is_shared(expr) || expr_is_shared(exclude),
+        Expr::Intersect { expr, intersect } => expr_is_shared(expr) || expr_is_shared(intersect),
+        Expr::Seq(parts) | Expr::Choice(parts) => parts.iter().any(expr_is_shared),
+        Expr::Repeat { expr, .. } => expr_is_shared(expr),
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => false,
+    }
+}
+
+fn expr_profile_summary(expr: &Expr) -> String {
+    const MAX_LEN: usize = 80;
+    let mut summary = format!("{:?}", expr);
+    if summary.len() > MAX_LEN {
+        summary.truncate(MAX_LEN - 3);
+        summary.push_str("...");
+    }
+    summary
+}
+
+fn build_exclusion_compile_plan_with_labels(
+    exprs: &[Expr],
+    visible_labels: Option<&[String]>,
+) -> ExclusionCompilePlan {
     let visible_groups = exprs.len();
     let mut compiled_exprs = Vec::with_capacity(visible_groups);
     let mut deferred_exclusions = Vec::<Vec<Expr>>::with_capacity(visible_groups);
     let mut deferred_intersections = Vec::<Vec<Expr>>::with_capacity(visible_groups);
+    let mut profile_labels = visible_labels.map(|_| Vec::with_capacity(visible_groups));
 
-    for expr in exprs {
+    if let Some(labels) = visible_labels {
+        assert_eq!(
+            labels.len(),
+            visible_groups,
+            "visible profile labels must match expression count"
+        );
+    }
+
+    for (index, expr) in exprs.iter().enumerate() {
         let (base, excluded, intersections) = split_top_level_group_ops(expr);
         let base = materialize_nested_group_ops(base);
         let excluded = excluded
@@ -132,6 +228,13 @@ fn build_exclusion_compile_plan(exprs: &[Expr]) -> ExclusionCompilePlan {
             );
         }
         compiled_exprs.push(base);
+        if let (Some(labels), Some(profile_labels)) = (visible_labels, profile_labels.as_mut()) {
+            profile_labels.push(ProductComponentProfileLabel {
+                name: labels[index].clone(),
+                origin: "visible",
+                shared: expr_is_shared(expr),
+            });
+        }
         deferred_exclusions.push(excluded);
         deferred_intersections.push(intersections);
     }
@@ -145,16 +248,34 @@ fn build_exclusion_compile_plan(exprs: &[Expr]) -> ExclusionCompilePlan {
         .enumerate()
     {
         let exclusion_entry = exclusions.entry(group_id as u32).or_default();
-        for excluded_expr in excluded_exprs {
+        for (excluded_index, excluded_expr) in excluded_exprs.into_iter().enumerate() {
+            let is_shared = expr_is_shared(&excluded_expr);
             compiled_exprs.push(excluded_expr);
             exclusion_entry.insert(next_group);
+            if let Some(profile_labels) = profile_labels.as_mut() {
+                let base_name = profile_labels[group_id].name.clone();
+                profile_labels.push(ProductComponentProfileLabel {
+                    name: format!("{}::exclude#{}", base_name, excluded_index),
+                    origin: "internal_exclusion",
+                    shared: is_shared,
+                });
+            }
             next_group += 1;
         }
 
         let intersection_entry = intersections.entry(group_id as u32).or_default();
-        for intersection_expr in intersection_exprs {
+        for (intersection_index, intersection_expr) in intersection_exprs.into_iter().enumerate() {
+            let is_shared = expr_is_shared(&intersection_expr);
             compiled_exprs.push(intersection_expr);
             intersection_entry.insert(next_group);
+            if let Some(profile_labels) = profile_labels.as_mut() {
+                let base_name = profile_labels[group_id].name.clone();
+                profile_labels.push(ProductComponentProfileLabel {
+                    name: format!("{}::intersect#{}", base_name, intersection_index),
+                    origin: "internal_intersection",
+                    shared: is_shared,
+                });
+            }
             next_group += 1;
         }
     }
@@ -167,7 +288,12 @@ fn build_exclusion_compile_plan(exprs: &[Expr]) -> ExclusionCompilePlan {
         exclusions,
         intersections,
         visible_groups,
+        profile_labels,
     }
+}
+
+fn build_exclusion_compile_plan(exprs: &[Expr]) -> ExclusionCompilePlan {
+    build_exclusion_compile_plan_with_labels(exprs, None)
 }
 
 fn expr_accepts_empty(expr: &Expr) -> bool {
@@ -1005,6 +1131,29 @@ fn compile_single_expr_dfa(expr: &Expr) -> DFA {
     nfa.to_dfa()
 }
 
+fn compile_multi_expr_dfa_via_nfa(exprs: &[Expr]) -> DFA {
+    let mut nfa = build_regex_nfa(exprs);
+    nfa.condense_epsilon_sccs();
+    nfa.to_dfa()
+}
+
+fn should_use_shared_multi_nfa(plan: &ExclusionCompilePlan) -> bool {
+    if plan.compiled_exprs.len() < 16 {
+        return false;
+    }
+
+    let Some(labels) = plan.profile_labels.as_ref() else {
+        return false;
+    };
+
+    labels
+        .iter()
+        .take(plan.visible_groups)
+        .filter(|label| label.name.starts_with("json_string_constrained"))
+        .count()
+        >= 8
+}
+
 fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
     let group_sets: Vec<U8Set> = plan
@@ -1012,10 +1161,13 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
         .iter()
         .map(|expr| expr_u8set(expr))
         .collect();
-    let used_product_dfa = plan.compiled_exprs.len() > 1;
+    let use_shared_multi_nfa = should_use_shared_multi_nfa(&plan);
+    let used_product_dfa = plan.compiled_exprs.len() > 1 && !use_shared_multi_nfa;
 
     let mut dfa = if used_product_dfa {
-        build_product_dfa(&plan.compiled_exprs)
+        build_product_dfa(&plan.compiled_exprs, plan.profile_labels.as_deref())
+    } else if plan.compiled_exprs.len() > 1 {
+        compile_multi_expr_dfa_via_nfa(&plan.compiled_exprs)
     } else {
         compile_single_expr_dfa(&plan.compiled_exprs[0])
     };
@@ -1049,16 +1201,27 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     } else {
         dfa.minimize()
     };
+    let forced_minimized_states = if profile_detail {
+        if used_product_dfa {
+            Some(final_dfa.minimize().num_states())
+        } else {
+            Some(final_dfa.num_states())
+        }
+    } else {
+        None
+    };
     if profile_detail {
         eprintln!(
-            "[glrmask/profile][tokenizer] combined groups={} visible_groups={} product_dfa={} pre_minimize_states={} pre_minimize_transitions={} final_states={} final_transitions={}",
+            "[glrmask/profile][tokenizer] combined groups={} visible_groups={} product_dfa={} shared_multi_nfa={} pre_minimize_states={} pre_minimize_transitions={} final_states={} final_transitions={} forced_minimized_states={}",
             plan.compiled_exprs.len(),
             plan.visible_groups,
             used_product_dfa,
+            use_shared_multi_nfa,
             pre_minimize_states,
             pre_minimize_transitions,
             final_dfa.num_states(),
-            dfa_transition_count(&final_dfa)
+            dfa_transition_count(&final_dfa),
+            forced_minimized_states.unwrap_or(final_dfa.num_states())
         );
     }
     final_dfa
@@ -1066,6 +1229,15 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
 
 pub fn build_regex(exprs: &[Expr]) -> Regex {
     let dfa = compile_with_plan(build_exclusion_compile_plan(exprs));
+
+    Regex { dfa }
+}
+
+pub fn build_regex_with_profile_labels(exprs: &[Expr], visible_labels: &[String]) -> Regex {
+    let dfa = compile_with_plan(build_exclusion_compile_plan_with_labels(
+        exprs,
+        Some(visible_labels),
+    ));
 
     Regex { dfa }
 }
@@ -1259,7 +1431,7 @@ fn compile_product_component(expr: &Expr) -> ProductComponent {
     }
 }
 
-fn build_product_dfa(exprs: &[Expr]) -> DFA {
+fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentProfileLabel]>) -> DFA {
     let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
     let profile_started_at = Instant::now();
     let components: Vec<ProductComponent> = exprs
@@ -1274,17 +1446,29 @@ fn build_product_dfa(exprs: &[Expr]) -> DFA {
         );
         for (index, component) in components.iter().enumerate() {
             let states = component.partition_dfa().num_states();
+            let transitions = dfa_transition_count(component.partition_dfa());
+            let label = profile_labels
+                .and_then(|labels| labels.get(index))
+                .map(|label| {
+                    format!(
+                        " name={:?} origin={} shared={}",
+                        label.name,
+                        label.origin,
+                        label.shared
+                    )
+                })
+                .unwrap_or_else(|| format!(" expr={:?}", expr_profile_summary(&exprs[index])));
             match component {
                 ProductComponent::Materialized(_) => {
                     eprintln!(
-                        "[glrmask/profile][tokenizer] component index={} kind=materialized states={}",
-                        index, states
+                        "[glrmask/profile][tokenizer] component index={} kind=materialized states={} transitions={}{}",
+                        index, states, transitions, label
                     );
                 }
                 ProductComponent::VirtualBoundedRepeat { min, max, .. } => {
                     eprintln!(
-                        "[glrmask/profile][tokenizer] component index={} kind=virtual_bounded_repeat base_states={} min={} max={}",
-                        index, states, min, max
+                        "[glrmask/profile][tokenizer] component index={} kind=virtual_bounded_repeat base_states={} base_transitions={} min={} max={}{}",
+                        index, states, transitions, min, max, label
                     );
                 }
             }
@@ -1318,7 +1502,11 @@ fn build_product_dfa(exprs: &[Expr]) -> DFA {
         .collect();
     let mut class_active = vec![false; num_classes];
     let mut used_classes = Vec::<usize>::new();
+    let mut growth_recorder = profile_detail.then(|| ProductGrowthRecorder::new(num_groups));
     state_map.insert(start_tuple.clone(), 0);
+    if let Some(recorder) = growth_recorder.as_mut() {
+        recorder.record(num_groups, &start_tuple);
+    }
     worklist.push_back((0, start_tuple));
 
     while let Some((current_state, state_tuple)) = worklist.pop_front() {
@@ -1390,6 +1578,9 @@ fn build_product_dfa(exprs: &[Expr]) -> DFA {
                 let (finalizers, future) = product_state_metadata(&components, next_tuple);
                 dfa.overwrite_state_metadata(new_state, finalizers, future);
                 state_map.insert(next_tuple.clone(), new_state);
+                if let Some(recorder) = growth_recorder.as_mut() {
+                    recorder.record(num_groups, next_tuple);
+                }
                 pending_class_transitions.push(Vec::new());
                 worklist.push_back((new_state, next_tuple.clone()));
                 new_state
@@ -1403,6 +1594,31 @@ fn build_product_dfa(exprs: &[Expr]) -> DFA {
     }
 
     if profile_detail {
+        if let Some(recorder) = growth_recorder.as_ref() {
+            let mut states_before = 0usize;
+            for (index, states_after) in recorder.prefix_counts().iter().copied().enumerate() {
+                let label = profile_labels
+                    .and_then(|labels| labels.get(index))
+                    .map(|label| {
+                        format!(
+                            " name={:?} origin={} shared={}",
+                            label.name,
+                            label.origin,
+                            label.shared
+                        )
+                    })
+                    .unwrap_or_else(|| format!(" expr={:?}", expr_profile_summary(&exprs[index])));
+                eprintln!(
+                    "[glrmask/profile][tokenizer/product-growth] component_index={} states_before={} states_after={} delta_states={}{}",
+                    index,
+                    states_before,
+                    states_after,
+                    states_after.saturating_sub(states_before),
+                    label
+                );
+                states_before = states_after;
+            }
+        }
         eprintln!(
             "[glrmask/profile][tokenizer] product_reachable states={} classes={} construct_ms={:.3}",
             dfa.num_states(),
@@ -1571,6 +1787,7 @@ mod tests {
     use super::build_regex;
     use super::compile_product_component_dfa_direct;
     use crate::automata::lexer::ast::Expr;
+    use crate::automata::lexer::regex::parse_regex;
     use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::ds::u8set::U8Set;
     use std::sync::Arc;
@@ -2038,6 +2255,33 @@ mod tests {
                 .any(|matched| matched.id == 0 && matched.width == 3),
             "prefixed optional word-list matched leading space unexpectedly: {:?}",
             exec.matches,
+        );
+    }
+
+    #[test]
+    fn direct_tokenizer_states_for_o35155_regex_groups() {
+        let expr_1 = parse_regex(r"(\w+\.)+\d+", false);
+        let expr_2 = parse_regex(r"\w+_(\w_)?\d+", false);
+        let expr_3 = parse_regex(r"(\w|-){12}", false);
+        let expr_5 = parse_regex(r"\d{7,9}", false);
+
+        let regex_1235 = build_regex(&[
+            expr_1.clone(),
+            expr_2.clone(),
+            expr_3.clone(),
+            expr_5.clone(),
+        ]);
+        let regex_125 = build_regex(&[expr_1, expr_2, expr_5]);
+
+        eprintln!(
+            "o35155 direct tokenizer states for regex groups 1,2,3,5: states={} transitions={}",
+            regex_1235.num_states(),
+            regex_1235.num_transitions()
+        );
+        eprintln!(
+            "o35155 direct tokenizer states for regex groups 1,2,5: states={} transitions={}",
+            regex_125.num_states(),
+            regex_125.num_transitions()
         );
     }
 

@@ -64,6 +64,11 @@ impl<'a> Lowerer<'a> {
         )? {
             return Ok(expr);
         }
+        if object_choice_branches_have_singleton_discriminator(&factoring_branches) {
+            if let Some(expr) = self.try_lower_unordered_open_object_any_of_variants(&factoring_branches)? {
+                return Ok(expr);
+            }
+        }
         if let Some(expr) = self.try_lower_open_object_any_of_variants(&factoring_branches)? {
             return Ok(expr);
         }
@@ -570,7 +575,7 @@ impl<'a> Lowerer<'a> {
                     }
                 }
                 ChoiceKind::OneOf => {
-                    if distributed_one_of_objects_have_singleton_discriminator(&distributed) {
+                    if object_choice_branches_have_singleton_discriminator(&distributed) {
                         if let Some(expr) =
                             self.try_lower_unordered_open_object_any_of_variants(&distributed)?
                         {
@@ -2751,24 +2756,15 @@ fn object_like_all_of_properties_are_compatible(branches: &[Schema]) -> bool {
     true
 }
 
-fn distributed_one_of_objects_have_singleton_discriminator(branches: &[Schema]) -> bool {
+fn object_choice_branches_have_singleton_discriminator(branches: &[Schema]) -> bool {
     let mut discriminator_name = None;
     let mut discriminator_literals = Vec::with_capacity(branches.len());
 
     for branch in branches {
-        let SchemaKind::Assertions(assertions) = &branch.kind else {
+        let Some(object) = choice_branch_singleton_discriminator_object(branch) else {
             return false;
         };
-        if !assertions.clone_without_combinators().is_empty() {
-            return false;
-        }
-        let Some(merged) = merge_all_of_object_like_schema(&assertions.all_of) else {
-            return false;
-        };
-        let Some(object) = plain_object_schema(&merged) else {
-            return false;
-        };
-        let Some((name, literal)) = required_singleton_string_discriminator_property(object) else {
+        let Some((name, literal)) = required_singleton_string_discriminator_property(&object) else {
             return false;
         };
         if let Some(expected) = &discriminator_name {
@@ -2782,6 +2778,21 @@ fn distributed_one_of_objects_have_singleton_discriminator(branches: &[Schema]) 
     }
 
     discriminator_name.is_some() && singleton_string_literals_are_distinct(&discriminator_literals)
+}
+
+fn choice_branch_singleton_discriminator_object(branch: &Schema) -> Option<ObjectSchema> {
+    if let Some(object) = plain_object_schema(branch) {
+        return Some(object.clone());
+    }
+
+    let SchemaKind::Assertions(assertions) = &branch.kind else {
+        return None;
+    };
+    if !assertions.clone_without_combinators().is_empty() {
+        return None;
+    }
+    let merged = merge_all_of_object_like_schema(&assertions.all_of)?;
+    plain_object_schema(&merged).cloned()
 }
 
 fn object_like_schema(schema: &Schema) -> Option<Schema> {

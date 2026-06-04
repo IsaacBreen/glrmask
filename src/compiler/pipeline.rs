@@ -5,7 +5,7 @@ use std::time::Instant;
 use once_cell::sync::Lazy;
 
 use crate::Vocab;
-use crate::automata::lexer::compile::build_regex;
+use crate::automata::lexer::compile::{build_regex, build_regex_with_profile_labels};
 use crate::automata::lexer::regex::parse_regex;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::regex::Expr;
@@ -332,6 +332,12 @@ pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<
 
 pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
     let exprs: Vec<Expr> = grammar.terminals.iter().map(terminal_expr).collect();
+    let terminal_labels: Vec<String> = grammar
+        .terminals
+        .iter()
+        .enumerate()
+        .map(|(index, _)| grammar.terminal_display_name(index as u32))
+        .collect();
     if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some() {
         eprintln!(
             "[glrmask/profile][tokenizer] terminals={}",
@@ -352,11 +358,18 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
             );
         }
     }
-    build_tokenizer_from_exprs(&exprs)
+    build_tokenizer_from_exprs(&exprs, Some(&terminal_labels))
 }
 
-pub(crate) fn build_tokenizer_from_exprs(exprs: &[Expr]) -> Tokenizer {
-    let regex = build_regex(exprs);
+pub(crate) fn build_tokenizer_from_exprs(
+    exprs: &[Expr],
+    profile_labels: Option<&[String]>,
+) -> Tokenizer {
+    let regex = if let Some(labels) = profile_labels {
+        build_regex_with_profile_labels(exprs, labels)
+    } else {
+        build_regex(exprs)
+    };
 
     Tokenizer {
         dfa: regex.dfa,

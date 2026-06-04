@@ -2144,6 +2144,64 @@ fn very_large_bounded_string_still_uses_split_chunk_rules() {
     lower(&grammar).unwrap();
 }
 
+
+#[test]
+fn discriminator_anyof_object_lowers_to_compact_body() {
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"enum": ["INSPIRE BAI"], "type": "string"},
+                    "value": {"pattern": "(\\w+\\.)+\\d+", "type": "string"}
+                },
+                "required": ["type", "value"]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"enum": ["ARXIV"], "type": "string"},
+                    "value": {"pattern": "\\w+_(\\w_)?\\d+", "type": "string"}
+                },
+                "required": ["type", "value"]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"enum": ["GOOGLESCHOLAR"], "type": "string"},
+                    "value": {"pattern": "(\\w|-){12}", "type": "string"}
+                },
+                "required": ["type", "value"]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"enum": ["VIAF"], "type": "string"},
+                    "value": {"pattern": "\\d{7,9}", "type": "string"}
+                },
+                "required": ["type", "value"]
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("json_discriminator_anyof_object_body"), "{glrm}");
+    assert!(glrm.contains("json_string_pattern_body"), "{glrm}");
+    assert!(!glrm.contains("json_anyof_object_body"), "{glrm}");
+    assert!(!glrm.contains("json_additional_key_colon_local"), "{glrm}");
+    assert!(!glrm.contains("__exact_sub_json_additional"), "{glrm}");
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"type": "ARXIV", "value": "abc_d1"}"#
+    ));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"type": "VIAF", "value": "1234567", "extra": true}"#
+    ));
+    lower(&grammar).unwrap();
+}
+
 #[test]
 fn decoded_string_patterns_are_matched_against_json_string_bodies() {
     assert!(property_name_matches_pattern(r#"^/[^/]+$"#, "/abc").unwrap());
