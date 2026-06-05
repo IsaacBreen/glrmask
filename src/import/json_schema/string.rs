@@ -199,19 +199,42 @@ impl<'a> Lowerer<'a> {
                 if anchored_start {
                     self.add_string_pattern_anchored_start_terminal(lowered, anchored_end)
                 } else {
-                    let prefix_chunk = self.add_string_pattern_prefix_chunk_terminal();
-                    let middle = self.add_string_pattern_middle_terminal(lowered);
-                    let end = self.add_string_pattern_end_terminal(anchored_end);
-                    seq(vec![
-                        lit("\""),
-                        GrammarExpr::Repeat(Box::new(prefix_chunk)),
-                        middle,
-                        end,
-                    ])
+                    match unanchored_pattern_split_mode() {
+                        UnanchoredPatternSplitMode::ChunkedPrefixMiddle => {
+                            let prefix_chunk = self.add_string_pattern_prefix_chunk_terminal();
+                            let middle = self.add_string_pattern_middle_terminal(lowered);
+                            let end = self.add_string_pattern_end_terminal(anchored_end);
+                            seq(vec![
+                                lit("\""),
+                                GrammarExpr::Repeat(Box::new(prefix_chunk)),
+                                middle,
+                                end,
+                            ])
+                        }
+                        UnanchoredPatternSplitMode::OpenMiddle => {
+                            let open_middle = self.add_string_pattern_open_middle_terminal(lowered);
+                            let end = self.add_string_pattern_end_terminal(anchored_end);
+                            seq(vec![open_middle, end])
+                        }
+                    }
                 }
             })
             .collect::<Vec<_>>();
         Ok(Some(choice(alternatives)))
+    }
+
+    fn add_string_pattern_open_middle_terminal(&mut self, body_regex: String) -> GrammarExpr {
+        let body = self.add_string_pattern_body_terminal(body_regex);
+        let name = self.fresh_rule_name("json_string_pattern_open_middle");
+        self.add_terminal_rule(
+            &name,
+            seq(vec![
+                lit("\""),
+                GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))),
+                body,
+            ]),
+        );
+        r(&name)
     }
 
     fn add_string_pattern_prefix_chunk_terminal(&mut self) -> GrammarExpr {
@@ -1160,6 +1183,63 @@ fn preprocess_ascii_shorthand(pattern: &str) -> String {
     }
 
     lowered
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UnanchoredPatternSplitMode {
+    ChunkedPrefixMiddle,
+    OpenMiddle,
+}
+
+fn unanchored_pattern_split_mode() -> UnanchoredPatternSplitMode {
+    static VALUE: std::sync::OnceLock<UnanchoredPatternSplitMode> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        if let Some(mode) = std::env::var("GLRMASK_JSON_SCHEMA_UNANCHORED_PATTERN_SPLIT_MODE")
+            .ok()
+            .and_then(|value| parse_unanchored_pattern_split_mode(&value))
+        {
+            return mode;
+        }
+
+        // Backwards-compatible spelling from the original two-mode experiment.
+        // The current safe default is chunked prefix/middle. Set this variable
+        // to 0/false/no/off to force the legacy open-middle split.
+        std::env::var("GLRMASK_JSON_SCHEMA_UNANCHORED_PATTERN_CHUNK_PREFIX_MIDDLE")
+            .ok()
+            .and_then(|value| parse_env_bool(&value))
+            .map(|enabled| {
+                if enabled {
+                    UnanchoredPatternSplitMode::ChunkedPrefixMiddle
+                } else {
+                    UnanchoredPatternSplitMode::OpenMiddle
+                }
+            })
+            .unwrap_or(UnanchoredPatternSplitMode::ChunkedPrefixMiddle)
+    })
+}
+
+fn parse_unanchored_pattern_split_mode(value: &str) -> Option<UnanchoredPatternSplitMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "chunk" | "chunked" | "chunked_prefix_middle" | "chunked-prefix-middle" => {
+            Some(UnanchoredPatternSplitMode::ChunkedPrefixMiddle)
+        }
+        "open_middle" | "open-middle" | "openmiddle" | "legacy" => {
+            Some(UnanchoredPatternSplitMode::OpenMiddle)
+        }
+        _ => None,
+    }
+}
+
+fn parse_env_bool(value: &str) -> Option<bool> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Some(false);
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn unanchored_pattern_prefix_chunk_size() -> usize {
