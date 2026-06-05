@@ -833,6 +833,7 @@ fn compile_prepared_with_profile(
             token_bytes,
             internal_token_bytes,
             token_bytes_dense: Vec::new(),
+            llguidance_json_unicode_escape_token_filter: false,
             internal_token_buf_masks: Vec::new(),
             word_group_buf_masks: Vec::new(),
             pair_word_group_buf_masks: Vec::new(),

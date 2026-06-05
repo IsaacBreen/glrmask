@@ -167,6 +167,15 @@ fn token_bytes_for_id(constraint: &Constraint, token_id: u32) -> Option<&[u8]> {
         .or_else(|| constraint.token_bytes.get(&token_id).map(Vec::as_slice))
 }
 
+fn reject_filtered_token(constraint: &Constraint, token_id: u32, bytes: &[u8]) -> Result<(), String> {
+    if constraint.llguidance_json_unicode_escape_token_filtered(bytes) {
+        return Err(format!(
+            "commit_token: token_id {token_id} is filtered by llguidance JSON unicode-escape compatibility"
+        ));
+    }
+    Ok(())
+}
+
 fn commit_mask_assert_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -3304,6 +3313,7 @@ impl<'a> ConstraintState<'a> {
             .ok_or_else(|| {
                 format!("commit_token: token_id {token_id} not in vocabulary")
             })?;
+        reject_filtered_token(constraint, token_id, bytes)?;
         let was_in_mask = snapshot_mask_membership(self, token_id);
         let result = commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
         self.generation += 1;
@@ -3317,6 +3327,7 @@ impl<'a> ConstraintState<'a> {
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id)
             .ok_or_else(|| format!("commit_token: token_id {token_id} not in vocabulary"))?;
+        reject_filtered_token(constraint, token_id, bytes)?;
         let was_in_mask = snapshot_mask_membership(self, token_id);
         let start = Instant::now();
         let result = commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
@@ -3330,6 +3341,7 @@ impl<'a> ConstraintState<'a> {
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id)
             .ok_or_else(|| format!("commit_token: token_id {token_id} not in vocabulary"))?;
+        reject_filtered_token(constraint, token_id, bytes)?;
         let was_in_mask = snapshot_mask_membership(self, token_id);
         let result = commit_bytes_impl_profiled(
             constraint,
@@ -3350,6 +3362,7 @@ impl<'a> ConstraintState<'a> {
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id)
             .ok_or_else(|| format!("commit_token: token_id {token_id} not in vocabulary"))?;
+        reject_filtered_token(constraint, token_id, bytes)?;
         let was_in_mask = snapshot_mask_membership(self, token_id);
         let mut advances = Vec::new();
         let result = commit_bytes_impl_profiled(
