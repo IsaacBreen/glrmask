@@ -39,6 +39,10 @@ struct ObjectItem {
 const ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES: usize = 4096;
 const PROPERTY_DEPENDENCY_MAX_FIXED_PROPERTIES: usize = 12;
 
+fn discriminator_anyof_fastpath_disabled() -> bool {
+    std::env::var_os("GLRMASK_DISABLE_DISCRIMINATOR_ANYOF_FASTPATH").is_some()
+}
+
 struct AnyOfFixedObjectItem {
     key: String,
     value_expr: GrammarExpr,
@@ -2027,11 +2031,13 @@ impl<'a> Lowerer<'a> {
         if variants.is_empty() {
             return Ok(None);
         }
-        if let Some(expr) = self.try_lower_discriminator_value_open_any_of_object(
-            variants,
-            include_untyped_non_object_alts,
-        )? {
-            return Ok(Some(expr));
+        if !discriminator_anyof_fastpath_disabled() {
+            if let Some(expr) = self.try_lower_discriminator_value_open_any_of_object(
+                variants,
+                include_untyped_non_object_alts,
+            )? {
+                return Ok(Some(expr));
+            }
         }
 
         let mut builder = ExprNfaBuilder::new();

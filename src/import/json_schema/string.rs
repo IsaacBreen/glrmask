@@ -504,14 +504,14 @@ impl<'a> Lowerer<'a> {
             (0, Some(1)) => GrammarExpr::Optional(Box::new(sub)),
             (min, Some(max)) => GrammarExpr::RepeatRange {
                 expr: Box::new(sub),
-                min,
-                max,
+                min: min.try_into().unwrap(),
+                max: max.try_into().unwrap(),
             },
             (min, None) => seq(vec![
                 GrammarExpr::RepeatRange {
                     expr: Box::new(sub.clone()),
-                    min,
-                    max: min,
+                    min: min.try_into().unwrap(),
+                    max: min.try_into().unwrap(),
                 },
                 GrammarExpr::Repeat(Box::new(sub)),
             ]),

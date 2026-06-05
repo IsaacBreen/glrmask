@@ -16,6 +16,10 @@ use super::lower::{
 };
 use super::string::string_value_satisfies_schema;
 
+fn discriminator_anyof_fastpath_disabled() -> bool {
+    std::env::var_os("GLRMASK_DISABLE_DISCRIMINATOR_ANYOF_FASTPATH").is_some()
+}
+
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_any_of(
         &mut self,
@@ -64,7 +68,9 @@ impl<'a> Lowerer<'a> {
         )? {
             return Ok(expr);
         }
-        if object_choice_branches_have_singleton_discriminator(&factoring_branches) {
+        if !discriminator_anyof_fastpath_disabled()
+            && object_choice_branches_have_singleton_discriminator(&factoring_branches)
+        {
             if let Some(expr) = self.try_lower_unordered_open_object_any_of_variants(&factoring_branches)? {
                 return Ok(expr);
             }
