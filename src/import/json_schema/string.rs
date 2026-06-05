@@ -361,7 +361,7 @@ impl<'a> Lowerer<'a> {
         key: &str,
         schema: &StringSchema,
     ) -> ImportResult<GrammarExpr> {
-        let value = self.lower_constrained_string_terminal_expr(schema)?;
+        let value = self.lower_string_property_value_expr(schema)?;
         let value = match value {
             GrammarExpr::Ref(_) => value,
             other => {
@@ -374,6 +374,18 @@ impl<'a> Lowerer<'a> {
             self.lower_literal_key_colon_with_prefix(prefix, key),
             value,
         ]))
+    }
+
+    fn lower_string_property_value_expr(
+        &mut self,
+        schema: &StringSchema,
+    ) -> ImportResult<GrammarExpr> {
+        if schema.pattern.is_none()
+            && recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_none()
+        {
+            return self.lower_string_expr(schema);
+        }
+        self.lower_constrained_string_terminal_expr(schema)
     }
 
     pub(crate) fn lower_string_literal(&mut self, text: &str) -> GrammarExpr {
