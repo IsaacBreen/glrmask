@@ -191,10 +191,6 @@ impl<'a> Lowerer<'a> {
         let hir = Parser::new()
             .parse(&pattern)
             .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")))?;
-        if let Some(branches) = self.lower_string_pattern_hir_branch_expr_parts(hir.clone())? {
-            return Ok(Some(self.lower_string_pattern_split_expr_from_expr_branches(branches)));
-        }
-
         let branches = lower_string_pattern_hir_branch_parts(hir)?;
         if branches.iter().all(|(_, anchored_start, _)| *anchored_start) {
             return Ok(None);
@@ -206,12 +202,7 @@ impl<'a> Lowerer<'a> {
                 if anchored_start {
                     self.add_string_pattern_anchored_start_terminal(lowered, anchored_end)
                 } else {
-                    let split_mode = if self.llguidance_compat_enabled() {
-                        UnanchoredPatternSplitMode::ChunkedPrefixMiddle
-                    } else {
-                        unanchored_pattern_split_mode()
-                    };
-                    match split_mode {
+                    match unanchored_pattern_split_mode() {
                         UnanchoredPatternSplitMode::ChunkedPrefixMiddle => {
                             let prefix_chunk = self.add_string_pattern_prefix_chunk_terminal();
                             let middle = self.add_string_pattern_middle_terminal(lowered);
@@ -235,25 +226,6 @@ impl<'a> Lowerer<'a> {
         Ok(Some(choice(alternatives)))
     }
 
-    fn json_string_char_for_pattern_fill(&mut self) -> GrammarExpr {
-        if !self.llguidance_compat_enabled() {
-            return r(JSON_STRING_CHAR_RULE);
-        }
-
-        let name = self.fresh_rule_name("json_string_char_llguidance_compat");
-        self.add_terminal_rule(
-            &name,
-            GrammarExpr::Exclude {
-                expr: Box::new(r(JSON_STRING_CHAR_RULE)),
-                // Match llguidance's token-level behaviour for JSON string
-                // escapes here: a token like `\\u` must not be admitted merely
-                // because `\\` is the prefix of some valid escape spelling.
-                exclude: Box::new(GrammarExpr::RawRegex(r#"\\[^"\\bfnrt]"#.to_string())),
-            },
-        );
-        r(&name)
-    }
-
     fn lower_string_pattern_split_expr_from_expr_branches(
         &mut self,
         branches: Vec<(GrammarExpr, bool, bool)>,
@@ -269,12 +241,11 @@ impl<'a> Lowerer<'a> {
     fn add_string_pattern_open_middle_terminal(&mut self, body_regex: String) -> GrammarExpr {
         let body = self.add_string_pattern_body_terminal(body_regex);
         let name = self.fresh_rule_name("json_string_pattern_open_middle");
-        let ch = self.json_string_char_for_pattern_fill();
         self.add_terminal_rule(
             &name,
             seq(vec![
                 lit("\""),
-                GrammarExpr::Repeat(Box::new(ch)),
+                GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))),
                 body,
             ]),
         );
@@ -284,12 +255,11 @@ impl<'a> Lowerer<'a> {
     fn add_string_pattern_open_middle_expr_terminal(&mut self, body_expr: GrammarExpr) -> GrammarExpr {
         let body = self.add_string_pattern_body_expr_terminal(body_expr);
         let name = self.fresh_rule_name("json_string_pattern_open_middle");
-        let ch = self.json_string_char_for_pattern_fill();
         self.add_terminal_rule(
             &name,
             seq(vec![
                 lit("\""),
-                GrammarExpr::Repeat(Box::new(ch)),
+                GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))),
                 body,
             ]),
         );
@@ -299,11 +269,10 @@ impl<'a> Lowerer<'a> {
     fn add_string_pattern_prefix_chunk_terminal(&mut self) -> GrammarExpr {
         let chunk_size = unanchored_pattern_prefix_chunk_size();
         let name = self.fresh_rule_name("json_string_pattern_prefix_chunk");
-        let ch = self.json_string_char_for_pattern_fill();
         self.add_terminal_rule(
             &name,
             GrammarExpr::RepeatRange {
-                expr: Box::new(ch),
+                expr: Box::new(r(JSON_STRING_CHAR_RULE)),
                 min: chunk_size,
                 max: chunk_size,
             },
@@ -315,12 +284,11 @@ impl<'a> Lowerer<'a> {
         let chunk_size = unanchored_pattern_prefix_chunk_size();
         let body = self.add_string_pattern_body_terminal(body_regex);
         let name = self.fresh_rule_name("json_string_pattern_middle");
-        let ch = self.json_string_char_for_pattern_fill();
         self.add_terminal_rule(
             &name,
             seq(vec![
                 GrammarExpr::RepeatRange {
-                    expr: Box::new(ch),
+                    expr: Box::new(r(JSON_STRING_CHAR_RULE)),
                     min: 0,
                     max: chunk_size.saturating_sub(1),
                 },
@@ -334,12 +302,11 @@ impl<'a> Lowerer<'a> {
         let chunk_size = unanchored_pattern_prefix_chunk_size();
         let body = self.add_string_pattern_body_expr_terminal(body_expr);
         let name = self.fresh_rule_name("json_string_pattern_middle");
-        let ch = self.json_string_char_for_pattern_fill();
         self.add_terminal_rule(
             &name,
             seq(vec![
                 GrammarExpr::RepeatRange {
-                    expr: Box::new(ch),
+                    expr: Box::new(r(JSON_STRING_CHAR_RULE)),
                     min: 0,
                     max: chunk_size.saturating_sub(1),
                 },
@@ -353,7 +320,7 @@ impl<'a> Lowerer<'a> {
         let name = self.fresh_rule_name("json_string_pattern_end");
         let mut parts = Vec::new();
         if !anchored_end {
-            parts.push(GrammarExpr::Repeat(Box::new(self.json_string_char_for_pattern_fill())));
+            parts.push(GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))));
         }
         parts.push(lit("\""));
         self.add_terminal_rule(&name, seq(parts));
@@ -369,7 +336,7 @@ impl<'a> Lowerer<'a> {
         let name = self.fresh_rule_name("json_string_constrained_part");
         let mut parts = vec![lit("\""), body];
         if !anchored_end {
-            parts.push(GrammarExpr::Repeat(Box::new(self.json_string_char_for_pattern_fill())));
+            parts.push(GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))));
         }
         parts.push(lit("\""));
         self.add_terminal_rule(&name, seq(parts));
@@ -524,7 +491,7 @@ impl<'a> Lowerer<'a> {
         }
         if is_unicode_non_decimal_digit_class(class) {
             return Some(GrammarExpr::Exclude {
-                expr: Box::new(self.json_string_char_for_pattern_fill()),
+                expr: Box::new(r(JSON_STRING_CHAR_RULE)),
                 exclude: Box::new(self.string_pattern_digit_char_ref()),
             });
         }
@@ -562,11 +529,10 @@ impl<'a> Lowerer<'a> {
         const NAME: &str = "JSON_STRING_PATTERN_NON_WHITESPACE_CHAR";
         if !self.rules.iter().any(|rule| rule.name == NAME) {
             let whitespace = self.string_pattern_whitespace_char_ref();
-            let ch = self.json_string_char_for_pattern_fill();
             self.add_internal_terminal_rule(
                 NAME,
                 GrammarExpr::Exclude {
-                    expr: Box::new(ch),
+                    expr: Box::new(r(JSON_STRING_CHAR_RULE)),
                     exclude: Box::new(whitespace),
                 },
             );
@@ -783,39 +749,25 @@ impl<'a> Lowerer<'a> {
         key: &str,
         schema: &StringSchema,
     ) -> ImportResult<GrammarExpr> {
-        let value = self.shared_property_string_value_ref(schema)?;
-        Ok(seq(vec![
-            self.lower_literal_key_colon_with_prefix(prefix, key),
-            value,
-        ]))
-    }
-
-    fn shared_property_string_value_ref(
-        &mut self,
-        schema: &StringSchema,
-    ) -> ImportResult<GrammarExpr> {
-        let cache_key = (
-            schema.min_length,
-            schema.max_length,
-            schema.pattern.clone(),
-            schema.format.clone(),
-        );
-        if let Some(rule_name) = self.shared_property_string_value_rules.get(&cache_key) {
-            return Ok(r(rule_name));
+        if schema.pattern.is_none()
+            && recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_none()
+        {
+            return Ok(seq(vec![
+                self.lower_literal_key_colon_with_prefix(prefix, key),
+                self.lower_string_expr(schema)?,
+            ]));
         }
 
+        let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+        let mut literal_prefix = Vec::new();
+        literal_prefix.extend_from_slice(prefix);
+        literal_prefix.extend_from_slice(encoded.as_bytes());
+        literal_prefix.extend_from_slice(b": ");
         let value = self.lower_string_property_value_expr(schema)?;
-        let rule_name = match value {
-            GrammarExpr::Ref(name) => name,
-            other => {
-                let name = self.fresh_rule_name("json_property_string_value");
-                self.add_terminal_rule(&name, other);
-                name
-            }
-        };
-        self.shared_property_string_value_rules
-            .insert(cache_key, rule_name.clone());
-        Ok(r(&rule_name))
+        let expr = prepend_literal_prefix_to_expr(literal_prefix, value);
+        let name = self.fresh_rule_name("json_property_string_value");
+        self.add_terminal_rule(&name, expr);
+        Ok(r(&name))
     }
 
     fn lower_string_property_value_expr(
@@ -2053,6 +2005,41 @@ fn escape_regex_class_char(ch: char) -> String {
         ']' => r"\]".to_string(),
         '^' => r"\^".to_string(),
         _ => regex::escape(&ch.to_string()),
+    }
+}
+
+fn prepend_literal_prefix_to_expr(prefix: Vec<u8>, expr: GrammarExpr) -> GrammarExpr {
+    if prefix.is_empty() {
+        return expr;
+    }
+    match expr {
+        GrammarExpr::Literal(mut bytes) => {
+            let mut merged = prefix;
+            merged.append(&mut bytes);
+            lit_bytes(merged)
+        }
+        GrammarExpr::RawRegex(regex) => GrammarExpr::RawRegex(format!(
+            "{}{}",
+            regex::escape(&String::from_utf8_lossy(&prefix)),
+            regex
+        )),
+        GrammarExpr::Sequence(mut parts) => {
+            if let Some(GrammarExpr::Literal(bytes)) = parts.first_mut() {
+                let mut merged = prefix;
+                merged.append(bytes);
+                *bytes = merged;
+                return seq(parts);
+            }
+            let mut prefixed = Vec::with_capacity(parts.len() + 1);
+            prefixed.push(lit_bytes(prefix));
+            prefixed.extend(parts);
+            seq(prefixed)
+        }
+        GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+            expr: Box::new(prepend_literal_prefix_to_expr(prefix.clone(), *expr)),
+            intersect: Box::new(prepend_literal_prefix_to_expr(prefix, *intersect)),
+        },
+        other => seq(vec![lit_bytes(prefix), other]),
     }
 }
 

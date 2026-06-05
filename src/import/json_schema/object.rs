@@ -1517,12 +1517,15 @@ impl<'a> Lowerer<'a> {
 
     fn split_object_pair_symbols(pair: &GrammarExpr) -> ImportResult<[GrammarExpr; 2]> {
         match pair {
-            GrammarExpr::Sequence(parts) if parts.len() == 2 => {
-                Ok([parts[0].clone(), parts[1].clone()])
+            GrammarExpr::Sequence(parts) if parts.len() >= 2 => {
+                let value = if parts.len() == 2 {
+                    parts[1].clone()
+                } else {
+                    seq(parts[1..].to_vec())
+                };
+                Ok([parts[0].clone(), value])
             }
-            _ => Err(SchemaImportError::new(
-                "expected object pair to lower as key-colon/value sequence",
-            )),
+            other => Ok([other.clone(), GrammarExpr::Epsilon]),
         }
     }
 
