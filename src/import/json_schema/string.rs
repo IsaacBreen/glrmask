@@ -783,19 +783,39 @@ impl<'a> Lowerer<'a> {
         key: &str,
         schema: &StringSchema,
     ) -> ImportResult<GrammarExpr> {
-        let value = self.lower_string_property_value_expr(schema)?;
-        let value = match value {
-            GrammarExpr::Ref(_) => value,
-            other => {
-                let name = self.fresh_rule_name("json_property_string_value");
-                self.add_terminal_rule(&name, other);
-                r(&name)
-            }
-        };
+        let value = self.shared_property_string_value_ref(schema)?;
         Ok(seq(vec![
             self.lower_literal_key_colon_with_prefix(prefix, key),
             value,
         ]))
+    }
+
+    fn shared_property_string_value_ref(
+        &mut self,
+        schema: &StringSchema,
+    ) -> ImportResult<GrammarExpr> {
+        let cache_key = (
+            schema.min_length,
+            schema.max_length,
+            schema.pattern.clone(),
+            schema.format.clone(),
+        );
+        if let Some(rule_name) = self.shared_property_string_value_rules.get(&cache_key) {
+            return Ok(r(rule_name));
+        }
+
+        let value = self.lower_string_property_value_expr(schema)?;
+        let rule_name = match value {
+            GrammarExpr::Ref(name) => name,
+            other => {
+                let name = self.fresh_rule_name("json_property_string_value");
+                self.add_terminal_rule(&name, other);
+                name
+            }
+        };
+        self.shared_property_string_value_rules
+            .insert(cache_key, rule_name.clone());
+        Ok(r(&rule_name))
     }
 
     fn lower_string_property_value_expr(
@@ -2089,10 +2109,10 @@ pub(crate) fn json_string_body_char_regex() -> &'static str {
 fn json_string_body_char_regex_in_mode(mode: JsonStringCompatMode) -> &'static str {
     match mode {
         JsonStringCompatMode::JsonSchema => {
-            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bfnrt])"#
+            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bfnrt]|\\u[0-9A-Fa-f]{4})"#
         }
         JsonStringCompatMode::LlGuidanceNative => {
-            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt])"#
+            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt]|\\u[0-9A-Fa-f]{4})"#
         }
     }
 }
@@ -2108,10 +2128,10 @@ fn json_string_body_dot_regex() -> &'static str {
 fn json_string_body_dot_regex_in_mode(mode: JsonStringCompatMode) -> &'static str {
     match mode {
         JsonStringCompatMode::JsonSchema => {
-            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bft])"#
+            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bft]|\\u[0-9A-Fa-f]{4})"#
         }
         JsonStringCompatMode::LlGuidanceNative => {
-            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bft])"#
+            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bft]|\\u[0-9A-Fa-f]{4})"#
         }
     }
 }
