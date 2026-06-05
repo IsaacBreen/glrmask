@@ -1995,9 +1995,7 @@ impl<'a> Lowerer<'a> {
             let Some(discriminator_value) = singleton_string_enum_value(&discriminator.schema) else {
                 return Ok(None);
             };
-            let payload_expr = self
-                .lower_readable_pattern_string(&payload.schema)?
-                .unwrap_or_else(|| payload.value_expr.clone());
+            let payload_expr = payload.value_expr.clone();
             alternatives.push(seq(vec![
                 self.lower_literal_key_colon(&discriminator.key),
                 self.lower_string_literal(&discriminator_value),
