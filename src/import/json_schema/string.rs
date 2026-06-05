@@ -28,6 +28,12 @@ impl<'a> Lowerer<'a> {
             || ((schema.min_length != 0 || schema.max_length.is_some()) && should_terminalize_length)
         {
             let name = self.fresh_rule_name("json_string_constrained");
+            if let Some(pattern) = &schema.pattern
+                && let Some(expr) = self.lower_unanchored_pattern_string_split_expr(pattern)?
+            {
+                self.add_nonterminal_rule(&name, expr);
+                return Ok(r(&name));
+            }
             let expr = self.lower_constrained_string_terminal_expr(schema)?;
             self.add_terminal_rule(&name, expr);
             return Ok(r(&name));
@@ -166,6 +172,105 @@ impl<'a> Lowerer<'a> {
         let body = self.string_body_for_length(schema.min_length, schema.max_length);
 
         Ok(seq(vec![lit("\""), body, lit("\"")]))
+    }
+
+    fn add_string_pattern_body_terminal(&mut self, body_regex: String) -> GrammarExpr {
+        let name = self.fresh_rule_name("json_string_pattern_body");
+        self.add_terminal_rule(&name, GrammarExpr::RawRegex(body_regex));
+        r(&name)
+    }
+
+    fn lower_unanchored_pattern_string_split_expr(
+        &mut self,
+        pattern: &str,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        let pattern = preprocess_ascii_shorthand(pattern);
+        let hir = Parser::new()
+            .parse(&pattern)
+            .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")))?;
+        let branches = lower_string_pattern_hir_branch_parts(hir)?;
+        if branches.iter().all(|(_, anchored_start, _)| *anchored_start) {
+            return Ok(None);
+        }
+
+        let alternatives = branches
+            .into_iter()
+            .map(|(lowered, anchored_start, anchored_end)| {
+                if anchored_start {
+                    self.add_string_pattern_anchored_start_terminal(lowered, anchored_end)
+                } else {
+                    let prefix_chunk = self.add_string_pattern_prefix_chunk_terminal();
+                    let middle = self.add_string_pattern_middle_terminal(lowered);
+                    let end = self.add_string_pattern_end_terminal(anchored_end);
+                    seq(vec![
+                        lit("\""),
+                        GrammarExpr::Repeat(Box::new(prefix_chunk)),
+                        middle,
+                        end,
+                    ])
+                }
+            })
+            .collect::<Vec<_>>();
+        Ok(Some(choice(alternatives)))
+    }
+
+    fn add_string_pattern_prefix_chunk_terminal(&mut self) -> GrammarExpr {
+        let chunk_size = unanchored_pattern_prefix_chunk_size();
+        let name = self.fresh_rule_name("json_string_pattern_prefix_chunk");
+        self.add_terminal_rule(
+            &name,
+            GrammarExpr::RepeatRange {
+                expr: Box::new(r(JSON_STRING_CHAR_RULE)),
+                min: chunk_size,
+                max: chunk_size,
+            },
+        );
+        r(&name)
+    }
+
+    fn add_string_pattern_middle_terminal(&mut self, body_regex: String) -> GrammarExpr {
+        let chunk_size = unanchored_pattern_prefix_chunk_size();
+        let body = self.add_string_pattern_body_terminal(body_regex);
+        let name = self.fresh_rule_name("json_string_pattern_middle");
+        self.add_terminal_rule(
+            &name,
+            seq(vec![
+                GrammarExpr::RepeatRange {
+                    expr: Box::new(r(JSON_STRING_CHAR_RULE)),
+                    min: 0,
+                    max: chunk_size.saturating_sub(1),
+                },
+                body,
+            ]),
+        );
+        r(&name)
+    }
+
+    fn add_string_pattern_end_terminal(&mut self, anchored_end: bool) -> GrammarExpr {
+        let name = self.fresh_rule_name("json_string_pattern_end");
+        let mut parts = Vec::new();
+        if !anchored_end {
+            parts.push(GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))));
+        }
+        parts.push(lit("\""));
+        self.add_terminal_rule(&name, seq(parts));
+        r(&name)
+    }
+
+    fn add_string_pattern_anchored_start_terminal(
+        &mut self,
+        body_regex: String,
+        anchored_end: bool,
+    ) -> GrammarExpr {
+        let body = self.add_string_pattern_body_terminal(body_regex);
+        let name = self.fresh_rule_name("json_string_constrained_part");
+        let mut parts = vec![lit("\""), body];
+        if !anchored_end {
+            parts.push(GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))));
+        }
+        parts.push(lit("\""));
+        self.add_terminal_rule(&name, seq(parts));
+        r(&name)
     }
 
     fn should_split_bounded_string(&self, min: usize, max: usize) -> bool {
@@ -1055,6 +1160,29 @@ fn preprocess_ascii_shorthand(pattern: &str) -> String {
     }
 
     lowered
+}
+
+fn unanchored_pattern_prefix_chunk_size() -> usize {
+    static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("GLRMASK_JSON_SCHEMA_UNANCHORED_PATTERN_PREFIX_CHUNK_SIZE")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(8)
+    })
+}
+
+fn lower_string_pattern_hir_branch_parts(hir: Hir) -> ImportResult<Vec<(String, bool, bool)>> {
+    match hir.kind() {
+        HirKind::Alternation(parts) => parts
+            .iter()
+            .cloned()
+            .map(lower_string_pattern_branch_parts)
+            .collect(),
+        HirKind::Capture(capture) => lower_string_pattern_hir_branch_parts(*capture.sub.clone()),
+        _ => lower_string_pattern_branch_parts(hir).map(|branch| vec![branch]),
+    }
 }
 
 fn string_pattern_hir_as_body_regex(hir: &Hir) -> ImportResult<String> {
