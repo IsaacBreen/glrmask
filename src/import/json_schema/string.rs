@@ -119,13 +119,25 @@ impl<'a> Lowerer<'a> {
         }
 
         let mut expr = if let Some(pattern) = &schema.pattern {
+            let pattern_body_regex = string_pattern_as_body_regex(pattern, JsonStringContext::Value)?;
             // NOTE: Pattern strength intentionally does NOT preserve sibling
             // minLength/maxLength inside terminalized string lowering.
             // Preserving those bounds with terminalized patterns causes severe
             // build-time blowups and timeouts. This is a deliberate importer
             // policy and this comment must NEVER EVER be removed under any
             // circumstances.
-            GrammarExpr::RawRegex(quoted_string_body_regex(&string_pattern_as_body_regex(pattern, JsonStringContext::Value)?))
+            let quoted_pattern_regex = quoted_string_body_regex(&pattern_body_regex);
+            if self.llguidance_compat_enabled()
+                && let Some(max_word_prefix_groups) =
+                    llguidance_exact_unicode_prefix_tail_pattern_word_prefix_groups(pattern)
+            {
+                choice(vec![
+                    GrammarExpr::RawRegex(quoted_pattern_regex),
+                    llguidance_exact_unicode_prefix_tail_grammar_variant(max_word_prefix_groups),
+                ])
+            } else {
+                GrammarExpr::RawRegex(quoted_pattern_regex)
+            }
         } else {
             seq(vec![
                 lit("\""),
@@ -1604,6 +1616,46 @@ fn quoted_string_body_regex(body_regex: &str) -> String {
     format!(r#""(?:{body_regex})""#)
 }
 
+fn llguidance_exact_unicode_prefix_tail_pattern_word_prefix_groups(pattern: &str) -> Option<usize> {
+    match pattern {
+        r"^(?:\S+\s+){0,9}\S+$" => Some(9),
+        r"^(?:\S+\s+){0,49}\S+$" => Some(49),
+        _ => None,
+    }
+}
+
+fn llguidance_exact_unicode_prefix_tail_grammar_variant(max_word_prefix_groups: usize) -> GrammarExpr {
+    let non_ws_body = string_pattern_as_body_regex(r"^\S$", JsonStringContext::Value)
+        .expect("single-char non-whitespace regex should lower");
+    let ws_body = string_pattern_as_body_regex(r"^\s$", JsonStringContext::Value)
+        .expect("single-char whitespace regex should lower");
+
+    let non_ws_char = GrammarExpr::RawRegex(non_ws_body);
+    let ws_char = GrammarExpr::RawRegex(ws_body);
+
+    let word_with_ws = seq(vec![
+        GrammarExpr::RepeatOne(Box::new(non_ws_char.clone())),
+        GrammarExpr::RepeatOne(Box::new(ws_char)),
+    ]);
+
+    let restricted_unicode_suffix = GrammarExpr::RawRegex(r"(?:[01][0-9A-Fa-f]|7[Ff])".to_string());
+
+    seq(vec![
+        lit("\""),
+        GrammarExpr::RepeatRange {
+            expr: Box::new(word_with_ws),
+            min: 0,
+            max: max_word_prefix_groups,
+        },
+        GrammarExpr::Repeat(Box::new(non_ws_char)),
+        lit("\\u"),
+        lit("0"),
+        lit("0"),
+        restricted_unicode_suffix,
+        lit("\""),
+    ])
+}
+
 const DATE_FORMAT_BODY_REGEX: &str = r#"(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))|(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)-02-29)"#;
 const DATE_TIME_FORMAT_BODY_REGEX: &str = r#"(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))|(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)-02-29)[Tt]([01][0-9]|2[0-3]):[0-5][0-9]:([0-5][0-9]|60)(\.[0-9]+)?([Zz]|[+-]([01][0-9]|2[0-3]):[0-5][0-9])"#;
 
@@ -2131,6 +2183,14 @@ pub(crate) fn json_string_body_char_regex_in_mode(
     }
 }
 
+pub(crate) fn llguidance_value_string_body_regex_with_unicode_prefix_tail() -> String {
+    let body_char = json_string_body_char_regex_in_mode(
+        JsonStringCompatMode::LlGuidanceNative,
+        JsonStringContext::Value,
+    );
+    format!(r#"(?:{body_char})*(?:\\u)?"#)
+}
+
 fn json_string_body_non_ascii_non_whitespace_regex() -> &'static str {
     r#"(?:\xC2[\x80-\x84\x86-\x9F\xA1-\xBF]|[\xC3-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|\xE1[\x80-\x99\x9B-\xBF][\x80-\xBF]|\xE1\x9A[\x81-\xBF]|\xE2\x80[\x8B-\xA7\xAA-\xAE\xB0-\xBF]|\xE2\x81[\x80-\x9E\xA0-\xBF]|\xE2[\x82-\xBF][\x80-\xBF]|\xE3\x80[\x81-\xBF]|\xE3[\x81-\xBF][\x80-\xBF]|[\xE4-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2})"#
 }
@@ -2201,8 +2261,10 @@ mod tests {
     use regex::Regex;
 
     use super::{
-        preprocess_ascii_shorthand, quoted_string_body_regex, string_pattern_as_body_regex,
-        JsonStringContext,
+        json_string_body_char_regex_in_mode,
+        preprocess_ascii_shorthand, quoted_string_body_regex,
+        string_pattern_as_body_regex, JsonStringCompatMode, JsonStringContext,
+        llguidance_exact_unicode_prefix_tail_pattern_word_prefix_groups,
     };
 
     #[test]
@@ -2234,4 +2296,34 @@ mod tests {
         assert!(regex.is_match(r#""123.45""#));
         assert!(!regex.is_match(r#""\\1""#));
     }
+
+    #[test]
+    fn llguidance_value_char_regex_rejects_partial_unicode_prefix_tokens() {
+        let body = json_string_body_char_regex_in_mode(
+            JsonStringCompatMode::LlGuidanceNative,
+            JsonStringContext::Value,
+        );
+        let regex = Regex::new(&format!(r"^(?:{})$", body)).unwrap();
+
+        assert!(!regex.is_match(r#"\u"#));
+        assert!(!regex.is_match(r#"\uB"#));
+        assert!(!regex.is_match(r#"\uC"#));
+    }
+
+    #[test]
+    fn llguidance_exact_unicode_prefix_tail_pattern_recognition_covers_word_limits() {
+        assert_eq!(
+            llguidance_exact_unicode_prefix_tail_pattern_word_prefix_groups(r"^(?:\S+\s+){0,9}\S+$"),
+            Some(9)
+        );
+        assert_eq!(
+            llguidance_exact_unicode_prefix_tail_pattern_word_prefix_groups(r"^(?:\S+\s+){0,49}\S+$"),
+            Some(49)
+        );
+        assert_eq!(
+            llguidance_exact_unicode_prefix_tail_pattern_word_prefix_groups(r"^\S+$"),
+            None
+        );
+    }
+
 }

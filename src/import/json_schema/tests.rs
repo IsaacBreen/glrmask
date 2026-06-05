@@ -522,6 +522,71 @@ fn llguidance_compat_rejects_patterned_escaped_solidus() {
 }
 
 #[test]
+fn llguidance_compat_patterned_string_stays_strict_without_unconstrained_suffix_path() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "string",
+        "maxLength": 120,
+        "pattern": "^(?:\\S+\\s+){0,9}\\S+$"
+    });
+    assert!(schema_accepts_bytes(&schema, br#""Benefit 1""#));
+    assert!(!schema_accepts_bytes(&schema, br#""Benefit                                                                                                   ""#));
+
+    let json_u_token = 30_001u32;
+    let json_u_b_token = 30_003u32;
+    let json_u_c_token = 30_004u32;
+    let longspaces_token = 30_005u32;
+    let zero_token = 30_006u32;
+    let b_token = 30_007u32;
+
+    let mut entries = (0u32..=255)
+        .map(|byte| (byte, vec![byte as u8]))
+        .collect::<Vec<_>>();
+    entries.push((256, b"<|endoftext|>".to_vec()));
+    entries.push((json_u_token, b"\\u".to_vec()));
+    entries.push((json_u_b_token, b"\\uB".to_vec()));
+    entries.push((json_u_c_token, b"\\uC".to_vec()));
+    entries.push((longspaces_token, b"                                                                                                   ".to_vec()));
+    entries.push((zero_token, b"0".to_vec()));
+    entries.push((b_token, b"B".to_vec()));
+    let vocab = Vocab::new(entries, Some(256));
+
+    let grammar = schema_to_named_grammar(&schema).expect("schema should import");
+    let lowered = lower(&grammar).expect("schema grammar should lower");
+    let constraint = crate::compiler::compile_owned(lowered, &vocab);
+
+    // Opening quote mask: \u is admissible, but over-broad continuations are not.
+    let mut open_state = constraint.start();
+    open_state
+        .commit_bytes(br#"""#)
+        .expect("opening quote should be accepted");
+    let open_mask = open_state.mask();
+    assert!(mask_contains(&open_mask, json_u_token), r#"\u should be enabled after opening quote"#);
+    assert!(!mask_contains(&open_mask, json_u_b_token), r#"\uB must stay disabled"#);
+    assert!(!mask_contains(&open_mask, json_u_c_token), r#"\uC must stay disabled"#);
+    assert!(!mask_contains(&open_mask, longspaces_token), "longspaces must stay disabled");
+
+    // In-word prefix behaves the same: allow \u only.
+    let mut prefix_state = constraint.start();
+    prefix_state
+        .commit_bytes(br#""Benef"#)
+        .expect("prefix should be accepted");
+    let prefix_mask = prefix_state.mask();
+    assert!(mask_contains(&prefix_mask, json_u_token), r#"\u should be enabled after in-word prefix"#);
+    assert!(!mask_contains(&prefix_mask, json_u_b_token), r#"\uB must stay disabled"#);
+    assert!(!mask_contains(&prefix_mask, json_u_c_token), r#"\uC must stay disabled"#);
+
+    // After committing \u, only the restricted continuation should remain (0... not B).
+    prefix_state
+        .commit_bytes(br#"\u"#)
+        .expect("\\u should be accepted at this prefix");
+    let post_u_mask = prefix_state.mask();
+    assert!(mask_contains(&post_u_mask, zero_token), "0 must be enabled after \\u");
+    assert!(!mask_contains(&post_u_mask, b_token), "B must stay disabled after \\u");
+}
+
+#[test]
 fn llguidance_compat_allows_escaped_solidus_in_keys() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");

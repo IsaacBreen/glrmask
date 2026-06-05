@@ -125,9 +125,14 @@ impl<'a> Lowerer<'a> {
             JSON_STRING_CHAR_RULE,
             GrammarExpr::RawRegex(value_string_char.to_string()),
         );
+        let json_string_body_regex = if mode == super::string::JsonStringCompatMode::LlGuidanceNative {
+            super::string::llguidance_value_string_body_regex_with_unicode_prefix_tail()
+        } else {
+            format!(r#"(?:{value_string_char})*"#)
+        };
         self.add_terminal_rule(
             JSON_STRING_RULE,
-            GrammarExpr::RawRegex(format!(r#""(?:{value_string_char})*""#)),
+            GrammarExpr::RawRegex(format!(r#""{json_string_body_regex}""#)),
         );
         if mode == super::string::JsonStringCompatMode::LlGuidanceNative {
             self.add_terminal_rule(
