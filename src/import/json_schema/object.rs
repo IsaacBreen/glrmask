@@ -1516,17 +1516,9 @@ impl<'a> Lowerer<'a> {
             GrammarExpr::Sequence(parts) if parts.len() == 2 => {
                 Ok([parts[0].clone(), parts[1].clone()])
             }
-            GrammarExpr::Sequence(parts) if parts.len() > 2 => Ok([
-                parts[0].clone(),
-                seq(parts[1..].to_vec()),
-            ]),
-            // Some importer fast paths deliberately fuse a whole object pair
-            // (key, separator, and value) into a single terminal expression so
-            // that tokenization cannot cross from the key/separator into an
-            // invalid value prefix. Fixed-object NFA builders only need a
-            // two-symbol path; a fused whole-pair symbol is already the key
-            // transition and has no remaining value transition.
-            other => Ok([other.clone(), GrammarExpr::Epsilon]),
+            _ => Err(SchemaImportError::new(
+                "expected object pair to lower as key-colon/value sequence",
+            )),
         }
     }
 
