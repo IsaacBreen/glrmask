@@ -27,6 +27,11 @@ impl<'a> Lowerer<'a> {
             || has_recognized_format
             || ((schema.min_length != 0 || schema.max_length.is_some()) && should_terminalize_length)
         {
+            if let Some(pattern) = &schema.pattern
+                && schema.format.is_none()
+            {
+                return self.lower_readable_pattern_string_from_pattern(pattern);
+            }
             let expr = self.lower_constrained_string_terminal_expr(schema)?;
             let name = self.fresh_rule_name("json_string_constrained");
             self.add_terminal_rule(&name, expr);
@@ -1408,12 +1413,6 @@ fn lower_decoded_repetition_to_json_body_regex(repetition: &Repetition) -> Impor
         (1, None) => format!("{atom}+"),
         (0, Some(1)) => format!("{atom}?"),
         (min, Some(max)) if min == max => format!("{atom}{{{min}}}"),
-        (min, Some(max)) if max <= 20 => {
-            let alternatives = (min..=max)
-                .map(|count| atom.repeat(count as usize))
-                .collect::<Vec<_>>();
-            format!("(?:{})", alternatives.join("|"))
-        }
         (min, Some(max)) => format!("{atom}{{{min},{max}}}"),
         (min, None) => format!("{atom}{{{min},}}"),
     })

@@ -2188,10 +2188,21 @@ fn discriminator_anyof_object_lowers_to_compact_body() {
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("json_discriminator_anyof_object_body"), "{glrm}");
     assert!(glrm.contains("json_string_pattern_body"), "{glrm}");
-    assert!(!glrm.contains("json_anyof_object_body"), "{glrm}");
-    assert!(!glrm.contains("json_additional_key_colon_local"), "{glrm}");
+    assert!(glrm.contains("JSON_STRING_CHAR*"), "{glrm}");
+    assert!(glrm.contains("nt json_string_constrained"), "{glrm}");
+    assert!(!glrm.contains("\nt json_string_constrained"), "{glrm}");
+    assert!(!glrm.contains("\nnt json_anyof_object_body"), "{glrm}");
+    assert!(!glrm.contains("\nnt json_additional_key_colon_local ::= "), "{glrm}");
     assert!(!glrm.contains("__exact_sub_json_additional"), "{glrm}");
     assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"type": "ARXIV", "value": "abc_1"}"#
+    ));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"type": "ARXIV", "value": "abc_d_1"}"#
+    ));
+    assert!(!schema_accepts_bytes(
         &schema,
         br#"{"type": "ARXIV", "value": "abc_d1"}"#
     ));
