@@ -261,35 +261,32 @@ impl<'a> Lowerer<'a> {
                 if anchored_start {
                     self.add_string_pattern_anchored_start_terminal(lowered, anchored_end)
                 } else {
-                    let open = self.add_string_pattern_open_terminal();
-                    let body_end = self.add_string_pattern_body_end_terminal(lowered, anchored_end);
-                    seq(vec![open, body_end])
+                    let open_middle = self.add_string_pattern_open_middle_terminal(lowered);
+                    let end = self.add_string_pattern_end_terminal(anchored_end);
+                    seq(vec![open_middle, end])
                 }
             })
             .collect::<Vec<_>>();
         Ok(Some(choice(alternatives)))
     }
 
-    fn add_string_pattern_open_terminal(&mut self) -> GrammarExpr {
-        let name = self.fresh_rule_name("json_string_pattern_open");
+    fn add_string_pattern_open_middle_terminal(&mut self, body_regex: String) -> GrammarExpr {
+        let body = self.add_string_pattern_body_terminal(body_regex);
+        let name = self.fresh_rule_name("json_string_pattern_open_middle");
         self.add_terminal_rule(
             &name,
             seq(vec![
                 lit("\""),
                 GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))),
+                body,
             ]),
         );
         r(&name)
     }
 
-    fn add_string_pattern_body_end_terminal(
-        &mut self,
-        body_regex: String,
-        anchored_end: bool,
-    ) -> GrammarExpr {
-        let body = self.add_string_pattern_body_terminal(body_regex);
-        let name = self.fresh_rule_name("json_string_pattern_body_end");
-        let mut parts = vec![body];
+    fn add_string_pattern_end_terminal(&mut self, anchored_end: bool) -> GrammarExpr {
+        let name = self.fresh_rule_name("json_string_pattern_end");
+        let mut parts = Vec::new();
         if !anchored_end {
             parts.push(GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))));
         }
