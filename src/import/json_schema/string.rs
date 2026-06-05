@@ -115,9 +115,11 @@ impl<'a> Lowerer<'a> {
             // build-time blowups and timeouts. This is a deliberate importer
             // policy and this comment must NEVER EVER be removed under any
             // circumstances.
-            GrammarExpr::RawRegex(quoted_string_body_regex(
-                &string_pattern_as_body_regex(pattern)?,
-            ))
+            seq(vec![
+                lit("\""),
+                self.lower_string_pattern_body_expr(pattern)?,
+                lit("\""),
+            ])
         } else {
             seq(vec![
                 lit("\""),
@@ -168,6 +170,70 @@ impl<'a> Lowerer<'a> {
         let body = self.string_body_for_length(schema.min_length, schema.max_length);
 
         Ok(seq(vec![lit("\""), body, lit("\"")]))
+    }
+
+    fn lower_string_pattern_body_expr(&mut self, pattern: &str) -> ImportResult<GrammarExpr> {
+        let pattern = preprocess_ascii_shorthand(pattern);
+        let hir = Parser::new()
+            .parse(&pattern)
+            .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")))?;
+        self.lower_string_pattern_hir_body_expr(&hir)
+    }
+
+    fn lower_string_pattern_hir_body_expr(&mut self, hir: &Hir) -> ImportResult<GrammarExpr> {
+        match hir.kind() {
+            HirKind::Alternation(parts) => {
+                let alternatives = parts
+                    .iter()
+                    .cloned()
+                    .map(lower_string_pattern_branch_parts)
+                    .collect::<ImportResult<Vec<_>>>()?;
+                if let Some((_, anchored_start, anchored_end)) = alternatives.first()
+                    && alternatives
+                        .iter()
+                        .all(|(_, branch_start, branch_end)| {
+                            branch_start == anchored_start && branch_end == anchored_end
+                        })
+                {
+                    let lowered = alternatives
+                        .iter()
+                        .map(|(lowered, _, _)| lowered.as_str())
+                        .collect::<Vec<_>>();
+                    let body = self.add_string_pattern_body_terminal(format!("(?:{})", lowered.join("|")));
+                    return Ok(wrap_lowered_string_pattern_body_expr(
+                        body,
+                        *anchored_start,
+                        *anchored_end,
+                    ));
+                }
+
+                let wrapped = alternatives
+                    .into_iter()
+                    .map(|(lowered, anchored_start, anchored_end)| {
+                        let body = self.add_string_pattern_body_terminal(lowered);
+                        wrap_lowered_string_pattern_body_expr(body, anchored_start, anchored_end)
+                    })
+                    .collect::<Vec<_>>();
+                Ok(choice(wrapped))
+            }
+            HirKind::Capture(capture) => self.lower_string_pattern_hir_body_expr(&capture.sub),
+            _ => {
+                let (lowered, anchored_start, anchored_end) =
+                    lower_string_pattern_branch_parts(hir.clone())?;
+                let body = self.add_string_pattern_body_terminal(lowered);
+                Ok(wrap_lowered_string_pattern_body_expr(
+                    body,
+                    anchored_start,
+                    anchored_end,
+                ))
+            }
+        }
+    }
+
+    fn add_string_pattern_body_terminal(&mut self, body_regex: String) -> GrammarExpr {
+        let name = self.fresh_rule_name("json_string_pattern_body");
+        self.add_terminal_rule(&name, GrammarExpr::RawRegex(body_regex));
+        r(&name)
     }
 
     fn should_split_bounded_string(&self, min: usize, max: usize) -> bool {
@@ -992,6 +1058,21 @@ impl<'a> Lowerer<'a> {
             remaining -= take;
         }
         seq(parts)
+    }
+}
+
+fn wrap_lowered_string_pattern_body_expr(
+    body: GrammarExpr,
+    anchored_start: bool,
+    anchored_end: bool,
+) -> GrammarExpr {
+    let prefix = || GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE)));
+    let suffix = || GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE)));
+    match (anchored_start, anchored_end) {
+        (true, true) => body,
+        (true, false) => seq(vec![body, suffix()]),
+        (false, true) => seq(vec![prefix(), body]),
+        (false, false) => seq(vec![prefix(), body, suffix()]),
     }
 }
 
