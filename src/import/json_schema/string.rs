@@ -68,6 +68,9 @@ impl<'a> Lowerer<'a> {
         };
 
         if let Some(pattern) = &string.pattern {
+            if self.llguidance_compat_enabled() {
+                return Ok(None);
+            }
             if string.min_length != 0 || string.max_length.is_some() || string.format.is_some() {
                 return Ok(None);
             }
@@ -508,6 +511,13 @@ impl<'a> Lowerer<'a> {
         &mut self,
         schema: &StringSchema,
     ) -> ImportResult<GrammarExpr> {
+        if schema.pattern.is_some() && schema.format.is_none() {
+            // Keep property pattern strings on the same lowering path as ordinary
+            // strings. In llguidance-compat mode this is required so the
+            // unanchored-pattern split can use the llguidance-compatible chunked
+            // form rather than a single raw regex terminal that overaccepts `\\u`.
+            return self.lower_string(schema);
+        }
         if schema.pattern.is_none()
             && recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_none()
         {
@@ -1192,6 +1202,10 @@ enum UnanchoredPatternSplitMode {
 }
 
 fn unanchored_pattern_split_mode() -> UnanchoredPatternSplitMode {
+    if llguidance_compat_enabled_from_env() {
+        return UnanchoredPatternSplitMode::ChunkedPrefixMiddle;
+    }
+
     static VALUE: std::sync::OnceLock<UnanchoredPatternSplitMode> = std::sync::OnceLock::new();
     *VALUE.get_or_init(|| {
         if let Some(mode) = std::env::var("GLRMASK_JSON_SCHEMA_UNANCHORED_PATTERN_SPLIT_MODE")

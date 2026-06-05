@@ -545,6 +545,42 @@ fn mask_does_not_enable_json_u_by_runtime_patch() {
     assert!(!mask_contains(&mask, json_u_token), r#"\u must not be enabled outside the grammar"#);
 }
 
+#[test]
+fn llguidance_compat_rejects_json_u_escape_prefix_in_pattern_property_mask() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _compat_guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let _split_guard = EnvVarGuard::set(
+        "GLRMASK_JSON_SCHEMA_UNANCHORED_PATTERN_SPLIT_MODE",
+        "open_middle",
+    );
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "pattern": r#"^[\w\.-_]+$"#}
+        },
+        "required": ["name"],
+        "additionalProperties": false,
+    });
+    let grammar = schema_to_named_grammar(&schema).expect("schema should import");
+    let lowered = lower(&grammar).expect("schema grammar should lower");
+
+    let json_u_token = 257u32;
+    let mut entries = (0u32..=255)
+        .map(|byte| (byte, vec![byte as u8]))
+        .collect::<Vec<_>>();
+    entries.push((256, b"<|endoftext|>".to_vec()));
+    entries.push((json_u_token, b"\\u".to_vec()));
+    let vocab = Vocab::new(entries, Some(256));
+    let constraint = crate::compiler::compile_owned(lowered, &vocab);
+    let mut state = constraint.start();
+    state.commit_bytes(br#"{"name": ""#).expect("object string prefix should be accepted");
+
+    let mask = state.mask();
+    assert!(!mask_contains(&mask, json_u_token), r#"\u must not be enabled in llguidance compat mode"#);
+}
+
+
 fn contains_exclude(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::Exclude { .. } => true,
