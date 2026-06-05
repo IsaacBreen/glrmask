@@ -260,7 +260,7 @@ impl<'a> Lowerer<'a> {
             .map(|(lowered, anchored_start, anchored_end)| {
                 if anchored_start {
                     self.add_string_pattern_anchored_start_terminal(lowered, anchored_end)
-                } else {
+                } else if chunk_unanchored_pattern_prefix_middle_enabled() {
                     let prefix_chunk = self.add_string_pattern_prefix_chunk_terminal();
                     let middle = self.add_string_pattern_middle_terminal(lowered);
                     let end = self.add_string_pattern_end_terminal(anchored_end);
@@ -270,10 +270,28 @@ impl<'a> Lowerer<'a> {
                         middle,
                         end,
                     ])
+                } else {
+                    let open_middle = self.add_string_pattern_open_middle_terminal(lowered);
+                    let end = self.add_string_pattern_end_terminal(anchored_end);
+                    seq(vec![open_middle, end])
                 }
             })
             .collect::<Vec<_>>();
         Ok(Some(choice(alternatives)))
+    }
+
+    fn add_string_pattern_open_middle_terminal(&mut self, body_regex: String) -> GrammarExpr {
+        let body = self.add_string_pattern_body_terminal(body_regex);
+        let name = self.fresh_rule_name("json_string_pattern_open_middle");
+        self.add_terminal_rule(
+            &name,
+            seq(vec![
+                lit("\""),
+                GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))),
+                body,
+            ]),
+        );
+        r(&name)
     }
 
     fn add_string_pattern_prefix_chunk_terminal(&mut self) -> GrammarExpr {
@@ -1223,6 +1241,18 @@ fn preprocess_ascii_shorthand(pattern: &str) -> String {
     }
 
     lowered
+}
+
+fn chunk_unanchored_pattern_prefix_middle_enabled() -> bool {
+    static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("GLRMASK_JSON_SCHEMA_UNANCHORED_PATTERN_CHUNK_PREFIX_MIDDLE")
+            .map(|value| {
+                let trimmed = value.trim();
+                !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn unanchored_pattern_prefix_chunk_size() -> usize {
