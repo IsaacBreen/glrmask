@@ -68,6 +68,9 @@ impl<'a> Lowerer<'a> {
         };
 
         if let Some(pattern) = &string.pattern {
+            if self.llguidance_compat_enabled() {
+                return Ok(None);
+            }
             if string.min_length != 0 || string.max_length.is_some() || string.format.is_some() {
                 return Ok(None);
             }
@@ -199,7 +202,12 @@ impl<'a> Lowerer<'a> {
                 if anchored_start {
                     self.add_string_pattern_anchored_start_terminal(lowered, anchored_end)
                 } else {
-                    match unanchored_pattern_split_mode() {
+                    let split_mode = if self.llguidance_compat_enabled() {
+                        UnanchoredPatternSplitMode::ChunkedPrefixMiddle
+                    } else {
+                        unanchored_pattern_split_mode()
+                    };
+                    match split_mode {
                         UnanchoredPatternSplitMode::ChunkedPrefixMiddle => {
                             let prefix_chunk = self.add_string_pattern_prefix_chunk_terminal();
                             let middle = self.add_string_pattern_middle_terminal(lowered);
@@ -223,14 +231,34 @@ impl<'a> Lowerer<'a> {
         Ok(Some(choice(alternatives)))
     }
 
+    fn json_string_char_for_pattern_fill(&mut self) -> GrammarExpr {
+        if !self.llguidance_compat_enabled() {
+            return r(JSON_STRING_CHAR_RULE);
+        }
+
+        let name = self.fresh_rule_name("json_string_char_llguidance_compat");
+        self.add_terminal_rule(
+            &name,
+            GrammarExpr::Exclude {
+                expr: Box::new(r(JSON_STRING_CHAR_RULE)),
+                // Match llguidance's token-level behaviour for JSON string
+                // escapes here: a token like `\\u` must not be admitted merely
+                // because `\\` is the prefix of some valid escape spelling.
+                exclude: Box::new(GrammarExpr::RawRegex(r#"\\[^"\\bfnrt]"#.to_string())),
+            },
+        );
+        r(&name)
+    }
+
     fn add_string_pattern_open_middle_terminal(&mut self, body_regex: String) -> GrammarExpr {
         let body = self.add_string_pattern_body_terminal(body_regex);
         let name = self.fresh_rule_name("json_string_pattern_open_middle");
+        let ch = self.json_string_char_for_pattern_fill();
         self.add_terminal_rule(
             &name,
             seq(vec![
                 lit("\""),
-                GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))),
+                GrammarExpr::Repeat(Box::new(ch)),
                 body,
             ]),
         );
@@ -240,10 +268,11 @@ impl<'a> Lowerer<'a> {
     fn add_string_pattern_prefix_chunk_terminal(&mut self) -> GrammarExpr {
         let chunk_size = unanchored_pattern_prefix_chunk_size();
         let name = self.fresh_rule_name("json_string_pattern_prefix_chunk");
+        let ch = self.json_string_char_for_pattern_fill();
         self.add_terminal_rule(
             &name,
             GrammarExpr::RepeatRange {
-                expr: Box::new(r(JSON_STRING_CHAR_RULE)),
+                expr: Box::new(ch),
                 min: chunk_size,
                 max: chunk_size,
             },
@@ -255,11 +284,12 @@ impl<'a> Lowerer<'a> {
         let chunk_size = unanchored_pattern_prefix_chunk_size();
         let body = self.add_string_pattern_body_terminal(body_regex);
         let name = self.fresh_rule_name("json_string_pattern_middle");
+        let ch = self.json_string_char_for_pattern_fill();
         self.add_terminal_rule(
             &name,
             seq(vec![
                 GrammarExpr::RepeatRange {
-                    expr: Box::new(r(JSON_STRING_CHAR_RULE)),
+                    expr: Box::new(ch),
                     min: 0,
                     max: chunk_size.saturating_sub(1),
                 },
@@ -273,7 +303,7 @@ impl<'a> Lowerer<'a> {
         let name = self.fresh_rule_name("json_string_pattern_end");
         let mut parts = Vec::new();
         if !anchored_end {
-            parts.push(GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))));
+            parts.push(GrammarExpr::Repeat(Box::new(self.json_string_char_for_pattern_fill())));
         }
         parts.push(lit("\""));
         self.add_terminal_rule(&name, seq(parts));
