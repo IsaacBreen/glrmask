@@ -138,15 +138,6 @@ fn count_complement_subgroups(missing: u64, valid_mask: u64) -> (u32, u32, u32) 
 }
 
 impl Constraint {
-    pub(crate) fn enable_llguidance_json_unicode_escape_token_filter(&mut self) {
-        self.llguidance_json_unicode_escape_token_filter = true;
-    }
-
-    pub(crate) fn llguidance_json_unicode_escape_token_filtered(&self, token_bytes: &[u8]) -> bool {
-        self.llguidance_json_unicode_escape_token_filter
-            && matches!(token_bytes, [b'\\', b'u', next, ..] if *next != b'0')
-    }
-
     pub fn table_ambiguous_actions(&self) -> Vec<TableAmbiguity> {
         self.table.ambiguous_actions()
     }

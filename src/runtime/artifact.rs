@@ -80,8 +80,6 @@ pub struct Constraint {
     pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,
     #[serde(skip)]
     pub(crate) token_bytes_dense: Vec<Option<Box<[u8]>>>,
-    #[serde(default)]
-    pub(crate) llguidance_json_unicode_escape_token_filter: bool,
 
     /// Precomputed bitmask fragments for each internal token.
     /// `internal_token_buf_masks[i]` contains (word_index, or_mask) pairs

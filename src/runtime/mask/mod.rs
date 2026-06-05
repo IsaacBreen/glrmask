@@ -1731,32 +1731,10 @@ impl<'a> ConstraintState<'a> {
 
     pub fn fill_mask(&self, buf: &mut [u32]) {
         if self.try_fill_mask_from_cache(buf) {
-            self.apply_llguidance_json_unicode_escape_token_filter(buf);
             return;
         }
 
         self.fill_mask_uncached(buf);
-        self.apply_llguidance_json_unicode_escape_token_filter(buf);
-    }
-
-    fn apply_llguidance_json_unicode_escape_token_filter(&self, buf: &mut [u32]) {
-        if !self.constraint.llguidance_json_unicode_escape_token_filter {
-            return;
-        }
-
-        for (&token_id, token_bytes) in self.constraint.token_bytes.iter() {
-            if !self
-                .constraint
-                .llguidance_json_unicode_escape_token_filtered(token_bytes)
-            {
-                continue;
-            }
-            let word_index = token_id as usize / 32;
-            let bit_index = token_id % 32;
-            if let Some(word) = buf.get_mut(word_index) {
-                *word &= !(1u32 << bit_index);
-            }
-        }
     }
 
     pub fn fill_mask_timed_ns(&self, buf: &mut [u32]) -> u64 {

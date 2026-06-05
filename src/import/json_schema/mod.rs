@@ -40,10 +40,6 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
     lower_document(&document, config).map_err(GlrMaskError::from)
 }
 
-pub(crate) fn llguidance_compat_enabled() -> bool {
-    JsonSchemaConfig::from_env().llguidance_compat
-}
-
 /// The new importer deliberately does not depend on the old post-import grammar
 /// simplification pass.
 pub(crate) fn simplify_grammar_enabled() -> bool {

@@ -101,20 +101,14 @@ fn compile_from_source(
         let parse_started_at = std::time::Instant::now();
         let grammar = lower_factored_named_grammar(source, source_kind, parse)?;
         let import_ms = parse_started_at.elapsed().as_secs_f64() * 1000.0;
-        let (mut constraint, profile) = compile_owned_profiled(grammar, vocab);
-        if source_kind == "json_schema" && json_schema::llguidance_compat_enabled() {
-            constraint.enable_llguidance_json_unicode_escape_token_filter();
-        }
+        let (constraint, profile) = compile_owned_profiled(grammar, vocab);
         emit_compile_profile_summary(Some(source_kind), Some(import_ms), &profile);
         emit_import_phase_end("compile_from_source", compile_from_source_started_at);
         return Ok(constraint);
     }
 
     let grammar = lower_factored_named_grammar(source, source_kind, parse)?;
-    let mut constraint = compile_owned(grammar, vocab);
-    if source_kind == "json_schema" && json_schema::llguidance_compat_enabled() {
-        constraint.enable_llguidance_json_unicode_escape_token_filter();
-    }
+    let constraint = compile_owned(grammar, vocab);
     emit_import_phase_end("compile_from_source", compile_from_source_started_at);
     Ok(constraint)
 }

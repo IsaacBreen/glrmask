@@ -357,10 +357,7 @@ fn schema_mask_allows_token_after_prefix(
     let vocab = Vocab::new(entries, Some(256));
     let grammar = schema_to_named_grammar(schema).expect("schema should import");
     let lowered = lower(&grammar).expect("schema grammar should lower");
-    let mut constraint = crate::compiler::compile_owned(lowered, &vocab);
-    if super::llguidance_compat_enabled() {
-        constraint.enable_llguidance_json_unicode_escape_token_filter();
-    }
+    let constraint = crate::compiler::compile_owned(lowered, &vocab);
     let mut state = constraint.start();
     state.commit_bytes(prefix).expect("prefix should be accepted");
     let mask = state.mask();
@@ -522,38 +519,6 @@ fn llguidance_compat_rejects_patterned_escaped_solidus() {
     let schema = json!({"type": "string", "pattern": "^/$"});
     assert!(!schema_accepts_bytes(&schema, br#""\/""#));
     assert!(schema_accepts_bytes(&schema, br#""/""#));
-}
-
-#[test]
-fn llguidance_compat_bounded_string_mask_allows_unicode_escape_prefix() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
-    let schema = json!({"type": "string", "maxLength": 1024});
-
-    assert!(schema_mask_allows_token_after_prefix(
-        &schema,
-        br#"""#,
-        257,
-        br#"\u"#,
-    ));
-    assert!(!schema_mask_allows_token_after_prefix(
-        &schema,
-        br#"""#,
-        257,
-        br#"\uC"#,
-    ));
-    assert!(schema_mask_allows_token_after_prefix(
-        &schema,
-        br#"""#,
-        257,
-        br#"\u0"#,
-    ));
-    assert!(!schema_mask_allows_token_after_prefix(
-        &schema,
-        br#"""#,
-        257,
-        br#"\/"#,
-    ));
 }
 
 #[test]
