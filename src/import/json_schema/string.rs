@@ -277,19 +277,21 @@ impl<'a> Lowerer<'a> {
     }
 
     fn add_string_pattern_prefix_chunk_terminal(&mut self) -> GrammarExpr {
+        let chunk_size = unanchored_pattern_prefix_chunk_size();
         let name = self.fresh_rule_name("json_string_pattern_prefix_chunk");
         self.add_terminal_rule(
             &name,
             GrammarExpr::RepeatRange {
                 expr: Box::new(r(JSON_STRING_CHAR_RULE)),
-                min: 8,
-                max: 8,
+                min: chunk_size,
+                max: chunk_size,
             },
         );
         r(&name)
     }
 
     fn add_string_pattern_middle_terminal(&mut self, body_regex: String) -> GrammarExpr {
+        let chunk_size = unanchored_pattern_prefix_chunk_size();
         let body = self.add_string_pattern_body_terminal(body_regex);
         let name = self.fresh_rule_name("json_string_pattern_middle");
         self.add_terminal_rule(
@@ -298,7 +300,7 @@ impl<'a> Lowerer<'a> {
                 GrammarExpr::RepeatRange {
                     expr: Box::new(r(JSON_STRING_CHAR_RULE)),
                     min: 0,
-                    max: 7,
+                    max: chunk_size.saturating_sub(1),
                 },
                 body,
             ]),
@@ -1221,6 +1223,17 @@ fn preprocess_ascii_shorthand(pattern: &str) -> String {
     }
 
     lowered
+}
+
+fn unanchored_pattern_prefix_chunk_size() -> usize {
+    static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("GLRMASK_JSON_SCHEMA_UNANCHORED_PATTERN_PREFIX_CHUNK_SIZE")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(8)
+    })
 }
 
 fn lower_string_pattern_hir_branch_parts(hir: Hir) -> ImportResult<Vec<(String, bool, bool)>> {

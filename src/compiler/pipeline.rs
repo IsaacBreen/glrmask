@@ -202,6 +202,8 @@ where
 pub(crate) struct CompilePhaseProfile {
     pub(crate) prepare_ms: f64,
     pub(crate) tokenizer_build_ms: f64,
+    pub(crate) tokenizer_final_states: usize,
+    pub(crate) tokenizer_final_transitions: usize,
     pub(crate) analyze_grammar_ms: f64,
     pub(crate) glr_table_ms: f64,
     pub(crate) terminal_coloring_ms: f64,
@@ -247,11 +249,13 @@ pub(crate) fn emit_compile_profile_summary(
         .unwrap_or_default();
 
     eprintln!(
-        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} split_terminal_dwa_total_ms={:.3} global_merge_ms={:.3} templates_ms={:.3} compact_ms={:.3} possible_matches_collect_ms={:.3} possible_matches_materialize_ms={:.3} shared_id_reconcile_ms={:.3} possible_matches_pipeline_ms={:.3} terminal_dwa_interned_ranges_before_pm_reconcile={} possible_matches_interned_ranges_before_pm_reconcile={} terminal_pm_joint_interned_ranges_before_reconcile={} terminal_pm_joint_interned_ranges={} internal_token_bytes_ms={:.3} parser_dwa_ms={:.3} parser_dwa_interned_ranges={} possible_matches_interned_ranges={} parser_pm_joint_interned_ranges={} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
+        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} tokenizer_final_states={} tokenizer_final_transitions={} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} split_terminal_dwa_total_ms={:.3} global_merge_ms={:.3} templates_ms={:.3} compact_ms={:.3} possible_matches_collect_ms={:.3} possible_matches_materialize_ms={:.3} shared_id_reconcile_ms={:.3} possible_matches_pipeline_ms={:.3} terminal_dwa_interned_ranges_before_pm_reconcile={} possible_matches_interned_ranges_before_pm_reconcile={} terminal_pm_joint_interned_ranges_before_reconcile={} terminal_pm_joint_interned_ranges={} internal_token_bytes_ms={:.3} parser_dwa_ms={:.3} parser_dwa_interned_ranges={} possible_matches_interned_ranges={} parser_pm_joint_interned_ranges={} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
         source,
         import_fragment,
         profile.prepare_ms,
         profile.tokenizer_build_ms,
+        profile.tokenizer_final_states,
+        profile.tokenizer_final_transitions,
         profile.analyze_grammar_ms,
         profile.glr_table_ms,
         profile.terminal_coloring_ms,
@@ -365,11 +369,29 @@ pub(crate) fn build_tokenizer_from_exprs(
     exprs: &[Expr],
     profile_labels: Option<&[String]>,
 ) -> Tokenizer {
+    let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
+    let started_at = Instant::now();
+    if profile_detail {
+        eprintln!(
+            "[glrmask/profile][tokenizer] combined_build_start terminals={} labels={} ",
+            exprs.len(),
+            profile_labels.map_or(0, |labels| labels.len())
+        );
+    }
     let regex = if let Some(labels) = profile_labels {
         build_regex_with_profile_labels(exprs, labels)
     } else {
         build_regex(exprs)
     };
+    if profile_detail {
+        eprintln!(
+            "[glrmask/profile][tokenizer] combined_build_done terminals={} elapsed_ms={:.3} final_states={} final_transitions={}",
+            exprs.len(),
+            elapsed_ms(started_at),
+            regex.num_states(),
+            regex.num_transitions()
+        );
+    }
 
     Tokenizer {
         dfa: regex.dfa,
@@ -465,6 +487,13 @@ fn compile_prepared_with_profile(
             },
         );
         profile.tokenizer_build_ms = tokenizer_build_ms;
+        profile.tokenizer_final_states = tokenizer.num_states() as usize;
+        profile.tokenizer_final_transitions = tokenizer
+            .dfa
+            .states()
+            .iter()
+            .map(|state| state.transitions.len())
+            .sum();
         profile.analyze_grammar_ms = analyze_grammar_ms;
         profile.glr_table_ms = glr_table_ms;
         profile.terminal_coloring_ms = terminal_coloring_ms;

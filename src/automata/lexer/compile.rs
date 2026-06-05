@@ -1138,6 +1138,14 @@ fn compile_multi_expr_dfa_via_nfa(exprs: &[Expr]) -> DFA {
 }
 
 fn should_use_shared_multi_nfa(plan: &ExclusionCompilePlan) -> bool {
+    if std::env::var_os("GLRMASK_DISABLE_SHARED_MULTI_NFA").is_some() {
+        return false;
+    }
+
+    if plan.compiled_exprs.len() != plan.visible_groups {
+        return false;
+    }
+
     if plan.compiled_exprs.len() < 16 {
         return false;
     }
@@ -1196,13 +1204,14 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
 
     let pre_minimize_states = dfa.num_states();
     let pre_minimize_transitions = dfa_transition_count(&dfa);
-    let final_dfa = if used_product_dfa {
+    let force_tokenizer_minimize = std::env::var_os("GLRMASK_FORCE_TOKENIZER_MINIMIZE").is_some();
+    let final_dfa = if used_product_dfa && !force_tokenizer_minimize {
         dfa
     } else {
         dfa.minimize()
     };
     let forced_minimized_states = if profile_detail {
-        if used_product_dfa {
+        if used_product_dfa && !force_tokenizer_minimize {
             Some(final_dfa.minimize().num_states())
         } else {
             Some(final_dfa.num_states())
@@ -1434,10 +1443,38 @@ fn compile_product_component(expr: &Expr) -> ProductComponent {
 fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentProfileLabel]>) -> DFA {
     let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
     let profile_started_at = Instant::now();
-    let components: Vec<ProductComponent> = exprs
-        .par_iter()
-        .map(compile_product_component)
-        .collect();
+    let components: Vec<ProductComponent> = if profile_detail {
+        let mut components = Vec::with_capacity(exprs.len());
+        for (index, expr) in exprs.iter().enumerate() {
+            let component_started_at = Instant::now();
+            let component = compile_product_component(expr);
+            let states = component.partition_dfa().num_states();
+            let transitions = dfa_transition_count(component.partition_dfa());
+            let label = profile_labels
+                .and_then(|labels| labels.get(index))
+                .map(|label| {
+                    format!(
+                        " name={:?} origin={} shared={}",
+                        label.name,
+                        label.origin,
+                        label.shared
+                    )
+                })
+                .unwrap_or_else(|| format!(" expr={:?}", expr_profile_summary(expr)));
+            eprintln!(
+                "[glrmask/profile][tokenizer] product_component_compiled index={} states={} transitions={} compile_ms={:.3}{}",
+                index,
+                states,
+                transitions,
+                component_started_at.elapsed().as_secs_f64() * 1000.0,
+                label
+            );
+            components.push(component);
+        }
+        components
+    } else {
+        exprs.par_iter().map(compile_product_component).collect()
+    };
     if profile_detail {
         eprintln!(
             "[glrmask/profile][tokenizer] product_components groups={} compile_components_ms={:.3}",
