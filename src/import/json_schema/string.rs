@@ -1202,8 +1202,8 @@ fn unanchored_pattern_split_mode() -> UnanchoredPatternSplitMode {
         }
 
         // Backwards-compatible spelling from the original two-mode experiment.
-        // The current safe default is chunked prefix/middle. Set this variable
-        // to 0/false/no/off to force the legacy open-middle split.
+        // Preserve the original default: unset means legacy open-middle split.
+        // Set this variable to 1/true/yes/on to force chunked prefix/middle.
         std::env::var("GLRMASK_JSON_SCHEMA_UNANCHORED_PATTERN_CHUNK_PREFIX_MIDDLE")
             .ok()
             .and_then(|value| parse_env_bool(&value))
@@ -1214,7 +1214,7 @@ fn unanchored_pattern_split_mode() -> UnanchoredPatternSplitMode {
                     UnanchoredPatternSplitMode::OpenMiddle
                 }
             })
-            .unwrap_or(UnanchoredPatternSplitMode::ChunkedPrefixMiddle)
+            .unwrap_or(UnanchoredPatternSplitMode::OpenMiddle)
     })
 }
 
