@@ -161,7 +161,7 @@ fn global_max_length_env_override() -> Option<bool> {
 fn use_global_max_length(tokenizer: &Tokenizer) -> bool {
     match global_max_length_env_override() {
         Some(enabled) => enabled,
-        None => tokenizer.num_states() <= 50_000,
+        None => tokenizer.num_states() > 50_000,
     }
 }
 
