@@ -191,6 +191,10 @@ impl<'a> Lowerer<'a> {
         let hir = Parser::new()
             .parse(&pattern)
             .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")))?;
+        if let Some(branches) = self.lower_string_pattern_hir_branch_expr_parts(hir.clone())? {
+            return Ok(Some(self.lower_string_pattern_split_expr_from_expr_branches(branches)));
+        }
+
         let branches = lower_string_pattern_hir_branch_parts(hir)?;
         if branches.iter().all(|(_, anchored_start, _)| *anchored_start) {
             return Ok(None);
@@ -250,8 +254,35 @@ impl<'a> Lowerer<'a> {
         r(&name)
     }
 
+    fn lower_string_pattern_split_expr_from_expr_branches(
+        &mut self,
+        branches: Vec<(GrammarExpr, bool, bool)>,
+    ) -> GrammarExpr {
+        choice(branches
+            .into_iter()
+            .map(|(lowered, anchored_start, anchored_end)| {
+                self.lower_string_pattern_split_expr_from_body_expr(lowered, anchored_start, anchored_end)
+            })
+            .collect())
+    }
+
     fn add_string_pattern_open_middle_terminal(&mut self, body_regex: String) -> GrammarExpr {
         let body = self.add_string_pattern_body_terminal(body_regex);
+        let name = self.fresh_rule_name("json_string_pattern_open_middle");
+        let ch = self.json_string_char_for_pattern_fill();
+        self.add_terminal_rule(
+            &name,
+            seq(vec![
+                lit("\""),
+                GrammarExpr::Repeat(Box::new(ch)),
+                body,
+            ]),
+        );
+        r(&name)
+    }
+
+    fn add_string_pattern_open_middle_expr_terminal(&mut self, body_expr: GrammarExpr) -> GrammarExpr {
+        let body = self.add_string_pattern_body_expr_terminal(body_expr);
         let name = self.fresh_rule_name("json_string_pattern_open_middle");
         let ch = self.json_string_char_for_pattern_fill();
         self.add_terminal_rule(
@@ -299,6 +330,25 @@ impl<'a> Lowerer<'a> {
         r(&name)
     }
 
+    fn add_string_pattern_middle_expr_terminal(&mut self, body_expr: GrammarExpr) -> GrammarExpr {
+        let chunk_size = unanchored_pattern_prefix_chunk_size();
+        let body = self.add_string_pattern_body_expr_terminal(body_expr);
+        let name = self.fresh_rule_name("json_string_pattern_middle");
+        let ch = self.json_string_char_for_pattern_fill();
+        self.add_terminal_rule(
+            &name,
+            seq(vec![
+                GrammarExpr::RepeatRange {
+                    expr: Box::new(ch),
+                    min: 0,
+                    max: chunk_size.saturating_sub(1),
+                },
+                body,
+            ]),
+        );
+        r(&name)
+    }
+
     fn add_string_pattern_end_terminal(&mut self, anchored_end: bool) -> GrammarExpr {
         let name = self.fresh_rule_name("json_string_pattern_end");
         let mut parts = Vec::new();
@@ -308,6 +358,220 @@ impl<'a> Lowerer<'a> {
         parts.push(lit("\""));
         self.add_terminal_rule(&name, seq(parts));
         r(&name)
+    }
+
+    fn add_string_pattern_anchored_start_expr_terminal(
+        &mut self,
+        body_expr: GrammarExpr,
+        anchored_end: bool,
+    ) -> GrammarExpr {
+        let body = self.add_string_pattern_body_expr_terminal(body_expr);
+        let name = self.fresh_rule_name("json_string_constrained_part");
+        let mut parts = vec![lit("\""), body];
+        if !anchored_end {
+            parts.push(GrammarExpr::Repeat(Box::new(self.json_string_char_for_pattern_fill())));
+        }
+        parts.push(lit("\""));
+        self.add_terminal_rule(&name, seq(parts));
+        r(&name)
+    }
+
+    fn lower_string_pattern_split_expr_from_body_expr(
+        &mut self,
+        body_expr: GrammarExpr,
+        anchored_start: bool,
+        anchored_end: bool,
+    ) -> GrammarExpr {
+        if anchored_start {
+            return self.add_string_pattern_anchored_start_expr_terminal(body_expr, anchored_end);
+        }
+        match unanchored_pattern_split_mode() {
+            UnanchoredPatternSplitMode::ChunkedPrefixMiddle => {
+                let prefix_chunk = self.add_string_pattern_prefix_chunk_terminal();
+                let middle = self.add_string_pattern_middle_expr_terminal(body_expr);
+                let end = self.add_string_pattern_end_terminal(anchored_end);
+                seq(vec![
+                    lit("\""),
+                    GrammarExpr::Repeat(Box::new(prefix_chunk)),
+                    middle,
+                    end,
+                ])
+            }
+            UnanchoredPatternSplitMode::OpenMiddle => {
+                let open_middle = self.add_string_pattern_open_middle_expr_terminal(body_expr);
+                let end = self.add_string_pattern_end_terminal(anchored_end);
+                seq(vec![open_middle, end])
+            }
+        }
+    }
+
+    fn add_string_pattern_body_expr_terminal(&mut self, body_expr: GrammarExpr) -> GrammarExpr {
+        let name = self.fresh_rule_name("json_string_pattern_body");
+        self.add_terminal_rule(&name, body_expr);
+        r(&name)
+    }
+
+    fn lower_string_pattern_hir_branch_expr_parts(
+        &mut self,
+        hir: Hir,
+    ) -> ImportResult<Option<Vec<(GrammarExpr, bool, bool)>>> {
+        match hir.kind() {
+            HirKind::Alternation(parts) => {
+                let mut lowered = Vec::with_capacity(parts.len());
+                for part in parts.iter().cloned() {
+                    let Some(branch) = self.lower_string_pattern_branch_expr_parts(part)? else {
+                        return Ok(None);
+                    };
+                    lowered.push(branch);
+                }
+                Ok(Some(lowered))
+            }
+            HirKind::Capture(capture) => self.lower_string_pattern_hir_branch_expr_parts(*capture.sub.clone()),
+            _ => self
+                .lower_string_pattern_branch_expr_parts(hir)
+                .map(|branch| branch.map(|branch| vec![branch])),
+        }
+    }
+
+    fn lower_string_pattern_branch_expr_parts(
+        &mut self,
+        hir: Hir,
+    ) -> ImportResult<Option<(GrammarExpr, bool, bool)>> {
+        let (hir, anchored_start, anchored_end) = strip_outer_anchors(hir);
+        let Some(lowered) = self.lower_decoded_regex_hir_to_json_body_expr(&hir)? else {
+            return Ok(None);
+        };
+        Ok(Some((lowered, anchored_start, anchored_end)))
+    }
+
+    fn lower_decoded_regex_hir_to_json_body_expr(
+        &mut self,
+        hir: &Hir,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        Ok(match hir.kind() {
+            HirKind::Empty => Some(GrammarExpr::Epsilon),
+            HirKind::Literal(Literal(bytes)) => {
+                let literal = std::str::from_utf8(bytes).map_err(|error| {
+                    SchemaImportError::new(format!(
+                        "string pattern literal is not valid UTF-8 after parsing: {error}"
+                    ))
+                })?;
+                Some(seq(literal.chars().map(json_body_char_expr_for_decoded_char).collect()))
+            }
+            HirKind::Class(class) => self.lower_decoded_class_to_json_body_expr(class),
+            HirKind::Look(look) if is_start_look(*look) || is_end_look(*look) => Some(GrammarExpr::Epsilon),
+            HirKind::Look(look) => {
+                return Err(SchemaImportError::new(format!(
+                    "unsupported zero-width assertion in string pattern: {look:?}"
+                )));
+            }
+            HirKind::Repetition(repetition) => self.lower_decoded_repetition_to_json_body_expr(repetition)?,
+            HirKind::Capture(capture) => self.lower_decoded_regex_hir_to_json_body_expr(&capture.sub)?,
+            HirKind::Concat(parts) => {
+                let mut lowered = Vec::with_capacity(parts.len());
+                for part in parts {
+                    let Some(part) = self.lower_decoded_regex_hir_to_json_body_expr(part)? else {
+                        return Ok(None);
+                    };
+                    lowered.push(part);
+                }
+                Some(seq(lowered))
+            }
+            HirKind::Alternation(parts) => {
+                let mut lowered = Vec::with_capacity(parts.len());
+                for part in parts {
+                    let Some(part) = self.lower_decoded_regex_hir_to_json_body_expr(part)? else {
+                        return Ok(None);
+                    };
+                    lowered.push(part);
+                }
+                Some(choice(lowered))
+            }
+        })
+    }
+
+    fn lower_decoded_repetition_to_json_body_expr(
+        &mut self,
+        repetition: &Repetition,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        let Some(sub) = self.lower_decoded_regex_hir_to_json_body_expr(&repetition.sub)? else {
+            return Ok(None);
+        };
+        Ok(Some(match (repetition.min, repetition.max) {
+            (0, Some(0)) => GrammarExpr::Epsilon,
+            (0, None) => GrammarExpr::Repeat(Box::new(sub)),
+            (1, None) => GrammarExpr::RepeatOne(Box::new(sub)),
+            (0, Some(1)) => GrammarExpr::Optional(Box::new(sub)),
+            (min, Some(max)) => GrammarExpr::RepeatRange {
+                expr: Box::new(sub),
+                min,
+                max,
+            },
+            (min, None) => seq(vec![
+                GrammarExpr::RepeatRange {
+                    expr: Box::new(sub.clone()),
+                    min,
+                    max: min,
+                },
+                GrammarExpr::Repeat(Box::new(sub)),
+            ]),
+        }))
+    }
+
+    fn lower_decoded_class_to_json_body_expr(&mut self, class: &Class) -> Option<GrammarExpr> {
+        if is_unicode_decimal_digit_class(class) {
+            return Some(self.string_pattern_digit_char_ref());
+        }
+        if is_unicode_non_decimal_digit_class(class) {
+            return Some(GrammarExpr::Exclude {
+                expr: Box::new(self.json_string_char_for_pattern_fill()),
+                exclude: Box::new(self.string_pattern_digit_char_ref()),
+            });
+        }
+        if is_unicode_pattern_whitespace_class(class) {
+            return Some(self.string_pattern_whitespace_char_ref());
+        }
+        if is_unicode_pattern_non_whitespace_class(class) {
+            return Some(self.string_pattern_non_whitespace_char_ref());
+        }
+        None
+    }
+
+    fn string_pattern_digit_char_ref(&mut self) -> GrammarExpr {
+        const NAME: &str = "JSON_STRING_PATTERN_DIGIT_CHAR";
+        if !self.rules.iter().any(|rule| rule.name == NAME) {
+            self.add_internal_terminal_rule(NAME, GrammarExpr::RawRegex("[0-9]".to_string()));
+        }
+        r(NAME)
+    }
+
+    fn string_pattern_whitespace_char_ref(&mut self) -> GrammarExpr {
+        const NAME: &str = "JSON_STRING_PATTERN_WHITESPACE_CHAR";
+        if !self.rules.iter().any(|rule| rule.name == NAME) {
+            let alternatives = PATTERN_WHITESPACE_CHARS
+                .iter()
+                .copied()
+                .map(json_body_char_expr_for_decoded_char)
+                .collect::<Vec<_>>();
+            self.add_internal_terminal_rule(NAME, choice(alternatives));
+        }
+        r(NAME)
+    }
+
+    fn string_pattern_non_whitespace_char_ref(&mut self) -> GrammarExpr {
+        const NAME: &str = "JSON_STRING_PATTERN_NON_WHITESPACE_CHAR";
+        if !self.rules.iter().any(|rule| rule.name == NAME) {
+            let whitespace = self.string_pattern_whitespace_char_ref();
+            let ch = self.json_string_char_for_pattern_fill();
+            self.add_internal_terminal_rule(
+                NAME,
+                GrammarExpr::Exclude {
+                    expr: Box::new(ch),
+                    exclude: Box::new(whitespace),
+                },
+            );
+        }
+        r(NAME)
     }
 
     fn add_string_pattern_anchored_start_terminal(
@@ -1670,6 +1934,33 @@ fn is_unicode_decimal_digit_class(class: &Class) -> bool {
     })
 }
 
+fn is_unicode_non_decimal_digit_class(class: &Class) -> bool {
+    ['0', '1', '9'].into_iter().all(|ch| !decoded_class_contains(class, ch))
+        && ['A', '_', '-', 'π', '中', '😀']
+            .into_iter()
+            .all(|ch| decoded_class_contains(class, ch))
+}
+
+const PATTERN_WHITESPACE_CHARS: &[char] = &[
+    ' ', '\n', '\r', '\t', '\u{0c}', '\u{85}', '\u{a0}', '\u{1680}', '\u{2000}', '\u{2001}',
+    '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}',
+    '\u{2009}', '\u{200a}', '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}', '\u{3000}',
+];
+
+fn is_unicode_pattern_whitespace_class(class: &Class) -> bool {
+    PATTERN_WHITESPACE_CHARS.iter().copied().all(|ch| decoded_class_contains(class, ch))
+        && ['A', '0', '_', '-', '/', 'π', '中', '😀']
+            .into_iter()
+            .all(|ch| !decoded_class_contains(class, ch))
+}
+
+fn is_unicode_pattern_non_whitespace_class(class: &Class) -> bool {
+    PATTERN_WHITESPACE_CHARS.iter().copied().all(|ch| !decoded_class_contains(class, ch))
+        && ['A', '0', '_', '-', '/', 'π', '中', '😀']
+            .into_iter()
+            .all(|ch| decoded_class_contains(class, ch))
+}
+
 fn is_dot_like_unicode_class(class: &Class) -> bool {
     let Class::Unicode(class) = class else {
         return false;
@@ -1770,6 +2061,10 @@ fn json_string_compat_mode() -> JsonStringCompatMode {
 
 fn json_body_char_regex_for_decoded_char(ch: char) -> String {
     json_body_char_regex_for_decoded_char_in_mode(ch, json_string_compat_mode())
+}
+
+fn json_body_char_expr_for_decoded_char(ch: char) -> GrammarExpr {
+    GrammarExpr::RawRegex(json_body_char_regex_for_decoded_char(ch))
 }
 
 fn json_body_char_regex_for_decoded_char_in_mode(ch: char, mode: JsonStringCompatMode) -> String {
