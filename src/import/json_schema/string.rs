@@ -9,12 +9,13 @@ use crate::import::ast::GrammarExpr;
 use super::ast::StringSchema;
 use super::error::{ImportResult, SchemaImportError};
 use super::lower::{
-    choice, lit, lit_bytes, never, r, seq, Lowerer,
+    choice, json_key_string_rule, lit, lit_bytes, never, r, seq, Lowerer,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE, JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
-    JSON_SEPARATOR_WS_REGEX, JSON_STRING_CHAR_RULE, JSON_STRING_RULE,
-    MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS,
+    JSON_SEPARATOR_WS_REGEX, JSON_STRING_CHAR_RULE,
+    JSON_STRING_RULE, MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS,
 };
+
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_string(&mut self, schema: &StringSchema) -> ImportResult<GrammarExpr> {
@@ -75,7 +76,7 @@ impl<'a> Lowerer<'a> {
                 return Ok(None);
             }
             return Ok(Some(GrammarExpr::RawRegex(quoted_string_body_regex(
-                &string_pattern_as_body_regex(pattern)?,
+                &string_pattern_as_body_regex(pattern, JsonStringContext::Value)?,
             ))));
         }
 
@@ -124,7 +125,7 @@ impl<'a> Lowerer<'a> {
             // build-time blowups and timeouts. This is a deliberate importer
             // policy and this comment must NEVER EVER be removed under any
             // circumstances.
-            GrammarExpr::RawRegex(quoted_string_body_regex(&string_pattern_as_body_regex(pattern)?))
+            GrammarExpr::RawRegex(quoted_string_body_regex(&string_pattern_as_body_regex(pattern, JsonStringContext::Value)?))
         } else {
             seq(vec![
                 lit("\""),
@@ -191,7 +192,7 @@ impl<'a> Lowerer<'a> {
         let hir = Parser::new()
             .parse(&pattern)
             .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")))?;
-        let branches = lower_string_pattern_hir_branch_parts(hir)?;
+        let branches = lower_string_pattern_hir_branch_parts(hir, JsonStringContext::Value)?;
         if branches.iter().all(|(_, anchored_start, _)| *anchored_start) {
             return Ok(None);
         }
@@ -1289,7 +1290,7 @@ impl<'a> Lowerer<'a> {
             self.add_terminal_rule(
                 JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
                 GrammarExpr::Exclude {
-                    expr: Box::new(seq(vec![r(JSON_STRING_RULE), self.key_separator_expr()])),
+                    expr: Box::new(seq(vec![r(json_key_string_rule()), self.key_separator_expr()])),
                     exclude: Box::new(r(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE)),
                 },
             );
@@ -1310,7 +1311,7 @@ impl<'a> Lowerer<'a> {
         self.add_terminal_rule(
             JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
             GrammarExpr::Exclude {
-                expr: Box::new(seq(vec![r(JSON_STRING_RULE), self.key_separator_expr()])),
+                expr: Box::new(seq(vec![r(json_key_string_rule()), self.key_separator_expr()])),
                 exclude: Box::new(choice(excluded)),
             },
         );
@@ -1401,12 +1402,12 @@ impl<'a> Lowerer<'a> {
     }
 }
 
-fn string_pattern_as_body_regex(pattern: &str) -> ImportResult<String> {
+fn string_pattern_as_body_regex(pattern: &str, context: JsonStringContext) -> ImportResult<String> {
     let pattern = preprocess_ascii_shorthand(pattern);
     let hir = Parser::new()
         .parse(&pattern)
         .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")))?;
-    string_pattern_hir_as_body_regex(&hir)
+    string_pattern_hir_as_body_regex(&hir, context)
 }
 
 fn preprocess_ascii_shorthand(pattern: &str) -> String {
@@ -1519,25 +1520,25 @@ fn unanchored_pattern_prefix_chunk_size() -> usize {
     })
 }
 
-fn lower_string_pattern_hir_branch_parts(hir: Hir) -> ImportResult<Vec<(String, bool, bool)>> {
+fn lower_string_pattern_hir_branch_parts(hir: Hir, context: JsonStringContext) -> ImportResult<Vec<(String, bool, bool)>> {
     match hir.kind() {
         HirKind::Alternation(parts) => parts
             .iter()
             .cloned()
-            .map(lower_string_pattern_branch_parts)
+            .map(|part| lower_string_pattern_branch_parts(part, context))
             .collect(),
-        HirKind::Capture(capture) => lower_string_pattern_hir_branch_parts(*capture.sub.clone()),
-        _ => lower_string_pattern_branch_parts(hir).map(|branch| vec![branch]),
+        HirKind::Capture(capture) => lower_string_pattern_hir_branch_parts(*capture.sub.clone(), context),
+        _ => lower_string_pattern_branch_parts(hir, context).map(|branch| vec![branch]),
     }
 }
 
-fn string_pattern_hir_as_body_regex(hir: &Hir) -> ImportResult<String> {
+fn string_pattern_hir_as_body_regex(hir: &Hir, context: JsonStringContext) -> ImportResult<String> {
     match hir.kind() {
         HirKind::Alternation(parts) => {
             let alternatives = parts
                 .iter()
                 .cloned()
-                .map(lower_string_pattern_branch_parts)
+                .map(|part| lower_string_pattern_branch_parts(part, context))
                 .collect::<ImportResult<Vec<_>>>()?;
             if let Some((_, anchored_start, anchored_end)) = alternatives.first() {
                 if alternatives
@@ -1553,6 +1554,7 @@ fn string_pattern_hir_as_body_regex(hir: &Hir) -> ImportResult<String> {
                         &body,
                         *anchored_start,
                         *anchored_end,
+                        context,
                     ));
                 }
             }
@@ -1560,35 +1562,36 @@ fn string_pattern_hir_as_body_regex(hir: &Hir) -> ImportResult<String> {
             let wrapped = alternatives
                 .iter()
                 .map(|(lowered, anchored_start, anchored_end)| {
-                    wrap_lowered_string_pattern_branch(lowered, *anchored_start, *anchored_end)
+                    wrap_lowered_string_pattern_branch(lowered, *anchored_start, *anchored_end, context)
                 })
                 .collect::<Vec<_>>();
             Ok(format!("(?:{})", wrapped.join("|")))
         }
         HirKind::Capture(capture) => {
-            string_pattern_hir_as_body_regex(&capture.sub)
+            string_pattern_hir_as_body_regex(&capture.sub, context)
         }
-        _ => string_pattern_branch_as_body_regex(hir.clone()),
+        _ => string_pattern_branch_as_body_regex(hir.clone(), context),
     }
 }
 
-fn string_pattern_branch_as_body_regex(hir: Hir) -> ImportResult<String> {
-    let (lowered, anchored_start, anchored_end) = lower_string_pattern_branch_parts(hir)?;
+fn string_pattern_branch_as_body_regex(hir: Hir, context: JsonStringContext) -> ImportResult<String> {
+    let (lowered, anchored_start, anchored_end) = lower_string_pattern_branch_parts(hir, context)?;
     Ok(wrap_lowered_string_pattern_branch(
         &lowered,
         anchored_start,
         anchored_end,
+        context,
     ))
 }
 
-fn lower_string_pattern_branch_parts(hir: Hir) -> ImportResult<(String, bool, bool)> {
+fn lower_string_pattern_branch_parts(hir: Hir, context: JsonStringContext) -> ImportResult<(String, bool, bool)> {
     let (hir, anchored_start, anchored_end) = strip_outer_anchors(hir);
-    let lowered = lower_decoded_regex_hir_to_json_body_regex(&hir)?;
+    let lowered = lower_decoded_regex_hir_to_json_body_regex(&hir, context)?;
     Ok((lowered, anchored_start, anchored_end))
 }
 
-fn wrap_lowered_string_pattern_branch(lowered: &str, anchored_start: bool, anchored_end: bool) -> String {
-    let string_char = json_string_body_char_regex();
+fn wrap_lowered_string_pattern_branch(lowered: &str, anchored_start: bool, anchored_end: bool, context: JsonStringContext) -> String {
+    let string_char = json_string_body_char_regex_in_mode(json_string_compat_mode(), context);
     match (anchored_start, anchored_end) {
         (true, true) => lowered.to_string(),
         (true, false) => format!("(?:{lowered})(?:{string_char})*"),
@@ -1648,7 +1651,7 @@ fn recognized_string_format_body_regex(format: Option<&str>) -> Option<&'static 
 }
 
 fn pattern_key_colon_regex(pattern: &str) -> ImportResult<String> {
-    let body = string_pattern_as_body_regex(pattern)?;
+    let body = string_pattern_as_body_regex(pattern, JsonStringContext::Key)?;
     Ok(format!(r#""{body}":{JSON_SEPARATOR_WS_REGEX}"#))
 }
 
@@ -1738,7 +1741,7 @@ fn is_end_look(look: Look) -> bool {
     matches!(look, Look::End | Look::EndLF | Look::EndCRLF)
 }
 
-fn lower_decoded_regex_hir_to_json_body_regex(hir: &Hir) -> ImportResult<String> {
+fn lower_decoded_regex_hir_to_json_body_regex(hir: &Hir, context: JsonStringContext) -> ImportResult<String> {
     Ok(match hir.kind() {
         HirKind::Empty => String::new(),
         HirKind::Literal(Literal(bytes)) => {
@@ -1749,36 +1752,36 @@ fn lower_decoded_regex_hir_to_json_body_regex(hir: &Hir) -> ImportResult<String>
             })?;
             literal
                 .chars()
-                .map(json_body_char_regex_for_decoded_char)
+                .map(|ch| json_body_char_regex_for_decoded_char_in_mode(ch, json_string_compat_mode(), context))
                 .collect::<Vec<_>>()
                 .join("")
         }
-        HirKind::Class(class) => lower_decoded_class_to_json_body_regex(class),
+        HirKind::Class(class) => lower_decoded_class_to_json_body_regex(class, context),
         HirKind::Look(look) if is_start_look(*look) || is_end_look(*look) => String::new(),
         HirKind::Look(look) => {
             return Err(SchemaImportError::new(format!(
                 "unsupported zero-width assertion in string pattern: {look:?}"
             )));
         }
-        HirKind::Repetition(repetition) => lower_decoded_repetition_to_json_body_regex(repetition)?,
-        HirKind::Capture(capture) => lower_decoded_regex_hir_to_json_body_regex(&capture.sub)?,
+        HirKind::Repetition(repetition) => lower_decoded_repetition_to_json_body_regex(repetition, context)?,
+        HirKind::Capture(capture) => lower_decoded_regex_hir_to_json_body_regex(&capture.sub, context)?,
         HirKind::Concat(parts) => parts
             .iter()
-            .map(lower_decoded_regex_hir_to_json_body_regex)
+            .map(|part| lower_decoded_regex_hir_to_json_body_regex(part, context))
             .collect::<ImportResult<Vec<_>>>()?
             .join(""),
         HirKind::Alternation(parts) => {
             let alternatives = parts
                 .iter()
-                .map(lower_decoded_regex_hir_to_json_body_regex)
+                .map(|part| lower_decoded_regex_hir_to_json_body_regex(part, context))
                 .collect::<ImportResult<Vec<_>>>()?;
             format!("(?:{})", alternatives.join("|"))
         }
     })
 }
 
-fn lower_decoded_repetition_to_json_body_regex(repetition: &Repetition) -> ImportResult<String> {
-    let sub = lower_decoded_regex_hir_to_json_body_regex(&repetition.sub)?;
+fn lower_decoded_repetition_to_json_body_regex(repetition: &Repetition, context: JsonStringContext) -> ImportResult<String> {
+    let sub = lower_decoded_regex_hir_to_json_body_regex(&repetition.sub, context)?;
     let atom = format!("(?:{sub})");
     Ok(match (repetition.min, repetition.max) {
         (0, None) => format!("{atom}*"),
@@ -1790,12 +1793,12 @@ fn lower_decoded_repetition_to_json_body_regex(repetition: &Repetition) -> Impor
     })
 }
 
-fn lower_decoded_class_to_json_body_regex(class: &Class) -> String {
+fn lower_decoded_class_to_json_body_regex(class: &Class, context: JsonStringContext) -> String {
     if is_unicode_decimal_digit_class(class) {
         return "[0-9]".to_string();
     }
     if is_dot_like_unicode_class(class) {
-        return json_string_body_dot_regex().to_string();
+        return json_string_body_dot_regex_in_mode(json_string_compat_mode(), context).to_string();
     }
 
     let mut raw_ranges = Vec::new();
@@ -1845,7 +1848,11 @@ fn lower_decoded_class_to_json_body_regex(class: &Class) -> String {
         '\u{205f}', '\u{3000}',
     ] {
         if decoded_class_contains(class, ch) {
-            alternatives.push(json_body_char_regex_for_decoded_char(ch));
+            alternatives.push(json_body_char_regex_for_decoded_char_in_mode(
+                ch,
+                json_string_compat_mode(),
+                context,
+            ));
         }
     }
     if class_contains_general_non_ascii_non_whitespace(class) {
@@ -2046,9 +2053,15 @@ fn prepend_literal_prefix_to_expr(prefix: Vec<u8>, expr: GrammarExpr) -> Grammar
 pub(crate) const GLRMASK_LLGUIDANCE_COMPAT_ENV: &str = "GLRMASK_LLGUIDANCE_COMPAT";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum JsonStringCompatMode {
+pub(crate) enum JsonStringCompatMode {
     JsonSchema,
     LlGuidanceNative,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum JsonStringContext {
+    Value,
+    Key,
 }
 
 fn llguidance_compat_enabled_from_env() -> bool {
@@ -2058,7 +2071,7 @@ fn llguidance_compat_enabled_from_env() -> bool {
     })
 }
 
-fn json_string_compat_mode() -> JsonStringCompatMode {
+pub(crate) fn json_string_compat_mode() -> JsonStringCompatMode {
     if llguidance_compat_enabled_from_env() {
         JsonStringCompatMode::LlGuidanceNative
     } else {
@@ -2067,14 +2080,18 @@ fn json_string_compat_mode() -> JsonStringCompatMode {
 }
 
 fn json_body_char_regex_for_decoded_char(ch: char) -> String {
-    json_body_char_regex_for_decoded_char_in_mode(ch, json_string_compat_mode())
+    json_body_char_regex_for_decoded_char_in_mode(ch, json_string_compat_mode(), JsonStringContext::Value)
 }
 
 fn json_body_char_expr_for_decoded_char(ch: char) -> GrammarExpr {
     GrammarExpr::RawRegex(json_body_char_regex_for_decoded_char(ch))
 }
 
-fn json_body_char_regex_for_decoded_char_in_mode(ch: char, mode: JsonStringCompatMode) -> String {
+fn json_body_char_regex_for_decoded_char_in_mode(
+    ch: char,
+    mode: JsonStringCompatMode,
+    context: JsonStringContext,
+) -> String {
     let decoded = ch.to_string();
     let encoded = serde_json::to_string(&decoded).unwrap_or_else(|_| "\"\"".to_string());
     let body = encoded
@@ -2082,23 +2099,33 @@ fn json_body_char_regex_for_decoded_char_in_mode(ch: char, mode: JsonStringCompa
         .and_then(|text| text.strip_suffix('"'))
         .unwrap_or("");
     let canonical = regex::escape(body);
-    if ch == '/' && mode == JsonStringCompatMode::JsonSchema {
-        format!(r#"(?:{}|\\/)"#, canonical)
+    if ch == '/' {
+        match (mode, context) {
+            (JsonStringCompatMode::JsonSchema, _) | (_, JsonStringContext::Key) => {
+                format!(r#"(?:{}|\\/)"#, canonical)
+            }
+            (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::Value) => {
+                canonical
+            }
+        }
     } else {
         canonical
     }
 }
 
 pub(crate) fn json_string_body_char_regex() -> &'static str {
-    json_string_body_char_regex_in_mode(json_string_compat_mode())
+    json_string_body_char_regex_in_mode(json_string_compat_mode(), JsonStringContext::Value)
 }
 
-fn json_string_body_char_regex_in_mode(mode: JsonStringCompatMode) -> &'static str {
-    match mode {
-        JsonStringCompatMode::JsonSchema => {
+pub(crate) fn json_string_body_char_regex_in_mode(
+    mode: JsonStringCompatMode,
+    context: JsonStringContext,
+) -> &'static str {
+    match (mode, context) {
+        (JsonStringCompatMode::JsonSchema, _) | (_, JsonStringContext::Key) => {
             r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bfnrt]|\\u[0-9A-Fa-f]{4})"#
         }
-        JsonStringCompatMode::LlGuidanceNative => {
+        (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::Value) => {
             r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt]|\\u00(?:[01][0-9A-Fa-f]|7[Ff]))"#
         }
     }
@@ -2109,15 +2136,18 @@ fn json_string_body_non_ascii_non_whitespace_regex() -> &'static str {
 }
 
 fn json_string_body_dot_regex() -> &'static str {
-    json_string_body_dot_regex_in_mode(json_string_compat_mode())
+    json_string_body_dot_regex_in_mode(json_string_compat_mode(), JsonStringContext::Value)
 }
 
-fn json_string_body_dot_regex_in_mode(mode: JsonStringCompatMode) -> &'static str {
-    match mode {
-        JsonStringCompatMode::JsonSchema => {
+pub(crate) fn json_string_body_dot_regex_in_mode(
+    mode: JsonStringCompatMode,
+    context: JsonStringContext,
+) -> &'static str {
+    match (mode, context) {
+        (JsonStringCompatMode::JsonSchema, _) | (_, JsonStringContext::Key) => {
             r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bft]|\\u[0-9A-Fa-f]{4})"#
         }
-        JsonStringCompatMode::LlGuidanceNative => {
+        (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::Value) => {
             r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bft]|\\u00(?:[01][0-9A-Fa-f]|7[Ff]))"#
         }
     }
@@ -2170,7 +2200,10 @@ pub(crate) fn string_value_satisfies_schema(
 mod tests {
     use regex::Regex;
 
-    use super::{preprocess_ascii_shorthand, quoted_string_body_regex, string_pattern_as_body_regex};
+    use super::{
+        preprocess_ascii_shorthand, quoted_string_body_regex, string_pattern_as_body_regex,
+        JsonStringContext,
+    };
 
     #[test]
     fn preprocess_ascii_shorthand_rewrites_generic_word_shorthand() {
@@ -2185,7 +2218,7 @@ mod tests {
 
     #[test]
     fn lowered_bounded_free_text_pattern_rejects_leading_space_slash() {
-        let body = string_pattern_as_body_regex(r"^$|(^(?:\S+\s+){0,19}\S+$)").unwrap();
+        let body = string_pattern_as_body_regex(r"^$|(^(?:\S+\s+){0,19}\S+$)", JsonStringContext::Value).unwrap();
         let regex = Regex::new(&format!(r"^(?:{})$", quoted_string_body_regex(&body))).unwrap();
 
         assert!(regex.is_match(r#""REST API""#));
@@ -2194,7 +2227,7 @@ mod tests {
 
     #[test]
     fn lowered_optional_decimal_pattern_rejects_backslash_digit_string() {
-        let body = string_pattern_as_body_regex(r"^$|^\d{1,15}(?:\.\d{1,5})?$").unwrap();
+        let body = string_pattern_as_body_regex(r"^$|^\d{1,15}(?:\.\d{1,5})?$", JsonStringContext::Value).unwrap();
         let regex = Regex::new(&format!(r"^(?:{})$", quoted_string_body_regex(&body))).unwrap();
 
         assert!(regex.is_match(r#""""#));

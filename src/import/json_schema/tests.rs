@@ -522,6 +522,34 @@ fn llguidance_compat_rejects_patterned_escaped_solidus() {
 }
 
 #[test]
+fn llguidance_compat_allows_escaped_solidus_in_keys() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "additionalProperties": {"type": "string"}
+    });
+    // Additional property key accepts escaped solidus
+    assert!(schema_accepts_bytes(&schema, br#"{"\/": "value"}"#));
+}
+
+#[test]
+fn llguidance_compat_allows_escaped_solidus_in_pattern_keys() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "patternProperties": {
+            "^/$": {"type": "string"}
+        },
+        "additionalProperties": false
+    });
+    // Pattern key accepts escaped solidus and non-escaped
+    assert!(schema_accepts_bytes(&schema, br#"{"\/": "value"}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"/": "value"}"#));
+}
+
+#[test]
 fn mask_does_not_enable_json_u_by_runtime_patch() {
     let schema = json!({"type": "string", "pattern": r#"^[\w\.-_]+$"#});
     let grammar = schema_to_named_grammar(&schema).expect("schema should import");

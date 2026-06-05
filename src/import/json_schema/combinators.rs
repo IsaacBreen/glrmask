@@ -11,8 +11,9 @@ use super::error::{ImportResult, SchemaImportError};
 use super::lower::{
     choice, never, normalize_local_ref, r, Lowerer, JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE,
     JSON_ADDITIONAL_KEY_COLON_SHARED_RULE, JSON_BOOL_RULE, JSON_INTEGER_RULE,
-    JSON_ITEM_SEPARATOR_RULE, JSON_KEY_SEPARATOR_RULE, JSON_NULL_RULE, JSON_NUMBER_RULE,
-    JSON_OBJECT_RULE, JSON_STRING_CHAR_RULE, JSON_STRING_RULE, JSON_VALUE_RULE,
+    JSON_ITEM_SEPARATOR_RULE, JSON_KEY_SEPARATOR_RULE, JSON_KEY_STRING_RULE, JSON_NULL_RULE,
+    JSON_NUMBER_RULE, JSON_OBJECT_RULE, JSON_STRING_CHAR_RULE, JSON_STRING_RULE,
+    JSON_VALUE_RULE,
 };
 use super::string::string_value_satisfies_schema;
 
@@ -1192,6 +1193,7 @@ fn all_of_intersection_terminal_safe(expr: &GrammarExpr) -> bool {
                 | JSON_INTEGER_RULE
                 | JSON_ITEM_SEPARATOR_RULE
                 | JSON_KEY_SEPARATOR_RULE
+                | JSON_KEY_STRING_RULE
                 | JSON_NULL_RULE
                 | JSON_NUMBER_RULE
                 | JSON_STRING_CHAR_RULE
