@@ -15,6 +15,181 @@ use super::nfa::NFA;
 
 type ProductStateTuple = SmallVec<[(u32, u32); 12]>;
 
+fn unwrap_shared(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Shared(inner) => unwrap_shared(inner),
+        other => other,
+    }
+}
+
+fn expr_to_seq_parts(expr: Expr) -> Vec<Expr> {
+    match expr {
+        Expr::Seq(parts) => parts,
+        Expr::Shared(inner) => expr_to_seq_parts((*inner).clone()),
+        Expr::Epsilon => Vec::new(),
+        other => vec![other],
+    }
+}
+
+fn seq_from_parts(mut parts: Vec<Expr>) -> Expr {
+    match parts.len() {
+        0 => Expr::Epsilon,
+        1 => parts.pop().unwrap(),
+        _ => Expr::Seq(parts),
+    }
+}
+
+fn factor_choice_common_prefix(options: Vec<Expr>) -> Option<Expr> {
+    if options.len() < 2 {
+        return None;
+    }
+
+    let seqs: Vec<Vec<Expr>> = options.into_iter().map(expr_to_seq_parts).collect();
+    if seqs.iter().any(|parts| parts.is_empty()) {
+        return None;
+    }
+
+    let first = &seqs[0][0];
+    if !seqs.iter().all(|parts| parts[0] == *first) {
+        return None;
+    }
+
+    let prefix = first.clone();
+    let remainders = seqs
+        .into_iter()
+        .map(|mut parts| {
+            parts.remove(0);
+            seq_from_parts(parts)
+        })
+        .collect::<Vec<_>>();
+
+    Some(seq_from_parts(vec![
+        prefix,
+        factor_regex_expr(Expr::Choice(remainders)),
+    ]))
+}
+
+fn factor_choice_common_suffix(options: Vec<Expr>) -> Option<Expr> {
+    if options.len() < 2 {
+        return None;
+    }
+
+    let mut seqs: Vec<Vec<Expr>> = options.into_iter().map(expr_to_seq_parts).collect();
+    if seqs.iter().any(|parts| parts.is_empty()) {
+        return None;
+    }
+
+    let suffix = seqs[0].last()?.clone();
+    if !seqs.iter().all(|parts| parts.last() == Some(&suffix)) {
+        return None;
+    }
+
+    let prefixes = seqs
+        .iter_mut()
+        .map(|parts| {
+            parts.pop();
+            seq_from_parts(std::mem::take(parts))
+        })
+        .collect::<Vec<_>>();
+
+    Some(seq_from_parts(vec![
+        factor_regex_expr(Expr::Choice(prefixes)),
+        suffix,
+    ]))
+}
+
+fn factor_choice_literals(options: Vec<Expr>) -> Option<Expr> {
+    if options.len() < 2 {
+        return None;
+    }
+
+    let mut byte_options = Vec::<Vec<u8>>::with_capacity(options.len());
+    for option in &options {
+        match unwrap_shared(option) {
+            Expr::U8Seq(bytes) if !bytes.is_empty() => {
+                byte_options.push(bytes.clone());
+            }
+            _ => return None,
+        }
+    }
+
+    let first_byte = byte_options[0][0];
+    if !byte_options.iter().all(|bytes| bytes[0] == first_byte) {
+        return None;
+    }
+
+    let remainders = byte_options
+        .into_iter()
+        .map(|bytes| {
+            if bytes.len() == 1 {
+                Expr::Epsilon
+            } else {
+                Expr::U8Seq(bytes[1..].to_vec())
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Some(seq_from_parts(vec![
+        Expr::U8Seq(vec![first_byte]),
+        factor_regex_expr(Expr::Choice(remainders)),
+    ]))
+}
+
+pub(crate) fn factor_regex_expr(expr: Expr) -> Expr {
+    match expr {
+        Expr::Seq(parts) => {
+            let mut out = Vec::new();
+            for part in parts {
+                match factor_regex_expr(part) {
+                    Expr::Seq(inner) => out.extend(inner),
+                    Expr::Epsilon => {}
+                    other => out.push(other),
+                }
+            }
+            seq_from_parts(out)
+        }
+        Expr::Choice(options) => {
+            let mut factored_options = options.into_iter().map(factor_regex_expr).collect::<Vec<_>>();
+
+            if factored_options.len() == 1 {
+                return factored_options.pop().unwrap();
+            }
+
+            // Repeatedly peel common structure. Prefix first handles
+            // A B1 C | A B2 C; suffix then handles B1 C | B2 C.
+            loop {
+                if let Some(factored) = factor_choice_literals(factored_options.clone()) {
+                    return factored;
+                }
+                if let Some(factored) = factor_choice_common_prefix(factored_options.clone()) {
+                    return factored;
+                }
+                if let Some(factored) = factor_choice_common_suffix(factored_options.clone()) {
+                    return factored;
+                }
+                break;
+            }
+
+            Expr::Choice(factored_options)
+        }
+        Expr::Repeat { expr, min, max } => Expr::Repeat {
+            expr: Box::new(factor_regex_expr(*expr)),
+            min,
+            max,
+        },
+        Expr::Exclude { expr, exclude } => Expr::Exclude {
+            expr: Box::new(factor_regex_expr(*expr)),
+            exclude: Box::new(factor_regex_expr(*exclude)),
+        },
+        Expr::Intersect { expr, intersect } => Expr::Intersect {
+            expr: Box::new(factor_regex_expr(*expr)),
+            intersect: Box::new(factor_regex_expr(*intersect)),
+        },
+        Expr::Shared(inner) => factor_regex_expr((*inner).clone()),
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => expr,
+    }
+}
+
 fn common_prefix_factor(exprs: &[Expr]) -> Option<(Expr, Vec<Expr>)> {
     fn candidate_prefix(expr: &Expr) -> Option<&Expr> {
         match expr {
@@ -1875,6 +2050,7 @@ fn build_regex_nfa_impl(exprs: &[Expr]) -> NFA {
 mod tests {
     use super::build_regex;
     use super::compile_product_component_dfa_direct;
+    use super::factor_regex_expr;
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::regex::parse_regex;
     use crate::automata::lexer::tokenizer::Tokenizer;
@@ -1900,6 +2076,71 @@ mod tests {
         exec.matches
             .iter()
             .any(|matched| matched.id == 0 && matched.width == input.len())
+    }
+
+    #[test]
+    fn factors_contains_literal_choice_with_common_json_string_shell() {
+        let char = Expr::U8Class(U8Set::from_bytes(br#"ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789"#));
+        let mk = |s: &[u8]| {
+            Expr::Seq(vec![
+                Expr::U8Seq(b"\"".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(char.clone()),
+                    min: 0,
+                    max: None,
+                },
+                Expr::U8Seq(s.to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(char.clone()),
+                    min: 0,
+                    max: None,
+                },
+                Expr::U8Seq(b"\"".to_vec()),
+            ])
+        };
+        let expr = Expr::Seq(vec![
+            Expr::U8Seq(b"\"interval\": ".to_vec()),
+            Expr::Choice(vec![
+                mk(b"INTERVAL_TICK"),
+                mk(b"INTERVAL_M1"),
+                mk(b"INTERVAL_M2"),
+                mk(b"INTERVAL_M3"),
+                mk(b"INTERVAL_M4"),
+                mk(b"INTERVAL_M5"),
+                mk(b"INTERVAL_M6"),
+                mk(b"INTERVAL_M10"),
+                mk(b"INTERVAL_M15"),
+                mk(b"INTERVAL_M20"),
+                mk(b"INTERVAL_M30"),
+                mk(b"INTERVAL_H1"),
+                mk(b"INTERVAL_H2"),
+                mk(b"INTERVAL_H4"),
+                mk(b"INTERVAL_D1"),
+                mk(b"INTERVAL_W1"),
+                mk(b"INTERVAL_MN1"),
+            ]),
+        ]);
+        let factored = factor_regex_expr(expr);
+        let regex = build_regex(&[factored]);
+        assert!(
+            regex.num_states() < 500,
+            "factored regex should not construct a huge terminal DFA; states={}",
+            regex.num_states(),
+        );
+        let accept = |bytes: &[u8]| {
+            let mut state = 0;
+            for &b in bytes {
+                let Some(next) = regex.step(state, b) else {
+                    return false;
+                };
+                state = next;
+            }
+            !regex.dfa.finalizers(state).is_empty()
+        };
+        assert!(accept(br#""interval": "INTERVAL_M1""#));
+        assert!(accept(br#""interval": "XXXINTERVAL_M1YYY""#));
+        assert!(accept(br#""interval": "INTERVAL_TICK""#));
+        assert!(!accept(br#""interval": "NOPE""#));
     }
 
     #[test]

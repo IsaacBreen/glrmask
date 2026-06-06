@@ -5,7 +5,11 @@ use std::time::Instant;
 use once_cell::sync::Lazy;
 
 use crate::Vocab;
-use crate::automata::lexer::compile::{build_regex, build_regex_with_profile_labels};
+use crate::automata::lexer::compile::{
+    build_regex,
+    build_regex_with_profile_labels,
+    factor_regex_expr,
+};
 use crate::automata::lexer::regex::parse_regex;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::regex::Expr;
@@ -335,7 +339,12 @@ pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<
 }
 
 pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
-    let exprs: Vec<Expr> = grammar.terminals.iter().map(terminal_expr).collect();
+    let exprs: Vec<Expr> = grammar
+        .terminals
+        .iter()
+        .map(terminal_expr)
+        .map(factor_regex_expr)
+        .collect();
     let terminal_labels: Vec<String> = grammar
         .terminals
         .iter()
