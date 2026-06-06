@@ -153,6 +153,30 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
 }
 
 #[test]
+fn bounded_repeat_suffix_must_not_greedily_drop_suffix_path() {
+    let token_id = 0u32;
+    let vocab = Vocab::new(vec![(token_id, b"aa".to_vec())], None);
+
+    let grammar = r####"
+        start s;
+        nt s ::= X "$";
+        t X ::= ("a"+)? "a";
+    "####;
+
+    let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+    let state = constraint.start();
+
+    // Semantically valid:
+    //
+    //   ("a"+)?  consumes the first "a"
+    //   "a"      consumes the second "a"
+    //
+    // The buggy bounded-repeat-with-suffix optimizer instead keeps extending
+    // the optional "a"+ body on the second "a" and drops the valid suffix path.
+    assert!(token_allowed(&state.mask(), token_id as usize));
+}
+
+#[test]
 fn chunk16_bounded_service_name_allows_spaces_token_after_open_quote() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _chunk = EnvVarGuard::set("GLRMASK_STRING_REPEAT_CHUNK", "16");
