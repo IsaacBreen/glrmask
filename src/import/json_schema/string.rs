@@ -2125,10 +2125,10 @@ fn json_body_char_regex_for_decoded_char_in_mode(
     let canonical = regex::escape(body);
     if ch == '/' {
         match (mode, context) {
-            (JsonStringCompatMode::JsonSchema, _) | (_, JsonStringContext::Key) => {
+            (JsonStringCompatMode::JsonSchema, _) => {
                 format!(r#"(?:{}|\\/)"#, canonical)
             }
-            (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::Value) => {
+            (JsonStringCompatMode::LlGuidanceNative, _) => {
                 canonical
             }
         }
@@ -2146,10 +2146,10 @@ pub(crate) fn json_string_body_char_regex_in_mode(
     context: JsonStringContext,
 ) -> &'static str {
     match (mode, context) {
-        (JsonStringCompatMode::JsonSchema, _) | (_, JsonStringContext::Key) => {
+        (JsonStringCompatMode::JsonSchema, _) => {
             r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bfnrt]|\\u[0-9A-Fa-f]{4})"#
         }
-        (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::Value) => {
+        (JsonStringCompatMode::LlGuidanceNative, _) => {
             r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt]|\\u00(?:[01][0-9A-Fa-f]|7[Ff]))"#
         }
     }
@@ -2168,10 +2168,10 @@ pub(crate) fn json_string_body_dot_regex_in_mode(
     context: JsonStringContext,
 ) -> &'static str {
     match (mode, context) {
-        (JsonStringCompatMode::JsonSchema, _) | (_, JsonStringContext::Key) => {
+        (JsonStringCompatMode::JsonSchema, _) => {
             r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bft]|\\u[0-9A-Fa-f]{4})"#
         }
-        (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::Value) => {
+        (JsonStringCompatMode::LlGuidanceNative, _) => {
             r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bft]|\\u00(?:[01][0-9A-Fa-f]|7[Ff]))"#
         }
     }
