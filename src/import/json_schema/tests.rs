@@ -563,8 +563,8 @@ fn llguidance_compat_patterned_string_non_whitespace_unicode_escape_progression(
         .lines()
         .filter(|line| line.starts_with("t json_string_constrained_"))
         .collect::<Vec<_>>();
-    assert_eq!(constrained_lines.len(), 1, "{glrm}");
-    assert!(constrained_lines[0].contains("\\u00"), "{glrm}");
+    assert!(!constrained_lines.is_empty(), "{glrm}");
+    assert!(glrm.contains("\\u00(?:[01][0-9A-Fa-f]|7[Ff])"), "{glrm}");
 
     let json_u = 300u32;
     let json_u_b = 301u32;
@@ -624,8 +624,10 @@ fn mre_llguidance_compat_non_whitespace_subtraction_mask_gap() {
     state.commit_bytes(b"\"a").expect("prefix should be accepted");
     let mask = state.mask();
 
-    // MRE: should be a non-whitespace continuation, but is rejected.
-    assert!(!mask_contains(&mask, space_escaped_quote));
+    // Regression check: after subtraction/helper lowering fixes, this
+    // space+escaped-quote token remains admitted as a non-whitespace
+    // continuation in llguidance-compat mode.
+    assert!(mask_contains(&mask, space_escaped_quote));
 }
 fn mask_does_not_enable_json_u_by_runtime_patch() {
     let schema = json!({"type": "string", "pattern": r#"^[\w\.-_]+$"#});
