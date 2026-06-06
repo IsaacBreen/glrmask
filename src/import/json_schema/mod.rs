@@ -46,13 +46,14 @@ pub(crate) fn simplify_grammar_enabled() -> bool {
     false
 }
 
-/// Exact terminal subtraction is enabled by default because open-object
-/// lowering uses `JSON_STRING - {fixed literal keys}` for additional-property
-/// keys.
+/// Exact terminal subtraction lowering is disabled by default.
 ///
-/// Set `GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS=0` (or `false`, `no`,
-/// `off`, or empty) to disable exact-subtraction lowering in grammar dumps and
-/// downstream import paths.
+/// Set `GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS=1` (or any non-empty,
+/// non-falsey value) to enable exact-subtraction lowering in downstream import
+/// and compile paths.
+///
+/// Note: JSON Schema GLRM dumps preserve exact subtraction syntax and do not
+/// apply this lowering pass.
 pub(crate) fn lower_exact_subtractions_enabled() -> bool {
     match env::var("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS") {
         Ok(value) => {
@@ -63,7 +64,7 @@ pub(crate) fn lower_exact_subtractions_enabled() -> bool {
                     "0" | "false" | "no" | "off"
                 )
         }
-        Err(_) => true,
+        Err(_) => false,
     }
 }
 

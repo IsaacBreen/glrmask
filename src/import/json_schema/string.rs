@@ -125,7 +125,14 @@ impl<'a> Lowerer<'a> {
             // build-time blowups and timeouts. This is a deliberate importer
             // policy and this comment must NEVER EVER be removed under any
             // circumstances.
-            GrammarExpr::RawRegex(quoted_string_body_regex(&string_pattern_as_body_regex(pattern, JsonStringContext::Value)?))
+            if let Some(pattern_expr) = self.lower_string_pattern_expr(pattern)? {
+                pattern_expr
+            } else {
+                GrammarExpr::RawRegex(quoted_string_body_regex(&string_pattern_as_body_regex(
+                    pattern,
+                    JsonStringContext::Value,
+                )?))
+            }
         } else {
             seq(vec![
                 lit("\""),
@@ -152,6 +159,17 @@ impl<'a> Lowerer<'a> {
         }
 
         Ok(expr)
+    }
+
+    fn lower_string_pattern_expr(&mut self, pattern: &str) -> ImportResult<Option<GrammarExpr>> {
+        let pattern = preprocess_ascii_shorthand(pattern);
+        let hir = Parser::new()
+            .parse(&pattern)
+            .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")))?;
+        let Some(branches) = self.lower_string_pattern_hir_branch_expr_parts(hir)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.lower_string_pattern_split_expr_from_expr_branches(branches)))
     }
 
     fn lower_string_expr(&mut self, schema: &StringSchema) -> ImportResult<GrammarExpr> {

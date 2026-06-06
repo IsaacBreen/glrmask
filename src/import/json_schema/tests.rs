@@ -137,19 +137,21 @@ fn start_expr(grammar: &NamedGrammar) -> &GrammarExpr {
 }
 
 #[test]
-fn exact_subtraction_lowering_env_var_defaults_true_and_accepts_falsey_values() {
+fn exact_subtraction_lowering_env_var_defaults_false_and_accepts_truthy_values() {
     let _lock = ENV_LOCK.lock().unwrap();
 
     let _unset = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS");
-    assert!(lower_exact_subtractions_enabled());
+    assert!(!lower_exact_subtractions_enabled());
 
     for value in ["", "0", "false", "FALSE", "no", "off"] {
         let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS", value);
         assert!(!lower_exact_subtractions_enabled(), "value {value:?} should disable exact-sub lowering");
     }
 
-    let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS", "1");
-    assert!(lower_exact_subtractions_enabled());
+    for value in ["1", "true", "yes", "on", "anything"] {
+        let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS", value);
+        assert!(lower_exact_subtractions_enabled(), "value {value:?} should enable exact-sub lowering");
+    }
 }
 
 #[test]
@@ -596,6 +598,34 @@ fn llguidance_compat_patterned_string_non_whitespace_unicode_escape_progression(
     let post_u_mask = post_u.mask();
     assert!(mask_contains(&post_u_mask, zero), "0 must be admitted after \\u");
     assert!(!mask_contains(&post_u_mask, upper_b), "B must remain rejected after \\u");
+}
+
+#[test]
+fn mre_llguidance_compat_non_whitespace_subtraction_mask_gap() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({"type": "string", "pattern": r"^(?:\S+\s+){0,9}\S+$"});
+
+    let grammar = schema_to_named_grammar(&schema).expect("schema should import");
+    let lowered = lower(&grammar).expect("schema grammar should lower");
+
+    let space_escaped_quote = 0u32;
+    let end_of_text = 1u32;
+    let vocab = Vocab::new(
+        vec![
+            (space_escaped_quote, b" \\\"".to_vec()),
+            (end_of_text, b"<|endoftext|>".to_vec()),
+        ],
+        Some(end_of_text),
+    );
+
+    let constraint = crate::compiler::compile_owned(lowered, &vocab);
+    let mut state = constraint.start();
+    state.commit_bytes(b"\"a").expect("prefix should be accepted");
+    let mask = state.mask();
+
+    // MRE: should be a non-whitespace continuation, but is rejected.
+    assert!(!mask_contains(&mask, space_escaped_quote));
 }
 fn mask_does_not_enable_json_u_by_runtime_patch() {
     let schema = json!({"type": "string", "pattern": r#"^[\w\.-_]+$"#});

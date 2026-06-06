@@ -51,6 +51,10 @@ pub fn prepare_vocab_for_compile(vocab: &Vocab) {
 }
 
 /// Dump the imported JSON Schema grammar in GLRM format.
+///
+/// This intentionally preserves exact subtraction syntax so dumps reflect the
+/// source-level structure. The compile/import pipeline may still apply exact
+/// subtraction lowering.
 pub fn dump_json_schema_grammar_glrm(schema_json: &str) -> Result<String> {
     let schema: serde_json::Value = serde_json::from_str(schema_json)
         .map_err(|e| GlrMaskError::GrammarParse(format!("invalid JSON: {e}")))?;
@@ -58,9 +62,6 @@ pub fn dump_json_schema_grammar_glrm(schema_json: &str) -> Result<String> {
     let mut factored = grammar::factoring::factor_named_grammar(named);
     if import::json_schema::simplify_grammar_enabled() {
         grammar::named_simplify::simplify_named_grammar(&mut factored);
-    }
-    if import::json_schema::lower_exact_subtractions_enabled() {
-        grammar::exact_subtraction_lowering::lower_exact_subtractions(&mut factored)?;
     }
     if import::json_schema::promote_literal_choices_enabled() {
         grammar::terminal_choice_promotion::promote_choice_terminals_exact(&mut factored, false);

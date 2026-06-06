@@ -58,6 +58,124 @@ fn byte_vocab_with_separator_token() -> (Vocab, u32) {
 }
 
 #[test]
+fn glrm_subtraction_space_escaped_quote_control_accepts_token() {
+    let grammar = r#"
+start s;
+
+nt s ::= "\"" "a" ws+ non_ws;
+t ws_char ::= " ";
+nt ws ::= ws_char;
+nt non_ws ::= json_char - ws_char;
+t json_char ::= /(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt]|\\u00(?:[01][0-9A-Fa-f]|7[Ff]))/;
+"#;
+
+    let token_id = 0u32;
+    let end_of_text = 1u32;
+    let vocab = Vocab::new(
+        vec![
+            (token_id, b" \\\"".to_vec()),
+            (end_of_text, b"<|endoftext|>".to_vec()),
+        ],
+        Some(end_of_text),
+    );
+
+    let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_bytes(b"\"a").unwrap();
+
+    // Control: this handcrafted GLRM still admits the token.
+    assert!(token_allowed(&state.mask(), token_id as usize));
+}
+
+#[test]
+fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _compat = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
+
+    let grammar = r####"start s;
+
+t JSON_STRING_CHAR ::= /(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\/\\bfnrt]|\\u[0-9A-Fa-f]{4})/;
+internal t JSON_STRING_PATTERN_WHITESPACE_CHAR ::= / / | /\\n/ | /\\r/ | /\\t/ | /\\f/ | // | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | /　/;
+internal t JSON_STRING_PATTERN_NON_WHITESPACE_CHAR ::= JSON_STRING_CHAR - JSON_STRING_PATTERN_WHITESPACE_CHAR;
+t json_string_pattern_body_1 ::= (JSON_STRING_PATTERN_NON_WHITESPACE_CHAR+ JSON_STRING_PATTERN_WHITESPACE_CHAR+){0,9} JSON_STRING_PATTERN_NON_WHITESPACE_CHAR+;
+t s ::= "\"" json_string_pattern_body_1 "\"";
+"####;
+    let token_id = 0u32;
+    let end_of_text = 1u32;
+    let vocab = Vocab::new(
+        vec![
+            (token_id, b" \\\"".to_vec()),
+            (end_of_text, b"<|endoftext|>".to_vec()),
+        ],
+        Some(end_of_text),
+    );
+
+    let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_bytes(b"\"a").unwrap();
+    assert!(!token_allowed(&state.mask(), token_id as usize));
+}
+
+#[test]
+fn simplified_non_ws_body_no_prefix_quote_only_vs_space_quote() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _compat = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
+
+    let grammar = r####"start s;
+
+t JSON_STRING_CHAR ::= /(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\/\\bfnrt]|\\u[0-9A-Fa-f]{4})/;
+internal t JSON_STRING_PATTERN_WHITESPACE_CHAR ::= / / | /\\n/ | /\\r/ | /\\t/ | /\\f/ | // | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | /　/;
+internal t JSON_STRING_PATTERN_NON_WHITESPACE_CHAR ::= JSON_STRING_CHAR - JSON_STRING_PATTERN_WHITESPACE_CHAR;
+t json_string_pattern_body_1 ::= (JSON_STRING_PATTERN_NON_WHITESPACE_CHAR+ JSON_STRING_PATTERN_WHITESPACE_CHAR+){0,9} JSON_STRING_PATTERN_NON_WHITESPACE_CHAR+;
+t s ::= "\"" json_string_pattern_body_1;
+"####;
+
+    let token_quote_only = 0u32;
+    let end_of_text = 1u32;
+    let vocab = Vocab::new(
+        vec![
+            (token_quote_only, b"\\\"".to_vec()),
+            (end_of_text, b"<|endoftext|>".to_vec()),
+        ],
+        Some(end_of_text),
+    );
+
+    let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+    let state = constraint.start();
+    let mask = state.mask();
+    assert!(!token_allowed(&mask, token_quote_only as usize));
+}
+
+#[test]
+fn simplified_ws_then_non_ws_then_dollar_allows_space_then_quote_token() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _compat = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
+
+    let grammar = r####"start s;
+
+t JSON_STRING_CHAR ::= /(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\/\\bfnrt]|\\u[0-9A-Fa-f]{4})/;
+internal t JSON_STRING_PATTERN_WHITESPACE_CHAR ::= / / | /\\n/ | /\\r/ | /\\t/ | /\\f/ | // | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | /　/;
+internal t JSON_STRING_PATTERN_NON_WHITESPACE_CHAR ::= JSON_STRING_CHAR - JSON_STRING_PATTERN_WHITESPACE_CHAR;
+t s ::= JSON_STRING_PATTERN_WHITESPACE_CHAR JSON_STRING_PATTERN_NON_WHITESPACE_CHAR "$";
+"####;
+
+    let token_space_quote = 0u32;
+    let end_of_text = 1u32;
+    let vocab = Vocab::new(
+        vec![
+            (token_space_quote, b" \\\"".to_vec()),
+            (end_of_text, b"<|endoftext|>".to_vec()),
+        ],
+        Some(end_of_text),
+    );
+
+    let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+    let state = constraint.start();
+    let mask = state.mask();
+    assert!(token_allowed(&mask, token_space_quote as usize));
+}
+
+#[test]
 fn chunk16_bounded_service_name_allows_spaces_token_after_open_quote() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _chunk = EnvVarGuard::set("GLRMASK_STRING_REPEAT_CHUNK", "16");
