@@ -1797,6 +1797,13 @@ fn lower_decoded_class_to_json_body_regex(class: &Class, context: JsonStringCont
     if is_unicode_decimal_digit_class(class) {
         return "[0-9]".to_string();
     }
+    if is_unicode_pattern_non_whitespace_class(class)
+        && matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative)
+        && matches!(context, JsonStringContext::Value)
+    {
+        return json_string_body_non_whitespace_char_regex_in_mode(json_string_compat_mode(), context)
+            .to_string();
+    }
     if is_dot_like_unicode_class(class) {
         return json_string_body_dot_regex_in_mode(json_string_compat_mode(), context).to_string();
     }
@@ -1863,6 +1870,18 @@ fn lower_decoded_class_to_json_body_regex(class: &Class, context: JsonStringCont
         0 => r"[^\s\S]".to_string(),
         1 => alternatives.remove(0),
         _ => format!("(?:{})", alternatives.join("|")),
+    }
+}
+
+fn json_string_body_non_whitespace_char_regex_in_mode(
+    mode: JsonStringCompatMode,
+    context: JsonStringContext,
+) -> &'static str {
+    match (mode, context) {
+        (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::Value) => {
+            r#"(?:[!\#-\[\]-\~]|\\"|/|\\\\|\\b|\\u00(?:[01][0-9A-Fa-f]|7[Ff])|(?:\xC2[\x80-\x84\x86-\x9F\xA1-\xBF]|[\xC3-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|\xE1[\x80-\x99\x9B-\xBF][\x80-\xBF]|\xE1\x9A[\x81-\xBF]|\xE2\x80[\x8B-\xA7\xAA-\xAE\xB0-\xBF]|\xE2\x81[\x80-\x9E\xA0-\xBF]|\xE2[\x82-\xBF][\x80-\xBF]|\xE3\x80[\x81-\xBF]|\xE3[\x81-\xBF][\x80-\xBF]|[\xE4-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}))"#
+        }
+        _ => json_string_body_char_regex_in_mode(mode, context),
     }
 }
 
