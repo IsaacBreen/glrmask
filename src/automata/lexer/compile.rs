@@ -2438,4 +2438,43 @@ mod tests {
         assert!(!terminal_matches(expr, b"ab"));
     }
 
+    #[test]
+    fn bounded_repeat_zero_max_literal_suffix_must_not_consume_body() {
+        // "a"{0,0} "b" is just "b".
+        //
+        // If this passes while the U8Class version fails, max=0 is specifically
+        // broken in build_bounded_repeat_with_regex_suffix.
+        // If this also fails, max=0 is broken in a more general repeat path.
+        let expr = Expr::Seq(vec![
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(vec![b'a'])),
+                min: 0,
+                max: Some(0),
+            },
+            Expr::U8Seq(vec![b'b']),
+        ]);
+        assert!(terminal_matches(expr.clone(), b"b"));
+        assert!(!terminal_matches(expr, b"ab"));
+    }
+
+    #[test]
+    fn bounded_repeat_regex_suffix_nullable_class_suffix_finalizes_after_body() {
+        // "a" [b]?
+        //
+        // Should match both "a" and "ab".
+        let expr = Expr::Seq(vec![
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(vec![b'a'])),
+                min: 1,
+                max: Some(1),
+            },
+            Expr::Choice(vec![
+                Expr::Epsilon,
+                Expr::U8Class(U8Set::single(b'b')),
+            ]),
+        ]);
+        assert!(terminal_matches(expr.clone(), b"a"));
+        assert!(terminal_matches(expr, b"ab"));
+    }
+
 }
