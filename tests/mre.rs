@@ -98,7 +98,7 @@ t JSON_STRING_CHAR ::= /(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|
 internal t JSON_STRING_PATTERN_WHITESPACE_CHAR ::= / / | /\\n/ | /\\r/ | /\\t/ | /\\f/ | // | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | /　/;
 internal t JSON_STRING_PATTERN_NON_WHITESPACE_CHAR ::= JSON_STRING_CHAR - JSON_STRING_PATTERN_WHITESPACE_CHAR;
 t json_string_pattern_body_1 ::= (JSON_STRING_PATTERN_NON_WHITESPACE_CHAR+ JSON_STRING_PATTERN_WHITESPACE_CHAR+){0,9} JSON_STRING_PATTERN_NON_WHITESPACE_CHAR+;
-t s ::= "\"" json_string_pattern_body_1 "\"";
+t s ::= json_string_pattern_body_1 "$";
 "####;
     let token_id = 0u32;
     let end_of_text = 1u32;
@@ -112,7 +112,7 @@ t s ::= "\"" json_string_pattern_body_1 "\"";
 
     let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"a").unwrap();
+    state.commit_bytes(b"a").unwrap();
     assert!(!token_allowed(&state.mask(), token_id as usize));
 }
 
