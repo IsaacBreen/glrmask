@@ -1837,10 +1837,8 @@ mod tests {
     use super::build_regex;
     use super::compile_product_component_dfa_direct;
     use crate::automata::lexer::ast::Expr;
-    use crate::automata::lexer::dfa::DFA;
     use crate::automata::lexer::regex::parse_regex;
     use crate::automata::lexer::tokenizer::Tokenizer;
-    use crate::ds::bitset::BitSet;
     use crate::ds::u8set::U8Set;
     use std::sync::Arc;
 
@@ -2366,28 +2364,6 @@ mod tests {
     }
 
     #[test]
-    fn bounded_repeat_regex_suffix_nullable_suffix_finalizes_after_body() {
-        // Semantically:
-        //
-        //   "a"? ε
-        //
-        // should match both "" and "a".
-        //
-        // This diagnoses a boundary bug where repeat count only increments when
-        // another byte arrives. With nullable suffix, there may be no next byte.
-        let expr = Expr::Seq(vec![
-            Expr::Repeat {
-                expr: Box::new(Expr::U8Seq(vec![b'a'])),
-                min: 0,
-                max: Some(1),
-            },
-            Expr::Epsilon,
-        ]);
-        assert!(terminal_matches(expr.clone(), b""));
-        assert!(terminal_matches(expr, b"a"));
-    }
-
-    #[test]
     fn bounded_repeat_regex_suffix_nullable_optional_suffix_finalizes_after_required_body() {
         // Slightly less artificial than bare ε:
         //
@@ -2403,6 +2379,28 @@ mod tests {
             Expr::Choice(vec![Expr::Epsilon, Expr::U8Seq(vec![b'b'])]),
         ]);
         assert!(terminal_matches(expr.clone(), b"a"));
+        assert!(terminal_matches(expr, b"ab"));
+    }
+
+    #[test]
+    fn bounded_repeat_regex_suffix_nullable_suffix_after_optional_body() {
+        // ("a")? ("b")?
+        //
+        // Valid strings: "", "a", "b", "ab".
+        //
+        // This checks whether repeated body and nullable suffix are finalized
+        // correctly at end-of-input.
+        let expr = Expr::Seq(vec![
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(vec![b'a'])),
+                min: 0,
+                max: Some(1),
+            },
+            Expr::Choice(vec![Expr::Epsilon, Expr::U8Seq(vec![b'b'])]),
+        ]);
+        assert!(terminal_matches(expr.clone(), b""));
+        assert!(terminal_matches(expr.clone(), b"a"));
+        assert!(terminal_matches(expr.clone(), b"b"));
         assert!(terminal_matches(expr, b"ab"));
     }
 
@@ -2426,26 +2424,18 @@ mod tests {
     }
 
     #[test]
-    fn optional_choice_direct_dfa_must_not_mark_reachable_start_accepting() {
-        // Diagnose direct-optimizer invariant issue for ε | X when X start state
-        // is reachable after consuming bytes.
-        let mut dfa = DFA::new(2);
-        dfa.ensure_group_capacity(1);
-        dfa.set_group_u8set(0, U8Set::from_bytes(b"ab"));
-        let mut future0 = BitSet::new(1);
-        future0.set(0);
-        dfa.overwrite_state_metadata(0, BitSet::new(1), future0);
-        dfa.set_transitions_from_sorted_entries(0, vec![(b'a', 0), (b'b', 1)]);
-        let mut final1 = BitSet::new(1);
-        final1.set(0);
-        dfa.overwrite_state_metadata(1, final1, BitSet::new(1));
-
-        let expr = Expr::Choice(vec![Expr::Epsilon, Expr::Dfa(Arc::new(dfa))]);
-        assert!(terminal_matches(expr.clone(), b""));
+    fn bounded_repeat_regex_suffix_zero_max_literal_suffix_must_not_consume_body() {
+        // "a"{0,0} "b" is just "b".
+        let expr = Expr::Seq(vec![
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(vec![b'a'])),
+                min: 0,
+                max: Some(0),
+            },
+            Expr::U8Seq(vec![b'b']),
+        ]);
         assert!(terminal_matches(expr.clone(), b"b"));
-        assert!(terminal_matches(expr.clone(), b"ab"));
-        assert!(terminal_matches(expr.clone(), b"aab"));
-        assert!(!terminal_matches(expr, b"a"));
+        assert!(!terminal_matches(expr, b"ab"));
     }
 
 }

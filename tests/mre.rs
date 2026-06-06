@@ -179,6 +179,34 @@ fn bounded_repeat_suffix_must_not_greedily_drop_suffix_path() {
 }
 
 #[test]
+fn optional_choice_must_not_accept_prefix_after_loop_to_start() {
+    let token_a = 0u32;
+    let token_b = 1u32;
+    let token_ab = 2u32;
+    let vocab = Vocab::new(
+        vec![
+            (token_a, b"a".to_vec()),
+            (token_b, b"b".to_vec()),
+            (token_ab, b"ab".to_vec()),
+        ],
+        None,
+    );
+
+    let grammar = r####"
+        start s;
+        nt s ::= X "$";
+        t X ::= "a"* "b" | "";
+    "####;
+
+    let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+    let state = constraint.start();
+    let mask = state.mask();
+    assert!(!token_allowed(&mask, token_a as usize));
+    assert!(token_allowed(&mask, token_b as usize));
+    assert!(token_allowed(&mask, token_ab as usize));
+}
+
+#[test]
 fn chunk16_bounded_service_name_allows_spaces_token_after_open_quote() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _chunk = EnvVarGuard::set("GLRMASK_STRING_REPEAT_CHUNK", "16");
