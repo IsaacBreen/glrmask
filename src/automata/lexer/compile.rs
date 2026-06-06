@@ -808,20 +808,31 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
     let mut dfa = DFA::new(1);
     dfa.ensure_group_capacity(1);
 
+    let start_body = if max == 0 { body_dead } else { 0u32 };
     let start_suffix = if min == 0 { 0u32 } else { suffix_dead };
-    let start_key = (0u32, start_suffix, 0u32);
+    let start_key = (start_body, start_suffix, 0u32);
     state_map.insert(start_key, 0);
     worklist.push_back((0, start_key));
 
     {
-        let is_accept = start_suffix < suffix_dead
-            && !suffix_dfa.finalizers(start_suffix).is_empty();
+        let (b, s, c) = start_key;
+        let body_is_accept = b < body_dead && !body_dfa.finalizers(b).is_empty();
+        let is_accept = (s < suffix_dead
+            && !suffix_dfa.finalizers(s).is_empty()
+            && c >= min as u32)
+            || (body_is_accept
+                && c + 1 >= min as u32
+                && c + 1 <= max as u32
+                && !suffix_dfa.finalizers(0).is_empty());
         let mut finalizers = BitSet::new(1);
         let mut future = BitSet::new(1);
         if is_accept {
             finalizers.set(0);
         }
-        future.set(0);
+        let has_future = b < body_dead || s < suffix_dead;
+        if has_future {
+            future.set(0);
+        }
         dfa.overwrite_state_metadata(0, finalizers, future);
     }
 
@@ -837,53 +848,53 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
             } else {
                 body_dead
             };
+            let s_next = if s < suffix_dead {
+                suffix_dfa.step(s, x).map_or(suffix_dead, |t| t)
+            } else {
+                suffix_dead
+            };
 
-            // If body can both continue on this byte and legally finish before this
-            // byte so suffix can start, this compact state model cannot represent both
-            // live paths at once. Fall back to general construction to preserve exactness.
-            if body_is_accept && b_next != body_dead {
-                let completed_count = c + 1;
-                if completed_count <= max as u32 && completed_count >= min as u32 {
-                    let fresh_suffix = suffix_dfa.step(0, x).map_or(suffix_dead, |t| t);
-                    if fresh_suffix != suffix_dead {
-                        return None;
-                    }
+            let option1_active = b_next != body_dead;
+
+            let mut option2_active = false;
+            let mut fresh_b = body_dead;
+            let mut fresh_s = suffix_dead;
+            let new_c = c + 1;
+
+            if body_is_accept && new_c <= max as u32 {
+                fresh_b = if new_c < max as u32 {
+                    body_dfa.step(0, x).map_or(body_dead, |t| t)
+                } else {
+                    body_dead
+                };
+                fresh_s = if new_c >= min as u32 {
+                    suffix_dfa.step(0, x).map_or(suffix_dead, |t| t)
+                } else {
+                    suffix_dead
+                };
+                if fresh_b != body_dead || fresh_s != suffix_dead {
+                    option2_active = true;
                 }
             }
 
-            let (final_b, final_s, final_c) =
-                if body_is_accept && b_next == body_dead {
-                    let new_c = c + 1;
-                    let new_b = if new_c < max as u32 {
-                        body_dfa.step(0, x).map_or(body_dead, |t| t)
-                    } else {
-                        body_dead
-                    };
-                    let old_s_next = if s < suffix_dead {
-                        suffix_dfa.step(s, x).map_or(suffix_dead, |t| t)
-                    } else {
-                        suffix_dead
-                    };
-                    let fresh_s = if new_c >= min as u32 {
-                        suffix_dfa.step(0, x).map_or(suffix_dead, |t| t)
-                    } else {
-                        suffix_dead
-                    };
-                    let new_s = match (old_s_next < suffix_dead, fresh_s < suffix_dead) {
-                        (true, true) if old_s_next != fresh_s => return None,
-                        (true, _) => old_s_next,
-                        (_, true) => fresh_s,
-                        _ => suffix_dead,
-                    };
-                    (new_b, new_s, new_c)
-                } else {
-                    let s_next = if s < suffix_dead {
-                        suffix_dfa.step(s, x).map_or(suffix_dead, |t| t)
-                    } else {
-                        suffix_dead
-                    };
-                    (b_next, s_next, c)
+            if option1_active && option2_active {
+                // If body can both continue on this byte and legally finish before this
+                // byte so suffix/new-body can start, this compact state model cannot represent
+                // both live paths at once. Fall back to general construction.
+                return None;
+            }
+
+            let (final_b, final_s, final_c) = if option2_active {
+                let merged_s = match (s_next < suffix_dead, fresh_s < suffix_dead) {
+                    (true, true) if s_next != fresh_s => return None,
+                    (true, _) => s_next,
+                    (_, true) => fresh_s,
+                    _ => suffix_dead,
                 };
+                (fresh_b, merged_s, new_c)
+            } else {
+                (b_next, s_next, c)
+            };
 
             if final_b == body_dead && final_s == suffix_dead {
                 continue;
@@ -895,9 +906,14 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
                     existing
                 } else {
                     let new_state = dfa.add_state();
-                    let accept = final_s < suffix_dead
+                    let target_body_is_accept = final_b < body_dead && !body_dfa.finalizers(final_b).is_empty();
+                    let accept = (final_s < suffix_dead
                         && !suffix_dfa.finalizers(final_s).is_empty()
-                        && final_c >= min as u32;
+                        && final_c >= min as u32)
+                        || (target_body_is_accept
+                            && final_c + 1 >= min as u32
+                            && final_c + 1 <= max as u32
+                            && !suffix_dfa.finalizers(0).is_empty());
                     let has_future = final_b < body_dead || final_s < suffix_dead;
                     let mut finalizers = BitSet::new(1);
                     let mut future = BitSet::new(1);
