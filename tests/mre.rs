@@ -397,7 +397,7 @@ fn sp343_delete_only_subset_separator_wave_matches_cfa_oracle() {
         "commit_profile={commit_profile:#?} advances={advances:#?} final_stacks={final_stacks:#?}",
     );
 
-    for (i, advance) in advances.iter().enumerate() {
+    for advance in &advances {
         assert_eq!(advance.profile.n_nondet_waves, 0);
         assert_eq!(advance.profile.n_nondet_reduce_ops, 0);
         assert_eq!(advance.profile.n_nondet_merges, 0);
