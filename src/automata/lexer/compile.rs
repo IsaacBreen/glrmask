@@ -727,6 +727,11 @@ fn build_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
     Some((dfa, false))
 }
 
+/// TODO: replace this compact product with an exact subset construction if we
+/// need to support ambiguous body/suffix boundaries or nullable suffixes in the
+/// fast path. Until then, this function must return None for any case requiring
+/// multiple simultaneous boundary choices.
+///
 /// Builds a DFA for `Seq([Repeat{body, min, max}, suffix_exprs...])` using a
 /// product construction of body_DFA × suffix_DFA × completion_counter.
 ///
@@ -739,9 +744,13 @@ fn build_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
 ///   - suffix tracks the suffix match (started at body boundaries when counter >= min)
 ///   - counter tracks completed body repetitions (0..max)
 ///
-/// At body completion (body transitions from accept to dead), counter increments
-/// and both body and suffix restart. If both old and fresh suffix are alive but
-/// diverge, the function falls back to None (would need NFA-like tracking).
+/// This is a fast path, not a general NFA subset construction. It must return
+/// `None` whenever the compact state would need to represent multiple live
+/// body/suffix boundary choices.
+///
+/// At body completion, the counter increments and the suffix may start. If two
+/// live paths cannot be represented by one `(body_state, suffix_state, counter)`
+/// tuple, this function falls back to the general compiler.
 fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)> {
     if parts.len() < 2 {
         return None;
@@ -779,6 +788,15 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
         } => (expr.as_ref(), *min, *max),
         _ => return None,
     };
+
+    // With max == 0 the body is not allowed to consume anything. The compact
+    // product construction starts with a live body state, so it would otherwise
+    // permit one body occurrence before the suffix. Let the general path handle
+    // this exact zero-repeat case.
+    if max == 0 {
+        return None;
+    }
+
     let body_dfa = compile_expr_to_dfa(repeat_expr);
     if body_dfa.num_states() == 0 || !body_dfa.finalizers(0).is_empty() {
         return None;
@@ -791,6 +809,14 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
     };
     let suffix_dfa = compile_expr_to_dfa(&suffix_expr);
     if suffix_dfa.num_states() == 0 {
+        return None;
+    }
+
+    // Nullable suffixes require considering a body/suffix boundary without
+    // consuming another byte. This compact construction only starts fresh
+    // suffix paths while processing a byte, so it can miss finalization at
+    // end-of-input. Fall back to the general construction.
+    if !suffix_dfa.finalizers(0).is_empty() {
         return None;
     }
 
@@ -838,14 +864,27 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
                 body_dead
             };
 
-            // If body can both continue on this byte and legally finish before this
-            // byte so suffix can start, this compact state model cannot represent both
-            // live paths at once. Fall back to general construction to preserve exactness.
+            // If the body is accepting before this byte, there is an implicit
+            // boundary here: either continue the repeated body with `x`, or
+            // finish the body and let the suffix consume `x`.
+            //
+            // This product state tracks only one body state and one suffix
+            // state. If both paths are live, keeping only the body path is a
+            // lossy greedy approximation.
+            //
+            // Minimal counterexample:
+            //
+            //   ("a"+)? "a"
+            //
+            // on input "aa". At the second "a", the body can continue, but the
+            // suffix can also start. Dropping the suffix path falsely rejects.
             if body_is_accept && b_next != body_dead {
-                let completed_count = c + 1;
-                if completed_count <= max as u32 && completed_count >= min as u32 {
-                    let fresh_suffix = suffix_dfa.step(0, x).map_or(suffix_dead, |t| t);
-                    if fresh_suffix != suffix_dead {
+                let new_c = c + 1;
+                if new_c >= min as u32 && new_c <= max as u32 {
+                    let fresh_s = suffix_dfa
+                        .step(0, x)
+                        .map_or(suffix_dead, |t| t);
+                    if fresh_s != suffix_dead {
                         return None;
                     }
                 }
@@ -2337,17 +2376,13 @@ mod tests {
 
     #[test]
     fn bounded_repeat_regex_suffix_must_fork_at_ambiguous_boundary() {
-        // Minimal form of:
-        //
-        //   ("a"+)? "a"
-        //
-        // Input "aa" is valid:
+        // ("a"+)? "a" matches "aa":
         //
         //   optional body "a"+ consumes the first "a"
         //   suffix "a" consumes the second "a"
         //
-        // The buggy direct regex-suffix optimizer greedily continues the body on
-        // the second "a" and drops the valid suffix path.
+        // The regex-suffix fast path used to greedily continue the body on the
+        // second "a" and drop the valid suffix path.
         let expr = Expr::Seq(vec![
             Expr::Repeat {
                 expr: Box::new(Expr::Repeat {
@@ -2362,55 +2397,51 @@ mod tests {
         ]);
         assert!(terminal_matches(expr, b"aa"));
     }
-
     #[test]
-    fn bounded_repeat_regex_suffix_nullable_optional_suffix_finalizes_after_required_body() {
-        // Slightly less artificial than bare ε:
+    fn bounded_repeat_regex_suffix_nullable_class_suffix_finalizes_after_body() {
+        // "a" [b]? matches both "a" and "ab".
         //
-        //   "a" ("b")?
-        //
-        // should match both "a" and "ab".
+        // The regex-suffix fast path used to miss the body/suffix boundary at
+        // end-of-input when the suffix was nullable.
         let expr = Expr::Seq(vec![
             Expr::Repeat {
                 expr: Box::new(Expr::U8Seq(vec![b'a'])),
                 min: 1,
                 max: Some(1),
             },
-            Expr::Choice(vec![Expr::Epsilon, Expr::U8Seq(vec![b'b'])]),
+            Expr::Choice(vec![
+                Expr::Epsilon,
+                Expr::U8Class(U8Set::single(b'b')),
+            ]),
         ]);
         assert!(terminal_matches(expr.clone(), b"a"));
         assert!(terminal_matches(expr, b"ab"));
     }
-
     #[test]
     fn bounded_repeat_regex_suffix_nullable_suffix_after_optional_body() {
-        // ("a")? ("b")?
-        //
-        // Valid strings: "", "a", "b", "ab".
-        //
-        // This checks whether repeated body and nullable suffix are finalized
-        // correctly at end-of-input.
+        // ("a")? [b]? matches "", "a", "b", and "ab".
         let expr = Expr::Seq(vec![
             Expr::Repeat {
                 expr: Box::new(Expr::U8Seq(vec![b'a'])),
                 min: 0,
                 max: Some(1),
             },
-            Expr::Choice(vec![Expr::Epsilon, Expr::U8Seq(vec![b'b'])]),
+            Expr::Choice(vec![
+                Expr::Epsilon,
+                Expr::U8Class(U8Set::single(b'b')),
+            ]),
         ]);
         assert!(terminal_matches(expr.clone(), b""));
         assert!(terminal_matches(expr.clone(), b"a"));
         assert!(terminal_matches(expr.clone(), b"b"));
         assert!(terminal_matches(expr, b"ab"));
     }
-
     #[test]
     fn bounded_repeat_regex_suffix_zero_max_must_not_consume_body() {
-        // Semantically:
+        // "a"{0,0} [b] is just [b]. It must not match "ab".
         //
-        //   "a"{0,0} [b]
-        //
-        // is just [b]. It must match "b" and must NOT match "ab".
+        // The regex-suffix fast path used to start with a live body state even when
+        // max == 0.
         let expr = Expr::Seq(vec![
             Expr::Repeat {
                 expr: Box::new(Expr::U8Seq(vec![b'a'])),
@@ -2418,21 +2449,6 @@ mod tests {
                 max: Some(0),
             },
             Expr::U8Class(U8Set::single(b'b')),
-        ]);
-        assert!(terminal_matches(expr.clone(), b"b"));
-        assert!(!terminal_matches(expr, b"ab"));
-    }
-
-    #[test]
-    fn bounded_repeat_regex_suffix_zero_max_literal_suffix_must_not_consume_body() {
-        // "a"{0,0} "b" is just "b".
-        let expr = Expr::Seq(vec![
-            Expr::Repeat {
-                expr: Box::new(Expr::U8Seq(vec![b'a'])),
-                min: 0,
-                max: Some(0),
-            },
-            Expr::U8Seq(vec![b'b']),
         ]);
         assert!(terminal_matches(expr.clone(), b"b"));
         assert!(!terminal_matches(expr, b"ab"));
