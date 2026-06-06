@@ -838,6 +838,19 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
                 body_dead
             };
 
+            // If body can both continue on this byte and legally finish before this
+            // byte so suffix can start, this compact state model cannot represent both
+            // live paths at once. Fall back to general construction to preserve exactness.
+            if body_is_accept && b_next != body_dead {
+                let completed_count = c + 1;
+                if completed_count <= max as u32 && completed_count >= min as u32 {
+                    let fresh_suffix = suffix_dfa.step(0, x).map_or(suffix_dead, |t| t);
+                    if fresh_suffix != suffix_dead {
+                        return None;
+                    }
+                }
+            }
+
             let (final_b, final_s, final_c) =
                 if body_is_accept && b_next == body_dead {
                     let new_c = c + 1;
