@@ -94,7 +94,7 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
 
     let grammar = r####"
         start s;
-        nt s ::= JSON_STRING_PATTERN_WHITESPACE_CHAR "$";
+        nt s ::= JSON_STRING_PATTERN_NON_WHITESPACE_CHAR JSON_STRING_PATTERN_WHITESPACE_CHAR "$";
         t JSON_STRING_PATTERN_NON_WHITESPACE_CHAR ::= JSON_STRING_CHAR - JSON_STRING_PATTERN_WHITESPACE_CHAR;
         t JSON_STRING_CHAR ::= /(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\/\\bfnrt]|\\u[0-9A-Fa-f]{4})/;
         t JSON_STRING_PATTERN_WHITESPACE_CHAR ::= / / | /\\n/ | /\\r/ | /\\t/ | /\\f/ | // | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | /　/;
