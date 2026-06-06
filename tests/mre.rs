@@ -1,4 +1,4 @@
-use std::{env, ffi::OsString, sync::Mutex};
+use std::{env, ffi::OsString, sync::{Mutex, MutexGuard}};
 
 use glrmask::{Constraint, Vocab};
 
@@ -36,6 +36,10 @@ fn token_allowed(mask: &[u32], id: usize) -> bool {
     mask.get(id / 32)
         .map(|word| (word >> (id % 32)) & 1 != 0)
         .unwrap_or(false)
+}
+
+fn env_lock() -> MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn total_parser_stack_count(state: &glrmask::ConstraintState<'_>) -> usize {
@@ -251,7 +255,7 @@ fn chunk16_bounded_service_name_allows_spaces_token_after_open_quote() {
 #[test]
 #[ignore = "known-failing SP343 profile oracle diagnostic; run explicitly while investigating parser-wave collapse"]
 fn minimized_sp343_separator_wave_matches_profile_oracle() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
     let _trace = EnvVarGuard::set("GLRMASK_PROFILE_ADVANCE_TRACE", "1");
 
     let schema = r#"{
@@ -290,25 +294,79 @@ fn minimized_sp343_separator_wave_matches_profile_oracle() {
 
     let mut state = constraint.start();
     state.commit_bytes(prefix).unwrap();
+
+    eprintln!(
+        "\n[sp343:minimized] after prefix: has_parser_ambiguity={} parser_path_count={} total_parser_stack_count={}",
+        state.has_parser_ambiguity(),
+        state.parser_path_count(1_000_000),
+        total_parser_stack_count(&state),
+    );
+    eprintln!(
+        "[sp343:minimized] parser stacks after prefix:\n{:#?}",
+        state.debug_parser_stacks(),
+    );
+
     assert!(
         !state.has_parser_ambiguity(),
         "recognizer-equivalent parser branches should be represented by one suffix state: {:?}",
         state.debug_parser_stacks(),
     );
 
-    assert!(token_allowed(&state.mask(), separator_token_id as usize));
-    assert_eq!(state.parser_path_count(1_000_000), 1);
-    assert_eq!(total_parser_stack_count(&state), 1);
+    let mask = state.mask();
+    eprintln!(
+        "[sp343:minimized] separator_token_id={separator_token_id} token_allowed={}",
+        token_allowed(&mask, separator_token_id as usize),
+    );
+    assert!(token_allowed(&mask, separator_token_id as usize));
+
+    let path_count = state.parser_path_count(1_000_000);
+    let stack_count = total_parser_stack_count(&state);
+    eprintln!(
+        "[sp343:minimized] path_count={path_count} stack_count={stack_count}",
+    );
+    assert_eq!(path_count, 1);
+    assert_eq!(stack_count, 1);
 
     let (advances, final_stacks, commit_profile) = state.commit_token_per_advance(separator_token_id).unwrap();
 
-    assert_eq!(advances.len(), 1);
-    assert_eq!(commit_profile.adv_n_nondet_waves, 0);
-    assert_eq!(commit_profile.adv_n_nondet_reduce_ops, 0);
-    assert_eq!(commit_profile.adv_n_nondet_merges, 0);
-    assert_eq!(commit_profile.adv_n_nondet_isolates, 0);
+    eprintln!(
+        "[sp343:minimized] commit: advances_len={} final_stack_count={} commit_profile={:#?}",
+        advances.len(),
+        total_final_stack_count(&final_stacks),
+        commit_profile,
+    );
+    eprintln!(
+        "[sp343:minimized] final_stacks:\n{:#?}",
+        final_stacks,
+    );
+
+    assert_eq!(advances.len(), 1, "advances={advances:#?}");
+    assert_eq!(
+        commit_profile.adv_n_nondet_waves, 0,
+        "commit_profile={commit_profile:#?} advances={advances:#?} final_stacks={final_stacks:#?}",
+    );
+    assert_eq!(
+        commit_profile.adv_n_nondet_reduce_ops, 0,
+        "commit_profile={commit_profile:#?} advances={advances:#?} final_stacks={final_stacks:#?}",
+    );
+    assert_eq!(
+        commit_profile.adv_n_nondet_merges, 0,
+        "commit_profile={commit_profile:#?} advances={advances:#?} final_stacks={final_stacks:#?}",
+    );
+    assert_eq!(
+        commit_profile.adv_n_nondet_isolates, 0,
+        "commit_profile={commit_profile:#?} advances={advances:#?} final_stacks={final_stacks:#?}",
+    );
 
     let advance = &advances[0];
+    eprintln!(
+        "[sp343:minimized] advance[0]: profile={:#?} before_len={} after_len={} before={:#?} after={:#?}",
+        advance.profile,
+        advance.gss_stacks_before.len(),
+        advance.gss_stacks_after.len(),
+        advance.gss_stacks_before,
+        advance.gss_stacks_after,
+    );
     assert_eq!(advance.profile.n_nondet_waves, 0);
     assert_eq!(advance.profile.n_nondet_reduce_ops, 0);
     assert_eq!(advance.profile.n_nondet_merges, 0);
@@ -321,7 +379,7 @@ fn minimized_sp343_separator_wave_matches_profile_oracle() {
 #[test]
 #[ignore = "known-failing SP343 profile oracle diagnostic; run explicitly while investigating parser-wave collapse"]
 fn sp343_delete_only_subset_separator_wave_matches_cfa_oracle() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = env_lock();
 
     // Deletion-only subset of CFA `jsb/data/Snowplow---sp_343_Normalized`.
     // This keeps the same `failure.messages[*]` branches that produce the
@@ -336,6 +394,20 @@ fn sp343_delete_only_subset_separator_wave_matches_cfa_oracle() {
     let mut state = constraint.start();
     state.commit_bytes(prefix).unwrap();
 
+    eprintln!(
+        "\n[sp343:delete-only] after prefix: has_parser_ambiguity={} parser_path_count={} total_parser_stack_count={}",
+        state.has_parser_ambiguity(),
+        state.parser_path_count(1_000_000),
+        total_parser_stack_count(&state),
+    );
+    eprintln!(
+        "[sp343:delete-only] parser stacks after prefix:\n{:#?}",
+        state.debug_parser_stacks(),
+    );
+    eprintln!(
+        "[sp343:delete-only] separator_token_id={separator_token_id} token_allowed={}",
+        token_allowed(&state.mask(), separator_token_id as usize),
+    );
     assert!(token_allowed(&state.mask(), separator_token_id as usize));
     assert!(
         !state.has_parser_ambiguity(),
@@ -345,12 +417,47 @@ fn sp343_delete_only_subset_separator_wave_matches_cfa_oracle() {
 
     let (advances, final_stacks, commit_profile) =
         state.commit_token_per_advance(separator_token_id).unwrap();
-    assert_eq!(advances.len(), 1);
-    assert_eq!(commit_profile.adv_n_nondet_waves, 0);
-    assert_eq!(commit_profile.adv_n_nondet_reduce_ops, 0);
-    assert_eq!(commit_profile.adv_n_nondet_merges, 0);
-    assert_eq!(commit_profile.adv_n_nondet_isolates, 0);
+
+    eprintln!(
+        "[sp343:delete-only] commit: advances_len={} final_stack_count={} commit_profile={:#?}",
+        advances.len(),
+        total_final_stack_count(&final_stacks),
+        commit_profile,
+    );
+    eprintln!(
+        "[sp343:delete-only] final_stacks:\n{:#?}",
+        final_stacks,
+    );
+
+    assert_eq!(advances.len(), 1, "advances={advances:#?}");
+    assert_eq!(
+        commit_profile.adv_n_nondet_waves, 0,
+        "commit_profile={commit_profile:#?} advances={advances:#?} final_stacks={final_stacks:#?}",
+    );
+    assert_eq!(
+        commit_profile.adv_n_nondet_reduce_ops, 0,
+        "commit_profile={commit_profile:#?} advances={advances:#?} final_stacks={final_stacks:#?}",
+    );
+    assert_eq!(
+        commit_profile.adv_n_nondet_merges, 0,
+        "commit_profile={commit_profile:#?} advances={advances:#?} final_stacks={final_stacks:#?}",
+    );
+    assert_eq!(
+        commit_profile.adv_n_nondet_isolates, 0,
+        "commit_profile={commit_profile:#?} advances={advances:#?} final_stacks={final_stacks:#?}",
+    );
     assert_eq!(total_final_stack_count(&final_stacks), 1);
+
+    for (i, advance) in advances.iter().enumerate() {
+        eprintln!(
+            "[sp343:delete-only] advance[{i}]: profile={:#?} before_len={} after_len={} before={:#?} after={:#?}",
+            advance.profile,
+            advance.gss_stacks_before.len(),
+            advance.gss_stacks_after.len(),
+            advance.gss_stacks_before,
+            advance.gss_stacks_after,
+        );
+    }
 }
 
 #[test]
