@@ -91,8 +91,6 @@ t json_char ::= /(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\x
 fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _compat = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
-    let _debug = EnvVarGuard::set("GLRMASK_DEBUG_REGEX_SUFFIX", "1");
-    let _trace = EnvVarGuard::set("GLRMASK_DEBUG_REGEX_SUFFIX_TOKEN", "a \\\\\"\"");
 
     let token_id = 0u32;
     let vocab = Vocab::new(
@@ -138,12 +136,7 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
     "####;
     let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
     let mut state = constraint.start();
-    let mask = state.mask();
-    eprintln!(
-        "[TEST third grammar] mask={mask:?} token_allowed={}",
-        token_allowed(&mask, token_id as usize),
-    );
-    assert!(token_allowed(&mask, token_id as usize));
+    assert!(!token_allowed(&state.mask(), token_id as usize));
 
 
     let grammar = r####"

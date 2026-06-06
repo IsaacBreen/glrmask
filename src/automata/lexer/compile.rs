@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::env;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,66 +14,6 @@ use super::dfa::DFA;
 use super::nfa::NFA;
 
 type ProductStateTuple = SmallVec<[(u32, u32); 12]>;
-
-fn glrmask_debug_regex_suffix() -> bool {
-    env::var_os("GLRMASK_DEBUG_REGEX_SUFFIX").is_some()
-}
-
-fn debug_byte_repr(x: u8) -> String {
-    match x {
-        b'\n' => "\\n".to_string(),
-        b'\r' => "\\r".to_string(),
-        b'\t' => "\\t".to_string(),
-        b'\\' => "\\\\".to_string(),
-        b'"' => "\\\"".to_string(),
-        0x20..=0x7e => (x as char).to_string(),
-        _ => format!("\\x{x:02X}"),
-    }
-}
-
-fn debug_bytes_repr(xs: &[u8]) -> String {
-    let mut out = String::new();
-    for &x in xs {
-        out.push_str(&debug_byte_repr(x));
-    }
-    out
-}
-
-fn debug_env_token_bytes(name: &str) -> Option<Vec<u8>> {
-    let raw = env::var(name).ok()?;
-    let mut out = Vec::new();
-    let mut it = raw.as_bytes().iter().copied().peekable();
-    while let Some(b) = it.next() {
-        if b == b'\\' {
-            match it.peek().copied() {
-                Some(b'n') => {
-                    it.next();
-                    out.push(b'\n');
-                }
-                Some(b't') => {
-                    it.next();
-                    out.push(b'\t');
-                }
-                Some(b'r') => {
-                    it.next();
-                    out.push(b'\r');
-                }
-                Some(b'\\') => {
-                    it.next();
-                    out.push(b'\\');
-                }
-                Some(b'"') => {
-                    it.next();
-                    out.push(b'"');
-                }
-                _ => out.push(b),
-            }
-        } else {
-            out.push(b);
-        }
-    }
-    Some(out)
-}
 
 fn common_prefix_factor(exprs: &[Expr]) -> Option<(Expr, Vec<Expr>)> {
     fn candidate_prefix(expr: &Expr) -> Option<&Expr> {
@@ -808,8 +747,6 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
         return None;
     }
 
-    let debug = glrmask_debug_regex_suffix();
-
     // Flatten one level of nested Seq: Seq([Seq([a, b]), c]) → [a, b, c]
     let flat_parts: Vec<&Expr>;
     let parts_ref: &[&Expr] = {
@@ -844,13 +781,6 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
     };
     let body_dfa = compile_expr_to_dfa(repeat_expr);
     if body_dfa.num_states() == 0 || !body_dfa.finalizers(0).is_empty() {
-        if debug {
-            eprintln!(
-                "[regex-suffix] reject candidate: body_dfa states={}, start_finalizers={:?}",
-                body_dfa.num_states(),
-                body_dfa.finalizers(0),
-            );
-        }
         return None;
     }
 
@@ -861,24 +791,12 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
     };
     let suffix_dfa = compile_expr_to_dfa(&suffix_expr);
     if suffix_dfa.num_states() == 0 {
-        if debug {
-            eprintln!("[regex-suffix] reject candidate: suffix_dfa has zero states");
-        }
         return None;
     }
 
     let max_product =
         (body_dfa.num_states() + 1) * (suffix_dfa.num_states() + 1) * (max + 1);
     if max_product > 500_000 {
-        if debug {
-            eprintln!(
-                "[regex-suffix] reject candidate: max_product={} body_states={} suffix_states={} max={}",
-                max_product,
-                body_dfa.num_states(),
-                suffix_dfa.num_states(),
-                max,
-            );
-        }
         return None;
     }
 
@@ -886,7 +804,6 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
     let suffix_dead = suffix_dfa.num_states() as u32;
 
     let mut state_map: FxHashMap<(u32, u32, u32), u32> = FxHashMap::default();
-    let mut state_keys: Vec<(u32, u32, u32)> = Vec::new();
     let mut worklist: VecDeque<(u32, (u32, u32, u32))> = VecDeque::new();
     let mut dfa = DFA::new(1);
     dfa.ensure_group_capacity(1);
@@ -894,24 +811,7 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
     let start_suffix = if min == 0 { 0u32 } else { suffix_dead };
     let start_key = (0u32, start_suffix, 0u32);
     state_map.insert(start_key, 0);
-    state_keys.push(start_key);
     worklist.push_back((0, start_key));
-
-    if debug {
-        eprintln!();
-        eprintln!("[regex-suffix] ENTER build_bounded_repeat_with_regex_suffix");
-        eprintln!("[regex-suffix] full parts = {parts_ref:#?}");
-        eprintln!("[regex-suffix] repeat_expr = {repeat_expr:#?}");
-        eprintln!("[regex-suffix] suffix_expr = {suffix_expr:#?}");
-        eprintln!(
-            "[regex-suffix] min={min} max={max} body_states={} suffix_states={} body_dead={} suffix_dead={} start_key={:?}",
-            body_dfa.num_states(),
-            suffix_dfa.num_states(),
-            body_dead,
-            suffix_dead,
-            start_key,
-        );
-    }
 
     {
         let is_accept = start_suffix < suffix_dead
@@ -928,14 +828,6 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
     while let Some((dfa_state, (b, s, c))) = worklist.pop_front() {
         let body_is_accept = b < body_dead && !body_dfa.finalizers(b).is_empty();
 
-        if debug {
-            eprintln!(
-                "[regex-suffix] POP dfa_state={dfa_state} key=(body={b}, suffix={s}, count={c}) body_is_accept={body_is_accept} body_finalizers={:?} suffix_finalizers={:?}",
-                if b < body_dead { Some(body_dfa.finalizers(b)) } else { None },
-                if s < suffix_dead { Some(suffix_dfa.finalizers(s)) } else { None },
-            );
-        }
-
         let mut transitions = Vec::new();
         for byte_val in 0u16..=255 {
             let x = byte_val as u8;
@@ -945,44 +837,6 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
             } else {
                 body_dead
             };
-
-            if debug && body_is_accept {
-                let boundary_c = c + 1;
-                let boundary_new_b = if boundary_c < max as u32 {
-                    body_dfa.step(0, x).map_or(body_dead, |t| t)
-                } else {
-                    body_dead
-                };
-                let old_s_next = if s < suffix_dead {
-                    suffix_dfa.step(s, x).map_or(suffix_dead, |t| t)
-                } else {
-                    suffix_dead
-                };
-                let boundary_fresh_s = if boundary_c >= min as u32 {
-                    suffix_dfa.step(0, x).map_or(suffix_dead, |t| t)
-                } else {
-                    suffix_dead
-                };
-
-                if b_next != body_dead && boundary_fresh_s != suffix_dead {
-                    eprintln!(
-                        "[regex-suffix][AMBIG_BOUNDARY] from dfa_state={dfa_state} key=(body={b}, suffix={s}, count={c}) byte=0x{x:02X} '{}' \
-                         body_can_continue: {b}->{b_next}; finish_body_first: count {c}->{boundary_c}, restart_body_on_byte={boundary_new_b}, fresh_suffix_on_byte={boundary_fresh_s}; old_suffix_on_byte={old_s_next}",
-                        debug_byte_repr(x),
-                    );
-                }
-
-                if b_next != body_dead
-                    && old_s_next != suffix_dead
-                    && boundary_fresh_s != suffix_dead
-                    && old_s_next != boundary_fresh_s
-                {
-                    eprintln!(
-                        "[regex-suffix][THREE_WAY_DIVERGE_POSSIBLE] from dfa_state={dfa_state} byte=0x{x:02X} '{}': body_next={b_next}, old_s_next={old_s_next}, boundary_fresh_s={boundary_fresh_s}",
-                        debug_byte_repr(x),
-                    );
-                }
-            }
 
             let (final_b, final_s, final_c) =
                 if body_is_accept && b_next == body_dead {
@@ -1003,26 +857,11 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
                         suffix_dead
                     };
                     let new_s = match (old_s_next < suffix_dead, fresh_s < suffix_dead) {
-                        (true, true) if old_s_next != fresh_s => {
-                            if debug {
-                                eprintln!(
-                                    "[regex-suffix][FALLBACK_DIVERGE] from dfa_state={dfa_state} key=(body={b}, suffix={s}, count={c}) byte=0x{x:02X} '{}' old_s_next={old_s_next} fresh_s={fresh_s}",
-                                    debug_byte_repr(x),
-                                );
-                            }
-                            return None;
-                        }
+                        (true, true) if old_s_next != fresh_s => return None,
                         (true, _) => old_s_next,
                         (_, true) => fresh_s,
                         _ => suffix_dead,
                     };
-                    if debug && (old_s_next < suffix_dead || fresh_s < suffix_dead) {
-                        eprintln!(
-                            "[regex-suffix][FINISH_BODY] from dfa_state={dfa_state} key=(body={b}, suffix={s}, count={c}) byte=0x{x:02X} '{}' \
-                             because b_next=DEAD; new_key=(body={new_b}, suffix={new_s}, count={new_c}); old_s_next={old_s_next}, fresh_s={fresh_s}",
-                            debug_byte_repr(x),
-                        );
-                    }
                     (new_b, new_s, new_c)
                 } else {
                     let s_next = if s < suffix_dead {
@@ -1030,16 +869,6 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
                     } else {
                         suffix_dead
                     };
-                    if debug && body_is_accept && b_next != body_dead {
-                        let fresh_s_if_finished = if c + 1 >= min as u32 {
-                            suffix_dfa.step(0, x).map_or(suffix_dead, |t| t)
-                        } else {
-                            suffix_dead
-                        };
-                        if fresh_s_if_finished != suffix_dead {
-                            eprintln!("[regex-suffix][GREEDY_KEEP_BODY] from dfa_state={dfa_state} byte=0x{x:02X} '{}' kept key=(body={b_next}, suffix={s_next}, count={c}); DROPPED finish-before-byte suffix_state={fresh_s_if_finished}", debug_byte_repr(x));
-                        }
-                    }
                     (b_next, s_next, c)
                 };
 
@@ -1067,10 +896,6 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
                     }
                     dfa.overwrite_state_metadata(new_state, finalizers, future);
                     state_map.insert(target_key, new_state);
-                    if new_state as usize >= state_keys.len() {
-                        state_keys.resize(new_state as usize + 1, (u32::MAX, u32::MAX, u32::MAX));
-                    }
-                    state_keys[new_state as usize] = target_key;
                     worklist.push_back((new_state, target_key));
                     new_state
                 };
@@ -1084,72 +909,7 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
         dfa.set_transitions_from_sorted_entries(dfa_state, transitions);
     }
 
-    if debug {
-        eprintln!(
-            "[regex-suffix] BUILT raw product DFA states={} transitions_done=true",
-            dfa.num_states(),
-        );
-        for sid in 0..dfa.num_states() {
-            let key = state_keys
-                .get(sid)
-                .copied()
-                .unwrap_or((u32::MAX, u32::MAX, u32::MAX));
-            eprintln!(
-                "[regex-suffix][STATE] dfa_state={sid} key={key:?} finalizers={:?} future={:?}",
-                dfa.finalizers(sid as u32),
-                dfa.possible_future_group_ids(sid as u32),
-            );
-        }
-    }
-
-    if debug {
-        if let Some(token) = debug_env_token_bytes("GLRMASK_DEBUG_REGEX_SUFFIX_TOKEN") {
-            eprintln!(
-                "[regex-suffix][TRACE_TOKEN] token bytes len={} repr='{}' raw={:?}",
-                token.len(),
-                debug_bytes_repr(&token),
-                token,
-            );
-            let mut st = 0u32;
-            eprintln!(
-                "[regex-suffix][TRACE_TOKEN] start state={st} key={:?} finalizers={:?} future={:?}",
-                state_keys.get(st as usize),
-                dfa.finalizers(st),
-                dfa.possible_future_group_ids(st),
-            );
-            for (i, &x) in token.iter().enumerate() {
-                let next = dfa.step(st, x);
-                eprintln!(
-                    "[regex-suffix][TRACE_TOKEN] byte[{i}]=0x{x:02X} '{}' state={st} key={:?} -> {:?}",
-                    debug_byte_repr(x),
-                    state_keys.get(st as usize),
-                    next,
-                );
-                match next {
-                    Some(n) => st = n,
-                    None => {
-                        eprintln!("[regex-suffix][TRACE_TOKEN] DEAD after byte[{i}]");
-                        break;
-                    }
-                }
-            }
-            if (st as usize) < dfa.num_states() {
-                eprintln!(
-                    "[regex-suffix][TRACE_TOKEN] end state={st} key={:?} finalizers={:?} future={:?}",
-                    state_keys.get(st as usize),
-                    dfa.finalizers(st),
-                    dfa.possible_future_group_ids(st),
-                );
-            }
-        }
-    }
-
     let dfa = dfa.minimize();
-    if debug {
-        eprintln!("[regex-suffix] minimized states={}", dfa.num_states());
-        eprintln!("[regex-suffix] EXIT build_bounded_repeat_with_regex_suffix");
-        eprintln!();
-    }
     Some((dfa, false))
 }
 
