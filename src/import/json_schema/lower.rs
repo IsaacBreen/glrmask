@@ -119,7 +119,7 @@ impl<'a> Lowerer<'a> {
         );
         let key_string_char = super::string::json_string_body_char_regex_in_mode(
             mode,
-            super::string::JsonStringContext::Key,
+            super::string::JsonStringContext::KeyAdditional,
         );
         self.add_terminal_rule(
             JSON_STRING_CHAR_RULE,

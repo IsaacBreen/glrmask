@@ -537,7 +537,7 @@ fn llguidance_compat_allows_escaped_solidus_in_keys() {
 }
 
 #[test]
-fn llguidance_compat_allows_escaped_solidus_in_pattern_keys() {
+fn llguidance_compat_rejects_escaped_solidus_in_pattern_keys() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
@@ -547,13 +547,12 @@ fn llguidance_compat_allows_escaped_solidus_in_pattern_keys() {
         },
         "additionalProperties": false
     });
-    // llguidance accepts escaped solidus in key spelling and matches decoded "/".
-    assert!(schema_accepts_bytes(&schema, br#"{"\/": "value"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"\/": "value"}"#));
     assert!(schema_accepts_bytes(&schema, br#"{"/": "value"}"#));
 }
 
 #[test]
-fn llguidance_compat_allows_escaped_solidus_as_entire_key() {
+fn llguidance_compat_rejects_escaped_solidus_as_entire_key() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
@@ -564,8 +563,64 @@ fn llguidance_compat_allows_escaped_solidus_as_entire_key() {
         "required": ["/"],
         "additionalProperties": false
     });
-    assert!(schema_accepts_bytes(&schema, br#"{"\/":"ok"}"#));
-    assert!(schema_accepts_bytes(&schema, br#"{"/":"ok"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"\/": "ok"}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"/": "ok"}"#));
+}
+
+#[test]
+fn escaped_solidus_instance_rejected_when_no_key_matches_solidus() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "a": {"type": "string"}
+        },
+        "required": ["a"],
+        "additionalProperties": false
+    });
+
+    assert!(!schema_accepts_bytes(&schema, br#"{"\/":"bad"}"#));
+}
+
+#[test]
+fn llguidance_literal_property_mask_rejects_escaped_solidus() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "/": {"type": "string"}
+        },
+        "required": ["/"],
+        "additionalProperties": false
+    });
+
+    assert!(schema_mask_allows_token_after_prefix(&schema, br#"{""#, 402, b"/"));
+    assert!(!schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{""#,
+        403,
+        br#"\/"#,
+    ));
+}
+
+#[test]
+fn llguidance_additional_property_mask_allows_escaped_solidus() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "additionalProperties": {"type": "string"}
+    });
+
+    assert!(schema_mask_allows_token_after_prefix(&schema, br#"{""#, 404, b"/"));
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{""#,
+        405,
+        br#"\/"#,
+    ));
 }
 
 #[test]
