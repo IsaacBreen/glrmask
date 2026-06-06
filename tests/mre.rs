@@ -97,7 +97,7 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
 t JSON_STRING_CHAR ::= /(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\/\\bfnrt]|\\u[0-9A-Fa-f]{4})/;
 internal t JSON_STRING_PATTERN_WHITESPACE_CHAR ::= / / | /\\n/ | /\\r/ | /\\t/ | /\\f/ | // | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | / / | /　/;
 internal t JSON_STRING_PATTERN_NON_WHITESPACE_CHAR ::= JSON_STRING_CHAR - JSON_STRING_PATTERN_WHITESPACE_CHAR;
-t json_string_pattern_body_1 ::= JSON_STRING_PATTERN_NON_WHITESPACE_CHAR JSON_STRING_PATTERN_WHITESPACE_CHAR;
+t json_string_pattern_body_1 ::= JSON_STRING_PATTERN_WHITESPACE_CHAR;
 t s ::= json_string_pattern_body_1 "$";
 "####;
     let token_id = 0u32;
@@ -110,7 +110,6 @@ t s ::= json_string_pattern_body_1 "$";
 
     let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"a").unwrap();
     assert!(!token_allowed(&state.mask(), token_id as usize));
 }
 
