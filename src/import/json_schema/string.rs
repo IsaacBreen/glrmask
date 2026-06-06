@@ -16,6 +16,18 @@ use super::lower::{
     JSON_STRING_RULE, MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS,
 };
 
+fn encoded_json_key_regex(encoded: &str) -> String {
+    let mut regex = String::with_capacity(encoded.len() + 8);
+    for ch in encoded.chars() {
+        if ch == '/' {
+            regex.push_str(r#"(?:/|\\/)"#);
+        } else {
+            regex.push_str(&regex_escape(&ch.to_string()));
+        }
+    }
+    regex
+}
+
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_string(&mut self, schema: &StringSchema) -> ImportResult<GrammarExpr> {
@@ -819,19 +831,22 @@ impl<'a> Lowerer<'a> {
         key: &str,
     ) -> GrammarExpr {
         let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+        let encoded_regex = encoded_json_key_regex(&encoded);
         if prefix == b", " {
             return GrammarExpr::RawRegex(format!(
                 r#",{JSON_SEPARATOR_WS_REGEX}{}:{JSON_SEPARATOR_WS_REGEX}"#,
-                regex_escape(&encoded)
+                encoded_regex
             ));
         }
 
-        let key = lit_bytes(encoded.as_bytes().to_vec());
-        let key_colon = seq(vec![key, self.key_separator_expr()]);
         if prefix.is_empty() {
-            key_colon
+            GrammarExpr::RawRegex(format!(r#"{}:{JSON_SEPARATOR_WS_REGEX}"#, encoded_regex))
         } else {
-            seq(vec![lit_bytes(prefix.to_vec()), key_colon])
+            GrammarExpr::RawRegex(format!(
+                r#"{}{}:{JSON_SEPARATOR_WS_REGEX}"#,
+                regex_escape(&String::from_utf8_lossy(prefix)),
+                encoded_regex
+            ))
         }
     }
 
@@ -842,19 +857,20 @@ impl<'a> Lowerer<'a> {
         suffix: u8,
     ) -> GrammarExpr {
         let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+        let encoded_regex = encoded_json_key_regex(&encoded);
         let suffix_byte = suffix;
         let suffix = regex_escape(&String::from_utf8_lossy(&[suffix_byte]));
         if prefix == b", " {
             return GrammarExpr::RawRegex(format!(
                 r#",{JSON_SEPARATOR_WS_REGEX}{}:{JSON_SEPARATOR_WS_REGEX}{}"#,
-                regex_escape(&encoded),
+                encoded_regex,
                 suffix
             ));
         }
         if prefix.is_empty() {
             return GrammarExpr::RawRegex(format!(
                 r#"{}:{JSON_SEPARATOR_WS_REGEX}{}"#,
-                regex_escape(&encoded),
+                encoded_regex,
                 suffix
             ));
         }
@@ -871,18 +887,19 @@ impl<'a> Lowerer<'a> {
         key: &str,
     ) -> GrammarExpr {
         let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+        let encoded_regex = encoded_json_key_regex(&encoded);
         let string_body = self.json_string_char_regex();
         if prefix == b", " {
             return GrammarExpr::RawRegex(format!(
                 r#",{JSON_SEPARATOR_WS_REGEX}{}:{JSON_SEPARATOR_WS_REGEX}"(?:{})*""#,
-                regex_escape(&encoded),
+                encoded_regex,
                 string_body
             ));
         }
         if prefix.is_empty() {
             return GrammarExpr::RawRegex(format!(
                 r#"{}:{JSON_SEPARATOR_WS_REGEX}"(?:{})*""#,
-                regex_escape(&encoded),
+                encoded_regex,
                 string_body
             ));
         }
@@ -900,18 +917,19 @@ impl<'a> Lowerer<'a> {
         value: &[u8],
     ) -> GrammarExpr {
         let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+        let encoded_regex = encoded_json_key_regex(&encoded);
         let value_regex = regex_escape(&String::from_utf8_lossy(value));
         if prefix == b", " {
             return GrammarExpr::RawRegex(format!(
                 r#",{JSON_SEPARATOR_WS_REGEX}{}:{JSON_SEPARATOR_WS_REGEX}{}"#,
-                regex_escape(&encoded),
+                encoded_regex,
                 value_regex
             ));
         }
         if prefix.is_empty() {
             return GrammarExpr::RawRegex(format!(
                 r#"{}:{JSON_SEPARATOR_WS_REGEX}{}"#,
-                regex_escape(&encoded),
+                encoded_regex,
                 value_regex
             ));
         }
@@ -2125,10 +2143,10 @@ fn json_body_char_regex_for_decoded_char_in_mode(
     let canonical = regex::escape(body);
     if ch == '/' {
         match (mode, context) {
-            (JsonStringCompatMode::JsonSchema, _) => {
+            (JsonStringCompatMode::JsonSchema, _) | (_, JsonStringContext::Key) => {
                 format!(r#"(?:{}|\\/)"#, canonical)
             }
-            (JsonStringCompatMode::LlGuidanceNative, _) => {
+            (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::Value) => {
                 canonical
             }
         }
@@ -2146,10 +2164,10 @@ pub(crate) fn json_string_body_char_regex_in_mode(
     context: JsonStringContext,
 ) -> &'static str {
     match (mode, context) {
-        (JsonStringCompatMode::JsonSchema, _) => {
+        (JsonStringCompatMode::JsonSchema, _) | (_, JsonStringContext::Key) => {
             r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bfnrt]|\\u[0-9A-Fa-f]{4})"#
         }
-        (JsonStringCompatMode::LlGuidanceNative, _) => {
+        (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::Value) => {
             r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt]|\\u00(?:[01][0-9A-Fa-f]|7[Ff]))"#
         }
     }
@@ -2168,10 +2186,10 @@ pub(crate) fn json_string_body_dot_regex_in_mode(
     context: JsonStringContext,
 ) -> &'static str {
     match (mode, context) {
-        (JsonStringCompatMode::JsonSchema, _) => {
+        (JsonStringCompatMode::JsonSchema, _) | (_, JsonStringContext::Key) => {
             r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bft]|\\u[0-9A-Fa-f]{4})"#
         }
-        (JsonStringCompatMode::LlGuidanceNative, _) => {
+        (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::Value) => {
             r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bft]|\\u00(?:[01][0-9A-Fa-f]|7[Ff]))"#
         }
     }

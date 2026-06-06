@@ -524,31 +524,48 @@ fn llguidance_compat_rejects_patterned_escaped_solidus() {
 }
 
 #[test]
-fn llguidance_compat_rejects_escaped_solidus_in_keys() {
+fn llguidance_compat_allows_escaped_solidus_in_keys() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
         "additionalProperties": {"type": "string"}
     });
-    // Additional property key rejects escaped solidus
-    assert!(!schema_accepts_bytes(&schema, br#"{"\/": "value"}"#));
+    // llguidance accepts escaped solidus in key spelling.
+    assert!(schema_accepts_bytes(&schema, br#"{"\/": "value"}"#));
     assert!(schema_accepts_bytes(&schema, br#"{"/": "value"}"#));
 }
 
 #[test]
-fn llguidance_compat_rejects_escaped_solidus_in_pattern_keys() {
+fn llguidance_compat_allows_escaped_solidus_in_pattern_keys() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
         "patternProperties": {
             "^/$": {"type": "string"}
-        }
+        },
+        "additionalProperties": false
     });
-    // Pattern key rejects escaped solidus
-    assert!(!schema_accepts_bytes(&schema, br#"{"\/": "value"}"#));
+    // llguidance accepts escaped solidus in key spelling and matches decoded "/".
+    assert!(schema_accepts_bytes(&schema, br#"{"\/": "value"}"#));
     assert!(schema_accepts_bytes(&schema, br#"{"/": "value"}"#));
+}
+
+#[test]
+fn llguidance_compat_allows_escaped_solidus_as_entire_key() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "/": {"type": "string"}
+        },
+        "required": ["/"],
+        "additionalProperties": false
+    });
+    assert!(schema_accepts_bytes(&schema, br#"{"\/":"ok"}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"/":"ok"}"#));
 }
 
 #[test]
