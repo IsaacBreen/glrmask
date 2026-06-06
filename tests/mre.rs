@@ -136,8 +136,9 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
     "####;
     let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
     let mut state = constraint.start();
-    // Regression: bounded-repeat-with-suffix must not greedily continue optional
-    // body at the '\\' byte and drop the valid path where suffix NON_WS starts.
+    // Regression: after `a `, the optional body may finish before `\`, allowing the
+    // suffix NON_WS to consume `\"`. The regex-suffix optimizer used to greedily
+    // continue WS as a possible "\\n" and drop the suffix path.
     assert!(token_allowed(&state.mask(), token_id as usize));
 
 
