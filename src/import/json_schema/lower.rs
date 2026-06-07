@@ -25,7 +25,7 @@ pub(crate) const JSON_INTEGER_RULE: &str = "JSON_INTEGER";
 pub(crate) const JSON_NUMBER_RULE: &str = "JSON_NUMBER";
 pub(crate) const JSON_BOOL_RULE: &str = "JSON_BOOL";
 pub(crate) const JSON_NULL_RULE: &str = "JSON_NULL";
-pub(crate) const JSON_SEPARATOR_WS_REGEX: &str = r#" "#;
+pub(crate) const JSON_SEPARATOR_WS_REGEX: &str = r#"[ \t\r\n]*"#;
 pub(crate) const JSON_ADDITIONAL_KEY_COLON_SHARED_RULE: &str = "JSON_ADDITIONAL_KEY_COLON_SHARED";
 pub(crate) const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE: &str =
     "JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED";
@@ -170,7 +170,7 @@ impl<'a> Lowerer<'a> {
         self.add_nonterminal_rule(
             JSON_ARRAY_RULE,
             seq(vec![
-                lit("["),
+                GrammarExpr::RawRegex(r#"[ \t\r\n]*\["#.to_string()),
                 GrammarExpr::Optional(Box::new(seq(vec![
                     r(JSON_VALUE_RULE),
                     GrammarExpr::Repeat(Box::new(array_item_tail)),
@@ -308,6 +308,9 @@ impl<'a> Lowerer<'a> {
             let inferred = self.inferred_constrained_types(assertions);
             if inferred.len() == 1 {
                 if self.llguidance_compat_enabled() {
+                    if inferred[0] == SchemaType::Object {
+                        return self.lower_untyped_single_family_assertions(inferred[0], assertions);
+                    }
                     return self.lower_for_type(inferred[0], assertions);
                 }
                 return self.lower_untyped_single_family_assertions(inferred[0], assertions);

@@ -39,7 +39,11 @@ impl<'a> Lowerer<'a> {
         } else {
             self.lower_tuple_array_body(schema)?
         };
-        Ok(seq(vec![lit("["), body, lit("]")]))
+        Ok(seq(vec![
+            GrammarExpr::RawRegex(r#"[ \t\r\n]*\["#.to_string()),
+            body,
+            lit("]"),
+        ]))
     }
 
     fn should_terminalize_bounded_scalar_array(&self, max_items: usize) -> bool {
@@ -109,7 +113,10 @@ impl<'a> Lowerer<'a> {
             &rule_name,
             GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized())),
         );
-        seq(vec![lit("["), super::lower::r(&rule_name)])
+        seq(vec![
+            GrammarExpr::RawRegex(r#"[ \t\r\n]*\["#.to_string()),
+            super::lower::r(&rule_name),
+        ])
     }
 
     fn bounded_homogeneous_array_terminal(
@@ -140,7 +147,14 @@ impl<'a> Lowerer<'a> {
         };
 
         let rule_name = self.fresh_rule_name("bounded_scalar_array");
-        self.add_terminal_rule(&rule_name, seq(vec![lit("["), body, lit("]")]));
+        self.add_terminal_rule(
+            &rule_name,
+            seq(vec![
+                GrammarExpr::RawRegex(r#"[ \t\r\n]*\["#.to_string()),
+                body,
+                lit("]"),
+            ]),
+        );
         super::lower::r(&rule_name)
     }
 
@@ -152,7 +166,14 @@ impl<'a> Lowerer<'a> {
         ])));
 
         let rule_name = self.fresh_rule_name("unbounded_scalar_array");
-        self.add_terminal_rule(&rule_name, seq(vec![lit("["), body, lit("]")]));
+        self.add_terminal_rule(
+            &rule_name,
+            seq(vec![
+                GrammarExpr::RawRegex(r#"[ \t\r\n]*\["#.to_string()),
+                body,
+                lit("]"),
+            ]),
+        );
         super::lower::r(&rule_name)
     }
 
