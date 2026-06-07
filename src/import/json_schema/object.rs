@@ -14,9 +14,11 @@ use super::combinators::{
 use super::error::{ImportResult, SchemaImportError};
 use super::lower::{
     choice, lit, lit_bytes, never, normalize_local_ref, r, seq, Lowerer, JSON_ARRAY_RULE,
+    json_key_string_rule,
     JSON_BOOL_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
     JSON_ADDITIONAL_KEY_COLON_SHARED_RULE, JSON_NULL_RULE,
+    JSON_KEY_SEPARATOR_RULE,
     JSON_NUMBER_RULE, JSON_OBJECT_RULE, JSON_STRING_RULE, JSON_VALUE_RULE,
 };
 use super::string::property_name_matches_pattern;
@@ -738,12 +740,24 @@ impl<'a> Lowerer<'a> {
             AdditionalProperties::Deny => {}
             AdditionalProperties::Schema(value_schema) => {
                 let value = self.lower_schema(value_schema)?;
-                tail_pairs.push(seq(vec![
+                let key_colon = if fixed_names.is_empty()
+                    && pattern_keys.is_empty()
+                    && property_name_pattern.is_none()
+                    && super::string::json_string_compat_mode()
+                        == super::string::JsonStringCompatMode::LlGuidanceNative
+                {
+                    // Keep map-only typed additionalProperties aligned with
+                    // llguidance's strict key handling.
+                    seq(vec![r(json_key_string_rule()), r(JSON_KEY_SEPARATOR_RULE)])
+                } else {
                     self.lower_object_additional_key_colon(
                         &fixed_names,
                         &pattern_keys,
                         property_name_pattern.as_deref(),
-                    )?,
+                    )?
+                };
+                tail_pairs.push(seq(vec![
+                    key_colon,
                     value,
                 ]));
             }
