@@ -982,7 +982,14 @@ impl<'a> Lowerer<'a> {
         }
 
         if open_object_any_of_covers_json_object(&assertions.any_of) {
-            return Ok(Some(r(JSON_OBJECT_RULE)));
+            if super::string::json_string_compat_mode()
+                == super::string::JsonStringCompatMode::JsonSchema
+            {
+                return Ok(Some(r(JSON_OBJECT_RULE)));
+            }
+
+            // In llguidance mode, preserve open anyOf lowering so unknown keys
+            // use additional-key semantics instead of strict JSON_OBJECT keys.
         }
 
         self.try_lower_open_object_any_of_variants(&assertions.any_of)
