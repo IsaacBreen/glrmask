@@ -426,7 +426,7 @@ fn llguidance_compat_treats_untyped_format_as_typed_string() {
 }
 
 #[test]
-fn llguidance_compat_treats_untyped_property_format_as_typed_string() {
+fn llguidance_compat_keeps_untyped_property_format_permissive() {
     let _lock = ENV_LOCK.lock().unwrap();
     let schema = json!({
         "type": "object",
@@ -445,8 +445,8 @@ fn llguidance_compat_treats_untyped_property_format_as_typed_string() {
 
     {
         let _guard = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
-        assert!(!schema_accepts_bytes(&schema, br#"{"uri": true}"#));
-        assert!(!schema_mask_allows_token_after_prefix(
+        assert!(schema_accepts_bytes(&schema, br#"{"uri": true}"#));
+        assert!(schema_mask_allows_token_after_prefix(
             &schema,
             br#"{"uri":"#,
             300,

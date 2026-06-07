@@ -3406,7 +3406,7 @@ impl<'a> Lowerer<'a> {
             types.iter().all(|schema_type| *schema_type == SchemaType::String)
         });
         let untyped = assertions.types.is_none();
-        let allow_non_string_fallbacks = untyped && !self.llguidance_compat_enabled();
+        let allow_non_string_fallbacks = untyped;
         if !string_only && !untyped {
             return Ok(None);
         }
@@ -3470,9 +3470,6 @@ impl<'a> Lowerer<'a> {
             || !assertions.one_of.is_empty()
             || !assertions.all_of.is_empty()
         {
-            return self.lower_schema(schema);
-        }
-        if self.llguidance_compat_enabled() {
             return self.lower_schema(schema);
         }
         if let Some(number) = &assertions.number
