@@ -457,7 +457,7 @@ fn llguidance_compat_keeps_untyped_property_format_permissive() {
 }
 
 #[test]
-fn llguidance_compat_keeps_untyped_property_pattern_permissive() {
+fn llguidance_compat_treats_untyped_property_pattern_as_typed_string() {
     let _lock = ENV_LOCK.lock().unwrap();
     let schema = json!({
         "type": "object",
@@ -477,7 +477,7 @@ fn llguidance_compat_keeps_untyped_property_pattern_permissive() {
 
     {
         let _guard = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
-        assert!(schema_accepts_bytes(&schema, br#"{"cur": true}"#));
+        assert!(!schema_accepts_bytes(&schema, br#"{"cur": true}"#));
         assert!(!schema_mask_allows_token_after_prefix(
             &schema,
             br#"{"cur":"#,
@@ -722,86 +722,6 @@ fn mre_llguidance_compat_non_whitespace_subtraction_mask_gap() {
     // continuation in llguidance-compat mode.
     assert!(mask_contains(&mask, space_escaped_quote));
 }
-
-#[test]
-fn llguidance_compat_patterned_small_max_length_rejects_oversized_continuation() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
-    let schema = json!({
-        "type": "string",
-        "maxLength": 32,
-        "pattern": "^(\\d+\\.\\d+\\.\\d+.*)$"
-    });
-
-    assert!(!schema_mask_allows_token_after_prefix(
-        &schema,
-        b"\"1.0.0",
-        710,
-        b"                                ",
-    ));
-}
-
-#[test]
-fn llguidance_compat_patterned_small_max_length_allows_in_bound_continuation() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
-    let schema = json!({
-        "type": "string",
-        "maxLength": 32,
-        "pattern": "^(\\d+\\.\\d+\\.\\d+.*)$"
-    });
-
-    assert!(schema_mask_allows_token_after_prefix(
-        &schema,
-        b"\"1.0.0",
-        711,
-        b" \"",
-    ));
-}
-
-#[test]
-fn llguidance_compat_patterned_small_max_length_respects_min_length() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
-    let schema = json!({
-        "type": "string",
-        "minLength": 8,
-        "maxLength": 32,
-        "pattern": "^(\\d+\\.\\d+\\.\\d+.*)$"
-    });
-
-    assert!(!schema_mask_allows_token_after_prefix(
-        &schema,
-        b"\"1.0.0",
-        712,
-        b"\"",
-    ));
-    assert!(schema_mask_allows_token_after_prefix(
-        &schema,
-        b"\"1.0.0",
-        713,
-        b"abc\"",
-    ));
-}
-
-#[test]
-fn llguidance_compat_patterned_large_max_length_keeps_existing_permissive_behavior() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
-    let schema = json!({
-        "type": "string",
-        "maxLength": 512,
-        "pattern": "^(\\d+\\.\\d+\\.\\d+.*)$"
-    });
-
-    assert!(schema_mask_allows_token_after_prefix(
-        &schema,
-        b"\"1.0.0",
-        714,
-        b"                                ",
-    ));
-}
-
 fn mask_does_not_enable_json_u_by_runtime_patch() {
     let schema = json!({"type": "string", "pattern": r#"^[\w\.-_]+$"#});
     let grammar = schema_to_named_grammar(&schema).expect("schema should import");

@@ -16,8 +16,6 @@ use super::lower::{
     JSON_STRING_RULE, MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS,
 };
 
-const LLGUIDANCE_PATTERN_LENGTH_BOUND_THRESHOLD: usize = 64;
-
 fn encoded_json_key_regex(encoded: &str) -> String {
     // Keep literal property spelling exactly as serde_json emits it.
     // This matches llguidance's builder.string(json_dumps(name)) behavior.
@@ -107,12 +105,6 @@ impl<'a> Lowerer<'a> {
         &mut self,
         schema: &StringSchema,
     ) -> ImportResult<GrammarExpr> {
-        let preserve_llguidance_pattern_length_bounds = self.llguidance_compat_enabled()
-            && schema.pattern.is_some()
-            && schema
-                .max_length
-                .is_some_and(|max_length| max_length <= LLGUIDANCE_PATTERN_LENGTH_BOUND_THRESHOLD);
-
         if schema.pattern.is_none()
             && let Some(format_body_regex) =
                 recognized_string_format_body_regex_for_lowering(schema.format.as_deref())
@@ -156,16 +148,8 @@ impl<'a> Lowerer<'a> {
         };
         let mut constraints = Vec::new();
 
-        if preserve_llguidance_pattern_length_bounds {
-            constraints.push(seq(vec![
-                lit("\""),
-                self.string_body_for_length(schema.min_length, schema.max_length),
-                lit("\""),
-            ]));
-        }
-
         if let Some(format_body_regex) = recognized_string_format_body_regex_for_lowering(schema.format.as_deref()) {
-            constraints.push(GrammarExpr::RawRegex(quoted_string_body_regex(format_body_regex)));
+            constraints.push(quoted_string_body_regex(format_body_regex));
         }
 
         for (index, constraint) in constraints.into_iter().enumerate() {
@@ -176,7 +160,7 @@ impl<'a> Lowerer<'a> {
             }
             expr = GrammarExpr::Intersect {
                 expr: Box::new(expr),
-                intersect: Box::new(constraint),
+                intersect: Box::new(GrammarExpr::RawRegex(constraint)),
             };
         }
 
