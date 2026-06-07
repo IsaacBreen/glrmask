@@ -64,8 +64,7 @@ impl Default for JsonSchemaConfig {
 impl JsonSchemaConfig {
     pub(crate) fn from_env() -> Self {
         let mut config = Self::default();
-        config.llguidance_compat = read_bool("GLRMASK_LLGUIDANCE_COMPAT")
-            .unwrap_or(config.llguidance_compat);
+        config.llguidance_compat = super::string::json_string_compat_mode() == super::string::JsonStringCompatMode::LlGuidanceNative;
         config.repeat_chunk_size = read_usize("GLRMASK_JSON_SCHEMA_REPEAT_CHUNK")
             .unwrap_or(config.repeat_chunk_size)
             .max(1);

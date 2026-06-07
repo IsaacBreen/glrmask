@@ -68,3 +68,14 @@ pub fn dump_json_schema_grammar_glrm(schema_json: &str) -> Result<String> {
     }
     Ok(grammar::glrm::to_glrm(&factored))
 }
+
+#[doc(hidden)]
+pub fn set_test_compat_mode(enabled: bool) {
+    crate::import::json_schema::string::TEST_COMPAT_MODE.with(|cell| {
+        cell.set(if enabled {
+            crate::import::json_schema::string::JsonStringCompatMode::LlGuidanceNative
+        } else {
+            crate::import::json_schema::string::JsonStringCompatMode::JsonSchema
+        });
+    });
+}

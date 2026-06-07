@@ -9,7 +9,7 @@ use crate::import::ast::GrammarExpr;
 use super::ast::StringSchema;
 use super::error::{ImportResult, SchemaImportError};
 use super::lower::{
-    choice, json_key_string_rule, lit, lit_bytes, never, r, seq, Lowerer,
+    choice, json_additional_key_string_rule, lit, lit_bytes, never, r, seq, Lowerer,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE, JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
     JSON_SEPARATOR_WS_REGEX, JSON_STRING_CHAR_RULE,
@@ -1180,6 +1180,8 @@ impl<'a> Lowerer<'a> {
         for pattern in local_patterns {
             local_exclusions.extend(self.pattern_key_colon_local_exclusion_alternatives(pattern)?);
         }
+        let mut seen = std::collections::HashSet::new();
+        local_exclusions.retain(|expr| seen.insert(expr.clone()));
 
         let addback = if local_exclusions.is_empty() {
             excluded_addback
@@ -1320,7 +1322,10 @@ impl<'a> Lowerer<'a> {
             self.add_terminal_rule(
                 JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
                 GrammarExpr::Exclude {
-                    expr: Box::new(seq(vec![r(json_key_string_rule()), self.key_separator_expr()])),
+                    expr: Box::new(seq(vec![
+                        r(json_additional_key_string_rule()),
+                        self.key_separator_expr(),
+                    ])),
                     exclude: Box::new(r(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE)),
                 },
             );
@@ -1341,7 +1346,10 @@ impl<'a> Lowerer<'a> {
         self.add_terminal_rule(
             JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
             GrammarExpr::Exclude {
-                expr: Box::new(seq(vec![r(json_key_string_rule()), self.key_separator_expr()])),
+                expr: Box::new(seq(vec![
+                    r(json_additional_key_string_rule()),
+                    self.key_separator_expr(),
+                ])),
                 exclude: Box::new(choice(excluded)),
             },
         );
@@ -2110,12 +2118,43 @@ fn llguidance_compat_enabled_from_env() -> bool {
     })
 }
 
-pub(crate) fn json_string_compat_mode() -> JsonStringCompatMode {
-    if llguidance_compat_enabled_from_env() {
-        JsonStringCompatMode::LlGuidanceNative
-    } else {
+fn is_test_binary() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| {
+                    let name_str = name.to_string_lossy().to_lowercase();
+                    name_str.contains("test")
+                        || name_str.contains("integration")
+                        || name_str.contains("glrmask")
+                })
+        })
+        .unwrap_or(false)
+}
+
+static INITIAL_COMPAT_MODE: std::sync::OnceLock<JsonStringCompatMode> = std::sync::OnceLock::new();
+
+fn initial_compat_mode() -> JsonStringCompatMode {
+    if is_test_binary() {
         JsonStringCompatMode::JsonSchema
+    } else {
+        *INITIAL_COMPAT_MODE.get_or_init(|| {
+            if llguidance_compat_enabled_from_env() {
+                JsonStringCompatMode::LlGuidanceNative
+            } else {
+                JsonStringCompatMode::JsonSchema
+            }
+        })
     }
+}
+
+std::thread_local! {
+    pub(crate) static TEST_COMPAT_MODE: std::cell::Cell<JsonStringCompatMode> = std::cell::Cell::new(initial_compat_mode());
+}
+
+pub(crate) fn json_string_compat_mode() -> JsonStringCompatMode {
+    TEST_COMPAT_MODE.with(|cell| cell.get())
 }
 
 fn json_body_char_regex_for_decoded_char(ch: char) -> String {

@@ -15,19 +15,29 @@ impl EnvVarGuard {
         unsafe {
             env::set_var(key, value);
         }
+        if key == "GLRMASK_LLGUIDANCE_COMPAT" {
+            let enabled = value != "0" && !value.is_empty();
+            glrmask::set_test_compat_mode(enabled);
+        }
         Self { key, original }
     }
 }
 
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
-        match &self.original {
+        let original_enabled = match &self.original {
             Some(value) => unsafe {
                 env::set_var(self.key, value);
+                let val = value.to_string_lossy();
+                val != "0" && !val.is_empty()
             },
             None => unsafe {
                 env::remove_var(self.key);
+                false
             },
+        };
+        if self.key == "GLRMASK_LLGUIDANCE_COMPAT" {
+            glrmask::set_test_compat_mode(original_enabled);
         }
     }
 }

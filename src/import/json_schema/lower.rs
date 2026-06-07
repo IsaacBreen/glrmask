@@ -17,6 +17,7 @@ pub(crate) const JSON_OBJECT_RULE: &str = "json_object";
 pub(crate) const JSON_ARRAY_RULE: &str = "json_array";
 pub(crate) const JSON_STRING_RULE: &str = "JSON_STRING";
 pub(crate) const JSON_KEY_STRING_RULE: &str = "JSON_KEY_STRING";
+pub(crate) const JSON_ADDITIONAL_KEY_STRING_RULE: &str = "JSON_ADDITIONAL_KEY_STRING";
 pub(crate) const JSON_STRING_CHAR_RULE: &str = "JSON_STRING_CHAR";
 pub(crate) const JSON_ITEM_SEPARATOR_RULE: &str = "JSON_ITEM_SEPARATOR";
 pub(crate) const JSON_KEY_SEPARATOR_RULE: &str = "JSON_KEY_SEPARATOR";
@@ -119,6 +120,10 @@ impl<'a> Lowerer<'a> {
         );
         let key_string_char = super::string::json_string_body_char_regex_in_mode(
             mode,
+            super::string::JsonStringContext::KeyStrict,
+        );
+        let additional_key_string_char = super::string::json_string_body_char_regex_in_mode(
+            mode,
             super::string::JsonStringContext::KeyAdditional,
         );
         self.add_terminal_rule(
@@ -133,6 +138,10 @@ impl<'a> Lowerer<'a> {
             self.add_terminal_rule(
                 JSON_KEY_STRING_RULE,
                 GrammarExpr::RawRegex(format!(r#""(?:{key_string_char})*""#)),
+            );
+            self.add_terminal_rule(
+                JSON_ADDITIONAL_KEY_STRING_RULE,
+                GrammarExpr::RawRegex(format!(r#""(?:{additional_key_string_char})*""#)),
             );
         }
         self.add_terminal_rule(
@@ -613,7 +622,8 @@ fn collect_shared_ap_exclusions_from_schema(
 
     if let Some(object) = &assertions.object {
         let include_object_keys =
-            !matches!(object.additional_properties, AdditionalProperties::Deny);
+            !matches!(object.additional_properties, AdditionalProperties::Deny)
+            || !object.pattern_properties.is_empty();
         if include_object_keys {
             for required_name in &object.required {
                 literal_keys.insert(required_name.clone());
@@ -714,12 +724,19 @@ pub(crate) fn never() -> GrammarExpr {
 }
 
 /// Returns the rule name to use for JSON object keys.
-/// In `LlGuidanceNative` compat mode, this is the dedicated `JSON_KEY_STRING` rule
-/// which permits `\/` (escaped solidus). In default `JsonSchema` mode, object keys
-/// use the same `JSON_STRING` rule as values (which already permits `\/`).
+/// In `LlGuidanceNative` compat mode, this is the strict key rule used by
+/// literal `properties` and `patternProperties` key paths.
 pub(crate) fn json_key_string_rule() -> &'static str {
     match super::string::json_string_compat_mode() {
         super::string::JsonStringCompatMode::JsonSchema => JSON_STRING_RULE,
         super::string::JsonStringCompatMode::LlGuidanceNative => JSON_KEY_STRING_RULE,
+    }
+}
+
+/// Returns the rule name to use for additional/generic object keys.
+pub(crate) fn json_additional_key_string_rule() -> &'static str {
+    match super::string::json_string_compat_mode() {
+        super::string::JsonStringCompatMode::JsonSchema => JSON_STRING_RULE,
+        super::string::JsonStringCompatMode::LlGuidanceNative => JSON_ADDITIONAL_KEY_STRING_RULE,
     }
 }

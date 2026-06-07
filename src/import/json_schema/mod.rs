@@ -8,7 +8,7 @@ mod lower;
 mod number;
 mod object;
 mod preflight;
-mod string;
+pub(crate) mod string;
 
 #[cfg(test)]
 mod tests;
