@@ -132,16 +132,16 @@ impl<'a> Lowerer<'a> {
         );
         self.add_terminal_rule(
             JSON_STRING_RULE,
-            GrammarExpr::RawRegex(format!(r#"\"(?:{value_string_char})*\""#)),
+            GrammarExpr::RawRegex(format!(r#""(?:{value_string_char})*""#)),
         );
         if mode == super::string::JsonStringCompatMode::LlGuidanceNative {
             self.add_terminal_rule(
                 JSON_KEY_STRING_RULE,
-                GrammarExpr::RawRegex(format!(r#"\"(?:{key_string_char})*\""#)),
+                GrammarExpr::RawRegex(format!(r#""(?:{key_string_char})*""#)),
             );
             self.add_terminal_rule(
                 JSON_ADDITIONAL_KEY_STRING_RULE,
-                GrammarExpr::RawRegex(format!(r#"\"(?:{additional_key_string_char})*\""#)),
+                GrammarExpr::RawRegex(format!(r#""(?:{additional_key_string_char})*""#)),
             );
         }
         self.add_terminal_rule(
