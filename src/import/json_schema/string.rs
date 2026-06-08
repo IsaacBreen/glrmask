@@ -1215,10 +1215,6 @@ impl<'a> Lowerer<'a> {
             return Ok(never());
         }
 
-        if !fixed_keys.is_empty() {
-            return self.lower_additional_key_colon_expanded_addback(fixed_keys, local_patterns);
-        }
-
         if super::share_additional_addback_choices_enabled() && !self.llguidance_compat_enabled() {
             return self.lower_additional_key_colon_shared(fixed_keys, local_patterns);
         }
@@ -1265,10 +1261,6 @@ impl<'a> Lowerer<'a> {
         fixed_keys: &BTreeSet<String>,
         local_patterns: &[String],
     ) -> ImportResult<GrammarExpr> {
-        if !local_patterns.is_empty() {
-            return self.lower_additional_key_colon_expanded_addback(fixed_keys, local_patterns);
-        }
-
         for key in fixed_keys {
             if self.shared_ap_literal_keys.contains(key) {
                 continue;
@@ -1303,10 +1295,8 @@ impl<'a> Lowerer<'a> {
 
         let base = self.shared_additional_key_colon_base()?;
         let excluded_addback = self.shared_additional_excluded_key_colon()?;
-        let shared_literal_keys = self.shared_ap_literal_keys.clone();
         let mut local_exclusions = fixed_keys
             .iter()
-            .filter(|key| shared_literal_keys.contains(*key))
             .map(|key| self.lower_literal_key_colon(key))
             .collect::<Vec<_>>();
         for pattern in local_patterns {
@@ -1375,10 +1365,8 @@ impl<'a> Lowerer<'a> {
     ) -> ImportResult<GrammarExpr> {
         let base = self.shared_additional_key_colon_base()?;
         let excluded_addback = self.shared_additional_excluded_key_colon()?;
-        let shared_literal_keys = self.shared_ap_literal_keys.clone();
         let local_exclusions = fixed_keys
             .iter()
-            .filter(|key| shared_literal_keys.contains(*key))
             .map(|key| self.lower_literal_key_colon(key))
             .collect::<Vec<_>>();
 
