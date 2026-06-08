@@ -448,7 +448,12 @@ impl<'a> Lowerer<'a> {
                         "string pattern literal is not valid UTF-8 after parsing: {error}"
                     ))
                 })?;
-                Some(seq(literal.chars().map(json_body_char_expr_for_decoded_char).collect()))
+                Some(seq(
+                    literal
+                        .chars()
+                        .map(json_body_char_expr_for_pattern_literal)
+                        .collect(),
+                ))
             }
             HirKind::Class(class) => self.lower_decoded_class_to_json_body_expr(class),
             HirKind::Look(look) if is_start_look(*look) || is_end_look(*look) => Some(GrammarExpr::Epsilon),
@@ -545,7 +550,14 @@ impl<'a> Lowerer<'a> {
                 .copied()
                 .map(json_body_char_expr_for_decoded_char)
                 .collect::<Vec<_>>();
-            self.add_internal_terminal_rule(NAME, choice(alternatives));
+            let mut rule_expr = choice(alternatives);
+            if matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative) {
+                rule_expr = choice(vec![
+                    rule_expr,
+                    GrammarExpr::RawRegex(json_unicode_escape_regex_for_chars(PATTERN_WHITESPACE_CHARS)),
+                ]);
+            }
+            self.add_internal_terminal_rule(NAME, rule_expr);
         }
         r(NAME)
     }
@@ -554,13 +566,17 @@ impl<'a> Lowerer<'a> {
         const NAME: &str = "JSON_STRING_PATTERN_NON_WHITESPACE_CHAR";
         if !self.rules.iter().any(|rule| rule.name == NAME) {
             let whitespace = self.string_pattern_whitespace_char_ref();
-            self.add_internal_terminal_rule(
-                NAME,
-                GrammarExpr::Exclude {
+            let mut rule_expr = GrammarExpr::Exclude {
                     expr: Box::new(r(JSON_STRING_CHAR_RULE)),
                     exclude: Box::new(whitespace),
-                },
-            );
+                };
+            if matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative) {
+                rule_expr = choice(vec![
+                    rule_expr,
+                    GrammarExpr::RawRegex(json_unicode_escape_regex_for_bmp_non_whitespace()),
+                ]);
+            }
+            self.add_internal_terminal_rule(NAME, rule_expr);
         }
         r(NAME)
     }
@@ -1790,7 +1806,7 @@ fn lower_decoded_regex_hir_to_json_body_regex(hir: &Hir, context: JsonStringCont
             })?;
             literal
                 .chars()
-                .map(|ch| json_body_char_regex_for_decoded_char_in_mode(ch, json_string_compat_mode(), context))
+                .map(|ch| json_body_char_regex_for_pattern_literal_in_mode(ch, json_string_compat_mode(), context))
                 .collect::<Vec<_>>()
                 .join("")
         }
@@ -1857,6 +1873,9 @@ fn lower_decoded_class_to_json_body_regex(class: &Class, context: JsonStringCont
                     let non_ascii_start = std::cmp::max(start, '\u{80}');
                     alternatives.push(unicode_range_to_utf8_regex_string(non_ascii_start, end));
                 }
+                if let Some(escaped_range) = unicode_range_to_json_unicode_escape_regex_string(start, end) {
+                    alternatives.push(escaped_range);
+                }
             }
         }
         Class::Bytes(class) => {
@@ -1874,6 +1893,9 @@ fn lower_decoded_class_to_json_body_regex(class: &Class, context: JsonStringCont
                     } else {
                         alternatives.push(format!(r#"[\x{:02x}-\x{:02x}]"#, non_ascii_start, end));
                     }
+                }
+                if let Some(escaped_range) = byte_range_to_json_unicode_escape_regex_string(start, end) {
+                    alternatives.push(escaped_range);
                 }
             }
         }
@@ -1931,6 +1953,113 @@ fn unicode_range_to_utf8_regex_string(start: char, end: char) -> String {
         seqs.into_iter().next().unwrap()
     } else {
         format!("(?:{})", seqs.join("|"))
+    }
+}
+
+fn unicode_range_to_json_unicode_escape_regex_string(start: char, end: char) -> Option<String> {
+    let start = u32::from(start);
+    let end = u32::from(end).min(0xFFFF);
+    if start > end {
+        return None;
+    }
+    Some(json_unicode_escape_range_regex_string(start as u16, end as u16))
+}
+
+fn byte_range_to_json_unicode_escape_regex_string(start: u8, end: u8) -> Option<String> {
+    if start > end {
+        return None;
+    }
+    Some(json_unicode_escape_range_regex_string(start as u16, end as u16))
+}
+
+fn json_unicode_escape_range_regex_string(start: u16, end: u16) -> String {
+    let mut patterns = Vec::new();
+    push_hex_range_patterns(start, end, 0, &mut patterns);
+    let prefixed = patterns
+        .into_iter()
+        .map(|pattern| format!(r#"\\u{}"#, pattern))
+        .collect::<Vec<_>>();
+    match prefixed.len() {
+        0 => r#"[^\s\S]"#.to_string(),
+        1 => prefixed.into_iter().next().unwrap(),
+        _ => format!(r#"(?:{})"#, prefixed.join("|")),
+    }
+}
+
+fn push_hex_range_patterns(start: u16, end: u16, digit_index: usize, output: &mut Vec<String>) {
+    if start > end {
+        return;
+    }
+    if digit_index == 4 {
+        output.push(String::new());
+        return;
+    }
+
+    let shift = 4 * (3 - digit_index);
+    let low_digit = ((start >> shift) & 0xF) as u8;
+    let high_digit = ((end >> shift) & 0xF) as u8;
+    let suffix_mask = if shift == 0 { 0 } else { (1u16 << shift) - 1 };
+
+    if low_digit == high_digit {
+        let mut suffixes = Vec::new();
+        push_hex_range_patterns(start, end, digit_index + 1, &mut suffixes);
+        for suffix in suffixes {
+            output.push(format!("{}{}", hex_digit_exact_regex(low_digit), suffix));
+        }
+        return;
+    }
+
+    let low_branch_end = start | suffix_mask;
+    let mut low_suffixes = Vec::new();
+    push_hex_range_patterns(start, low_branch_end, digit_index + 1, &mut low_suffixes);
+    for suffix in low_suffixes {
+        output.push(format!("{}{}", hex_digit_exact_regex(low_digit), suffix));
+    }
+
+    if low_digit + 1 < high_digit {
+        output.push(format!(
+            "{}{}",
+            hex_digit_range_regex(low_digit + 1, high_digit - 1),
+            any_hex_suffix_regex(3 - digit_index)
+        ));
+    }
+
+    let high_branch_start = end & !suffix_mask;
+    let mut high_suffixes = Vec::new();
+    push_hex_range_patterns(high_branch_start, end, digit_index + 1, &mut high_suffixes);
+    for suffix in high_suffixes {
+        output.push(format!("{}{}", hex_digit_exact_regex(high_digit), suffix));
+    }
+}
+
+fn any_hex_suffix_regex(digits: usize) -> String {
+    match digits {
+        0 => String::new(),
+        1 => String::from("[0-9A-Fa-f]"),
+        _ => format!("[0-9A-Fa-f]{{{digits}}}"),
+    }
+}
+
+fn hex_digit_exact_regex(digit: u8) -> String {
+    match digit {
+        0..=9 => char::from(b'0' + digit).to_string(),
+        10..=15 => {
+            let upper = char::from(b'A' + (digit - 10));
+            let lower = char::from(b'a' + (digit - 10));
+            format!("[{}{lower}]", upper)
+        }
+        _ => unreachable!("hex digit out of range"),
+    }
+}
+
+fn hex_digit_range_regex(start: u8, end: u8) -> String {
+    let parts = (start..=end)
+        .map(hex_digit_exact_regex)
+        .collect::<Vec<_>>();
+    match parts.len() {
+        0 => String::new(),
+        1 => parts.into_iter().next().unwrap(),
+        _ => format!("(?:{})", parts.join("|")),
     }
 }
 fn is_unicode_decimal_digit_class(class: &Class) -> bool {
@@ -2165,6 +2294,14 @@ fn json_body_char_expr_for_decoded_char(ch: char) -> GrammarExpr {
     GrammarExpr::RawRegex(json_body_char_regex_for_decoded_char(ch))
 }
 
+fn json_body_char_expr_for_pattern_literal(ch: char) -> GrammarExpr {
+    GrammarExpr::RawRegex(json_body_char_regex_for_pattern_literal_in_mode(
+        ch,
+        json_string_compat_mode(),
+        JsonStringContext::Value,
+    ))
+}
+
 fn json_body_char_regex_for_decoded_char_in_mode(
     ch: char,
     mode: JsonStringCompatMode,
@@ -2188,6 +2325,84 @@ fn json_body_char_regex_for_decoded_char_in_mode(
         }
     } else {
         canonical
+    }
+}
+
+fn json_body_char_regex_for_pattern_literal_in_mode(
+    ch: char,
+    mode: JsonStringCompatMode,
+    context: JsonStringContext,
+) -> String {
+    let canonical = json_body_char_regex_for_decoded_char_in_mode(ch, mode, context);
+    if !should_allow_json_unicode_escape_for_pattern_literal(ch) {
+        return canonical;
+    }
+    let escaped = json_unicode_escape_for_char_regex(ch);
+    format!(r#"(?:{}|{})"#, canonical, escaped)
+}
+
+fn should_allow_json_unicode_escape_for_pattern_literal(ch: char) -> bool {
+    u32::from(ch) <= 0xFFFF && (is_safe_raw_json_string_char(ch) || u32::from(ch) >= 0x80)
+}
+
+fn json_unicode_escape_for_char_regex(ch: char) -> String {
+    let codepoint = u32::from(ch);
+    format!(
+        r#"\\u{}{}{}{}"#,
+        hex_digit_exact_regex(((codepoint >> 12) & 0xF) as u8),
+        hex_digit_exact_regex(((codepoint >> 8) & 0xF) as u8),
+        hex_digit_exact_regex(((codepoint >> 4) & 0xF) as u8),
+        hex_digit_exact_regex((codepoint & 0xF) as u8),
+    )
+}
+
+fn json_unicode_escape_regex_for_chars(chars: &[char]) -> String {
+    let parts = chars
+        .iter()
+        .copied()
+        .filter(|ch| u32::from(*ch) <= 0xFFFF)
+        .map(json_unicode_escape_for_char_regex)
+        .collect::<Vec<_>>();
+    match parts.len() {
+        0 => r#"[^\s\S]"#.to_string(),
+        1 => parts.into_iter().next().unwrap(),
+        _ => format!(r#"(?:{})"#, parts.join("|")),
+    }
+}
+
+fn json_unicode_escape_regex_for_bmp_non_whitespace() -> String {
+    let mut excluded = PATTERN_WHITESPACE_CHARS
+        .iter()
+        .copied()
+        .filter_map(|ch| u16::try_from(u32::from(ch)).ok())
+        .collect::<BTreeSet<_>>();
+    for surrogate in 0xD800u16..=0xDFFFu16 {
+        excluded.insert(surrogate);
+    }
+
+    let mut ranges = Vec::new();
+    let mut range_start: Option<u16> = None;
+    let mut previous: Option<u16> = None;
+    for codepoint in 0u16..=0xFFFFu16 {
+        if excluded.contains(&codepoint) {
+            if let (Some(start), Some(end)) = (range_start.take(), previous.take()) {
+                ranges.push(json_unicode_escape_range_regex_string(start, end));
+            }
+            continue;
+        }
+        if range_start.is_none() {
+            range_start = Some(codepoint);
+        }
+        previous = Some(codepoint);
+    }
+    if let (Some(start), Some(end)) = (range_start, previous) {
+        ranges.push(json_unicode_escape_range_regex_string(start, end));
+    }
+
+    match ranges.len() {
+        0 => r#"[^\s\S]"#.to_string(),
+        1 => ranges.into_iter().next().unwrap(),
+        _ => format!(r#"(?:{})"#, ranges.join("|")),
     }
 }
 
