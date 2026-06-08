@@ -21,13 +21,13 @@ pub(crate) struct SchemaDefinition {
     pub(crate) schema: Schema,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Schema {
     pub(crate) location: String,
     pub(crate) kind: SchemaKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SchemaKind {
     /// JSON Schema boolean `true`.
     Any,
@@ -39,7 +39,7 @@ pub(crate) enum SchemaKind {
     Assertions(Box<SchemaAssertions>),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct SchemaAssertions {
     pub(crate) types: Option<Vec<SchemaType>>,
     pub(crate) const_value: Option<Value>,
@@ -107,7 +107,7 @@ pub(crate) enum SchemaType {
     Integer,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ObjectSchema {
     pub(crate) properties: Vec<PropertySchema>,
     pub(crate) required: BTreeSet<String>,
@@ -134,26 +134,26 @@ impl Default for ObjectSchema {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PropertySchema {
     pub(crate) name: String,
     pub(crate) schema: Schema,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PatternPropertySchema {
     pub(crate) pattern: String,
     pub(crate) schema: Schema,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum AdditionalProperties {
     AllowAny,
     Deny,
     Schema(Box<Schema>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ArraySchema {
     pub(crate) items: Box<Schema>,
     pub(crate) prefix_items: Vec<Schema>,
@@ -172,7 +172,7 @@ impl Default for ArraySchema {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct StringSchema {
     pub(crate) min_length: usize,
     pub(crate) max_length: Option<usize>,
@@ -180,7 +180,7 @@ pub(crate) struct StringSchema {
     pub(crate) format: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct NumberSchema {
     pub(crate) integer: bool,
     pub(crate) minimum: Option<f64>,

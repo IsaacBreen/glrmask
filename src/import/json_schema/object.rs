@@ -3687,6 +3687,121 @@ fn singleton_string_identity_literal_expr(identity: &str) -> Option<GrammarExpr>
     Some(lit_bytes(encoded.as_bytes().to_vec()))
 }
 
+fn schemas_structurally_equal(lhs: &Schema, rhs: &Schema) -> bool {
+    match (&lhs.kind, &rhs.kind) {
+        (SchemaKind::Any, SchemaKind::Any) | (SchemaKind::Never, SchemaKind::Never) => true,
+        (SchemaKind::Ref(left), SchemaKind::Ref(right)) => left == right,
+        (SchemaKind::Assertions(left), SchemaKind::Assertions(right)) => {
+            left.types == right.types
+                && left.const_value == right.const_value
+                && left.enum_values == right.enum_values
+                && object_schemas_structurally_equal(left.object.as_ref(), right.object.as_ref())
+                && array_schemas_structurally_equal(left.array.as_ref(), right.array.as_ref())
+                && left.string == right.string
+                && left.number == right.number
+                && schema_slices_structurally_equal(&left.any_of, &right.any_of)
+                && schema_slices_structurally_equal(&left.one_of, &right.one_of)
+                && schema_slices_structurally_equal(&left.all_of, &right.all_of)
+                && optional_schemas_structurally_equal(left.not.as_ref(), right.not.as_ref())
+        }
+        _ => false,
+    }
+}
+
+fn optional_schemas_structurally_equal(lhs: Option<&Schema>, rhs: Option<&Schema>) -> bool {
+    match (lhs, rhs) {
+        (Some(left), Some(right)) => schemas_structurally_equal(left, right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn schema_slices_structurally_equal(lhs: &[Schema], rhs: &[Schema]) -> bool {
+    lhs.len() == rhs.len()
+        && lhs
+            .iter()
+            .zip(rhs)
+            .all(|(left, right)| schemas_structurally_equal(left, right))
+}
+
+fn object_schemas_structurally_equal(lhs: Option<&ObjectSchema>, rhs: Option<&ObjectSchema>) -> bool {
+    match (lhs, rhs) {
+        (Some(left), Some(right)) => {
+            left.required == right.required
+                && left.property_dependencies == right.property_dependencies
+                && left.min_properties == right.min_properties
+                && left.max_properties == right.max_properties
+                && left.properties.len() == right.properties.len()
+                && left
+                    .properties
+                    .iter()
+                    .zip(&right.properties)
+                    .all(|(lprop, rprop)| {
+                        lprop.name == rprop.name
+                            && schemas_structurally_equal(&lprop.schema, &rprop.schema)
+                    })
+                && left.pattern_properties.len() == right.pattern_properties.len()
+                && left
+                    .pattern_properties
+                    .iter()
+                    .zip(&right.pattern_properties)
+                    .all(|(lpat, rpat)| {
+                        lpat.pattern == rpat.pattern
+                            && schemas_structurally_equal(&lpat.schema, &rpat.schema)
+                    })
+                && optional_schemas_structurally_equal(
+                    left.property_names.as_ref(),
+                    right.property_names.as_ref(),
+                )
+                && additional_properties_structurally_equal(
+                    &left.additional_properties,
+                    &right.additional_properties,
+                )
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn array_schemas_structurally_equal(lhs: Option<&super::ast::ArraySchema>, rhs: Option<&super::ast::ArraySchema>) -> bool {
+    match (lhs, rhs) {
+        (Some(left), Some(right)) => {
+            schemas_structurally_equal(&left.items, &right.items)
+                && left.prefix_items.len() == right.prefix_items.len()
+                && left
+                    .prefix_items
+                    .iter()
+                    .zip(&right.prefix_items)
+                    .all(|(litem, ritem)| schemas_structurally_equal(litem, ritem))
+                && left.min_items == right.min_items
+                && left.max_items == right.max_items
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn additional_properties_structurally_equal(
+    lhs: &AdditionalProperties,
+    rhs: &AdditionalProperties,
+) -> bool {
+    match (lhs, rhs) {
+        (AdditionalProperties::AllowAny, AdditionalProperties::AllowAny)
+        | (AdditionalProperties::Deny, AdditionalProperties::Deny) => true,
+        (AdditionalProperties::Schema(left), AdditionalProperties::Schema(right)) => {
+            schemas_structurally_equal(left, right)
+        }
+        _ => false,
+    }
+}
+
+fn shareable_property_schemas_match(lhs: &AnyOfFixedObjectItem, rhs: &AnyOfFixedObjectItem) -> bool {
+    match (lhs.value_identity.as_ref(), rhs.value_identity.as_ref()) {
+        (Some(left), Some(right)) => left == right,
+        _ => schemas_structurally_equal(&lhs.schema, &rhs.schema),
+    }
+}
+
 fn plain_object_schema_for_closed_any_of(schema: &Schema) -> Option<&ObjectSchema> {
     let SchemaKind::Assertions(assertions) = &schema.kind else {
         return None;
@@ -3712,14 +3827,10 @@ fn closed_any_of_variants_have_shareable_property(variants: &[AnyOfFixedObjectVa
         return false;
     };
     first.items.iter().any(|first_item| {
-        let Some(identity) = first_item.value_identity.as_ref() else {
-            return false;
-        };
         variants.iter().skip(1).all(|variant| {
             variant
                 .item_for_key(&first_item.key)
-                .and_then(|item| item.value_identity.as_ref())
-                .is_some_and(|candidate| candidate == identity)
+                .is_some_and(|candidate| shareable_property_schemas_match(first_item, candidate))
         })
     })
 }
@@ -3737,13 +3848,12 @@ fn shared_closed_any_of_key_transition(
         let variant = &variants[cursor.variant_idx as usize];
         let next_cursor = variant.advance_cursor(cursor.cursor as usize, key)?;
         let item = variant.item_for_key(key)?;
-        let item_identity = item.value_identity.as_ref()?;
         if let Some(expected) = identity {
-            if expected != item_identity {
+            if !shareable_property_schemas_match(expected, item) {
                 return None;
             }
         } else {
-            identity = Some(item_identity);
+            identity = Some(item);
             value_expr = Some(item.value_expr.clone());
         }
         next_cursors.push(AnyOfFixedObjectCursor {
