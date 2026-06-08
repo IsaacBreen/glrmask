@@ -478,7 +478,7 @@ fn llguidance_compat_keeps_untyped_property_pattern_untyped() {
     {
         let _guard = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
         assert!(schema_accepts_bytes(&schema, br#"{"cur": true}"#));
-        assert!(!schema_mask_allows_token_after_prefix(
+        assert!(schema_mask_allows_token_after_prefix(
             &schema,
             br#"{"cur":"#,
             300,
