@@ -22,18 +22,7 @@ fn encoded_json_key_regex(encoded: &str) -> String {
     regex_escape(encoded)
 }
 
-
 impl<'a> Lowerer<'a> {
-    fn lower_known_key_colon_llguidance_fallback(&mut self, prefix: &[u8]) -> GrammarExpr {
-        let mut parts = Vec::new();
-        if !prefix.is_empty() {
-            parts.push(lit_bytes(prefix.to_vec()));
-        }
-        parts.push(r(json_key_string_rule()));
-        parts.push(r(JSON_KEY_SEPARATOR_RULE));
-        seq(parts)
-    }
-
     pub(crate) fn lower_string(&mut self, schema: &StringSchema) -> ImportResult<GrammarExpr> {
         let should_terminalize_length = schema.max_length.is_none_or(|max_length| {
             !self.should_split_bounded_string(schema.min_length, max_length)
@@ -872,13 +861,6 @@ impl<'a> Lowerer<'a> {
     ) -> GrammarExpr {
         let exact = self.lower_literal_key_colon_exact_with_prefix(prefix, key);
 
-        if self.llguidance_compat_enabled() {
-            return choice(vec![
-                exact,
-                self.lower_known_key_colon_llguidance_fallback(prefix),
-            ]);
-        }
-
         exact
     }
 
@@ -911,16 +893,6 @@ impl<'a> Lowerer<'a> {
             ])
         };
 
-        if self.llguidance_compat_enabled() {
-            return choice(vec![
-                exact,
-                seq(vec![
-                    self.lower_known_key_colon_llguidance_fallback(prefix),
-                    lit_bytes(vec![suffix_byte]),
-                ]),
-            ]);
-        }
-
         exact
     }
 
@@ -950,16 +922,6 @@ impl<'a> Lowerer<'a> {
                 self.lower_literal_key_colon_with_prefix_and_json_string(b"", key),
             ])
         };
-
-        if self.llguidance_compat_enabled() {
-            return choice(vec![
-                exact,
-                seq(vec![
-                    self.lower_known_key_colon_llguidance_fallback(prefix),
-                    GrammarExpr::RawRegex(format!(r#"\"(?:{})*\""#, string_body)),
-                ]),
-            ]);
-        }
 
         exact
     }
@@ -991,16 +953,6 @@ impl<'a> Lowerer<'a> {
                 self.lower_literal_key_colon_with_prefix_and_literal_value(b"", key, value),
             ])
         };
-
-        if self.llguidance_compat_enabled() {
-            return choice(vec![
-                exact,
-                seq(vec![
-                    self.lower_known_key_colon_llguidance_fallback(prefix),
-                    lit_bytes(value.to_vec()),
-                ]),
-            ]);
-        }
 
         exact
     }
