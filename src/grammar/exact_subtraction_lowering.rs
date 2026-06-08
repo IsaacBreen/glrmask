@@ -148,11 +148,6 @@ impl<'a> ExactSubtractionResolver<'a> {
             }
             GrammarExpr::Grouped(inner) => Ok(top_level_alternatives(inner)),
             GrammarExpr::Ref(name) => {
-                let Some(false) = self.rule_is_terminal.get(name).copied() else {
-                    return Err(GlrMaskError::GrammarParse(format!(
-                        "{lhs_name} - {name} requires {name} to name a nonterminal rule"
-                    )));
-                };
                 let referenced_expr = self.rule_exprs.get(name).ok_or_else(|| {
                     GlrMaskError::GrammarParse(format!(
                         "unknown rule referenced in exact alternative subtraction: {name}"

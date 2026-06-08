@@ -46,11 +46,6 @@ pub enum GrammarExpr {
     ///
     /// `items` is an ordered list of `(item_expr, is_required)` pairs.
     /// The sequence allows any subset of items (respecting order) where all
-    /// required items are present and optional items may be omitted.
-    /// Items that are present are joined by `separator` between consecutive ones.
-    ///
-    /// This generalises the "ordered object" pattern from JSON Schema (comma-separated
-    /// key-value pairs where some keys are optional) to arbitrary grammars.
     SeparatedSequence {
         items: Vec<(GrammarExpr, bool)>,
         separator: Box<GrammarExpr>,
