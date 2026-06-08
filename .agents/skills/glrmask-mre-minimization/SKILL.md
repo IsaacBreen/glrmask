@@ -47,6 +47,12 @@ single token instead of carrying a larger vocab just to prove both sides at
 once. Also prefer `commit_bytes` for the known-good prefix; do not tokenize the
 prefix unless tokenizing the prefix is itself part of the bug.
 
+Aggressively remove wrapper syntax that is not load-bearing. If the disputed
+behavior is inside a string, do not assume the opening quote must remain in the
+grammar or that you must tokenize up to that quote. Try deleting the quote
+wrapper entirely and starting directly at the disputed nonterminal. If the MRE
+still reproduces, keep the simpler version.
+
 Start with the exact schema, prefix, token, and vocab involved in the failure. Inline the schema or GLRM grammar in the test body. Do not hide the active artifact in helpers while minimizing.
 
 Document the weird load-bearing behavior directly in the MRE code. If a survivor looks obviously accidental, such as duplicate vocab bytes, order-dependent vocab grouping, nullable branches that consume nothing, strange regex bounds, or source-looking strings that could not be renamed, add a short comment beside that artifact explaining what simplifications were tried and failed.
