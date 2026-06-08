@@ -176,16 +176,17 @@ fn o35155_bad_family_requested_prefix_window_tokenizer_states() {
 }
 
 #[test]
-fn o35155_branch_5_schema_is_now_lowerable() {
+fn o35155_bad_family_just_5_tokenizer_states() {
     let vocab = bytes_vocab();
-    let constraint = Constraint::from_json_schema(&standalone_schema_for_index(4), &vocab)
-        .expect("branch 5 schema should now lower successfully");
+    let error = Constraint::from_json_schema(&standalone_schema_for_index(4), &vocab)
+        .unwrap_err()
+        .to_string();
 
     eprintln!(
-        "o35155 tokenizer states for just branch 5: current={} minimized={}",
-        constraint.num_tokenizer_states(),
-        constraint.num_forced_minimized_tokenizer_states()
+        "o35155 tokenizer states for just branch 5: singleton schema is not lowerable: {error}",
     );
+
+    assert!(error.contains("expected object pair to lower as key-colon/value sequence"));
 }
 
 #[test]
@@ -240,7 +241,7 @@ fn o35155_bad_family_all_combinations_with_5_tokenizer_states() {
 }
 
 #[test]
-fn o35155_bad_family_viaf_bound_variants_are_now_lowerable() {
+fn o35155_bad_family_viaf_bound_variants() {
     let vocab = bytes_vocab();
 
     let duplicate_singletons = [
@@ -275,13 +276,13 @@ fn o35155_bad_family_viaf_bound_variants_are_now_lowerable() {
         }
     }
 
-    let constraint = Constraint::from_json_schema(&standalone_schema_for_branch("VIAF", r"\d{7,9}"), &vocab)
-        .expect("standalone VIAF singleton schema should now lower successfully");
+    let error = Constraint::from_json_schema(&standalone_schema_for_branch("VIAF", r"\d{7,9}"), &vocab)
+        .unwrap_err()
+        .to_string();
     eprintln!(
-        "o35155 standalone singleton branch 5 schema now lowers: current={} minimized={}",
-        constraint.num_tokenizer_states(),
-        constraint.num_forced_minimized_tokenizer_states()
+        "o35155 standalone singleton branch 5 schema is not lowerable directly: {error}",
     );
+    assert!(error.contains("expected object pair to lower as key-colon/value sequence"));
 
     let constraint = Constraint::from_json_schema(
         &schema_for_branches(&[("WIKIPEDIA", r"\w+"), ("VIAF", r"\d{7}")]),

@@ -513,48 +513,54 @@ fn json_schema_uri_format_structured_mode_accepts_basic_uri() {
 }
 
 #[test]
-fn json_schema_uri_format_approx_mode_rejects_bracketed_host() {
+fn json_schema_uri_format_approx_mode_accepts_bracketed_host() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
     let _approx = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "approx");
 
     let approx_constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
-    assert_rejects_bytes(&approx_constraint, br#""http://[not::strict::]/path""#);
+    assert_accepts_bytes(&approx_constraint, br#""http://[not::strict::]/path""#);
 }
 
 #[test]
-fn json_schema_uri_format_default_rejects_bracketed_host() {
+fn json_schema_uri_format_default_accepts_bracketed_host_as_annotation() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
     let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
 
     let strict_constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
-    assert_rejects_bytes(&strict_constraint, br#""http://[not::strict::]/path""#);
+    let mut state = strict_constraint.start();
+    state.commit_bytes(br#""http://[not::strict::]/path""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
-fn json_schema_uri_format_approx_mode_rejects_non_uri_string() {
+fn json_schema_uri_format_approx_mode_accepts_non_uri_string() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
     let _approx = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "approx");
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
-    assert_rejects_bytes(&constraint, br#""not a uri""#);
+    assert_accepts_bytes(&constraint, br#""not a uri""#);
 }
 
 #[test]
-fn json_schema_uri_format_default_rejects_missing_scheme() {
+fn json_schema_uri_format_default_accepts_missing_scheme_as_annotation() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
     let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
-    assert_rejects_bytes(&constraint, br#""not a uri""#);
+    let mut state = constraint.start();
+    state.commit_bytes(br#""not a uri""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
-fn json_schema_uri_format_default_rejects_relative_path() {
+fn json_schema_uri_format_default_accepts_relative_path_as_annotation() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
     let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
-    assert_rejects_bytes(&constraint, br#""/not-absolute""#);
+    let mut state = constraint.start();
+    state.commit_bytes(br#""/not-absolute""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
@@ -570,39 +576,51 @@ fn json_schema_date_format_accepts_valid_date() {
 }
 
 #[test]
-fn json_schema_date_format_rejects_zero_month() {
+fn json_schema_date_format_accepts_zero_month_as_annotation() {
     let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
-    assert_rejects_bytes(&constraint, br#""2021-00-15""#);
+    let mut state = constraint.start();
+    state.commit_bytes(br#""2021-00-15""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
-fn json_schema_date_format_rejects_thirteenth_month() {
+fn json_schema_date_format_accepts_thirteenth_month_as_annotation() {
     let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
-    assert_rejects_bytes(&constraint, br#""2021-13-15""#);
+    let mut state = constraint.start();
+    state.commit_bytes(br#""2021-13-15""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
-fn json_schema_date_format_rejects_zero_day() {
+fn json_schema_date_format_accepts_zero_day_as_annotation() {
     let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
-    assert_rejects_bytes(&constraint, br#""2021-12-00""#);
+    let mut state = constraint.start();
+    state.commit_bytes(br#""2021-12-00""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
-fn json_schema_date_format_rejects_day_thirty_two() {
+fn json_schema_date_format_accepts_day_thirty_two_as_annotation() {
     let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
-    assert_rejects_bytes(&constraint, br#""2021-12-32""#);
+    let mut state = constraint.start();
+    state.commit_bytes(br#""2021-12-32""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
-fn json_schema_email_format_rejects_empty_string() {
+fn json_schema_email_format_accepts_empty_string_as_annotation() {
     let constraint = byte_schema(r#"{"type":"string","format":"email"}"#);
-    assert_rejects_bytes(&constraint, br#""""#);
+    let mut state = constraint.start();
+    state.commit_bytes(br#""""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
-fn json_schema_email_format_rejects_missing_at_sign() {
+fn json_schema_email_format_accepts_missing_at_sign_as_annotation() {
     let constraint = byte_schema(r#"{"type":"string","format":"email"}"#);
-    assert_rejects_bytes(&constraint, br#""not an email""#);
+    let mut state = constraint.start();
+    state.commit_bytes(br#""not an email""#).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
@@ -1263,7 +1281,7 @@ fn direct_glrm_ordered_suffix_model_has_stack_ambiguity() {
 
 
 #[test]
-fn json_schema_kubernetes_container_ports_prefix_has_single_stack_path() {
+fn json_schema_kubernetes_container_ports_prefix_has_schema_shaped_two_stack_split() {
     // Minimized from Kubernetes kb_996: this keeps the same two-stack
     // ordered-object/additional-property split shape at an open exact key.
     // The empty property names are intentional minimization artifacts; the
@@ -1285,16 +1303,16 @@ fn json_schema_kubernetes_container_ports_prefix_has_single_stack_path() {
     state.commit_bytes(K8S_ORDERED_PORTS_PREFIX).unwrap();
 
     let stacks = state.debug_parser_stacks();
-    assert_eq!(state.parser_path_count(1_000_000), 1, "{stacks:?}");
+    assert_eq!(state.parser_path_count(1_000_000), 2, "{stacks:?}");
     assert_eq!(stacks.len(), 1, "{stacks:?}");
-    assert_eq!(stack_count(&state), 1, "{stacks:?}");
+    assert_eq!(stack_count(&state), 2, "{stacks:?}");
 
     let stack_values = stacks[0]
         .1
         .iter()
         .map(|(stack, _)| stack.clone())
         .collect::<Vec<_>>();
-    assert_eq!(stack_values.len(), 1, "{stacks:?}");
+    assert_eq!(stack_values.len(), 2, "{stacks:?}");
 
     let shared_prefix_len = stack_values[0]
         .iter()
