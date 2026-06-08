@@ -6,41 +6,55 @@ fn token_allowed(mask: &[u32], id: usize) -> bool {
         .unwrap_or(false)
 }
 
-#[test]
-fn glrm_unicode_escape_progression_allows_bare_u_but_rejects_u_c() {
-    let grammar = r#"
+const GLRM_UNICODE_ESCAPE_PROGRESS_MRE: &str = r#"
 start s;
 
 nt s ::= "\"" esc "\"";
 t esc ::= /\\u00(?:[01][0-9A-Fa-f]|7[Ff])/;
 "#;
 
-    let quote = 0u32;
-    let json_u = 1u32;
-    let json_u_c = 2u32;
-    let zero = 3u32;
-    let upper_c = 4u32;
-    let vocab = Vocab::new(
-        vec![
-            (quote, b"\"".to_vec()),
-            (json_u, br#"\u"#.to_vec()),
-            (json_u_c, br#"\uC"#.to_vec()),
-            (zero, b"0".to_vec()),
-            (upper_c, b"C".to_vec()),
-        ],
-        None,
-    );
-
-    let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+#[test]
+fn glrm_unicode_escape_progression_allows_bare_u() {
+    let vocab = Vocab::new(vec![(0u32, br#"\u"#.to_vec())], None);
+    let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_MRE, &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_token(quote).unwrap();
+    state.commit_bytes(b"\"").unwrap();
 
     let mask = state.mask();
-    assert!(token_allowed(&mask, json_u as usize), r#"bare \u should be live because \u00.. is valid"#);
-    assert!(!token_allowed(&mask, json_u_c as usize), r#"\uC should already be dead for /\\u00.../"#);
+    assert!(token_allowed(&mask, 0), r#"bare \u should be live because \u00.. is valid"#);
+}
 
-    state.commit_token(json_u).unwrap();
-    let post_u = state.mask();
-    assert!(token_allowed(&post_u, zero as usize), r#"0 should be live after \u for /\\u00.../"#);
-    assert!(!token_allowed(&post_u, upper_c as usize), r#"C should be dead after \u for /\\u00.../"#);
+#[test]
+fn glrm_unicode_escape_progression_rejects_u_c() {
+    let vocab = Vocab::new(vec![(0u32, br#"\uC"#.to_vec())], None);
+    let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_MRE, &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_bytes(b"\"").unwrap();
+
+    let mask = state.mask();
+    assert!(!token_allowed(&mask, 0), r#"\uC should already be dead for /\\u00.../"#);
+}
+
+#[test]
+fn glrm_unicode_escape_progression_allows_zero_after_bare_u() {
+    let vocab = Vocab::new(vec![(0u32, br#"\u"#.to_vec()), (1u32, b"0".to_vec())], None);
+    let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_MRE, &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_bytes(b"\"").unwrap();
+    state.commit_bytes(br#"\u"#).unwrap();
+
+    let mask = state.mask();
+    assert!(token_allowed(&mask, 1), r#"0 should be live after \u for /\\u00.../"#);
+}
+
+#[test]
+fn glrm_unicode_escape_progression_rejects_c_after_bare_u() {
+    let vocab = Vocab::new(vec![(0u32, br#"\u"#.to_vec()), (1u32, b"C".to_vec())], None);
+    let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_MRE, &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_bytes(b"\"").unwrap();
+    state.commit_bytes(br#"\u"#).unwrap();
+
+    let mask = state.mask();
+    assert!(!token_allowed(&mask, 1), r#"C should be dead after \u for /\\u00.../"#);
 }
