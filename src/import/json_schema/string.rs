@@ -1117,6 +1117,10 @@ impl<'a> Lowerer<'a> {
         fixed_keys: &BTreeSet<String>,
         local_patterns: &[String],
     ) -> ImportResult<GrammarExpr> {
+        if local_patterns.iter().any(|pattern| pattern_matches_any_key(pattern)) {
+            return Ok(never());
+        }
+
         if super::share_additional_addback_choices_enabled() {
             return self.lower_additional_key_colon_shared(fixed_keys, local_patterns);
         }
@@ -1521,6 +1525,10 @@ fn unanchored_pattern_split_mode() -> UnanchoredPatternSplitMode {
             })
             .unwrap_or(UnanchoredPatternSplitMode::OpenMiddle)
     })
+}
+
+fn pattern_matches_any_key(pattern: &str) -> bool {
+    matches!(preprocess_ascii_shorthand(pattern).as_str(), ".*" | "^.*$")
 }
 
 fn parse_unanchored_pattern_split_mode(value: &str) -> Option<UnanchoredPatternSplitMode> {
