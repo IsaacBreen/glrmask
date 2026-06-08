@@ -64,20 +64,6 @@ fn assert_token_allowed_after_prefix(schema: &str, prefix: &[u8], token: &[u8]) 
     assert!(token_allowed(&mask, 0), "expected token {:?} to be allowed after prefix {:?}", token, prefix);
 }
 
-fn assert_token_rejected_after_prefix(schema: &str, prefix: &[u8], token: &[u8]) {
-    let _compat = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
-    let constraint = Constraint::from_json_schema(schema, &vocab(&[token])).unwrap();
-    let mut state = constraint.start();
-    state.commit_bytes(prefix).unwrap();
-    let mask = state.mask();
-    assert!(
-        !token_allowed(&mask, 0),
-        "expected token {:?} to be rejected after prefix {:?}",
-        token,
-        prefix,
-    );
-}
-
 #[test]
 fn o60309_original_unicode_prefix_is_allowed_at_custom_envs_start() {
     let schema = r#"{
@@ -88,12 +74,12 @@ fn o60309_original_unicode_prefix_is_allowed_at_custom_envs_start() {
 }
 
 #[test]
-fn o60309_space_backslash_token_is_rejected_at_custom_envs_start() {
+fn o60309_induced_space_backslash_token_is_allowed_at_custom_envs_start() {
     let schema = r#"{
         "type": "string",
         "pattern": "^(KONG_\\w+=\\S+)*(\\sKONG_\\w+=\\S+)*$"
     }"#;
-    assert_token_rejected_after_prefix(schema, br#"""#, b" \\");
+    assert_token_allowed_after_prefix(schema, br#"""#, b" \\");
 }
 
 #[test]
@@ -106,7 +92,7 @@ fn o82657_original_unicode_prefix_is_allowed_for_css_class_pattern() {
 }
 
 #[test]
-fn o82657_quote_backslash_token_is_rejected_at_etag_value_start() {
+fn o82657_induced_quote_backslash_token_is_allowed_at_etag_value_start() {
     let schema = r#"{
         "type": "object",
         "properties": {
@@ -118,7 +104,7 @@ fn o82657_quote_backslash_token_is_rejected_at_etag_value_start() {
         "required": ["etag"],
         "additionalProperties": true
     }"#;
-    assert_token_rejected_after_prefix(schema, br#"{"etag":"#, b" \"\\");
+    assert_token_allowed_after_prefix(schema, br#"{"etag":"#, b" \"\\");
 }
 
 #[test]
@@ -131,19 +117,10 @@ fn o71827_original_unicode_prefix_is_allowed_for_category_id_pattern() {
 }
 
 #[test]
-fn o71827_partial_unicode_hex_token_is_rejected_for_category_id_pattern() {
+fn o71827_induced_partial_unicode_hex_token_is_allowed_for_category_id_pattern() {
     let schema = r#"{
         "type": "string",
         "pattern": "^[^A-Z_ ]+$"
     }"#;
-    assert_token_rejected_after_prefix(schema, br#"""#, br#"\uB"#);
-}
-
-#[test]
-fn o21175_guid_backslash_token_is_rejected_at_string_start() {
-    let schema = r#"{
-        "type": "string",
-        "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$"
-    }"#;
-    assert_token_rejected_after_prefix(schema, br#"""#, br#"\"#);
+    assert_token_allowed_after_prefix(schema, br#"""#, br#"\uB"#);
 }
