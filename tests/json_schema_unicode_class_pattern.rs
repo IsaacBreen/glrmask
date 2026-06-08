@@ -231,3 +231,123 @@ fn unicode_class_pattern_preserves_explicit_fullwidth_digit_range_in_mixed_class
     let mut state_bytes_ef = state.clone();
     state_bytes_ef.commit_bytes(&[239]).unwrap();
 }
+
+#[test]
+fn non_whitespace_class_accepts_unicode_escape_prefix_and_valid_bmp_escape() {
+    let schema = r#"{
+        "type": "string",
+        "pattern": "^\\S+$"
+    }"#;
+
+    let vocab = Vocab::new(
+        vec![
+            (0, br#"\u"#.to_vec()),
+            (1, br#"\u00B2"#.to_vec()),
+        ],
+        None,
+    );
+
+    let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_bytes(b"\"").unwrap();
+
+    let mask = state.mask();
+    let allows_prefix = (mask[0 / 32] >> (0 % 32)) & 1 != 0;
+    let allows_escape = (mask[1 / 32] >> (1 % 32)) & 1 != 0;
+
+    assert!(allows_prefix, "glrmask should allow bare \\u when some non-whitespace BMP escapes remain valid");
+    assert!(allows_escape, "glrmask should allow a valid non-whitespace BMP unicode escape");
+
+    let mut committed = state.clone();
+    committed.commit_bytes(br#"\u00B2"#).unwrap();
+}
+
+#[test]
+fn mixed_word_whitespace_class_accepts_bmp_unicode_escape_for_nbsp() {
+    let schema = r#"{
+        "type": "string",
+        "pattern": "^[\\w\\s-]+$"
+    }"#;
+
+    let vocab = Vocab::new(
+        vec![
+            (0, br#"\u"#.to_vec()),
+            (1, br#"\u00A0"#.to_vec()),
+        ],
+        None,
+    );
+
+    let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_bytes(b"\"").unwrap();
+
+    let mask = state.mask();
+    let allows_prefix = (mask[0 / 32] >> (0 % 32)) & 1 != 0;
+    let allows_escape = (mask[1 / 32] >> (1 % 32)) & 1 != 0;
+
+    assert!(allows_prefix, "glrmask should allow bare \\u when some whitespace BMP escapes remain valid");
+    assert!(allows_escape, "glrmask should allow a valid NBSP unicode escape for \\s");
+
+    let mut committed = state.clone();
+    committed.commit_bytes(br#"\u00A0"#).unwrap();
+}
+
+#[test]
+fn negated_ascii_class_accepts_unicode_escape_prefix_and_valid_bmp_escape() {
+    let schema = r#"{
+        "type": "string",
+        "pattern": "^[^A-Z_ ]+$"
+    }"#;
+
+    let vocab = Vocab::new(
+        vec![
+            (0, br#"\u"#.to_vec()),
+            (1, br#"\u00B2"#.to_vec()),
+        ],
+        None,
+    );
+
+    let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_bytes(b"\"").unwrap();
+
+    let mask = state.mask();
+    let allows_prefix = (mask[0 / 32] >> (0 % 32)) & 1 != 0;
+    let allows_escape = (mask[1 / 32] >> (1 % 32)) & 1 != 0;
+
+    assert!(allows_prefix, "glrmask should allow bare \\u when some negated-class BMP escapes remain valid");
+    assert!(allows_escape, "glrmask should allow a valid BMP unicode escape in the negated class");
+
+    let mut committed = state.clone();
+    committed.commit_bytes(br#"\u00B2"#).unwrap();
+}
+
+#[test]
+fn literal_prefix_pattern_accepts_unicode_escape_for_printable_bmp_character() {
+    let schema = r#"{
+        "type": "string",
+        "pattern": "^KONG_$"
+    }"#;
+
+    let vocab = Vocab::new(
+        vec![
+            (0, br#"\u"#.to_vec()),
+            (1, br#"\u004BONG_"#.to_vec()),
+        ],
+        None,
+    );
+
+    let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_bytes(b"\"").unwrap();
+
+    let mask = state.mask();
+    let allows_prefix = (mask[0 / 32] >> (0 % 32)) & 1 != 0;
+    let allows_escape = (mask[1 / 32] >> (1 % 32)) & 1 != 0;
+
+    assert!(allows_prefix, "glrmask should allow bare \\u when a printable literal can be spelled via unicode escape");
+    assert!(allows_escape, "glrmask should allow a printable literal via unicode escape spelling");
+
+    let mut committed = state.clone();
+    committed.commit_bytes(br#"\u004BONG_"#).unwrap();
+}

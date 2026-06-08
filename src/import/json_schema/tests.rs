@@ -457,7 +457,7 @@ fn llguidance_compat_keeps_untyped_property_format_permissive() {
 }
 
 #[test]
-fn llguidance_compat_treats_untyped_property_pattern_as_typed_string() {
+fn llguidance_compat_keeps_untyped_property_pattern_untyped() {
     let _lock = ENV_LOCK.lock().unwrap();
     let schema = json!({
         "type": "object",
@@ -477,7 +477,7 @@ fn llguidance_compat_treats_untyped_property_pattern_as_typed_string() {
 
     {
         let _guard = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
-        assert!(!schema_accepts_bytes(&schema, br#"{"cur": true}"#));
+        assert!(schema_accepts_bytes(&schema, br#"{"cur": true}"#));
         assert!(!schema_mask_allows_token_after_prefix(
             &schema,
             br#"{"cur":"#,
@@ -545,15 +545,14 @@ fn llguidance_compat_rejects_patterned_escaped_solidus() {
 }
 
 #[test]
-fn llguidance_additional_property_allows_escaped_solidus_key() {
+fn llguidance_additional_property_rejects_escaped_solidus_key() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
         "additionalProperties": {"type": "string"}
     });
-    // llguidance accepts escaped solidus in key spelling.
-    assert!(schema_accepts_bytes(&schema, br#"{"\/": "value"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"\/": "value"}"#));
     assert!(schema_accepts_bytes(&schema, br#"{"/": "value"}"#));
 }
 
@@ -627,7 +626,7 @@ fn llguidance_literal_property_mask_rejects_escaped_solidus() {
 }
 
 #[test]
-fn llguidance_additional_property_mask_allows_escaped_solidus() {
+fn llguidance_additional_property_mask_rejects_escaped_solidus() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
@@ -636,7 +635,7 @@ fn llguidance_additional_property_mask_allows_escaped_solidus() {
     });
 
     assert!(schema_mask_allows_token_after_prefix(&schema, br#"{""#, 404, b"/"));
-    assert!(schema_mask_allows_token_after_prefix(
+    assert!(!schema_mask_allows_token_after_prefix(
         &schema,
         br#"{""#,
         405,

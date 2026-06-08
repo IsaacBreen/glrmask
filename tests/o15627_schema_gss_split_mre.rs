@@ -55,12 +55,12 @@ fn stack_count(state: &ConstraintState<'_>) -> usize {
 }
 
 #[test]
-fn o15627_schema_prefix_reaches_two_gss_paths_at_next_key_quote() {
+fn o15627_schema_prefix_has_single_gss_path_at_next_key_quote() {
     let constraint = Constraint::from_json_schema(O15627_SCHEMA_MRE, &bytes_vocab()).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(O15627_PREFIX).unwrap();
 
     let stacks = state.debug_parser_stacks();
-    assert_eq!(state.parser_path_count(1_000_000), 2, "{stacks:?}");
-    assert_eq!(stack_count(&state), 2, "{stacks:?}");
+    assert_eq!(state.parser_path_count(1_000_000), 1, "{stacks:?}");
+    assert_eq!(stack_count(&state), 1, "{stacks:?}");
 }
