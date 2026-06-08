@@ -724,10 +724,7 @@ impl Lowerer {
                 .iter()
                 .position(|candidate| candidate == &remove_alt_key)
             else {
-                return Err(GlrMaskError::GrammarParse(format!(
-                    "no exact alternative {:?} in {}",
-                    remove_alt, lhs_name
-                )));
+                continue;
             };
             remaining.remove(position);
             remaining_keys.remove(position);

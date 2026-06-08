@@ -121,10 +121,7 @@ impl<'a> ExactSubtractionResolver<'a> {
                 .iter()
                 .position(|&index| lhs_alt_keys[index] == remove_alt_key)
             else {
-                return Err(GlrMaskError::GrammarParse(format!(
-                    "no exact alternative {:?} in {}",
-                    remove_alt, lhs_name
-                )));
+                continue;
             };
             removed_indices.push(remaining_indices.remove(position));
         }
