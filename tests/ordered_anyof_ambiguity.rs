@@ -378,7 +378,7 @@ fn build_config_schema_with_optional_environment_branches() -> &'static str {
 }
 
 #[test]
-fn build_config_optional_environment_branches_now_keep_four_stack_continuations() {
+fn build_config_optional_environment_branches_collapse_stack_continuations() {
     let vocab = make_byte_vocab();
     let constraint = Constraint::from_json_schema(
         build_config_schema_with_optional_environment_branches(),
@@ -388,5 +388,5 @@ fn build_config_optional_environment_branches_now_keep_four_stack_continuations(
     let example = r#"{"artifacts": [{"context": ".", "image": "gcr.io/k8s-skaffold/example", "sync": {"*.py": ".", "css/**/*.css": "app/css"}}], "tagPolicy": {"gitCommit": {}}}"#;
 
     let (max_stacks, max_paths) = measure_max_stack_and_path_counts(&constraint, example);
-    assert_eq!((max_stacks, max_paths), (4, 4));
+    assert_eq!((max_stacks, max_paths), (1, 1));
 }
