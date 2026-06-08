@@ -13,11 +13,19 @@ nt s ::= esc "\"";
 t esc ::= /\\u00(?:[01][0-9A-Fa-f]|7[Ff])/;
 "#;
 
+const GLRM_UNICODE_ESCAPE_PROGRESS_STRUCTURED_MRE: &str = r#"
+start s;
+
+nt s ::= esc "\"";
+nt esc ::= "\\u" "0" "0" tail;
+t tail ::= /(?:[01][0-9A-Fa-f]|7[Ff])/;
+"#;
+
 #[test]
 fn glrm_unicode_escape_progression_allows_bare_u() {
     let vocab = Vocab::new(vec![(0u32, br#"\u"#.to_vec())], None);
     let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_MRE, &vocab).unwrap();
-    let mut state = constraint.start();
+    let state = constraint.start();
 
     let mask = state.mask();
     assert!(token_allowed(&mask, 0), r#"bare \u should be live because \u00.. is valid"#);
@@ -27,7 +35,7 @@ fn glrm_unicode_escape_progression_allows_bare_u() {
 fn glrm_unicode_escape_progression_rejects_u_c() {
     let vocab = Vocab::new(vec![(0u32, br#"\uC"#.to_vec())], None);
     let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_MRE, &vocab).unwrap();
-    let mut state = constraint.start();
+    let state = constraint.start();
 
     let mask = state.mask();
     assert!(!token_allowed(&mask, 0), r#"\uC should already be dead for /\\u00.../"#);
@@ -53,4 +61,24 @@ fn glrm_unicode_escape_progression_rejects_c_after_bare_u() {
 
     let mask = state.mask();
     assert!(!token_allowed(&mask, 1), r#"C should be dead after \u for /\\u00.../"#);
+}
+
+#[test]
+fn structured_glrm_unicode_escape_progression_allows_bare_backslash() {
+    let vocab = Vocab::new(vec![(0u32, br#"\"#.to_vec())], None);
+    let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_STRUCTURED_MRE, &vocab).unwrap();
+    let state = constraint.start();
+
+    let mask = state.mask();
+    assert!(token_allowed(&mask, 0), r#"bare backslash stays live because later tokens can provide the required u00... suffix"#);
+}
+
+#[test]
+fn structured_glrm_unicode_escape_progression_allows_bare_u() {
+    let vocab = Vocab::new(vec![(0u32, br#"\u"#.to_vec())], None);
+    let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_STRUCTURED_MRE, &vocab).unwrap();
+    let state = constraint.start();
+
+    let mask = state.mask();
+    assert!(token_allowed(&mask, 0), r#"bare \u should stay live in structured GLRM"#);
 }
