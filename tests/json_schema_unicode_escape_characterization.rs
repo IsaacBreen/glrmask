@@ -88,12 +88,12 @@ fn o60309_original_unicode_prefix_is_allowed_at_custom_envs_start() {
 }
 
 #[test]
-fn o60309_space_backslash_token_is_allowed_at_custom_envs_start() {
+fn o60309_space_backslash_token_is_rejected_at_custom_envs_start() {
     let schema = r#"{
         "type": "string",
         "pattern": "^(KONG_\\w+=\\S+)*(\\sKONG_\\w+=\\S+)*$"
     }"#;
-    assert_token_allowed_after_prefix(schema, br#"""#, b" \\");
+    assert_token_rejected_after_prefix(schema, br#"""#, b" \\");
 }
 
 #[test]
@@ -106,7 +106,7 @@ fn o82657_original_unicode_prefix_is_allowed_for_css_class_pattern() {
 }
 
 #[test]
-fn o82657_quote_backslash_token_is_allowed_at_etag_value_start() {
+fn o82657_quote_backslash_token_is_rejected_at_etag_value_start() {
     let schema = r#"{
         "type": "object",
         "properties": {
@@ -118,7 +118,7 @@ fn o82657_quote_backslash_token_is_allowed_at_etag_value_start() {
         "required": ["etag"],
         "additionalProperties": true
     }"#;
-    assert_token_allowed_after_prefix(schema, br#"{"etag":"#, b" \"\\");
+    assert_token_rejected_after_prefix(schema, br#"{"etag":"#, b" \"\\");
 }
 
 #[test]
@@ -140,10 +140,10 @@ fn o71827_partial_unicode_hex_token_is_rejected_for_category_id_pattern() {
 }
 
 #[test]
-fn o21175_guid_backslash_token_is_allowed_at_string_start() {
+fn o21175_guid_backslash_token_is_rejected_at_string_start() {
     let schema = r#"{
         "type": "string",
         "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$"
     }"#;
-    assert_token_allowed_after_prefix(schema, br#"""#, br#"\"#);
+    assert_token_rejected_after_prefix(schema, br#"""#, br#"\"#);
 }
