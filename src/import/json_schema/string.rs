@@ -541,9 +541,6 @@ impl<'a> Lowerer<'a> {
         if is_unicode_pattern_non_whitespace_class(class) {
             return Some(self.string_pattern_non_whitespace_char_ref());
         }
-        if matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative) {
-            return lower_llguidance_value_pattern_class_expr(class);
-        }
         None
     }
 
@@ -579,10 +576,16 @@ impl<'a> Lowerer<'a> {
         const NAME: &str = "JSON_STRING_PATTERN_NON_WHITESPACE_CHAR";
         if !self.rules.iter().any(|rule| rule.name == NAME) {
             let whitespace = self.string_pattern_whitespace_char_ref();
-            let rule_expr = GrammarExpr::Exclude {
-                expr: Box::new(r(JSON_STRING_CHAR_RULE)),
-                exclude: Box::new(whitespace),
-            };
+            let mut rule_expr = GrammarExpr::Exclude {
+                    expr: Box::new(r(JSON_STRING_CHAR_RULE)),
+                    exclude: Box::new(whitespace),
+                };
+            if matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative) {
+                rule_expr = choice(vec![
+                    rule_expr,
+                    GrammarExpr::RawRegex(json_unicode_escape_regex_for_bmp_non_whitespace()),
+                ]);
+            }
             self.add_internal_terminal_rule(NAME, rule_expr);
         }
         r(NAME)
@@ -842,14 +845,14 @@ impl<'a> Lowerer<'a> {
         self.lower_literal_key_colon_with_prefix(b"", key)
     }
 
-    fn lower_literal_key_colon_exact_with_prefix(
-        &self,
+    pub(crate) fn lower_literal_key_colon_with_prefix(
+        &mut self,
         prefix: &[u8],
         key: &str,
     ) -> GrammarExpr {
         let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
         let encoded_regex = encoded_json_key_regex(&encoded);
-        if prefix == b", " {
+        let exact = if prefix == b", " {
             GrammarExpr::RawRegex(format!(
                 r#",{JSON_SEPARATOR_WS_REGEX}{}:{JSON_SEPARATOR_WS_REGEX}"#,
                 encoded_regex
@@ -862,15 +865,7 @@ impl<'a> Lowerer<'a> {
                 regex_escape(&String::from_utf8_lossy(prefix)),
                 encoded_regex
             ))
-        }
-    }
-
-    pub(crate) fn lower_literal_key_colon_with_prefix(
-        &mut self,
-        prefix: &[u8],
-        key: &str,
-    ) -> GrammarExpr {
-        let exact = self.lower_literal_key_colon_exact_with_prefix(prefix, key);
+        };
 
         if self.llguidance_compat_enabled() {
             return choice(vec![
@@ -1058,29 +1053,6 @@ impl<'a> Lowerer<'a> {
         &mut self,
         pattern: &str,
     ) -> ImportResult<GrammarExpr> {
-        if matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative)
-            && pattern_matches_any_key(pattern)
-        {
-            let global_overlaps = self.pattern_overlapping_literal_keys(pattern)?;
-            let expr = if global_overlaps.is_empty() {
-                seq(vec![r(json_key_string_rule()), r(JSON_KEY_SEPARATOR_RULE)])
-            } else {
-                GrammarExpr::Exclude {
-                    expr: Box::new(seq(vec![r(json_key_string_rule()), r(JSON_KEY_SEPARATOR_RULE)])),
-                    exclude: Box::new(choice(
-                        global_overlaps
-                            .iter()
-                            .map(|key| self.lower_literal_key_colon_exact_with_prefix(b"", key))
-                            .collect::<Vec<_>>(),
-                    )),
-                }
-            };
-            let name = self.fresh_rule_name("json_pattern_key_colon");
-            self.add_nonterminal_rule(&name, expr);
-            self.shared_ap_pattern_rules.insert(pattern.to_string(), name.clone());
-            return Ok(r(&name));
-        }
-
         if let Some(rule_name) = self.shared_ap_pattern_rules.get(pattern) {
             return Ok(r(rule_name));
         }
@@ -1211,11 +1183,7 @@ impl<'a> Lowerer<'a> {
         fixed_keys: &BTreeSet<String>,
         local_patterns: &[String],
     ) -> ImportResult<GrammarExpr> {
-        if local_patterns.iter().any(|pattern| pattern_matches_any_key(pattern)) {
-            return Ok(never());
-        }
-
-        if super::share_additional_addback_choices_enabled() && !self.llguidance_compat_enabled() {
+        if super::share_additional_addback_choices_enabled() {
             return self.lower_additional_key_colon_shared(fixed_keys, local_patterns);
         }
 
@@ -1261,30 +1229,6 @@ impl<'a> Lowerer<'a> {
         fixed_keys: &BTreeSet<String>,
         local_patterns: &[String],
     ) -> ImportResult<GrammarExpr> {
-        for key in fixed_keys {
-            if self.shared_ap_literal_keys.contains(key) {
-                continue;
-            }
-            let mut covered_by_shared_pattern = false;
-            for pattern in &self.shared_ap_patterns {
-                match property_name_matches_pattern(pattern, key) {
-                    Ok(true) => {
-                        covered_by_shared_pattern = true;
-                        break;
-                    }
-                    Ok(false) => {}
-                    Err(error) if is_regex_compile_limit_error(&error) => {
-                        covered_by_shared_pattern = true;
-                        break;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            if covered_by_shared_pattern {
-                return self.lower_additional_key_colon_expanded_addback(fixed_keys, local_patterns);
-            }
-        }
-
         let cache_key = (
             fixed_keys.iter().cloned().collect::<Vec<_>>(),
             local_patterns.to_vec(),
@@ -1416,7 +1360,7 @@ impl<'a> Lowerer<'a> {
         for key in self.shared_ap_literal_keys.clone() {
             let literal = self.lower_literal_key_colon(&key);
             excluded.push(literal.clone());
-            terminal_excluded.push(self.lower_literal_key_colon_exact_with_prefix(b"", &key));
+            terminal_excluded.push(literal);
         }
         for pattern in self.shared_ap_patterns.clone() {
             excluded.extend(self.pattern_key_colon_shared_addback_alternatives(&pattern)?);
@@ -1610,10 +1554,6 @@ fn preprocess_ascii_shorthand(pattern: &str) -> String {
     }
 
     lowered
-}
-
-fn pattern_matches_any_key(pattern: &str) -> bool {
-    matches!(preprocess_ascii_shorthand(pattern).as_str(), ".*" | "^.*$")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1958,26 +1898,10 @@ fn lower_decoded_repetition_to_json_body_regex(repetition: &Repetition, context:
 }
 
 fn lower_decoded_class_to_json_body_regex(class: &Class, context: JsonStringContext) -> String {
-    lower_decoded_class_to_json_body_regex_with_unicode_escapes(class, context, true)
-}
-
-fn lower_decoded_class_to_json_body_regex_without_unicode_escapes(
-    class: &Class,
-    context: JsonStringContext,
-) -> String {
-    lower_decoded_class_to_json_body_regex_with_unicode_escapes(class, context, false)
-}
-
-fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
-    class: &Class,
-    context: JsonStringContext,
-    include_unicode_escapes: bool,
-) -> String {
     if is_unicode_decimal_digit_class(class) {
         return "[0-9]".to_string();
     }
     let add_llguidance_non_ws_unicode_escape_branch = is_unicode_pattern_non_whitespace_class(class)
-        && include_unicode_escapes
         && matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative)
         && matches!(context, JsonStringContext::Value);
     if is_dot_like_unicode_class(class) {
@@ -1999,9 +1923,7 @@ fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
                     let non_ascii_start = std::cmp::max(start, '\u{80}');
                     alternatives.push(unicode_range_to_utf8_regex_string(non_ascii_start, end));
                 }
-                if include_unicode_escapes
-                    && let Some(escaped_range) = unicode_range_to_json_unicode_escape_regex_string(start, end)
-                {
+                if let Some(escaped_range) = unicode_range_to_json_unicode_escape_regex_string(start, end) {
                     alternatives.push(escaped_range);
                 }
             }
@@ -2022,9 +1944,7 @@ fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
                         alternatives.push(format!(r#"[\x{:02x}-\x{:02x}]"#, non_ascii_start, end));
                     }
                 }
-                if include_unicode_escapes
-                    && let Some(escaped_range) = byte_range_to_json_unicode_escape_regex_string(start, end)
-                {
+                if let Some(escaped_range) = byte_range_to_json_unicode_escape_regex_string(start, end) {
                     alternatives.push(escaped_range);
                 }
             }
@@ -2059,28 +1979,6 @@ fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
         0 => r"[^\s\S]".to_string(),
         1 => alternatives.remove(0),
         _ => format!("(?:{})", alternatives.join("|")),
-    }
-}
-
-fn lower_llguidance_value_pattern_class_expr(class: &Class) -> Option<GrammarExpr> {
-    let raw_regex = lower_decoded_class_to_json_body_regex_without_unicode_escapes(
-        class,
-        JsonStringContext::Value,
-    );
-    let mut alternatives = Vec::new();
-    if raw_regex != r"[^\s\S]" {
-        alternatives.push(GrammarExpr::RawRegex(raw_regex));
-    }
-    for byte in 0u8..=0x7f {
-        let ch = char::from(byte);
-        if decoded_class_contains(class, ch) && should_allow_json_unicode_escape_for_pattern_literal(ch) {
-            alternatives.push(json_unicode_escape_for_char_expr(ch));
-        }
-    }
-    match alternatives.len() {
-        0 => None,
-        1 => alternatives.into_iter().next(),
-        _ => Some(choice(alternatives)),
     }
 }
 
@@ -2447,27 +2345,11 @@ fn json_body_char_expr_for_decoded_char(ch: char) -> GrammarExpr {
 }
 
 fn json_body_char_expr_for_pattern_literal(ch: char) -> GrammarExpr {
-    json_body_char_expr_for_pattern_literal_in_mode(
+    GrammarExpr::RawRegex(json_body_char_regex_for_pattern_literal_in_mode(
         ch,
         json_string_compat_mode(),
         JsonStringContext::Value,
-    )
-}
-
-fn json_body_char_expr_for_pattern_literal_in_mode(
-    ch: char,
-    mode: JsonStringCompatMode,
-    context: JsonStringContext,
-) -> GrammarExpr {
-    let canonical = GrammarExpr::RawRegex(json_body_char_regex_for_decoded_char_in_mode(
-        ch,
-        mode,
-        context,
-    ));
-    if !should_allow_json_unicode_escape_for_pattern_literal(ch) {
-        return canonical;
-    }
-    choice(vec![canonical, json_unicode_escape_for_char_expr(ch)])
+    ))
 }
 
 fn json_body_char_regex_for_decoded_char_in_mode(
@@ -2522,17 +2404,6 @@ fn json_unicode_escape_for_char_regex(ch: char) -> String {
         hex_digit_exact_regex(((codepoint >> 4) & 0xF) as u8),
         hex_digit_exact_regex((codepoint & 0xF) as u8),
     )
-}
-
-fn json_unicode_escape_for_char_expr(ch: char) -> GrammarExpr {
-    let codepoint = u32::from(ch);
-    seq(vec![
-        lit("\\u"),
-        GrammarExpr::RawRegex(hex_digit_exact_regex(((codepoint >> 12) & 0xF) as u8)),
-        GrammarExpr::RawRegex(hex_digit_exact_regex(((codepoint >> 8) & 0xF) as u8)),
-        GrammarExpr::RawRegex(hex_digit_exact_regex(((codepoint >> 4) & 0xF) as u8)),
-        GrammarExpr::RawRegex(hex_digit_exact_regex((codepoint & 0xF) as u8)),
-    ])
 }
 
 fn json_unicode_escape_regex_for_chars(chars: &[char]) -> String {
