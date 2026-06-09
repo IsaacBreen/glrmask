@@ -69,7 +69,6 @@ fn max_length_string_quote_token_can_be_committed_even_when_mask_omits_it_glrm()
         start start;
 
         internal t JSON_STRING_CHAR ::= /[bc]/;
-        t json_string_char_exact_1_0 ::= JSON_STRING_CHAR{1};
         t json_string_char_upto_2_1 ::= JSON_STRING_CHAR{0,2};
         nt json_closed_object_body_2 ::= "\"a\": " "\"" json_string_char_upto_2_1 "\"";
         nt start ::= "{" json_closed_object_body_2 "}";
