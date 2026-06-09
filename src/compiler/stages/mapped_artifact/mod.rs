@@ -261,12 +261,6 @@ impl<T: WeightRefs> MappedArtifact<T> {
         self.interned_range_counts().total_ranges()
     }
 
-    pub(crate) fn expand_vocab_tokens_to_singletons(&mut self) {
-        let (artifact, id_map) = self.parts_mut();
-        let mut weights = artifact.weight_refs_mut();
-        reconcile::expand_vocab_tokens_to_singletons(&mut weights, id_map);
-    }
-
     pub(crate) fn reconcile_with<U>(&mut self, other: &mut MappedArtifact<U>) -> InternalIdMap
     where
         U: WeightRefs,

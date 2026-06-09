@@ -733,6 +733,7 @@ fn compile_prepared_with_profile(
                     terminal_pm_pair.into_parts();
                 terminal_dwa = MappedArtifact::new(terminal_dwa_artifact, compacted_ids.clone());
                 possible_matches = MappedArtifact::new(possible_matches_artifact, compacted_ids.clone());
+                internal_ids = compacted_ids.clone();
                 (parser_dwa, parser_dwa_ms)
             }
         } else {
@@ -769,6 +770,7 @@ fn compile_prepared_with_profile(
                     parser_pm_pair.into_parts();
                 parser_dwa = MappedArtifact::new(parser_dwa_artifact, compacted_ids.clone());
                 possible_matches = MappedArtifact::new(possible_matches_artifact, compacted_ids.clone());
+                internal_ids = compacted_ids;
             }
         } else {
             let shared_id_reconcile_started_at = Instant::now();
@@ -783,22 +785,7 @@ fn compile_prepared_with_profile(
                 parser_pm_pair.into_parts();
             parser_dwa = MappedArtifact::new(parser_dwa_artifact, reconciled_ids.clone());
             possible_matches = MappedArtifact::new(possible_matches_artifact, reconciled_ids.clone());
-        }
-
-        // Correctness barrier: the runtime mask is subtractive in internal-token
-        // space, while commit executes concrete original token bytes. If a final
-        // internal token still represents multiple original byte strings, removing
-        // that class for one disallowed terminal can incorrectly remove an original
-        // token whose concrete bytes would commit successfully. Keep tokenizer-state
-        // compaction, but split the final vocab space back to singleton original
-        // token classes before Constraint finalization.
-        {
-            let mut parser_pm_pair = MappedArtifact::from((parser_dwa, possible_matches));
-            parser_pm_pair.expand_vocab_tokens_to_singletons();
-            let (parser_dwa_next, possible_matches_next) = parser_pm_pair.split_pair();
-            parser_dwa = parser_dwa_next;
-            possible_matches = possible_matches_next;
-            internal_ids = parser_dwa.id_map().clone();
+            internal_ids = reconciled_ids;
         }
 
         let parser_dwa_interned_ranges = parser_dwa.artifact().stats().interned_ranges;
