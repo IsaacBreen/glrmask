@@ -5,14 +5,15 @@ const QUOTE_TOKEN_BYTES: &[u8] = b"\"";
 const SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
-    "name": {
+    "a": {
       "type": "string",
-      "maxLength": 32
+      "maxLength": 2
     }
   },
-  "required": ["name"]
+  "required": ["a"],
+  "additionalProperties": false
 }"#;
-const PREFIX: &[u8] = br#"{"name": "example"#;
+const PREFIX: &[u8] = br#"{"a": "x"#;
 
 fn token_allowed(mask: &[u32], token_id: u32) -> bool {
     let word = token_id as usize / 32;
