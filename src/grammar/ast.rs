@@ -20,6 +20,17 @@ pub enum Quantifier {
     Range(usize, Option<usize>),
 }
 
+fn quantifier_suffix(quantifier: &Quantifier) -> String {
+    match quantifier {
+        Quantifier::Optional => "?".to_string(),
+        Quantifier::ZeroPlus => "*".to_string(),
+        Quantifier::OnePlus => "+".to_string(),
+        Quantifier::Range(min, Some(max)) if min == max => format!("{{{min}}}"),
+        Quantifier::Range(min, Some(max)) => format!("{{{min},{max}}}"),
+        Quantifier::Range(min, None) => format!("{{{min},}}"),
+    }
+}
+
 impl Quantifier {
     pub fn min(&self) -> usize {
         match self {
