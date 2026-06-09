@@ -1,40 +1,41 @@
 use glrmask::{Constraint, Vocab};
 
-const C_TOKEN_ID: u32 = 0;
-const C_TOKEN_BYTES: &[u8] = b"c";
-const QUOTE_TOKEN_ID: u32 = 1;
-const QUOTE_TOKEN_BYTES: &[u8] = b"\"";
-const SCHEMA: &str = r#"{
-  "type": "object",
-  "properties": {
-    "a": {
-      "type": "string",
-      "maxLength": 2
-    }
-  },
-  "required": ["a"],
-  "additionalProperties": false
-}"#;
-const PREFIX: &[u8] = br#"{"a": "x"#;
-
 fn token_allowed(mask: &[u32], token_id: u32) -> bool {
     let word = token_id as usize / 32;
     let bit = token_id as usize % 32;
     word < mask.len() && ((mask[word] >> bit) & 1) != 0
 }
 
-fn minimal_vocab() -> Vocab {
-    Vocab::new(
-        vec![
-            (C_TOKEN_ID, C_TOKEN_BYTES.to_vec()),
-            (QUOTE_TOKEN_ID, QUOTE_TOKEN_BYTES.to_vec()),
-        ],
-        None,
-    )
-}
 
 #[test]
 fn max_length_string_quote_token_can_be_committed_even_when_mask_omits_it() {
+    const C_TOKEN_ID: u32 = 0;
+    const C_TOKEN_BYTES: &[u8] = b"c";
+    const QUOTE_TOKEN_ID: u32 = 1;
+    const QUOTE_TOKEN_BYTES: &[u8] = b"\"";
+    const SCHEMA: &str = r#"{
+      "type": "object",
+      "properties": {
+        "a": {
+          "type": "string",
+          "maxLength": 2
+        }
+      },
+      "required": ["a"],
+      "additionalProperties": false
+    }"#;
+    const PREFIX: &[u8] = br#"{"a": "x"#;
+
+    fn minimal_vocab() -> Vocab {
+        Vocab::new(
+            vec![
+                (C_TOKEN_ID, C_TOKEN_BYTES.to_vec()),
+                (QUOTE_TOKEN_ID, QUOTE_TOKEN_BYTES.to_vec()),
+            ],
+            None,
+        )
+    }
+
     let constraint = Constraint::from_json_schema(SCHEMA, &minimal_vocab()).unwrap();
 
     let mut base = constraint.start();
