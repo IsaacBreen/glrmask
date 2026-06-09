@@ -62,7 +62,7 @@ fn max_length_string_quote_token_can_be_committed_even_when_mask_omits_it() {
 #[test]
 fn max_length_string_quote_token_can_be_committed_even_when_mask_omits_it_glrm() {
     const C_TOKEN_ID: u32 = 0;
-    const C_TOKEN_BYTES: &[u8] = b"b";
+    const C_TOKEN_BYTES: &[u8] = b"a";
     const QUOTE_TOKEN_ID: u32 = 1;
     const QUOTE_TOKEN_BYTES: &[u8] = b"$";
     const GLRM: &str = r#"
@@ -70,7 +70,7 @@ fn max_length_string_quote_token_can_be_committed_even_when_mask_omits_it_glrm()
 
         nt start ::= bc_rep "$";
         t bc_rep ::= bc{0,2};
-        internal t bc ::= "a" | "b";
+        internal t bc ::= "a";
     "#;
     const PREFIX: &[u8] = br#"a"#;
 
