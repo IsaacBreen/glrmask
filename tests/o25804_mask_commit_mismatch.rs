@@ -61,24 +61,23 @@ fn max_length_string_quote_token_can_be_committed_even_when_mask_omits_it() {
 
 #[test]
 fn max_length_string_quote_token_can_be_committed_even_when_mask_omits_it_glrm() {
-    const C_TOKEN_ID: u32 = 0;
-    const C_TOKEN_BYTES: &[u8] = b"a";
-    const QUOTE_TOKEN_ID: u32 = 1;
-    const QUOTE_TOKEN_BYTES: &[u8] = b"$";
+    const A_TOKEN_ID: u32 = 0;
+    const A_TOKEN_BYTES: &[u8] = b"a";
+    const EOS_TOKEN_ID: u32 = 1;
+    const EOS_TOKEN_BYTES: &[u8] = b"$";
     const GLRM: &str = r#"
         start start;
 
-        nt start ::= bc_rep "$";
-        t bc_rep ::= bc{0,2};
-        internal t bc ::= "a";
+        nt start ::= a_rep "$";
+        t a_rep ::= "a"{0,2};
     "#;
     const PREFIX: &[u8] = br#"a"#;
 
     fn minimal_vocab() -> Vocab {
         Vocab::new(
             vec![
-                (C_TOKEN_ID, C_TOKEN_BYTES.to_vec()),
-                (QUOTE_TOKEN_ID, QUOTE_TOKEN_BYTES.to_vec()),
+                (A_TOKEN_ID, A_TOKEN_BYTES.to_vec()),
+                (EOS_TOKEN_ID, EOS_TOKEN_BYTES.to_vec()),
             ],
             None,
         )
@@ -89,15 +88,15 @@ fn max_length_string_quote_token_can_be_committed_even_when_mask_omits_it_glrm()
     let mut base = constraint.start();
     base.commit_bytes(PREFIX).unwrap();
 
-    let mask_has_quote = token_allowed(&base.mask(), QUOTE_TOKEN_ID);
+    let mask_has_quote = token_allowed(&base.mask(), EOS_TOKEN_ID);
     dbg!(mask_has_quote);
 
     let mut commit_bytes_state = base.clone();
-    let commit_bytes_ok = commit_bytes_state.commit_bytes(QUOTE_TOKEN_BYTES).is_ok();
+    let commit_bytes_ok = commit_bytes_state.commit_bytes(EOS_TOKEN_BYTES).is_ok();
     dbg!(commit_bytes_ok);
 
     let mut commit_token_state = base.clone();
-    let commit_token_ok = commit_token_state.commit_token(QUOTE_TOKEN_ID).is_ok();
+    let commit_token_ok = commit_token_state.commit_token(EOS_TOKEN_ID).is_ok();
     dbg!(commit_token_ok);
 
     assert!(
