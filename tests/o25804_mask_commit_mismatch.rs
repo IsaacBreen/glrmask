@@ -68,8 +68,7 @@ fn max_length_string_quote_token_can_be_committed_even_when_mask_omits_it_glrm()
     const GLRM: &str = r#"
         start start;
 
-        nt start ::= "{" x "}";
-        nt x ::= "\"a\": " "\"" bc_rep "\"";
+        nt start ::= "{" "\"a\": " "\"" bc_rep "\"" "}";
         t bc_rep ::= bc{0,2};
         internal t bc ::= "b" | "c";
     "#;
