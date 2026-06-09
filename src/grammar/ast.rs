@@ -13,6 +13,36 @@ use crate::grammar::flat::{
 use crate::grammar::expr_nfa::ExprNFA;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Quantifier {
+    Optional,
+    ZeroPlus,
+    OnePlus,
+    Range(usize, Option<usize>),
+}
+
+impl Quantifier {
+    pub fn min(&self) -> usize {
+        match self {
+            Quantifier::Optional | Quantifier::ZeroPlus => 0,
+            Quantifier::OnePlus => 1,
+            Quantifier::Range(min, _) => *min,
+        }
+    }
+
+    pub fn max(&self) -> Option<usize> {
+        match self {
+            Quantifier::Optional => Some(1),
+            Quantifier::ZeroPlus | Quantifier::OnePlus => None,
+            Quantifier::Range(_, max) => *max,
+        }
+    }
+
+    pub fn is_nullable(&self) -> bool {
+        self.min() == 0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GrammarExpr {
     Ref(String),
     Grouped(Box<GrammarExpr>),
@@ -29,25 +59,20 @@ pub enum GrammarExpr {
         expr: Box<GrammarExpr>,
         intersect: Box<GrammarExpr>,
     },
-    Optional(Box<GrammarExpr>),
-    Repeat(Box<GrammarExpr>),
-    RepeatOne(Box<GrammarExpr>),
-    RepeatRange {
-        expr: Box<GrammarExpr>,
-        min: usize,
-        max: usize,
-    },
+    Quantified(Box<GrammarExpr>, Quantifier),
     Literal(Vec<u8>),
     CharClass { def: String, negate: bool, utf8: bool },
     RawRegex(String),
     LexerDfa(Arc<LexerDFA>),
     AnyByte,
-    /// A separator-delimited sequence of items where some items are optional.
+    /// A separator-delimited sequence of quantified items.
     ///
-    /// `items` is an ordered list of `(item_expr, is_required)` pairs.
-    /// The sequence allows any subset of items (respecting order) where all
+    /// Each item is stored as `(item_expr, item_quantifier)`. The quantifier, if
+    /// present, is the single postfix quantifier that binds to the separator. For
+    /// example, `sep ~ (x*)` means zero or more `x` items separated by `sep`,
+    /// while `sep ~ ((x*))` is a single grouped item whose body is `x*`.
     SeparatedSequence {
-        items: Vec<(GrammarExpr, bool)>,
+        items: Vec<(GrammarExpr, Option<Quantifier>)>,
         separator: Box<GrammarExpr>,
         allow_empty: bool,
     },
@@ -142,10 +167,10 @@ impl NamedGrammar {
                 GrammarExpr::Intersect { expr, intersect } => {
                     collect_refs(expr, out); collect_refs(intersect, out);
                 }
-                GrammarExpr::Optional(e) | GrammarExpr::Repeat(e) | GrammarExpr::RepeatOne(e) => {
+                GrammarExpr::Quantified(e, Quantifier::Optional) | GrammarExpr::Quantified(e, Quantifier::ZeroPlus) | GrammarExpr::Quantified(e, Quantifier::OnePlus) => {
                     collect_refs(e, out);
                 }
-                GrammarExpr::RepeatRange { expr, .. } => collect_refs(expr, out),
+                GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => collect_refs(expr, out),
                 GrammarExpr::SeparatedSequence { items, separator, .. } => {
                     for (e, _) in items { collect_refs(e, out); }
                     collect_refs(separator, out);
@@ -313,22 +338,26 @@ fn grammar_expr_to_lark_with_indent(
                 write!(out, "/*hex:{}*/", hex_str).unwrap();
             }
         }
-        GrammarExpr::Optional(inner) => {
+        GrammarExpr::Quantified(inner, Quantifier::Optional) => {
             grammar_expr_to_lark_with_indent(inner, out, true, indent);
             out.push('?');
         }
-        GrammarExpr::Repeat(inner) => {
+        GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) => {
             grammar_expr_to_lark_with_indent(inner, out, true, indent);
             out.push('*');
         }
-        GrammarExpr::RepeatOne(inner) => {
+        GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
             grammar_expr_to_lark_with_indent(inner, out, true, indent);
             out.push('+');
         }
-        GrammarExpr::RepeatRange { expr: inner, min, max } => {
+        GrammarExpr::Quantified(inner, Quantifier::Range(min, max)) => {
             grammar_expr_to_lark_with_indent(inner, out, true, indent);
-            write!(out, "~{}..{}", min, max).unwrap();
-        }
+            match max {
+                Some(max) if min == max => write!(out, "{{{}}}", min).unwrap(),
+                Some(max) => write!(out, "{{{},{}}}", min, max).unwrap(),
+                None => write!(out, "{{{},}}", min).unwrap(),
+            }
+        },
         GrammarExpr::Epsilon => {
             out.push_str("/*eps*/");
         }
@@ -369,10 +398,12 @@ fn grammar_expr_to_lark_with_indent(
             write!(out, "/*SeparatedSequence(sep=").unwrap();
             grammar_expr_to_lark_with_indent(separator, out, false, indent);
             write!(out, ", allow_empty={}, items=[", allow_empty).unwrap();
-            for (i, (item, required)) in items.iter().enumerate() {
+            for (i, (item, quantifier)) in items.iter().enumerate() {
                 if i > 0 { write!(out, ", ").unwrap(); }
                 grammar_expr_to_lark_with_indent(item, out, true, indent);
-                if !required { write!(out, "?").unwrap(); }
+                if let Some(quantifier) = quantifier {
+                    write!(out, "{}", quantifier_suffix(quantifier)).unwrap();
+                }
             }
             write!(out, "])*/").unwrap();
         }
@@ -641,20 +672,10 @@ impl Lowerer {
                 expr: Box::new(self.canonical_exact_expr_inner(expr, visiting, memo)),
                 intersect: Box::new(self.canonical_exact_expr_inner(intersect, visiting, memo)),
             },
-            GrammarExpr::Optional(inner) => GrammarExpr::Optional(Box::new(
-                self.canonical_exact_expr_inner(inner, visiting, memo),
-            )),
-            GrammarExpr::Repeat(inner) => GrammarExpr::Repeat(Box::new(
-                self.canonical_exact_expr_inner(inner, visiting, memo),
-            )),
-            GrammarExpr::RepeatOne(inner) => GrammarExpr::RepeatOne(Box::new(
-                self.canonical_exact_expr_inner(inner, visiting, memo),
-            )),
-            GrammarExpr::RepeatRange { expr, min, max } => GrammarExpr::RepeatRange {
-                expr: Box::new(self.canonical_exact_expr_inner(expr, visiting, memo)),
-                min: *min,
-                max: *max,
-            },
+            GrammarExpr::Quantified(inner, quantifier) => GrammarExpr::Quantified(
+                Box::new(self.canonical_exact_expr_inner(inner, visiting, memo)),
+                quantifier.clone(),
+            ),
             GrammarExpr::SeparatedSequence {
                 items,
                 separator,
@@ -662,10 +683,10 @@ impl Lowerer {
             } => GrammarExpr::SeparatedSequence {
                 items: items
                     .iter()
-                    .map(|(item, required)| {
+                    .map(|(item, quantifier)| {
                         (
                             self.canonical_exact_expr_inner(item, visiting, memo),
-                            *required,
+                            quantifier.clone(),
                         )
                     })
                     .collect(),
@@ -845,7 +866,7 @@ impl Lowerer {
             GrammarExpr::Literal(bytes) if bytes.is_empty() => Ok(None),
             GrammarExpr::Grouped(inner) => self.lower_nonnullable_expr_symbol(inner),
             GrammarExpr::Ref(name) => Ok(Some(self.lower_nonnullable_named_rule(name)?)),
-            GrammarExpr::Optional(inner) => self.lower_nonnullable_expr_symbol(inner),
+            GrammarExpr::Quantified(inner, Quantifier::Optional) => self.lower_nonnullable_expr_symbol(inner),
             GrammarExpr::Exclude { .. } => {
                 if let Some(lowered) = self.exact_nonterminal_subtraction_expr(expr)? {
                     return self.lower_nonnullable_expr_symbol(&lowered);
@@ -935,10 +956,10 @@ impl Lowerer {
                     self.emit_nonnullable_expr(lhs, option)?;
                 }
             }
-            GrammarExpr::Optional(inner) => {
+            GrammarExpr::Quantified(inner, Quantifier::Optional) => {
                 self.emit_nonnullable_expr(lhs, inner)?;
             }
-            GrammarExpr::Repeat(inner) | GrammarExpr::RepeatOne(inner) => {
+            GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
                 if let Some(symbol) = self.lower_nonnullable_expr_symbol(inner)? {
                     self.rules.push(Rule {
                         lhs,
@@ -950,29 +971,29 @@ impl Lowerer {
                     });
                 }
             }
-            GrammarExpr::RepeatRange { expr, min, max } => {
+            GrammarExpr::Quantified(expr, Quantifier::Range(min, max)) => {
                 let Some(symbol) = self.lower_nonnullable_expr_symbol(expr)? else {
                     return Ok(());
                 };
-                let adjusted_min = if self.expr_is_nullable(expr) {
-                    1
+                let adjusted_min = (*min).max(1);
+                if let Some(max) = max {
+                    if adjusted_min > *max {
+                        return Ok(());
+                    }
+                    let shape = repeat_tree_shape();
+                    let range_nonterminal = self.repeat_range_nonterminal(
+                        &symbol,
+                        adjusted_min,
+                        *max,
+                        shape,
+                    );
+                    self.rules.push(Rule {
+                        lhs,
+                        rhs: vec![Symbol::Nonterminal(range_nonterminal)],
+                    });
                 } else {
-                    *min
-                };
-                if adjusted_min > *max {
-                    return Ok(());
+                    self.emit_repeat_range(lhs, expr, adjusted_min, None)?;
                 }
-                let shape = repeat_tree_shape();
-                let range_nonterminal = self.repeat_range_nonterminal(
-                    &symbol,
-                    adjusted_min,
-                    *max,
-                    shape,
-                );
-                self.rules.push(Rule {
-                    lhs,
-                    rhs: vec![Symbol::Nonterminal(range_nonterminal)],
-                });
             }
             GrammarExpr::SeparatedSequence { items, separator, .. } => {
                 let shape = comma_sep_shape();
@@ -1338,21 +1359,37 @@ impl Lowerer {
         lhs: NonterminalID,
         inner: &GrammarExpr,
         min: usize,
-        max: usize,
+        max: Option<usize>,
     ) -> Result<(), GlrMaskError> {
-        debug_assert!(min <= max);
         let symbol = self.lower_expr_terminalish(inner)?;
         let shape = repeat_tree_shape();
-        let range_nonterminal = self.repeat_range_nonterminal(
-            &symbol,
-            min,
-            max,
-            shape,
-        );
+        if let Some(max) = max {
+            debug_assert!(min <= max);
+            let range_nonterminal = self.repeat_range_nonterminal(&symbol, min, max, shape);
+            self.rules.push(Rule {
+                lhs,
+                rhs: vec![Symbol::Nonterminal(range_nonterminal)],
+            });
+            return Ok(());
+        }
+
+        let suffix_nt = self.repeat_range_nonterminal(&symbol, 0, 1, shape);
+        // Replace the finite optional suffix with a proper Kleene tail.
+        self.rules.push(Rule { lhs: suffix_nt, rhs: Vec::new() });
         self.rules.push(Rule {
-            lhs,
-            rhs: vec![Symbol::Nonterminal(range_nonterminal)],
+            lhs: suffix_nt,
+            rhs: vec![Symbol::Nonterminal(suffix_nt), symbol.clone()],
         });
+
+        if min == 0 {
+            self.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(suffix_nt)] });
+        } else {
+            let prefix_nt = self.repeat_exact_nonterminal(&symbol, min, shape);
+            self.rules.push(Rule {
+                lhs,
+                rhs: vec![Symbol::Nonterminal(prefix_nt), Symbol::Nonterminal(suffix_nt)],
+            });
+        }
         Ok(())
     }
 
@@ -1542,11 +1579,11 @@ impl Lowerer {
                         emit(lowerer, lhs, option)?;
                     }
                 }
-                GrammarExpr::Optional(inner) => {
+                GrammarExpr::Quantified(inner, Quantifier::Optional) => {
                     lowerer.rules.push(Rule { lhs, rhs: Vec::new() });
                     emit(lowerer, lhs, inner)?;
                 }
-                GrammarExpr::Repeat(inner) => {
+                GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) => {
                     let symbol = lowerer.lower_expr(inner);
                     lowerer.rules.push(Rule { lhs, rhs: Vec::new() });
                     lowerer.rules.push(Rule {
@@ -1554,7 +1591,7 @@ impl Lowerer {
                         rhs: vec![Symbol::Nonterminal(lhs), symbol],
                     });
                 }
-                GrammarExpr::RepeatOne(inner) => {
+                GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
                     let symbol = lowerer.lower_expr(inner);
                     lowerer.rules.push(Rule {
                         lhs,
@@ -1565,7 +1602,7 @@ impl Lowerer {
                         rhs: vec![Symbol::Nonterminal(lhs), symbol],
                     });
                 }
-                GrammarExpr::RepeatRange { expr, min, max } => {
+                GrammarExpr::Quantified(expr, Quantifier::Range(min, max)) => {
                     lowerer.emit_repeat_range(lhs, expr, *min, *max)?;
                 }
                 GrammarExpr::SeparatedSequence { items, separator, allow_empty } => {
@@ -1656,12 +1693,12 @@ impl Lowerer {
             }
             GrammarExpr::Sequence(_)
             | GrammarExpr::Choice(_)
-            | GrammarExpr::Optional(_)
-            | GrammarExpr::Repeat(_)
-            | GrammarExpr::RepeatOne(_)
-            | GrammarExpr::RepeatRange { .. }
+            | GrammarExpr::Quantified(_, Quantifier::Optional)
+            | GrammarExpr::Quantified(_, Quantifier::ZeroPlus)
+            | GrammarExpr::Quantified(_, Quantifier::OnePlus)
+            | GrammarExpr::Quantified(_, Quantifier::Range(_, _))
             | GrammarExpr::SeparatedSequence { .. } => self.lower_expr(expr),
-            | GrammarExpr::ExprNFA(_) => {
+            GrammarExpr::ExprNFA(_) => {
                 return Err(GlrMaskError::GrammarParse(
                     "GrammarExpr::ExprNFA must be the complete expression of a nonterminal rule"
                         .into(),
@@ -1691,16 +1728,30 @@ impl Lowerer {
         let shape = repeat_tree_shape();
 
         if max.is_none() {
-            let (_, rep_nt) = self.fresh_nonterminal("sep_rep_plus");
+            let min = min.max(1);
+            let prefix_sym = if min == 1 {
+                item_sym.clone()
+            } else {
+                let (_, prefix_nt) = self.fresh_nonterminal("sep_rep_prefix");
+                let prefix_tail_nt = self.repeat_exact_nonterminal(&pair_symbol, min - 1, shape);
+                self.rules.push(Rule {
+                    lhs: prefix_nt,
+                    rhs: vec![item_sym.clone(), Symbol::Nonterminal(prefix_tail_nt)],
+                });
+                Symbol::Nonterminal(prefix_nt)
+            };
+            let (_, tail_nt) = self.fresh_nonterminal("sep_rep_tail");
+            self.rules.push(Rule { lhs: tail_nt, rhs: Vec::new() });
             self.rules.push(Rule {
-                lhs: rep_nt,
-                rhs: vec![item_sym.clone()],
+                lhs: tail_nt,
+                rhs: vec![Symbol::Nonterminal(tail_nt), pair_symbol],
             });
+            let (_, result_nt) = self.fresh_nonterminal("sep_rep_plus");
             self.rules.push(Rule {
-                lhs: rep_nt,
-                rhs: vec![Symbol::Nonterminal(rep_nt), pair_symbol],
+                lhs: result_nt,
+                rhs: vec![prefix_sym, Symbol::Nonterminal(tail_nt)],
             });
-            return Ok(Some(Symbol::Nonterminal(rep_nt)));
+            return Ok(Some(Symbol::Nonterminal(result_nt)));
         }
 
         let max = max.expect("finite bound expected when max.is_none() is false");
@@ -1741,20 +1792,21 @@ impl Lowerer {
     fn lower_sepseq_item_nonempty_symbol(
         &mut self,
         item_expr: &GrammarExpr,
+        item_quantifier: Option<&Quantifier>,
         separator: &GrammarExpr,
     ) -> Result<Option<Symbol>, GlrMaskError> {
-        match item_expr {
-            GrammarExpr::Repeat(inner) => {
-                self.lower_sepseq_repetition_item_nonempty_symbol(inner, separator, 1, None)
+        match item_quantifier {
+            Some(Quantifier::Optional) | None => self.lower_nonnullable_expr_symbol(item_expr),
+            Some(Quantifier::ZeroPlus) => {
+                self.lower_sepseq_repetition_item_nonempty_symbol(item_expr, separator, 1, None)
             }
-            GrammarExpr::RepeatOne(inner) => {
-                self.lower_sepseq_repetition_item_nonempty_symbol(inner, separator, 1, None)
+            Some(Quantifier::OnePlus) => {
+                self.lower_sepseq_repetition_item_nonempty_symbol(item_expr, separator, 1, None)
             }
-            GrammarExpr::RepeatRange { expr, min, max } => {
+            Some(Quantifier::Range(min, max)) => {
                 let required = (*min).max(1);
-                self.lower_sepseq_repetition_item_nonempty_symbol(expr, separator, required, Some(*max))
+                self.lower_sepseq_repetition_item_nonempty_symbol(item_expr, separator, required, *max)
             }
-            _ => self.lower_nonnullable_expr_symbol(item_expr),
         }
     }
 
@@ -1767,26 +1819,27 @@ impl Lowerer {
     /// for JSON Schema ordered objects.
     fn lower_separated_sequence_inner(
         &mut self,
-        items: &[(GrammarExpr, bool)],
+        items: &[(GrammarExpr, Option<Quantifier>)],
         separator: &GrammarExpr,
         shape: CommaSepShape,
     ) -> Result<(Symbol, bool), GlrMaskError> {
         debug_assert!(!items.is_empty());
 
         if items.len() == 1 {
-            let (item_expr, is_required) = &items[0];
+            let (item_expr, item_quantifier) = &items[0];
             // Always route through lower_sepseq_item_nonempty_symbol so that the
             // separator is correctly threaded through repetition items.
             // e.g. RepeatOne(item) must become `item (sep item)*`, not bare `item+`.
             // For non-repetition items the function falls through to
             // lower_nonnullable_expr_symbol which handles them correctly.
-            let item_sym = self.lower_sepseq_item_nonempty_symbol(item_expr, separator)?;
+            let item_sym = self.lower_sepseq_item_nonempty_symbol(item_expr, item_quantifier.as_ref(), separator)?;
             // Return can_be_empty=true for optional items as a signal to the parent to add
             // a "without this item and its preceding separator" alternative.  We do NOT emit
             // an epsilon rule here — that would create dangling separators in the parent rule
             // (e.g. "key": , ).  The caller of lower_separated_sequence_inner handles the
             // all-optional empty case via an explicit separate alternative (e.g. "{}").
-            let can_be_empty = !is_required || self.expr_is_nullable(item_expr);
+            let can_be_empty = item_quantifier.as_ref().is_some_and(Quantifier::is_nullable)
+                || self.expr_is_nullable(item_expr);
             return Ok((item_sym.unwrap_or_else(|| self.lower_expr(&GrammarExpr::Epsilon)), can_be_empty));
         }
 
@@ -1795,7 +1848,9 @@ impl Lowerer {
             CommaSepShape::Left => items.len() - 1,
             CommaSepShape::Right => 1,
             CommaSepShape::LeftBalanced => {
-                let first_optional = items.iter().position(|(_, required)| !required);
+                let first_optional = items
+                    .iter()
+                    .position(|(_, quantifier)| quantifier.as_ref().is_some_and(Quantifier::is_nullable));
                 match first_optional {
                     None => items.len() - 1,
                     Some(0) => items.len() / 2,
@@ -1901,25 +1956,25 @@ fn grammar_expr_to_expr(
             expr: Box::new(grammar_expr_to_expr(expr, terminal_bodies, terminal_expr_cache, visiting)?),
             intersect: Box::new(grammar_expr_to_expr(intersect, terminal_bodies, terminal_expr_cache, visiting)?),
         },
-        GrammarExpr::Optional(inner) => Expr::Repeat {
+        GrammarExpr::Quantified(inner, Quantifier::Optional) => Expr::Repeat {
             expr: Box::new(grammar_expr_to_expr(inner, terminal_bodies, terminal_expr_cache, visiting)?),
             min: 0,
             max: Some(1),
         },
-        GrammarExpr::Repeat(inner) => Expr::Repeat {
+        GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) => Expr::Repeat {
             expr: Box::new(grammar_expr_to_expr(inner, terminal_bodies, terminal_expr_cache, visiting)?),
             min: 0,
             max: None,
         },
-        GrammarExpr::RepeatOne(inner) => Expr::Repeat {
+        GrammarExpr::Quantified(inner, Quantifier::OnePlus) => Expr::Repeat {
             expr: Box::new(grammar_expr_to_expr(inner, terminal_bodies, terminal_expr_cache, visiting)?),
             min: 1,
             max: None,
         },
-        GrammarExpr::RepeatRange { expr, min, max } => Expr::Repeat {
+        GrammarExpr::Quantified(expr, Quantifier::Range(min, max)) => Expr::Repeat {
             expr: Box::new(grammar_expr_to_expr(expr, terminal_bodies, terminal_expr_cache, visiting)?),
             min: *min,
-            max: Some(*max),
+            max: *max,
         },
         GrammarExpr::Ref(name) => {
             // Look up in cache first
@@ -1975,9 +2030,9 @@ fn grammar_expr_is_nullable(
             grammar_expr_is_nullable(expr, rule_nullable)
                 && grammar_expr_is_nullable(intersect, rule_nullable)
         }
-        GrammarExpr::Optional(_) | GrammarExpr::Repeat(_) => true,
-        GrammarExpr::RepeatOne(inner) => grammar_expr_is_nullable(inner, rule_nullable),
-        GrammarExpr::RepeatRange { expr, min, .. } => {
+        GrammarExpr::Quantified(_, Quantifier::Optional) | GrammarExpr::Quantified(_, Quantifier::ZeroPlus) => true,
+        GrammarExpr::Quantified(inner, Quantifier::OnePlus) => grammar_expr_is_nullable(inner, rule_nullable),
+        GrammarExpr::Quantified(expr, Quantifier::Range(min, _)) => {
             *min == 0 || grammar_expr_is_nullable(expr, rule_nullable)
         }
         GrammarExpr::Literal(bytes) => bytes.is_empty(),
@@ -1989,9 +2044,10 @@ fn grammar_expr_is_nullable(
         GrammarExpr::AnyByte => false,
         GrammarExpr::SeparatedSequence { items, allow_empty, .. } => {
             *allow_empty
-                && items
-                    .iter()
-                    .all(|(item, is_required)| !*is_required || grammar_expr_is_nullable(item, rule_nullable))
+                && items.iter().all(|(item, quantifier)| {
+                    quantifier.as_ref().is_some_and(Quantifier::is_nullable)
+                        || grammar_expr_is_nullable(item, rule_nullable)
+                })
         }
         GrammarExpr::ExprNFA(expr_nfa) => {
             let dfa = expr_nfa.determinize_and_minimize();
@@ -2084,10 +2140,10 @@ fn validate_expr_nfa_placement(grammar: &NamedGrammar) -> Result<(), GlrMaskErro
                 walk(expr, false, rule_name)?;
                 walk(intersect, false, rule_name)?;
             }
-            GrammarExpr::Optional(inner)
-            | GrammarExpr::Repeat(inner)
-            | GrammarExpr::RepeatOne(inner)
-            | GrammarExpr::RepeatRange { expr: inner, .. } => {
+            GrammarExpr::Quantified(inner, Quantifier::Optional)
+            | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
+            | GrammarExpr::Quantified(inner, Quantifier::OnePlus)
+            | GrammarExpr::Quantified(inner, Quantifier::Range(_, _)) => {
                 walk(inner, false, rule_name)?;
             }
             GrammarExpr::SeparatedSequence { items, separator, .. } => {
@@ -2162,15 +2218,15 @@ pub fn expr_to_grammar_expr(expr: &Expr) -> GrammarExpr {
         Expr::Repeat { expr: inner, min, max } => {
             let g = expr_to_grammar_expr(inner);
             match (*min, *max) {
-                (0, None) => GrammarExpr::Repeat(Box::new(g)),
-                (1, None) => GrammarExpr::RepeatOne(Box::new(g)),
-                (0, Some(1)) => GrammarExpr::Optional(Box::new(g)),
-                (n, Some(m)) => GrammarExpr::RepeatRange { expr: Box::new(g), min: n, max: m },
+                (0, None) => GrammarExpr::Quantified(Box::new(g), Quantifier::ZeroPlus),
+                (1, None) => GrammarExpr::Quantified(Box::new(g), Quantifier::OnePlus),
+                (0, Some(1)) => GrammarExpr::Quantified(Box::new(g), Quantifier::Optional),
+                (n, Some(m)) => GrammarExpr::Quantified(Box::new(g), Quantifier::Range(n, Some(m))),
                 (n, None) => {
                     // n+ : express as exactly-n followed by zero-or-more
                     GrammarExpr::Sequence(vec![
-                        GrammarExpr::RepeatRange { expr: Box::new(g.clone()), min: n, max: n },
-                        GrammarExpr::Repeat(Box::new(g)),
+                        GrammarExpr::Quantified(Box::new(g.clone()), Quantifier::Range(n, Some(n))),
+                        GrammarExpr::Quantified(Box::new(g), Quantifier::ZeroPlus),
                     ])
                 }
             }
@@ -2306,22 +2362,22 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
                     }
                 }
             }
-            GrammarExpr::Optional(inner) => {
+            GrammarExpr::Quantified(inner, Quantifier::Optional) => {
                 lowerer.rules.push(Rule { lhs, rhs: Vec::new() });
                 let symbol = lowerer.lower_expr_terminalish(inner)?;
                 lowerer.rules.push(Rule { lhs, rhs: vec![symbol] });
             }
-            GrammarExpr::Repeat(inner) => {
+            GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) => {
                 let symbol = lowerer.lower_expr_terminalish(inner)?;
                 lowerer.rules.push(Rule { lhs, rhs: Vec::new() });
                 lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(lhs), symbol] });
             }
-            GrammarExpr::RepeatOne(inner) => {
+            GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
                 let symbol = lowerer.lower_expr_terminalish(inner)?;
                 lowerer.rules.push(Rule { lhs, rhs: vec![symbol.clone()] });
                 lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(lhs), symbol] });
             }
-            GrammarExpr::RepeatRange { expr, min, max } => {
+            GrammarExpr::Quantified(expr, Quantifier::Range(min, max)) => {
                 lowerer.emit_repeat_range(lhs, expr, *min, *max)?;
             }
             GrammarExpr::ExprNFA(expr_nfa) => {
@@ -2513,11 +2569,11 @@ mod tests {
                 ),
                 nonterminal(
                     "item",
-                    GrammarExpr::RepeatOne(Box::new(GrammarExpr::Sequence(vec![
+                    GrammarExpr::Quantified(Box::new(GrammarExpr::Sequence(vec![
                         literal("{"),
                         GrammarExpr::Ref("body".to_string()),
                         literal("}"),
-                    ]))),
+                    ])), Quantifier::OnePlus),
                 ),
                 nonterminal("start", GrammarExpr::Ref("item".to_string())),
             ],

@@ -4,7 +4,7 @@ use regex::escape as regex_escape;
 use serde_json::Value;
 
 use crate::grammar::expr_nfa::ExprNFA;
-use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule};
+use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier};
 
 use super::ast::{
     AdditionalProperties, Schema, SchemaAssertions, SchemaDocument, SchemaKind, SchemaType,
@@ -172,10 +172,10 @@ impl<'a> Lowerer<'a> {
             JSON_ARRAY_RULE,
             seq(vec![
                 lit("["),
-                GrammarExpr::Optional(Box::new(seq(vec![
+                GrammarExpr::Quantified(Box::new(seq(vec![
                     r(JSON_VALUE_RULE),
-                    GrammarExpr::Repeat(Box::new(array_item_tail)),
-                ]))),
+                    GrammarExpr::Quantified(Box::new(array_item_tail), Quantifier::ZeroPlus),
+                ])), Quantifier::Optional),
                 lit("]"),
             ]),
         );
@@ -186,10 +186,10 @@ impl<'a> Lowerer<'a> {
             JSON_OBJECT_RULE,
             seq(vec![
                 lit("{"),
-                GrammarExpr::Optional(Box::new(seq(vec![
+                GrammarExpr::Quantified(Box::new(seq(vec![
                     object_entry,
-                    GrammarExpr::Repeat(Box::new(object_tail)),
-                ]))),
+                    GrammarExpr::Quantified(Box::new(object_tail), Quantifier::ZeroPlus),
+                ])), Quantifier::Optional),
                 lit("}"),
             ]),
         );
@@ -532,26 +532,16 @@ impl<'a> Lowerer<'a> {
                 expr: Box::new(self.hoist_raw_regexes_out_of_expr_nfa_symbol(*expr)),
                 intersect: Box::new(self.hoist_raw_regexes_out_of_expr_nfa_symbol(*intersect)),
             },
-            GrammarExpr::Optional(inner) => GrammarExpr::Optional(Box::new(
-                self.hoist_raw_regexes_out_of_expr_nfa_symbol(*inner),
-            )),
-            GrammarExpr::Repeat(inner) => GrammarExpr::Repeat(Box::new(
-                self.hoist_raw_regexes_out_of_expr_nfa_symbol(*inner),
-            )),
-            GrammarExpr::RepeatOne(inner) => GrammarExpr::RepeatOne(Box::new(
-                self.hoist_raw_regexes_out_of_expr_nfa_symbol(*inner),
-            )),
-            GrammarExpr::RepeatRange { expr, min, max } => GrammarExpr::RepeatRange {
-                expr: Box::new(self.hoist_raw_regexes_out_of_expr_nfa_symbol(*expr)),
-                min,
-                max,
-            },
+            GrammarExpr::Quantified(inner, quantifier) => GrammarExpr::Quantified(
+                Box::new(self.hoist_raw_regexes_out_of_expr_nfa_symbol(*inner)),
+                quantifier,
+            ),
             GrammarExpr::SeparatedSequence { items, separator, allow_empty } => {
                 GrammarExpr::SeparatedSequence {
                     items: items
                         .into_iter()
-                        .map(|(item, required)| {
-                            (self.hoist_raw_regexes_out_of_expr_nfa_symbol(item), required)
+                        .map(|(item, quantifier)| {
+                            (self.hoist_raw_regexes_out_of_expr_nfa_symbol(item), quantifier)
                         })
                         .collect(),
                     separator: Box::new(self.hoist_raw_regexes_out_of_expr_nfa_symbol(*separator)),

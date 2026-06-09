@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::import::ast::GrammarExpr;
+use crate::import::ast::{GrammarExpr, Quantifier};
 use serde_json::Value;
 
 use super::ast::{
@@ -1200,10 +1200,10 @@ fn all_of_intersection_terminal_safe(expr: &GrammarExpr) -> bool {
                 | JSON_STRING_RULE
         ),
         GrammarExpr::Grouped(inner)
-        | GrammarExpr::Optional(inner)
-        | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner) => all_of_intersection_terminal_safe(inner),
-        GrammarExpr::RepeatRange { expr, .. } => all_of_intersection_terminal_safe(expr),
+        | GrammarExpr::Quantified(inner, Quantifier::Optional)
+        | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
+        | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => all_of_intersection_terminal_safe(inner),
+        GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => all_of_intersection_terminal_safe(expr),
         GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
             parts.iter().all(all_of_intersection_terminal_safe)
         }

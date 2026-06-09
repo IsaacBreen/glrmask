@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use super::{choice_or_single, sequence_or_single};
 use crate::GlrMaskError;
 use crate::grammar::flat::GrammarDef;
-use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower};
+use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier, lower};
 use crate::grammar::factoring::factor_named_grammar;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -288,13 +288,10 @@ impl<'a> Lexer<'a> {
 }
 
 fn bounded_repeat_expr(atom: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr {
-    let max = max.unwrap_or(min);
-    assert!(max >= min, "tilde max must be >= min");
-    GrammarExpr::RepeatRange {
-        expr: Box::new(atom),
-        min,
-        max,
+    if let Some(max) = max {
+        assert!(max >= min, "tilde max must be >= min");
     }
+    GrammarExpr::Quantified(Box::new(atom), Quantifier::Range(min, max))
 }
 
 fn escape_char_class_byte(b: u8) -> String {
@@ -456,10 +453,10 @@ fn validate_lark_terminal_refs(
             validate_lark_terminal_refs(expr, rule_name, terminal_names, rule_map)?;
             validate_lark_terminal_refs(exclude, rule_name, terminal_names, rule_map)
         }
-        GrammarExpr::Optional(inner)
-        | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner)
-        | GrammarExpr::RepeatRange { expr: inner, .. } => {
+        GrammarExpr::Quantified(inner, Quantifier::Optional)
+        | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
+        | GrammarExpr::Quantified(inner, Quantifier::OnePlus)
+        | GrammarExpr::Quantified(inner, Quantifier::Range(_, _)) => {
             validate_lark_terminal_refs(inner, rule_name, terminal_names, rule_map)
         }
         _ => Ok(()),
@@ -600,7 +597,7 @@ fn expand_lark_expr(
                 visiting,
             )?,
         },
-        GrammarExpr::Optional(inner) => GrammarExpr::Optional(expand_lark_boxed_expr(
+        GrammarExpr::Quantified(inner, Quantifier::Optional) => GrammarExpr::Quantified(expand_lark_boxed_expr(
             inner,
             in_terminal_rule,
             rule_map,
@@ -608,8 +605,8 @@ fn expand_lark_expr(
             parser_names,
             memo,
             visiting,
-        )?),
-        GrammarExpr::Repeat(inner) => GrammarExpr::Repeat(expand_lark_boxed_expr(
+        )?, Quantifier::Optional),
+        GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) => GrammarExpr::Quantified(expand_lark_boxed_expr(
             inner,
             in_terminal_rule,
             rule_map,
@@ -617,8 +614,8 @@ fn expand_lark_expr(
             parser_names,
             memo,
             visiting,
-        )?),
-        GrammarExpr::RepeatOne(inner) => GrammarExpr::RepeatOne(expand_lark_boxed_expr(
+        )?, Quantifier::ZeroPlus),
+        GrammarExpr::Quantified(inner, Quantifier::OnePlus) => GrammarExpr::Quantified(expand_lark_boxed_expr(
             inner,
             in_terminal_rule,
             rule_map,
@@ -626,9 +623,8 @@ fn expand_lark_expr(
             parser_names,
             memo,
             visiting,
-        )?),
-        GrammarExpr::RepeatRange { expr, min, max } => GrammarExpr::RepeatRange {
-            expr: expand_lark_boxed_expr(
+        )?, Quantifier::OnePlus),
+        GrammarExpr::Quantified(expr, Quantifier::Range(min, max)) => GrammarExpr::Quantified(expand_lark_boxed_expr(
                 expr,
                 in_terminal_rule,
                 rule_map,
@@ -636,10 +632,7 @@ fn expand_lark_expr(
                 parser_names,
                 memo,
                 visiting,
-            )?,
-            min: *min,
-            max: *max,
-        },
+            )?, Quantifier::Range(*min, *max)),
         GrammarExpr::Literal(bytes) => GrammarExpr::Literal(bytes.clone()),
         GrammarExpr::CharClass { def, negate, utf8 } => GrammarExpr::CharClass {
             def: def.clone(),
@@ -653,7 +646,7 @@ fn expand_lark_expr(
         GrammarExpr::SeparatedSequence { items, separator, allow_empty } => {
             let new_items = items
                 .iter()
-                .map(|(item, req)| {
+                .map(|(item, quantifier)| {
                     Ok((
                         expand_lark_expr(
                             item,
@@ -664,7 +657,7 @@ fn expand_lark_expr(
                             memo,
                             visiting,
                         )?,
-                        *req,
+                        quantifier.clone(),
                     ))
                 })
                 .collect::<Result<Vec<_>, GlrMaskError>>()?;
@@ -682,7 +675,7 @@ fn expand_lark_expr(
                 separator: Box::new(new_separator),
                 allow_empty: *allow_empty,
             }
-        }
+        },
         GrammarExpr::ExprNFA(expr_nfa) => {
             let mut expanded = expr_nfa.as_ref().clone();
             expanded.symbols = expanded
@@ -1034,15 +1027,15 @@ impl Parser {
         match self.peek() {
             Some(Token::Star) => {
                 self.pos += 1;
-                Ok(GrammarExpr::Repeat(Box::new(atom)))
+                Ok(GrammarExpr::Quantified(Box::new(atom), Quantifier::ZeroPlus))
             }
             Some(Token::Plus) => {
                 self.pos += 1;
-                Ok(GrammarExpr::RepeatOne(Box::new(atom)))
+                Ok(GrammarExpr::Quantified(Box::new(atom), Quantifier::OnePlus))
             }
             Some(Token::Question) => {
                 self.pos += 1;
-                Ok(GrammarExpr::Optional(Box::new(atom)))
+                Ok(GrammarExpr::Quantified(Box::new(atom), Quantifier::Optional))
             }
             Some(Token::Tilde) => {
                 self.pos += 1;
@@ -1066,7 +1059,7 @@ impl Parser {
             Some(Token::LBracket) => {
                 let expr = self.parse_alternatives()?;
                 self.expect_token(&Token::RBracket)?;
-                Ok(GrammarExpr::Optional(Box::new(expr)))
+                Ok(GrammarExpr::Quantified(Box::new(expr), Quantifier::Optional))
             }
             other => Err(GlrMaskError::GrammarParse(format!(
                 "expected atom, got {:?}",

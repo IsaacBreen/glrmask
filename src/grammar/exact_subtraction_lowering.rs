@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::{GlrMaskError, Result};
 
-use super::ast::{GrammarExpr, NamedGrammar, NamedRule};
+use super::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ExactSubtractionLoweringStats {
@@ -191,20 +191,10 @@ impl<'a> ExactSubtractionResolver<'a> {
                 canonical
             }
             GrammarExpr::Grouped(inner) => self.canonical_exact_expr_inner(inner, visiting, memo),
-            GrammarExpr::Optional(inner) => GrammarExpr::Optional(Box::new(
-                self.canonical_exact_expr_inner(inner, visiting, memo),
-            )),
-            GrammarExpr::Repeat(inner) => GrammarExpr::Repeat(Box::new(
-                self.canonical_exact_expr_inner(inner, visiting, memo),
-            )),
-            GrammarExpr::RepeatOne(inner) => GrammarExpr::RepeatOne(Box::new(
-                self.canonical_exact_expr_inner(inner, visiting, memo),
-            )),
-            GrammarExpr::RepeatRange { expr, min, max } => GrammarExpr::RepeatRange {
-                expr: Box::new(self.canonical_exact_expr_inner(expr, visiting, memo)),
-                min: *min,
-                max: *max,
-            },
+            GrammarExpr::Quantified(inner, quantifier) => GrammarExpr::Quantified(
+                Box::new(self.canonical_exact_expr_inner(inner, visiting, memo)),
+                quantifier.clone(),
+            ),
             GrammarExpr::Sequence(items) => GrammarExpr::Sequence(
                 items
                     .iter()
@@ -232,10 +222,10 @@ impl<'a> ExactSubtractionResolver<'a> {
             } => GrammarExpr::SeparatedSequence {
                 items: items
                     .iter()
-                    .map(|(item, required)| {
+                    .map(|(item, quantifier)| {
                         (
                             self.canonical_exact_expr_inner(item, visiting, memo),
-                            *required,
+                            quantifier.clone(),
                         )
                     })
                     .collect(),
@@ -281,9 +271,9 @@ impl SiteCollector {
 
         match expr {
             GrammarExpr::Grouped(inner)
-            | GrammarExpr::Optional(inner)
-            | GrammarExpr::Repeat(inner)
-            | GrammarExpr::RepeatOne(inner) => self.collect_expr(inner, resolver),
+            | GrammarExpr::Quantified(inner, Quantifier::Optional)
+            | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
+            | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => self.collect_expr(inner, resolver),
             GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
                 for item in items {
                     self.collect_expr(item, resolver)?;
@@ -298,7 +288,7 @@ impl SiteCollector {
                 self.collect_expr(expr, resolver)?;
                 self.collect_expr(exclude, resolver)
             }
-            GrammarExpr::RepeatRange { expr, .. } => self.collect_expr(expr, resolver),
+            GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => self.collect_expr(expr, resolver),
             GrammarExpr::SeparatedSequence { items, separator, .. } => {
                 for (item, _) in items {
                     self.collect_expr(item, resolver)?;
@@ -547,9 +537,9 @@ fn rewrite_expr(
 
     match expr {
         GrammarExpr::Grouped(inner)
-        | GrammarExpr::Optional(inner)
-        | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner) => {
+        | GrammarExpr::Quantified(inner, Quantifier::Optional)
+        | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
+        | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
             rewrite_expr(inner, allow_exact_subtractions, resolver, rewrite_targets)
         }
         GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
@@ -566,7 +556,7 @@ fn rewrite_expr(
             rewrite_expr(expr, allow_exact_subtractions, resolver, rewrite_targets)?;
             rewrite_expr(exclude, allow_exact_subtractions, resolver, rewrite_targets)
         }
-        GrammarExpr::RepeatRange { expr, .. } => {
+        GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => {
             rewrite_expr(expr, allow_exact_subtractions, resolver, rewrite_targets)
         }
         GrammarExpr::SeparatedSequence { items, separator, .. } => {
@@ -673,7 +663,7 @@ impl NameAllocator {
 #[cfg(test)]
 mod tests {
     use super::lower_exact_subtractions;
-    use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar, NamedRule};
+    use crate::grammar::ast::{lower, GrammarExpr, Quantifier, NamedGrammar, NamedRule};
     use crate::dump_json_schema_grammar_glrm;
     use std::{env, ffi::OsString, sync::Mutex};
     use serde_json::json;
@@ -757,16 +747,16 @@ mod tests {
         match expr {
             GrammarExpr::Exclude { .. } => true,
             GrammarExpr::Grouped(inner)
-            | GrammarExpr::Optional(inner)
-            | GrammarExpr::Repeat(inner)
-            | GrammarExpr::RepeatOne(inner) => contains_exclude(inner),
+            | GrammarExpr::Quantified(inner, Quantifier::Optional)
+            | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
+            | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_exclude(inner),
             GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
                 items.iter().any(contains_exclude)
             }
             GrammarExpr::Intersect { expr, intersect } => {
                 contains_exclude(expr) || contains_exclude(intersect)
             }
-            GrammarExpr::RepeatRange { expr, .. } => contains_exclude(expr),
+            GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => contains_exclude(expr),
             GrammarExpr::SeparatedSequence { items, separator, .. } => {
                 items.iter().any(|(item, _)| contains_exclude(item)) || contains_exclude(separator)
             }

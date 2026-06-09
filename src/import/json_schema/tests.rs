@@ -7,7 +7,7 @@ use super::schema_to_named_grammar;
 use super::string::{property_name_matches_pattern, string_value_satisfies_schema, GLRMASK_LLGUIDANCE_COMPAT_ENV};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguityKind};
-use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar};
+use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar, Quantifier};
 use crate::grammar::glrm::{from_glrm, to_glrm};
 use crate::Vocab;
 
@@ -341,10 +341,10 @@ fn contains_separated_sequence(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::SeparatedSequence { .. } => true,
         GrammarExpr::Grouped(inner)
-        | GrammarExpr::Optional(inner)
-        | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner) => contains_separated_sequence(inner),
-        GrammarExpr::RepeatRange { expr, .. } => contains_separated_sequence(expr),
+        | GrammarExpr::Quantified(inner, Quantifier::Optional)
+        | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
+        | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_separated_sequence(inner),
+        GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => contains_separated_sequence(expr),
         GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
             items.iter().any(contains_separated_sequence)
         }
@@ -369,10 +369,10 @@ fn contains_expr_nfa(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::ExprNFA(_) => true,
         GrammarExpr::Grouped(inner)
-        | GrammarExpr::Optional(inner)
-        | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner) => contains_expr_nfa(inner),
-        GrammarExpr::RepeatRange { expr, .. } => contains_expr_nfa(expr),
+        | GrammarExpr::Quantified(inner, Quantifier::Optional)
+        | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
+        | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_expr_nfa(inner),
+        GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => contains_expr_nfa(expr),
         GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => items.iter().any(contains_expr_nfa),
         GrammarExpr::Exclude { expr, exclude } => {
             contains_expr_nfa(expr) || contains_expr_nfa(exclude)
@@ -397,11 +397,9 @@ fn contains_expr_nfa(expr: &GrammarExpr) -> bool {
 fn expr_contains_raw_regex(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::RawRegex(_) => true,
-        GrammarExpr::Grouped(inner)
-        | GrammarExpr::Optional(inner)
-        | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner) => expr_contains_raw_regex(inner),
-        GrammarExpr::RepeatRange { expr, .. } => expr_contains_raw_regex(expr),
+        GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+            expr_contains_raw_regex(inner)
+        }
         GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
             items.iter().any(expr_contains_raw_regex)
         }
@@ -826,10 +824,10 @@ fn contains_exclude(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::Exclude { .. } => true,
         GrammarExpr::Grouped(inner)
-        | GrammarExpr::Optional(inner)
-        | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner) => contains_exclude(inner),
-        GrammarExpr::RepeatRange { expr, .. } => contains_exclude(expr),
+        | GrammarExpr::Quantified(inner, Quantifier::Optional)
+        | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
+        | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_exclude(inner),
+        GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => contains_exclude(expr),
         GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => items.iter().any(contains_exclude),
         GrammarExpr::SeparatedSequence { items, separator, .. } => {
             items.iter().any(|(item, _)| contains_exclude(item)) || contains_exclude(separator)
@@ -850,10 +848,10 @@ fn contains_ref_with_prefix(expr: &GrammarExpr, prefix: &str) -> bool {
     match expr {
         GrammarExpr::Ref(name) => name.starts_with(prefix),
         GrammarExpr::Grouped(inner)
-        | GrammarExpr::Optional(inner)
-        | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner) => contains_ref_with_prefix(inner, prefix),
-        GrammarExpr::RepeatRange { expr, .. } => contains_ref_with_prefix(expr, prefix),
+        | GrammarExpr::Quantified(inner, Quantifier::Optional)
+        | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
+        | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_ref_with_prefix(inner, prefix),
+        GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => contains_ref_with_prefix(expr, prefix),
         GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
             items.iter().any(|item| contains_ref_with_prefix(item, prefix))
         }
@@ -934,10 +932,10 @@ fn contains_intersect(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::Intersect { .. } => true,
         GrammarExpr::Grouped(inner)
-        | GrammarExpr::Optional(inner)
-        | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner) => contains_intersect(inner),
-        GrammarExpr::RepeatRange { expr, .. } => contains_intersect(expr),
+        | GrammarExpr::Quantified(inner, Quantifier::Optional)
+        | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
+        | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_intersect(inner),
+        GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => contains_intersect(expr),
         GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => items.iter().any(contains_intersect),
         GrammarExpr::SeparatedSequence { items, separator, .. } => {
             items.iter().any(|(item, _)| contains_intersect(item)) || contains_intersect(separator)
@@ -963,10 +961,10 @@ fn contains_intersect_with_separated_sequence(expr: &GrammarExpr) -> bool {
                 || contains_intersect_with_separated_sequence(intersect)
         }
         GrammarExpr::Grouped(inner)
-        | GrammarExpr::Optional(inner)
-        | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner) => contains_intersect_with_separated_sequence(inner),
-        GrammarExpr::RepeatRange { expr, .. } => contains_intersect_with_separated_sequence(expr),
+        | GrammarExpr::Quantified(inner, Quantifier::Optional)
+        | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
+        | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_intersect_with_separated_sequence(inner),
+        GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => contains_intersect_with_separated_sequence(expr),
         GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
             items.iter().any(contains_intersect_with_separated_sequence)
         }
@@ -995,10 +993,10 @@ fn contains_ref_named(expr: &GrammarExpr, name: &str) -> bool {
     match expr {
         GrammarExpr::Ref(rule_name) => rule_name == name,
         GrammarExpr::Grouped(inner)
-        | GrammarExpr::Optional(inner)
-        | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner) => contains_ref_named(inner, name),
-        GrammarExpr::RepeatRange { expr, .. } => contains_ref_named(expr, name),
+        | GrammarExpr::Quantified(inner, Quantifier::Optional)
+        | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
+        | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_ref_named(inner, name),
+        GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => contains_ref_named(expr, name),
         GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
             items.iter().any(|item| contains_ref_named(item, name))
         }
@@ -1026,10 +1024,10 @@ fn contains_literal_bytes(expr: &GrammarExpr, bytes: &[u8]) -> bool {
     match expr {
         GrammarExpr::Literal(literal) => literal == bytes,
         GrammarExpr::Grouped(inner)
-        | GrammarExpr::Optional(inner)
-        | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner) => contains_literal_bytes(inner, bytes),
-        GrammarExpr::RepeatRange { expr, .. } => contains_literal_bytes(expr, bytes),
+        | GrammarExpr::Quantified(inner, Quantifier::Optional)
+        | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
+        | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_literal_bytes(inner, bytes),
+        GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => contains_literal_bytes(expr, bytes),
         GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
             items.iter().any(|item| contains_literal_bytes(item, bytes))
         }
@@ -1059,11 +1057,9 @@ fn contains_literal_bytes(expr: &GrammarExpr, bytes: &[u8]) -> bool {
 fn contains_raw_regex_substring(expr: &GrammarExpr, substring: &str) -> bool {
     match expr {
         GrammarExpr::RawRegex(pat) => pat.contains(substring),
-        GrammarExpr::Grouped(inner)
-        | GrammarExpr::Optional(inner)
-        | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner) => contains_raw_regex_substring(inner, substring),
-        GrammarExpr::RepeatRange { expr, .. } => contains_raw_regex_substring(expr, substring),
+        GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+            contains_raw_regex_substring(inner, substring)
+        }
         GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
             items
                 .iter()
@@ -1212,7 +1208,7 @@ fn open_additional_map_min_properties_requires_dynamic_pair() {
     };
     assert_eq!(parts.len(), 3);
     assert!(!matches!(parts[1], GrammarExpr::Epsilon));
-    assert!(!matches!(parts[1], GrammarExpr::Optional(_)));
+    assert!(!matches!(parts[1], GrammarExpr::Quantified(_, Quantifier::Optional)));
     lower(&grammar).unwrap();
 }
 

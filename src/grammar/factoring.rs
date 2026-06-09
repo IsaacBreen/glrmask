@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::ast::{GrammarExpr, NamedGrammar, NamedRule};
+use super::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier};
 
 fn contains_regex_features(expr: &GrammarExpr) -> bool {
     match expr {
@@ -28,10 +28,10 @@ fn contains_regex_features(expr: &GrammarExpr) -> bool {
         GrammarExpr::Intersect { expr, intersect } => {
             contains_regex_features(expr) || contains_regex_features(intersect)
         }
-        GrammarExpr::Optional(inner)
-        | GrammarExpr::Repeat(inner)
-        | GrammarExpr::RepeatOne(inner)
-        | GrammarExpr::RepeatRange { expr: inner, .. } => contains_regex_features(inner),
+        GrammarExpr::Quantified(inner, Quantifier::Optional)
+        | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
+        | GrammarExpr::Quantified(inner, Quantifier::OnePlus)
+        | GrammarExpr::Quantified(inner, Quantifier::Range(_, _)) => contains_regex_features(inner),
         GrammarExpr::SeparatedSequence { items, separator, .. } => {
             items.iter().any(|(item, _)| contains_regex_features(item))
                 || contains_regex_features(separator)
@@ -151,20 +151,10 @@ impl ChoiceFactorer {
                 expr: Box::new(self.factor_expr(*expr, rule_name)),
                 exclude: Box::new(self.factor_expr(*exclude, rule_name)),
             },
-            GrammarExpr::Optional(expr) => {
-                GrammarExpr::Optional(Box::new(self.factor_expr(*expr, rule_name)))
-            }
-            GrammarExpr::Repeat(expr) => {
-                GrammarExpr::Repeat(Box::new(self.factor_expr(*expr, rule_name)))
-            }
-            GrammarExpr::RepeatOne(expr) => {
-                GrammarExpr::RepeatOne(Box::new(self.factor_expr(*expr, rule_name)))
-            }
-            GrammarExpr::RepeatRange { expr, min, max } => GrammarExpr::RepeatRange {
-                expr: Box::new(self.factor_expr(*expr, rule_name)),
-                min,
-                max,
-            },
+            GrammarExpr::Quantified(expr, quantifier) => GrammarExpr::Quantified(
+                Box::new(self.factor_expr(*expr, rule_name)),
+                quantifier,
+            ),
             other => other,
         }
     }
@@ -261,10 +251,10 @@ impl ChoiceFactorer {
                 Self::collect_refs_impl(expr, refs);
                 Self::collect_refs_impl(intersect, refs);
             }
-            GrammarExpr::Optional(expr)
-            | GrammarExpr::Repeat(expr)
-            | GrammarExpr::RepeatOne(expr)
-            | GrammarExpr::RepeatRange { expr, .. } => Self::collect_refs_impl(expr, refs),
+            GrammarExpr::Quantified(expr, Quantifier::Optional)
+            | GrammarExpr::Quantified(expr, Quantifier::ZeroPlus)
+            | GrammarExpr::Quantified(expr, Quantifier::OnePlus)
+            | GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => Self::collect_refs_impl(expr, refs),
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
@@ -332,10 +322,10 @@ impl ChoiceFactorer {
             GrammarExpr::Sequence(parts) => parts.len() > 2,
             GrammarExpr::Choice(_) => true,
             GrammarExpr::Exclude { .. } => true,
-            GrammarExpr::Optional(_)
-            | GrammarExpr::Repeat(_)
-            | GrammarExpr::RepeatOne(_)
-            | GrammarExpr::RepeatRange { .. } => true,
+            GrammarExpr::Quantified(_, Quantifier::Optional)
+            | GrammarExpr::Quantified(_, Quantifier::ZeroPlus)
+            | GrammarExpr::Quantified(_, Quantifier::OnePlus)
+            | GrammarExpr::Quantified(_, Quantifier::Range(_, _)) => true,
             _ => false,
         }
     }
@@ -412,10 +402,10 @@ impl ChoiceFactorer {
                 Self::collect_refs_static(expr, refs);
                 Self::collect_refs_static(intersect, refs);
             }
-            GrammarExpr::Optional(expr)
-            | GrammarExpr::Repeat(expr)
-            | GrammarExpr::RepeatOne(expr)
-            | GrammarExpr::RepeatRange { expr, .. } => Self::collect_refs_static(expr, refs),
+            GrammarExpr::Quantified(expr, Quantifier::Optional)
+            | GrammarExpr::Quantified(expr, Quantifier::ZeroPlus)
+            | GrammarExpr::Quantified(expr, Quantifier::OnePlus)
+            | GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => Self::collect_refs_static(expr, refs),
             GrammarExpr::Literal(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)

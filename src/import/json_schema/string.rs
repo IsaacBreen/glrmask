@@ -4,7 +4,7 @@ use regex::{Regex, escape as regex_escape};
 use regex_syntax::hir::{Class, Hir, HirKind, Literal, Look, Repetition};
 use regex_syntax::Parser;
 
-use crate::import::ast::GrammarExpr;
+use crate::import::ast::{GrammarExpr, Quantifier};
 
 use super::ast::StringSchema;
 use super::error::{ImportResult, SchemaImportError};
@@ -233,7 +233,7 @@ impl<'a> Lowerer<'a> {
                             let end = self.add_string_pattern_end_terminal(anchored_end);
                             seq(vec![
                                 lit("\""),
-                                GrammarExpr::Repeat(Box::new(prefix_chunk)),
+                                GrammarExpr::Quantified(Box::new(prefix_chunk), Quantifier::ZeroPlus),
                                 middle,
                                 end,
                             ])
@@ -269,7 +269,7 @@ impl<'a> Lowerer<'a> {
             &name,
             seq(vec![
                 lit("\""),
-                GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))),
+                GrammarExpr::Quantified(Box::new(r(JSON_STRING_CHAR_RULE)), Quantifier::ZeroPlus),
                 body,
             ]),
         );
@@ -283,7 +283,7 @@ impl<'a> Lowerer<'a> {
             &name,
             seq(vec![
                 lit("\""),
-                GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))),
+                GrammarExpr::Quantified(Box::new(r(JSON_STRING_CHAR_RULE)), Quantifier::ZeroPlus),
                 body,
             ]),
         );
@@ -295,11 +295,7 @@ impl<'a> Lowerer<'a> {
         let name = self.fresh_rule_name("json_string_pattern_prefix_chunk");
         self.add_terminal_rule(
             &name,
-            GrammarExpr::RepeatRange {
-                expr: Box::new(r(JSON_STRING_CHAR_RULE)),
-                min: chunk_size,
-                max: chunk_size,
-            },
+            GrammarExpr::Quantified(Box::new(r(JSON_STRING_CHAR_RULE)), Quantifier::Range(chunk_size, Some(chunk_size))),
         );
         r(&name)
     }
@@ -311,11 +307,7 @@ impl<'a> Lowerer<'a> {
         self.add_terminal_rule(
             &name,
             seq(vec![
-                GrammarExpr::RepeatRange {
-                    expr: Box::new(r(JSON_STRING_CHAR_RULE)),
-                    min: 0,
-                    max: chunk_size.saturating_sub(1),
-                },
+                GrammarExpr::Quantified(Box::new(r(JSON_STRING_CHAR_RULE)), Quantifier::Range(0, Some(chunk_size.saturating_sub(1)))),
                 body,
             ]),
         );
@@ -329,11 +321,7 @@ impl<'a> Lowerer<'a> {
         self.add_terminal_rule(
             &name,
             seq(vec![
-                GrammarExpr::RepeatRange {
-                    expr: Box::new(r(JSON_STRING_CHAR_RULE)),
-                    min: 0,
-                    max: chunk_size.saturating_sub(1),
-                },
+                GrammarExpr::Quantified(Box::new(r(JSON_STRING_CHAR_RULE)), Quantifier::Range(0, Some(chunk_size.saturating_sub(1)))),
                 body,
             ]),
         );
@@ -344,7 +332,7 @@ impl<'a> Lowerer<'a> {
         let name = self.fresh_rule_name("json_string_pattern_end");
         let mut parts = Vec::new();
         if !anchored_end {
-            parts.push(GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))));
+            parts.push(GrammarExpr::Quantified(Box::new(r(JSON_STRING_CHAR_RULE)), Quantifier::ZeroPlus));
         }
         parts.push(lit("\""));
         self.add_terminal_rule(&name, seq(parts));
@@ -360,7 +348,7 @@ impl<'a> Lowerer<'a> {
         let name = self.fresh_rule_name("json_string_constrained_part");
         let mut parts = vec![lit("\""), body];
         if !anchored_end {
-            parts.push(GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))));
+            parts.push(GrammarExpr::Quantified(Box::new(r(JSON_STRING_CHAR_RULE)), Quantifier::ZeroPlus));
         }
         parts.push(lit("\""));
         self.add_terminal_rule(&name, seq(parts));
@@ -383,7 +371,7 @@ impl<'a> Lowerer<'a> {
                 let end = self.add_string_pattern_end_terminal(anchored_end);
                 seq(vec![
                     lit("\""),
-                    GrammarExpr::Repeat(Box::new(prefix_chunk)),
+                    GrammarExpr::Quantified(Box::new(prefix_chunk), Quantifier::ZeroPlus),
                     middle,
                     end,
                 ])
@@ -495,21 +483,13 @@ impl<'a> Lowerer<'a> {
         };
         Ok(Some(match (repetition.min, repetition.max) {
             (0, Some(0)) => GrammarExpr::Epsilon,
-            (0, None) => GrammarExpr::Repeat(Box::new(sub)),
-            (1, None) => GrammarExpr::RepeatOne(Box::new(sub)),
-            (0, Some(1)) => GrammarExpr::Optional(Box::new(sub)),
-            (min, Some(max)) => GrammarExpr::RepeatRange {
-                expr: Box::new(sub),
-                min: min.try_into().unwrap(),
-                max: max.try_into().unwrap(),
-            },
+            (0, None) => GrammarExpr::Quantified(Box::new(sub), Quantifier::ZeroPlus),
+            (1, None) => GrammarExpr::Quantified(Box::new(sub), Quantifier::OnePlus),
+            (0, Some(1)) => GrammarExpr::Quantified(Box::new(sub), Quantifier::Optional),
+            (min, Some(max)) => GrammarExpr::Quantified(Box::new(sub), Quantifier::Range(min.try_into().unwrap(), Some(max.try_into().unwrap()))),
             (min, None) => seq(vec![
-                GrammarExpr::RepeatRange {
-                    expr: Box::new(sub.clone()),
-                    min: min.try_into().unwrap(),
-                    max: min.try_into().unwrap(),
-                },
-                GrammarExpr::Repeat(Box::new(sub)),
+                GrammarExpr::Quantified(Box::new(sub.clone()), Quantifier::Range(min.try_into().unwrap(), Some(min.try_into().unwrap()))),
+                GrammarExpr::Quantified(Box::new(sub), Quantifier::ZeroPlus),
             ]),
         }))
     }
@@ -586,7 +566,7 @@ impl<'a> Lowerer<'a> {
         let name = self.fresh_rule_name("json_string_constrained_part");
         let mut parts = vec![lit("\""), body];
         if !anchored_end {
-            parts.push(GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))));
+            parts.push(GrammarExpr::Quantified(Box::new(r(JSON_STRING_CHAR_RULE)), Quantifier::ZeroPlus));
         }
         parts.push(lit("\""));
         self.add_terminal_rule(&name, seq(parts));
@@ -611,11 +591,7 @@ impl<'a> Lowerer<'a> {
                 let rule_name = self.fresh_rule_name(&format!("json_string_char_exact_{count}"));
                 self.add_terminal_rule(
                     &rule_name,
-                    GrammarExpr::RepeatRange {
-                        expr: Box::new(r(JSON_STRING_CHAR_RULE)),
-                        min: count,
-                        max: count,
-                    },
+                    GrammarExpr::Quantified(Box::new(r(JSON_STRING_CHAR_RULE)), Quantifier::Range(count, Some(count))),
                 );
                 self.shared_string_exact_rules.insert(count, rule_name.clone());
                 r(&rule_name)
@@ -633,11 +609,10 @@ impl<'a> Lowerer<'a> {
                 let rule_name = self.fresh_rule_name(&format!("json_string_char_upto_{max}"));
                 self.add_terminal_rule(
                     &rule_name,
-                    GrammarExpr::RepeatRange {
-                        expr: Box::new(r(JSON_STRING_CHAR_RULE)),
-                        min: 0,
-                        max,
-                    },
+                    GrammarExpr::Quantified(
+                        Box::new(r(JSON_STRING_CHAR_RULE)),
+                        Quantifier::Range(0, Some(max)),
+                    ),
                 );
                 self.shared_string_upto_rules.insert(max, rule_name.clone());
                 r(&rule_name)
@@ -684,11 +659,7 @@ impl<'a> Lowerer<'a> {
 
         let full_chunks = count / chunk;
         let remainder = count % chunk;
-        let mut parts = vec![GrammarExpr::RepeatRange {
-            expr: Box::new(self.string_char_exact_ref(chunk)),
-            min: full_chunks,
-            max: full_chunks,
-        }];
+        let mut parts = vec![GrammarExpr::Quantified(Box::new(self.string_char_exact_ref(chunk)), Quantifier::Range(full_chunks, Some(full_chunks)))];
         if remainder > 0 {
             parts.push(self.string_char_exact_ref(remainder));
         }
@@ -705,19 +676,11 @@ impl<'a> Lowerer<'a> {
         let remainder = max % chunk;
         let exact_chunk = self.string_char_exact_ref(chunk);
         let mut alternatives = vec![seq(vec![
-            GrammarExpr::RepeatRange {
-                expr: Box::new(exact_chunk.clone()),
-                min: 0,
-                max: full_chunks.saturating_sub(1),
-            },
+            GrammarExpr::Quantified(Box::new(exact_chunk.clone()), Quantifier::Range(0, Some(full_chunks.saturating_sub(1)))),
             self.string_char_upto_close_ref(chunk - 1),
         ])];
         alternatives.push(seq(vec![
-            GrammarExpr::RepeatRange {
-                expr: Box::new(exact_chunk),
-                min: full_chunks,
-                max: full_chunks,
-            },
+            GrammarExpr::Quantified(Box::new(exact_chunk), Quantifier::Range(full_chunks, Some(full_chunks))),
             self.string_char_upto_close_ref(remainder),
         ]));
         choice(alternatives)
@@ -748,21 +711,13 @@ impl<'a> Lowerer<'a> {
             let mut alternatives = vec![self.string_char_upto_wrapped_ref(chunk)];
             alternatives.push(seq(vec![
                 exact_open_chunk.clone(),
-                GrammarExpr::RepeatRange {
-                    expr: Box::new(exact_chunk.clone()),
-                    min: 0,
-                    max: full_chunks.saturating_sub(2),
-                },
+                GrammarExpr::Quantified(Box::new(exact_chunk.clone()), Quantifier::Range(0, Some(full_chunks.saturating_sub(2)))),
                 self.string_char_upto_close_ref(chunk),
             ]));
             if remainder > 0 {
                 alternatives.push(seq(vec![
                     exact_open_chunk,
-                    GrammarExpr::RepeatRange {
-                        expr: Box::new(exact_chunk),
-                        min: full_chunks.saturating_sub(1),
-                        max: full_chunks.saturating_sub(1),
-                    },
+                    GrammarExpr::Quantified(Box::new(exact_chunk), Quantifier::Range(full_chunks.saturating_sub(1), Some(full_chunks.saturating_sub(1)))),
                     self.string_char_upto_close_ref(remainder),
                 ]));
             }
@@ -1485,11 +1440,11 @@ impl<'a> Lowerer<'a> {
     fn string_body_for_length(&mut self, min: usize, max: Option<usize>) -> GrammarExpr {
         let ch = self.string_char_exact_ref(1);
         match (min, max) {
-            (0, None) => GrammarExpr::Repeat(Box::new(ch)),
-            (1, None) => GrammarExpr::RepeatOne(Box::new(ch)),
+            (0, None) => GrammarExpr::Quantified(Box::new(ch), Quantifier::ZeroPlus),
+            (1, None) => GrammarExpr::Quantified(Box::new(ch), Quantifier::OnePlus),
             (min, None) => seq(vec![
                 self.repeat_exact_string_char(min),
-                GrammarExpr::Repeat(Box::new(self.string_char_exact_ref(1))),
+                GrammarExpr::Quantified(Box::new(self.string_char_exact_ref(1)), Quantifier::ZeroPlus),
             ]),
             (0, Some(0)) => GrammarExpr::Epsilon,
             (0, Some(max)) => self.string_char_upto_ref(max),

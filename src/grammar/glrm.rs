@@ -46,7 +46,7 @@
 use crate::GlrMaskError;
 use crate::automata::unweighted_u32::dfa::Label;
 use crate::automata::unweighted_u32::nfa::NFA;
-use crate::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule};
+use crate::grammar::ast::{GrammarExpr, Quantifier, NamedGrammar, NamedRule};
 use crate::grammar::expr_nfa::ExprNFA;
 use std::collections::HashMap;
 
@@ -183,18 +183,27 @@ fn dump_nt_seq(expr: &GrammarExpr) -> String {
     }
 }
 
+fn dump_quantifier(quantifier: &Quantifier) -> String {
+    match quantifier {
+        Quantifier::Optional => "?".to_string(),
+        Quantifier::ZeroPlus => "*".to_string(),
+        Quantifier::OnePlus => "+".to_string(),
+        Quantifier::Range(min, Some(max)) if min == max => format!("{{{}}}", min),
+        Quantifier::Range(min, Some(max)) => format!("{{{},{}}}", min, max),
+        Quantifier::Range(min, None) => format!("{{{},}}", min),
+    }
+}
+
 fn dump_nt_postfix(expr: &GrammarExpr) -> String {
     match expr {
-        GrammarExpr::Optional(inner) => format!("{}?", dump_nt_atom(inner)),
-        GrammarExpr::Repeat(inner) => format!("{}*", dump_nt_atom(inner)),
-        GrammarExpr::RepeatOne(inner) => format!("{}+", dump_nt_atom(inner)),
-        GrammarExpr::RepeatRange { expr: inner, min, max } => {
-            if min == max {
-                format!("{}{{{}}}", dump_nt_atom(inner), min)
-            } else {
-                format!("{}{{{},{}}}", dump_nt_atom(inner), min, max)
-            }
-        }
+        GrammarExpr::Quantified(inner, Quantifier::Optional) => format!("{}?", dump_nt_atom(inner)),
+        GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) => format!("{}*", dump_nt_atom(inner)),
+        GrammarExpr::Quantified(inner, Quantifier::OnePlus) => format!("{}+", dump_nt_atom(inner)),
+        GrammarExpr::Quantified(inner, Quantifier::Range(min, max)) => match max {
+            Some(max) if min == max => format!("{}{{{}}}", dump_nt_atom(inner), min),
+            Some(max) => format!("{}{{{},{}}}", dump_nt_atom(inner), min, max),
+            None => format!("{}{{{},}}", dump_nt_atom(inner), min),
+        },
         _ => dump_nt_atom(expr),
     }
 }
@@ -237,9 +246,12 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
         GrammarExpr::SeparatedSequence { items, separator, allow_empty } => {
             let sep_str = dump_nt_atom(separator);
             let items_str = items.iter()
-                .map(|(e, req)| {
-                    let s = dump_nt_postfix(e);
-                    if *req { s } else { format!("{}?", s) }
+                .map(|(e, quantifier)| {
+                    let mut s = dump_nt_atom(e);
+                    if let Some(quantifier) = quantifier {
+                        s.push_str(&dump_quantifier(quantifier));
+                    }
+                    s
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
@@ -261,8 +273,8 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
             format!("({})", dump_nt_expr(expr, false))
         }
         // Quantifiers that appear here need parens around their inner:
-        GrammarExpr::Optional(_) | GrammarExpr::Repeat(_) | GrammarExpr::RepeatOne(_)
-        | GrammarExpr::RepeatRange { .. } => {
+        GrammarExpr::Quantified(_, Quantifier::Optional) | GrammarExpr::Quantified(_, Quantifier::ZeroPlus) | GrammarExpr::Quantified(_, Quantifier::OnePlus)
+        | GrammarExpr::Quantified(_, Quantifier::Range(_, _)) => {
             format!("({})", dump_nt_postfix(expr))
         }
     }
@@ -939,14 +951,8 @@ impl GlrmParser {
             self.consume(&Tok::LParen)?;
             let mut items = Vec::new();
             loop {
-                let item_expr = self.parse_sepseq_item(allow_raw_regex)?;
-                let optional = if matches!(self.peek(), Tok::Quest) {
-                    self.advance();
-                    true
-                } else {
-                    false
-                };
-                items.push((item_expr, !optional)); // is_required = !optional
+                let item = self.parse_sepseq_item(allow_raw_regex)?;
+                items.push(item);
                 if self.can_start_nt_atom() {
                     // more items
                 } else {
@@ -968,63 +974,66 @@ impl GlrmParser {
         self.apply_nt_quantifier(atom)
     }
 
-    fn parse_sepseq_item(&mut self, allow_raw_regex: bool) -> Result<GrammarExpr, GlrMaskError> {
-        let mut atom = match self.peek() {
+    fn parse_sepseq_item(
+        &mut self,
+        allow_raw_regex: bool,
+    ) -> Result<(GrammarExpr, Option<Quantifier>), GlrMaskError> {
+        let atom = match self.peek() {
             Tok::LParen => {
                 self.advance();
                 let inner = self.parse_nt_expr(allow_raw_regex)?;
                 self.consume(&Tok::RParen)?;
-                // Preserve explicit grouping in sepseq items so lowering can
-                // distinguish grouped repeats from top-level repeat items.
-                GrammarExpr::Sequence(vec![inner])
+                GrammarExpr::Grouped(Box::new(inner))
             }
             _ => self.parse_nt_atom(allow_raw_regex)?,
         };
 
-        // Inside `sep ~ ( ... )`, `?` is reserved for item optionality.
-        atom = match self.peek() {
+        let quantifier = match self.peek() {
+            Tok::Quest => {
+                self.advance();
+                Some(Quantifier::Optional)
+            }
             Tok::Star => {
                 self.advance();
-                GrammarExpr::Repeat(Box::new(atom))
+                Some(Quantifier::ZeroPlus)
             }
             Tok::Plus => {
                 self.advance();
-                GrammarExpr::RepeatOne(Box::new(atom))
+                Some(Quantifier::OnePlus)
             }
             Tok::LBrace => {
-                self.advance(); // `{`
+                self.advance();
                 let min = self.expect_int()?;
                 let max = if matches!(self.peek(), Tok::Comma) {
-                    self.advance(); // `,`
+                    self.advance();
                     if matches!(self.peek(), Tok::RBrace) {
-                        self.consume(&Tok::RBrace)?;
-                        return Ok(GrammarExpr::RepeatRange {
-                            expr: Box::new(atom),
-                            min,
-                            max: min,
-                        });
+                        None
+                    } else {
+                        Some(self.expect_int()?)
                     }
-                    self.expect_int()?
                 } else {
-                    min
+                    Some(min)
                 };
                 self.consume(&Tok::RBrace)?;
-                GrammarExpr::RepeatRange {
-                    expr: Box::new(atom),
-                    min,
-                    max,
-                }
+                Some(Quantifier::Range(min, max))
             }
-            _ => atom,
+            _ => None,
         };
-        Ok(atom)
+
+        if quantifier.is_some() && matches!(self.peek(), Tok::Quest | Tok::Star | Tok::Plus | Tok::LBrace) {
+            return Err(err(
+                "only one postfix quantifier may bind to a separated-sequence item; use extra parentheses, e.g. `sep ~ ( (expr+)? )`, when the outer quantifier should bind to the separator",
+            ));
+        }
+
+        Ok((atom, quantifier))
     }
 
     fn apply_nt_quantifier(&mut self, atom: GrammarExpr) -> Result<GrammarExpr, GlrMaskError> {
         match self.peek() {
-            Tok::Quest => { self.advance(); Ok(GrammarExpr::Optional(Box::new(atom))) }
-            Tok::Star  => { self.advance(); Ok(GrammarExpr::Repeat(Box::new(atom))) }
-            Tok::Plus  => { self.advance(); Ok(GrammarExpr::RepeatOne(Box::new(atom))) }
+            Tok::Quest => { self.advance(); Ok(GrammarExpr::Quantified(Box::new(atom), Quantifier::Optional)) }
+            Tok::Star  => { self.advance(); Ok(GrammarExpr::Quantified(Box::new(atom), Quantifier::ZeroPlus)) }
+            Tok::Plus  => { self.advance(); Ok(GrammarExpr::Quantified(Box::new(atom), Quantifier::OnePlus)) }
             Tok::LBrace => {
                 self.advance(); // `{`
                 let min = self.expect_int()?;
@@ -1038,14 +1047,14 @@ impl GlrmParser {
                         // To keep it correct, use a large max sentinel via Optional+RepeatOne.
                         // Actually just use RepeatRange with min==max as fallback:
                         // Better: reject or use a very large max. For now: min.
-                        return Ok(GrammarExpr::RepeatRange { expr: Box::new(atom), min, max: min });
+                        return Ok(GrammarExpr::Quantified(Box::new(atom), Quantifier::Range(min, None)));
                     }
                     self.expect_int()?
                 } else {
                     min
                 };
                 self.consume(&Tok::RBrace)?;
-                Ok(GrammarExpr::RepeatRange { expr: Box::new(atom), min, max })
+                Ok(GrammarExpr::Quantified(Box::new(atom), Quantifier::Range(min, Some(max))))
             }
             _ => Ok(atom),
         }
@@ -1351,6 +1360,40 @@ nt z ::= "x" (A - (B));
 
         let err = lower(&grammar).unwrap_err().to_string();
         assert!(err.contains("no exact alternative"), "{err}");
+    }
+
+
+    #[test]
+    fn sepseq_rejects_stacked_item_quantifiers() {
+        let err = from_glrm(
+            r#"
+start s;
+nt s ::= "," ~+ ( item+? );
+nt item ::= "a";
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("only one postfix quantifier may bind"), "{err}");
+    }
+
+    #[test]
+    fn sepseq_allows_grouped_inner_quantifier_then_outer_item_quantifier() {
+        let grammar = from_glrm(
+            r#"
+start s;
+nt s ::= "," ~+ ( (item+)? );
+nt item ::= "a";
+"#,
+        )
+        .unwrap();
+
+        let GrammarExpr::SeparatedSequence { items, .. } = &grammar.rules[0].expr else {
+            panic!("expected separated sequence");
+        };
+        assert_eq!(items.len(), 1);
+        assert!(matches!(items[0].1, Some(Quantifier::Optional)));
+        assert!(matches!(items[0].0, GrammarExpr::Grouped(_)));
     }
 
     #[test]

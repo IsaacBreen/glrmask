@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule};
+use crate::grammar::ast::{GrammarExpr, Quantifier, NamedGrammar, NamedRule};
 
 /// Promote literal alternatives from nonterminal choices into generated terminal rules
 /// when doing so provably reduces the number of terminal definitions after lowering.
@@ -186,22 +186,22 @@ impl CandidateCollector {
                 self.collect_expr(rule_idx, intersect, path);
                 path.pop();
             }
-            GrammarExpr::Optional(inner) => {
+            GrammarExpr::Quantified(inner, Quantifier::Optional) => {
                 path.push(PathStep::Optional);
                 self.collect_expr(rule_idx, inner, path);
                 path.pop();
             }
-            GrammarExpr::Repeat(inner) => {
+            GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) => {
                 path.push(PathStep::Repeat);
                 self.collect_expr(rule_idx, inner, path);
                 path.pop();
             }
-            GrammarExpr::RepeatOne(inner) => {
+            GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
                 path.push(PathStep::RepeatOne);
                 self.collect_expr(rule_idx, inner, path);
                 path.pop();
             }
-            GrammarExpr::RepeatRange { expr, .. } => {
+            GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => {
                 path.push(PathStep::RepeatRange);
                 self.collect_expr(rule_idx, expr, path);
                 path.pop();
@@ -427,10 +427,10 @@ fn expr_at_path_mut<'a>(mut expr: &'a mut GrammarExpr, path: &[PathStep]) -> &'a
         expr = match (step, expr) {
             (PathStep::Sequence(idx), GrammarExpr::Sequence(parts)) => &mut parts[*idx],
             (PathStep::Choice(idx), GrammarExpr::Choice(options)) => &mut options[*idx],
-            (PathStep::Optional, GrammarExpr::Optional(inner))
-            | (PathStep::Repeat, GrammarExpr::Repeat(inner))
-            | (PathStep::RepeatOne, GrammarExpr::RepeatOne(inner))
-            | (PathStep::RepeatRange, GrammarExpr::RepeatRange { expr: inner, .. }) => inner,
+            (PathStep::Optional, GrammarExpr::Quantified(inner, Quantifier::Optional))
+            | (PathStep::Repeat, GrammarExpr::Quantified(inner, Quantifier::ZeroPlus))
+            | (PathStep::RepeatOne, GrammarExpr::Quantified(inner, Quantifier::OnePlus))
+            | (PathStep::RepeatRange, GrammarExpr::Quantified(inner, Quantifier::Range(_, _))) => inner,
             (PathStep::ExcludeExpr, GrammarExpr::Exclude { expr: inner, .. }) => inner,
             (PathStep::ExcludeExclude, GrammarExpr::Exclude { exclude: inner, .. }) => inner,
             (PathStep::IntersectExpr, GrammarExpr::Intersect { expr: inner, .. }) => inner,
@@ -457,7 +457,7 @@ fn expr_at_path_mut<'a>(mut expr: &'a mut GrammarExpr, path: &[PathStep]) -> &'a
 #[cfg(test)]
 mod tests {
     use super::promote_choice_terminals_exact;
-    use crate::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule};
+    use crate::grammar::ast::{GrammarExpr, Quantifier, NamedGrammar, NamedRule};
 
     fn lit(s: &str) -> GrammarExpr {
         GrammarExpr::Literal(s.as_bytes().to_vec())

@@ -559,7 +559,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod ambiguity_tests {
     use crate::compiler::glr::analysis::AnalyzedGrammar;
-    use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar, NamedRule};
+    use crate::grammar::ast::{lower, GrammarExpr, Quantifier, NamedGrammar, NamedRule};
     use crate::grammar::expr_nfa::ExprNfaBuilder;
     use crate::grammar::glrm::from_glrm;
 
@@ -649,11 +649,11 @@ mod ambiguity_tests {
                                     GrammarExpr::Literal(b"{".to_vec()),
                                     GrammarExpr::SeparatedSequence {
                                         items: vec![(
-                                            GrammarExpr::Repeat(Box::new(GrammarExpr::Sequence(vec![
+                                            GrammarExpr::Sequence(vec![
                                                 GrammarExpr::Literal(b"\"k\": ".to_vec()),
                                                 GrammarExpr::Ref("json_value".into()),
-                                            ]))),
-                                            false,
+                                            ]),
+                                            Some(Quantifier::ZeroPlus),
                                         )],
                                         separator: Box::new(GrammarExpr::Ref("JSON_ITEM_SEPARATOR".into())),
                                         allow_empty: true,
@@ -661,7 +661,7 @@ mod ambiguity_tests {
                                     GrammarExpr::Literal(b"}".to_vec()),
                                 ]),
                             ]),
-                            false,
+                            Some(Quantifier::Optional),
                         )],
                         separator: Box::new(GrammarExpr::Ref("JSON_ITEM_SEPARATOR".into())),
                         allow_empty: true,
@@ -684,13 +684,13 @@ mod ambiguity_tests {
                     name: "json_array".into(),
                     expr: GrammarExpr::Sequence(vec![
                         GrammarExpr::Literal(b"[".to_vec()),
-                        GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
+                        GrammarExpr::Quantified(Box::new(GrammarExpr::Sequence(vec![
                             GrammarExpr::Ref("json_value".into()),
-                            GrammarExpr::Repeat(Box::new(GrammarExpr::Sequence(vec![
+                            GrammarExpr::Quantified(Box::new(GrammarExpr::Sequence(vec![
                                 GrammarExpr::Ref("JSON_ITEM_SEPARATOR".into()),
                                 GrammarExpr::Ref("json_value".into()),
-                            ]))),
-                        ]))),
+                            ])), Quantifier::ZeroPlus),
+                        ])), Quantifier::Optional),
                         GrammarExpr::Literal(b"]".to_vec()),
                     ]),
                     is_terminal: false,

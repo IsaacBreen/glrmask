@@ -1,5 +1,5 @@
 use crate::grammar::expr_nfa::ExprNfaBuilder;
-use crate::import::ast::GrammarExpr;
+use crate::import::ast::{GrammarExpr, Quantifier};
 
 use super::ast::{ArraySchema, SchemaKind};
 use super::error::ImportResult;
@@ -51,22 +51,22 @@ impl<'a> Lowerer<'a> {
             Some(0) => GrammarExpr::Epsilon,
             Some(max) => GrammarExpr::SeparatedSequence {
                 items: vec![(
-                    GrammarExpr::RepeatRange { expr: Box::new(item), min, max },
-                    min > 0,
+                    item,
+                    Some(Quantifier::Range(min, Some(max))),
                 )],
                 separator: Box::new(self.item_separator_expr()),
                 allow_empty: min == 0,
             },
             None if min == 0 => GrammarExpr::SeparatedSequence {
-                items: vec![(GrammarExpr::RepeatOne(Box::new(item)), false)],
+                items: vec![(item, Some(Quantifier::ZeroPlus))],
                 separator: Box::new(self.item_separator_expr()),
                 allow_empty: true,
             },
             None => {
                 let mut items = (0..min)
-                    .map(|_| (item.clone(), true))
+                    .map(|_| (item.clone(), None))
                     .collect::<Vec<_>>();
-                items.push((GrammarExpr::RepeatOne(Box::new(item)), false));
+                items.push((item, Some(Quantifier::ZeroPlus)));
                 GrammarExpr::SeparatedSequence {
                     items,
                     separator: Box::new(self.item_separator_expr()),
@@ -120,22 +120,14 @@ impl<'a> Lowerer<'a> {
     ) -> GrammarExpr {
         let separator_item = seq(vec![self.item_separator_expr(), item.clone()]);
         let body = if min == 0 {
-            GrammarExpr::Optional(Box::new(seq(vec![
+            GrammarExpr::Quantified(Box::new(seq(vec![
                 item,
-                GrammarExpr::RepeatRange {
-                    expr: Box::new(separator_item),
-                    min: 0,
-                    max: max - 1,
-                },
-            ])))
+                GrammarExpr::Quantified(Box::new(separator_item), Quantifier::Range(0, Some(max - 1))),
+            ])), Quantifier::Optional)
         } else {
             seq(vec![
                 item,
-                GrammarExpr::RepeatRange {
-                    expr: Box::new(separator_item),
-                    min: min - 1,
-                    max: max - 1,
-                },
+                GrammarExpr::Quantified(Box::new(separator_item), Quantifier::Range(min - 1, Some(max - 1))),
             ])
         };
 
@@ -146,10 +138,10 @@ impl<'a> Lowerer<'a> {
 
     fn unbounded_homogeneous_array_terminal(&mut self, item: GrammarExpr) -> GrammarExpr {
         let separator_item = seq(vec![self.item_separator_expr(), item.clone()]);
-        let body = GrammarExpr::Optional(Box::new(seq(vec![
+        let body = GrammarExpr::Quantified(Box::new(seq(vec![
             item,
-            GrammarExpr::Optional(Box::new(GrammarExpr::RepeatOne(Box::new(separator_item)))),
-        ])));
+            GrammarExpr::Quantified(Box::new(GrammarExpr::Quantified(Box::new(separator_item), Quantifier::OnePlus)), Quantifier::Optional),
+        ])), Quantifier::Optional);
 
         let rule_name = self.fresh_rule_name("unbounded_scalar_array");
         self.add_terminal_rule(&rule_name, seq(vec![lit("["), body, lit("]")]));
@@ -187,7 +179,7 @@ impl<'a> Lowerer<'a> {
             if tail_max != Some(0) {
                 let mut items = Vec::new();
                 for prefix in &schema.prefix_items {
-                    items.push((self.lower_schema(prefix)?, true));
+                    items.push((self.lower_schema(prefix)?, None));
                 }
                 items.extend(self.tuple_tail_items(tail, tail_min, tail_max));
                 alternatives.push(GrammarExpr::SeparatedSequence {
@@ -212,7 +204,7 @@ impl<'a> Lowerer<'a> {
         Ok(GrammarExpr::SeparatedSequence {
             items: items
                 .iter()
-                .map(|schema| self.lower_schema(schema).map(|expr| (expr, true)))
+                .map(|schema| self.lower_schema(schema).map(|expr| (expr, None)))
                 .collect::<ImportResult<Vec<_>>>()?,
             separator: Box::new(self.item_separator_expr()),
             allow_empty: false,
@@ -224,25 +216,15 @@ impl<'a> Lowerer<'a> {
         item: GrammarExpr,
         required_min: usize,
         max: Option<usize>,
-    ) -> Vec<(GrammarExpr, bool)> {
+    ) -> Vec<(GrammarExpr, Option<Quantifier>)> {
         match max {
             Some(0) => Vec::new(),
             Some(max) => vec![(
-                GrammarExpr::RepeatRange { expr: Box::new(item), min: required_min, max },
-                required_min > 0,
+                item,
+                Some(Quantifier::Range(required_min, Some(max))),
             )],
-            None if required_min == 0 => vec![(GrammarExpr::RepeatOne(Box::new(item)), false)],
-            None => vec![
-                (
-                    GrammarExpr::RepeatRange {
-                        expr: Box::new(item.clone()),
-                        min: required_min,
-                        max: required_min,
-                    },
-                    true,
-                ),
-                (GrammarExpr::RepeatOne(Box::new(item)), false),
-            ],
+            None if required_min == 0 => vec![(item, Some(Quantifier::ZeroPlus))],
+            None => vec![(item, Some(Quantifier::Range(required_min, None)))],
         }
     }
 }

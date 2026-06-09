@@ -2,7 +2,7 @@ use super::{choice_or_single, sequence_or_single};
 use crate::GlrMaskError;
 use crate::grammar::flat::GrammarDef;
 use crate::grammar::factoring::factor_named_grammar;
-use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, lower};
+use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier, lower};
 
 /// All-uppercase (plus underscores and digits) rule names are terminals.
 fn is_terminal_name(name: &str) -> bool {
@@ -223,9 +223,9 @@ fn is_ebnf_ident_continue(byte: u8) -> bool {
 
 fn apply_postfix_operator(atom: GrammarExpr, token: Option<&Token>) -> GrammarExpr {
     match token {
-        Some(Token::Question) => GrammarExpr::Optional(Box::new(atom)),
-        Some(Token::Star) => GrammarExpr::Repeat(Box::new(atom)),
-        Some(Token::Plus) => GrammarExpr::RepeatOne(Box::new(atom)),
+        Some(Token::Question) => GrammarExpr::Quantified(Box::new(atom), Quantifier::Optional),
+        Some(Token::Star) => GrammarExpr::Quantified(Box::new(atom), Quantifier::ZeroPlus),
+        Some(Token::Plus) => GrammarExpr::Quantified(Box::new(atom), Quantifier::OnePlus),
         _ => atom,
     }
 }

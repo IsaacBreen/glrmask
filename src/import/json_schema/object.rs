@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::grammar::expr_nfa::ExprNfaBuilder;
-use crate::import::ast::GrammarExpr;
+use crate::import::ast::{GrammarExpr, Quantifier};
 
 use super::ast::{
     AdditionalProperties, ObjectSchema, PatternPropertySchema,
@@ -823,7 +823,7 @@ impl<'a> Lowerer<'a> {
                 return self.lower_snowplow_large_pattern_object_key_trie(&items, &tail_pairs);
             }
 
-            let pair = GrammarExpr::RepeatOne(Box::new(choice(tail_pairs)));
+            let pair = GrammarExpr::Quantified(Box::new(choice(tail_pairs)), Quantifier::OnePlus);
             items.push(ObjectItem {
                 key: String::new(),
                 separator_pair: seq(vec![self.item_separator_expr(), pair.clone()]),
@@ -838,7 +838,7 @@ impl<'a> Lowerer<'a> {
             GrammarExpr::Epsilon
         } else {
             GrammarExpr::SeparatedSequence {
-                items: items.into_iter().map(|item| (item.pair, item.required)).collect(),
+                items: items.into_iter().map(|item| (item.pair, if item.required { None } else { Some(Quantifier::Optional) })).collect(),
                 separator: Box::new(self.item_separator_expr()),
                 allow_empty: true,
             }
@@ -857,11 +857,7 @@ impl<'a> Lowerer<'a> {
         match max_properties {
             Some(0) => GrammarExpr::Epsilon,
             Some(max_properties) => {
-                let tail = GrammarExpr::RepeatRange {
-                    expr: Box::new(separator_pair),
-                    min: min_properties.saturating_sub(1),
-                    max: max_properties - 1,
-                };
+                let tail = GrammarExpr::Quantified(Box::new(separator_pair), Quantifier::Range(min_properties.saturating_sub(1), Some(max_properties - 1)));
                 if min_properties == 0 {
                     choice(vec![GrammarExpr::Epsilon, seq(vec![pair, tail])])
                 } else {
@@ -875,7 +871,7 @@ impl<'a> Lowerer<'a> {
                 seq(vec![
                     pair,
                     seq(required_tail),
-                    GrammarExpr::Repeat(Box::new(separator_pair)),
+                    GrammarExpr::Quantified(Box::new(separator_pair), Quantifier::ZeroPlus),
                 ])
             }
         }
@@ -931,22 +927,14 @@ impl<'a> Lowerer<'a> {
             Some(max) => {
                 let separator_pair = seq(vec![self.item_separator_expr(), r(&pair_name)]);
                 if schema.min_properties == 0 {
-                    GrammarExpr::Optional(Box::new(seq(vec![
+                    GrammarExpr::Quantified(Box::new(seq(vec![
                         r(&pair_name),
-                        GrammarExpr::RepeatRange {
-                            expr: Box::new(separator_pair),
-                            min: 0,
-                            max: max - 1,
-                        },
-                    ])))
+                        GrammarExpr::Quantified(Box::new(separator_pair), Quantifier::Range(0, Some(max - 1))),
+                    ])), Quantifier::Optional)
                 } else {
                     seq(vec![
                         r(&pair_name),
-                        GrammarExpr::RepeatRange {
-                            expr: Box::new(separator_pair),
-                            min: schema.min_properties - 1,
-                            max: max - 1,
-                        },
+                        GrammarExpr::Quantified(Box::new(separator_pair), Quantifier::Range(schema.min_properties - 1, Some(max - 1))),
                     ])
                 }
             }
@@ -2040,7 +2028,7 @@ impl<'a> Lowerer<'a> {
         ]);
         let body = seq(vec![
             choice(alternatives),
-            GrammarExpr::Repeat(Box::new(additional_pair)),
+            GrammarExpr::Quantified(Box::new(additional_pair), Quantifier::ZeroPlus),
         ]);
         let rule_name = self.fresh_rule_name("json_discriminator_anyof_object_body");
         self.add_nonterminal_rule(&rule_name, body);
@@ -2924,10 +2912,10 @@ impl<'a> Lowerer<'a> {
             &free_nonempty_rule,
             seq(vec![
                 tail_pair_expr.clone(),
-                GrammarExpr::Repeat(Box::new(seq(vec![
+                GrammarExpr::Quantified(Box::new(seq(vec![
                     self.item_separator_expr(),
                     tail_pair_expr,
-                ]))),
+                ])), Quantifier::ZeroPlus),
             ]),
         );
 

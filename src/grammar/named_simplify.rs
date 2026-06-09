@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::grammar::ast::{GrammarExpr, NamedGrammar};
+use crate::grammar::ast::{GrammarExpr, Quantifier, NamedGrammar};
 
 /// Conservative normalization for `NamedGrammar` ASTs.
 ///
@@ -51,10 +51,12 @@ fn simplify_expr(expr: GrammarExpr, stats: &mut SimplifyStats) -> GrammarExpr {
             expr: Box::new(simplify_expr(*expr, stats)),
             intersect: Box::new(simplify_expr(*intersect, stats)),
         },
-        GrammarExpr::Optional(inner) => simplify_optional(*inner, stats),
-        GrammarExpr::Repeat(inner) => simplify_repeat(*inner, stats),
-        GrammarExpr::RepeatOne(inner) => simplify_repeat_one(*inner, stats),
-        GrammarExpr::RepeatRange { expr, min, max } => simplify_repeat_range(*expr, min, max, stats),
+        GrammarExpr::Quantified(inner, quantifier) => match quantifier {
+            Quantifier::Optional => simplify_optional(*inner, stats),
+            Quantifier::ZeroPlus => simplify_repeat(*inner, stats),
+            Quantifier::OnePlus => simplify_repeat_one(*inner, stats),
+            Quantifier::Range(min, max) => simplify_repeat_range(*inner, min, max, stats),
+        },
         GrammarExpr::SeparatedSequence {
             items,
             separator,
@@ -62,7 +64,7 @@ fn simplify_expr(expr: GrammarExpr, stats: &mut SimplifyStats) -> GrammarExpr {
         } => GrammarExpr::SeparatedSequence {
             items: items
                 .into_iter()
-                .map(|(item, required)| (simplify_expr(item, stats), required))
+                .map(|(item, quantifier)| (simplify_expr(item, stats), quantifier))
                 .collect(),
             separator: Box::new(simplify_expr(*separator, stats)),
             allow_empty,
@@ -132,15 +134,15 @@ fn simplify_optional(inner: GrammarExpr, stats: &mut SimplifyStats) -> GrammarEx
             stats.repeat_simplifications += 1;
             GrammarExpr::Epsilon
         }
-        GrammarExpr::Optional(inner) => {
+        GrammarExpr::Quantified(inner, Quantifier::Optional) => {
             stats.repeat_simplifications += 1;
-            GrammarExpr::Optional(inner)
+            GrammarExpr::Quantified(inner, Quantifier::Optional)
         }
-        GrammarExpr::Repeat(inner) | GrammarExpr::RepeatOne(inner) => {
+        GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
             stats.repeat_simplifications += 1;
-            GrammarExpr::Repeat(inner)
+            GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
         }
-        other => GrammarExpr::Optional(Box::new(other)),
+        other => GrammarExpr::Quantified(Box::new(other), Quantifier::Optional),
     }
 }
 
@@ -150,11 +152,11 @@ fn simplify_repeat(inner: GrammarExpr, stats: &mut SimplifyStats) -> GrammarExpr
             stats.repeat_simplifications += 1;
             GrammarExpr::Epsilon
         }
-        GrammarExpr::Optional(inner) | GrammarExpr::Repeat(inner) | GrammarExpr::RepeatOne(inner) => {
+        GrammarExpr::Quantified(inner, Quantifier::Optional) | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
             stats.repeat_simplifications += 1;
-            GrammarExpr::Repeat(inner)
+            GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
         }
-        other => GrammarExpr::Repeat(Box::new(other)),
+        other => GrammarExpr::Quantified(Box::new(other), Quantifier::ZeroPlus),
     }
 }
 
@@ -164,43 +166,39 @@ fn simplify_repeat_one(inner: GrammarExpr, stats: &mut SimplifyStats) -> Grammar
             stats.repeat_simplifications += 1;
             GrammarExpr::Epsilon
         }
-        GrammarExpr::RepeatOne(inner) => {
+        GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
             stats.repeat_simplifications += 1;
-            GrammarExpr::RepeatOne(inner)
+            GrammarExpr::Quantified(inner, Quantifier::OnePlus)
         }
-        GrammarExpr::Optional(inner) | GrammarExpr::Repeat(inner) => {
+        GrammarExpr::Quantified(inner, Quantifier::Optional) | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) => {
             stats.repeat_simplifications += 1;
-            GrammarExpr::Repeat(inner)
+            GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
         }
-        other => GrammarExpr::RepeatOne(Box::new(other)),
+        other => GrammarExpr::Quantified(Box::new(other), Quantifier::OnePlus),
     }
 }
 
 fn simplify_repeat_range(
     inner: GrammarExpr,
     min: usize,
-    max: usize,
+    max: Option<usize>,
     stats: &mut SimplifyStats,
 ) -> GrammarExpr {
     let inner = simplify_expr(inner, stats);
     match (min, max) {
-        (0, 0) => {
+        (0, Some(0)) => {
             stats.repeat_simplifications += 1;
             GrammarExpr::Epsilon
         }
-        (1, 1) => {
+        (1, Some(1)) => {
             stats.repeat_simplifications += 1;
             inner
         }
-        (0, 1) => {
+        (0, Some(1)) => {
             stats.repeat_simplifications += 1;
             simplify_optional(inner, stats)
         }
-        _ => GrammarExpr::RepeatRange {
-            expr: Box::new(inner),
-            min,
-            max,
-        },
+        _ => GrammarExpr::Quantified(Box::new(inner), Quantifier::Range(min, max)),
     }
 }
 
@@ -264,10 +262,10 @@ fn collect_ref_counts(expr: &GrammarExpr, counts: &mut HashMap<String, usize>) {
             collect_ref_counts(expr, counts);
             collect_ref_counts(intersect, counts);
         }
-        GrammarExpr::Optional(inner) | GrammarExpr::Repeat(inner) | GrammarExpr::RepeatOne(inner) => {
+        GrammarExpr::Quantified(inner, Quantifier::Optional) | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
             collect_ref_counts(inner, counts);
         }
-        GrammarExpr::RepeatRange { expr, .. } => collect_ref_counts(expr, counts),
+        GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => collect_ref_counts(expr, counts),
         GrammarExpr::SeparatedSequence {
             items, separator, ..
         } => {
@@ -336,10 +334,10 @@ fn inline_refs_in_expr(
             inline_refs_in_expr(expr, rule_exprs, ref_counts, protected, removed, stats);
             inline_refs_in_expr(intersect, rule_exprs, ref_counts, protected, removed, stats);
         }
-        GrammarExpr::Optional(inner) | GrammarExpr::Repeat(inner) | GrammarExpr::RepeatOne(inner) => {
+        GrammarExpr::Quantified(inner, Quantifier::Optional) | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
             inline_refs_in_expr(inner, rule_exprs, ref_counts, protected, removed, stats);
         }
-        GrammarExpr::RepeatRange { expr, .. } => {
+        GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => {
             inline_refs_in_expr(expr, rule_exprs, ref_counts, protected, removed, stats);
         }
         GrammarExpr::SeparatedSequence {
@@ -459,7 +457,7 @@ fn single_use_ref_to_choice(
 #[cfg(test)]
 mod tests {
     use super::simplify_named_grammar;
-    use crate::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule};
+    use crate::grammar::ast::{GrammarExpr, Quantifier, NamedGrammar, NamedRule};
 
     fn lit(s: &str) -> GrammarExpr {
         GrammarExpr::Literal(s.as_bytes().to_vec())
@@ -562,7 +560,7 @@ mod tests {
         let mut grammar = NamedGrammar {
             rules: vec![nt(
                 "start",
-                GrammarExpr::Optional(Box::new(GrammarExpr::RepeatOne(Box::new(lit("a"))))),
+                GrammarExpr::Quantified(Box::new(GrammarExpr::Quantified(Box::new(lit("a")), Quantifier::OnePlus)), Quantifier::Optional),
             )],
             start: "start".into(),
             ignore: None,
@@ -570,6 +568,6 @@ mod tests {
 
         simplify_named_grammar(&mut grammar);
 
-        assert_eq!(grammar.rules[0].expr, GrammarExpr::Repeat(Box::new(lit("a"))));
+        assert_eq!(grammar.rules[0].expr, GrammarExpr::Quantified(Box::new(lit("a")), Quantifier::ZeroPlus));
     }
 }
