@@ -68,10 +68,10 @@ fn max_length_string_quote_token_can_be_committed_even_when_mask_omits_it_glrm()
     const GLRM: &str = r#"
         start start;
 
-        internal t JSON_STRING_CHAR ::= /[bc]/;
-        t json_string_char_upto_2_1 ::= JSON_STRING_CHAR{0,2};
-        nt json_closed_object_body_2 ::= "\"a\": " "\"" json_string_char_upto_2_1 "\"";
-        nt start ::= "{" json_closed_object_body_2 "}";
+        nt start ::= "{" x "}";
+        nt x ::= "\"a\": " "\"" bc_rep "\"";
+        t bc_rep ::= bc{0,2};
+        internal t bc ::= "b" | "c";
     "#;
     const PREFIX: &[u8] = br#"{"a": "b"#;
 
