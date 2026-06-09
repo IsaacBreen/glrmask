@@ -29,7 +29,7 @@
 //! |--------------------------------|--------------------------------------|
 //! | `name`                         | Reference to a rule                  |
 //! | `"text"`                       | Literal bytes                        |
-//! | `/regex/`                      | Raw regex pattern                    |
+//! | `/regex/`                      | Raw regex pattern (terminal rules only) |
 //! | `[class]`, `[^class]`          | Byte character class                 |
 //! | `[class]/utf8`                 | UTF-8 character class                |
 //! | `.`                            | Any byte                             |
@@ -813,7 +813,7 @@ impl GlrmParser {
                 self.peek()
             )));
         }
-        self.parse_nt_expr(true)
+        self.parse_nt_expr(false)
     }
 
     // ---- NT expression parsing ---------------------------------------------
@@ -1235,6 +1235,26 @@ accept 1;
             expr_nfa.symbols.first(),
             Some(GrammarExpr::Exclude { .. })
         ));
+    }
+
+    #[test]
+    fn expr_nfa_transition_symbols_reject_raw_regex_literals() {
+        let err = from_glrm(
+            r#"
+start obj;
+fa obj ::= {
+start 0;
+accept 1;
+0 -- /[a-z]+/ --> 1;
+};
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("raw regex literals are only allowed in terminal (`t`) rules"),
+            "{err}"
+        );
     }
 
     #[test]
