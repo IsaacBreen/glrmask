@@ -64,15 +64,15 @@ fn max_length_string_quote_token_can_be_committed_even_when_mask_omits_it_glrm()
     const C_TOKEN_ID: u32 = 0;
     const C_TOKEN_BYTES: &[u8] = b"c";
     const QUOTE_TOKEN_ID: u32 = 1;
-    const QUOTE_TOKEN_BYTES: &[u8] = b"\"";
+    const QUOTE_TOKEN_BYTES: &[u8] = b"$";
     const GLRM: &str = r#"
         start start;
 
-        nt start ::= "\"" bc_rep "\"" "}";
+        nt start ::= bc_rep "$";
         t bc_rep ::= bc{0,2};
         internal t bc ::= "b" | "c";
     "#;
-    const PREFIX: &[u8] = br#""b"#;
+    const PREFIX: &[u8] = br#"b"#;
 
     fn minimal_vocab() -> Vocab {
         Vocab::new(
