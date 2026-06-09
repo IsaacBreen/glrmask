@@ -8,7 +8,7 @@ use super::string::{property_name_matches_pattern, string_value_satisfies_schema
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguityKind};
 use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar};
-use crate::grammar::glrm::to_glrm;
+use crate::grammar::glrm::{from_glrm, to_glrm};
 use crate::Vocab;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -391,6 +391,45 @@ fn contains_expr_nfa(expr: &GrammarExpr) -> bool {
         | GrammarExpr::LexerDfa(_)
         | GrammarExpr::AnyByte => false,
     }
+}
+
+
+fn expr_contains_raw_regex(expr: &GrammarExpr) -> bool {
+    match expr {
+        GrammarExpr::RawRegex(_) => true,
+        GrammarExpr::Grouped(inner)
+        | GrammarExpr::Optional(inner)
+        | GrammarExpr::Repeat(inner)
+        | GrammarExpr::RepeatOne(inner) => expr_contains_raw_regex(inner),
+        GrammarExpr::RepeatRange { expr, .. } => expr_contains_raw_regex(expr),
+        GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
+            items.iter().any(expr_contains_raw_regex)
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            expr_contains_raw_regex(expr) || expr_contains_raw_regex(exclude)
+        }
+        GrammarExpr::Intersect { expr, intersect } => {
+            expr_contains_raw_regex(expr) || expr_contains_raw_regex(intersect)
+        }
+        GrammarExpr::SeparatedSequence { items, separator, .. } => {
+            items.iter().any(|(item, _)| expr_contains_raw_regex(item))
+                || expr_contains_raw_regex(separator)
+        }
+        GrammarExpr::ExprNFA(expr_nfa) => expr_nfa.symbols.iter().any(expr_contains_raw_regex),
+        GrammarExpr::Ref(_)
+        | GrammarExpr::Epsilon
+        | GrammarExpr::Literal(_)
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte => false,
+    }
+}
+
+fn expr_nfa_symbols_contain_raw_regex(grammar: &NamedGrammar) -> bool {
+    grammar.rules.iter().any(|rule| match &rule.expr {
+        GrammarExpr::ExprNFA(expr_nfa) => expr_nfa.symbols.iter().any(expr_contains_raw_regex),
+        _ => false,
+    })
 }
 
 fn count_rules_with_prefix(grammar: &NamedGrammar, prefix: &str) -> usize {
@@ -1096,6 +1135,39 @@ fn large_optional_closed_object_uses_expr_nfa_body() {
     let glrm = to_glrm(&grammar);
     assert!(!glrm.contains("json_closed_object_fixed_pair_loop_body"), "{glrm}");
     assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn expr_nfa_pattern_property_symbols_hoist_raw_regexes_for_glrm_roundtrip() {
+    let mut properties = serde_json::Map::new();
+    for index in 0..8 {
+        properties.insert(format!("fixed{index}"), json!({"type": "string"}));
+    }
+
+    let schema = json!({
+        "type": "object",
+        "properties": properties,
+        "required": ["fixed0"],
+        "patternProperties": {
+            "^x": {"type": "number"}
+        },
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(grammar.rules.iter().any(|rule| contains_expr_nfa(&rule.expr)));
+    assert!(
+        !expr_nfa_symbols_contain_raw_regex(&grammar),
+        "ExprNFA transition symbols must not contain raw regex literals"
+    );
+
+    let glrm = to_glrm(&grammar);
+    for line in glrm.lines().filter(|line| line.trim_start().contains("--")) {
+        assert!(!line.contains("/"), "raw regex leaked into FA transition: {line}
+{glrm}");
+    }
+    from_glrm(&glrm).expect("JSON Schema GLRM dump should parse without FA raw regex literals");
     lower(&grammar).unwrap();
 }
 

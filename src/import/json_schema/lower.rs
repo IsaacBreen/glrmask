@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use regex::escape as regex_escape;
 use serde_json::Value;
 
+use crate::grammar::expr_nfa::ExprNFA;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule};
 
 use super::ast::{
@@ -477,6 +478,7 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(crate) fn add_nonterminal_rule(&mut self, name: &str, expr: GrammarExpr) {
+        let expr = self.hoist_raw_regexes_out_of_expr_nfa_symbols(expr);
         self.used_rule_names.insert(name.to_string());
         self.rules.push(NamedRule {
             name: name.to_string(),
@@ -484,6 +486,88 @@ impl<'a> Lowerer<'a> {
             is_terminal: false,
             is_internal: false,
         });
+    }
+
+    fn hoist_raw_regexes_out_of_expr_nfa_symbols(&mut self, expr: GrammarExpr) -> GrammarExpr {
+        match expr {
+            GrammarExpr::ExprNFA(expr_nfa) => {
+                let ExprNFA { nfa, symbols } = *expr_nfa;
+                let symbols = symbols
+                    .into_iter()
+                    .map(|symbol| self.hoist_raw_regexes_out_of_expr_nfa_symbol(symbol))
+                    .collect();
+                GrammarExpr::ExprNFA(Box::new(ExprNFA::new(nfa, symbols)))
+            }
+            other => other,
+        }
+    }
+
+    fn hoist_raw_regexes_out_of_expr_nfa_symbol(&mut self, expr: GrammarExpr) -> GrammarExpr {
+        match expr {
+            GrammarExpr::RawRegex(pattern) => {
+                let rule_name = self.fresh_rule_name("json_fa_regex_symbol");
+                self.add_terminal_rule(&rule_name, GrammarExpr::RawRegex(pattern));
+                r(&rule_name)
+            }
+            GrammarExpr::Grouped(inner) => GrammarExpr::Grouped(Box::new(
+                self.hoist_raw_regexes_out_of_expr_nfa_symbol(*inner),
+            )),
+            GrammarExpr::Sequence(items) => GrammarExpr::Sequence(
+                items
+                    .into_iter()
+                    .map(|item| self.hoist_raw_regexes_out_of_expr_nfa_symbol(item))
+                    .collect(),
+            ),
+            GrammarExpr::Choice(items) => GrammarExpr::Choice(
+                items
+                    .into_iter()
+                    .map(|item| self.hoist_raw_regexes_out_of_expr_nfa_symbol(item))
+                    .collect(),
+            ),
+            GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
+                expr: Box::new(self.hoist_raw_regexes_out_of_expr_nfa_symbol(*expr)),
+                exclude: Box::new(self.hoist_raw_regexes_out_of_expr_nfa_symbol(*exclude)),
+            },
+            GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+                expr: Box::new(self.hoist_raw_regexes_out_of_expr_nfa_symbol(*expr)),
+                intersect: Box::new(self.hoist_raw_regexes_out_of_expr_nfa_symbol(*intersect)),
+            },
+            GrammarExpr::Optional(inner) => GrammarExpr::Optional(Box::new(
+                self.hoist_raw_regexes_out_of_expr_nfa_symbol(*inner),
+            )),
+            GrammarExpr::Repeat(inner) => GrammarExpr::Repeat(Box::new(
+                self.hoist_raw_regexes_out_of_expr_nfa_symbol(*inner),
+            )),
+            GrammarExpr::RepeatOne(inner) => GrammarExpr::RepeatOne(Box::new(
+                self.hoist_raw_regexes_out_of_expr_nfa_symbol(*inner),
+            )),
+            GrammarExpr::RepeatRange { expr, min, max } => GrammarExpr::RepeatRange {
+                expr: Box::new(self.hoist_raw_regexes_out_of_expr_nfa_symbol(*expr)),
+                min,
+                max,
+            },
+            GrammarExpr::SeparatedSequence { items, separator, allow_empty } => {
+                GrammarExpr::SeparatedSequence {
+                    items: items
+                        .into_iter()
+                        .map(|(item, required)| {
+                            (self.hoist_raw_regexes_out_of_expr_nfa_symbol(item), required)
+                        })
+                        .collect(),
+                    separator: Box::new(self.hoist_raw_regexes_out_of_expr_nfa_symbol(*separator)),
+                    allow_empty,
+                }
+            }
+            GrammarExpr::ExprNFA(expr_nfa) => {
+                let ExprNFA { nfa, symbols } = *expr_nfa;
+                let symbols = symbols
+                    .into_iter()
+                    .map(|symbol| self.hoist_raw_regexes_out_of_expr_nfa_symbol(symbol))
+                    .collect();
+                GrammarExpr::ExprNFA(Box::new(ExprNFA::new(nfa, symbols)))
+            }
+            other => other,
+        }
     }
 
     pub(crate) fn add_terminal_rule(&mut self, name: &str, expr: GrammarExpr) {
