@@ -298,6 +298,45 @@ fn schema_size_preflight_invalid_max_nodes_reports_env_var() {
     }
 }
 
+#[test]
+fn overlapping_pattern_properties_preflight_rejects_non_disjoint_regexes() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _compat = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+
+    let schema = json!({
+        "type": "object",
+        "patternProperties": {
+            "^[a-zA-Z0-9_-]{1,}$": {"type": "string"},
+            "^MD5$": {"type": "string", "pattern": "^[a-fA-F0-9]{32}$"}
+        },
+        "additionalProperties": false
+    });
+
+    let err = schema_to_named_grammar(&schema).expect_err("overlapping patternProperties should reject early");
+    let message = err.to_string();
+    assert!(message.contains("patternProperty regexes"), "{message}");
+    assert!(message.contains("^[a-zA-Z0-9_-]{1,}$"), "{message}");
+    assert!(message.contains("^MD5$"), "{message}");
+}
+
+#[test]
+fn overlapping_pattern_properties_preflight_allows_non_disjoint_regexes_without_compat() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _compat = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
+
+    let schema = json!({
+        "type": "object",
+        "patternProperties": {
+            "^[a-zA-Z0-9_-]{1,}$": {"type": "string"},
+            "^MD5$": {"type": "string", "pattern": "^[a-fA-F0-9]{32}$"}
+        },
+        "additionalProperties": false
+    });
+
+    schema_to_named_grammar(&schema)
+        .expect("overlapping patternProperties should still import when compat mode is off");
+}
+
 fn contains_separated_sequence(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::SeparatedSequence { .. } => true,
@@ -2355,9 +2394,35 @@ fn moderately_bounded_string_terminalizes_by_default() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("JSON_STRING_CHAR{0,64}"), "{glrm}");
     assert!(glrm.contains("json_string_constrained"), "{glrm}");
+    assert!(!glrm.contains("JSON_STRING_CHAR{0,64}"), "{glrm}");
     assert!(!glrm.contains("json_string_char_exact_50"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn moderately_large_prefix_only_string_terminalizes_without_chunk_helper_rules() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _terminalize_guard = EnvVarGuard::unset(
+        "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
+    );
+
+    let schema = json!({
+        "type": "string",
+        "minLength": 80
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("json_string_constrained"), "{glrm}");
+    assert!(!glrm.contains("JSON_STRING_CHAR{50} JSON_STRING_CHAR{30}"), "{glrm}");
+    assert!(
+        !grammar
+            .rules
+            .iter()
+            .any(|rule| rule.name.starts_with("json_string_char_exact_") || rule.name.starts_with("json_string_char_upto_")),
+        "{glrm}"
+    );
     lower(&grammar).unwrap();
 }
 

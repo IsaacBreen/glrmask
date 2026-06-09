@@ -139,11 +139,11 @@ impl<'a> Lowerer<'a> {
                 )?))
             }
         } else {
-            seq(vec![
-                lit("\""),
-                self.string_body_for_length(schema.min_length, schema.max_length),
-                lit("\""),
-            ])
+            GrammarExpr::RawRegex(quoted_string_body_regex(&bounded_json_string_body_regex(
+                &self.json_string_char_regex(),
+                schema.min_length,
+                schema.max_length,
+            )))
         };
         let mut constraints = Vec::new();
 
@@ -604,7 +604,6 @@ impl<'a> Lowerer<'a> {
     fn string_char_exact_ref(&mut self, count: usize) -> GrammarExpr {
         match count {
             0 => GrammarExpr::Epsilon,
-            1 => r(JSON_STRING_CHAR_RULE),
             _ => {
                 if let Some(rule_name) = self.shared_string_exact_rules.get(&count) {
                     return r(rule_name);
@@ -627,7 +626,6 @@ impl<'a> Lowerer<'a> {
     fn string_char_upto_ref(&mut self, max: usize) -> GrammarExpr {
         match max {
             0 => GrammarExpr::Epsilon,
-            1 => GrammarExpr::Optional(Box::new(r(JSON_STRING_CHAR_RULE))),
             _ => {
                 if let Some(rule_name) = self.shared_string_upto_rules.get(&max) {
                     return r(rule_name);
@@ -1484,42 +1482,39 @@ impl<'a> Lowerer<'a> {
         Ok(r(&name))
     }
 
-    fn string_body_for_length(&self, min: usize, max: Option<usize>) -> GrammarExpr {
-        let ch = r(JSON_STRING_CHAR_RULE);
+    fn string_body_for_length(&mut self, min: usize, max: Option<usize>) -> GrammarExpr {
+        let ch = self.string_char_exact_ref(1);
         match (min, max) {
             (0, None) => GrammarExpr::Repeat(Box::new(ch)),
             (1, None) => GrammarExpr::RepeatOne(Box::new(ch)),
             (min, None) => seq(vec![
                 self.repeat_exact_string_char(min),
-                GrammarExpr::Repeat(Box::new(r(JSON_STRING_CHAR_RULE))),
+                GrammarExpr::Repeat(Box::new(self.string_char_exact_ref(1))),
             ]),
             (0, Some(0)) => GrammarExpr::Epsilon,
-            (min, Some(max)) => GrammarExpr::RepeatRange { expr: Box::new(ch), min, max },
+            (0, Some(max)) => self.string_char_upto_ref(max),
+            (min, Some(max)) if min == max => self.repeat_exact_string_char(min),
+            (min, Some(max)) => seq(vec![
+                self.repeat_exact_string_char(min),
+                self.string_char_upto_ref(max - min),
+            ]),
         }
     }
 
-    fn repeat_exact_string_char(&self, count: usize) -> GrammarExpr {
+    fn repeat_exact_string_char(&mut self, count: usize) -> GrammarExpr {
         if count == 0 {
             return GrammarExpr::Epsilon;
         }
         let chunk = self.config.repeat_chunk_size.max(1);
         if count <= chunk {
-            return GrammarExpr::RepeatRange {
-                expr: Box::new(r(JSON_STRING_CHAR_RULE)),
-                min: count,
-                max: count,
-            };
+            return self.string_char_exact_ref(count);
         }
 
         let mut parts = Vec::new();
         let mut remaining = count;
         while remaining > 0 {
             let take = remaining.min(chunk);
-            parts.push(GrammarExpr::RepeatRange {
-                expr: Box::new(r(JSON_STRING_CHAR_RULE)),
-                min: take,
-                max: take,
-            });
+            parts.push(self.string_char_exact_ref(take));
             remaining -= take;
         }
         seq(parts)
@@ -1534,7 +1529,7 @@ fn string_pattern_as_body_regex(pattern: &str, context: JsonStringContext) -> Im
     string_pattern_hir_as_body_regex(&hir, context)
 }
 
-fn preprocess_ascii_shorthand(pattern: &str) -> String {
+pub(crate) fn preprocess_ascii_shorthand(pattern: &str) -> String {
     let mut lowered = String::with_capacity(pattern.len());
     let mut chars = pattern.chars().peekable();
     let mut in_class = false;
@@ -1730,6 +1725,17 @@ fn wrap_lowered_string_pattern_branch(lowered: &str, anchored_start: bool, ancho
 
 fn quoted_string_body_regex(body_regex: &str) -> String {
     format!(r#""(?:{body_regex})""#)
+}
+
+fn bounded_json_string_body_regex(string_char_regex: &str, min: usize, max: Option<usize>) -> String {
+    let atom = format!("(?:{string_char_regex})");
+    match (min, max) {
+        (0, None) => format!("{atom}*"),
+        (1, None) => format!("{atom}+"),
+        (min, None) => format!("{atom}{{{min},}}"),
+        (min, Some(max)) if min == max => format!("{atom}{{{min}}}"),
+        (min, Some(max)) => format!("{atom}{{{min},{max}}}"),
+    }
 }
 
 const DATE_FORMAT_BODY_REGEX: &str = r#"(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))|(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)-02-29)"#;

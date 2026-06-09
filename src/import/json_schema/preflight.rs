@@ -1,8 +1,10 @@
 use std::env;
 
+use derivre::{RegexAst, RegexBuilder};
 use serde_json::{Map, Value};
 
 use super::error::{ImportResult, SchemaImportError};
+use super::string::{JsonStringCompatMode, json_string_compat_mode, preprocess_ascii_shorthand};
 
 const DEFAULT_MAX_NODES: usize = 100_000;
 const ALLOW_LARGE_ENV: &str = "GLRMASK_JSON_SCHEMA_ALLOW_LARGE";
@@ -18,6 +20,11 @@ struct SchemaSizeMetrics {
     any_of_branches: usize,
     one_of_branches: usize,
     all_of_branches: usize,
+}
+
+pub(crate) fn check_schema_preflight(schema: &Value) -> ImportResult<()> {
+    check_pattern_properties_disjointness(schema)?;
+    check_schema_size(schema)
 }
 
 pub(crate) fn check_schema_size(schema: &Value) -> ImportResult<()> {
@@ -42,6 +49,95 @@ pub(crate) fn check_schema_size(schema: &Value) -> ImportResult<()> {
             metrics.one_of_branches,
             metrics.all_of_branches,
         )));
+    }
+
+    Ok(())
+}
+
+const PATTERN_PROPERTIES_CHECK_LIMIT: u64 = 10_000;
+
+fn check_pattern_properties_disjointness(schema: &Value) -> ImportResult<()> {
+    if !matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative) {
+        return Ok(());
+    }
+    walk_schema_for_pattern_properties(schema)
+}
+
+fn walk_schema_for_pattern_properties(value: &Value) -> ImportResult<()> {
+    match value {
+        Value::Object(object) => {
+            if let Some(pattern_properties) = object.get("patternProperties") {
+                check_pattern_properties_object(pattern_properties)?;
+            }
+            for child in object.values() {
+                walk_schema_for_pattern_properties(child)?;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                walk_schema_for_pattern_properties(item)?;
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+    Ok(())
+}
+
+fn check_pattern_properties_object(value: &Value) -> ImportResult<()> {
+    let Some(pattern_properties) = value.as_object() else {
+        return Ok(());
+    };
+    if pattern_properties.len() < 2 {
+        return Ok(());
+    }
+
+    let patterns = pattern_properties.keys().collect::<Vec<_>>();
+    let mut builder = RegexBuilder::new();
+    let refs = patterns
+        .iter()
+        .map(|pattern| {
+            let normalized = preprocess_ascii_shorthand(pattern);
+            builder
+                .mk_regex_for_serach(normalized.as_str())
+                .map_err(|error| {
+                    SchemaImportError::new(format!(
+                        "invalid patternProperties regex {pattern:?}: {error}"
+                    ))
+                })
+        })
+        .collect::<ImportResult<Vec<_>>>()?;
+
+    for (left_index, left_pattern) in patterns.iter().enumerate() {
+        for (right_index, right_pattern) in patterns.iter().enumerate() {
+            if left_index >= right_index {
+                continue;
+            }
+            let intersection = builder
+                .mk(&RegexAst::And(vec![
+                    RegexAst::ExprRef(refs[left_index]),
+                    RegexAst::ExprRef(refs[right_index]),
+                ]))
+                .map_err(|error| {
+                    SchemaImportError::new(format!(
+                        "can't determine if patternProperty regexes /{}/ and /{}/ are disjoint: {}",
+                        left_pattern, right_pattern, error
+                    ))
+                })?;
+            let mut regex = builder
+                .to_regex_limited(intersection, PATTERN_PROPERTIES_CHECK_LIMIT)
+                .map_err(|_| {
+                    SchemaImportError::new(format!(
+                        "can't determine if patternProperty regexes /{}/ and /{}/ are disjoint",
+                        left_pattern, right_pattern
+                    ))
+                })?;
+            if !regex.always_empty() {
+                return Err(SchemaImportError::new(format!(
+                    "patternProperty regexes /{}/ and /{}/ are not disjoint",
+                    left_pattern, right_pattern
+                )));
+            }
+        }
     }
 
     Ok(())

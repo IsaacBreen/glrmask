@@ -126,7 +126,7 @@ impl<'a> Lowerer<'a> {
             mode,
             super::string::JsonStringContext::KeyAdditional,
         );
-        self.add_terminal_rule(
+        self.add_internal_terminal_rule(
             JSON_STRING_CHAR_RULE,
             GrammarExpr::RawRegex(value_string_char.to_string()),
         );
