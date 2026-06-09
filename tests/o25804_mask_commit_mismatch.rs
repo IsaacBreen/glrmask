@@ -69,18 +69,6 @@ fn max_length_string_quote_token_can_be_committed_even_when_mask_omits_it_glrm()
         start start;
 
         internal t JSON_STRING_CHAR ::= /(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt]|\\u00(?:[01][0-9A-Fa-f]|7[Ff]))/;
-        t JSON_STRING ::= /\"(?:(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt]|\\u00(?:[01][0-9A-Fa-f]|7[Ff])))*\"/;
-        t JSON_KEY_STRING ::= /\"(?:(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt]|\\u00(?:[01][0-9A-Fa-f]|7[Ff])))*\"/;
-        t JSON_ADDITIONAL_KEY_STRING ::= /\"(?:(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\/\\bfnrt]|\\u(?:[0-9A-Fa-f]{0,3})?$))*\"/;
-        t JSON_ITEM_SEPARATOR ::= /(?:, )/;
-        t JSON_KEY_SEPARATOR ::= /(?:: )/;
-        t JSON_INTEGER ::= /-?(0|[1-9][0-9]*)/;
-        t JSON_NUMBER ::= /-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/;
-        t JSON_BOOL ::= "true" | "false";
-        t JSON_NULL ::= "null";
-        nt json_array ::= "[" (json_value (JSON_ITEM_SEPARATOR json_value)*)? "]";
-        nt json_object ::= "{" ((JSON_KEY_STRING JSON_KEY_SEPARATOR json_value) (JSON_ITEM_SEPARATOR (JSON_KEY_STRING JSON_KEY_SEPARATOR json_value))*)? "}";
-        nt json_value ::= JSON_NULL | JSON_BOOL | JSON_NUMBER | JSON_STRING | json_array | json_object;
         t json_string_char_exact_1_0 ::= JSON_STRING_CHAR{1};
         t json_string_char_upto_2_1 ::= JSON_STRING_CHAR{0,2};
         fa json_closed_object_body_2 ::= {
