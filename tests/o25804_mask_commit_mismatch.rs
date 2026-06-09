@@ -1,6 +1,8 @@
 use glrmask::{Constraint, Vocab};
 
-const QUOTE_TOKEN_ID: u32 = 5;
+const C_TOKEN_ID: u32 = 0;
+const C_TOKEN_BYTES: &[u8] = b"c";
+const QUOTE_TOKEN_ID: u32 = 1;
 const QUOTE_TOKEN_BYTES: &[u8] = b"\"";
 const SCHEMA: &str = r#"{
   "type": "object",
@@ -24,11 +26,7 @@ fn token_allowed(mask: &[u32], token_id: u32) -> bool {
 fn minimal_vocab() -> Vocab {
     Vocab::new(
         vec![
-            (0, b"{\"".to_vec()),
-            (1, b"name".to_vec()),
-            (2, b"\":".to_vec()),
-            (3, b" \"".to_vec()),
-            (4, b"example".to_vec()),
+            (C_TOKEN_ID, C_TOKEN_BYTES.to_vec()),
             (QUOTE_TOKEN_ID, QUOTE_TOKEN_BYTES.to_vec()),
         ],
         None,
