@@ -43,12 +43,15 @@ fn max_length_string_quote_token_can_be_committed_even_when_mask_omits_it() {
     base.commit_bytes(PREFIX).unwrap();
 
     let mask_has_quote = token_allowed(&base.mask(), QUOTE_TOKEN_ID);
-
-    let mut commit_token_state = base.clone();
-    let commit_token_ok = commit_token_state.commit_token(QUOTE_TOKEN_ID).is_ok();
+    dbg!(mask_has_quote);
 
     let mut commit_bytes_state = base.clone();
     let commit_bytes_ok = commit_bytes_state.commit_bytes(QUOTE_TOKEN_BYTES).is_ok();
+    dbg!(commit_bytes_ok);
+
+    let mut commit_token_state = base.clone();
+    let commit_token_ok = commit_token_state.commit_token(QUOTE_TOKEN_ID).is_ok();
+    dbg!(commit_token_ok);
 
     assert!(
         !mask_has_quote && commit_token_ok && commit_bytes_ok,
