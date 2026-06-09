@@ -66,6 +66,63 @@ pub(super) fn reconcile_weight_id_maps_into_common(
     common_id_map
 }
 
+
+
+pub(super) fn expand_vocab_tokens_to_singletons(
+    weights: &mut [&mut Weight],
+    id_map: &mut InternalIdMap,
+) {
+    let num_local_tokens = id_map.num_internal_tokens() as usize;
+    if num_local_tokens == 0 {
+        return;
+    }
+
+    let already_singleton = id_map
+        .vocab_tokens
+        .internal_to_originals
+        .iter()
+        .all(|originals| originals.len() <= 1);
+    if already_singleton {
+        return;
+    }
+
+    let mut original_to_internal = vec![u32::MAX; id_map.vocab_tokens.original_to_internal.len()];
+    let mut internal_to_originals = Vec::<Vec<u32>>::new();
+    let mut representatives = Vec::<u32>::new();
+    let mut local_to_common_tokens = vec![Vec::<u32>::new(); num_local_tokens];
+
+    for (local_token, originals) in id_map.vocab_tokens.internal_to_originals.iter().enumerate() {
+        for &original in originals {
+            let original_index = original as usize;
+            if original_index >= original_to_internal.len() {
+                continue;
+            }
+            let common_token = internal_to_originals.len() as u32;
+            original_to_internal[original_index] = common_token;
+            internal_to_originals.push(vec![original]);
+            representatives.push(original);
+            local_to_common_tokens[local_token].push(common_token);
+        }
+    }
+
+    let local_to_common_tsids: Vec<Vec<u32>> = (0..id_map.num_tsids())
+        .map(|tsid| vec![tsid])
+        .collect();
+
+    remap_weights_with_maps(
+        weights,
+        &local_to_common_tsids,
+        &local_to_common_tokens,
+        id_map.num_tsids() as usize,
+    );
+
+    id_map.vocab_tokens = ManyToOneIdMap {
+        original_to_internal,
+        internal_to_originals,
+        representative_original_ids: representatives,
+    };
+}
+
 fn build_common_internal_id_map(inputs: &[&InternalIdMap]) -> InternalIdMap {
     let num_tokenizer_states = inputs
         .iter()
