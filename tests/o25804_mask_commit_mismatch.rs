@@ -69,7 +69,7 @@ fn max_length_string_quote_token_can_be_committed_even_when_mask_omits_it_glrm()
         start start;
 
         nt start ::= a_rep "$";
-        t a_rep ::= "a"{0,2};
+        t a_rep ::= "a"{1,2};
     "#;
     const PREFIX: &[u8] = br#"a"#;
 
