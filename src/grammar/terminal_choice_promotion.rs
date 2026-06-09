@@ -457,7 +457,7 @@ fn expr_at_path_mut<'a>(mut expr: &'a mut GrammarExpr, path: &[PathStep]) -> &'a
 #[cfg(test)]
 mod tests {
     use super::promote_choice_terminals_exact;
-    use crate::grammar::ast::{GrammarExpr, Quantifier, NamedGrammar, NamedRule};
+    use crate::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule};
 
     fn lit(s: &str) -> GrammarExpr {
         GrammarExpr::Literal(s.as_bytes().to_vec())

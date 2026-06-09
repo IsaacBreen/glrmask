@@ -2457,7 +2457,7 @@ fn regex_escape_byte(b: u8) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{lower, GrammarExpr, NamedGrammar, NamedRule};
+    use super::{lower, GrammarExpr, NamedGrammar, NamedRule, Quantifier};
 
     fn nonterminal(name: &str, expr: GrammarExpr) -> NamedRule {
         NamedRule {
