@@ -68,11 +68,11 @@ fn max_length_string_quote_token_can_be_committed_even_when_mask_omits_it_glrm()
     const GLRM: &str = r#"
         start start;
 
-        nt start ::= "{" "\"a\": " "\"" bc_rep "\"" "}";
+        nt start ::= "\"" bc_rep "\"" "}";
         t bc_rep ::= bc{0,2};
         internal t bc ::= "b" | "c";
     "#;
-    const PREFIX: &[u8] = br#"{"a": "b"#;
+    const PREFIX: &[u8] = br#""b"#;
 
     fn minimal_vocab() -> Vocab {
         Vocab::new(
