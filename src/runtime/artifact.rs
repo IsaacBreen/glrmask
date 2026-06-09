@@ -24,8 +24,6 @@ pub(crate) type DenseWeightMaskCache = FxHashMap<usize, DenseWords>;
 pub(crate) type DenseWeightBufMaskCache = FxHashMap<usize, Box<[u32]>>;
 pub(crate) type SparseWeightBufMaskCache = FxHashMap<usize, Box<[(u16, u32)]>>;
 pub(crate) type SeedTerminalDenseMasks = FxHashMap<(u32, TerminalID), DenseWords>;
-pub(crate) type SeedStateDenseMasks = Vec<DenseWords>;
-pub(crate) type SeedStateBufMasks = Vec<Option<Box<[u32]>>>;
 pub(crate) type FastDwaTransitions = Vec<FxHashMap<i32, (u32, Weight)>>;
 pub(crate) type FastTokenizerTransitions = Vec<Box<[u32; 256]>>;
 pub(crate) type TemplateDfasByTerminal = Vec<Option<Arc<CommitTemplateDfas>>>;
@@ -142,18 +140,6 @@ pub struct Constraint {
     /// the dense bitmap of internal tokens that terminal covers in that state.
     #[serde(skip)]
     pub(crate) seed_terminal_dense: SeedTerminalDenseMasks,
-    /// Precomputed dense seed baseline for each ORIGINAL tokenizer state.
-    ///
-    /// seed_state_dense[s] is the dense bitmap of final shared internal token ids
-    /// whose original token bytes are lexically live from original tokenizer state s.
-    #[serde(skip)]
-    pub(crate) seed_state_dense: SeedStateDenseMasks,
-    /// Exact hash lookup for `seed_state_dense` -> `seed_state_dense` index.
-    #[serde(skip)]
-    pub(crate) seed_state_by_dense_hash: FxHashMap<u64, Vec<usize>>,
-    /// Optional pre-expanded output masks for expensive seed-state dense masks.
-    #[serde(skip)]
-    pub(crate) seed_state_buf_masks: SeedStateBufMasks,
     /// Dense bitmap of the full internal token universe.
     #[serde(skip, default = "empty_dense_words")]
     pub(crate) seed_universe_dense: DenseWords,

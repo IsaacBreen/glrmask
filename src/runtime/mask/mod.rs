@@ -893,13 +893,13 @@ impl<'a> ConstraintState<'a> {
     fn terminals_disallowed_to_dense_acc(
         &self,
         terminals_disallowed: &TerminalsDisallowed,
-        original_tokenizer_state: u32,
+        _original_tokenizer_state: u32,
         internal_tsid: u32,
     ) -> Option<DenseMaskAcc> {
-        let base = self
-            .constraint
-            .seed_state_dense
-            .get(original_tokenizer_state as usize)?;
+        let base = &self.constraint.seed_universe_dense;
+        if base.is_empty() {
+            return None;
+        }
         let terminal_masks = &self.constraint.seed_terminal_dense;
 
         let no_disallowed_terminals = terminals_disallowed.is_empty()
@@ -955,26 +955,11 @@ impl<'a> ConstraintState<'a> {
         let mut all_direct = true;
         if final_weight.is_full() {
             for (_, dense) in &acc.0 {
-                let handled_directly = if let Some(buf) = direct_buf.as_deref_mut() {
-                    self.constraint
-                        .seed_state_index_for_dense(dense)
-                        .filter(|&seed_idx| self.constraint.has_seed_state_buf_mask(seed_idx))
-                        .map(|seed_idx| {
-                        self.constraint.or_seed_state_dense_to_buf(seed_idx, buf);
-                        *direct_buf_dirty = true;
-                        })
-                        .is_some()
-                } else {
-                    false
-                };
-
-                if !handled_directly {
-                    let n = dense.len().min(merged.len());
-                    for i in 0..n {
-                        merged[i] |= dense[i];
-                    }
-                    all_direct = false;
+                let n = dense.len().min(merged.len());
+                for i in 0..n {
+                    merged[i] |= dense[i];
                 }
+                all_direct = false;
             }
         } else {
             for (tsid, dense) in &acc.0 {
@@ -999,11 +984,6 @@ impl<'a> ConstraintState<'a> {
                         .constraint
                         .or_weight_token_set_to_buf_if_contained(dense, token_set, buf)
                     {
-                        *direct_buf_dirty = true;
-                        true
-                    } else if let Some(seed_idx) = self.constraint.seed_state_index_for_dense(dense) {
-                        self.constraint
-                            .or_seed_dense_token_set_to_buf(seed_idx, token_set, buf);
                         *direct_buf_dirty = true;
                         true
                     } else {
