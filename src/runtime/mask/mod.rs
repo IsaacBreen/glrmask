@@ -893,7 +893,7 @@ impl<'a> ConstraintState<'a> {
     fn terminals_disallowed_to_dense_acc(
         &self,
         terminals_disallowed: &TerminalsDisallowed,
-        _original_tokenizer_state: u32,
+        original_tokenizer_state: u32,
         internal_tsid: u32,
     ) -> Option<DenseMaskAcc> {
         let base = &self.constraint.seed_universe_dense;
@@ -902,16 +902,15 @@ impl<'a> ConstraintState<'a> {
         }
         let terminal_masks = &self.constraint.seed_terminal_dense;
 
-        let no_disallowed_terminals = terminals_disallowed.is_empty()
-            || terminals_disallowed
-                .values()
-                .all(|disallowed| disallowed.is_empty());
+        let Some(disallowed_in_state) = terminals_disallowed.get(&original_tokenizer_state) else {
+            return DenseMaskAcc::from_dense_arc(internal_tsid, Arc::clone(base));
+        };
 
-        if no_disallowed_terminals {
+        if disallowed_in_state.is_empty() {
             return DenseMaskAcc::from_dense_arc(internal_tsid, Arc::clone(base));
         }
 
-        let mut dense = vec![0u64; base.len()];
+        let mut dense = base.to_vec();
 
         // TerminalsDisallowed remains keyed by ORIGINAL tokenizer state because
         // it describes tokenizer futures accumulated by the GLR parser.
@@ -920,23 +919,11 @@ impl<'a> ConstraintState<'a> {
         // internal TSID/token spaces. `seed_terminal_dense` bridges back to
         // original tokenizer states by expanding each internal TSID through
         // `internal_tsid_to_states` during precomputation.
-        for (&original_tokenizer_state, disallowed_in_state) in terminals_disallowed.iter() {
-            if disallowed_in_state.is_empty() {
-                continue;
-            }
-
-            let mut allowed_for_state = base.to_vec();
-
-            for &terminal_id in disallowed_in_state {
-                if let Some(mask) = terminal_masks.get(&(original_tokenizer_state, terminal_id)) {
-                    for (allowed_word, mask_word) in allowed_for_state.iter_mut().zip(mask.iter()) {
-                        *allowed_word &= !mask_word;
-                    }
+        for &terminal_id in disallowed_in_state {
+            if let Some(mask) = terminal_masks.get(&(original_tokenizer_state, terminal_id)) {
+                for (allowed_word, mask_word) in dense.iter_mut().zip(mask.iter()) {
+                    *allowed_word &= !mask_word;
                 }
-            }
-
-            for (dense_word, allowed_word) in dense.iter_mut().zip(allowed_for_state.iter()) {
-                *dense_word |= *allowed_word;
             }
         }
 
