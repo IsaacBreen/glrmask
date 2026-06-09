@@ -2453,6 +2453,33 @@ fn medium_bounded_string_terminalizes_with_env_override() {
 }
 
 #[test]
+fn ascii_string_pattern_class_unicode_escape_branch_is_compact() {
+    let schema = json!({
+        "type": "string",
+        "pattern": "^[0-9A-Z_a-z]+$"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let rule = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
+        .expect("expected terminalized constrained string rule");
+
+    let GrammarExpr::RawRegex(regex) = &rule.expr else {
+        panic!("expected raw regex constrained string rule: {:?}", rule.expr);
+    };
+
+    assert!(regex.contains("[0-9A-Z_a-z]"), "{regex}");
+    assert!(regex.contains(r#"\\u00(?:"#), "{regex}");
+    assert!(!regex.contains(r#"\\u0030|\\u0031|\\u0032"#), "{regex}");
+
+    let glrm = to_glrm(&grammar);
+    assert!(!glrm.contains(r#""\\u" /0/ /0/ /3/ /0/"#), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
 fn moderately_bounded_string_terminalizes_by_default() {
     let _env_lock = ENV_LOCK.lock().unwrap();
     let _terminalize_guard = EnvVarGuard::unset(

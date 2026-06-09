@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use regex::{Regex, escape as regex_escape};
 use regex_syntax::hir::{Class, Hir, HirKind, Literal, Look, Repetition};
@@ -1944,8 +1944,9 @@ fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
     include_unicode_escapes: bool,
 ) -> String {
     if is_unicode_decimal_digit_class(class) {
-        return "[0-9]".to_string();
+        return ascii_json_body_class_regex("[0-9]", b'0'..=b'9', context);
     }
+    let add_ascii_unicode_escape_branch = should_add_ascii_json_unicode_escape_branch(context);
     let add_llguidance_non_ws_unicode_escape_branch = is_unicode_pattern_non_whitespace_class(class)
         && include_unicode_escapes
         && matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative)
@@ -1955,6 +1956,7 @@ fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
     }
 
     let mut raw_ranges = Vec::new();
+    let mut ascii_unicode_escape_codes = BTreeSet::new();
     let mut alternatives = Vec::new();
     match class {
         Class::Unicode(class) => {
@@ -1964,6 +1966,13 @@ fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
                 if start <= '\x7f' {
                     let ascii_end = std::cmp::min(end, '\x7f');
                     push_safe_raw_char_ranges(start, ascii_end, &mut raw_ranges);
+                    if add_ascii_unicode_escape_branch {
+                        collect_ascii_json_unicode_escape_codes(
+                            start,
+                            ascii_end,
+                            &mut ascii_unicode_escape_codes,
+                        );
+                    }
                 }
                 if end >= '\u{80}' {
                     let non_ascii_start = std::cmp::max(start, '\u{80}');
@@ -1983,6 +1992,13 @@ fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
                 if start <= 127 {
                     let ascii_end = std::cmp::min(end, 127);
                     push_safe_raw_char_ranges(char::from(start), char::from(ascii_end), &mut raw_ranges);
+                    if add_ascii_unicode_escape_branch {
+                        collect_ascii_json_unicode_escape_codes(
+                            char::from(start),
+                            char::from(ascii_end),
+                            &mut ascii_unicode_escape_codes,
+                        );
+                    }
                 }
                 if end >= 128 {
                     let non_ascii_start = std::cmp::max(start, 128);
@@ -2003,6 +2019,9 @@ fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
 
     if !raw_ranges.is_empty() {
         alternatives.push(format!("[{}]", raw_ranges.join("")));
+    }
+    if let Some(escaped_ascii) = json_unicode_escape_regex_for_ascii_codes(&ascii_unicode_escape_codes) {
+        alternatives.push(escaped_ascii);
     }
     for ch in [
         '"', '/', '\\', '\n', '\r', '\t', '\u{08}', '\u{0c}', '\u{85}', '\u{a0}', '\u{1680}',
@@ -2267,6 +2286,125 @@ fn push_safe_raw_char_ranges(start: char, end: char, output: &mut Vec<String>) {
     }
     if let (Some(first), Some(last)) = (range_start, previous) {
         output.push(regex_char_class_range(first, last));
+    }
+}
+
+fn collect_ascii_json_unicode_escape_codes(start: char, end: char, output: &mut BTreeSet<u8>) {
+    for codepoint in u32::from(start)..=u32::from(end) {
+        if codepoint <= 0x7f {
+            output.insert(codepoint as u8);
+        }
+    }
+}
+
+fn should_add_ascii_json_unicode_escape_branch(context: JsonStringContext) -> bool {
+    matches!(json_string_compat_mode(), JsonStringCompatMode::JsonSchema)
+        || matches!(context, JsonStringContext::KeyStrict)
+}
+
+fn ascii_json_body_class_regex(
+    raw_class_regex: &str,
+    codes: std::ops::RangeInclusive<u8>,
+    context: JsonStringContext,
+) -> String {
+    if !should_add_ascii_json_unicode_escape_branch(context) {
+        return raw_class_regex.to_string();
+    }
+    let codes = codes.collect::<BTreeSet<_>>();
+    let escaped_ascii = json_unicode_escape_regex_for_ascii_codes(&codes)
+        .expect("non-empty ASCII range has a unicode escape branch");
+    format!("(?:{raw_class_regex}|{escaped_ascii})")
+}
+
+fn json_unicode_escape_regex_for_ascii_codes(codes: &BTreeSet<u8>) -> Option<String> {
+    if codes.is_empty() {
+        return None;
+    }
+
+    let mut by_high_nibble: BTreeMap<u8, BTreeSet<u8>> = BTreeMap::new();
+    for code in codes.iter().copied() {
+        debug_assert!(code <= 0x7f);
+        by_high_nibble.entry(code >> 4).or_default().insert(code & 0x0f);
+    }
+
+    let branches = by_high_nibble
+        .into_iter()
+        .map(|(high, lows)| {
+            format!(
+                "{}{}",
+                ascii_hex_digit_regex_fragment(high),
+                hex_low_nibble_set_regex_fragment(&lows)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let body = match branches.as_slice() {
+        [single] => single.clone(),
+        _ => format!("(?:{})", branches.join("|")),
+    };
+    Some(format!(r#"\\u00{body}"#))
+}
+
+fn ascii_hex_digit_regex_fragment(nibble: u8) -> String {
+    match nibble {
+        0..=9 => char::from(b'0' + nibble).to_string(),
+        10..=15 => {
+            let upper = char::from(b'A' + (nibble - 10));
+            let lower = char::from(b'a' + (nibble - 10));
+            format!("[{upper}{lower}]")
+        }
+        _ => unreachable!("hex nibble out of range: {nibble}"),
+    }
+}
+
+fn hex_low_nibble_set_regex_fragment(lows: &BTreeSet<u8>) -> String {
+    if lows.len() == 1 {
+        return ascii_hex_digit_regex_fragment(*lows.iter().next().unwrap());
+    }
+
+    let mut parts = Vec::new();
+    let mut range_start = None;
+    let mut previous = None;
+    for low in lows.iter().copied() {
+        if let Some(prev) = previous {
+            if low != prev + 1 {
+                push_hex_nibble_class_range(range_start.take().unwrap(), prev, &mut parts);
+                range_start = Some(low);
+            }
+        }
+        if range_start.is_none() {
+            range_start = Some(low);
+        }
+        previous = Some(low);
+    }
+    if let (Some(start), Some(end)) = (range_start, previous) {
+        push_hex_nibble_class_range(start, end, &mut parts);
+    }
+
+    format!("[{}]", parts.join(""))
+}
+
+fn push_hex_nibble_class_range(start: u8, end: u8, output: &mut Vec<String>) {
+    match (start, end) {
+        (0..=9, 0..=9) if start == end => output.push(char::from(b'0' + start).to_string()),
+        (0..=9, 0..=9) => output.push(format!("{}-{}", char::from(b'0' + start), char::from(b'0' + end))),
+        (10..=15, 10..=15) if start == end => {
+            let upper = char::from(b'A' + (start - 10));
+            let lower = char::from(b'a' + (start - 10));
+            output.push(format!("{upper}{lower}"));
+        }
+        (10..=15, 10..=15) => {
+            let upper_start = char::from(b'A' + (start - 10));
+            let upper_end = char::from(b'A' + (end - 10));
+            let lower_start = char::from(b'a' + (start - 10));
+            let lower_end = char::from(b'a' + (end - 10));
+            output.push(format!("{upper_start}-{upper_end}{lower_start}-{lower_end}"));
+        }
+        (0..=9, 10..=15) => {
+            push_hex_nibble_class_range(start, 9, output);
+            push_hex_nibble_class_range(10, end, output);
+        }
+        _ => unreachable!("hex nibble range out of range: {start}..={end}"),
     }
 }
 
