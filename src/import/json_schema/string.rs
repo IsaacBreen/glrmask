@@ -535,14 +535,7 @@ impl<'a> Lowerer<'a> {
                 .copied()
                 .map(json_body_char_expr_for_decoded_char)
                 .collect::<Vec<_>>();
-            let mut rule_expr = choice(alternatives);
-            if matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative) {
-                rule_expr = choice(vec![
-                    rule_expr,
-                    GrammarExpr::RawRegex(json_unicode_escape_regex_for_chars(PATTERN_WHITESPACE_CHARS)),
-                ]);
-            }
-            self.add_internal_terminal_rule(NAME, rule_expr);
+            self.add_internal_terminal_rule(NAME, choice(alternatives));
         }
         r(NAME)
     }
@@ -1921,7 +1914,15 @@ fn lower_decoded_repetition_to_json_body_regex(repetition: &Repetition, context:
 }
 
 fn lower_decoded_class_to_json_body_regex(class: &Class, context: JsonStringContext) -> String {
-    lower_decoded_class_to_json_body_regex_with_unicode_escapes(class, context, true)
+    let include_unicode_escapes = !matches!(
+        (json_string_compat_mode(), context),
+        (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::Value)
+    );
+    lower_decoded_class_to_json_body_regex_with_unicode_escapes(
+        class,
+        context,
+        include_unicode_escapes,
+    )
 }
 
 fn lower_decoded_class_to_json_body_regex_without_unicode_escapes(
@@ -2781,7 +2782,7 @@ mod tests {
 
     use super::{
         preprocess_ascii_shorthand, quoted_string_body_regex, string_pattern_as_body_regex,
-        JsonStringContext,
+        JsonStringCompatMode, JsonStringContext, TEST_COMPAT_MODE,
     };
 
     #[test]
@@ -2813,4 +2814,28 @@ mod tests {
         assert!(regex.is_match(r#""123.45""#));
         assert!(!regex.is_match(r#""\\1""#));
     }
+
+    #[test]
+    fn llguidance_value_pattern_terminal_regex_classes_do_not_add_unicode_escape_spellings() {
+        TEST_COMPAT_MODE.with(|cell| cell.set(JsonStringCompatMode::LlGuidanceNative));
+
+        let body = string_pattern_as_body_regex(r"^[0-9a-f]{8}$", JsonStringContext::Value).unwrap();
+        assert!(!body.contains(r"\u00"), "{body}");
+        let regex = Regex::new(&format!(r"^(?:{})$", quoted_string_body_regex(&body))).unwrap();
+
+        assert!(regex.is_match(r#""1234abcd""#));
+        assert!(!regex.is_match(r#""\u0031234abcd""#));
+    }
+
+    #[test]
+    fn llguidance_value_pattern_whitespace_class_rejects_unicode_escape_spelling() {
+        TEST_COMPAT_MODE.with(|cell| cell.set(JsonStringCompatMode::LlGuidanceNative));
+
+        let body = string_pattern_as_body_regex(r"^\s$", JsonStringContext::Value).unwrap();
+        let regex = Regex::new(&format!(r"^(?:{})$", quoted_string_body_regex(&body))).unwrap();
+
+        assert!(regex.is_match(r#""\t""#));
+        assert!(!regex.is_match(r#""\u0009""#));
+    }
+
 }
