@@ -78,6 +78,12 @@ pub struct Constraint {
     pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,
     #[serde(skip)]
     pub(crate) token_bytes_dense: Vec<Option<Box<[u8]>>>,
+    /// Small set of original token ids that can finish a structural token and
+    /// stop inside the following canonical separator, e.g. `},` before the
+    /// required separator space. These need commit-validated mask repair because
+    /// their admissibility depends on parser state after the structural close.
+    #[serde(skip)]
+    pub(crate) boundary_prefix_token_ids: Vec<u32>,
 
     /// Precomputed bitmask fragments for each internal token.
     /// `internal_token_buf_masks[i]` contains (word_index, or_mask) pairs

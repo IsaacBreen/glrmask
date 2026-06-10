@@ -216,6 +216,19 @@ fn format_token_bytes(token_bytes: &[u8]) -> String {
     format!("b\"{}\"", escaped)
 }
 
+pub(crate) fn commit_bytes_accepts_for_mask(
+    constraint: &Constraint,
+    state: &BTreeMap<u32, ParserGSS>,
+    bytes: &[u8],
+) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+    let mut cloned_state = state.clone();
+    let mut buffers = CommitBuffers::default();
+    commit_bytes_impl(constraint, &mut cloned_state, bytes, &mut buffers).is_ok()
+}
+
 fn assert_mask_commit_equivalence(
     token_id: u32,
     token_bytes: &[u8],

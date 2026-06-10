@@ -13,7 +13,7 @@ use super::lower::{
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE, JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
     JSON_KEY_SEPARATOR_RULE, JSON_SEPARATOR_WS_REGEX, JSON_STRING_CHAR_RULE,
-    JSON_STRING_RULE, MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS,
+    JSON_STRING_PATTERN_DOT_CHAR_RULE, JSON_STRING_RULE, MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS,
 };
 
 fn encoded_json_key_regex(encoded: &str) -> String {
@@ -511,6 +511,9 @@ impl<'a> Lowerer<'a> {
             return Some(self.string_pattern_non_whitespace_char_ref());
         }
         if matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative) {
+            if is_dot_like_unicode_class(class) {
+                return Some(self.string_pattern_dot_char_ref());
+            }
             return lower_llguidance_value_pattern_class_expr(class);
         }
         None
@@ -555,6 +558,26 @@ impl<'a> Lowerer<'a> {
             self.add_internal_terminal_rule(NAME, rule_expr);
         }
         r(NAME)
+    }
+
+    fn string_pattern_dot_char_ref(&mut self) -> GrammarExpr {
+        if !self
+            .rules
+            .iter()
+            .any(|rule| rule.name == JSON_STRING_PATTERN_DOT_CHAR_RULE)
+        {
+            self.add_internal_terminal_rule(
+                JSON_STRING_PATTERN_DOT_CHAR_RULE,
+                GrammarExpr::RawRegex(
+                    json_string_body_dot_regex_in_mode(
+                        json_string_compat_mode(),
+                        JsonStringContext::Value,
+                    )
+                    .to_string(),
+                ),
+            );
+        }
+        r(JSON_STRING_PATTERN_DOT_CHAR_RULE)
     }
 
     fn add_string_pattern_anchored_start_terminal(
@@ -638,16 +661,26 @@ impl<'a> Lowerer<'a> {
         if count == 0 {
             return lit("\"");
         }
+        if let Some(rule_name) = self.shared_string_exact_open_rules.get(&count) {
+            return r(rule_name);
+        }
         let rule_name = self.fresh_rule_name(&format!("json_string_char_exact_open_{count}"));
         let exact = self.string_char_exact_ref(count);
         self.add_terminal_rule(&rule_name, seq(vec![lit("\""), exact]));
+        self.shared_string_exact_open_rules
+            .insert(count, rule_name.clone());
         r(&rule_name)
     }
 
     fn string_char_upto_wrapped_ref(&mut self, max: usize) -> GrammarExpr {
+        if let Some(rule_name) = self.shared_string_upto_wrapped_rules.get(&max) {
+            return r(rule_name);
+        }
         let rule_name = self.fresh_rule_name(&format!("json_string_char_upto_wrapped_{max}"));
         let upto = self.string_char_upto_ref(max);
         self.add_terminal_rule(&rule_name, seq(vec![lit("\""), upto, lit("\"")]));
+        self.shared_string_upto_wrapped_rules
+            .insert(max, rule_name.clone());
         r(&rule_name)
     }
 
@@ -2015,11 +2048,15 @@ fn lower_llguidance_value_pattern_class_expr(class: &Class) -> Option<GrammarExp
     if raw_regex != r"[^\s\S]" {
         alternatives.push(GrammarExpr::RawRegex(raw_regex));
     }
-    for byte in 0u8..=0x7f {
-        let ch = char::from(byte);
-        if decoded_class_contains(class, ch) && should_allow_json_unicode_escape_for_pattern_literal(ch) {
-            alternatives.push(json_unicode_escape_for_char_expr(ch));
-        }
+    let unicode_escape_codes = (0u8..=0x7f)
+        .filter(|byte| {
+            let ch = char::from(*byte);
+            decoded_class_contains(class, ch)
+                && should_allow_json_unicode_escape_for_pattern_literal(ch)
+        })
+        .collect::<BTreeSet<_>>();
+    if let Some(unicode_escape_regex) = json_unicode_escape_regex_for_ascii_codes(&unicode_escape_codes) {
+        alternatives.push(GrammarExpr::RawRegex(unicode_escape_regex));
     }
     match alternatives.len() {
         0 => None,
@@ -2527,7 +2564,9 @@ fn json_body_char_expr_for_pattern_literal_in_mode(
         mode,
         context,
     ));
-    if !should_allow_json_unicode_escape_for_pattern_literal(ch) {
+    if mode == JsonStringCompatMode::LlGuidanceNative
+        || !should_allow_json_unicode_escape_for_pattern_literal(ch)
+    {
         return canonical;
     }
     choice(vec![canonical, json_unicode_escape_for_char_expr(ch)])
@@ -2565,7 +2604,9 @@ fn json_body_char_regex_for_pattern_literal_in_mode(
     context: JsonStringContext,
 ) -> String {
     let canonical = json_body_char_regex_for_decoded_char_in_mode(ch, mode, context);
-    if !should_allow_json_unicode_escape_for_pattern_literal(ch) {
+    if mode == JsonStringCompatMode::LlGuidanceNative
+        || !should_allow_json_unicode_escape_for_pattern_literal(ch)
+    {
         return canonical;
     }
     let escaped = json_unicode_escape_for_char_regex(ch);
@@ -2686,16 +2727,16 @@ pub(crate) fn json_string_body_dot_regex_in_mode(
 ) -> &'static str {
     match (mode, context) {
         (JsonStringCompatMode::JsonSchema, _) => {
-            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bfnrt]|\\u[0-9A-Fa-f]{4})"#
+            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bfrt]|\\u(?:[1-9A-Fa-f][0-9A-Fa-f]{3}|0[1-9A-Fa-f][0-9A-Fa-f]{2}|00[1-9A-Fa-f][0-9A-Fa-f]|000[0-9B-Fb-f]))"#
         }
         (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::KeyAdditional) => {
             r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bft]|\\u(?:[0-9A-Fa-f]{0,3})?$)"#
         }
         (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::KeyStrict) => {
-            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt]|\\u00(?:[01][0-9A-Fa-f]|7[Ff]))"#
+            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfrt]|\\u00(?:0[0-9B-Fb-f]|1[0-9A-Fa-f]|7[Ff]))"#
         }
         (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::Value) => {
-            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt]|\\u00(?:[01][0-9A-Fa-f]|7[Ff]))"#
+            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfrt]|\\u00(?:0[0-9B-Fb-f]|1[0-9A-Fa-f]|7[Ff]))"#
         }
     }
 }

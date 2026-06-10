@@ -518,6 +518,7 @@ impl Constraint {
         self.light_avg_cost_x256 = if n_light > 0 { (light_total * 256) / n_light } else { 0 };
 
         self.token_bytes_dense = Vec::new();
+        self.boundary_prefix_token_ids = self.compute_boundary_prefix_token_ids();
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
         let derived_piece_started_at = profile.then(std::time::Instant::now);
@@ -961,6 +962,25 @@ impl Constraint {
             .collect()
     }
 
+    fn is_boundary_prefix_token(bytes: &[u8]) -> bool {
+        bytes == b"},"
+            || bytes == b"],"
+            || (bytes.len() > 2
+                && bytes.ends_with(b",")
+                && bytes[..bytes.len() - 1]
+                    .iter()
+                    .all(|&byte| matches!(byte, b'}' | b']')))
+    }
+
+    fn compute_boundary_prefix_token_ids(&self) -> Vec<u32> {
+        self.token_bytes
+            .iter()
+            .filter_map(|(&token_id, bytes)| {
+                Self::is_boundary_prefix_token(bytes).then_some(token_id)
+            })
+            .collect()
+    }
+
     fn compute_dense_token_bytes(&self) -> Vec<Option<Box<[u8]>>> {
         let Some(max_token_id) = self.max_original_token_id() else {
             return Vec::new();
@@ -1056,6 +1076,7 @@ impl Constraint {
 
     pub(crate) fn build_dense_token_bytes(&mut self) {
         self.token_bytes_dense = self.compute_dense_token_bytes();
+        self.boundary_prefix_token_ids = self.compute_boundary_prefix_token_ids();
     }
 
     /// Build fast transition lookup tables from the DWA's BTreeMap transitions.

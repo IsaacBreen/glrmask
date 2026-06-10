@@ -20,6 +20,9 @@ pub(crate) const JSON_STRING_RULE: &str = "JSON_STRING";
 pub(crate) const JSON_KEY_STRING_RULE: &str = "JSON_KEY_STRING";
 pub(crate) const JSON_ADDITIONAL_KEY_STRING_RULE: &str = "JSON_ADDITIONAL_KEY_STRING";
 pub(crate) const JSON_STRING_CHAR_RULE: &str = "JSON_STRING_CHAR";
+pub(crate) const JSON_STRING_PATTERN_DOT_CHAR_RULE: &str = "JSON_STRING_PATTERN_DOT_CHAR";
+pub(crate) const JSON_KEY_STRING_CHAR_RULE: &str = "JSON_KEY_STRING_CHAR";
+pub(crate) const JSON_ADDITIONAL_KEY_STRING_CHAR_RULE: &str = "JSON_ADDITIONAL_KEY_STRING_CHAR";
 pub(crate) const JSON_ITEM_SEPARATOR_RULE: &str = "JSON_ITEM_SEPARATOR";
 pub(crate) const JSON_KEY_SEPARATOR_RULE: &str = "JSON_KEY_SEPARATOR";
 pub(crate) const JSON_INTEGER_RULE: &str = "JSON_INTEGER";
@@ -51,6 +54,8 @@ pub(crate) struct Lowerer<'a> {
     pub(crate) shared_string_exact_rules: BTreeMap<usize, String>,
     pub(crate) shared_string_upto_rules: BTreeMap<usize, String>,
     pub(crate) shared_string_upto_close_rules: BTreeMap<usize, String>,
+    pub(crate) shared_string_exact_open_rules: BTreeMap<usize, String>,
+    pub(crate) shared_string_upto_wrapped_rules: BTreeMap<usize, String>,
     pub(crate) shared_ap_literal_keys: BTreeSet<String>,
     pub(crate) shared_ap_patterns: Vec<String>,
     pub(crate) shared_ap_base_rule: Option<String>,
@@ -64,6 +69,14 @@ pub(crate) struct Lowerer<'a> {
     definition_by_pointer: BTreeMap<String, &'a Schema>,
     used_rule_names: BTreeSet<String>,
     next_rule_id: usize,
+}
+
+fn quoted_repeated_char_rule_expr(char_rule: &str) -> GrammarExpr {
+    seq(vec![
+        lit("\""),
+        GrammarExpr::Quantified(Box::new(r(char_rule)), Quantifier::ZeroPlus),
+        lit("\""),
+    ])
 }
 
 impl<'a> Lowerer<'a> {
@@ -89,6 +102,8 @@ impl<'a> Lowerer<'a> {
             shared_string_exact_rules: BTreeMap::new(),
             shared_string_upto_rules: BTreeMap::new(),
             shared_string_upto_close_rules: BTreeMap::new(),
+            shared_string_exact_open_rules: BTreeMap::new(),
+            shared_string_upto_wrapped_rules: BTreeMap::new(),
             shared_ap_literal_keys,
             shared_ap_patterns,
             shared_ap_base_rule: None,
@@ -110,6 +125,7 @@ impl<'a> Lowerer<'a> {
     fn finish(mut self) -> ImportResult<NamedGrammar> {
         let start_expr = self.lower_schema(&self.document.root)?;
         self.add_nonterminal_rule("start", start_expr);
+        simplify_terminal_rules(&mut self.rules);
         Ok(NamedGrammar { rules: self.rules, start: "start".to_string(), ignore: None })
     }
 
@@ -133,16 +149,24 @@ impl<'a> Lowerer<'a> {
         );
         self.add_terminal_rule(
             JSON_STRING_RULE,
-            GrammarExpr::RawRegex(format!(r#"\"(?:{value_string_char})*\""#)),
+            quoted_repeated_char_rule_expr(JSON_STRING_CHAR_RULE),
         );
         if mode == super::string::JsonStringCompatMode::LlGuidanceNative {
+            self.add_internal_terminal_rule(
+                JSON_KEY_STRING_CHAR_RULE,
+                GrammarExpr::RawRegex(key_string_char.to_string()),
+            );
             self.add_terminal_rule(
                 JSON_KEY_STRING_RULE,
-                GrammarExpr::RawRegex(format!(r#"\"(?:{key_string_char})*\""#)),
+                quoted_repeated_char_rule_expr(JSON_KEY_STRING_CHAR_RULE),
+            );
+            self.add_internal_terminal_rule(
+                JSON_ADDITIONAL_KEY_STRING_CHAR_RULE,
+                GrammarExpr::RawRegex(additional_key_string_char.to_string()),
             );
             self.add_terminal_rule(
                 JSON_ADDITIONAL_KEY_STRING_RULE,
-                GrammarExpr::RawRegex(format!(r#"\"(?:{additional_key_string_char})*\""#)),
+                quoted_repeated_char_rule_expr(JSON_ADDITIONAL_KEY_STRING_CHAR_RULE),
             );
         }
         self.add_terminal_rule(
@@ -739,6 +763,116 @@ fn collect_shared_ap_exclusions_from_schema(
     for branch in &assertions.all_of {
         collect_shared_ap_exclusions_from_schema(branch, literal_keys, patterns);
     }
+}
+
+
+fn simplify_terminal_rules(rules: &mut [NamedRule]) {
+    for rule in rules.iter_mut().filter(|rule| rule.is_terminal) {
+        rule.expr = simplify_terminal_expr(rule.expr.clone());
+    }
+}
+
+fn simplify_terminal_expr(expr: GrammarExpr) -> GrammarExpr {
+    match expr {
+        GrammarExpr::Grouped(inner) => GrammarExpr::Grouped(Box::new(simplify_terminal_expr(*inner))),
+        GrammarExpr::Sequence(items) => simplify_terminal_sequence(items),
+        GrammarExpr::Choice(alternatives) => choice(
+            alternatives
+                .into_iter()
+                .map(simplify_terminal_expr)
+                .collect(),
+        ),
+        GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
+            expr: Box::new(simplify_terminal_expr(*expr)),
+            exclude: Box::new(simplify_terminal_expr(*exclude)),
+        },
+        GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+            expr: Box::new(simplify_terminal_expr(*expr)),
+            intersect: Box::new(simplify_terminal_expr(*intersect)),
+        },
+        GrammarExpr::Quantified(inner, quantifier) => {
+            GrammarExpr::Quantified(Box::new(simplify_terminal_expr(*inner)), quantifier)
+        },
+        GrammarExpr::SeparatedSequence { items, separator, allow_empty } => {
+            GrammarExpr::SeparatedSequence {
+                items: items
+                    .into_iter()
+                    .map(|(item, quantifier)| (simplify_terminal_expr(item), quantifier))
+                    .collect(),
+                separator: Box::new(simplify_terminal_expr(*separator)),
+                allow_empty,
+            }
+        },
+        GrammarExpr::RawRegex(regex) => {
+            if let Some(byte) = fixed_ascii_regex_byte(&regex) {
+                lit_bytes(vec![byte])
+            } else {
+                GrammarExpr::RawRegex(regex)
+            }
+        },
+        other => other,
+    }
+}
+
+fn simplify_terminal_sequence(items: Vec<GrammarExpr>) -> GrammarExpr {
+    let mut simplified = Vec::new();
+    let mut pending_literal = Vec::new();
+
+    fn flush_pending(pending_literal: &mut Vec<u8>, simplified: &mut Vec<GrammarExpr>) {
+        if !pending_literal.is_empty() {
+            simplified.push(lit_bytes(std::mem::take(pending_literal)));
+        }
+    }
+
+    for item in items.into_iter().map(simplify_terminal_expr) {
+        match item {
+            GrammarExpr::Epsilon => {}
+            GrammarExpr::Sequence(nested) => {
+                for nested_item in nested {
+                    match nested_item {
+                        GrammarExpr::Literal(mut bytes) => pending_literal.append(&mut bytes),
+                        other => {
+                            flush_pending(&mut pending_literal, &mut simplified);
+                            simplified.push(other);
+                        }
+                    }
+                }
+            }
+            GrammarExpr::Literal(mut bytes) => pending_literal.append(&mut bytes),
+            other => {
+                flush_pending(&mut pending_literal, &mut simplified);
+                simplified.push(other);
+            }
+        }
+    }
+
+    flush_pending(&mut pending_literal, &mut simplified);
+    seq(simplified)
+}
+
+fn fixed_ascii_regex_byte(regex: &str) -> Option<u8> {
+    let bytes = regex.as_bytes();
+    match bytes {
+        [byte] if is_plain_fixed_ascii_regex_byte(*byte) => Some(*byte),
+        [b'\\', byte] if is_escaped_fixed_ascii_regex_byte(*byte) => Some(*byte),
+        _ => None,
+    }
+}
+
+fn is_plain_fixed_ascii_regex_byte(byte: u8) -> bool {
+    byte.is_ascii()
+        && !byte.is_ascii_control()
+        && !matches!(
+            byte,
+            b'\\' | b'.' | b'+' | b'*' | b'?' | b'(' | b')' | b'|' | b'[' | b']' | b'{' | b'}'
+                | b'^' | b'$'
+        )
+}
+
+fn is_escaped_fixed_ascii_regex_byte(byte: u8) -> bool {
+    byte.is_ascii()
+        && !byte.is_ascii_control()
+        && !byte.is_ascii_alphanumeric()
 }
 
 pub(crate) fn normalize_local_ref(pointer: &str) -> ImportResult<String> {

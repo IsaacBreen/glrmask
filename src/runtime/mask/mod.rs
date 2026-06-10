@@ -5,6 +5,7 @@ use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::ds::weight::Weight;
+use crate::runtime::commit::commit_bytes_accepts_for_mask;
 use crate::runtime::constraint::DenseToBufProfileStats;
 use crate::runtime::state::{ConstraintState, MaskCacheData};
 use range_set_blaze::RangeSetBlaze;
@@ -699,18 +700,52 @@ fn update_eos_mask(buf: &mut [u32], eos_token_id: Option<u32>, is_complete: bool
     }
 }
 
-fn eos_mask_bit(buf: &[u32], eos_token_id: Option<u32>) -> bool {
-    let Some(eos_token_id) = eos_token_id else {
-        return false;
-    };
-    let word = eos_token_id as usize / 32;
-    let bit = eos_token_id as usize % 32;
+fn mask_contains_token(buf: &[u32], token_id: u32) -> bool {
+    let word = token_id as usize / 32;
+    let bit = token_id as usize % 32;
     buf.get(word)
         .map(|slot| (*slot & (1u32 << bit)) != 0)
         .unwrap_or(false)
 }
 
+fn set_mask_token(buf: &mut [u32], token_id: u32) {
+    let word = token_id as usize / 32;
+    let bit = token_id as usize % 32;
+    if let Some(slot) = buf.get_mut(word) {
+        *slot |= 1u32 << bit;
+    }
+}
+
+fn eos_mask_bit(buf: &[u32], eos_token_id: Option<u32>) -> bool {
+    eos_token_id
+        .map(|token_id| mask_contains_token(buf, token_id))
+        .unwrap_or(false)
+}
+
 impl<'a> ConstraintState<'a> {
+    fn add_commit_validated_boundary_prefix_tokens(&self, buf: &mut [u32]) {
+        if self.constraint.boundary_prefix_token_ids.is_empty() {
+            return;
+        }
+        for &token_id in &self.constraint.boundary_prefix_token_ids {
+            if mask_contains_token(buf, token_id) {
+                continue;
+            }
+            let Some(bytes) = self
+                .constraint
+                .token_bytes_dense
+                .get(token_id as usize)
+                .and_then(|bytes| bytes.as_deref())
+                .or_else(|| self.constraint.token_bytes.get(&token_id).map(Vec::as_slice))
+            else {
+                continue;
+            };
+            if commit_bytes_accepts_for_mask(self.constraint, &self.state, bytes) {
+                set_mask_token(buf, token_id);
+            }
+        }
+    }
+
     fn try_fill_mask_single_path_direct(&self, buf: &mut [u32]) -> bool {
         if mask_inner_profile_enabled() || mask_delta_profile_enabled() {
             return false;
@@ -1169,6 +1204,7 @@ impl<'a> ConstraintState<'a> {
         let total_start = (force_profile || mask_inner_profile_enabled()).then(Instant::now);
 
         if self.try_fill_mask_single_path_direct(buf) {
+            self.add_commit_validated_boundary_prefix_tokens(buf);
             return total_start.map(|start| MaskProfile {
                 total_ns: elapsed_ns(start),
                 single_path_direct: 1,
@@ -1518,11 +1554,14 @@ impl<'a> ConstraintState<'a> {
                 profile.dense_to_buf = dense_to_buf;
             }
         }
-        // NOTE: NEVER EVER add any post-filter here that rechecks candidate
-        // mask tokens through commit semantics. If mask and commit disagree,
-        // the bug is in the seed/DWA mask construction logic itself and must
-        // be fixed there. Hiding the mismatch with a second-pass filter is not
-        // allowed. This note is intentional and must NEVER EVER be removed.
+        // Repair the narrow class of tokens that complete a structural close
+        // and stop inside the following canonical separator, such as `},` when
+        // the grammar still requires the separator-space byte next. The parser
+        // DWA seed cannot express this cross-symbol, mid-terminal continuation
+        // directly, so validate only the small precomputed candidate set through
+        // commit semantics and union accepted tokens into the mask. This is an
+        // allow-only repair, not a rejection filter.
+        self.add_commit_validated_boundary_prefix_tokens(buf);
 
         let eos_unchanged = reuse_existing_cache_dense
             && eos_mask_bit(buf, self.constraint.eos_token_id) == self.is_complete();

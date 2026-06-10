@@ -621,6 +621,110 @@ fn llguidance_compat_rejects_patterned_escaped_solidus() {
 }
 
 #[test]
+fn llguidance_compat_rejects_unicode_escaped_pattern_literal() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({"type": "string", "pattern": "^file:.+\\.geodatabase?$"});
+
+    assert!(schema_accepts_bytes(&schema, br#""file:./esricampus.geodatabase""#));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#""\u0066ile:./esricampus.geodatabase""#,
+    ));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#""file:.\n.geodatabase""#,
+    ));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#""file:.\u000A.geodatabase""#,
+    ));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#""file:.\t.geodatabase""#,
+    ));
+}
+
+#[test]
+fn llguidance_compat_pattern_literal_mask_rejects_json_u_prefix() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({"type": "string", "pattern": "^file:.+\\.geodatabase?$"});
+
+    assert!(schema_mask_allows_token_after_prefix(&schema, br#"""#, 400, b"f"));
+    assert!(!schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"""#,
+        401,
+        br#"\"#,
+    ));
+    assert!(!schema_mask_allows_token_after_prefix(
+        &schema,
+        br#""file:."#,
+        402,
+        br#"\n"#,
+    ));
+}
+
+
+#[test]
+fn llguidance_compat_accepts_close_object_comma_token_boundary() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "a": {
+                "type": "object",
+                "properties": {"b": {"type": "boolean"}},
+                "required": ["b"],
+                "additionalProperties": false
+            },
+            "c": {"type": "boolean"}
+        },
+        "required": ["a", "c"],
+        "additionalProperties": false
+    });
+
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"a": {"b": true}, "c": false}"#,
+    ));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#"{"a":{"b":true},"c":false}"#,
+    ));
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{"a": {"b": true"#,
+        403,
+        b"},",
+    ));
+    assert!(!schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{"a": {"b": true}, "#,
+        404,
+        b"\":",
+    ));
+}
+
+#[test]
+fn json_importer_compacts_terminal_pattern_literals() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({"type": "string", "pattern": "^file:.+\\.geodatabase?$"});
+    let grammar = schema_to_named_grammar(&schema).expect("schema lowers");
+    let glrm = to_glrm(&grammar);
+
+    assert!(glrm.contains(r#""file:""#), "{glrm}");
+    assert!(glrm.contains("JSON_STRING_PATTERN_DOT_CHAR+"), "{glrm}");
+    assert!(glrm.contains(r#"".geodatabas""#), "{glrm}");
+    assert!(!glrm.contains("JSON_STRING_CHAR+"), "{glrm}");
+    assert!(!glrm.contains("/f/ /i/ /l/ /e/ /:/"), "{glrm}");
+    assert!(!glrm.contains(r#"\u" /0/ /0/ /6/ /6/"#), "{glrm}");
+}
+
+#[test]
 fn llguidance_additional_property_rejects_escaped_solidus_key() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
