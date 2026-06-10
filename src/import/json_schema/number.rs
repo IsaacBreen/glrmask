@@ -206,7 +206,10 @@ fn power_of_ten_multiple_regex(multiple: f64) -> Option<String> {
 fn decimal_multiple_regex(multiple: f64) -> Option<String> {
     let step = parse_decimal_step(multiple)?;
     let fraction = decimal_fraction_regex(&step)?;
-    Some(format!(r#"-?(0|[1-9][0-9]*)(?:\.(?:{fraction}))?"#))
+    // Match llguidance/derivre MultipleOf for simple decimal multiples:
+    // the generated decimal-multiple language is non-negative, but includes
+    // zero and integer values such as `1` / `1.0` when they are multiples.
+    Some(format!(r#"(?:0|[1-9][0-9]*)(?:\.(?:{fraction}))?"#))
 }
 
 struct DecimalStep {
