@@ -57,24 +57,21 @@ impl<'a> Lowerer<'a> {
                 separator: Box::new(self.item_separator_expr()),
                 allow_empty: min == 0,
             },
-            None if min == 0 => {
-                let separator_item = seq(vec![self.item_separator_expr(), item.clone()]);
-                choice(vec![
-                    GrammarExpr::Epsilon,
-                    seq(vec![
-                        item,
-                        GrammarExpr::Quantified(Box::new(separator_item), Quantifier::ZeroPlus),
-                    ]),
-                ])
-            }
+            None if min == 0 => GrammarExpr::SeparatedSequence {
+                items: vec![(item, Some(Quantifier::ZeroPlus))],
+                separator: Box::new(self.item_separator_expr()),
+                allow_empty: true,
+            },
             None => {
-                let separator_item = seq(vec![self.item_separator_expr(), item.clone()]);
-                let mut parts = vec![item.clone()];
-                for _ in 1..min {
-                    parts.push(separator_item.clone());
+                let mut items = (0..min)
+                    .map(|_| (item.clone(), None))
+                    .collect::<Vec<_>>();
+                items.push((item, Some(Quantifier::ZeroPlus)));
+                GrammarExpr::SeparatedSequence {
+                    items,
+                    separator: Box::new(self.item_separator_expr()),
+                    allow_empty: false,
                 }
-                parts.push(GrammarExpr::Quantified(Box::new(separator_item), Quantifier::ZeroPlus));
-                seq(parts)
             }
         }
     }
