@@ -646,6 +646,19 @@ fn llguidance_compat_rejects_unicode_escaped_pattern_literal() {
 }
 
 #[test]
+fn llguidance_compat_rejects_unicode_escaped_pattern_class_chars() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let uuid = json!({"type": "string", "pattern": "^[0-9a-f]{8}$"});
+    let date = json!({"type": "string", "pattern": "^(0[1-9]|1[0-2])-20[0-9]{2}$"});
+
+    assert!(schema_accepts_bytes(&uuid, br#""1234abcd""#));
+    assert!(!schema_accepts_bytes(&uuid, br#""\u0031234abcd""#));
+    assert!(schema_accepts_bytes(&date, br#""01-2022""#));
+    assert!(!schema_accepts_bytes(&date, br#""01-202\u0032""#));
+}
+
+#[test]
 fn llguidance_compat_pattern_literal_mask_rejects_json_u_prefix() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");

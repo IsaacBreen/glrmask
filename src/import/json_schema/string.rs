@@ -2049,24 +2049,10 @@ fn lower_llguidance_value_pattern_class_expr(class: &Class) -> Option<GrammarExp
         class,
         JsonStringContext::Value,
     );
-    let mut alternatives = Vec::new();
-    if raw_regex != r"[^\s\S]" {
-        alternatives.push(GrammarExpr::RawRegex(raw_regex));
-    }
-    let unicode_escape_codes = (0u8..=0x7f)
-        .filter(|byte| {
-            let ch = char::from(*byte);
-            decoded_class_contains(class, ch)
-                && should_allow_json_unicode_escape_for_pattern_literal(ch)
-        })
-        .collect::<BTreeSet<_>>();
-    if let Some(unicode_escape_regex) = json_unicode_escape_regex_for_ascii_codes(&unicode_escape_codes) {
-        alternatives.push(GrammarExpr::RawRegex(unicode_escape_regex));
-    }
-    match alternatives.len() {
-        0 => None,
-        1 => alternatives.into_iter().next(),
-        _ => Some(choice(alternatives)),
+    if raw_regex == r"[^\s\S]" {
+        None
+    } else {
+        Some(GrammarExpr::RawRegex(raw_regex))
     }
 }
 
