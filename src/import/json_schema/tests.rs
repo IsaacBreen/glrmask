@@ -2954,9 +2954,11 @@ fn uri_format_rejects_repeated_fragment_marker_without_full_llguidance_regex() {
     assert!(schema_accepts_bytes(&schema, br#""https://example.com/#frag""#));
     assert!(schema_accepts_bytes(&schema, br#""https://example.com/?q=a/b""#));
     assert!(schema_accepts_bytes(&schema, br#""https://example.com/%23ok?q=%3F#frag%20x""#));
+    assert!(schema_accepts_bytes(&schema, br#""https://[::1]/path""#));
     assert!(!schema_accepts_bytes(&schema, br#""https://##""#));
     assert!(!schema_accepts_bytes(&schema, br#""https://%!""#));
     assert!(!schema_accepts_bytes(&schema, br#""https://example.com/%!""#));
+    assert!(!schema_accepts_bytes(&schema, br#""https://[V1.foo]/path""#));
 }
 
 #[test]
