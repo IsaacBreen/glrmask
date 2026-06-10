@@ -2940,6 +2940,38 @@ fn uri_format_lowers_to_constrained_terminal() {
 }
 
 #[test]
+fn uri_format_rejects_repeated_fragment_marker_without_full_llguidance_regex() {
+    let schema = json!({
+        "type": "string",
+        "format": "uri"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(!glrm.contains("path_abempty"), "should not import llguidance's full URI regex: {glrm}");
+    lower(&grammar).unwrap();
+
+    assert!(schema_accepts_bytes(&schema, br#""https://example.com/#frag""#));
+    assert!(schema_accepts_bytes(&schema, br#""https://example.com/?q=a/b""#));
+    assert!(!schema_accepts_bytes(&schema, br#""https://##""#));
+}
+
+#[test]
+fn decimal_multiple_of_accepts_negative_and_zero_values() {
+    let schema = json!({
+        "type": "number",
+        "multipleOf": 0.01
+    });
+
+    assert!(schema_accepts_bytes(&schema, b"0"));
+    assert!(schema_accepts_bytes(&schema, b"0.00"));
+    assert!(schema_accepts_bytes(&schema, b"-0.01"));
+    assert!(schema_accepts_bytes(&schema, b"-99.99"));
+    assert!(!schema_accepts_bytes(&schema, b"0.001"));
+    assert!(!schema_accepts_bytes(&schema, b"-99.999"));
+}
+
+#[test]
 fn string_pattern_is_intersected_with_format() {
     let schema = json!({
         "type": "string",

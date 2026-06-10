@@ -1766,7 +1766,12 @@ fn recognized_string_format_body_regex(format: Option<&str>) -> Option<&'static 
             r#"(?:[A-Fa-f0-9]{1,4}:){1,7}(?::[A-Fa-f0-9]{0,4}|[A-Fa-f0-9]{1,4})?|::[A-Fa-f0-9]{0,4}"#,
         ),
         Some("uri") => Some(
-            r#"[A-Za-z][A-Za-z0-9+.-]*:(?://(?:[A-Za-z0-9._~!$&'()*+,;=:%-]*@)?(?:\[(?:[A-Fa-f0-9:.]*|[Vv][0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+)\]|[A-Za-z0-9._~!$&'()*+,;=%-]*)(?::[0-9]*)?(?:[/?#](?:[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]|%[0-9A-Fa-f]{2})*)?|(?:[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]|%[0-9A-Fa-f]{2})*)"#,
+            // Deliberately smaller than llguidance's full RFC 3986 regex: keep the
+            // tokenizer-state footprint low, but do not collapse path/query/fragment
+            // into one repeated class.  In particular, '#' is only allowed once as the
+            // fragment introducer, so prefixes like "https://##" stay aligned with
+            // llguidance without importing its full IPv6/path machinery.
+            r#"[A-Za-z][A-Za-z0-9+.-]*:(?://(?:[A-Za-z0-9._~!$&'()*+,;=:%-]*@)?(?:\[(?:[A-Fa-f0-9:.]*|[Vv][0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+)\]|[A-Za-z0-9._~!$&'()*+,;=%-]*)(?::[0-9]*)?(?:/(?:[A-Za-z0-9._~:@!$&'()*+,;=%-]|%[0-9A-Fa-f]{2})*)*|(?:/(?:[A-Za-z0-9._~:@!$&'()*+,;=%-]|%[0-9A-Fa-f]{2})*)?|(?:[A-Za-z0-9._~:@!$&'()*+,;=%-]|%[0-9A-Fa-f]{2})+(?:/(?:[A-Za-z0-9._~:@!$&'()*+,;=%-]|%[0-9A-Fa-f]{2})*)*)?(?:\?(?:[A-Za-z0-9._~:/?@!$&'()*+,;=%-]|%[0-9A-Fa-f]{2})*)?(?:#(?:[A-Za-z0-9._~:/?@!$&'()*+,;=%-]|%[0-9A-Fa-f]{2})*)?"#,
         ),
         _ => None,
     }
