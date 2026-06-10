@@ -584,7 +584,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
-        let mut items = normalized
+        let items = normalized
             .properties
             .iter()
             .filter(|property| {
@@ -763,10 +763,9 @@ impl<'a> Lowerer<'a> {
             }
         }
 
+        let mut tail_pair_repetition = None;
         if !tail_pairs.is_empty() {
-            if items.is_empty()
-                && (normalized.min_properties > 0 || normalized.max_properties.is_some())
-            {
+            if items.is_empty() {
                 let pair = choice(tail_pairs);
                 let body = self.dynamic_pair_list_body(
                     pair,
@@ -823,22 +822,32 @@ impl<'a> Lowerer<'a> {
                 return self.lower_snowplow_large_pattern_object_key_trie(&items, &tail_pairs);
             }
 
-            let pair = GrammarExpr::Quantified(Box::new(choice(tail_pairs)), Quantifier::OnePlus);
-            items.push(ObjectItem {
-                key: String::new(),
-                separator_pair: seq(vec![self.item_separator_expr(), pair.clone()]),
-                pair,
-                required: false,
-                satisfies_any_group: false,
-                exclusive_group: false,
-            });
+            // The dynamic tail is a repeated object entry.  Keep the repetition
+            // on the SeparatedSequence item so the SeparatedSequence lowerer
+            // threads JSON_ITEM_SEPARATOR between tail entries.  Putting `+`
+            // inside the item expression would produce adjacent entries with no
+            // separator, e.g. `entry entry`, and reject valid `entry, entry` maps.
+            tail_pair_repetition = Some(choice(tail_pairs));
         }
 
-        let body = if items.is_empty() {
+        let mut separated_items = items
+            .into_iter()
+            .map(|item| {
+                (
+                    item.pair,
+                    if item.required { None } else { Some(Quantifier::Optional) },
+                )
+            })
+            .collect::<Vec<_>>();
+        if let Some(tail_pair) = tail_pair_repetition {
+            separated_items.push((tail_pair, Some(Quantifier::ZeroPlus)));
+        }
+
+        let body = if separated_items.is_empty() {
             GrammarExpr::Epsilon
         } else {
             GrammarExpr::SeparatedSequence {
-                items: items.into_iter().map(|item| (item.pair, if item.required { None } else { Some(Quantifier::Optional) })).collect(),
+                items: separated_items,
                 separator: Box::new(self.item_separator_expr()),
                 allow_empty: true,
             }
@@ -868,11 +877,16 @@ impl<'a> Lowerer<'a> {
                 let required_tail = (0..min_properties.saturating_sub(1))
                     .map(|_| separator_pair.clone())
                     .collect::<Vec<_>>();
-                seq(vec![
+                let nonempty = seq(vec![
                     pair,
                     seq(required_tail),
                     GrammarExpr::Quantified(Box::new(separator_pair), Quantifier::ZeroPlus),
-                ])
+                ]);
+                if min_properties == 0 {
+                    choice(vec![GrammarExpr::Epsilon, nonempty])
+                } else {
+                    nonempty
+                }
             }
         }
     }

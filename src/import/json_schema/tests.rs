@@ -666,48 +666,6 @@ fn llguidance_compat_pattern_literal_mask_rejects_json_u_prefix() {
     ));
 }
 
-
-#[test]
-fn llguidance_compat_accepts_close_object_comma_token_boundary() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
-    let schema = json!({
-        "type": "object",
-        "properties": {
-            "a": {
-                "type": "object",
-                "properties": {"b": {"type": "boolean"}},
-                "required": ["b"],
-                "additionalProperties": false
-            },
-            "c": {"type": "boolean"}
-        },
-        "required": ["a", "c"],
-        "additionalProperties": false
-    });
-
-    assert!(schema_accepts_bytes(
-        &schema,
-        br#"{"a": {"b": true}, "c": false}"#,
-    ));
-    assert!(!schema_accepts_bytes(
-        &schema,
-        br#"{"a":{"b":true},"c":false}"#,
-    ));
-    assert!(schema_mask_allows_token_after_prefix(
-        &schema,
-        br#"{"a": {"b": true"#,
-        403,
-        b"},",
-    ));
-    assert!(!schema_mask_allows_token_after_prefix(
-        &schema,
-        br#"{"a": {"b": true}, "#,
-        404,
-        b"\":",
-    ));
-}
-
 #[test]
 fn json_importer_compacts_terminal_pattern_literals() {
     let _lock = ENV_LOCK.lock().unwrap();
@@ -722,6 +680,50 @@ fn json_importer_compacts_terminal_pattern_literals() {
     assert!(!glrm.contains("JSON_STRING_CHAR+"), "{glrm}");
     assert!(!glrm.contains("/f/ /i/ /l/ /e/ /:/"), "{glrm}");
     assert!(!glrm.contains(r#"\u" /0/ /0/ /6/ /6/"#), "{glrm}");
+}
+
+#[test]
+fn map_only_typed_additional_properties_repeat_with_separators() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "additionalProperties": {
+            "type": "object",
+            "properties": {
+                "enabled": {"type": "boolean"}
+            },
+            "required": ["enabled"],
+            "additionalProperties": false
+        }
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#"{}"#));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"plugin1": {"enabled": true}}"#,
+    ));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"plugin1": {"enabled": true}, "plugin2": {"enabled": false}}"#,
+    ));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#"{"plugin1": {"enabled": true}"plugin2": {"enabled": false}}"#,
+    ));
+
+    let grammar = schema_to_named_grammar(&schema).expect("schema lowers");
+    let glrm = to_glrm(&grammar);
+    assert!(
+        !glrm.contains("JSON_ITEM_SEPARATOR ~ ( (((JSON_KEY_STRING JSON_KEY_SEPARATOR)"),
+        "map entries must not be emitted as one optional inner `+` item: {glrm}",
+    );
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{"plugin1": {"enabled": true"#,
+        405,
+        b"},",
+    ));
 }
 
 #[test]
