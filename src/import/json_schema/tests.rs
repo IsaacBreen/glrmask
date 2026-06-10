@@ -806,6 +806,34 @@ fn llguidance_pattern_property_dotstar_accepts_escaped_solidus_key_prefix() {
 }
 
 #[test]
+fn llguidance_pattern_property_accepts_unicode_escape_key_spelling() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "patternProperties": {
+            "^[0-9a-z]+$": {"type": "string"}
+        },
+        "additionalProperties": false
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#"{"\u0031": "digit"}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"\u0061": "letter"}"#));
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{""#,
+        300,
+        br#"\u0031"#,
+    ));
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{""#,
+        301,
+        br#"\u0061"#,
+    ));
+}
+
+#[test]
 fn llguidance_literal_property_accepts_escaped_solidus_key() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
@@ -819,6 +847,40 @@ fn llguidance_literal_property_accepts_escaped_solidus_key() {
     });
     assert!(schema_accepts_bytes(&schema, br#"{"\/": "ok"}"#));
     assert!(schema_accepts_bytes(&schema, br#"{"/": "ok"}"#));
+}
+
+#[test]
+fn llguidance_literal_property_accepts_unicode_escape_key_spelling() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "a": {"type": "string"}
+        },
+        "required": ["a"],
+        "additionalProperties": false
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#"{"\u0061": "ok"}"#));
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{""#,
+        302,
+        br#"\u0061"#,
+    ));
+}
+
+#[test]
+fn llguidance_additional_property_accepts_unicode_escape_key_spelling() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "additionalProperties": {"type": "string"}
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#"{"\u0031": "digit"}"#));
 }
 
 #[test]
@@ -3008,6 +3070,7 @@ fn uri_format_rejects_repeated_fragment_marker_without_full_llguidance_regex() {
     assert!(schema_accepts_bytes(&schema, br#""https://example.com/%23ok?q=%3F#frag%20x""#));
     assert!(schema_accepts_bytes(&schema, br#""https://[::1]/path""#));
     assert!(schema_accepts_bytes(&schema, br#""https://[V1.foo]/path""#));
+    assert!(!schema_accepts_bytes(&schema, br#""https://[]""#));
     assert!(!schema_accepts_bytes(&schema, br#""https://##""#));
     assert!(!schema_accepts_bytes(&schema, br#""https://%!""#));
     assert!(!schema_accepts_bytes(&schema, br#""https://example.com/%!""#));
@@ -6681,4 +6744,3 @@ fn test_reproduce_declared_key_failure() {
     let lowered = lower(&grammar).unwrap();
     println!("LOWERED: {:#?}", lowered);
 }
-
