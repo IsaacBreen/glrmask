@@ -659,6 +659,57 @@ fn llguidance_compat_rejects_unicode_escaped_pattern_class_chars() {
 }
 
 #[test]
+fn simple_decimal_multiple_of_matches_llguidance_scale() {
+    let schema = json!({"type": "number", "multipleOf": 0.01});
+
+    assert!(schema_accepts_bytes(&schema, br#"0"#));
+    assert!(schema_accepts_bytes(&schema, br#"0.0"#));
+    assert!(schema_accepts_bytes(&schema, br#"0.00"#));
+    assert!(schema_accepts_bytes(&schema, br#"99.9"#));
+    assert!(schema_accepts_bytes(&schema, br#"99.99"#));
+    assert!(!schema_accepts_bytes(&schema, br#"-0.01"#));
+    assert!(!schema_accepts_bytes(&schema, br#"99.999"#));
+    assert!(!schema_accepts_bytes(&schema, br#"99.000"#));
+    assert!(!schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"99."#,
+        920,
+        b"000",
+    ));
+}
+
+#[test]
+fn unbounded_object_array_mask_allows_open_array_and_first_item_token() {
+    let schema = json!({
+        "type": "object",
+        "required": ["packages"],
+        "properties": {
+            "packages": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["width"],
+                    "properties": {
+                        "width": {"type": "number"}
+                    },
+                    "additionalProperties": false
+                }
+            }
+        },
+        "additionalProperties": false
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#"{"packages": []}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"packages": [{"width": 1}]}"#));
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{"packages":"#,
+        921,
+        b" [{",
+    ));
+}
+
+#[test]
 fn llguidance_compat_pattern_literal_mask_rejects_json_u_prefix() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");

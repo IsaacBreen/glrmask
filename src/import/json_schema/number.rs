@@ -254,9 +254,9 @@ fn decimal_fraction_regex(step: &DecimalStep) -> Option<String> {
 
     if step.numerator == 1 {
         if step.scale_digits == 1 {
-            return Some(r#"[0-9]0*"#.to_string());
+            return Some(r#"[0-9]"#.to_string());
         }
-        return Some(format!(r#"(?:[0-9]{{1,{}}}|[0-9]{{{}}}0*)"#, step.scale_digits - 1, step.scale_digits));
+        return Some(format!(r#"[0-9]{{1,{}}}"#, step.scale_digits));
     }
 
     if step.scale_digits > 3 {
@@ -274,13 +274,18 @@ fn decimal_fraction_regex(step: &DecimalStep) -> Option<String> {
 
     let parts = prefixes
         .into_iter()
-        .map(|prefix| {
-            if prefix == "0" {
-                "0+".to_string()
-            } else {
-                format!("{prefix}0*")
-            }
-        })
+        .map(|prefix| decimal_fraction_prefix_regex(&prefix, step.scale_digits))
         .collect::<Vec<_>>();
     Some(parts.join("|"))
+}
+
+fn decimal_fraction_prefix_regex(prefix: &str, scale_digits: usize) -> String {
+    let extra_zeros = scale_digits.saturating_sub(prefix.len());
+    if extra_zeros == 0 {
+        return prefix.to_string();
+    }
+    if prefix == "0" {
+        return format!("0{{1,{scale_digits}}}");
+    }
+    format!("{prefix}0{{0,{extra_zeros}}}")
 }
