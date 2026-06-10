@@ -206,9 +206,13 @@ fn power_of_ten_multiple_regex(multiple: f64) -> Option<String> {
 fn decimal_multiple_regex(multiple: f64) -> Option<String> {
     let step = parse_decimal_step(multiple)?;
     let fraction = decimal_fraction_regex(&step)?;
-    // Match llguidance/derivre MultipleOf for simple decimal multiples:
-    // the generated decimal-multiple language is non-negative, but includes
-    // zero and integer values such as `1` / `1.0` when they are multiples.
+    // Local llguidance-parity compromise for simple decimal multiples:
+    // llguidance-native rejects a signed numeric start for `multipleOf: 0.01`
+    // in mask sweeps, while zero and integer spellings are valid. Keep this
+    // compact language non-negative, but do not tighten to a fixed fractional
+    // scale: redundant trailing zeros are normal JSON number spellings of the
+    // same decimal value and should not be rejected without direct evidence
+    // from llguidance/derivre.
     Some(format!(r#"(?:0|[1-9][0-9]*)(?:\.(?:{fraction}))?"#))
 }
 

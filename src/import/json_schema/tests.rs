@@ -2995,7 +2995,7 @@ fn uri_format_rejects_repeated_fragment_marker_without_full_llguidance_regex() {
 }
 
 #[test]
-fn decimal_multiple_of_matches_llguidance_for_zero_and_sign() {
+fn decimal_multiple_of_cent_uses_nonnegative_compact_language_without_fixed_scale() {
     let schema = json!({
         "type": "number",
         "multipleOf": 0.01
@@ -3005,6 +3005,8 @@ fn decimal_multiple_of_matches_llguidance_for_zero_and_sign() {
     assert!(schema_accepts_bytes(&schema, b"0.00"));
     assert!(schema_accepts_bytes(&schema, b"1"));
     assert!(schema_accepts_bytes(&schema, b"99.99"));
+    assert!(schema_accepts_bytes(&schema, b"99.9900"));
+    assert!(schema_accepts_bytes(&schema, b"99.000"));
     assert!(!schema_accepts_bytes(&schema, b"-0.01"));
     assert!(!schema_accepts_bytes(&schema, b"-99.99"));
     assert!(!schema_accepts_bytes(&schema, b"0.001"));
