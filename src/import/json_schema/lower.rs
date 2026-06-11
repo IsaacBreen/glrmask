@@ -167,7 +167,7 @@ impl<'a> Lowerer<'a> {
             );
             self.add_terminal_rule(
                 JSON_ADDITIONAL_KEY_STRING_RULE,
-                quoted_repeated_char_rule_expr(JSON_ADDITIONAL_KEY_STRING_CHAR_RULE),
+                GrammarExpr::RawRegex(format!(r#""(?:{})*""#, additional_key_string_char)),
             );
         }
         self.add_terminal_rule(
