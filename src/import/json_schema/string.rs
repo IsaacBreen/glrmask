@@ -2656,7 +2656,7 @@ fn json_body_char_regex_for_pattern_literal_in_mode(
         return canonical;
     }
     if mode == JsonStringCompatMode::LlGuidanceNative
-        && !(matches!(context, JsonStringContext::Value) && at_start)
+        && !(matches!(context, JsonStringContext::Value) && at_start && ch.is_ascii_uppercase())
     {
         return canonical;
     }
