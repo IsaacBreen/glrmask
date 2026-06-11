@@ -3505,7 +3505,14 @@ impl<'a> Lowerer<'a> {
             .map(|property| property.name.clone())
             .collect::<BTreeSet<_>>();
 
+        let mut required_names = schema.required_order.clone();
         for required_name in &schema.required {
+            if !required_names.contains(required_name) {
+                required_names.push(required_name.clone());
+            }
+        }
+
+        for required_name in &required_names {
             if known.contains(required_name) {
                 continue;
             }

@@ -1484,6 +1484,7 @@ fn try_factor_closed_object_variant_any_of(
         ObjectSchema {
             properties: merged_properties,
             required: BTreeSet::new(),
+            required_order: Vec::new(),
             property_dependencies: BTreeMap::new(),
             min_properties: 0,
             max_properties: None,
@@ -1538,6 +1539,7 @@ fn try_factor_mutually_exclusive_property_not_any_of(
         ObjectSchema {
             properties,
             required: BTreeSet::new(),
+            required_order: Vec::new(),
             property_dependencies: BTreeMap::new(),
             min_properties: 0,
             max_properties: None,
@@ -2934,7 +2936,16 @@ pub(crate) fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> Ob
         (None, None) => None,
     };
 
+    for required in &right.required_order {
+        if !merged.required_order.contains(required) {
+            merged.required_order.push(required.clone());
+        }
+        merged.required.insert(required.clone());
+    }
     for required in &right.required {
+        if !merged.required_order.contains(required) {
+            merged.required_order.push(required.clone());
+        }
         merged.required.insert(required.clone());
     }
     for (trigger, dependents) in &right.property_dependencies {

@@ -706,6 +706,7 @@ fn load_object_keywords(
                 return Err(SchemaImportError::at(location, format!("required[{index}] must be a string")));
             };
             required_order.push(name.to_string());
+            schema.required_order.push(name.to_string());
             schema.required.insert(name.to_string());
         }
     }

@@ -111,6 +111,7 @@ pub(crate) enum SchemaType {
 pub(crate) struct ObjectSchema {
     pub(crate) properties: Vec<PropertySchema>,
     pub(crate) required: BTreeSet<String>,
+    pub(crate) required_order: Vec<String>,
     pub(crate) property_dependencies: BTreeMap<String, BTreeSet<String>>,
     pub(crate) min_properties: usize,
     pub(crate) max_properties: Option<usize>,
@@ -124,6 +125,7 @@ impl Default for ObjectSchema {
         Self {
             properties: Vec::new(),
             required: BTreeSet::new(),
+            required_order: Vec::new(),
             property_dependencies: BTreeMap::new(),
             min_properties: 0,
             max_properties: None,
