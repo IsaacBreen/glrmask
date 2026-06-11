@@ -174,6 +174,9 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_string_pattern_expr(&mut self, pattern: &str) -> ImportResult<Option<GrammarExpr>> {
+        if matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative) {
+            return Ok(None);
+        }
         let pattern = preprocess_ascii_shorthand(pattern);
         let hir = Parser::new()
             .parse(&pattern)
@@ -1876,7 +1879,29 @@ fn is_end_look(look: Look) -> bool {
     matches!(look, Look::End | Look::EndLF | Look::EndCRLF)
 }
 
+
+fn hir_can_match_empty(hir: &Hir) -> bool {
+    match hir.kind() {
+        HirKind::Empty => true,
+        HirKind::Literal(Literal(bytes)) => bytes.is_empty(),
+        HirKind::Class(_) => false,
+        HirKind::Look(_) => true,
+        HirKind::Repetition(repetition) => repetition.min == 0 || hir_can_match_empty(&repetition.sub),
+        HirKind::Capture(capture) => hir_can_match_empty(&capture.sub),
+        HirKind::Concat(parts) => parts.iter().all(hir_can_match_empty),
+        HirKind::Alternation(parts) => parts.iter().any(hir_can_match_empty),
+    }
+}
+
 fn lower_decoded_regex_hir_to_json_body_regex(hir: &Hir, context: JsonStringContext) -> ImportResult<String> {
+    lower_decoded_regex_hir_to_json_body_regex_at_start(hir, context, true)
+}
+
+fn lower_decoded_regex_hir_to_json_body_regex_at_start(
+    hir: &Hir,
+    context: JsonStringContext,
+    at_start: bool,
+) -> ImportResult<String> {
     Ok(match hir.kind() {
         HirKind::Empty => String::new(),
         HirKind::Literal(Literal(bytes)) => {
@@ -1887,7 +1912,15 @@ fn lower_decoded_regex_hir_to_json_body_regex(hir: &Hir, context: JsonStringCont
             })?;
             literal
                 .chars()
-                .map(|ch| json_body_char_regex_for_pattern_literal_in_mode(ch, json_string_compat_mode(), context))
+                .enumerate()
+                .map(|(index, ch)| {
+                    json_body_char_regex_for_pattern_literal_in_mode(
+                        ch,
+                        json_string_compat_mode(),
+                        context,
+                        at_start && index == 0,
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("")
         }
@@ -1898,25 +1931,37 @@ fn lower_decoded_regex_hir_to_json_body_regex(hir: &Hir, context: JsonStringCont
                 "unsupported zero-width assertion in string pattern: {look:?}"
             )));
         }
-        HirKind::Repetition(repetition) => lower_decoded_repetition_to_json_body_regex(repetition, context)?,
-        HirKind::Capture(capture) => lower_decoded_regex_hir_to_json_body_regex(&capture.sub, context)?,
-        HirKind::Concat(parts) => parts
-            .iter()
-            .map(|part| lower_decoded_regex_hir_to_json_body_regex(part, context))
-            .collect::<ImportResult<Vec<_>>>()?
-            .join(""),
+        HirKind::Repetition(repetition) => lower_decoded_repetition_to_json_body_regex(repetition, context, at_start)?,
+        HirKind::Capture(capture) => lower_decoded_regex_hir_to_json_body_regex_at_start(&capture.sub, context, at_start)?,
+        HirKind::Concat(parts) => {
+            let mut current_at_start = at_start;
+            let mut out = Vec::new();
+            for part in parts {
+                out.push(lower_decoded_regex_hir_to_json_body_regex_at_start(
+                    part,
+                    context,
+                    current_at_start,
+                )?);
+                current_at_start = current_at_start && hir_can_match_empty(part);
+            }
+            out.join("")
+        }
         HirKind::Alternation(parts) => {
             let alternatives = parts
                 .iter()
-                .map(|part| lower_decoded_regex_hir_to_json_body_regex(part, context))
+                .map(|part| lower_decoded_regex_hir_to_json_body_regex_at_start(part, context, at_start))
                 .collect::<ImportResult<Vec<_>>>()?;
             format!("(?:{})", alternatives.join("|"))
         }
     })
 }
 
-fn lower_decoded_repetition_to_json_body_regex(repetition: &Repetition, context: JsonStringContext) -> ImportResult<String> {
-    let sub = lower_decoded_regex_hir_to_json_body_regex(&repetition.sub, context)?;
+fn lower_decoded_repetition_to_json_body_regex(
+    repetition: &Repetition,
+    context: JsonStringContext,
+    at_start: bool,
+) -> ImportResult<String> {
+    let sub = lower_decoded_regex_hir_to_json_body_regex_at_start(&repetition.sub, context, at_start)?;
     let atom = format!("(?:{sub})");
     Ok(match (repetition.min, repetition.max) {
         (0, None) => format!("{atom}*"),
@@ -1958,7 +2003,6 @@ fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
     }
     let add_ascii_unicode_escape_branch = should_add_ascii_json_unicode_escape_branch(context);
     let add_llguidance_non_ws_unicode_escape_branch = is_unicode_pattern_non_whitespace_class(class)
-        && include_unicode_escapes
         && matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative)
         && matches!(context, JsonStringContext::Value);
     if is_dot_like_unicode_class(class) {
@@ -2571,9 +2615,8 @@ fn json_body_char_expr_for_pattern_literal_in_mode(
         mode,
         context,
     ));
-    if !should_allow_json_unicode_escape_for_pattern_literal(ch)
-        || (mode == JsonStringCompatMode::LlGuidanceNative
-            && !matches!(context, JsonStringContext::Value))
+    if mode == JsonStringCompatMode::LlGuidanceNative
+        || !should_allow_json_unicode_escape_for_pattern_literal(ch)
     {
         return canonical;
     }
@@ -2606,15 +2649,18 @@ fn json_body_char_regex_for_pattern_literal_in_mode(
     ch: char,
     mode: JsonStringCompatMode,
     context: JsonStringContext,
+    at_start: bool,
 ) -> String {
     let canonical = json_body_char_regex_for_decoded_char_in_mode(ch, mode, context);
-    if !should_allow_json_unicode_escape_for_pattern_literal(ch)
-        || (mode == JsonStringCompatMode::LlGuidanceNative
-            && !matches!(context, JsonStringContext::Value))
+    if !should_allow_json_unicode_escape_for_pattern_literal(ch) {
+        return canonical;
+    }
+    if mode == JsonStringCompatMode::LlGuidanceNative
+        && !(matches!(context, JsonStringContext::Value) && at_start)
     {
         return canonical;
     }
-    let escaped = json_unicode_escape_for_char_regex(ch);
+    let escaped = json_unicode_escape_prefix_regex_for_char(ch);
     format!(r#"(?:{}|{})"#, canonical, escaped)
 }
 
@@ -2631,6 +2677,15 @@ fn json_unicode_escape_for_char_regex(ch: char) -> String {
         hex_digit_exact_regex(((codepoint >> 4) & 0xF) as u8),
         hex_digit_exact_regex((codepoint & 0xF) as u8),
     )
+}
+
+fn json_unicode_escape_prefix_regex_for_char(ch: char) -> String {
+    let codepoint = u32::from(ch);
+    let d0 = hex_digit_exact_regex(((codepoint >> 12) & 0xF) as u8);
+    let d1 = hex_digit_exact_regex(((codepoint >> 8) & 0xF) as u8);
+    let d2 = hex_digit_exact_regex(((codepoint >> 4) & 0xF) as u8);
+    let d3 = hex_digit_exact_regex((codepoint & 0xF) as u8);
+    format!(r#"\\u(?:{d0}(?:{d1}(?:{d2}(?:{d3})?)?)?)?"#)
 }
 
 fn json_unicode_escape_for_char_expr(ch: char) -> GrammarExpr {
