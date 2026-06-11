@@ -34,7 +34,9 @@ impl<'a> Lowerer<'a> {
             || ((schema.min_length != 0 || schema.max_length.is_some()) && should_terminalize_length)
         {
             let name = self.fresh_rule_name("json_string_constrained");
-            if let Some(pattern) = &schema.pattern
+            if schema.min_length == 0
+                && schema.max_length.is_none()
+                && let Some(pattern) = &schema.pattern
                 && let Some(expr) = self.lower_unanchored_pattern_string_split_expr(pattern)?
             {
                 self.add_nonterminal_rule(&name, expr);
@@ -123,14 +125,11 @@ impl<'a> Lowerer<'a> {
             )));
         }
 
+        let has_length_bounds = schema.min_length != 0 || schema.max_length.is_some();
         let mut expr = if let Some(pattern) = &schema.pattern {
-            // NOTE: Pattern strength intentionally does NOT preserve sibling
-            // minLength/maxLength inside terminalized string lowering.
-            // Preserving those bounds with terminalized patterns causes severe
-            // build-time blowups and timeouts. This is a deliberate importer
-            // policy and this comment must NEVER EVER be removed under any
-            // circumstances.
-            if let Some(pattern_expr) = self.lower_string_pattern_expr(pattern)? {
+            if !has_length_bounds
+                && let Some(pattern_expr) = self.lower_string_pattern_expr(pattern)?
+            {
                 pattern_expr
             } else {
                 GrammarExpr::RawRegex(quoted_string_body_regex(&string_pattern_as_body_regex(
@@ -146,6 +145,14 @@ impl<'a> Lowerer<'a> {
             )))
         };
         let mut constraints = Vec::new();
+
+        if schema.pattern.is_some() && has_length_bounds {
+            constraints.push(quoted_string_body_regex(&bounded_json_string_body_regex(
+                &self.json_string_char_regex(),
+                schema.min_length,
+                schema.max_length,
+            )));
+        }
 
         if let Some(format_body_regex) = recognized_string_format_body_regex_for_lowering(schema.format.as_deref()) {
             constraints.push(quoted_string_body_regex(format_body_regex));
@@ -1925,6 +1932,7 @@ fn lower_decoded_class_to_json_body_regex(class: &Class, context: JsonStringCont
     let include_unicode_escapes = !matches!(
         (json_string_compat_mode(), context),
         (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::Value)
+            | (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::KeyStrict)
     );
     lower_decoded_class_to_json_body_regex_with_unicode_escapes(
         class,
@@ -2289,9 +2297,8 @@ fn collect_ascii_json_unicode_escape_codes(start: char, end: char, output: &mut 
     }
 }
 
-fn should_add_ascii_json_unicode_escape_branch(context: JsonStringContext) -> bool {
+fn should_add_ascii_json_unicode_escape_branch(_context: JsonStringContext) -> bool {
     matches!(json_string_compat_mode(), JsonStringCompatMode::JsonSchema)
-        || matches!(context, JsonStringContext::KeyStrict)
 }
 
 fn ascii_json_body_class_regex(
@@ -2564,8 +2571,9 @@ fn json_body_char_expr_for_pattern_literal_in_mode(
         mode,
         context,
     ));
-    if mode == JsonStringCompatMode::LlGuidanceNative
-        || !should_allow_json_unicode_escape_for_pattern_literal(ch)
+    if !should_allow_json_unicode_escape_for_pattern_literal(ch)
+        || (mode == JsonStringCompatMode::LlGuidanceNative
+            && !matches!(context, JsonStringContext::Value))
     {
         return canonical;
     }
@@ -2600,8 +2608,9 @@ fn json_body_char_regex_for_pattern_literal_in_mode(
     context: JsonStringContext,
 ) -> String {
     let canonical = json_body_char_regex_for_decoded_char_in_mode(ch, mode, context);
-    if mode == JsonStringCompatMode::LlGuidanceNative
-        || !should_allow_json_unicode_escape_for_pattern_literal(ch)
+    if !should_allow_json_unicode_escape_for_pattern_literal(ch)
+        || (mode == JsonStringCompatMode::LlGuidanceNative
+            && !matches!(context, JsonStringContext::Value))
     {
         return canonical;
     }

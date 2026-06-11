@@ -480,6 +480,9 @@ impl<'a> Lowerer<'a> {
             .iter()
             .map(|property| property.name.clone())
             .collect::<BTreeSet<_>>();
+        let implicit_ap_default_false = self.llguidance_compat_enabled()
+            && normalized.required.len() > normalized.properties.len()
+            && matches!(normalized.additional_properties, AdditionalProperties::AllowAny);
         if let Some(pattern) = &property_name_pattern {
             for key in &fixed_names {
                 if !property_name_matches_pattern(pattern, key)? {
@@ -537,6 +540,7 @@ impl<'a> Lowerer<'a> {
 
             let tail_pair = match &normalized.additional_properties {
                 AdditionalProperties::Deny => None,
+                AdditionalProperties::AllowAny if implicit_ap_default_false => None,
                 AdditionalProperties::AllowAny => Some(seq(vec![
                     self.lower_object_additional_key_colon(
                         &fixed_names,
@@ -632,6 +636,7 @@ impl<'a> Lowerer<'a> {
         }
 
         match &normalized.additional_properties {
+            AdditionalProperties::AllowAny if implicit_ap_default_false => {}
             AdditionalProperties::AllowAny => {
                 tail_pairs.push(seq(vec![
                     self.lower_object_additional_key_colon(
@@ -1392,6 +1397,7 @@ impl<'a> Lowerer<'a> {
 
     fn split_additional_key_colon_transition(symbol: GrammarExpr) -> Vec<GrammarExpr> {
         match symbol {
+            GrammarExpr::Choice(alternatives) if alternatives.is_empty() => Vec::new(),
             GrammarExpr::Choice(alternatives)
                 if Self::is_shared_additional_key_colon_choice(&alternatives) =>
             {
@@ -3518,6 +3524,9 @@ impl<'a> Lowerer<'a> {
                 schema
             } else {
                 match &schema.additional_properties {
+                    AdditionalProperties::AllowAny if self.llguidance_compat_enabled() => {
+                        continue;
+                    }
                     AdditionalProperties::AllowAny => {
                         Schema::any(format!("<required:{required_name}>"))
                     }

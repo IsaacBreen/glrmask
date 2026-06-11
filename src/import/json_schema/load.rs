@@ -659,16 +659,36 @@ fn load_object_keywords(
     location: &str,
 ) -> ImportResult<ObjectSchema> {
     let mut schema = ObjectSchema::default();
+    let mut required_order = Vec::new();
 
-    if let Some(properties) = object.get("properties") {
-        let Some(properties) = properties.as_object() else {
+    let object_items_fallback = object
+        .get("items")
+        .and_then(Value::as_object)
+        .filter(|items| object.get("properties").is_none() && items.get("properties").is_some());
+    let using_object_items_properties = object_items_fallback.is_some();
+
+    if let Some(properties_value) = object
+        .get("properties")
+        .or_else(|| object_items_fallback.and_then(|items| items.get("properties")))
+    {
+        let Some(properties) = properties_value.as_object() else {
             return Err(SchemaImportError::at(location, "properties must be an object"));
         };
+        let properties_location = if object.get("properties").is_some() {
+            format!("{location}/properties")
+        } else {
+            format!("{location}/items/properties")
+        };
         for (name, property_value) in properties {
-            let child_location = format!("{location}/properties/{}", escape_pointer_segment(name));
+            let child_location = format!("{properties_location}/{}", escape_pointer_segment(name));
+            let property_schema = if using_object_items_properties {
+                Schema::any(child_location.clone())
+            } else {
+                load_schema_at(property_value, &child_location)?
+            };
             schema.properties.push(PropertySchema {
                 name: name.clone(),
-                schema: load_schema_at(property_value, &child_location)?,
+                schema: property_schema,
             });
         }
     }
@@ -681,19 +701,50 @@ fn load_object_keywords(
             let Some(name) = value.as_str() else {
                 return Err(SchemaImportError::at(location, format!("required[{index}] must be a string")));
             };
+            required_order.push(name.to_string());
             schema.required.insert(name.to_string());
         }
+    }
+
+    if using_object_items_properties && !required_order.is_empty() {
+        let original_order = schema
+            .properties
+            .iter()
+            .map(|property| property.name.clone())
+            .collect::<Vec<_>>();
+        schema.properties.sort_by_key(|property| {
+            let required_index = required_order
+                .iter()
+                .position(|name| name == &property.name)
+                .unwrap_or(usize::MAX);
+            let original_index = original_order
+                .iter()
+                .position(|name| name == &property.name)
+                .unwrap_or(usize::MAX);
+            (required_index, original_index)
+        });
     }
 
     load_legacy_dependencies(object, location, &mut schema)?;
     load_dependent_required(object, location, &mut schema)?;
 
-    if let Some(pattern_properties) = object.get("patternProperties") {
-        let Some(pattern_properties) = pattern_properties.as_object() else {
+    if let Some(pattern_properties_value) = object
+        .get("patternProperties")
+        .or_else(|| object_items_fallback.and_then(|items| items.get("patternProperties")))
+    {
+        let Some(pattern_properties) = pattern_properties_value.as_object() else {
             return Err(SchemaImportError::at(location, "patternProperties must be an object"));
         };
+        let pattern_properties_location = if object.get("patternProperties").is_some() {
+            format!("{location}/patternProperties")
+        } else {
+            format!("{location}/items/patternProperties")
+        };
         for (pattern, property_value) in pattern_properties {
-            let child_location = format!("{location}/patternProperties/{}", escape_pointer_segment(pattern));
+            let child_location = format!(
+                "{pattern_properties_location}/{}",
+                escape_pointer_segment(pattern)
+            );
             schema.pattern_properties.push(PatternPropertySchema {
                 pattern: pattern.clone(),
                 schema: load_schema_at(property_value, &child_location)?,
@@ -703,15 +754,25 @@ fn load_object_keywords(
 
     schema.property_names = load_schema_member(object, "propertyNames", location)?;
 
-    if let Some(additional) = object.get("additionalProperties") {
+    if let Some(additional) = object
+        .get("additionalProperties")
+        .or_else(|| object_items_fallback.and_then(|items| items.get("additionalProperties")))
+    {
+        let additional_location = if object.get("additionalProperties").is_some() {
+            format!("{location}/additionalProperties")
+        } else {
+            format!("{location}/items/additionalProperties")
+        };
         schema.additional_properties = match additional {
             Value::Bool(true) => AdditionalProperties::AllowAny,
             Value::Bool(false) => AdditionalProperties::Deny,
             _ => AdditionalProperties::Schema(Box::new(load_schema_at(
                 additional,
-                &format!("{location}/additionalProperties"),
+                &additional_location,
             )?)),
         };
+    } else if using_object_items_properties && required_order.is_empty() {
+        schema.additional_properties = AdditionalProperties::Deny;
     }
 
     schema.min_properties = read_usize_keyword(object, "minProperties", location)?.unwrap_or(0);
