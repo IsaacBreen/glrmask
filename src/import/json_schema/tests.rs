@@ -872,6 +872,27 @@ fn llguidance_pattern_property_dotstar_rejects_escaped_solidus_key_prefix_and_ac
 }
 
 #[test]
+fn llguidance_fixed_object_additional_property_accepts_escaped_solidus_key() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "known": {"type": "string"}
+        },
+        "additionalProperties": {"type": "string"}
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#"{"\/": "value"}"#));
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{""#,
+        408,
+        br#"\/"#,
+    ));
+}
+
+#[test]
 fn llguidance_literal_property_rejects_escaped_solidus_key() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
