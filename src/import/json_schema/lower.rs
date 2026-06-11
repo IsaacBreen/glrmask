@@ -7,11 +7,12 @@ use crate::grammar::expr_nfa::ExprNFA;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier};
 
 use super::ast::{
-    AdditionalProperties, Schema, SchemaAssertions, SchemaDocument, SchemaKind, SchemaType,
+    AdditionalProperties, ArraySchema, NumberSchema, ObjectSchema, Schema, SchemaAssertions,
+    SchemaDocument, SchemaKind, SchemaType,
 };
 use super::config::JsonSchemaConfig;
 use super::error::{ImportResult, SchemaImportError};
-use super::string::string_value_satisfies_schema;
+use super::string::{property_name_matches_pattern, string_value_satisfies_schema};
 
 pub(crate) const JSON_VALUE_RULE: &str = "json_value";
 pub(crate) const JSON_OBJECT_RULE: &str = "json_object";
@@ -309,20 +310,23 @@ impl<'a> Lowerer<'a> {
         }
 
         if let Some(value) = &assertions.const_value {
-            return Ok(self.lower_json_literal(value));
-        }
-        if let Some(encoded_literals) = large_string_enum_regex_literals(assertions)? {
-            return Ok(GrammarExpr::RawRegex(string_enum_regex(&encoded_literals)));
+            if self.json_literal_satisfies_assertions(value, assertions)? {
+                return Ok(self.lower_json_literal(value));
+            }
+            return Ok(never());
         }
         if let Some(values) = &assertions.enum_values {
-            let values = if let Some(string_schema) = &assertions.string {
-                values
-                    .iter()
-                    .filter(|value| string_value_satisfies_schema(value, string_schema).unwrap_or(false))
-                    .collect::<Vec<_>>()
-            } else {
-                values.iter().collect::<Vec<_>>()
-            };
+            let values = values
+                .iter()
+                .filter_map(|value| match self.json_literal_satisfies_assertions(value, assertions) {
+                    Ok(true) => Some(Ok(value)),
+                    Ok(false) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<ImportResult<Vec<_>>>()?;
+            if let Some(encoded_literals) = large_string_enum_regex_literals(assertions, &values)? {
+                return Ok(GrammarExpr::RawRegex(string_enum_regex(&encoded_literals)));
+            }
             if let Some(expr) = factored_small_string_enum_expr(&values) {
                 return Ok(expr);
             }
@@ -501,6 +505,222 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn json_literal_satisfies_schema(&self, value: &Value, schema: &Schema) -> ImportResult<bool> {
+        let mut ref_stack = BTreeSet::new();
+        self.json_literal_satisfies_schema_inner(value, schema, &mut ref_stack)
+    }
+
+    fn json_literal_satisfies_schema_inner(
+        &self,
+        value: &Value,
+        schema: &Schema,
+        ref_stack: &mut BTreeSet<String>,
+    ) -> ImportResult<bool> {
+        match &schema.kind {
+            SchemaKind::Any => Ok(true),
+            SchemaKind::Never => Ok(false),
+            SchemaKind::Ref(pointer) => {
+                let normalized = normalize_local_ref(pointer)?;
+                if !ref_stack.insert(normalized.clone()) {
+                    // Recursive schemas can be satisfied by finite literals, but
+                    // proving that here is not needed for enum/const pruning.
+                    // Avoid looping and let the surrounding non-recursive
+                    // assertions do the remaining filtering.
+                    return Ok(true);
+                }
+                let target = self.resolve_ref_target(pointer)?;
+                let result = self.json_literal_satisfies_schema_inner(value, target, ref_stack);
+                ref_stack.remove(&normalized);
+                result
+            }
+            SchemaKind::Assertions(assertions) => {
+                self.json_literal_satisfies_assertions_inner(value, assertions, ref_stack)
+            }
+        }
+    }
+
+    fn json_literal_satisfies_assertions(
+        &self,
+        value: &Value,
+        assertions: &SchemaAssertions,
+    ) -> ImportResult<bool> {
+        let mut ref_stack = BTreeSet::new();
+        self.json_literal_satisfies_assertions_inner(value, assertions, &mut ref_stack)
+    }
+
+    fn json_literal_satisfies_assertions_inner(
+        &self,
+        value: &Value,
+        assertions: &SchemaAssertions,
+        ref_stack: &mut BTreeSet<String>,
+    ) -> ImportResult<bool> {
+        for branch in &assertions.all_of {
+            if !self.json_literal_satisfies_schema_inner(value, branch, ref_stack)? {
+                return Ok(false);
+            }
+        }
+        if !assertions.any_of.is_empty() {
+            let mut matched = false;
+            for branch in &assertions.any_of {
+                if self.json_literal_satisfies_schema_inner(value, branch, ref_stack)? {
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                return Ok(false);
+            }
+        }
+        if !assertions.one_of.is_empty() {
+            let mut matches = 0usize;
+            for branch in &assertions.one_of {
+                if self.json_literal_satisfies_schema_inner(value, branch, ref_stack)? {
+                    matches += 1;
+                }
+            }
+            if matches != 1 {
+                return Ok(false);
+            }
+        }
+        if let Some(schema) = &assertions.not
+            && self.json_literal_satisfies_schema_inner(value, schema, ref_stack)?
+        {
+            return Ok(false);
+        }
+
+        if let Some(const_value) = &assertions.const_value
+            && value != const_value
+        {
+            return Ok(false);
+        }
+        if let Some(enum_values) = &assertions.enum_values
+            && !enum_values.iter().any(|enum_value| enum_value == value)
+        {
+            return Ok(false);
+        }
+        if !json_literal_satisfies_declared_types(value, assertions.types.as_deref()) {
+            return Ok(false);
+        }
+        if let Some(string) = &assertions.string
+            && !string_value_satisfies_schema(value, string)?
+        {
+            return Ok(false);
+        }
+        if let Some(number) = &assertions.number
+            && !number_value_satisfies_schema(value, number)
+        {
+            return Ok(false);
+        }
+        if let Some(object) = &assertions.object
+            && !self.object_value_satisfies_schema(value, object, ref_stack)?
+        {
+            return Ok(false);
+        }
+        if let Some(array) = &assertions.array
+            && !self.array_value_satisfies_schema(value, array, ref_stack)?
+        {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn object_value_satisfies_schema(
+        &self,
+        value: &Value,
+        schema: &ObjectSchema,
+        ref_stack: &mut BTreeSet<String>,
+    ) -> ImportResult<bool> {
+        let Some(map) = value.as_object() else {
+            return Ok(true);
+        };
+        if map.len() < schema.min_properties
+            || schema.max_properties.is_some_and(|max| map.len() > max)
+        {
+            return Ok(false);
+        }
+        for required in &schema.required {
+            if !map.contains_key(required) {
+                return Ok(false);
+            }
+        }
+        for (trigger, dependents) in &schema.property_dependencies {
+            if map.contains_key(trigger) && dependents.iter().any(|dependent| !map.contains_key(dependent)) {
+                return Ok(false);
+            }
+        }
+        if let Some(property_names) = &schema.property_names {
+            for key in map.keys() {
+                if !self.json_literal_satisfies_schema_inner(
+                    &Value::String(key.clone()),
+                    property_names,
+                    ref_stack,
+                )? {
+                    return Ok(false);
+                }
+            }
+        }
+
+        for (key, item) in map {
+            let mut matched_known_property = false;
+            if let Some(property) = schema.properties.iter().find(|property| property.name == key.as_str()) {
+                matched_known_property = true;
+                if !self.json_literal_satisfies_schema_inner(item, &property.schema, ref_stack)? {
+                    return Ok(false);
+                }
+            }
+            for pattern_property in &schema.pattern_properties {
+                if property_name_matches_pattern(&pattern_property.pattern, key)? {
+                    matched_known_property = true;
+                    if !self.json_literal_satisfies_schema_inner(
+                        item,
+                        &pattern_property.schema,
+                        ref_stack,
+                    )? {
+                        return Ok(false);
+                    }
+                }
+            }
+            if !matched_known_property {
+                match &schema.additional_properties {
+                    AdditionalProperties::AllowAny => {}
+                    AdditionalProperties::Deny => return Ok(false),
+                    AdditionalProperties::Schema(additional) => {
+                        if !self.json_literal_satisfies_schema_inner(item, additional, ref_stack)? {
+                            return Ok(false);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn array_value_satisfies_schema(
+        &self,
+        value: &Value,
+        schema: &ArraySchema,
+        ref_stack: &mut BTreeSet<String>,
+    ) -> ImportResult<bool> {
+        let Some(items) = value.as_array() else {
+            return Ok(true);
+        };
+        if items.len() < schema.min_items
+            || schema.max_items.is_some_and(|max| items.len() > max)
+        {
+            return Ok(false);
+        }
+        for (index, item) in items.iter().enumerate() {
+            let item_schema = schema
+                .prefix_items
+                .get(index)
+                .unwrap_or(schema.items.as_ref());
+            if !self.json_literal_satisfies_schema_inner(item, item_schema, ref_stack)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub(crate) fn add_nonterminal_rule(&mut self, name: &str, expr: GrammarExpr) {
         let expr = self.hoist_raw_regexes_out_of_expr_nfa_symbols(expr);
         self.used_rule_names.insert(name.to_string());
@@ -615,10 +835,77 @@ impl<'a> Lowerer<'a> {
     }
 }
 
-fn large_string_enum_regex_literals(assertions: &SchemaAssertions) -> ImportResult<Option<Vec<String>>> {
-    let Some(values) = &assertions.enum_values else {
-        return Ok(None);
+fn json_literal_satisfies_declared_types(value: &Value, types: Option<&[SchemaType]>) -> bool {
+    types.is_none_or(|types| {
+        types
+            .iter()
+            .any(|schema_type| json_literal_has_type(value, *schema_type))
+    })
+}
+
+fn json_literal_has_type(value: &Value, schema_type: SchemaType) -> bool {
+    match schema_type {
+        SchemaType::Null => value.is_null(),
+        SchemaType::Boolean => value.is_boolean(),
+        SchemaType::Object => value.is_object(),
+        SchemaType::Array => value.is_array(),
+        SchemaType::String => value.is_string(),
+        SchemaType::Number => value.is_number(),
+        SchemaType::Integer => value
+            .as_number()
+            .is_some_and(json_number_is_integer),
+    }
+}
+
+fn number_value_satisfies_schema(value: &Value, schema: &NumberSchema) -> bool {
+    let Some(number) = value.as_number() else {
+        return true;
     };
+    if schema.integer && !json_number_is_integer(number) {
+        return false;
+    }
+    let Some(value) = number.as_f64() else {
+        return false;
+    };
+    if let Some(minimum) = schema.minimum {
+        if schema.exclusive_minimum {
+            if value <= minimum {
+                return false;
+            }
+        } else if value < minimum {
+            return false;
+        }
+    }
+    if let Some(maximum) = schema.maximum {
+        if schema.exclusive_maximum {
+            if value >= maximum {
+                return false;
+            }
+        } else if value > maximum {
+            return false;
+        }
+    }
+    if let Some(multiple) = schema.multiple_of {
+        let quotient = value / multiple;
+        if (quotient - quotient.round()).abs() > 1e-9 {
+            return false;
+        }
+    }
+    true
+}
+
+fn json_number_is_integer(number: &serde_json::Number) -> bool {
+    number.as_i64().is_some()
+        || number.as_u64().is_some()
+        || number
+            .as_f64()
+            .is_some_and(|value| value.is_finite() && value.fract() == 0.0)
+}
+
+fn large_string_enum_regex_literals(
+    assertions: &SchemaAssertions,
+    values: &[&Value],
+) -> ImportResult<Option<Vec<String>>> {
     if assertions.const_value.is_some()
         || !assertions.any_of.is_empty()
         || !assertions.one_of.is_empty()
@@ -639,7 +926,7 @@ fn large_string_enum_regex_literals(assertions: &SchemaAssertions) -> ImportResu
     }
 
     let mut encoded_literals = Vec::new();
-    for value in values {
+    for value in values.iter().copied() {
         let Value::String(text) = value else {
             return Ok(None);
         };
@@ -682,7 +969,7 @@ fn factored_small_string_enum_expr(values: &[&Value]) -> Option<GrammarExpr> {
     }
 
     let mut suffixes = Vec::with_capacity(values.len());
-    for value in values {
+    for value in values.iter().copied() {
         let Value::String(text) = value else {
             return None;
         };

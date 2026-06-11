@@ -484,6 +484,50 @@ fn schema_accepts_bytes(schema: &serde_json::Value, input: &[u8]) -> bool {
 }
 
 #[test]
+fn typed_string_enum_rejects_non_string_enum_members() {
+    let schema = json!({
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": ["unknown", -1, 0, 2, 3, 7, 9]
+            }
+        },
+        "additionalProperties": false
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#"{"status": "unknown"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"status": -1}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"status": 0}"#));
+}
+
+#[test]
+fn typed_integer_enum_rejects_wrong_type_and_failed_number_constraints() {
+    let schema = json!({
+        "type": "integer",
+        "minimum": 2,
+        "enum": [1, 2, "2", true]
+    });
+
+    assert!(!schema_accepts_bytes(&schema, b"1"));
+    assert!(schema_accepts_bytes(&schema, b"2"));
+    assert!(!schema_accepts_bytes(&schema, br#""2""#));
+    assert!(!schema_accepts_bytes(&schema, b"true"));
+}
+
+#[test]
+fn typed_const_rejects_literal_that_conflicts_with_sibling_assertions() {
+    let schema = json!({
+        "type": "object",
+        "required": ["id"],
+        "const": {}
+    });
+
+    assert!(!schema_accepts_bytes(&schema, br#"{}"#));
+}
+
+#[test]
 fn llguidance_compat_treats_untyped_format_as_typed_string() {
     let _lock = ENV_LOCK.lock().unwrap();
     let schema = json!({"format": "uri"});
