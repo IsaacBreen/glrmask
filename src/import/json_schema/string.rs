@@ -2006,10 +2006,10 @@ fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
     if is_unicode_decimal_digit_class(class) {
         return ascii_json_body_class_regex("[0-9]", b'0'..=b'9', context);
     }
-    let add_ascii_unicode_escape_branch = should_add_ascii_json_unicode_escape_branch(context);
-    let add_llguidance_non_ws_unicode_escape_branch = is_unicode_pattern_non_whitespace_class(class)
-        && matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative)
-        && matches!(context, JsonStringContext::Value);
+    let add_ascii_unicode_escape_branch = should_add_ascii_json_unicode_escape_branch(context)
+        || (matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative)
+            && matches!(context, JsonStringContext::Value)
+            && !is_unicode_pattern_whitespace_class(class));
     if is_dot_like_unicode_class(class) {
         return json_string_body_dot_regex_in_mode(json_string_compat_mode(), context).to_string();
     }
@@ -2099,10 +2099,6 @@ fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
     if class_contains_general_non_ascii_non_whitespace(class) {
         alternatives.push(json_string_body_non_ascii_non_whitespace_regex().to_string());
     }
-    if add_llguidance_non_ws_unicode_escape_branch {
-        alternatives.push(r#"\\u00(?:[01][0-9A-Fa-f]|7[Ff])"#.to_string());
-    }
-
     match alternatives.len() {
         0 => r"[^\s\S]".to_string(),
         1 => alternatives.remove(0),
@@ -2889,15 +2885,16 @@ mod tests {
     }
 
     #[test]
-    fn llguidance_value_pattern_terminal_regex_classes_do_not_add_unicode_escape_spellings() {
+    fn llguidance_value_pattern_terminal_regex_classes_add_ascii_unicode_escape_spellings() {
         TEST_COMPAT_MODE.with(|cell| cell.set(JsonStringCompatMode::LlGuidanceNative));
 
         let body = string_pattern_as_body_regex(r"^[0-9a-f]{8}$", JsonStringContext::Value).unwrap();
-        assert!(!body.contains(r"\u00"), "{body}");
+        assert!(body.contains(r"\u00"), "{body}");
         let regex = Regex::new(&format!(r"^(?:{})$", quoted_string_body_regex(&body))).unwrap();
 
         assert!(regex.is_match(r#""1234abcd""#));
-        assert!(!regex.is_match(r#""\u0031234abcd""#));
+        assert!(regex.is_match(r#""\u0031234abcd""#));
+        assert!(!regex.is_match(r#""\uC1234abcd""#));
     }
 
     #[test]
