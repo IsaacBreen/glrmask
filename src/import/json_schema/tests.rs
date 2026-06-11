@@ -820,14 +820,14 @@ fn map_only_typed_additional_properties_repeat_with_separators() {
 }
 
 #[test]
-fn llguidance_additional_property_rejects_escaped_solidus_key() {
+fn llguidance_additional_property_accepts_escaped_solidus_key() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
         "additionalProperties": {"type": "string"}
     });
-    assert!(!schema_accepts_bytes(&schema, br#"{"\/": "value"}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"\/": "value"}"#));
     assert!(schema_accepts_bytes(&schema, br#"{"/": "value"}"#));
 }
 
@@ -847,7 +847,7 @@ fn llguidance_pattern_property_rejects_escaped_solidus_key() {
 }
 
 #[test]
-fn llguidance_pattern_property_dotstar_rejects_escaped_solidus_key_prefix_and_accepts_partial_unicode() {
+fn llguidance_pattern_property_dotstar_accepts_escaped_solidus_key_prefix_and_partial_unicode() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
@@ -856,7 +856,7 @@ fn llguidance_pattern_property_dotstar_rejects_escaped_solidus_key_prefix_and_ac
             ".*": {"type": "string"}
         }
     });
-    assert!(!schema_mask_allows_token_after_prefix(
+    assert!(schema_mask_allows_token_after_prefix(
         &schema,
         br#"{""#,
         406,
@@ -868,7 +868,27 @@ fn llguidance_pattern_property_dotstar_rejects_escaped_solidus_key_prefix_and_ac
         407,
         br#"\uC"#,
     ));
-    assert!(!schema_accepts_bytes(&schema, br#"{"\/": "value"}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"\/": "value"}"#));
+}
+
+#[test]
+fn llguidance_generic_json_object_rejects_partial_unicode_key_escape() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "top": {}
+        },
+        "required": ["top"]
+    });
+
+    assert!(!schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{"top": {""#,
+        409,
+        br#"\uC"#,
+    ));
 }
 
 #[test]
@@ -947,7 +967,7 @@ fn llguidance_literal_property_mask_rejects_escaped_solidus() {
 }
 
 #[test]
-fn llguidance_additional_property_mask_rejects_escaped_solidus() {
+fn llguidance_additional_property_mask_accepts_escaped_solidus() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
@@ -956,7 +976,7 @@ fn llguidance_additional_property_mask_rejects_escaped_solidus() {
     });
 
     assert!(schema_mask_allows_token_after_prefix(&schema, br#"{""#, 404, b"/"));
-    assert!(!schema_mask_allows_token_after_prefix(
+    assert!(schema_mask_allows_token_after_prefix(
         &schema,
         br#"{""#,
         405,
