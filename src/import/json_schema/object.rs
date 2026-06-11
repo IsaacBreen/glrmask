@@ -3524,9 +3524,6 @@ impl<'a> Lowerer<'a> {
                 schema
             } else {
                 match &schema.additional_properties {
-                    AdditionalProperties::AllowAny if self.llguidance_compat_enabled() => {
-                        continue;
-                    }
                     AdditionalProperties::AllowAny => {
                         Schema::any(format!("<required:{required_name}>"))
                     }

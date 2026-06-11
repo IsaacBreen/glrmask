@@ -661,10 +661,14 @@ fn load_object_keywords(
     let mut schema = ObjectSchema::default();
     let mut required_order = Vec::new();
 
-    let object_items_fallback = object
-        .get("items")
-        .and_then(Value::as_object)
-        .filter(|items| object.get("properties").is_none() && items.get("properties").is_some());
+    let object_items_fallback = object.get("items").and_then(Value::as_object).filter(|items| {
+        object.get("properties").is_none()
+            && items.get("properties").is_some()
+            && object
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|required| required.iter().any(Value::is_string))
+    });
     let using_object_items_properties = object_items_fallback.is_some();
 
     if let Some(properties_value) = object
@@ -771,8 +775,6 @@ fn load_object_keywords(
                 &additional_location,
             )?)),
         };
-    } else if using_object_items_properties && required_order.is_empty() {
-        schema.additional_properties = AdditionalProperties::Deny;
     }
 
     schema.min_properties = read_usize_keyword(object, "minProperties", location)?.unwrap_or(0);
