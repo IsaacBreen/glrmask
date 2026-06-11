@@ -17,26 +17,14 @@ use super::lower::{
 };
 
 fn encoded_json_key_regex(encoded: &str) -> String {
-    let Ok(decoded) = serde_json::from_str::<String>(encoded) else {
-        return regex_escape(encoded);
-    };
-    let body = decoded
-        .chars()
-        .map(|ch| {
-            let canonical = json_body_char_regex_for_decoded_char_in_mode(
-                ch,
-                json_string_compat_mode(),
-                JsonStringContext::KeyStrict,
-            );
-            if should_allow_json_unicode_escape_for_pattern_literal(ch) {
-                format!(r#"(?:{}|{})"#, canonical, json_unicode_escape_for_char_regex(ch))
-            } else {
-                canonical
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("");
-    format!(r#""{body}""#)
+    // Keep literal property spelling exactly as serde_json emits it.
+    // This matches llguidance's builder.string(json_dumps(name)) behavior.
+    let canonical = regex_escape(encoded);
+    if matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative) {
+        canonical.replace("/", r#"(?:\/|\\\/)"#)
+    } else {
+        canonical
+    }
 }
 
 impl<'a> Lowerer<'a> {
@@ -1781,7 +1769,7 @@ fn recognized_string_format_body_regex(format: Option<&str>) -> Option<&'static 
             // into one repeated class.  In particular, '#' is only allowed once as the
             // fragment introducer, so prefixes like "https://##" stay aligned with
             // llguidance without importing its full IPv6/path machinery.
-            r#"[A-Za-z][A-Za-z0-9+.-]*:(?://(?:(?:[A-Za-z0-9._~!$&'()*+,;=:-]|%[0-9A-Fa-f]{2})*@)?(?:\[(?:[A-Fa-f0-9:.]+|[Vv][0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+)\]|(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)(?::[0-9]*)?(?:/(?:[A-Za-z0-9._~:@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)*|(?:/(?:[A-Za-z0-9._~:@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)?|(?:[A-Za-z0-9._~:@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})+(?:/(?:[A-Za-z0-9._~:@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)*)?(?:\?(?:[A-Za-z0-9._~:/?@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)?(?:#(?:[A-Za-z0-9._~:/?@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)?"#,
+            r#"[A-Za-z][A-Za-z0-9+.-]*:(?://(?:(?:[A-Za-z0-9._~!$&'()*+,;=:-]|%[0-9A-Fa-f]{2})*@)?(?:\[(?:[A-Fa-f0-9:.]*|[Vv][0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+)\]|(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)(?::[0-9]*)?(?:/(?:[A-Za-z0-9._~:@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)*|(?:/(?:[A-Za-z0-9._~:@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)?|(?:[A-Za-z0-9._~:@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})+(?:/(?:[A-Za-z0-9._~:@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)*)?(?:\?(?:[A-Za-z0-9._~:/?@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)?(?:#(?:[A-Za-z0-9._~:/?@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)?"#,
         ),
         _ => None,
     }
@@ -2711,10 +2699,10 @@ pub(crate) fn json_string_body_char_regex_in_mode(
             r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bfnrt]|\\u[0-9A-Fa-f]{4})"#
         }
         (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::KeyAdditional) => {
-            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bfnrt]|\\u00[0-9A-Fa-f]{2})"#
+            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bfnrt]|\\u(?:[0-9A-Fa-f]{0,3})?$)"#
         }
         (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::KeyStrict) => {
-            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bfnrt]|\\u00[0-9A-Fa-f]{2})"#
+            r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bfnrt]|\\u00(?:[01][0-9A-Fa-f]|7[Ff]))"#
         }
         (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::Value) => {
             r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["\\bfnrt]|\\u00(?:[01][0-9A-Fa-f]|7[Ff]))"#
