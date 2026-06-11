@@ -1800,7 +1800,7 @@ fn allof_drops_vacuous_untyped_object_branch_for_typed_property() {
 }
 
 #[test]
-fn large_snowplow_like_pattern_property_object_uses_expr_nfa_body() {
+fn large_closed_pattern_property_object_uses_generic_key_trie_expr_nfa_body() {
     let mut properties = serde_json::Map::new();
     for index in 0..64 {
         properties.insert(format!("k{index}"), json!({"type": "string"}));
@@ -1812,8 +1812,8 @@ fn large_snowplow_like_pattern_property_object_uses_expr_nfa_body() {
         (
             "patternProperties".to_string(),
             json!({
-                "^contexts_.*": {"type": "array"},
-                "^unstruct_event_.*": {"type": "string"}
+                "^foo_.*": {"type": "array"},
+                "^bar_.*": {"type": "string"}
             }),
         ),
         ("additionalProperties".to_string(), json!(false)),
@@ -4375,10 +4375,10 @@ fn small_string_enum_at_root_uses_factored_suffix_choice() {
 }
 
 #[test]
-fn snowplow_style_string_enum_uses_factored_suffix_choice() {
+fn shared_prefix_string_enum_uses_factored_suffix_choice() {
     let schema = json!({
         "type": "string",
-        "enum": ["INVALID_SCHEMAVER", "INVALID_IGLUURI", "INVALID_DATA_PAYLOAD", "INVALID_SCHEMA"]
+        "enum": ["SHARED_ALPHA", "SHARED_BETA", "SHARED_GAMMA", "SHARED_DELTA"]
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
@@ -4391,11 +4391,11 @@ fn snowplow_style_string_enum_uses_factored_suffix_choice() {
         panic!("expected suffix choice: {:?}", parts[1]);
     };
     assert_eq!(suffixes.len(), 4);
-    assert!(suffixes.contains(&GrammarExpr::Literal(b"INVALID_SCHEMAVER\"".to_vec())));
-    assert!(suffixes.contains(&GrammarExpr::Literal(b"INVALID_IGLUURI\"".to_vec())));
-    assert!(suffixes.contains(&GrammarExpr::Literal(b"INVALID_DATA_PAYLOAD\"".to_vec())));
-    assert!(suffixes.contains(&GrammarExpr::Literal(b"INVALID_SCHEMA\"".to_vec())));
-    assert!(!contains_literal_bytes(start_expr(&grammar), b"\"INVALID_SCHEMAVER\""), "{:?}", start_expr(&grammar));
+    assert!(suffixes.contains(&GrammarExpr::Literal(b"SHARED_ALPHA\"".to_vec())));
+    assert!(suffixes.contains(&GrammarExpr::Literal(b"SHARED_BETA\"".to_vec())));
+    assert!(suffixes.contains(&GrammarExpr::Literal(b"SHARED_GAMMA\"".to_vec())));
+    assert!(suffixes.contains(&GrammarExpr::Literal(b"SHARED_DELTA\"".to_vec())));
+    assert!(!contains_literal_bytes(start_expr(&grammar), b"\"SHARED_ALPHA\""), "{:?}", start_expr(&grammar));
     lower(&grammar).unwrap();
 }
 

@@ -23,11 +23,8 @@ use super::lower::{
 };
 use super::string::property_name_matches_pattern;
 
-const POINT_PATH_PATTERN: &str = "^(/[^/]+)+$";
 const LARGE_OBJECT_LITERAL_KEY_TRIE_MIN_ITEMS: usize = 64;
-const SNOWPLOW_CONTEXTS_PATTERN: &str = "^contexts_.*";
-const SNOWPLOW_UNSTRUCT_EVENT_PATTERN: &str = "^unstruct_event_.*";
-const SNOWPLOW_KEY_TRIE_PREFIX_SPLIT_BYTES: usize = 1;
+const LARGE_OBJECT_KEY_TRIE_PREFIX_SPLIT_BYTES: usize = 1;
 
 struct ObjectItem {
     key: String,
@@ -381,111 +378,19 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn try_lower_ref_string_path_object_any_of(
         &mut self,
-        current_schema: &Schema,
-        branches: &[Schema],
+        _current_schema: &Schema,
+        _branches: &[Schema],
     ) -> ImportResult<Option<GrammarExpr>> {
-        if branches.len() != 3 {
-            return Ok(None);
-        }
-
-        let mut array_branch = None;
-        let mut saw_ref_string_object = false;
-        let mut saw_path_object = false;
-
-        for branch in branches {
-            let resolved = self.resolve_branch_schema(branch)?;
-            if is_ref_string_open_object_branch(resolved) {
-                if saw_ref_string_object {
-                    return Ok(None);
-                }
-                saw_ref_string_object = true;
-                continue;
-            }
-            if self.is_path_recursive_open_object_branch(current_schema, resolved)? {
-                if saw_path_object {
-                    return Ok(None);
-                }
-                saw_path_object = true;
-                continue;
-            }
-            if is_plain_array_branch(resolved) {
-                if array_branch.is_some() {
-                    return Ok(None);
-                }
-                array_branch = Some(branch.clone());
-                continue;
-            }
-            return Ok(None);
-        }
-
-        if !saw_ref_string_object || !saw_path_object {
-            return Ok(None);
-        }
-
-        let Some(array_branch) = array_branch else {
-            return Ok(None);
-        };
-
-        // This recognizer is intentionally tied to the observed Point-like
-        // overlap shape: the open "$ref": string object branch and the open
-        // path-key object branch together already cover the full object
-        // language, so we can collapse just that object subset and leave the
-        // array sibling untouched.
-        Ok(Some(choice(vec![r(JSON_OBJECT_RULE), self.lower_schema(&array_branch)?])))
-    }
-
-    fn resolve_branch_schema<'b>(&'b self, schema: &'b Schema) -> ImportResult<&'b Schema> {
-        match &schema.kind {
-            SchemaKind::Ref(pointer) => self.resolve_ref_target(pointer),
-            _ => Ok(schema),
-        }
-    }
-
-    fn is_path_recursive_open_object_branch(
-        &self,
-        current_schema: &Schema,
-        schema: &Schema,
-    ) -> ImportResult<bool> {
-        let SchemaKind::Assertions(assertions) = &schema.kind else {
-            return Ok(false);
-        };
-        if assertions.const_value.is_some()
-            || assertions.enum_values.is_some()
-            || assertions.array.is_some()
-            || assertions.string.is_some()
-            || assertions.number.is_some()
-            || !assertions.any_of.is_empty()
-            || !assertions.one_of.is_empty()
-            || !assertions.all_of.is_empty()
-        {
-            return Ok(false);
-        }
-        if let Some(types) = &assertions.types {
-            if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
-                return Ok(false);
-            }
-        }
-
-        let Some(object) = &assertions.object else {
-            return Ok(false);
-        };
-        if !object.properties.is_empty() || object.pattern_properties.len() != 1 {
-            return Ok(false);
-        }
-        if !matches!(object.additional_properties, AdditionalProperties::AllowAny) {
-            return Ok(false);
-        }
-
-        let pattern_property = &object.pattern_properties[0];
-        if pattern_property.pattern != POINT_PATH_PATTERN {
-            return Ok(false);
-        }
-
-        let SchemaKind::Ref(pointer) = &pattern_property.schema.kind else {
-            return Ok(false);
-        };
-        let target = self.resolve_ref_target(pointer)?;
-        Ok(target.location == current_schema.location)
+        // Do not recognize exact benchmark-observed path-recursive anyOf
+        // shapes here. This used to collapse a "$ref" string object branch,
+        // a recursive path-key object branch, and an array branch into
+        // JSON_OBJECT | array after matching the exact pattern
+        // `^(/[^/]+)+$`. That is too schema-tailored for the production JSON
+        // importer. If this optimization is needed, reintroduce it as a
+        // separately reviewed, shape-generic proof that the object branches
+        // cover the full JSON object language, without matching literal
+        // benchmark regexes.
+        Ok(None)
     }
 
     fn lower_object_internal(
@@ -803,23 +708,16 @@ impl<'a> Lowerer<'a> {
                 );
             }
 
-            let is_snowplow_large_closed_pattern_object = normalized.properties.len()
+            let use_large_closed_pattern_object_key_trie = normalized.properties.len()
                 >= LARGE_OBJECT_LITERAL_KEY_TRIE_MIN_ITEMS
                 && normalized.required.is_empty()
                 && any_required_names.is_none()
                 && exclusive_group.is_none()
                 && matches!(normalized.additional_properties, AdditionalProperties::Deny)
-                && normalized.pattern_properties.len() == 2
-                && normalized
-                    .pattern_properties
-                    .iter()
-                    .all(|pattern_property| {
-                        pattern_property.pattern == SNOWPLOW_CONTEXTS_PATTERN
-                            || pattern_property.pattern == SNOWPLOW_UNSTRUCT_EVENT_PATTERN
-                    });
+                && !tail_pairs.is_empty();
 
-            if is_snowplow_large_closed_pattern_object {
-                return self.lower_snowplow_large_pattern_object_key_trie(&items, &tail_pairs);
+            if use_large_closed_pattern_object_key_trie {
+                return self.lower_large_closed_pattern_object_key_trie(&items, &tail_pairs);
             }
 
             // The dynamic tail is a repeated object entry.  Keep the repetition
@@ -2697,7 +2595,7 @@ impl<'a> Lowerer<'a> {
     fn split_literal_key_symbol(symbol: GrammarExpr) -> Vec<GrammarExpr> {
         match symbol {
             GrammarExpr::Literal(bytes) if bytes.len() > 1 => {
-                let split_len = SNOWPLOW_KEY_TRIE_PREFIX_SPLIT_BYTES.min(bytes.len());
+                let split_len = LARGE_OBJECT_KEY_TRIE_PREFIX_SPLIT_BYTES.min(bytes.len());
                 if split_len >= bytes.len() {
                     bytes
                         .into_iter()
@@ -2726,7 +2624,7 @@ impl<'a> Lowerer<'a> {
         symbols
     }
 
-    fn lower_snowplow_large_pattern_object_key_trie(
+    fn lower_large_closed_pattern_object_key_trie(
         &mut self,
         items: &[ObjectItem],
         tail_pairs: &[GrammarExpr],
