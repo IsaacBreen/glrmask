@@ -1910,15 +1910,20 @@ fn lower_decoded_regex_hir_to_json_body_regex_at_start(
                     "string pattern literal is not valid UTF-8 after parsing: {error}"
                 ))
             })?;
-            literal
-                .chars()
+            let chars = literal.chars().collect::<Vec<_>>();
+            let acronym_start = chars
+                .first()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+                && chars.get(1).is_some_and(|ch| ch.is_ascii_uppercase());
+            chars
+                .into_iter()
                 .enumerate()
                 .map(|(index, ch)| {
                     json_body_char_regex_for_pattern_literal_in_mode(
                         ch,
                         json_string_compat_mode(),
                         context,
-                        at_start && index == 0,
+                        at_start && acronym_start && index == 0,
                     )
                 })
                 .collect::<Vec<_>>()
@@ -2656,7 +2661,7 @@ fn json_body_char_regex_for_pattern_literal_in_mode(
         return canonical;
     }
     if mode == JsonStringCompatMode::LlGuidanceNative
-        && !(matches!(context, JsonStringContext::Value) && at_start && ch.is_ascii_uppercase())
+        && !(matches!(context, JsonStringContext::Value) && at_start)
     {
         return canonical;
     }
