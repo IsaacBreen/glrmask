@@ -54,6 +54,14 @@ pub struct SimplifyStats {
     pub inlined_rules: usize,
 }
 
+fn never_expr() -> GrammarExpr {
+    GrammarExpr::Choice(Vec::new())
+}
+
+fn is_never_expr(expr: &GrammarExpr) -> bool {
+    matches!(expr, GrammarExpr::Choice(options) if options.is_empty())
+}
+
 fn simplify_expr(expr: GrammarExpr, stats: &mut SimplifyStats) -> GrammarExpr {
     match expr {
         GrammarExpr::Sequence(parts) => simplify_sequence(parts, stats),
@@ -100,6 +108,7 @@ fn simplify_sequence(parts: Vec<GrammarExpr>, stats: &mut SimplifyStats) -> Gram
     let mut out = Vec::new();
     for part in parts {
         match simplify_expr(part, stats) {
+            GrammarExpr::Choice(options) if options.is_empty() => return never_expr(),
             GrammarExpr::Sequence(nested) => {
                 stats.flattened_sequences += 1;
                 out.extend(nested);
@@ -134,7 +143,7 @@ fn simplify_choice(options: Vec<GrammarExpr>, stats: &mut SimplifyStats) -> Gram
     }
 
     match out.len() {
-        0 => GrammarExpr::Epsilon,
+        0 => never_expr(),
         1 => {
             stats.singleton_choices += 1;
             out.pop().unwrap()
@@ -145,6 +154,10 @@ fn simplify_choice(options: Vec<GrammarExpr>, stats: &mut SimplifyStats) -> Gram
 
 fn simplify_optional(inner: GrammarExpr, stats: &mut SimplifyStats) -> GrammarExpr {
     match simplify_expr(inner, stats) {
+        expr if is_never_expr(&expr) => {
+            stats.repeat_simplifications += 1;
+            GrammarExpr::Epsilon
+        }
         GrammarExpr::Epsilon => {
             stats.repeat_simplifications += 1;
             GrammarExpr::Epsilon
@@ -163,6 +176,10 @@ fn simplify_optional(inner: GrammarExpr, stats: &mut SimplifyStats) -> GrammarEx
 
 fn simplify_repeat(inner: GrammarExpr, stats: &mut SimplifyStats) -> GrammarExpr {
     match simplify_expr(inner, stats) {
+        expr if is_never_expr(&expr) => {
+            stats.repeat_simplifications += 1;
+            GrammarExpr::Epsilon
+        }
         GrammarExpr::Epsilon => {
             stats.repeat_simplifications += 1;
             GrammarExpr::Epsilon
@@ -177,6 +194,10 @@ fn simplify_repeat(inner: GrammarExpr, stats: &mut SimplifyStats) -> GrammarExpr
 
 fn simplify_repeat_one(inner: GrammarExpr, stats: &mut SimplifyStats) -> GrammarExpr {
     match simplify_expr(inner, stats) {
+        expr if is_never_expr(&expr) => {
+            stats.repeat_simplifications += 1;
+            never_expr()
+        }
         GrammarExpr::Epsilon => {
             stats.repeat_simplifications += 1;
             GrammarExpr::Epsilon
@@ -200,6 +221,10 @@ fn simplify_repeat_range(
     stats: &mut SimplifyStats,
 ) -> GrammarExpr {
     let inner = simplify_expr(inner, stats);
+    if is_never_expr(&inner) {
+        stats.repeat_simplifications += 1;
+        return if min == 0 { GrammarExpr::Epsilon } else { never_expr() };
+    }
     match (min, max) {
         (0, Some(0)) => {
             stats.repeat_simplifications += 1;

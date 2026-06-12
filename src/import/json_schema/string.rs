@@ -149,6 +149,17 @@ impl<'a> Lowerer<'a> {
         };
         let mut constraints = Vec::new();
 
+        if let Some(pattern) = &schema.pattern
+            && let Some(length_bound_body) = cheap_pattern_length_bound_body_regex(
+                pattern,
+                &self.json_string_char_regex(),
+                schema.min_length,
+                schema.max_length,
+            )
+        {
+            constraints.push(quoted_string_body_regex(&length_bound_body));
+        }
+
         if let Some(format_body_regex) = recognized_string_format_body_regex_for_lowering(schema.format.as_deref()) {
             constraints.push(quoted_string_body_regex(format_body_regex));
         }
@@ -1649,6 +1660,10 @@ fn pattern_matches_any_key(pattern: &str) -> bool {
     matches!(preprocess_ascii_shorthand(pattern).as_str(), ".*" | "^.*$")
 }
 
+fn pattern_matches_any_string(pattern: &str) -> bool {
+    matches!(preprocess_ascii_shorthand(pattern).as_str(), ".*" | "^.*$" | "^(.*)$")
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UnanchoredPatternSplitMode {
     ChunkedPrefixMiddle,
@@ -1810,6 +1825,38 @@ fn bounded_json_string_body_regex(string_char_regex: &str, min: usize, max: Opti
         (min, Some(max)) if min == max => format!("{atom}{{{min}}}"),
         (min, Some(max)) => format!("{atom}{{{min},{max}}}"),
     }
+}
+
+fn cheap_pattern_length_bound_body_regex(
+    pattern: &str,
+    string_char_regex: &str,
+    min: usize,
+    max: Option<usize>,
+) -> Option<String> {
+    if min == 0 && max.is_none() {
+        return None;
+    }
+
+    let pattern = preprocess_ascii_shorthand(pattern);
+    if pattern_matches_any_string(&pattern) {
+        return Some(bounded_json_string_body_regex(string_char_regex, min, max));
+    }
+
+    // Preserve short finite bounds: these are the common JSON-Schema idioms like
+    // `[0-9]{10}` plus `minLength=maxLength=10`, and they do not trigger the
+    // severe pattern/length product blowups that motivated the broad policy.
+    if max.is_some_and(|max| max <= 64) {
+        return Some(bounded_json_string_body_regex(string_char_regex, min, max));
+    }
+
+    // For large bounded patterns, keep the cheap lower bound but still drop the
+    // potentially explosive upper bound. This rejects impossible too-short
+    // complete string tokens without rebuilding the old maxLength product.
+    if min > 0 {
+        return Some(bounded_json_string_body_regex(string_char_regex, min, None));
+    }
+
+    None
 }
 
 const DATE_FORMAT_BODY_REGEX: &str = r#"(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))|(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)-02-29)"#;
