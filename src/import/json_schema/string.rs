@@ -534,7 +534,7 @@ impl<'a> Lowerer<'a> {
                 GrammarExpr::Quantified(Box::new(sub), Quantifier::ZeroPlus),
             ]),
         };
-        Ok(Some(simplify_nested_regex_repetition_expr(expr)))
+        Ok(Some(expr))
     }
 
     fn lower_decoded_class_to_json_body_expr(
@@ -2670,25 +2670,6 @@ fn prepend_literal_prefix_to_expr(prefix: Vec<u8>, expr: GrammarExpr) -> Grammar
     }
 }
 
-fn simplify_nested_regex_repetition_expr(expr: GrammarExpr) -> GrammarExpr {
-    match expr {
-        GrammarExpr::Quantified(inner, outer) => match *inner {
-            GrammarExpr::Quantified(grandchild, inner_quantifier) => {
-                if let Some(merged) = merge_nested_regex_quantifiers(&inner_quantifier, &outer) {
-                    GrammarExpr::Quantified(grandchild, merged)
-                } else {
-                    GrammarExpr::Quantified(
-                        Box::new(GrammarExpr::Quantified(grandchild, inner_quantifier)),
-                        outer,
-                    )
-                }
-            }
-            other => GrammarExpr::Quantified(Box::new(other), outer),
-        },
-        other => other,
-    }
-}
-
 fn llguidance_property_value_expr_is_safe_to_fuse(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::Literal(_) | GrammarExpr::CharClass { .. } | GrammarExpr::Epsilon => true,
@@ -2700,17 +2681,6 @@ fn llguidance_property_value_expr_is_safe_to_fuse(expr: &GrammarExpr) -> bool {
             llguidance_property_value_expr_is_safe_to_fuse(inner)
         }
         _ => false,
-    }
-}
-
-fn merge_nested_regex_quantifiers(inner: &Quantifier, outer: &Quantifier) -> Option<Quantifier> {
-    use Quantifier::{OnePlus, Optional, ZeroPlus};
-    match (inner, outer) {
-        (ZeroPlus, ZeroPlus | OnePlus | Optional) => Some(ZeroPlus),
-        (OnePlus, ZeroPlus) => Some(ZeroPlus),
-        (OnePlus, OnePlus) => Some(OnePlus),
-        (Optional, ZeroPlus | OnePlus) => Some(ZeroPlus),
-        _ => None,
     }
 }
 

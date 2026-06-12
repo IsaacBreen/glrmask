@@ -2,6 +2,21 @@ use std::collections::{HashMap, HashSet};
 
 use crate::grammar::ast::{GrammarExpr, Quantifier, NamedGrammar};
 
+/// Run only the syntax-directed expression simplifier over each rule body.
+///
+/// Unlike [`simplify_named_grammar`], this does not inline or remove rules. It is
+/// useful for importers that want language-preserving expression normalization,
+/// such as nested-repeat collapse, without depending on broader grammar-shape
+/// changes.
+pub fn simplify_named_grammar_expressions(grammar: &mut NamedGrammar) -> SimplifyStats {
+    let mut stats = SimplifyStats::default();
+    for rule in &mut grammar.rules {
+        let expr = std::mem::replace(&mut rule.expr, GrammarExpr::Epsilon);
+        rule.expr = simplify_expr(expr, &mut stats);
+    }
+    stats
+}
+
 /// Conservative normalization for `NamedGrammar` ASTs.
 ///
 /// This pass is intentionally syntax-directed and language-preserving. It does

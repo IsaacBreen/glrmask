@@ -4,6 +4,7 @@ use regex::escape as regex_escape;
 use serde_json::Value;
 
 use crate::grammar::expr_nfa::ExprNFA;
+use crate::grammar::named_simplify::simplify_named_grammar_expressions;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier};
 
 use super::ast::{
@@ -127,7 +128,13 @@ impl<'a> Lowerer<'a> {
         let start_expr = self.lower_schema(&self.document.root)?;
         self.add_nonterminal_rule("start", start_expr);
         simplify_terminal_rules(&mut self.rules);
-        Ok(NamedGrammar { rules: self.rules, start: "start".to_string(), ignore: None })
+        let mut grammar = NamedGrammar {
+            rules: self.rules,
+            start: "start".to_string(),
+            ignore: None,
+        };
+        simplify_named_grammar_expressions(&mut grammar);
+        Ok(grammar)
     }
 
     fn install_json_builtins(&mut self) {
