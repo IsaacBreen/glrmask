@@ -290,6 +290,9 @@ impl<'a> Lowerer<'a> {
         &mut self,
         branches: &[Schema],
     ) -> ImportResult<Option<GrammarExpr>> {
+        if self.llguidance_compat_enabled() {
+            return Ok(None);
+        }
         if branches.len() < 2 {
             return Ok(None);
         }
@@ -354,6 +357,9 @@ impl<'a> Lowerer<'a> {
         &mut self,
         branches: &[Schema],
     ) -> ImportResult<Option<GrammarExpr>> {
+        if self.llguidance_compat_enabled() {
+            return Ok(None);
+        }
         if branches.len() < 2 {
             return Ok(None);
         }
@@ -699,7 +705,8 @@ impl<'a> Lowerer<'a> {
 
             let required_prefix_len = items.iter().take_while(|item| item.required).count();
             let required_count = items.iter().filter(|item| item.required).count();
-            let use_required_prefix_open_object_pair_loop = required_prefix_len > 0
+            let use_required_prefix_open_object_pair_loop = !self.llguidance_compat_enabled()
+                && required_prefix_len > 0
                 && required_prefix_len == required_count
                 && items.len().saturating_sub(required_prefix_len) + tail_pairs.len() >= 8
                 && any_required_names.is_none()
@@ -1399,7 +1406,7 @@ impl<'a> Lowerer<'a> {
         match symbol {
             GrammarExpr::Choice(alternatives) if alternatives.is_empty() => Vec::new(),
             GrammarExpr::Choice(alternatives)
-                if Self::is_shared_additional_key_colon_choice(&alternatives) =>
+                if Self::is_additional_key_colon_choice(&alternatives) =>
             {
                 alternatives
             }
@@ -1407,19 +1414,9 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    fn is_shared_additional_key_colon_choice(alternatives: &[GrammarExpr]) -> bool {
-        if alternatives.len() != 2 {
-            return false;
-        }
-
-        let has_shared_base = alternatives
-            .iter()
-            .any(Self::is_shared_additional_key_colon_base_ref);
-        let has_shared_excluded_addback = alternatives
-            .iter()
-            .any(Self::is_shared_additional_key_colon_addback);
-
-        has_shared_base && has_shared_excluded_addback
+    fn is_additional_key_colon_choice(alternatives: &[GrammarExpr]) -> bool {
+        alternatives.iter().any(Self::is_shared_additional_key_colon_base_ref)
+            || alternatives.iter().any(Self::is_shared_additional_key_colon_addback)
     }
 
     fn is_shared_additional_key_colon_base_ref(expr: &GrammarExpr) -> bool {
@@ -1439,6 +1436,17 @@ impl<'a> Lowerer<'a> {
                 )
             }
             _ => false,
+        }
+    }
+
+
+    fn split_key_colon_symbol_paths(symbol: GrammarExpr) -> Vec<Vec<GrammarExpr>> {
+        match symbol {
+            GrammarExpr::Choice(alternatives) => alternatives
+                .into_iter()
+                .map(Self::split_literal_key_symbol)
+                .collect(),
+            other => vec![Self::split_literal_key_symbol(other)],
         }
     }
 
@@ -2055,7 +2063,7 @@ impl<'a> Lowerer<'a> {
             if can_leave_fixed_tail
                 && let Some(value_expr) = &variant.additional_value_expr
             {
-                let mut excluded_fixed_keys = variant.fixed_keys.clone();
+                let excluded_fixed_keys = variant.fixed_keys.clone();
                 let mut owner_fixed_keys = Vec::<(String, bool)>::new();
                 if let ShadowOwnerState::Possible {
                     variant_idx: owner_idx,
@@ -2073,7 +2081,6 @@ impl<'a> Lowerer<'a> {
                                         .as_ref()
                                         .and_then(Self::invalid_residual_value_for_owner)
                                         .is_some();
-                                    excluded_fixed_keys.insert(owner_key.to_string());
                                     owner_fixed_keys.push((owner_key.to_string(), can_split));
                                 }
                             }
@@ -2081,7 +2088,6 @@ impl<'a> Lowerer<'a> {
                         AnyOfObjectPhase::Additional => {
                             for owner_key in &owner.fixed_keys {
                                 if !variant.fixed_keys.contains(owner_key) {
-                                    excluded_fixed_keys.insert(owner_key.clone());
                                     owner_fixed_keys.push((owner_key.clone(), false));
                                 }
                             }
@@ -2126,16 +2132,19 @@ impl<'a> Lowerer<'a> {
                     id
                 };
 
-                let mut symbols = Vec::new();
-                if state.has_content {
-                    symbols.push(self.item_separator_expr());
-                }
-                symbols.push(self.lower_additional_key_colon(
+                let key_symbol = self.lower_additional_key_colon(
                     &excluded_fixed_keys,
                     &variant.pattern_keys,
-                )?);
-                symbols.push(value_expr.clone());
-                Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, next_state_id);
+                )?;
+                for key_path in Self::split_key_colon_symbol_paths(key_symbol) {
+                    let mut symbols = Vec::new();
+                    if state.has_content {
+                        symbols.push(self.item_separator_expr());
+                    }
+                    symbols.extend(key_path);
+                    symbols.push(value_expr.clone());
+                    Self::add_expr_nfa_symbol_path(&mut builder, state_id, symbols, next_state_id);
+                }
 
                 for (owner_key, owner_fixed_key_can_advance) in owner_fixed_keys {
                     let ShadowOwnerState::Possible {
@@ -2486,6 +2495,7 @@ impl<'a> Lowerer<'a> {
             .as_ref()
             .map(Self::split_object_pair_symbols)
             .transpose()?;
+
 
         for (index, item) in items.iter().enumerate() {
             if !item.required {

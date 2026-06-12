@@ -174,13 +174,15 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_string_pattern_expr(&mut self, pattern: &str) -> ImportResult<Option<GrammarExpr>> {
-        if matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative) {
-            return Ok(None);
-        }
         let pattern = preprocess_ascii_shorthand(pattern);
         let hir = Parser::new()
             .parse(&pattern)
             .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")))?;
+        if matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative)
+            && hir_contains_pattern_non_whitespace_class(&hir)
+        {
+            return Ok(None);
+        }
         let Some(branches) = self.lower_string_pattern_hir_branch_expr_parts(hir)? else {
             return Ok(None);
         };
@@ -354,14 +356,24 @@ impl<'a> Lowerer<'a> {
         body_expr: GrammarExpr,
         anchored_end: bool,
     ) -> GrammarExpr {
-        let body = self.add_string_pattern_body_expr_terminal(body_expr);
-        let name = self.fresh_rule_name("json_string_constrained_part");
+        let split_llguidance_expr = matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative)
+            && anchored_end;
+        let body = if split_llguidance_expr {
+            body_expr
+        } else {
+            self.add_string_pattern_body_expr_terminal(body_expr)
+        };
         let mut parts = vec![lit("\""), body];
         if !anchored_end {
             parts.push(GrammarExpr::Quantified(Box::new(r(JSON_STRING_CHAR_RULE)), Quantifier::ZeroPlus));
         }
         parts.push(lit("\""));
-        self.add_terminal_rule(&name, seq(parts));
+        let expr = seq(parts);
+        if split_llguidance_expr {
+            return expr;
+        }
+        let name = self.fresh_rule_name("json_string_constrained_part");
+        self.add_terminal_rule(&name, expr);
         r(&name)
     }
 
@@ -427,7 +439,7 @@ impl<'a> Lowerer<'a> {
         hir: Hir,
     ) -> ImportResult<Option<(GrammarExpr, bool, bool)>> {
         let (hir, anchored_start, anchored_end) = strip_outer_anchors(hir);
-        let Some(lowered) = self.lower_decoded_regex_hir_to_json_body_expr(&hir)? else {
+        let Some(lowered) = self.lower_decoded_regex_hir_to_json_body_expr_at_start(&hir, true)? else {
             return Ok(None);
         };
         Ok(Some((lowered, anchored_start, anchored_end)))
@@ -436,6 +448,14 @@ impl<'a> Lowerer<'a> {
     fn lower_decoded_regex_hir_to_json_body_expr(
         &mut self,
         hir: &Hir,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        self.lower_decoded_regex_hir_to_json_body_expr_at_start(hir, true)
+    }
+
+    fn lower_decoded_regex_hir_to_json_body_expr_at_start(
+        &mut self,
+        hir: &Hir,
+        at_start: bool,
     ) -> ImportResult<Option<GrammarExpr>> {
         Ok(match hir.kind() {
             HirKind::Empty => Some(GrammarExpr::Epsilon),
@@ -448,33 +468,42 @@ impl<'a> Lowerer<'a> {
                 Some(seq(
                     literal
                         .chars()
-                        .map(json_body_char_expr_for_pattern_literal)
+                        .map(|ch| {
+                            json_body_char_expr_for_pattern_literal_in_mode(
+                                ch,
+                                json_string_compat_mode(),
+                                JsonStringContext::Value,
+                                false,
+                            )
+                        })
                         .collect(),
                 ))
             }
-            HirKind::Class(class) => self.lower_decoded_class_to_json_body_expr(class),
+            HirKind::Class(class) => self.lower_decoded_class_to_json_body_expr(class, at_start),
             HirKind::Look(look) if is_start_look(*look) || is_end_look(*look) => Some(GrammarExpr::Epsilon),
             HirKind::Look(look) => {
                 return Err(SchemaImportError::new(format!(
                     "unsupported zero-width assertion in string pattern: {look:?}"
                 )));
             }
-            HirKind::Repetition(repetition) => self.lower_decoded_repetition_to_json_body_expr(repetition)?,
-            HirKind::Capture(capture) => self.lower_decoded_regex_hir_to_json_body_expr(&capture.sub)?,
+            HirKind::Repetition(repetition) => self.lower_decoded_repetition_to_json_body_expr_at_start(repetition, at_start)?,
+            HirKind::Capture(capture) => self.lower_decoded_regex_hir_to_json_body_expr_at_start(&capture.sub, at_start)?,
             HirKind::Concat(parts) => {
+                let mut current_at_start = at_start;
                 let mut lowered = Vec::with_capacity(parts.len());
                 for part in parts {
-                    let Some(part) = self.lower_decoded_regex_hir_to_json_body_expr(part)? else {
+                    let Some(lowered_part) = self.lower_decoded_regex_hir_to_json_body_expr_at_start(part, current_at_start)? else {
                         return Ok(None);
                     };
-                    lowered.push(part);
+                    lowered.push(lowered_part);
+                    current_at_start = current_at_start && hir_can_match_empty(part);
                 }
                 Some(seq(lowered))
             }
             HirKind::Alternation(parts) => {
                 let mut lowered = Vec::with_capacity(parts.len());
                 for part in parts {
-                    let Some(part) = self.lower_decoded_regex_hir_to_json_body_expr(part)? else {
+                    let Some(part) = self.lower_decoded_regex_hir_to_json_body_expr_at_start(part, at_start)? else {
                         return Ok(None);
                     };
                     lowered.push(part);
@@ -488,7 +517,15 @@ impl<'a> Lowerer<'a> {
         &mut self,
         repetition: &Repetition,
     ) -> ImportResult<Option<GrammarExpr>> {
-        let Some(sub) = self.lower_decoded_regex_hir_to_json_body_expr(&repetition.sub)? else {
+        self.lower_decoded_repetition_to_json_body_expr_at_start(repetition, true)
+    }
+
+    fn lower_decoded_repetition_to_json_body_expr_at_start(
+        &mut self,
+        repetition: &Repetition,
+        at_start: bool,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        let Some(sub) = self.lower_decoded_regex_hir_to_json_body_expr_at_start(&repetition.sub, at_start)? else {
             return Ok(None);
         };
         Ok(Some(match (repetition.min, repetition.max) {
@@ -504,7 +541,11 @@ impl<'a> Lowerer<'a> {
         }))
     }
 
-    fn lower_decoded_class_to_json_body_expr(&mut self, class: &Class) -> Option<GrammarExpr> {
+    fn lower_decoded_class_to_json_body_expr(
+        &mut self,
+        class: &Class,
+        at_start: bool,
+    ) -> Option<GrammarExpr> {
         if is_unicode_decimal_digit_class(class) {
             return Some(self.string_pattern_digit_char_ref());
         }
@@ -524,7 +565,7 @@ impl<'a> Lowerer<'a> {
             if is_dot_like_unicode_class(class) {
                 return Some(self.string_pattern_dot_char_ref());
             }
-            return lower_llguidance_value_pattern_class_expr(class);
+            return lower_llguidance_value_pattern_class_expr(class, at_start);
         }
         None
     }
@@ -532,7 +573,7 @@ impl<'a> Lowerer<'a> {
     fn string_pattern_digit_char_ref(&mut self) -> GrammarExpr {
         const NAME: &str = "JSON_STRING_PATTERN_DIGIT_CHAR";
         if !self.rules.iter().any(|rule| rule.name == NAME) {
-            self.add_internal_terminal_rule(NAME, GrammarExpr::RawRegex("[0-9]".to_string()));
+            self.add_terminal_rule(NAME, GrammarExpr::RawRegex("[0-9]".to_string()));
         }
         r(NAME)
     }
@@ -540,12 +581,25 @@ impl<'a> Lowerer<'a> {
     fn string_pattern_whitespace_char_ref(&mut self) -> GrammarExpr {
         const NAME: &str = "JSON_STRING_PATTERN_WHITESPACE_CHAR";
         if !self.rules.iter().any(|rule| rule.name == NAME) {
-            let alternatives = PATTERN_WHITESPACE_CHARS
+            let mut alternatives = PATTERN_WHITESPACE_CHARS
                 .iter()
                 .copied()
                 .map(json_body_char_expr_for_decoded_char)
                 .collect::<Vec<_>>();
-            self.add_internal_terminal_rule(NAME, choice(alternatives));
+            if matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative) {
+                let mut escape = String::new();
+                escape.push(char::from(92));
+                escape.push_str("u000");
+                alternatives.push(seq(vec![
+                    lit(&escape),
+                    GrammarExpr::CharClass {
+                        def: "9-Da-d".to_string(),
+                        negate: false,
+                        utf8: true,
+                    },
+                ]));
+            }
+            self.add_terminal_rule(NAME, choice(alternatives));
         }
         r(NAME)
     }
@@ -558,7 +612,7 @@ impl<'a> Lowerer<'a> {
                 expr: Box::new(r(JSON_STRING_CHAR_RULE)),
                 exclude: Box::new(whitespace),
             };
-            self.add_internal_terminal_rule(NAME, rule_expr);
+            self.add_terminal_rule(NAME, rule_expr);
         }
         r(NAME)
     }
@@ -569,7 +623,7 @@ impl<'a> Lowerer<'a> {
             .iter()
             .any(|rule| rule.name == JSON_STRING_PATTERN_DOT_CHAR_RULE)
         {
-            self.add_internal_terminal_rule(
+            self.add_terminal_rule(
                 JSON_STRING_PATTERN_DOT_CHAR_RULE,
                 GrammarExpr::RawRegex(
                     json_string_body_dot_regex_in_mode(
@@ -784,6 +838,13 @@ impl<'a> Lowerer<'a> {
             ]));
         }
 
+        if self.llguidance_compat_enabled() && schema.pattern.is_some() {
+            return Ok(seq(vec![
+                self.lower_literal_key_colon_with_prefix(prefix, key),
+                self.lower_string_property_value_expr(schema)?,
+            ]));
+        }
+
         let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
         let mut literal_prefix = Vec::new();
         literal_prefix.extend_from_slice(prefix);
@@ -826,6 +887,13 @@ impl<'a> Lowerer<'a> {
         key: &str,
     ) -> GrammarExpr {
         let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+        if matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative) {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(prefix);
+            bytes.extend_from_slice(encoded.as_bytes());
+            bytes.extend_from_slice(b": ");
+            return lit_bytes(bytes);
+        }
         let encoded_regex = encoded_json_key_regex(&encoded);
         if prefix == b", " {
             GrammarExpr::RawRegex(format!(
@@ -1781,7 +1849,7 @@ fn recognized_string_format_body_regex(format: Option<&str>) -> Option<&'static 
             // into one repeated class.  In particular, '#' is only allowed once as the
             // fragment introducer, so prefixes like "https://##" stay aligned with
             // llguidance without importing its full IPv6/path machinery.
-            r#"[A-Za-z][A-Za-z0-9+.-]*:(?://(?:(?:[A-Za-z0-9._~!$&'()*+,;=:-]|%[0-9A-Fa-f]{2})*@)?(?:\[(?:[A-Fa-f0-9:.]*|[Vv][0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+)\]|(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)(?::[0-9]*)?(?:/(?:[A-Za-z0-9._~:@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)*|(?:/(?:[A-Za-z0-9._~:@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)?|(?:[A-Za-z0-9._~:@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})+(?:/(?:[A-Za-z0-9._~:@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)*)?(?:\?(?:[A-Za-z0-9._~:/?@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)?(?:#(?:[A-Za-z0-9._~:/?@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)?"#,
+            r#"[A-Za-z][A-Za-z0-9+.-]*:(?://(?:(?:[A-Za-z0-9._~!$&'()*+,;=:-]|%[0-9A-Fa-f]{2})*@)?(?:\[(?:(?:[A-Fa-f0-9][A-Fa-f0-9:.]*|:[A-Fa-f0-9:.]*[A-Fa-f0-9][A-Fa-f0-9:.]*)|v[0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+)\]|(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)(?::[0-9]*)?(?:/(?:[A-Za-z0-9._~:@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)*|(?:/(?:[A-Za-z0-9._~:@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)?|(?:[A-Za-z0-9._~:@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})+(?:/(?:[A-Za-z0-9._~:@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)*)?(?:\?(?:[A-Za-z0-9._~:/?@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)?(?:#(?:[A-Za-z0-9._~:/?@!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*)?"#,
         ),
         _ => None,
     }
@@ -1880,6 +1948,18 @@ fn is_end_look(look: Look) -> bool {
 }
 
 
+fn hir_contains_pattern_non_whitespace_class(hir: &Hir) -> bool {
+    match hir.kind() {
+        HirKind::Class(class) => is_unicode_pattern_non_whitespace_class(class),
+        HirKind::Repetition(repetition) => hir_contains_pattern_non_whitespace_class(&repetition.sub),
+        HirKind::Capture(capture) => hir_contains_pattern_non_whitespace_class(&capture.sub),
+        HirKind::Concat(parts) | HirKind::Alternation(parts) => {
+            parts.iter().any(hir_contains_pattern_non_whitespace_class)
+        }
+        _ => false,
+    }
+}
+
 fn hir_can_match_empty(hir: &Hir) -> bool {
     match hir.kind() {
         HirKind::Empty => true,
@@ -1910,26 +1990,20 @@ fn lower_decoded_regex_hir_to_json_body_regex_at_start(
                     "string pattern literal is not valid UTF-8 after parsing: {error}"
                 ))
             })?;
-            let chars = literal.chars().collect::<Vec<_>>();
-            let acronym_start = chars
-                .first()
-                .is_some_and(|ch| ch.is_ascii_uppercase())
-                && chars.get(1).is_some_and(|ch| ch.is_ascii_uppercase());
-            chars
-                .into_iter()
-                .enumerate()
-                .map(|(index, ch)| {
+            literal
+                .chars()
+                .map(|ch| {
                     json_body_char_regex_for_pattern_literal_in_mode(
                         ch,
                         json_string_compat_mode(),
                         context,
-                        at_start && acronym_start && index == 0,
+                        false,
                     )
                 })
                 .collect::<Vec<_>>()
                 .join("")
         }
-        HirKind::Class(class) => lower_decoded_class_to_json_body_regex(class, context),
+        HirKind::Class(class) => lower_decoded_class_to_json_body_regex_at_start(class, context, at_start),
         HirKind::Look(look) if is_start_look(*look) || is_end_look(*look) => String::new(),
         HirKind::Look(look) => {
             return Err(SchemaImportError::new(format!(
@@ -1979,6 +2053,14 @@ fn lower_decoded_repetition_to_json_body_regex(
 }
 
 fn lower_decoded_class_to_json_body_regex(class: &Class, context: JsonStringContext) -> String {
+    lower_decoded_class_to_json_body_regex_at_start(class, context, true)
+}
+
+fn lower_decoded_class_to_json_body_regex_at_start(
+    class: &Class,
+    context: JsonStringContext,
+    at_start: bool,
+) -> String {
     let include_unicode_escapes = !matches!(
         (json_string_compat_mode(), context),
         (JsonStringCompatMode::LlGuidanceNative, JsonStringContext::Value)
@@ -1988,28 +2070,34 @@ fn lower_decoded_class_to_json_body_regex(class: &Class, context: JsonStringCont
         class,
         context,
         include_unicode_escapes,
+        true,
     )
 }
 
 fn lower_decoded_class_to_json_body_regex_without_unicode_escapes(
     class: &Class,
     context: JsonStringContext,
+    at_start: bool,
 ) -> String {
-    lower_decoded_class_to_json_body_regex_with_unicode_escapes(class, context, false)
+    lower_decoded_class_to_json_body_regex_with_unicode_escapes(class, context, false, at_start)
 }
 
 fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
     class: &Class,
     context: JsonStringContext,
     include_unicode_escapes: bool,
+    at_start: bool,
 ) -> String {
     if is_unicode_decimal_digit_class(class) {
         return ascii_json_body_class_regex("[0-9]", b'0'..=b'9', context);
     }
+    let contains_control = class_contains_ascii_control(class);
     let add_ascii_unicode_escape_branch = should_add_ascii_json_unicode_escape_branch(context)
         || (matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative)
             && matches!(context, JsonStringContext::Value)
-            && !is_unicode_pattern_whitespace_class(class));
+            && (!at_start || class_contains_pattern_whitespace(class) || contains_control)
+            && !class_is_ascii_hex_subset(class)
+            && (!class_contains_url_punctuation(class) || contains_control));
     if is_dot_like_unicode_class(class) {
         return json_string_body_dot_regex_in_mode(json_string_compat_mode(), context).to_string();
     }
@@ -2106,10 +2194,11 @@ fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
     }
 }
 
-fn lower_llguidance_value_pattern_class_expr(class: &Class) -> Option<GrammarExpr> {
+fn lower_llguidance_value_pattern_class_expr(class: &Class, at_start: bool) -> Option<GrammarExpr> {
     let raw_regex = lower_decoded_class_to_json_body_regex_without_unicode_escapes(
         class,
         JsonStringContext::Value,
+        at_start,
     );
     if raw_regex == r"[^\s\S]" {
         None
@@ -2284,6 +2373,52 @@ const PATTERN_WHITESPACE_CHARS: &[char] = &[
     '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}',
     '\u{2009}', '\u{200a}', '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}', '\u{3000}',
 ];
+
+fn class_is_ascii_digit_only(class: &Class) -> bool {
+    (0x30u8..=0x39u8).all(|byte| decoded_class_contains(class, char::from(byte)))
+        && [0x2fu8, 0x3au8, b'A', b'a', b'_']
+            .into_iter()
+            .all(|byte| !decoded_class_contains(class, char::from(byte)))
+}
+
+fn class_is_ascii_hex_digit_only(class: &Class) -> bool {
+    (0x30u8..=0x39u8).all(|byte| decoded_class_contains(class, char::from(byte)))
+        && (b'A'..=b'F').all(|byte| decoded_class_contains(class, char::from(byte)))
+        && (b'a'..=b'f').all(|byte| decoded_class_contains(class, char::from(byte)))
+        && [0x2fu8, 0x3au8, b'G', b'g', b'_']
+            .into_iter()
+            .all(|byte| !decoded_class_contains(class, char::from(byte)))
+}
+
+fn class_is_ascii_hex_subset(class: &Class) -> bool {
+    let mut any = false;
+    for byte in 0u8..=0x7f {
+        if decoded_class_contains(class, char::from(byte)) {
+            any = true;
+            if !byte.is_ascii_hexdigit() {
+                return false;
+            }
+        }
+    }
+    any
+}
+
+fn class_contains_ascii_control(class: &Class) -> bool {
+    (0u8..=0x1f).any(|byte| decoded_class_contains(class, char::from(byte)))
+}
+
+fn class_contains_url_punctuation(class: &Class) -> bool {
+    [b'!', b'$', b'&', b'\'', b'(', b')', b'*', b'+', b',', b';', b'=', b'@', b'~']
+        .into_iter()
+        .any(|byte| decoded_class_contains(class, char::from(byte)))
+}
+
+fn class_contains_pattern_whitespace(class: &Class) -> bool {
+    PATTERN_WHITESPACE_CHARS
+        .iter()
+        .copied()
+        .any(|ch| decoded_class_contains(class, ch))
+}
 
 fn is_unicode_pattern_whitespace_class(class: &Class) -> bool {
     PATTERN_WHITESPACE_CHARS.iter().copied().all(|ch| decoded_class_contains(class, ch))
@@ -2603,6 +2738,7 @@ fn json_body_char_expr_for_pattern_literal(ch: char) -> GrammarExpr {
         ch,
         json_string_compat_mode(),
         JsonStringContext::Value,
+        false,
     )
 }
 
@@ -2610,14 +2746,18 @@ fn json_body_char_expr_for_pattern_literal_in_mode(
     ch: char,
     mode: JsonStringCompatMode,
     context: JsonStringContext,
+    at_start: bool,
 ) -> GrammarExpr {
     let canonical = GrammarExpr::RawRegex(json_body_char_regex_for_decoded_char_in_mode(
         ch,
         mode,
         context,
     ));
+    if !should_allow_json_unicode_escape_for_pattern_literal(ch) {
+        return canonical;
+    }
     if mode == JsonStringCompatMode::LlGuidanceNative
-        || !should_allow_json_unicode_escape_for_pattern_literal(ch)
+        && !(matches!(context, JsonStringContext::Value) && at_start)
     {
         return canonical;
     }

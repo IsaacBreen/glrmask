@@ -54,7 +54,11 @@ impl<'a> Lowerer<'a> {
         if open_object_any_of_covers_json_object(&factoring_branches) {
             return Ok(r(JSON_OBJECT_RULE));
         }
-        let factoring_branches = self.drop_subsumed_open_object_any_of_branches(factoring_branches)?;
+        let factoring_branches = if self.llguidance_compat_enabled() {
+            factoring_branches
+        } else {
+            self.drop_subsumed_open_object_any_of_branches(factoring_branches)?
+        };
         if let Some(expr) =
             self.try_lower_closed_object_any_of_variants(
                 &factoring_branches,
@@ -2698,6 +2702,14 @@ fn merge_all_of_object_like_schema(branches: &[Schema]) -> Option<Schema> {
         }
     }
 
+    for i in 0..objects.len() {
+        for j in (i + 1)..objects.len() {
+            if closed_object_required_conflict(&objects[i], &objects[j]) {
+                return Some(Schema::never("<merged-allOf-object-like:closed-required-conflict>"));
+            }
+        }
+    }
+
     if objects.is_empty() {
         return has_explicit_object_only_type.then(|| {
             Schema::assertions(
@@ -2926,6 +2938,28 @@ fn merge_array_bounds(left: &mut ArraySchema, right: &ArraySchema) {
     };
 }
 
+
+pub(crate) 
+fn closed_object_required_conflict(left: &ObjectSchema, right: &ObjectSchema) -> bool {
+    let Some(left_allowed) = closed_object_allowed_properties(left) else {
+        return false;
+    };
+    let Some(right_allowed) = closed_object_allowed_properties(right) else {
+        return false;
+    };
+    left.required.iter().any(|name| !right_allowed.contains(name))
+        || right.required.iter().any(|name| !left_allowed.contains(name))
+}
+
+fn closed_object_allowed_properties(object: &ObjectSchema) -> Option<BTreeSet<String>> {
+    if !matches!(object.additional_properties, AdditionalProperties::Deny)
+        || !object.pattern_properties.is_empty()
+        || object.property_names.is_some()
+    {
+        return None;
+    }
+    Some(object.properties.iter().map(|property| property.name.clone()).collect())
+}
 
 pub(crate) fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSchema {
     let mut merged = left.clone();
