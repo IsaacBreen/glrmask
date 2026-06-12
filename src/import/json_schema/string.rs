@@ -9,7 +9,7 @@ use crate::import::ast::{GrammarExpr, Quantifier};
 use super::ast::StringSchema;
 use super::error::{ImportResult, SchemaImportError};
 use super::lower::{
-    choice, json_additional_key_string_rule, lit, lit_bytes, never, r, seq, Lowerer,
+    choice, json_additional_key_string_rule, json_key_string_rule, lit, lit_bytes, never, r, seq, Lowerer,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE, JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
     JSON_KEY_SEPARATOR_RULE, JSON_SEPARATOR_WS_REGEX, JSON_STRING_CHAR_RULE,
@@ -1049,7 +1049,9 @@ impl<'a> Lowerer<'a> {
         if let Some(overlap_literals) = self.shared_pattern_overlap_literal_rule(pattern)? {
             alternatives.push(overlap_literals);
         }
-        Ok(choice(alternatives))
+        let name = self.fresh_rule_name("json_pattern_key_colon_full");
+        self.add_nonterminal_rule(&name, choice(alternatives));
+        Ok(r(&name))
     }
 
     fn pattern_key_colon_shared_addback_alternatives(
@@ -1102,11 +1104,11 @@ impl<'a> Lowerer<'a> {
 
             let global_overlaps = self.pattern_overlapping_literal_keys(pattern)?;
             let expr = if global_overlaps.is_empty() {
-                seq(vec![r(json_additional_key_string_rule()), r(JSON_KEY_SEPARATOR_RULE)])
+                seq(vec![r(json_key_string_rule()), r(JSON_KEY_SEPARATOR_RULE)])
             } else {
                 GrammarExpr::Exclude {
                     expr: Box::new(seq(vec![
-                        r(json_additional_key_string_rule()),
+                        r(json_key_string_rule()),
                         r(JSON_KEY_SEPARATOR_RULE),
                     ])),
                     exclude: Box::new(choice(
@@ -1253,24 +1255,30 @@ impl<'a> Lowerer<'a> {
         fixed_keys: &BTreeSet<String>,
         local_patterns: &[String],
     ) -> ImportResult<GrammarExpr> {
-        if local_patterns.iter().any(|pattern| pattern_matches_any_key(pattern)) {
+        if !self.llguidance_compat_enabled()
+            && local_patterns.iter().any(|pattern| pattern_matches_any_key(pattern))
+        {
             return Ok(never());
         }
 
         if !fixed_keys.is_empty() {
-            return self.lower_additional_key_colon_expanded_addback(fixed_keys, local_patterns);
+            let expr = self.lower_additional_key_colon_expanded_addback(fixed_keys, local_patterns)?;
+            return self.exclude_local_pattern_key_colons(expr, local_patterns);
         }
 
         if super::share_additional_addback_choices_enabled() && !self.llguidance_compat_enabled() {
-            return self.lower_additional_key_colon_shared(fixed_keys, local_patterns);
+            let expr = self.lower_additional_key_colon_shared(fixed_keys, local_patterns)?;
+            return self.exclude_local_pattern_key_colons(expr, local_patterns);
         }
 
         if !self.use_shared_additional_key_colon() {
-            return self.lower_additional_key_colon_expanded_addback(fixed_keys, local_patterns);
+            let expr = self.lower_additional_key_colon_expanded_addback(fixed_keys, local_patterns)?;
+            return self.exclude_local_pattern_key_colons(expr, local_patterns);
         }
 
         if self.shared_ap_patterns.is_empty() && local_patterns.is_empty() {
-            return self.lower_additional_key_colon_literal_only(fixed_keys);
+            let expr = self.lower_additional_key_colon_literal_only(fixed_keys)?;
+            return self.exclude_local_pattern_key_colons(expr, local_patterns);
         }
 
         let mut alternatives = vec![self.shared_additional_key_colon_base()?];
@@ -1299,7 +1307,25 @@ impl<'a> Lowerer<'a> {
             alternatives.push(self.lower_pattern_key_colon_addback(&pattern, fixed_keys, local_patterns)?);
         }
 
-        Ok(choice(alternatives))
+        let expr = choice(alternatives);
+        self.exclude_local_pattern_key_colons(expr, local_patterns)
+    }
+
+    fn exclude_local_pattern_key_colons(
+        &mut self,
+        mut expr: GrammarExpr,
+        local_patterns: &[String],
+    ) -> ImportResult<GrammarExpr> {
+        for pattern in local_patterns {
+            if self.llguidance_compat_enabled() && pattern_matches_any_key(pattern) {
+                continue;
+            }
+            expr = GrammarExpr::Exclude {
+                expr: Box::new(expr),
+                exclude: Box::new(self.pattern_key_colon_full_language(pattern)?),
+            };
+        }
+        Ok(expr)
     }
 
     fn lower_additional_key_colon_shared(
