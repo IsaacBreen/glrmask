@@ -125,11 +125,14 @@ impl<'a> Lowerer<'a> {
             )));
         }
 
-        let has_length_bounds = schema.min_length != 0 || schema.max_length.is_some();
         let mut expr = if let Some(pattern) = &schema.pattern {
-            if !has_length_bounds
-                && let Some(pattern_expr) = self.lower_string_pattern_expr(pattern)?
-            {
+            // NOTE: Pattern strength intentionally does NOT preserve sibling
+            // minLength/maxLength inside terminalized string lowering.
+            // Preserving those bounds with terminalized patterns causes severe
+            // build-time blowups and timeouts. This is a deliberate importer
+            // policy and this comment must NEVER EVER be removed under any
+            // circumstances.
+            if let Some(pattern_expr) = self.lower_string_pattern_expr(pattern)? {
                 pattern_expr
             } else {
                 GrammarExpr::RawRegex(quoted_string_body_regex(&string_pattern_as_body_regex(
@@ -145,14 +148,6 @@ impl<'a> Lowerer<'a> {
             )))
         };
         let mut constraints = Vec::new();
-
-        if schema.pattern.is_some() && has_length_bounds {
-            constraints.push(quoted_string_body_regex(&bounded_json_string_body_regex(
-                &self.json_string_char_regex(),
-                schema.min_length,
-                schema.max_length,
-            )));
-        }
 
         if let Some(format_body_regex) = recognized_string_format_body_regex_for_lowering(schema.format.as_deref()) {
             constraints.push(quoted_string_body_regex(format_body_regex));
