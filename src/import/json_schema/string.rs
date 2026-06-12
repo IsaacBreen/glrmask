@@ -900,7 +900,7 @@ impl<'a> Lowerer<'a> {
             bytes.extend_from_slice(prefix);
             bytes.extend_from_slice(encoded.as_bytes());
             bytes.extend_from_slice(b": ");
-            return GrammarExpr::RawRegex(regex::escape(&String::from_utf8_lossy(&bytes)));
+            return lit_bytes(bytes);
         }
         let encoded_regex = encoded_json_key_regex(&encoded);
         if prefix == b", " {
@@ -2078,7 +2078,7 @@ fn lower_decoded_class_to_json_body_regex_at_start(
         class,
         context,
         include_unicode_escapes,
-        at_start,
+        true,
     )
 }
 
