@@ -189,6 +189,13 @@ impl<'a> Lowerer<'a> {
         {
             return Ok(None);
         }
+        let (_body_hir, anchored_start, anchored_end) = strip_outer_anchors(hir.clone());
+        if anchored_start && anchored_end {
+            // A fully anchored value pattern is already a single terminal language;
+            // splitting it into per-regex-symbol grammar items only moves lexer work
+            // into the parser and creates very slow per-character TBM paths.
+            return Ok(None);
+        }
         let Some(branches) = self.lower_string_pattern_hir_branch_expr_parts(hir)? else {
             return Ok(None);
         };
