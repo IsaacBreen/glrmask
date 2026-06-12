@@ -2855,6 +2855,46 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.popn(1)
     }
 
+    /// Return the stack obtained by keeping only top-level paths whose top value
+    /// is `value`, then popping that top value.
+    ///
+    /// This is equivalent to `self.isolate(Some(value.clone())).popn(1)`, but it
+    /// avoids rebuilding the isolated top layer for the common Interface/General
+    /// frontier shape produced by small GLR waves.
+    pub fn pop_top_value(&self, value: &T) -> Self {
+        match &*self.inner {
+            Upper::Interface(interface) => {
+                let popped = match &*interface.inner {
+                    Lower::Segment(_) => {
+                        if interface.inner.segment_top_value() == value {
+                            interface.inner.segment_rest_arc()
+                        } else {
+                            return Self::empty();
+                        }
+                    }
+                    Lower::General { children, .. } => {
+                        let Some(kids) = children.get(value) else {
+                            return Self::empty();
+                        };
+                        let mut iter = kids.values();
+                        let Some(first) = iter.next() else {
+                            return Self::empty();
+                        };
+                        iter.fold(first.clone(), |acc, child| merge_lower(&acc, child))
+                    }
+                };
+                if popped.children_is_empty() && !popped.empty() {
+                    Self::empty()
+                } else {
+                    Self {
+                        inner: new_interface(popped, interface.acc.clone()),
+                    }
+                }
+            }
+            Upper::Branch(_) => self.isolate(Some(value.clone())).popn(1),
+        }
+    }
+
     /// Fast path for a top-level interface whose alternatives all share the
     /// same base after popping one value.
     pub fn pop1_common_interface_base(&self) -> Option<Self> {
