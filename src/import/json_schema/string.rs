@@ -2095,7 +2095,7 @@ fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
     let add_ascii_unicode_escape_branch = should_add_ascii_json_unicode_escape_branch(context)
         || (matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative)
             && matches!(context, JsonStringContext::Value)
-            && (!at_start || class_contains_pattern_whitespace(class) || contains_control)
+            && (class_contains_pattern_whitespace(class) || contains_control)
             && !class_is_ascii_hex_subset(class)
             && (!class_contains_url_punctuation(class) || contains_control));
     if is_dot_like_unicode_class(class) {
