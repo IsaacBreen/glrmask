@@ -528,7 +528,7 @@ impl<'a> Lowerer<'a> {
         let Some(sub) = self.lower_decoded_regex_hir_to_json_body_expr_at_start(&repetition.sub, at_start)? else {
             return Ok(None);
         };
-        Ok(Some(match (repetition.min, repetition.max) {
+        let expr = match (repetition.min, repetition.max) {
             (0, Some(0)) => GrammarExpr::Epsilon,
             (0, None) => GrammarExpr::Quantified(Box::new(sub), Quantifier::ZeroPlus),
             (1, None) => GrammarExpr::Quantified(Box::new(sub), Quantifier::OnePlus),
@@ -538,7 +538,8 @@ impl<'a> Lowerer<'a> {
                 GrammarExpr::Quantified(Box::new(sub.clone()), Quantifier::Range(min.try_into().unwrap(), Some(min.try_into().unwrap()))),
                 GrammarExpr::Quantified(Box::new(sub), Quantifier::ZeroPlus),
             ]),
-        }))
+        };
+        Ok(Some(simplify_nested_regex_repetition_expr(expr)))
     }
 
     fn lower_decoded_class_to_json_body_expr(
@@ -839,9 +840,21 @@ impl<'a> Lowerer<'a> {
         }
 
         if self.llguidance_compat_enabled() && schema.pattern.is_some() {
+            let value = self.lower_string_property_value_expr(schema)?;
+            if llguidance_property_value_expr_is_safe_to_fuse(&value) {
+                let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+                let mut literal_prefix = Vec::new();
+                literal_prefix.extend_from_slice(prefix);
+                literal_prefix.extend_from_slice(encoded.as_bytes());
+                literal_prefix.extend_from_slice(b": ");
+                let expr = prepend_literal_prefix_to_expr(literal_prefix, value);
+                let name = self.fresh_rule_name("json_property_string_value");
+                self.add_terminal_rule(&name, expr);
+                return Ok(r(&name));
+            }
             return Ok(seq(vec![
                 self.lower_literal_key_colon_with_prefix(prefix, key),
-                self.lower_string_property_value_expr(schema)?,
+                value,
             ]));
         }
 
@@ -892,7 +905,7 @@ impl<'a> Lowerer<'a> {
             bytes.extend_from_slice(prefix);
             bytes.extend_from_slice(encoded.as_bytes());
             bytes.extend_from_slice(b": ");
-            return lit_bytes(bytes);
+            return GrammarExpr::RawRegex(regex::escape(&String::from_utf8_lossy(&bytes)));
         }
         let encoded_regex = encoded_json_key_regex(&encoded);
         if prefix == b", " {
@@ -2070,7 +2083,7 @@ fn lower_decoded_class_to_json_body_regex_at_start(
         class,
         context,
         include_unicode_escapes,
-        true,
+        at_start,
     )
 }
 
@@ -2095,7 +2108,7 @@ fn lower_decoded_class_to_json_body_regex_with_unicode_escapes(
     let add_ascii_unicode_escape_branch = should_add_ascii_json_unicode_escape_branch(context)
         || (matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative)
             && matches!(context, JsonStringContext::Value)
-            && (class_contains_pattern_whitespace(class) || contains_control)
+            && contains_control
             && !class_is_ascii_hex_subset(class)
             && (!class_contains_url_punctuation(class) || contains_control));
     if is_dot_like_unicode_class(class) {
@@ -2659,6 +2672,50 @@ fn prepend_literal_prefix_to_expr(prefix: Vec<u8>, expr: GrammarExpr) -> Grammar
             intersect: Box::new(prepend_literal_prefix_to_expr(prefix, *intersect)),
         },
         other => seq(vec![lit_bytes(prefix), other]),
+    }
+}
+
+fn simplify_nested_regex_repetition_expr(expr: GrammarExpr) -> GrammarExpr {
+    match expr {
+        GrammarExpr::Quantified(inner, outer) => match *inner {
+            GrammarExpr::Quantified(grandchild, inner_quantifier) => {
+                if let Some(merged) = merge_nested_regex_quantifiers(&inner_quantifier, &outer) {
+                    GrammarExpr::Quantified(grandchild, merged)
+                } else {
+                    GrammarExpr::Quantified(
+                        Box::new(GrammarExpr::Quantified(grandchild, inner_quantifier)),
+                        outer,
+                    )
+                }
+            }
+            other => GrammarExpr::Quantified(Box::new(other), outer),
+        },
+        other => other,
+    }
+}
+
+fn llguidance_property_value_expr_is_safe_to_fuse(expr: &GrammarExpr) -> bool {
+    match expr {
+        GrammarExpr::Literal(_) | GrammarExpr::CharClass { .. } | GrammarExpr::Epsilon => true,
+        GrammarExpr::RawRegex(regex) => !regex.contains(char::from(92)),
+        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+            parts.iter().all(llguidance_property_value_expr_is_safe_to_fuse)
+        }
+        GrammarExpr::Quantified(inner, _) | GrammarExpr::Grouped(inner) => {
+            llguidance_property_value_expr_is_safe_to_fuse(inner)
+        }
+        _ => false,
+    }
+}
+
+fn merge_nested_regex_quantifiers(inner: &Quantifier, outer: &Quantifier) -> Option<Quantifier> {
+    use Quantifier::{OnePlus, Optional, ZeroPlus};
+    match (inner, outer) {
+        (ZeroPlus, ZeroPlus | OnePlus | Optional) => Some(ZeroPlus),
+        (OnePlus, ZeroPlus) => Some(ZeroPlus),
+        (OnePlus, OnePlus) => Some(OnePlus),
+        (Optional, ZeroPlus | OnePlus) => Some(ZeroPlus),
+        _ => None,
     }
 }
 
