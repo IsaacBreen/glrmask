@@ -1054,6 +1054,10 @@ impl<'a> Lowerer<'a> {
         Ok(r(&name))
     }
 
+    fn pattern_key_colon_full_terminal_language(&self, pattern: &str) -> ImportResult<GrammarExpr> {
+        Ok(GrammarExpr::RawRegex(pattern_key_colon_regex(pattern)?))
+    }
+
     fn pattern_key_colon_shared_addback_alternatives(
         &mut self,
         pattern: &str,
@@ -1102,15 +1106,17 @@ impl<'a> Lowerer<'a> {
                 return Ok(r(rule_name));
             }
 
+            let key_string_rule = if preprocess_ascii_shorthand(pattern).is_empty() {
+                json_additional_key_string_rule()
+            } else {
+                json_key_string_rule()
+            };
             let global_overlaps = self.pattern_overlapping_literal_keys(pattern)?;
             let expr = if global_overlaps.is_empty() {
-                seq(vec![r(json_key_string_rule()), r(JSON_KEY_SEPARATOR_RULE)])
+                seq(vec![r(key_string_rule), r(JSON_KEY_SEPARATOR_RULE)])
             } else {
                 GrammarExpr::Exclude {
-                    expr: Box::new(seq(vec![
-                        r(json_key_string_rule()),
-                        r(JSON_KEY_SEPARATOR_RULE),
-                    ])),
+                    expr: Box::new(seq(vec![r(key_string_rule), r(JSON_KEY_SEPARATOR_RULE)])),
                     exclude: Box::new(choice(
                         global_overlaps
                             .iter()
@@ -1255,9 +1261,11 @@ impl<'a> Lowerer<'a> {
         fixed_keys: &BTreeSet<String>,
         local_patterns: &[String],
     ) -> ImportResult<GrammarExpr> {
-        if !self.llguidance_compat_enabled()
-            && local_patterns.iter().any(|pattern| pattern_matches_any_key(pattern))
-        {
+        if local_patterns.iter().any(|pattern| {
+            pattern_matches_any_key(pattern)
+                && !(self.llguidance_compat_enabled()
+                    && llguidance_preserves_additional_path_for_any_key_pattern(pattern))
+        }) {
             return Ok(never());
         }
 
@@ -1317,12 +1325,14 @@ impl<'a> Lowerer<'a> {
         local_patterns: &[String],
     ) -> ImportResult<GrammarExpr> {
         for pattern in local_patterns {
-            if self.llguidance_compat_enabled() && pattern_matches_any_key(pattern) {
+            if self.llguidance_compat_enabled()
+                && llguidance_preserves_additional_path_for_any_key_pattern(pattern)
+            {
                 continue;
             }
             expr = GrammarExpr::Exclude {
                 expr: Box::new(expr),
-                exclude: Box::new(self.pattern_key_colon_full_language(pattern)?),
+                exclude: Box::new(self.pattern_key_colon_full_terminal_language(pattern)?),
             };
         }
         Ok(expr)
@@ -1479,13 +1489,18 @@ impl<'a> Lowerer<'a> {
             for key in self.shared_ap_literal_keys.clone() {
                 excluded.push(self.lower_literal_key_colon(&key));
             }
+            let mut terminal_excluded = excluded.clone();
             for pattern in self.shared_ap_patterns.clone() {
                 excluded.push(self.pattern_key_colon_full_language(&pattern)?);
+                terminal_excluded.push(self.pattern_key_colon_full_terminal_language(&pattern)?);
             }
 
             let expr = choice(excluded);
-            self.add_nonterminal_rule(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE, expr.clone());
-            self.add_internal_terminal_rule(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE, expr);
+            self.add_nonterminal_rule(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE, expr);
+            self.add_internal_terminal_rule(
+                JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE,
+                choice(terminal_excluded),
+            );
             self.shared_ap_excluded_rule =
                 Some(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE.to_string());
             return Ok(r(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE));
@@ -1500,7 +1515,7 @@ impl<'a> Lowerer<'a> {
         }
         for pattern in self.shared_ap_patterns.clone() {
             excluded.extend(self.pattern_key_colon_shared_addback_alternatives(&pattern)?);
-            terminal_excluded.push(GrammarExpr::RawRegex(pattern_key_colon_regex(&pattern)?));
+            terminal_excluded.push(self.pattern_key_colon_full_terminal_language(&pattern)?);
         }
 
         let expr = choice(excluded);
@@ -1565,39 +1580,23 @@ impl<'a> Lowerer<'a> {
         fixed_keys: &BTreeSet<String>,
         local_patterns: &[String],
     ) -> ImportResult<GrammarExpr> {
-        let mut pattern_expr = self.lower_pattern_key_colon_terminal(pattern)?;
+        let mut pattern_expr = self.pattern_key_colon_full_terminal_language(pattern)?;
+        for key in fixed_keys {
+            if property_name_matches_pattern(pattern, key)? {
+                pattern_expr = GrammarExpr::Exclude {
+                    expr: Box::new(pattern_expr),
+                    exclude: Box::new(self.lower_literal_key_colon_exact_with_prefix(b"", key)),
+                };
+            }
+        }
         for local_pattern in local_patterns {
             pattern_expr = GrammarExpr::Exclude {
                 expr: Box::new(pattern_expr),
-                exclude: Box::new(self.pattern_key_colon_full_language(local_pattern)?),
+                exclude: Box::new(self.pattern_key_colon_full_terminal_language(local_pattern)?),
             };
         }
 
-        let mut alternatives = vec![pattern_expr];
-        let overlap_keys = self.pattern_overlapping_literal_keys(pattern)?;
-        let mut addback_literals = Vec::new();
-        'keys: for key in &overlap_keys {
-            if fixed_keys.contains(key) {
-                continue;
-            }
-            for local_pattern in local_patterns {
-                if property_name_matches_pattern(local_pattern, key)? {
-                    continue 'keys;
-                }
-            }
-            addback_literals.push(self.lower_literal_key_colon(key));
-        }
-        if !addback_literals.is_empty() {
-            alternatives.push(choice(addback_literals));
-        }
-
-        if alternatives.len() == 1 {
-            return Ok(alternatives.remove(0));
-        }
-
-        let name = self.fresh_rule_name("json_pattern_key_colon_addback");
-        self.add_nonterminal_rule(&name, choice(alternatives));
-        Ok(r(&name))
+        Ok(pattern_expr)
     }
 
     fn string_body_for_length(&mut self, min: usize, max: Option<usize>) -> GrammarExpr {
@@ -1690,6 +1689,10 @@ pub(crate) fn preprocess_ascii_shorthand(pattern: &str) -> String {
 }
 
 fn pattern_matches_any_key(pattern: &str) -> bool {
+    matches!(preprocess_ascii_shorthand(pattern).as_str(), "" | ".*" | "^.*$")
+}
+
+fn llguidance_preserves_additional_path_for_any_key_pattern(pattern: &str) -> bool {
     matches!(preprocess_ascii_shorthand(pattern).as_str(), ".*" | "^.*$")
 }
 
@@ -1944,7 +1947,11 @@ fn recognized_string_format_body_regex(format: Option<&str>) -> Option<&'static 
 }
 
 fn pattern_key_colon_regex(pattern: &str) -> ImportResult<String> {
-    let context = JsonStringContext::KeyStrict;
+    let context = if preprocess_ascii_shorthand(pattern).is_empty() {
+        JsonStringContext::KeyAdditional
+    } else {
+        JsonStringContext::KeyStrict
+    };
     let body = string_pattern_as_body_regex(pattern, context)?;
     Ok(format!(r#""{body}":{JSON_SEPARATOR_WS_REGEX}"#))
 }
