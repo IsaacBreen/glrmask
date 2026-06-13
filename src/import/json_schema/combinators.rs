@@ -2732,6 +2732,23 @@ fn merge_all_of_object_like_schema(branches: &[Schema]) -> Option<Schema> {
         let SchemaKind::Assertions(assertions) = object_like.kind else {
             return None;
         };
+        if assertions.const_value.is_some()
+            || assertions.enum_values.is_some()
+            || assertions.array.is_some()
+            || assertions.string.is_some()
+            || assertions.number.is_some()
+            || !assertions.any_of.is_empty()
+            || !assertions.one_of.is_empty()
+            || !assertions.all_of.is_empty()
+            || assertions.not.is_some()
+        {
+            return None;
+        }
+        if let Some(types) = &assertions.types
+            && !types.iter().all(|schema_type| *schema_type == SchemaType::Object)
+        {
+            return None;
+        }
         if let Some(object) = assertions.object {
             objects.push(object.clone());
         }
@@ -3100,7 +3117,8 @@ fn is_vacuous_object_schema(schema: &Schema) -> bool {
     if !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
         return false;
     }
-    option_objects_shape_equivalent(assertions.object.as_ref(), Some(&ObjectSchema::default()))
+    (assertions.object.is_none()
+        || option_objects_shape_equivalent(assertions.object.as_ref(), Some(&ObjectSchema::default())))
         && assertions.array.is_none()
         && assertions.string.is_none()
         && assertions.number.is_none()
