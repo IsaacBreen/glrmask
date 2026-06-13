@@ -1777,20 +1777,32 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
         }
 
+        fn intern_lower<T: Clone + Eq + Hash>(
+            node: Arc<Lower<T>>,
+            pool: &mut Vec<Arc<Lower<T>>>,
+        ) -> Arc<Lower<T>> {
+            if let Some(existing) = pool.iter().find(|existing| ***existing == *node) {
+                return existing.clone();
+            }
+            pool.push(node.clone());
+            node
+        }
+
         fn build_lower<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
             d: &StdHashMap<T, Entry<T, A>>,
+            pool: &mut Vec<Arc<Lower<T>>>,
         ) -> Arc<Lower<T>> {
             let mut l_children: Children<T, Lower<T>> = CompactMap::new();
             for (v, e) in d.iter() {
                 let sub_children = if e.sub.is_empty() {
                     CompactMap::new()
                 } else {
-                    build_lower(&e.sub).children()
+                    build_lower(&e.sub, pool).children()
                 };
-                let node_for_v = new_lower(sub_children, e.end.is_some());
+                let node_for_v = intern_lower(new_lower(sub_children, e.end.is_some()), pool);
                 l_children.insert(v.clone(), CompactOrdMap::unit(node_for_v.max_depth(), node_for_v));
             }
-            new_lower(l_children, false)
+            intern_lower(new_lower(l_children, false), pool)
         }
 
         fn build_upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
@@ -1836,8 +1848,12 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
                 if accs.len() <= 1 {
                     if let Some(the_acc) = accs.into_iter().next() {
-                        let lower_tree = build_lower(d);
-                        let lower_root = new_lower(lower_tree.children(), root_empty.is_some());
+                        let mut lower_pool = Vec::new();
+                        let lower_tree = build_lower(d, &mut lower_pool);
+                        let lower_root = intern_lower(
+                            new_lower(lower_tree.children(), root_empty.is_some()),
+                            &mut lower_pool,
+                        );
                         return new_interface(lower_root, the_acc);
                     } else {
                         return empty_upper_inner();
@@ -4518,15 +4534,15 @@ mod tests {
 
 
     #[test]
-    fn shared_suffix_single_branches_materialize_duplicate_lower_segments() {
+    fn shared_suffix_single_branches_share_one_lower_segment() {
         // Abstract MRE for the GSS shape seen in CFA o13029 before committing
         // token ` [],`: eleven stacks differ only in the top value and share a
         // four-state suffix. This is intentionally independent of LR parsing,
         // tokenization, commit, and the JSON Schema importer.
         //
-        // Expected ideal shape:
+        // Expected shape:
         //   Interface -> General(top values 100..110) -> one shared Segment [0,1,12,30]
-        // Current shape materializes one Lower::Segment per top-value path.
+        // The empty floor is also represented as a Lower::General.
         let acc = TestAcc(7);
         let stacks: Vec<_> = (100_u32..111)
             .map(|top| (vec![0_u32, 1, 12, 30, top], acc.clone()))
@@ -4539,8 +4555,8 @@ mod tests {
         assert_eq!(flattened.len(), 11, "flattened={flattened:#?}");
         assert_eq!(summary.top_values_count, 11, "summary={summary:#?} flattened={flattened:#?}");
         assert_eq!(summary.interface_nodes, 1, "summary={summary:#?} flattened={flattened:#?}");
-        assert_eq!(summary.lower_general_nodes, 12, "summary={summary:#?} flattened={flattened:#?}");
-        assert_eq!(summary.lower_segment_nodes, 11, "summary={summary:#?} flattened={flattened:#?}");
+        assert_eq!(summary.lower_general_nodes, 2, "summary={summary:#?} flattened={flattened:#?}");
+        assert_eq!(summary.lower_segment_nodes, 1, "summary={summary:#?} flattened={flattened:#?}");
         assert_eq!(summary.max_depth, 5, "summary={summary:#?} flattened={flattened:#?}");
     }
 
