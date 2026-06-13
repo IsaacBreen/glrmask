@@ -1281,6 +1281,20 @@ impl<'a> Lowerer<'a> {
         }
 
         if !fixed_keys.is_empty() {
+            if local_patterns.is_empty() && self.llguidance_compat_enabled() {
+                let excluded = fixed_keys
+                    .iter()
+                    .map(|key| self.lower_literal_key_colon_exact_with_prefix(b"", key))
+                    .collect::<Vec<_>>();
+                let expr = GrammarExpr::Exclude {
+                    expr: Box::new(seq(vec![
+                        r(json_additional_key_string_rule()),
+                        self.key_separator_expr(),
+                    ])),
+                    exclude: Box::new(choice(excluded)),
+                };
+                return Ok(expr);
+            }
             let expr = if super::share_additional_addback_choices_enabled()
                 && !self.use_shared_additional_key_colon()
                 && local_patterns.is_empty()

@@ -819,6 +819,114 @@ fn map_only_typed_additional_properties_repeat_with_separators() {
     ));
 }
 
+
+
+#[test]
+fn llguidance_allof_child_required_prefix_rejects_optional_anyof_key_first() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "definitions": {
+            "child": {
+                "allOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "match": {"type": "string"},
+                            "browser": {"type": "string"}
+                        },
+                        "required": ["match"]
+                    },
+                    {
+                        "anyOf": [
+                            {"properties": {"devices": {"type": "object"}}},
+                            {"properties": {"device": {"type": "string"}}}
+                        ]
+                    },
+                    {
+                        "properties": {
+                            "platforms": {"type": "array", "items": {"type": "string"}},
+                            "engine": {"type": "string"}
+                        }
+                    }
+                ]
+            }
+        },
+        "type": "object",
+        "properties": {
+            "children": {
+                "type": "array",
+                "items": {"$ref": "#/definitions/child"}
+            }
+        },
+        "required": ["children"]
+    });
+
+    assert!(!schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{"children": [{""#,
+        67,
+        b"d",
+    ));
+}
+
+#[test]
+fn llguidance_additional_key_inside_pattern_property_anyof_accepts_escaped_solidus() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "ctx": {
+                "type": "object",
+                "patternProperties": {
+                    "^[0-9a-zA-Z_-]{1,255}$": {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "a": {"type": "string"},
+                                    "b": {"type": "number"},
+                                    "c": {
+                                        "type": "object",
+                                        "properties": {
+                                            "key": {"type": "string"},
+                                            "value": {"type": "string"}
+                                        },
+                                        "additionalProperties": false
+                                    }
+                                }
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "name": {"type": "string"},
+                                    "tags": {"type": "object"}
+                                }
+                            }
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            }
+        }
+    });
+
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{"ctx": {"key1": {""#,
+        4844,
+        br#"\/"#,
+    ));
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{"ctx": {"key1": {"a": "Example string", "b":"#,
+        259,
+        b" t",
+    ));
+}
+
 #[test]
 fn llguidance_additional_property_accepts_escaped_solidus_key() {
     let _lock = ENV_LOCK.lock().unwrap();

@@ -56,10 +56,16 @@ impl<'a> Lowerer<'a> {
             || assertions.types.as_ref().is_some_and(|types| {
                 types.iter().all(|schema_type| *schema_type == SchemaType::Object)
             });
-        if open_object_any_of_covers_json_object(&factoring_branches) {
+        if !self.llguidance_compat_enabled()
+            && open_object_any_of_covers_json_object(&factoring_branches)
+        {
             return Ok(r(JSON_OBJECT_RULE));
         }
-        let factoring_branches = self.drop_subsumed_open_object_any_of_branches(factoring_branches)?;
+        let factoring_branches = if self.llguidance_compat_enabled() {
+            factoring_branches
+        } else {
+            self.drop_subsumed_open_object_any_of_branches(factoring_branches)?
+        };
         if let Some(expr) =
             self.try_lower_closed_object_any_of_variants(
                 &factoring_branches,
@@ -2783,8 +2789,8 @@ impl<'a> Lowerer<'a> {
                 .into_iter()
                 .map(|alternative| {
                     let mut all_of = Vec::with_capacity(object_siblings.len() + 1);
-                    all_of.push(alternative);
                     all_of.extend(object_siblings.iter().cloned());
+                    all_of.push(alternative);
                     Schema::assertions(
                         "<distributed-allOf-anyOf>",
                         SchemaAssertions { all_of, ..SchemaAssertions::default() },
