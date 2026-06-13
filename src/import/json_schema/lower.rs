@@ -344,7 +344,7 @@ impl<'a> Lowerer<'a> {
             let inferred = self.inferred_constrained_types(assertions);
             if inferred.len() == 1 {
                 if self.llguidance_compat_enabled() {
-                    if inferred[0] == SchemaType::Object {
+                    if matches!(inferred[0], SchemaType::Object | SchemaType::Array) {
                         return self.lower_untyped_single_family_assertions(inferred[0], assertions);
                     }
                     return self.lower_for_type(inferred[0], assertions);
