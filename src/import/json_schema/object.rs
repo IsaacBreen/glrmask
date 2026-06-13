@@ -691,6 +691,8 @@ impl<'a> Lowerer<'a> {
                 return Ok(seq(vec![lit("{"), body, lit("}")]));
             }
 
+            let required_prefix_len = items.iter().take_while(|item| item.required).count();
+            let required_count = items.iter().filter(|item| item.required).count();
             let use_large_optional_open_object_prefix_chain = normalized.required.is_empty()
                 && any_required_names.is_none()
                 && exclusive_group.is_none()
@@ -703,8 +705,20 @@ impl<'a> Lowerer<'a> {
                 );
             }
 
-            let required_prefix_len = items.iter().take_while(|item| item.required).count();
-            let required_count = items.iter().filter(|item| item.required).count();
+            let use_required_prefix_large_optional_open_object_prefix_chain = required_prefix_len > 0
+                && required_prefix_len == required_count
+                && any_required_names.is_none()
+                && exclusive_group.is_none()
+                && !matches!(normalized.additional_properties, AdditionalProperties::Deny)
+                && items.len().saturating_sub(required_prefix_len) + tail_pairs.len() >= 16;
+            if use_required_prefix_large_optional_open_object_prefix_chain {
+                return self.lower_required_prefix_large_optional_open_object_fused_prefix_chain(
+                    &items,
+                    required_prefix_len,
+                    choice(tail_pairs),
+                );
+            }
+
             let use_required_prefix_open_object_pair_loop = !self.llguidance_compat_enabled()
                 && required_prefix_len > 0
                 && required_prefix_len == required_count
@@ -1403,12 +1417,18 @@ impl<'a> Lowerer<'a> {
     }
 
     fn split_additional_key_colon_transition(symbol: GrammarExpr) -> Vec<GrammarExpr> {
+        const MAX_SPLIT_ADDITIONAL_KEY_COLON_ALTERNATIVES: usize = 32;
+
         match symbol {
             GrammarExpr::Choice(alternatives) if alternatives.is_empty() => Vec::new(),
             GrammarExpr::Choice(alternatives)
                 if Self::is_additional_key_colon_choice(&alternatives) =>
             {
-                alternatives
+                if alternatives.len() <= MAX_SPLIT_ADDITIONAL_KEY_COLON_ALTERNATIVES {
+                    alternatives
+                } else {
+                    vec![choice(alternatives)]
+                }
             }
             other => vec![other],
         }
@@ -2861,6 +2881,84 @@ impl<'a> Lowerer<'a> {
         }
 
         Ok(seq(vec![lit("{"), choice(body_alternatives), lit("}")]))
+    }
+
+    fn lower_required_prefix_large_optional_open_object_fused_prefix_chain(
+        &mut self,
+        items: &[ObjectItem],
+        required_prefix_len: usize,
+        tail_pair_expr: GrammarExpr,
+    ) -> ImportResult<GrammarExpr> {
+        debug_assert!(required_prefix_len > 0);
+        debug_assert!(required_prefix_len <= items.len());
+
+        let required_prefix = seq(
+            items[..required_prefix_len]
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    if index == 0 {
+                        item.pair.clone()
+                    } else {
+                        item.separator_pair.clone()
+                    }
+                })
+                .collect(),
+        );
+
+        let optional_items = &items[required_prefix_len..];
+        let mut prefix_rule_names: Vec<String> = Vec::with_capacity(optional_items.len());
+        for end_exclusive in 1..=optional_items.len() {
+            let mut alternatives = Vec::new();
+            for start in 0..end_exclusive {
+                if start == 0 {
+                    alternatives.push(optional_items[end_exclusive - 1].pair.clone());
+                } else {
+                    alternatives.push(seq(vec![
+                        r(&prefix_rule_names[start - 1]),
+                        optional_items[end_exclusive - 1].separator_pair.clone(),
+                    ]));
+                }
+            }
+            let rule_name = self.fresh_rule_name("json_open_object_prefix");
+            self.add_nonterminal_rule(&rule_name, choice(alternatives));
+            prefix_rule_names.push(rule_name);
+        }
+
+        let free_nonempty_rule = self.fresh_rule_name("json_open_object_free_nonempty");
+        self.add_nonterminal_rule(
+            &free_nonempty_rule,
+            seq(vec![
+                tail_pair_expr.clone(),
+                GrammarExpr::Quantified(
+                    Box::new(seq(vec![self.item_separator_expr(), tail_pair_expr])),
+                    Quantifier::ZeroPlus,
+                ),
+            ]),
+        );
+
+        let mut suffix_alternatives = vec![r(&free_nonempty_rule)];
+        for prefix_rule_name in &prefix_rule_names {
+            suffix_alternatives.push(r(prefix_rule_name));
+            suffix_alternatives.push(seq(vec![
+                r(prefix_rule_name),
+                self.item_separator_expr(),
+                r(&free_nonempty_rule),
+            ]));
+        }
+
+        Ok(seq(vec![
+            lit("{"),
+            choice(vec![
+                required_prefix.clone(),
+                seq(vec![
+                    required_prefix,
+                    self.item_separator_expr(),
+                    choice(suffix_alternatives),
+                ]),
+            ]),
+            lit("}"),
+        ]))
     }
 
     fn lower_large_closed_object_prefix_chain(&mut self, items: &[ObjectItem]) -> GrammarExpr {

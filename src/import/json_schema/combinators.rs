@@ -35,6 +35,11 @@ impl<'a> Lowerer<'a> {
         }
 
         let siblings = sibling_assertion_schema(assertions);
+        if siblings.as_ref().is_some_and(is_vacuous_object_schema)
+            && self.any_of_has_resolved_unconstrained_open_object_branch(&assertions.any_of)?
+        {
+            return Ok(r(JSON_OBJECT_RULE));
+        }
         let branches = assertions
             .any_of
             .iter()
@@ -995,6 +1000,23 @@ impl<'a> Lowerer<'a> {
         Ok(Some((object, any_required_names)))
     }
 
+    fn any_of_has_resolved_unconstrained_open_object_branch(
+        &self,
+        branches: &[Schema],
+    ) -> ImportResult<bool> {
+        if branches.len() < 2 {
+            return Ok(false);
+        }
+        for branch in branches {
+            if let Some(object) = self.object_branch_resolved(branch)?
+                && object_schema_is_unconstrained_open(object)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn drop_subsumed_open_object_any_of_branches(
         &self,
         branches: Vec<Schema>,
@@ -1707,6 +1729,8 @@ pub(super) fn open_object_any_of_covers_json_object(branches: &[Schema]) -> bool
     if objects.iter().any(|object| {
         !matches!(object.additional_properties, AdditionalProperties::AllowAny)
             || !object.required.is_empty()
+            || !object.property_dependencies.is_empty()
+            || object.property_names.is_some()
             || object.min_properties != 0
             || object.max_properties.is_some()
             || !object.pattern_properties.is_empty()
@@ -1724,6 +1748,17 @@ pub(super) fn open_object_any_of_covers_json_object(branches: &[Schema]) -> bool
             .iter()
             .any(|object| property_schema_by_name(object, name).is_none())
     })
+}
+
+fn object_schema_is_unconstrained_open(object: &ObjectSchema) -> bool {
+    matches!(object.additional_properties, AdditionalProperties::AllowAny)
+        && object.properties.is_empty()
+        && object.required.is_empty()
+        && object.property_dependencies.is_empty()
+        && object.min_properties == 0
+        && object.max_properties.is_none()
+        && object.pattern_properties.is_empty()
+        && object.property_names.is_none()
 }
 
 fn object_branch(schema: &Schema) -> Option<&ObjectSchema> {

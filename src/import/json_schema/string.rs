@@ -1269,8 +1269,26 @@ impl<'a> Lowerer<'a> {
             return Ok(never());
         }
 
+        if fixed_keys.is_empty()
+            && local_patterns.is_empty()
+            && self.shared_ap_literal_keys.is_empty()
+            && self.shared_ap_patterns.is_empty()
+        {
+            return Ok(seq(vec![
+                r(json_additional_key_string_rule()),
+                self.key_separator_expr(),
+            ]));
+        }
+
         if !fixed_keys.is_empty() {
-            let expr = self.lower_additional_key_colon_expanded_addback(fixed_keys, local_patterns)?;
+            let expr = if super::share_additional_addback_choices_enabled()
+                && !self.use_shared_additional_key_colon()
+                && local_patterns.is_empty()
+            {
+                self.lower_additional_key_colon_shared(fixed_keys, local_patterns)?
+            } else {
+                self.lower_additional_key_colon_expanded_addback(fixed_keys, local_patterns)?
+            };
             return self.exclude_local_pattern_key_colons(expr, local_patterns);
         }
 
