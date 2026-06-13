@@ -428,8 +428,7 @@ impl GLRTable {
         } else {
             *self = work;
         }
-        if report.aborted
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         {
             eprintln!(
