@@ -4516,6 +4516,34 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn shared_suffix_single_branches_materialize_duplicate_lower_segments() {
+        // Abstract MRE for the GSS shape seen in CFA o13029 before committing
+        // token ` [],`: eleven stacks differ only in the top value and share a
+        // four-state suffix. This is intentionally independent of LR parsing,
+        // tokenization, commit, and the JSON Schema importer.
+        //
+        // Expected ideal shape:
+        //   Interface -> General(top values 100..110) -> one shared Segment [0,1,12,30]
+        // Current shape materializes one Lower::Segment per top-value path.
+        let acc = TestAcc(7);
+        let stacks: Vec<_> = (100_u32..111)
+            .map(|top| (vec![0_u32, 1, 12, 30, top], acc.clone()))
+            .collect();
+        let branched = LeveledGSS::from_stacks(&stacks);
+
+        let summary = branched.summary();
+        let flattened = branched.to_stacks();
+
+        assert_eq!(flattened.len(), 11, "flattened={flattened:#?}");
+        assert_eq!(summary.top_values_count, 11, "summary={summary:#?} flattened={flattened:#?}");
+        assert_eq!(summary.interface_nodes, 1, "summary={summary:#?} flattened={flattened:#?}");
+        assert_eq!(summary.lower_general_nodes, 12, "summary={summary:#?} flattened={flattened:#?}");
+        assert_eq!(summary.lower_segment_nodes, 11, "summary={summary:#?} flattened={flattened:#?}");
+        assert_eq!(summary.max_depth, 5, "summary={summary:#?} flattened={flattened:#?}");
+    }
+
     #[test]
     fn selective_top_pure_shift_extracts_one_shared_prefix_path() {
         let acc = TestAcc(7);
