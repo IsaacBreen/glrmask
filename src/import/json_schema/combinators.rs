@@ -545,6 +545,7 @@ impl<'a> Lowerer<'a> {
                         } else if let Some(types) = &mut assertions.types {
                             types.retain(|t| explicit_types_vec.contains(t));
                         }
+                        prune_assertion_families_to_types(assertions);
                     }
                 }
                 return self.lower_schema(&branch);
@@ -576,13 +577,18 @@ impl<'a> Lowerer<'a> {
                         } else if let Some(types) = &mut assertions.types {
                             types.retain(|t| explicit_types_vec.contains(t));
                         }
+                        prune_assertion_families_to_types(assertions);
                     }
                 }
             }
+            branches = drop_vacuous_string_branches(branches);
         }
 
         if branches.is_empty() {
             return Ok(r(JSON_VALUE_RULE));
+        }
+        if let Some(merged) = merge_all_of_string_like_schema(&branches) {
+            return self.lower_schema(&merged);
         }
         if let Some(merged) = merge_all_of_object_like_schema(&branches) {
             return self.lower_schema(&merged);
@@ -1256,6 +1262,100 @@ fn all_of_intersection_terminal_safe(expr: &GrammarExpr) -> bool {
         }
         GrammarExpr::SeparatedSequence { .. } | GrammarExpr::ExprNFA(_) => false,
     }
+}
+
+fn prune_assertion_families_to_types(assertions: &mut SchemaAssertions) {
+    let Some(types) = &assertions.types else {
+        return;
+    };
+    if !types.iter().any(|schema_type| *schema_type == SchemaType::Object) {
+        assertions.object = None;
+    }
+    if !types.iter().any(|schema_type| *schema_type == SchemaType::Array) {
+        assertions.array = None;
+    }
+    if !types.iter().any(|schema_type| *schema_type == SchemaType::String) {
+        assertions.string = None;
+    }
+    if !types
+        .iter()
+        .any(|schema_type| matches!(schema_type, SchemaType::Number | SchemaType::Integer))
+    {
+        assertions.number = None;
+    }
+}
+
+fn merge_all_of_string_like_schema(branches: &[Schema]) -> Option<Schema> {
+    let mut saw_string_family = false;
+    let mut string = super::ast::StringSchema::default();
+    let mut pattern: Option<String> = None;
+    let mut format: Option<String> = None;
+
+    for branch in branches {
+        let SchemaKind::Assertions(assertions) = &branch.kind else {
+            return None;
+        };
+        if assertions.const_value.is_some()
+            || assertions.enum_values.is_some()
+            || assertions.object.is_some()
+            || assertions.array.is_some()
+            || assertions.number.is_some()
+            || !assertions.any_of.is_empty()
+            || !assertions.one_of.is_empty()
+            || !assertions.all_of.is_empty()
+            || assertions.not.is_some()
+        {
+            return None;
+        }
+        if let Some(types) = &assertions.types
+            && !types.iter().any(|schema_type| *schema_type == SchemaType::String)
+        {
+            return None;
+        }
+        if let Some(branch_string) = &assertions.string {
+            saw_string_family = true;
+            string.min_length = string.min_length.max(branch_string.min_length);
+            string.max_length = match (string.max_length, branch_string.max_length) {
+                (Some(left), Some(right)) => Some(left.min(right)),
+                (Some(left), None) => Some(left),
+                (None, Some(right)) => Some(right),
+                (None, None) => None,
+            };
+            if let Some(branch_pattern) = &branch_string.pattern {
+                match &pattern {
+                    Some(existing) if existing != branch_pattern => return None,
+                    Some(_) => {}
+                    None => pattern = Some(branch_pattern.clone()),
+                }
+            }
+            if let Some(branch_format) = &branch_string.format {
+                match &format {
+                    Some(existing) if existing != branch_format => return None,
+                    Some(_) => {}
+                    None => format = Some(branch_format.clone()),
+                }
+            }
+        } else if assertions.types.as_ref()?.iter().any(|schema_type| *schema_type == SchemaType::String) {
+            saw_string_family = true;
+        }
+    }
+
+    if !saw_string_family {
+        return None;
+    }
+    if string.max_length.is_some_and(|max| max < string.min_length) {
+        return Some(Schema::never("<merged-allOf-string-like:empty-length>"));
+    }
+    string.pattern = pattern;
+    string.format = format;
+    Some(Schema::assertions(
+        "<merged-allOf-string-like>",
+        SchemaAssertions {
+            types: Some(vec![SchemaType::String]),
+            string: Some(string),
+            ..SchemaAssertions::default()
+        },
+    ))
 }
 
 fn explicit_all_of_type_intersection(branches: &[Schema]) -> Option<BTreeSet<SchemaType>> {
@@ -3176,10 +3276,11 @@ fn is_vacuous_string_schema(schema: &Schema) -> bool {
     }
     assertions.object.is_none()
         && assertions.array.is_none()
-        && option_strings_shape_equivalent(
-            assertions.string.as_ref(),
-            Some(&super::ast::StringSchema::default()),
-        )
+        && (assertions.string.is_none()
+            || option_strings_shape_equivalent(
+                assertions.string.as_ref(),
+                Some(&super::ast::StringSchema::default()),
+            ))
         && assertions.number.is_none()
 }
 
