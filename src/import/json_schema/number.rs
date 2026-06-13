@@ -31,7 +31,7 @@ impl<'a> Lowerer<'a> {
         };
 
         let base_expr = if let Some(multiple) = schema.multiple_of {
-            if let Some(regex) = power_of_ten_multiple_regex(multiple) {
+            if let Some(regex) = power_of_ten_multiple_regex(multiple, false) {
                 GrammarExpr::RawRegex(regex)
             } else if let Some(regex) = decimal_multiple_regex(multiple) {
                 GrammarExpr::RawRegex(regex)
@@ -166,7 +166,7 @@ fn ceil_div_i64(value: i64, divisor: i64) -> i64 {
 }
 
 fn integer_multiple_expr(multiple: f64) -> Option<GrammarExpr> {
-    power_of_ten_multiple_regex(multiple).map(GrammarExpr::RawRegex)
+    power_of_ten_multiple_regex(multiple, true).map(GrammarExpr::RawRegex)
 }
 
 fn positive_integer_multiple_value(multiple: f64) -> Option<u64> {
@@ -182,13 +182,14 @@ fn positive_integer_multiple_i64(multiple: f64) -> Option<i64> {
     i64::try_from(value).ok()
 }
 
-fn power_of_ten_multiple_regex(multiple: f64) -> Option<String> {
+fn power_of_ten_multiple_regex(multiple: f64, allow_sign: bool) -> Option<String> {
     if !multiple.is_finite() || multiple < 1.0 || multiple.fract() != 0.0 {
         return None;
     }
     let mut value = multiple as u64;
+    let sign = if allow_sign { "-?" } else { "" };
     if value == 1 {
-        return Some(r#"-?(0|[1-9][0-9]*)"#.to_string());
+        return Some(format!(r#"{sign}(0|[1-9][0-9]*)"#));
     }
 
     let mut zeros = 0usize;
@@ -200,7 +201,7 @@ fn power_of_ten_multiple_regex(multiple: f64) -> Option<String> {
         return None;
     }
 
-    Some(format!(r#"-?(0|[1-9][0-9]*{})"#, "0".repeat(zeros)))
+    Some(format!(r#"{sign}(0|[1-9][0-9]*{})"#, "0".repeat(zeros)))
 }
 
 fn decimal_multiple_regex(multiple: f64) -> Option<String> {
