@@ -62,7 +62,7 @@ impl<'a> Lowerer<'a> {
             return Ok(r(JSON_OBJECT_RULE));
         }
         let factoring_branches = if self.llguidance_compat_enabled() {
-            factoring_branches
+            self.drop_llguidance_plain_subsumed_open_object_any_of_branches(factoring_branches)?
         } else {
             self.drop_subsumed_open_object_any_of_branches(factoring_branches)?
         };
@@ -1043,6 +1043,55 @@ impl<'a> Lowerer<'a> {
         Ok(false)
     }
 
+    fn drop_llguidance_plain_subsumed_open_object_any_of_branches(
+        &self,
+        branches: Vec<Schema>,
+    ) -> ImportResult<Vec<Schema>> {
+        let keep = branches
+            .iter()
+            .enumerate()
+            .map(|(index, branch)| {
+                let Some(branch_object) = self.object_branch_resolved(branch)? else {
+                    return Ok(true);
+                };
+                if !llguidance_plain_open_object_subsumption_candidate(branch_object) {
+                    return Ok(true);
+                }
+
+                for (other_index, other_branch) in branches.iter().enumerate() {
+                    if index == other_index {
+                        continue;
+                    }
+                    let Some(other_object) = self.object_branch_resolved(other_branch)? else {
+                        continue;
+                    };
+                    if !self.object_schema_subsumes(
+                        other_object,
+                        branch_object,
+                        &mut BTreeSet::new(),
+                    )? {
+                        continue;
+                    }
+                    if !self.object_schema_subsumes(
+                        branch_object,
+                        other_object,
+                        &mut BTreeSet::new(),
+                    )? || other_index < index
+                    {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            })
+            .collect::<ImportResult<Vec<_>>>()?;
+
+        Ok(branches
+            .into_iter()
+            .zip(keep)
+            .filter_map(|(branch, keep)| keep.then_some(branch))
+            .collect())
+    }
+
     fn drop_subsumed_open_object_any_of_branches(
         &self,
         branches: Vec<Schema>,
@@ -1227,6 +1276,17 @@ impl<'a> Lowerer<'a> {
         seen_pairs.remove(&pair);
         Ok(result)
     }
+}
+
+fn llguidance_plain_open_object_subsumption_candidate(object: &ObjectSchema) -> bool {
+    object.required.is_empty()
+        && object.required_order.is_empty()
+        && object.property_dependencies.is_empty()
+        && object.min_properties == 0
+        && object.max_properties.is_none()
+        && object.pattern_properties.is_empty()
+        && object.property_names.is_none()
+        && matches!(object.additional_properties, AdditionalProperties::AllowAny)
 }
 
 fn all_of_intersection_terminal_safe(expr: &GrammarExpr) -> bool {

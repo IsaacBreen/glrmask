@@ -6413,6 +6413,68 @@ fn sibling_pattern_addback_subtracts_local_pattern_language_for_o10297_shape() {
     lower(&grammar).unwrap();
 }
 
+
+#[test]
+fn llguidance_compat_drops_only_plain_subsumed_open_object_anyof_branch() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "next": {"type": "array"}
+                }
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "next": {"type": "array"},
+                    "resource": {"type": "string"}
+                }
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("JSON_ADDITIONAL_KEY_STRING JSON_KEY_SEPARATOR"), "{glrm}");
+    assert!(!glrm.contains(r#""resource": "#), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn llguidance_compat_keeps_subsumed_open_object_branch_with_pattern_properties() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                }
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"}
+                },
+                "patternProperties": {
+                    "^(/([\\S]*)?)$": {"type": "string"}
+                }
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("json_pattern_key_colon"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
 #[test]
 fn anyof_drops_subsumed_open_object_branch_for_o83993_shape() {
     let schema = json!({
