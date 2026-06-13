@@ -982,6 +982,12 @@ fn llguidance_additional_property_mask_accepts_escaped_solidus() {
         405,
         br#"\/"#,
     ));
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{""#,
+        406,
+        br#"\uC"#,
+    ));
 }
 
 #[test]

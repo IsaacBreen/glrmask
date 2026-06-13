@@ -172,9 +172,13 @@ impl<'a> Lowerer<'a> {
                 JSON_ADDITIONAL_KEY_STRING_CHAR_RULE,
                 GrammarExpr::RawRegex(additional_key_string_char.to_string()),
             );
+            let additional_key_full_string_char = super::string::json_string_body_char_regex_in_mode(
+                super::string::JsonStringCompatMode::JsonSchema,
+                super::string::JsonStringContext::KeyAdditional,
+            );
             self.add_terminal_rule(
                 JSON_ADDITIONAL_KEY_STRING_RULE,
-                GrammarExpr::RawRegex(format!(r#""(?:{})*""#, additional_key_string_char)),
+                GrammarExpr::RawRegex(format!(r#""(?:{})*""#, additional_key_full_string_char)),
             );
         }
         self.add_terminal_rule(
