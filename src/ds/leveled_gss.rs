@@ -815,11 +815,90 @@ where
     merged
 }
 
-fn new_lower<T: Clone + Eq + Hash>(children: Children<T, Lower<T>>, empty: bool) -> Arc<Lower<T>> {
+fn find_equal_lower_child<T: Clone + Eq + Hash>(
+    children: &Children<T, Lower<T>>,
+    depth: u32,
+    child: &Arc<Lower<T>>,
+) -> Option<Arc<Lower<T>>> {
+    for kids in children.values() {
+        let Some(existing) = kids.get(&depth) else {
+            continue;
+        };
+        if Arc::ptr_eq(existing, child) || **existing == **child {
+            return Some(existing.clone());
+        }
+    }
+    None
+}
+
+fn canonicalize_lower_children<T: Clone + Eq + Hash>(children: &mut Children<T, Lower<T>>) {
+    if children.len() <= 1 {
+        return;
+    }
+    let keys: Vec<T> = children.keys().cloned().collect();
+    let mut seen: Vec<(u32, Arc<Lower<T>>)> = Vec::new();
+    for key in keys {
+        let entries: Vec<(u32, Arc<Lower<T>>)> = children
+            .get(&key)
+            .map(|kids| kids.iter().map(|(depth, child)| (*depth, child.clone())).collect())
+            .unwrap_or_default();
+        let Some(kids) = children.get_mut(&key) else {
+            continue;
+        };
+        for (depth, child) in entries {
+            let canonical = seen
+                .iter()
+                .find(|(seen_depth, seen_child)| {
+                    *seen_depth == depth && (Arc::ptr_eq(seen_child, &child) || **seen_child == *child)
+                })
+                .map(|(_, seen_child)| seen_child.clone());
+            match canonical {
+                Some(existing) => {
+                    if !Arc::ptr_eq(&existing, &child) {
+                        kids.insert(depth, existing);
+                    }
+                }
+                None => seen.push((depth, child)),
+            }
+        }
+    }
+}
+
+fn insert_lower_child_shared<T: Clone + Eq + Hash>(
+    children: &mut Children<T, Lower<T>>,
+    key: T,
+    depth: u32,
+    child: Arc<Lower<T>>,
+) {
+    let child = find_equal_lower_child(children, depth, &child).unwrap_or(child);
+    let merged = {
+        let Some(ord_map) = children.get_mut(&key) else {
+            children.insert(key, CompactOrdMap::unit(depth, child));
+            return;
+        };
+        let Some(existing) = ord_map.get(&depth).cloned() else {
+            ord_map.insert(depth, child);
+            return;
+        };
+        merge_lower(&existing, &child)
+    };
+    let merged = find_equal_lower_child(children, merged.max_depth(), &merged).unwrap_or(merged);
+    let Some(ord_map) = children.get_mut(&key) else {
+        return;
+    };
+    ord_map.insert(depth, merged);
+}
+
+fn new_lower<T: Clone + Eq + Hash>(mut children: Children<T, Lower<T>>, empty: bool) -> Arc<Lower<T>> {
     // Use Segment variant when there's exactly one key with one depth entry.
     // NOTE: We do NOT pack into existing child Segments here. Packing only happens
     // in batch-construction paths (into_gss) so that incremental push/pop
     // preserves Arc sharing (the child Arc is reused on pop).
+    // Share structurally equal child suffixes across different top values.
+    // This keeps common-bottom, different-top frontiers compact even when they
+    // are assembled incrementally rather than via `from_stacks`.
+    canonicalize_lower_children(&mut children);
+
     // Only compress to Segment when empty is false — Segments are non-accepting.
     if !empty && children.len() == 1 {
         let (key, ord_map) = children.iter().next().unwrap();
@@ -2411,23 +2490,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             return Self::empty();
         }
 
-        fn insert_lower_child<T: Clone + Eq + Hash>(
-            children: &mut Children<T, Lower<T>>,
-            key: T,
-            depth: u32,
-            child: Arc<Lower<T>>,
-        ) {
-            if let Some(ord_map) = children.get_mut(&key) {
-                if let Some(existing) = ord_map.get(&depth).cloned() {
-                    ord_map.insert(depth, merge_lower(&existing, &child));
-                } else {
-                    ord_map.insert(depth, child);
-                }
-            } else {
-                children.insert(key, CompactOrdMap::unit(depth, child));
-            }
-        }
-
         match &*self.inner {
             Upper::Interface(i) => {
                 let inner_children;
@@ -2458,13 +2520,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
                     if replace_top {
                         for (depth, child) in kids.iter() {
-                            insert_lower_child(&mut shifted_children, to.clone(), *depth, child.clone());
+                            insert_lower_child_shared(&mut shifted_children, to.clone(), *depth, child.clone());
                         }
                     } else {
                         let mut pushed_children: Children<T, Lower<T>> = CompactMap::new();
                         pushed_children.insert(from, kids.clone());
                         let pushed_child = new_lower(pushed_children, false);
-                        insert_lower_child(
+                        insert_lower_child_shared(
                             &mut shifted_children,
                             to,
                             pushed_child.max_depth(),
@@ -2543,18 +2605,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 lower_mut.ensure_general();
                 match lower_mut {
                     Lower::General { children, max_depth, .. } => {
-                        if let Some(existing_ordmap) = children.get_mut(&top) {
-                            match existing_ordmap.get(&child_depth).cloned() {
-                                Some(existing_child) => {
-                                    existing_ordmap.insert(child_depth, merge_lower(&existing_child, &child_node));
-                                }
-                                None => {
-                                    existing_ordmap.insert(child_depth, child_node);
-                                }
-                            }
-                        } else {
-                            children.insert(top, CompactOrdMap::unit(child_depth, child_node));
-                        }
+                        insert_lower_child_shared(children, top, child_depth, child_node);
 
                         if child_depth + 1 > *max_depth {
                             *max_depth = child_depth + 1;
@@ -2595,18 +2646,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                 lower_mut.ensure_general();
                 match lower_mut {
                     Lower::General { children, max_depth, .. } => {
-                        if let Some(existing_ordmap) = children.get_mut(&top) {
-                            match existing_ordmap.get(&child_depth).cloned() {
-                                Some(existing_child) => {
-                                    existing_ordmap.insert(child_depth, merge_lower(&existing_child, &child_node));
-                                }
-                                None => {
-                                    existing_ordmap.insert(child_depth, child_node);
-                                }
-                            }
-                        } else {
-                            children.insert(top, CompactOrdMap::unit(child_depth, child_node));
-                        }
+                        insert_lower_child_shared(children, top, child_depth, child_node);
 
                         if child_depth + 1 > *max_depth {
                             *max_depth = child_depth + 1;
@@ -2637,18 +2677,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             lower_mut.ensure_general();
             match lower_mut {
                 Lower::General { children, max_depth, .. } => {
-                    if let Some(existing_ordmap) = children.get_mut(&value) {
-                        match existing_ordmap.get(&child_depth).cloned() {
-                            Some(existing_child) => {
-                                existing_ordmap.insert(child_depth, merge_lower(&existing_child, &child_node));
-                            }
-                            None => {
-                                existing_ordmap.insert(child_depth, child_node);
-                            }
-                        }
-                    } else {
-                        children.insert(value, CompactOrdMap::unit(child_depth, child_node));
-                    }
+                    insert_lower_child_shared(children, value, child_depth, child_node);
 
                     if child_depth + 1 > *max_depth {
                         *max_depth = child_depth + 1;
