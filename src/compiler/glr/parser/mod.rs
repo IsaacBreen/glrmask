@@ -442,34 +442,64 @@ fn try_advance_single_alt_pop1_common_suffix_stackshift_wave(
     token: TerminalID,
 ) -> Option<ParserGSS> {
     let states = closure.peek_values();
-    if !(2..=3).contains(&states.len()) {
+    if !(2..=16).contains(&states.len()) {
         return None;
     }
 
-    let mut per_state_prefixes: SmallVec<[(u32, u32, bool); 3]> = SmallVec::new();
-    let mut common_suffix: Option<u32> = None;
+    let mut grouped_prefixes: SmallVec<[(u32, SmallVec<[(u32, u32, bool); 8]>); 4]> = SmallVec::new();
+    let mut pure_shifts: SmallVec<[(u32, u32, bool); 4]> = SmallVec::new();
+    let mut saw_stack_shift = false;
 
     for state in states {
-        let Action::StackShifts(shifts) = table.action(state, token)? else {
-            return None;
+        let Some(action) = table.action(state, token) else {
+            continue;
         };
-        let [shift] = shifts.as_slice() else {
-            return None;
-        };
-        if shift.pop != 1 || shift.pushes.len() != 2 {
-            return None;
+        match action {
+            Action::StackShifts(shifts) => {
+                let [shift] = shifts.as_slice() else {
+                    return None;
+                };
+                if shift.pop != 1 || shift.pushes.len() != 2 {
+                    return None;
+                }
+                saw_stack_shift = true;
+                let prefix = shift.pushes[0];
+                let suffix = shift.pushes[1];
+                if let Some((_, prefixes)) = grouped_prefixes
+                    .iter_mut()
+                    .find(|(existing_suffix, _)| *existing_suffix == suffix)
+                {
+                    prefixes.push((state, prefix, true));
+                } else {
+                    let mut prefixes = SmallVec::new();
+                    prefixes.push((state, prefix, true));
+                    grouped_prefixes.push((suffix, prefixes));
+                }
+            }
+            Action::Shift(target, is_replace) => {
+                pure_shifts.push((
+                    state,
+                    *target,
+                    *is_replace && !table.forwarded_shifts.contains(&(state, token)),
+                ));
+            }
+            _ => return None,
         }
-
-        let prefix = shift.pushes[0];
-        let suffix = shift.pushes[1];
-        if common_suffix.replace(suffix).is_some_and(|existing| existing != suffix) {
-            return None;
-        }
-        per_state_prefixes.push((state, prefix, true));
     }
 
-    let common_suffix = common_suffix?;
-    Some(closure.apply_top_pure_shifts(per_state_prefixes).push(common_suffix))
+    if !saw_stack_shift {
+        return None;
+    }
+
+    let mut out = ParserGSS::empty();
+    if !pure_shifts.is_empty() {
+        merge_into(&mut out, closure.apply_top_pure_shifts(pure_shifts));
+    }
+    for (suffix, prefixes) in grouped_prefixes {
+        merge_into(&mut out, closure.apply_top_pure_shifts(prefixes).push(suffix));
+    }
+
+    (!out.is_empty()).then_some(out)
 }
 
 fn try_advance_mixed_top_pop1_shift_reduce_wave(
@@ -480,18 +510,20 @@ fn try_advance_mixed_top_pop1_shift_reduce_wave(
     let mut closure = closure.clone();
     let mut shifted = ParserGSS::empty();
 
-    for _ in 0..4 {
+    for _ in 0..8 {
         let states = closure.peek_values();
-        if !(2..=4).contains(&states.len()) {
+        if !(2..=16).contains(&states.len()) {
             return None;
         }
 
-        let mut pure_shifts: SmallVec<[(u32, u32, bool); 4]> = SmallVec::new();
-        let mut stack_shifts: SmallVec<[(u32, &[StackShift]); 4]> = SmallVec::new();
-        let mut reductions: SmallVec<[(u32, u32); 4]> = SmallVec::new();
+        let mut pure_shifts: SmallVec<[(u32, u32, bool); 16]> = SmallVec::new();
+        let mut stack_shifts: SmallVec<[(u32, &[StackShift]); 16]> = SmallVec::new();
+        let mut reductions: SmallVec<[(u32, u32); 16]> = SmallVec::new();
 
         for state in states {
-            let action = table.action(state, token)?;
+            let Some(action) = table.action(state, token) else {
+                continue;
+            };
             match action {
                 Action::Shift(target, is_replace) => {
                     pure_shifts.push((state, *target, *is_replace));
@@ -524,6 +556,13 @@ fn try_advance_mixed_top_pop1_shift_reduce_wave(
             }
         }
 
+        if pure_shifts.is_empty() && stack_shifts.is_empty() && reductions.is_empty() {
+            return None;
+        }
+        if reductions.is_empty() && !stack_shifts.is_empty() {
+            return None;
+        }
+
         if !pure_shifts.is_empty() {
             let shifted_wave = match pure_shifts.as_slice() {
                 [shift] => closure
@@ -534,19 +573,48 @@ fn try_advance_mixed_top_pop1_shift_reduce_wave(
             merge_into(&mut shifted, shifted_wave);
         }
 
+        let common_pop1_base = closure.pop1_common_interface_base();
+
         for (state, shifts) in stack_shifts {
-            merge_into(
-                &mut shifted,
-                apply_stack_shifts(closure.isolate(Some(state)), shifts),
-            );
+            let branch_base = common_pop1_base
+                .as_ref()
+                .map(|base| base.clone().push(state))
+                .unwrap_or_else(|| closure.isolate(Some(state)));
+            merge_into(&mut shifted, apply_stack_shifts(branch_base, shifts));
         }
 
         if reductions.is_empty() {
             return (!shifted.is_empty()).then_some(shifted);
         }
 
+        let common_reduce_source = common_pop1_base.as_ref().and_then(|base| {
+            let values = base.peek_values();
+            let [source] = values.as_slice() else {
+                return None;
+            };
+            Some((base.clone(), *source))
+        });
+
         let mut next = ParserGSS::empty();
         for (state, nt) in reductions {
+            if let Some((base, goto_from)) = common_reduce_source.as_ref() {
+                let Some((target, is_replace)) = table.goto_target(*goto_from, nt) else { continue; };
+                let (branch, det_ok) = advance_reduce_branch(table, base.clone(), target, is_replace, token);
+                if det_ok {
+                    match branch {
+                        AdvancedBranch::Stack(stack) => {
+                            shifted = shifted.absorb_vstack_same_acc_owned(stack);
+                        }
+                        AdvancedBranch::Gss(branch) => {
+                            merge_into(&mut shifted, branch);
+                        }
+                    }
+                } else {
+                    merge_into(&mut next, branch.into_gss());
+                }
+                continue;
+            }
+
             let popped = closure.pop_top_value(&state);
             if popped.is_empty() {
                 continue;

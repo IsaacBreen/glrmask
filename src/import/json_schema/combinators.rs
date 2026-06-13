@@ -59,11 +59,7 @@ impl<'a> Lowerer<'a> {
         if open_object_any_of_covers_json_object(&factoring_branches) {
             return Ok(r(JSON_OBJECT_RULE));
         }
-        let factoring_branches = if self.llguidance_compat_enabled() {
-            factoring_branches
-        } else {
-            self.drop_subsumed_open_object_any_of_branches(factoring_branches)?
-        };
+        let factoring_branches = self.drop_subsumed_open_object_any_of_branches(factoring_branches)?;
         if let Some(expr) =
             self.try_lower_closed_object_any_of_variants(
                 &factoring_branches,
