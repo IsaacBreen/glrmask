@@ -502,6 +502,67 @@ fn try_advance_single_alt_pop1_common_suffix_stackshift_wave(
     (!out.is_empty()).then_some(out)
 }
 
+fn try_advance_single_active_pop1_reduce_wave(
+    table: &GLRTable,
+    closure: &ParserGSS,
+    token: TerminalID,
+) -> Option<ParserGSS> {
+    let states = closure.peek_values();
+    if !(2..=16).contains(&states.len()) {
+        return None;
+    }
+
+    let mut reduction: Option<(u32, u32)> = None;
+    for state in states {
+        match table.action(state, token) {
+            None => {}
+            Some(Action::Reduce(nt, 1)) => {
+                if reduction.replace((state, *nt)).is_some() {
+                    return None;
+                }
+            }
+            Some(Action::Split { shift: None, reduces, accept: false })
+                if reduces.len() == 1 && reduces[0].1 == 1 =>
+            {
+                if reduction.replace((state, reduces[0].0)).is_some() {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    let (state, nt) = reduction?;
+    let popped = closure.pop_top_value(&state);
+    if popped.is_empty() {
+        return None;
+    }
+
+    if let Some(mut stack) = popped.try_virtual_stack() {
+        let Some(&goto_from) = stack.top() else {
+            return None;
+        };
+        let Some((target, is_replace)) = table.goto_target(goto_from, nt) else {
+            return None;
+        };
+        if is_replace {
+            stack.replace_top(target);
+        } else {
+            stack.push(target);
+        }
+        let (branch, det_ok) = advance_deterministically_from_vstack_raw(table, stack, token);
+        return det_ok.then(|| branch.into_gss());
+    }
+
+    let goto_sources = popped.peek_values();
+    let [goto_from] = goto_sources.as_slice() else {
+        return None;
+    };
+    let (target, is_replace) = table.goto_target(*goto_from, nt)?;
+    let (branch, det_ok) = advance_reduce_branch(table, popped, target, is_replace, token);
+    det_ok.then(|| branch.into_gss())
+}
+
 fn try_advance_mixed_top_pop1_shift_reduce_wave(
     table: &GLRTable,
     closure: &ParserGSS,
@@ -675,6 +736,55 @@ fn try_advance_mixed_top_pop1_shift_reduce_wave(
     }
 
     None
+}
+
+fn try_advance_pop1_stackshift_shift_wave(
+    table: &GLRTable,
+    closure: &ParserGSS,
+    token: TerminalID,
+) -> Option<ParserGSS> {
+    let states = closure.peek_values();
+    if !(2..=16).contains(&states.len()) {
+        return None;
+    }
+    let base = closure.pop1_common_interface_base()?;
+
+    let mut out = ParserGSS::empty();
+    let mut saw_stack_shift = false;
+    let mut saw_action = false;
+    for state in states {
+        let Some(action) = table.action(state, token) else {
+            continue;
+        };
+        saw_action = true;
+        match action {
+            Action::StackShifts(shifts) => {
+                if let Some((target, is_replace)) = pure_frontier_shift(action) {
+                    let branch = if is_replace {
+                        base.clone().push(target)
+                    } else {
+                        base.clone().push(state).push(target)
+                    };
+                    merge_into(&mut out, branch);
+                } else {
+                    saw_stack_shift = true;
+                    merge_into(&mut out, apply_stack_shifts(base.clone().push(state), shifts));
+                }
+            }
+            Action::Shift(target, is_replace) => {
+                let is_replace = *is_replace && !table.forwarded_shifts.contains(&(state, token));
+                let branch = if is_replace {
+                    base.clone().push(*target)
+                } else {
+                    base.clone().push(state).push(*target)
+                };
+                merge_into(&mut out, branch);
+            }
+            _ => return None,
+        }
+    }
+
+    (saw_action && saw_stack_shift && !out.is_empty()).then_some(out)
 }
 
 fn try_advance_pop1_reduce_plus_stackshift_wave(
@@ -1541,6 +1651,29 @@ fn advance_nondeterministically_profiled(
         }
 
         if let Some(shifted_wave) =
+            try_advance_single_active_pop1_reduce_wave(table, &closure, token)
+        {
+            if let Some(trace) = profile.trace.as_mut()
+                && let Some(wave) = trace.nondet_waves.last_mut()
+            {
+                for &state in &frontier_states {
+                    let branch_gss = closure.isolate(Some(state));
+                    wave.branches.push(trace_action_summary(
+                        table,
+                        state,
+                        &branch_gss,
+                        table.action(state, token),
+                    ));
+                }
+            }
+            profile.n_nondet_branches += frontier_states.len() as u32;
+            profile.n_nondet_reduce_ops += 1;
+            profile.n_nondet_merges += 1;
+            merge_into(&mut shifted, shifted_wave);
+            return shifted;
+        }
+
+        if let Some(shifted_wave) =
             try_advance_mixed_top_pop1_shift_reduce_wave(table, &closure, token)
         {
             if let Some(trace) = profile.trace.as_mut()
@@ -1562,6 +1695,28 @@ fn advance_nondeterministically_profiled(
                 .filter(|&&state| matches!(table.action(state, token), Some(Action::Reduce(..))))
                 .count() as u32;
             profile.n_nondet_merges += frontier_states.len() as u32;
+            merge_into(&mut shifted, shifted_wave);
+            return shifted;
+        }
+
+        if let Some(shifted_wave) =
+            try_advance_pop1_stackshift_shift_wave(table, &closure, token)
+        {
+            if let Some(trace) = profile.trace.as_mut()
+                && let Some(wave) = trace.nondet_waves.last_mut()
+            {
+                for &state in &frontier_states {
+                    let branch_gss = closure.isolate(Some(state));
+                    wave.branches.push(trace_action_summary(
+                        table,
+                        state,
+                        &branch_gss,
+                        table.action(state, token),
+                    ));
+                }
+            }
+            profile.n_nondet_branches += frontier_states.len() as u32;
+            profile.n_nondet_merges += 1;
             merge_into(&mut shifted, shifted_wave);
             return shifted;
         }
@@ -1733,7 +1888,21 @@ fn advance_nondeterministically(
 
     loop {
         if let Some(shifted_wave) =
+            try_advance_single_active_pop1_reduce_wave(table, &closure, token)
+        {
+            merge_into(&mut shifted, shifted_wave);
+            return shifted;
+        }
+
+        if let Some(shifted_wave) =
             try_advance_mixed_top_pop1_shift_reduce_wave(table, &closure, token)
+        {
+            merge_into(&mut shifted, shifted_wave);
+            return shifted;
+        }
+
+        if let Some(shifted_wave) =
+            try_advance_pop1_stackshift_shift_wave(table, &closure, token)
         {
             merge_into(&mut shifted, shifted_wave);
             return shifted;
