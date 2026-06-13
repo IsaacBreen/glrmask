@@ -525,13 +525,29 @@ impl<'a> Lowerer<'a> {
                 return self.lower_schema(&branch);
             }
         }
+        let explicit_types_before_vacuous_prune = explicit_all_of_type_intersection(&branches);
         if branches.len() > 1 && branches.iter().any(schema_has_explicit_object_only_type) {
             branches.retain(|branch| !is_vacuous_object_schema(branch));
             if branches.is_empty() {
                 return Ok(r(JSON_OBJECT_RULE));
             }
             if branches.len() == 1 {
-                return self.lower_schema(&branches[0]);
+                let mut branch = branches.pop().unwrap();
+                if let Some(explicit_types) = explicit_types_before_vacuous_prune {
+                    let explicit_types_vec = explicit_types.into_iter().collect::<Vec<_>>();
+                    if let SchemaKind::Assertions(assertions) = &mut branch.kind
+                        && assertions.any_of.is_empty()
+                        && assertions.one_of.is_empty()
+                        && assertions.all_of.is_empty()
+                    {
+                        if assertions.types.is_none() {
+                            assertions.types = Some(explicit_types_vec);
+                        } else if let Some(types) = &mut assertions.types {
+                            types.retain(|t| explicit_types_vec.contains(t));
+                        }
+                    }
+                }
+                return self.lower_schema(&branch);
             }
         }
         branches = flatten_pure_all_of_branches(branches);
@@ -545,7 +561,9 @@ impl<'a> Lowerer<'a> {
         }
         branches = drop_vacuous_string_branches(branches);
 
-        if let Some(explicit_types) = explicit_all_of_type_intersection(&branches) {
+        if let Some(explicit_types) = explicit_all_of_type_intersection(&branches)
+            .or(explicit_types_before_vacuous_prune)
+        {
             let explicit_types_vec = explicit_types.into_iter().collect::<Vec<_>>();
             for branch in &mut branches {
                 if let SchemaKind::Assertions(assertions) = &mut branch.kind {
