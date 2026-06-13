@@ -4590,6 +4590,39 @@ mod tests {
     }
 
     #[test]
+    fn shared_suffix_compaction_is_order_insensitive() {
+        fn assert_compact(gss: LeveledGSS<u32, TestAcc>) {
+            let summary = gss.summary();
+            assert_eq!(summary.top_values_count, 11, "summary={summary:#?}");
+            assert_eq!(summary.lower_general_nodes, 2, "summary={summary:#?}");
+            assert_eq!(summary.lower_segment_nodes, 1, "summary={summary:#?}");
+            assert_eq!(summary.max_depth, 5, "summary={summary:#?}");
+        }
+
+        let acc = TestAcc(7);
+        let orders: [Vec<u32>; 3] = [
+            (100_u32..111).collect(),
+            (100_u32..111).rev().collect(),
+            vec![104, 100, 110, 101, 108, 103, 106, 102, 109, 105, 107],
+        ];
+
+        for order in orders {
+            let stacks: Vec<_> = order
+                .iter()
+                .map(|top| (vec![0_u32, 1, 12, 30, *top], acc.clone()))
+                .collect();
+            assert_compact(LeveledGSS::from_stacks(&stacks));
+
+            let merged = LeveledGSS::merge_many(
+                stacks
+                    .iter()
+                    .map(|(stack, acc)| LeveledGSS::from_single_stack(stack.clone(), acc.clone())),
+            );
+            assert_compact(merged);
+        }
+    }
+
+    #[test]
     fn selective_top_pure_shift_extracts_one_shared_prefix_path() {
         let acc = TestAcc(7);
         let gss = LeveledGSS::from_stacks(&[
