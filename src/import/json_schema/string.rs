@@ -9,7 +9,7 @@ use crate::import::ast::{GrammarExpr, Quantifier};
 use super::ast::StringSchema;
 use super::error::{ImportResult, SchemaImportError};
 use super::lower::{
-    choice, json_additional_key_string_rule, json_key_string_rule, lit, lit_bytes, never, r, seq, Lowerer,
+    choice, json_additional_key_string_rule, lit, lit_bytes, never, r, seq, Lowerer,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE, JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
     JSON_KEY_SEPARATOR_RULE, JSON_SEPARATOR_WS_REGEX, JSON_STRING_CHAR_RULE,
@@ -1106,11 +1106,7 @@ impl<'a> Lowerer<'a> {
                 return Ok(r(rule_name));
             }
 
-            let key_string_rule = if preprocess_ascii_shorthand(pattern).is_empty() {
-                json_additional_key_string_rule()
-            } else {
-                json_key_string_rule()
-            };
+            let key_string_rule = json_additional_key_string_rule();
             let global_overlaps = self.pattern_overlapping_literal_keys(pattern)?;
             let expr = if global_overlaps.is_empty() {
                 seq(vec![r(key_string_rule), r(JSON_KEY_SEPARATOR_RULE)])
