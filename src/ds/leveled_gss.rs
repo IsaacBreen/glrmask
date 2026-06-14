@@ -1518,6 +1518,22 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
         self.pending_top.as_ref().or_else(|| self.values.last())
     }
 
+    /// If `self` is exactly `base` with one extra top value pushed, return that
+    /// extra value.  This is deliberately structural: it compares the full
+    /// visible stack prefix, not just the immediate parent, so callers may use
+    /// it to batch many independently-advanced virtual stacks back into one GSS.
+    pub fn single_top_extension_of(&self, base: &Self) -> Option<T> {
+        if self.len() != base.len() + 1 {
+            return None;
+        }
+        for depth in 1..=base.len() {
+            if self.top_after_popping(depth)? != base.top_after_popping(depth - 1)? {
+                return None;
+            }
+        }
+        self.top().cloned()
+    }
+
     /// Return the top value that would be visible after popping `remaining`
     /// values, without mutating or cloning the virtual stack.
     #[inline]
@@ -1749,21 +1765,23 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
         };
         let base_depth = base.max_depth();
 
-        let mut children: Children<T, Lower<T>> = CompactMap::new();
+        let mut entries: SmallVec<[(T, CompactOrdMap<Arc<Lower<T>>>); 4]> = SmallVec::new();
+        let child = CompactOrdMap::unit(base_depth, base.clone());
         for target in targets {
-            if children.get(target).is_none() {
-                children.insert(target.clone(), CompactOrdMap::unit(base_depth, base.clone()));
+            if entries.iter().any(|(existing, _)| existing == target) {
+                continue;
             }
+            entries.push((target.clone(), child.clone()));
         }
 
-        if children.is_empty() {
+        if entries.is_empty() {
             return Some(LeveledGSS {
                 inner: new_interface(base, self.acc),
             });
         }
 
         Some(LeveledGSS {
-            inner: new_interface(new_lower(children, false), self.acc),
+            inner: new_interface(new_lower(CompactMap::Inline(entries), false), self.acc),
         })
     }
 }
