@@ -4388,6 +4388,52 @@ fn property_names_pattern_applies_to_additional_properties_keys() {
 }
 
 #[test]
+fn llguidance_compat_property_names_with_pattern_properties_broadens() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "propertyNames": {"pattern": "^\\d+$"},
+        "patternProperties": {
+            ".*": {"type": "string"}
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#"{"!": "ok"}"#));
+}
+
+#[test]
+fn oneof_mixed_local_ref_and_const_primitive_disjoint_family_lowers() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "$defs": {
+            "Init": {
+                "anyOf": [
+                    {"type": "array", "items": {"type": "string"}},
+                    {"$ref": "#/$defs/ActionChain"}
+                ]
+            },
+            "ActionChain": {
+                "type": "array",
+                "items": {"type": "object"}
+            }
+        },
+        "oneOf": [
+            {"$ref": "#/$defs/Init"},
+            {"const": ""}
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#""""#));
+    assert!(schema_accepts_bytes(&schema, br#"[]"#));
+}
+
+#[test]
 fn property_names_non_pattern_schema_still_errors() {
     let schema = json!({
         "type": "object",

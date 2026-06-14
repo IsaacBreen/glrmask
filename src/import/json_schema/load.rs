@@ -83,22 +83,34 @@ fn one_of_can_normalize_mixed_local_refs(branches: &[Schema]) -> bool {
         })
 }
 
-fn schema_has_explicit_single_primitive_inline_type(schema: &Schema) -> bool {
+fn schema_has_single_primitive_inline_family(schema: &Schema) -> bool {
     let SchemaKind::Assertions(assertions) = &schema.kind else {
         return false;
     };
 
-    matches!(
+    if assertions.object.is_some()
+        || assertions.array.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+        || assertions.not.is_some()
+    {
+        return false;
+    }
+
+    if matches!(
         assertions.types.as_deref(),
         Some([SchemaType::String])
             | Some([SchemaType::Number])
             | Some([SchemaType::Integer])
             | Some([SchemaType::Boolean])
-    ) && assertions.object.is_none()
-        && assertions.array.is_none()
-        && assertions.any_of.is_empty()
-        && assertions.one_of.is_empty()
-        && assertions.all_of.is_empty()
+    ) {
+        return true;
+    }
+
+    assertions.const_value.as_ref().is_some_and(|value| {
+        value.is_string() || value.is_number() || value.is_boolean()
+    })
 }
 
 fn one_of_can_defer_local_ref_disjoint_family_proof(branches: &[Schema]) -> bool {
@@ -107,7 +119,7 @@ fn one_of_can_defer_local_ref_disjoint_family_proof(branches: &[Schema]) -> bool
         && branches.iter().all(|branch| match &branch.kind {
             SchemaKind::Ref(reference) => reference.starts_with('#'),
             _ => {
-                schema_has_explicit_single_primitive_inline_type(branch)
+                schema_has_single_primitive_inline_family(branch)
                     || schema_is_null_only_inline_branch(branch)
                     || schema_is_object_shaped_inline_branch(branch)
                     || schema_is_array_shaped_inline_branch(branch)

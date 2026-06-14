@@ -482,11 +482,17 @@ impl<'a> Lowerer<'a> {
                 continue;
             };
             let target = self.resolve_ref_target(pointer)?;
-            if !schema_has_explicit_object_only_type(target) {
-                return Err(SchemaImportError::at(
-                    &branch.location,
-                    "oneOf primitive/ref support requires all $ref targets to be explicit object-only schemas",
-                ));
+            for primitive_type in &primitive_types {
+                if !self.schema_definitely_excludes_primitive_type(
+                    target,
+                    *primitive_type,
+                    &mut BTreeSet::new(),
+                )? {
+                    return Err(SchemaImportError::at(
+                        &branch.location,
+                        "oneOf primitive/ref support requires $ref targets to be disjoint from primitive inline branches",
+                    ));
+                }
             }
         }
 
@@ -502,6 +508,84 @@ impl<'a> Lowerer<'a> {
         }
 
         Ok(())
+    }
+
+    fn schema_definitely_excludes_primitive_type(
+        &self,
+        schema: &Schema,
+        primitive_type: SchemaType,
+        visiting_refs: &mut BTreeSet<String>,
+    ) -> ImportResult<bool> {
+        match &schema.kind {
+            SchemaKind::Never => Ok(true),
+            SchemaKind::Any => Ok(false),
+            SchemaKind::Ref(pointer) => {
+                if !visiting_refs.insert(pointer.clone()) {
+                    return Ok(false);
+                }
+                let target = self.resolve_ref_target(pointer)?;
+                let result = self.schema_definitely_excludes_primitive_type(
+                    target,
+                    primitive_type,
+                    visiting_refs,
+                );
+                visiting_refs.remove(pointer);
+                result
+            }
+            SchemaKind::Assertions(assertions) => {
+                if let Some(value) = &assertions.const_value {
+                    return Ok(!value_has_primitive_type(value, primitive_type));
+                }
+                if let Some(values) = &assertions.enum_values
+                    && values
+                        .iter()
+                        .all(|value| !value_has_primitive_type(value, primitive_type))
+                {
+                    return Ok(true);
+                }
+                if let Some(types) = &assertions.types {
+                    return Ok(!types_may_include_primitive(types, primitive_type));
+                }
+                if !assertions.all_of.is_empty() {
+                    for branch in &assertions.all_of {
+                        if self.schema_definitely_excludes_primitive_type(
+                            branch,
+                            primitive_type,
+                            visiting_refs,
+                        )? {
+                            return Ok(true);
+                        }
+                    }
+                }
+                if !assertions.any_of.is_empty() {
+                    return assertions
+                        .any_of
+                        .iter()
+                        .map(|branch| {
+                            self.schema_definitely_excludes_primitive_type(
+                                branch,
+                                primitive_type,
+                                visiting_refs,
+                            )
+                        })
+                        .try_fold(true, |acc, item| item.map(|value| acc && value));
+                }
+                if !assertions.one_of.is_empty() {
+                    return assertions
+                        .one_of
+                        .iter()
+                        .map(|branch| {
+                            self.schema_definitely_excludes_primitive_type(
+                                branch,
+                                primitive_type,
+                                visiting_refs,
+                            )
+                        })
+                        .try_fold(true, |acc, item| item.map(|value| acc && value));
+                }
+                Ok(false)
+            }
+        }
     }
 
     pub(crate) fn lower_all_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
@@ -2595,13 +2679,54 @@ fn primitive_inline_branch_type(schema: &Schema) -> Option<SchemaType> {
         return None;
     };
 
+    if assertions.object.is_some()
+        || assertions.array.is_some()
+        || !assertions.any_of.is_empty()
+        || !assertions.one_of.is_empty()
+        || !assertions.all_of.is_empty()
+        || assertions.not.is_some()
+    {
+        return None;
+    }
+
     match assertions.types.as_deref() {
         Some([schema_type @ SchemaType::String])
         | Some([schema_type @ SchemaType::Number])
         | Some([schema_type @ SchemaType::Integer])
         | Some([schema_type @ SchemaType::Boolean]) => Some(*schema_type),
-        _ => None,
+        _ => assertions.const_value.as_ref().and_then(value_primitive_type),
     }
+}
+
+fn value_primitive_type(value: &Value) -> Option<SchemaType> {
+    if value.is_string() {
+        Some(SchemaType::String)
+    } else if value.is_i64() || value.is_u64() {
+        Some(SchemaType::Integer)
+    } else if value.is_number() {
+        Some(SchemaType::Number)
+    } else if value.is_boolean() {
+        Some(SchemaType::Boolean)
+    } else {
+        None
+    }
+}
+
+fn value_has_primitive_type(value: &Value, schema_type: SchemaType) -> bool {
+    match schema_type {
+        SchemaType::String => value.is_string(),
+        SchemaType::Boolean => value.is_boolean(),
+        SchemaType::Integer => value.is_i64() || value.is_u64(),
+        SchemaType::Number => value.is_number(),
+        SchemaType::Null | SchemaType::Object | SchemaType::Array => false,
+    }
+}
+
+fn types_may_include_primitive(types: &[SchemaType], primitive_type: SchemaType) -> bool {
+    types.iter().any(|schema_type| {
+        *schema_type == primitive_type
+            || matches!((*schema_type, primitive_type), (SchemaType::Number, SchemaType::Integer))
+    })
 }
 
 enum InlineBranchFamily {

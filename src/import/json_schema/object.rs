@@ -406,7 +406,15 @@ impl<'a> Lowerer<'a> {
         exclusive_group: Option<(&BTreeSet<String>, bool)>,
     ) -> ImportResult<GrammarExpr> {
         let normalized = self.object_with_required_synthetic_properties(schema)?;
-        let property_name_pattern = self.resolve_property_names_pattern(&normalized)?;
+        // llguidance-compatible broad fallback: when `propertyNames` and
+        // `patternProperties` are both present, keep patternProperties lowering
+        // and ignore propertyNames.  Enforcing the name pattern here rejects
+        // tokens llguidance keeps admissible for these schemas.
+        let property_name_pattern = if normalized.pattern_properties.is_empty() {
+            self.resolve_property_names_pattern(&normalized)?
+        } else {
+            None
+        };
         if any_required_names.is_none()
             && exclusive_group.is_none()
             && is_unconstrained_open_object_schema(&normalized)
@@ -613,12 +621,9 @@ impl<'a> Lowerer<'a> {
             ));
         }
 
-        if property_name_pattern.is_some() && !normalized.pattern_properties.is_empty() {
-            return Err(SchemaImportError::new(
-                "propertyNames is only supported without patternProperties".to_string(),
-            ));
-        }
-
+        // If `propertyNames` and `patternProperties` were both present,
+        // `property_name_pattern` has intentionally been dropped above as a
+        // broad llguidance-compatible fallback.
         if normalized.properties.is_empty()
             && normalized.required.is_empty()
             && matches!(normalized.additional_properties, AdditionalProperties::Deny)
