@@ -7160,3 +7160,50 @@ fn test_reproduce_declared_key_failure() {
     println!("LOWERED: {:#?}", lowered);
 }
 
+
+#[test]
+fn allof_propagates_object_type_into_nested_oneof_sibling_branch() {
+    let schema = json!({
+        "$defs": {
+            "common": {
+                "type": "object",
+                "required": ["name", "type"],
+                "properties": {
+                    "name": {"type": "string"}
+                }
+            },
+            "file": {
+                "properties": {
+                    "type": {"enum": ["file"]},
+                    "size": {"type": "integer"}
+                }
+            },
+            "dir": {
+                "properties": {
+                    "type": {"enum": ["dir"]}
+                }
+            }
+        },
+        "type": "array",
+        "items": {
+            "allOf": [
+                {"$ref": "#/$defs/common"},
+                {
+                    "properties": {
+                        "user": {"type": "string"}
+                    },
+                    "oneOf": [
+                        {"$ref": "#/$defs/file"},
+                        {"$ref": "#/$defs/dir"}
+                    ]
+                }
+            ]
+        }
+    });
+
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"[{"size": 1, "name": "x", "type": "file"}]"#
+    ));
+    assert!(!schema_accepts_bytes(&schema, br#"[[{"name": "x", "type": "file"}]]"#));
+}

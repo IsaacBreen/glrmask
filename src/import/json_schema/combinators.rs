@@ -621,11 +621,7 @@ impl<'a> Lowerer<'a> {
                 let mut branch = branches.pop().unwrap();
                 if let Some(explicit_types) = explicit_types_before_vacuous_prune {
                     let explicit_types_vec = explicit_types.into_iter().collect::<Vec<_>>();
-                    if let SchemaKind::Assertions(assertions) = &mut branch.kind
-                        && assertions.any_of.is_empty()
-                        && assertions.one_of.is_empty()
-                        && assertions.all_of.is_empty()
-                    {
+                    if let SchemaKind::Assertions(assertions) = &mut branch.kind {
                         if assertions.types.is_none() {
                             assertions.types = Some(explicit_types_vec);
                         } else if let Some(types) = &mut assertions.types {
@@ -654,17 +650,12 @@ impl<'a> Lowerer<'a> {
             let explicit_types_vec = explicit_types.into_iter().collect::<Vec<_>>();
             for branch in &mut branches {
                 if let SchemaKind::Assertions(assertions) = &mut branch.kind {
-                    if assertions.any_of.is_empty()
-                        && assertions.one_of.is_empty()
-                        && assertions.all_of.is_empty()
-                    {
-                        if assertions.types.is_none() {
-                            assertions.types = Some(explicit_types_vec.clone());
-                        } else if let Some(types) = &mut assertions.types {
-                            types.retain(|t| explicit_types_vec.contains(t));
-                        }
-                        prune_assertion_families_to_types(assertions);
+                    if assertions.types.is_none() {
+                        assertions.types = Some(explicit_types_vec.clone());
+                    } else if let Some(types) = &mut assertions.types {
+                        types.retain(|t| explicit_types_vec.contains(t));
                     }
+                    prune_assertion_families_to_types(assertions);
                 }
             }
             branches = drop_vacuous_string_branches(branches);
