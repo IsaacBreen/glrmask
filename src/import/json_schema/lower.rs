@@ -125,8 +125,11 @@ impl<'a> Lowerer<'a> {
     }
 
     fn finish(mut self) -> ImportResult<NamedGrammar> {
-        let start_expr = self.lower_schema(&self.document.root)?;
-        self.add_nonterminal_rule("start", start_expr);
+        let root_rule = self.fresh_rule_name("schema_root");
+        self.definition_rules.insert("#".to_string(), root_rule.clone());
+        let root_expr = self.lower_schema(&self.document.root)?;
+        self.add_nonterminal_rule(&root_rule, root_expr);
+        self.add_nonterminal_rule("start", r(&root_rule));
         simplify_terminal_rules(&mut self.rules);
         let mut grammar = NamedGrammar {
             rules: self.rules,
@@ -273,9 +276,6 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn lower_ref(&mut self, pointer: &str) -> ImportResult<GrammarExpr> {
         let normalized = normalize_local_ref(pointer)?;
-        if normalized == "#" {
-            return Ok(r("start"));
-        }
         if let Some(rule_name) = self.definition_rules.get(&normalized) {
             return Ok(r(rule_name));
         }

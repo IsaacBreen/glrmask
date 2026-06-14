@@ -644,14 +644,21 @@ impl<'a> Lowerer<'a> {
         match &normalized.additional_properties {
             AdditionalProperties::AllowAny if implicit_ap_default_false => {}
             AdditionalProperties::AllowAny => {
-                tail_pairs.push(seq(vec![
+                let key_colon = if fixed_names.is_empty()
+                    && pattern_keys.is_empty()
+                    && property_name_pattern.is_none()
+                    && super::string::json_string_compat_mode()
+                        == super::string::JsonStringCompatMode::LlGuidanceNative
+                {
+                    seq(vec![r(json_key_string_rule()), r(JSON_KEY_SEPARATOR_RULE)])
+                } else {
                     self.lower_object_additional_key_colon(
                         &fixed_names,
                         &pattern_keys,
                         property_name_pattern.as_deref(),
-                    )?,
-                    r(JSON_VALUE_RULE),
-                ]));
+                    )?
+                };
+                tail_pairs.push(seq(vec![key_colon, r(JSON_VALUE_RULE)]));
             }
             AdditionalProperties::Deny => {}
             AdditionalProperties::Schema(value_schema) => {

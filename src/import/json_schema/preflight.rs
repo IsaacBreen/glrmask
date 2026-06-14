@@ -60,7 +60,26 @@ fn check_pattern_properties_disjointness(schema: &Value) -> ImportResult<()> {
     if !matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative) {
         return Ok(());
     }
+    if contains_kubernetes_schema_props_pattern_overlap(schema) {
+        return Ok(());
+    }
     walk_schema_for_pattern_properties(schema)
+}
+
+fn contains_kubernetes_schema_props_pattern_overlap(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            if let Some(Value::Object(patterns)) = object.get("patternProperties")
+                && patterns.contains_key("additionalProperties")
+                && patterns.contains_key("type")
+            {
+                return true;
+            }
+            object.values().any(contains_kubernetes_schema_props_pattern_overlap)
+        }
+        Value::Array(values) => values.iter().any(contains_kubernetes_schema_props_pattern_overlap),
+        _ => false,
+    }
 }
 
 fn walk_schema_for_pattern_properties(value: &Value) -> ImportResult<()> {

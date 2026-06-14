@@ -1020,6 +1020,71 @@ fn llguidance_fixed_object_additional_property_accepts_escaped_solidus_key() {
     ));
 }
 
+
+#[test]
+fn llguidance_map_only_allow_any_uses_strict_key_mask() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "minProperties": 1
+    });
+
+    assert!(!schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{""#,
+        4844,
+        br#"\/"#,
+    ));
+}
+
+#[test]
+fn llguidance_pattern_property_key_class_accepts_unicode_escape_prefix() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "patternProperties": {
+            "^[^ ]+$": {"type": "string"}
+        },
+        "additionalProperties": false
+    });
+
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{""#,
+        3855,
+        br#"\u"#,
+    ));
+    assert!(!schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{""#,
+        68515,
+        br#"\uC"#,
+    ));
+}
+
+
+#[test]
+fn llguidance_pattern_property_digit_key_rejects_bare_backslash_prefix() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "patternProperties": {
+            "^[1-5][0-9]{2}$": {"type": "string"}
+        },
+        "additionalProperties": false
+    });
+
+    assert!(!schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{""#,
+        59,
+        br#"\"#,
+    ));
+}
+
 #[test]
 fn llguidance_literal_property_rejects_escaped_solidus_key() {
     let _lock = ENV_LOCK.lock().unwrap();
@@ -4645,6 +4710,7 @@ fn mixed_type_enum_does_not_use_raw_regex_fast_path() {
     lower(&grammar).unwrap();
 }
 
+
 #[test]
 fn integer_power_of_ten_multiple_lowers_to_regex() {
     let schema = json!({"type": "integer", "multipleOf": 10});
@@ -4671,6 +4737,49 @@ fn lower_bounded_integer_multiple_of_twelve_lowers_to_range() {
     };
     assert!(regex.contains("[1-9][0-9]"), "{regex}");
     lower(&grammar).unwrap();
+}
+
+
+
+#[test]
+fn recursive_root_array_ref_allows_split_object_opener() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "definitions": {"Node": {"$ref": "#"}},
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "name": {"type": "string"},
+            "children": {"type": "array", "items": {"$ref": "#/definitions/Node"}}
+        },
+        "required": ["name", "children"]
+    });
+    assert!(schema_mask_allows_token_after_prefix(&schema, b"", 300, br#"{""#));
+}
+
+#[test]
+fn llguidance_bounded_integer_multiple_rejects_signed_start() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "min_y": {
+                "type": "integer",
+                "minimum": -2032,
+                "maximum": 2031,
+                "multipleOf": 16
+            }
+        }
+    });
+
+    assert!(!schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{"min_y":"#,
+        482,
+        b" -",
+    ));
 }
 
 #[test]
@@ -6413,6 +6522,46 @@ fn sibling_pattern_addback_subtracts_local_pattern_language_for_o10297_shape() {
     lower(&grammar).unwrap();
 }
 
+
+
+#[test]
+fn oneof_sibling_object_preserves_root_property_order() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "grantType": {"type": "string"},
+            "redirectUris": {"type": "array", "items": {"type": "string"}},
+            "responseType": {"type": "string"},
+            "scopes": {"type": "array", "items": {"type": "string"}}
+        },
+        "oneOf": [
+            {
+                "properties": {
+                    "grantType": {"enum": ["authorization_code"]},
+                    "responseType": {"enum": ["code"]}
+                },
+                "required": ["grantType"]
+            },
+            {
+                "properties": {
+                    "grantType": {"enum": ["client_credentials"]},
+                    "responseType": {"enum": ["token"]}
+                },
+                "required": ["grantType"]
+            }
+        ]
+    });
+
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{"grantType": "authorization_code", "redirectUris": ["https://example.com/callback"], ""#,
+        81,
+        b"r",
+    ));
+}
 
 #[test]
 fn llguidance_compat_drops_only_plain_subsumed_open_object_anyof_branch() {

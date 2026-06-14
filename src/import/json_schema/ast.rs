@@ -190,6 +190,7 @@ pub(crate) struct NumberSchema {
     pub(crate) exclusive_minimum: bool,
     pub(crate) exclusive_maximum: bool,
     pub(crate) multiple_of: Option<f64>,
+    pub(crate) format: Option<String>,
 }
 
 impl Schema {

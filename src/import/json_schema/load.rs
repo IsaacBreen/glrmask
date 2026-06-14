@@ -205,18 +205,6 @@ fn validate_unsupported_conditionals_in_schema_positions(
         return Ok(());
     };
 
-    let unsupported = ["if", "then", "else"]
-        .into_iter()
-        .filter(|key| object.contains_key(*key))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    if !unsupported.is_empty() {
-        return Err(SchemaImportError::at(
-            location,
-            format!("Unimplemented keys: {unsupported:?}"),
-        ));
-    }
-
     for map_key in ["properties", "patternProperties"] {
         let child_location = format!("{location}/{}", escape_pointer_segment(map_key));
         if let Some(children) = object.get(map_key).and_then(Value::as_object) {
@@ -525,11 +513,7 @@ fn validate_supported_keys(object: &Map<String, Value>, location: &str) -> Impor
 fn is_unsupported_validation_key(key: &str) -> bool {
     matches!(
         key,
-        "if"
-            | "then"
-            | "else"
-            | "uniqueItems"
-            | "contains"
+        "contains"
             | "minContains"
             | "maxContains"
             | "dependentSchemas"
@@ -940,6 +924,7 @@ fn load_number_keywords(
         exclusive_minimum: false,
         exclusive_maximum: false,
         multiple_of: read_f64_keyword(object, "multipleOf", location)?,
+        format: read_string_keyword(object, "format", location)?,
     };
 
     if let Some(value) = object.get("exclusiveMinimum") {

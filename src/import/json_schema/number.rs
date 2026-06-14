@@ -57,8 +57,15 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_integer(&mut self, schema: &NumberSchema) -> ImportResult<GrammarExpr> {
-        let lower = integer_lower_bound(schema);
+        let mut lower = integer_lower_bound(schema);
         let upper = integer_upper_bound(schema);
+        if self.llguidance_compat_enabled()
+            && schema.multiple_of.is_some()
+            && lower.is_some_and(|value| value < 0)
+            && upper.is_some_and(|value| value >= 0)
+        {
+            lower = Some(0);
+        }
         if let (Some(lower), Some(upper)) = (lower, upper) {
             if lower > upper {
                 return Ok(never());
