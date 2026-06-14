@@ -1085,7 +1085,7 @@ impl SuffixQuotient {
             // If a schema fails only above this cap, fix the quotient/table
             // invariant that fails at scale instead of hiding the failure.
             max_states: env_usize(RECOGNIZER_SUFFIX_QUOTIENT_MAX_STATES_ENV, 4096),
-            max_alts: env_usize(RECOGNIZER_SUFFIX_QUOTIENT_MAX_ALTS_ENV, 16),
+            max_alts: env_usize(RECOGNIZER_SUFFIX_QUOTIENT_MAX_ALTS_ENV, 64),
             max_width: env_usize(RECOGNIZER_SUFFIX_QUOTIENT_MAX_WIDTH_ENV, 8),
             created_states: 0,
         }
@@ -1282,7 +1282,7 @@ impl SuffixQuotient {
                 let Some(action) = table.action[top as usize].get(&terminal).cloned() else {
                     continue;
                 };
-                self.collect_effects_for_suffix_action(suffix, &action, &mut effects, &mut accepts)?;
+                self.collect_effects_for_suffix_action(table, suffix, terminal, &action, &mut effects, &mut accepts)?;
             }
 
             if accepts > 0 {
@@ -1357,60 +1357,34 @@ fn action_has_multi_stack_shifts(action: &Action) -> bool {
 
     fn collect_effects_for_suffix_action(
         &mut self,
+        table: &GLRTable,
         suffix: &[u32],
+        terminal: TerminalID,
         action: &Action,
         effects: &mut Vec<GuardedStackShift>,
         accepts: &mut usize,
     ) -> Result<(), ()> {
-        match action {
-            Action::Shift(target, replace) => {
-                effects.push(unguarded_suffix_effect(
-                    suffix,
-                    if *replace { 1 } else { 0 },
-                    &[*target],
-                )?);
-                Ok(())
-            }
-            Action::StackShifts(shifts) => {
-                for shift in shifts {
-                    effects.push(unguarded_suffix_effect(suffix, shift.pop, &shift.pushes)?);
-                }
-                Ok(())
-            }
-            Action::GuardedStackShifts(shifts) => {
-                for shift in shifts {
-                    if let Some(effect) = guarded_suffix_effect(suffix, shift)? {
-                        effects.push(effect);
-                    }
-                }
-                Ok(())
-            }
-            Action::Split {
-                shift,
-                reduces,
-                accept,
-            } => {
-                if !reduces.is_empty() {
-                    return Err(());
-                }
-                if *accept {
-                    *accepts += 1;
-                }
-                if let Some((target, replace)) = shift {
-                    effects.push(unguarded_suffix_effect(
-                        suffix,
-                        if *replace { 1 } else { 0 },
-                        &[*target],
-                    )?);
-                }
-                Ok(())
-            }
-            Action::Accept => {
-                *accepts += 1;
-                Ok(())
-            }
-            Action::Reduce(..) => Err(()),
+        if suffix.is_empty() {
+            return Err(());
         }
+        let Some(&state) = suffix.last() else {
+            return Err(());
+        };
+        let frame = StackEffectFrame {
+            pop: 1,
+            pushes: suffix.to_vec(),
+            guards: Vec::new(),
+        };
+        collect_suffix_effects_from_frame(
+            table,
+            terminal,
+            state,
+            action,
+            frame,
+            &mut FxHashSet::default(),
+            effects,
+            accepts,
+        )
     }
 }
 
@@ -1508,6 +1482,182 @@ fn suffix_effect(
         pop: macro_pop,
         pushes: macro_pushes,
     })
+}
+
+// Compile one concrete action row of a synthetic suffix state into an
+// equivalent macro stack effect.
+//
+// Invariant.  A synthetic suffix state Q_S denotes the finite set S of concrete
+// LR stack suffixes.  If the lower stack is alpha, a concrete member suffix s in
+// S denotes alpha·s, while the synthetic stack denotes alpha·Q_S.  A macro
+// effect produced here is correct when applying it to alpha·Q_S yields exactly
+// the same lower-stack result as applying the original LR action sequence to
+// alpha·s, for every alpha satisfying its guards.
+//
+// Shifts and existing stack effects are translated by replacing the synthetic
+// state with the concrete suffix, applying the concrete pop/push operation, and
+// then re-encoding the result as one macro pop plus pushes.  Reductions are the
+// only subtle case: the reduce pop may expose a state inside the represented
+// suffix, or it may cross below Q_S into alpha.  In the first case the exposed
+// predecessor is known statically.  In the second case the predecessor is not
+// known until runtime, so we enumerate table goto sources for the reduced
+// nonterminal and add a guard at the exposed depth.  The guarded alternatives
+// are disjoint by predecessor state, and states without the goto simply produce
+// no branch, matching ordinary LR reduce failure.  After goto, we recursively
+// continue on the same terminal until a consuming shift/stack-effect/accept is
+// reached, exactly as the GLR interpreter does for reductions.
+fn collect_suffix_effects_from_frame(
+    table: &GLRTable,
+    terminal: TerminalID,
+    state: u32,
+    action: &Action,
+    frame: StackEffectFrame,
+    visiting: &mut FxHashSet<StackEffectVisitKey>,
+    effects: &mut Vec<GuardedStackShift>,
+    accepts: &mut usize,
+) -> Result<(), ()> {
+    let key = StackEffectVisitKey {
+        state,
+        tid: terminal,
+        action_tag: stack_effect_action_tag(action),
+        frame: frame.clone(),
+    };
+    if !visiting.insert(key.clone()) {
+        return Err(());
+    }
+
+    let result = (|| {
+        match action {
+            Action::Shift(target, replace) => {
+                let mut frame = frame;
+                let effective_replace = *replace && !table.forwarded_shifts.contains(&(state, terminal));
+                push_transition_to_frame(&mut frame, *target, effective_replace);
+                effects.push(frame_to_guarded_shift(frame));
+                Ok(())
+            }
+            Action::StackShifts(shifts) => {
+                for shift in shifts {
+                    let mut frame = frame.clone();
+                    pop_frame(&mut frame, shift.pop);
+                    frame.pushes.extend_from_slice(&shift.pushes);
+                    effects.push(frame_to_guarded_shift(frame));
+                }
+                Ok(())
+            }
+            Action::GuardedStackShifts(shifts) => {
+                for shift in shifts {
+                    if let Some(frame) = compose_guarded_shift_with_frame(frame.clone(), shift).ok_or(())? {
+                        effects.push(frame_to_guarded_shift(frame));
+                    }
+                }
+                Ok(())
+            }
+            Action::Reduce(nt, len) => {
+                for frame in reduce_suffix_frame(table, frame, *nt, *len)? {
+                    let Some(&next_state) = frame.pushes.last() else {
+                        continue;
+                    };
+                    let Some(next_action) = table.action[next_state as usize].get(&terminal) else {
+                        continue;
+                    };
+                    collect_suffix_effects_from_frame(
+                        table,
+                        terminal,
+                        next_state,
+                        next_action,
+                        frame,
+                        visiting,
+                        effects,
+                        accepts,
+                    )?;
+                }
+                Ok(())
+            }
+            Action::Split { shift, reduces, accept } => {
+                if *accept {
+                    *accepts += 1;
+                }
+                if let Some((target, replace)) = shift {
+                    let shift_action = Action::Shift(*target, *replace);
+                    collect_suffix_effects_from_frame(
+                        table,
+                        terminal,
+                        state,
+                        &shift_action,
+                        frame.clone(),
+                        visiting,
+                        effects,
+                        accepts,
+                    )?;
+                }
+                for &(nt, len) in reduces {
+                    let reduce_action = Action::Reduce(nt, len);
+                    collect_suffix_effects_from_frame(
+                        table,
+                        terminal,
+                        state,
+                        &reduce_action,
+                        frame.clone(),
+                        visiting,
+                        effects,
+                        accepts,
+                    )?;
+                }
+                Ok(())
+            }
+            Action::Accept => {
+                *accepts += 1;
+                Ok(())
+            }
+        }
+    })();
+
+    visiting.remove(&key);
+    result
+}
+
+fn reduce_suffix_frame(
+    table: &GLRTable,
+    mut frame: StackEffectFrame,
+    nt: NonterminalID,
+    len: u32,
+) -> Result<Vec<StackEffectFrame>, ()> {
+    pop_frame(&mut frame, len);
+
+    let goto_froms: Vec<(u32, Option<Vec<u32>>)> = if let Some(&state) = frame.pushes.last() {
+        vec![(state, None)]
+    } else {
+        table
+            .goto
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.contains_key(&nt))
+            .map(|(state, _)| (state as u32, Some(vec![state as u32])))
+            .collect()
+    };
+
+    if goto_froms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let guard_pop = frame.pop;
+    let mut out = Vec::new();
+    for (goto_from, guard_states) in goto_froms {
+        let Some((target, replace)) = table.goto[goto_from as usize].get(&nt).copied() else {
+            continue;
+        };
+        let mut next = frame.clone();
+        if let Some(states) = guard_states
+            && !add_guard_to_frame(&mut next, guard_pop, states)
+        {
+            continue;
+        }
+        push_transition_to_frame(&mut next, target, replace);
+        out.push(next);
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
 }
 
 fn row_fingerprint(
@@ -3332,6 +3482,69 @@ mod tests {
             "{:#?}",
             table.ambiguous_actions()
         );
+    }
+
+
+    #[test]
+    fn suffix_quotient_builds_synthetic_rows_through_reductions() {
+        let produce = 0;
+        let consume = 1;
+        let mut action = vec![ActionRow::default(); 9];
+        action[0].insert(
+            produce,
+            Action::StackShifts(vec![
+                StackShift { pop: 0, pushes: vec![1] },
+                StackShift { pop: 0, pushes: vec![2] },
+            ]),
+        );
+        action[1].insert(consume, Action::Reduce(10, 1));
+        action[2].insert(consume, Action::Reduce(11, 1));
+        action[3].insert(consume, Action::Shift(7, false));
+        action[4].insert(consume, Action::Shift(8, false));
+
+        let mut goto = vec![GotoRow::default(); 9];
+        goto[0].insert(10, (3, false));
+        goto[0].insert(11, (4, false));
+
+        let mut table = GLRTable {
+            action,
+            goto,
+            num_states: 9,
+            num_terminals: 2,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            construction: GlrTableConstruction::LegacyRowBisim,
+            admission_policy: AdmissionPolicy::RowPresenceExact,
+            advance: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+            guarded_shift_index: Vec::new(),
+        };
+        table.rebuild_advance_rows_from_actions();
+
+        table.quotient_recognizer_stack_suffixes();
+
+        let synthetic = match table.action(0, produce) {
+            Some(Action::StackShifts(producer_shifts)) => {
+                assert_eq!(producer_shifts.len(), 1);
+                assert_eq!(producer_shifts[0].pop, 0);
+                assert_eq!(producer_shifts[0].pushes.len(), 1);
+                producer_shifts[0].pushes[0]
+            }
+            Some(Action::Shift(target, replace)) => {
+                assert!(!replace);
+                *target
+            }
+            other => panic!("expected producer to be rewritten to one target action, got {other:?}"),
+        };
+        let Some(Action::GuardedStackShifts(shifts)) = table.action(synthetic, consume) else {
+            panic!("expected synthetic row to compile reductions into guarded stack effects");
+        };
+        assert!(!shifts.is_empty());
+        assert!(shifts.iter().all(|shift| shift.pop == 1));
+        assert!(shifts.iter().all(|shift| shift.guards.len() == 1));
+        assert!(shifts.iter().all(|shift| shift.guards[0].pop == 1));
+        assert!(shifts.iter().all(|shift| shift.guards[0].states == vec![0]));
     }
 
     #[test]
