@@ -1721,15 +1721,15 @@ pub(crate) fn preprocess_ascii_shorthand(pattern: &str) -> String {
 }
 
 fn pattern_matches_any_key(pattern: &str) -> bool {
-    matches!(preprocess_ascii_shorthand(pattern).as_str(), "" | ".*" | "^.*$")
+    matches!(preprocess_ascii_shorthand(pattern).as_str(), "" | ".*")
 }
 
 fn llguidance_preserves_additional_path_for_any_key_pattern(pattern: &str) -> bool {
-    matches!(preprocess_ascii_shorthand(pattern).as_str(), ".*" | "^.*$")
+    matches!(preprocess_ascii_shorthand(pattern).as_str(), ".*")
 }
 
 fn pattern_matches_any_string(pattern: &str) -> bool {
-    matches!(preprocess_ascii_shorthand(pattern).as_str(), ".*" | "^.*$" | "^(.*)$")
+    matches!(preprocess_ascii_shorthand(pattern).as_str(), ".*")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

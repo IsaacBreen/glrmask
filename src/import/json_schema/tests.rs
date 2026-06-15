@@ -7213,3 +7213,74 @@ fn allof_propagates_object_type_into_nested_oneof_sibling_branch() {
     ));
     assert!(!schema_accepts_bytes(&schema, br#"[[{"name": "x", "type": "file"}]]"#));
 }
+
+#[test]
+fn llguidance_compat_oneof_sibling_optional_key_mask_regression() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "oneOf": [
+            {"properties": {"grantType": {"enum": ["authorization_code"]}, "responseType": {"enum": ["code"]}}, "required": ["grantType"]},
+            {"properties": {"grantType": {"enum": ["client_credentials"]}, "responseType": {"enum": ["token"]}}, "required": ["grantType"]}
+        ],
+        "properties": {
+            "grantType": {"type": "string"},
+            "redirectUris": {"type": "array", "items": {"type": "string"}},
+            "responseType": {"type": "string"},
+            "scopes": {"type": "array", "items": {"type": "string"}}
+        }
+    });
+    assert!(!schema_mask_allows_token_after_prefix(&schema, br#"{""#, 301, b"r"));
+    let prefix = br#"{"grantType": "authorization_code", "redirectUris": ["https://example.com/callback"], ""#;
+    assert!(schema_mask_allows_token_after_prefix(&schema, prefix, 300, b"response"));
+}
+
+#[test]
+fn max_properties_equal_required_count_blocks_trailing_pair_token() {
+    let schema = json!({
+        "type": "object",
+        "required": ["a", "b"],
+        "maxProperties": 2,
+        "properties": {
+            "a": {"type": "string"},
+            "b": {"type": "string"}
+        }
+    });
+    let prefix = br#"{"a": "x", "b": "#;
+    assert!(schema_mask_allows_token_after_prefix(&schema, prefix, 300, br#""y""#));
+    assert!(!schema_mask_allows_token_after_prefix(&schema, prefix, 301, br#""y", "#));
+}
+
+#[test]
+fn untyped_string_keywords_on_array_items_allow_non_string_items() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "checksums": {
+                "type": "array",
+                "items": {"minLength": 32, "maxLength": 32, "pattern": "^[0-9a-f]*$"}
+            }
+        }
+    });
+    assert!(schema_accepts_bytes(&schema, br#"{"checksums": ["b026324c6904b2a9cb4b88d6d61c81d1"]}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"checksums": [[]]}"#));
+    assert!(schema_mask_allows_token_after_prefix(&schema, br#"{"checksums":"#, 300, b" [["));
+}
+
+#[test]
+fn llguidance_compat_untyped_pattern_items_allow_non_string_items() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "checksums": {
+                "type": "array",
+                "items": {"minLength": 32, "maxLength": 32, "pattern": "^[0-9a-f]*$"}
+            }
+        }
+    });
+    assert!(schema_mask_allows_token_after_prefix(&schema, br#"{"checksums":"#, 300, b" [["));
+}
