@@ -40,15 +40,6 @@ impl<'a> Lowerer<'a> {
         {
             return Ok(r(JSON_OBJECT_RULE));
         }
-        if self.llguidance_compat_enabled()
-            && let Some(sibling_schema) = &siblings
-            && let Some(object) = self.try_merge_llguidance_any_of_object_siblings(
-                sibling_schema,
-                &assertions.any_of,
-            )?
-        {
-            return self.lower_object(&object);
-        }
         let branches = assertions
             .any_of
             .iter()
@@ -65,25 +56,13 @@ impl<'a> Lowerer<'a> {
             || assertions.types.as_ref().is_some_and(|types| {
                 types.iter().all(|schema_type| *schema_type == SchemaType::Object)
             });
-        let branches = if self.llguidance_compat_enabled() && suppress_untyped_non_object_alts {
-            branches
-                .into_iter()
-                .map(force_object_type_schema)
-                .collect::<Vec<_>>()
-        } else {
-            branches
-        };
         if !self.llguidance_compat_enabled()
             && open_object_any_of_covers_json_object(&factoring_branches)
         {
             return Ok(r(JSON_OBJECT_RULE));
         }
         let factoring_branches = if self.llguidance_compat_enabled() {
-            if siblings.is_some() {
-                factoring_branches
-            } else {
-                self.drop_llguidance_plain_subsumed_open_object_any_of_branches(factoring_branches)?
-            }
+            self.drop_llguidance_plain_subsumed_open_object_any_of_branches(factoring_branches)?
         } else {
             self.drop_subsumed_open_object_any_of_branches(factoring_branches)?
         };
@@ -133,51 +112,6 @@ impl<'a> Lowerer<'a> {
             .map(|branch| self.lower_schema(branch))
             .collect::<ImportResult<Vec<_>>>()?;
         Ok(choice(alternatives))
-    }
-
-    fn try_merge_llguidance_any_of_object_siblings(
-        &self,
-        sibling_schema: &Schema,
-        branches: &[Schema],
-    ) -> ImportResult<Option<ObjectSchema>> {
-        let Some(sibling_object) = self.object_branch_resolved(sibling_schema)? else {
-            return Ok(None);
-        };
-        let mut merged = sibling_object.clone();
-        let mut branch_properties = Vec::new();
-        for branch in branches {
-            let Some(branch_object) = self.object_branch_resolved(branch)? else {
-                return Ok(None);
-            };
-            for property in &branch_object.properties {
-                if let Some(existing) = branch_properties
-                    .iter_mut()
-                    .find(|candidate: &&mut PropertySchema| candidate.name == property.name)
-                {
-                    existing.schema = merge_property_schemas(
-                        existing.schema.clone(),
-                        property.schema.clone(),
-                    );
-                } else {
-                    branch_properties.push(property.clone());
-                }
-            }
-        }
-        for property in merged.properties.drain(..) {
-            if let Some(existing) = branch_properties
-                .iter_mut()
-                .find(|candidate| candidate.name == property.name)
-            {
-                existing.schema = merge_property_schemas(
-                    existing.schema.clone(),
-                    property.schema.clone(),
-                );
-            } else {
-                branch_properties.push(property);
-            }
-        }
-        merged.properties = branch_properties;
-        Ok(Some(merged))
     }
 
     fn try_merge_single_object_any_of_with_siblings(
@@ -247,22 +181,6 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn lower_one_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
         self.validate_mixed_ref_disjoint_family_one_of(assertions)?;
         let siblings = sibling_assertion_schema(assertions);
-        if self.llguidance_compat_enabled()
-            && let Some(sibling_schema) = &siblings
-        {
-            if assertions.one_of.len() == 1 && schema_requires_property(sibling_schema, "type") {
-                return self.lower_schema(sibling_schema);
-            }
-            let alternatives = assertions
-                .one_of
-                .iter()
-                .map(|branch| {
-                    let branch = branch_with_sibling_obj_type(branch, sibling_schema);
-                    self.lower_schema(&branch)
-                })
-                .collect::<ImportResult<Vec<_>>>()?;
-            return Ok(choice(alternatives));
-        }
         let branches = assertions
             .one_of
             .iter()
@@ -2669,54 +2587,6 @@ fn schema_slices_shape_equivalent(left: &[Schema], right: &[Schema]) -> bool {
             .all(|(left, right)| schemas_shape_equivalent(left, right))
 }
 
-fn force_object_type_schema(schema: Schema) -> Schema {
-    if let Some(pushed) = push_object_only_type_into_branch(&schema) {
-        return pushed;
-    }
-    let object_type = Schema::assertions(
-        "<forced-object-combinator-branch>",
-        SchemaAssertions {
-            types: Some(vec![SchemaType::Object]),
-            ..SchemaAssertions::default()
-        },
-    );
-    all_of_schema(object_type, schema)
-}
-
-fn branch_with_sibling_obj_type(branch: &Schema, sibling_schema: &Schema) -> Schema {
-    if !schema_has_object_assertions(sibling_schema) {
-        return branch.clone();
-    }
-    if let Some(pushed) = push_object_only_type_into_branch(branch) {
-        return pushed;
-    }
-    let object_type = Schema::assertions(
-        "<object-type-combinator-sibling>",
-        SchemaAssertions {
-            types: Some(vec![SchemaType::Object]),
-            ..SchemaAssertions::default()
-        },
-    );
-    all_of_schema(object_type, branch.clone())
-}
-
-fn schema_has_object_assertions(schema: &Schema) -> bool {
-    let SchemaKind::Assertions(assertions) = &schema.kind else {
-        return false;
-    };
-    assertions.object.is_some()
-}
-
-fn schema_requires_property(schema: &Schema, property: &str) -> bool {
-    let SchemaKind::Assertions(assertions) = &schema.kind else {
-        return false;
-    };
-    let Some(object) = &assertions.object else {
-        return false;
-    };
-    object.required.contains(property)
-}
-
 fn sibling_assertion_schema(assertions: &SchemaAssertions) -> Option<Schema> {
     let siblings = assertions.clone_without_combinators();
     if siblings.is_empty() {
@@ -2735,7 +2605,7 @@ fn branch_with_siblings(branch: Schema, siblings: Option<Schema>) -> Schema {
     {
         return branch;
     }
-    all_of_schema(branch, siblings)
+    all_of_schema(siblings, branch)
 }
 
 fn push_object_only_type_into_branch(branch: &Schema) -> Option<Schema> {
