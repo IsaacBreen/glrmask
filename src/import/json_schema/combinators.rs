@@ -2808,7 +2808,10 @@ fn pure_choice_branch(schema: &Schema) -> Option<(ChoiceKind, &[Schema])> {
     let SchemaKind::Assertions(assertions) = &schema.kind else {
         return None;
     };
-    if assertions.types.is_some()
+    if assertions
+        .types
+        .as_ref()
+        .is_some_and(|types| !types.iter().all(|schema_type| *schema_type == SchemaType::Object))
         || assertions.const_value.is_some()
         || assertions.enum_values.is_some()
         || assertions.object.is_some()

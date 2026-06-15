@@ -2713,6 +2713,12 @@ fn allof_oneof_ref_objects_with_required_sibling_factors_common_object() {
     );
     assert!(glrm.contains("AzureBlob"), "{glrm}");
     assert!(glrm.contains("AzureTable"), "{glrm}");
+    assert!(!schema_accepts_bytes(&schema, br#"{}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"type": "AzureBlob"}"#));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"type": "AzureBlob", "typeProperties": {}}"#
+    ));
     lower(&grammar).unwrap();
 }
 
