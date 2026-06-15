@@ -2605,7 +2605,7 @@ fn branch_with_siblings(branch: Schema, siblings: Option<Schema>) -> Schema {
     {
         return branch;
     }
-    all_of_schema(siblings, branch)
+    all_of_schema(branch, siblings)
 }
 
 fn push_object_only_type_into_branch(branch: &Schema) -> Option<Schema> {
