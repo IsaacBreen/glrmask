@@ -13,9 +13,19 @@ use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecondaryLexer {
+    pub(crate) dfa: DFA,
+    pub(crate) terminal_to_guard: Vec<Option<u32>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tokenizer {
     pub(crate) dfa: DFA,
     pub num_terminals: u32,
+    /// Optional secondary guard DFA. Guard finalizer ids are guard ids;
+    /// terminal_to_guard maps primary terminal ids to guard ids.
+    #[serde(default)]
+    pub(crate) secondary: Option<Arc<SecondaryLexer>>,
     /// Per-terminal regex expressions used to (re)build this tokenizer.
     /// Skipped during (de)serialization because they are only needed during
     /// compile-time simplification for active-terminal rebuilds.
@@ -67,9 +77,23 @@ impl Tokenizer {
         0
     }
 
+    pub(crate) fn has_secondary(&self) -> bool {
+        self.secondary.is_some()
+    }
+
+    #[inline]
+    pub(crate) fn pack_runtime_state(main: u32, secondary: u32) -> usize {
+        ((secondary as usize) << 32) | main as usize
+    }
+
     #[inline]
     pub(crate) fn runtime_primary_state(state: usize) -> u32 {
-        u32::try_from(state).expect("ordinary tokenizer runtime state does not fit in u32")
+        (state & 0xffff_ffff) as u32
+    }
+
+    #[inline]
+    pub(crate) fn runtime_secondary_state(state: usize) -> u32 {
+        (state >> 32) as u32
     }
 
     #[inline]
@@ -77,21 +101,19 @@ impl Tokenizer {
         Self::runtime_primary_state(state)
     }
 
-    #[inline]
     pub(crate) fn step_runtime_state(&self, state: usize, byte: u8) -> Option<usize> {
-        self.step(Self::runtime_primary_state(state), byte).map(|next| next as usize)
-    }
-
-    pub(crate) fn matched_terminals_runtime(&self, state: usize) -> Vec<TerminalID> {
-        self.matched_terminals_iter(Self::runtime_primary_state(state)).collect()
-    }
-
-    pub(crate) fn possible_future_terminals_runtime(&self, state: usize) -> BitSet {
-        self.possible_future_terminals(Self::runtime_primary_state(state)).clone()
-    }
-
-    pub(crate) fn is_end_runtime(&self, state: usize) -> bool {
-        self.possible_future_terminals_runtime(state).is_empty()
+        let main = Self::runtime_primary_state(state);
+        let next_main = self.step(main, byte)?;
+        let Some(secondary) = &self.secondary else {
+            return Some(next_main as usize);
+        };
+        let secondary_state = Self::runtime_secondary_state(state);
+        let next_secondary = if secondary_state == u32::MAX {
+            u32::MAX
+        } else {
+            secondary.dfa.step(secondary_state, byte).unwrap_or(u32::MAX)
+        };
+        Some(Self::pack_runtime_state(next_main, next_secondary))
     }
 
     /// Detect nullable terminals (those that match the empty string) by
@@ -139,6 +161,60 @@ impl Tokenizer {
 
     pub fn matched_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
         self.matched_terminals_iter(state).collect()
+    }
+
+    pub(crate) fn matched_terminals_runtime(&self, state: usize) -> Vec<TerminalID> {
+        let main = Self::runtime_primary_state(state);
+        let Some(secondary) = &self.secondary else {
+            return self.matched_terminals_iter(main).collect();
+        };
+        let secondary_state = Self::runtime_secondary_state(state);
+        self.dfa
+            .finalizers(main)
+            .iter()
+            .filter_map(|terminal| {
+                let terminal = terminal as TerminalID;
+                match secondary.terminal_to_guard.get(terminal as usize).copied().flatten() {
+                    None => Some(terminal),
+                    Some(guard) => {
+                        if secondary_state != u32::MAX
+                            && secondary.dfa.finalizers(secondary_state).contains(guard as usize)
+                        {
+                            Some(terminal)
+                        } else {
+                            None
+                        }
+                    }
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn possible_future_terminals_runtime(&self, state: usize) -> BitSet {
+        let main = Self::runtime_primary_state(state);
+        let mut futures = self.dfa.possible_future_group_ids(main).clone();
+        let Some(secondary) = &self.secondary else {
+            return futures;
+        };
+        let secondary_state = Self::runtime_secondary_state(state);
+        for terminal in 0..self.num_terminals as usize {
+            let Some(guard) = secondary.terminal_to_guard.get(terminal).copied().flatten() else {
+                continue;
+            };
+            let guard_possible = secondary_state != u32::MAX
+                && secondary
+                    .dfa
+                    .possible_future_group_ids(secondary_state)
+                    .contains(guard as usize);
+            if !guard_possible && terminal < futures.len() {
+                futures.clear(terminal);
+            }
+        }
+        futures
+    }
+
+    pub(crate) fn is_end_runtime(&self, state: usize) -> bool {
+        self.possible_future_terminals_runtime(state).is_empty()
     }
 
     pub(crate) fn matched_terminals_iter(
@@ -219,7 +295,11 @@ impl Tokenizer {
     }
 
     pub fn initial_state(&self) -> usize {
-        self.start_state() as usize
+        if self.secondary.is_some() {
+            Self::pack_runtime_state(self.start_state(), self.start_state())
+        } else {
+            self.start_state() as usize
+        }
     }
 
     pub fn initial_state_id(&self) -> u32 {
@@ -450,6 +530,7 @@ impl Tokenizer {
                 Tokenizer {
                     dfa,
                     num_terminals: self.num_terminals,
+                    secondary: self.secondary.clone(),
                     exprs: self.exprs.clone(),
                 },
                 identity,
@@ -470,6 +551,7 @@ impl Tokenizer {
                     Tokenizer {
                         dfa,
                         num_terminals: self.num_terminals,
+                        secondary: self.secondary.clone(),
                         exprs: self.exprs.clone(),
                     },
                     identity,
@@ -492,6 +574,7 @@ impl Tokenizer {
                 Tokenizer {
                     dfa,
                     num_terminals: self.num_terminals,
+                    secondary: self.secondary.clone(),
                     exprs: self.exprs.clone(),
                 },
                 identity,
@@ -505,6 +588,7 @@ impl Tokenizer {
             Tokenizer {
                 dfa: minimized,
                 num_terminals: self.num_terminals,
+                secondary: self.secondary.clone(),
                 exprs: self.exprs.clone(),
             },
             ManyToOneIdMap::from_original_to_internal_allowing_unmapped(

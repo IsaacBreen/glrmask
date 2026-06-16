@@ -186,6 +186,10 @@ impl CandidateCollector {
                 self.collect_expr(rule_idx, intersect, path);
                 path.pop();
             }
+            GrammarExpr::WithSecondaryLexer { main, secondary } => {
+                self.collect_expr(rule_idx, main, path);
+                self.collect_expr(rule_idx, secondary, path);
+            }
             GrammarExpr::Quantified(inner, Quantifier::Optional) => {
                 path.push(PathStep::Optional);
                 self.collect_expr(rule_idx, inner, path);

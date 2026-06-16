@@ -357,18 +357,35 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
             grammar.terminals.len()
         );
         for (index, expr) in exprs.iter().enumerate() {
+            let (main_expr, secondary_expr) = split_secondary_lexer_expr(expr);
             let started_at = Instant::now();
-            let regex = build_regex(std::slice::from_ref(expr));
+            let regex = build_regex(std::slice::from_ref(&main_expr));
+            let guard_regex = secondary_expr
+                .as_ref()
+                .map(|guard| build_regex(std::slice::from_ref(guard)));
             let elapsed = elapsed_ms(started_at);
             let name = grammar.terminal_display_name(index as u32);
-            eprintln!(
-                "[glrmask/profile][tokenizer] terminal id={} name={:?} final_states={} final_transitions={} alone_ms={:.3}",
-                index,
-                name,
-                regex.num_states(),
-                regex.num_transitions(),
-                elapsed
-            );
+            if let Some(guard_regex) = guard_regex {
+                eprintln!(
+                    "[glrmask/profile][tokenizer] terminal id={} name={:?} final_states={} final_transitions={} secondary_states={} secondary_transitions={} alone_ms={:.3}",
+                    index,
+                    name,
+                    regex.num_states(),
+                    regex.num_transitions(),
+                    guard_regex.num_states(),
+                    guard_regex.num_transitions(),
+                    elapsed
+                );
+            } else {
+                eprintln!(
+                    "[glrmask/profile][tokenizer] terminal id={} name={:?} final_states={} final_transitions={} alone_ms={:.3}",
+                    index,
+                    name,
+                    regex.num_states(),
+                    regex.num_transitions(),
+                    elapsed
+                );
+            }
         }
     }
     build_tokenizer_from_exprs(&exprs, Some(&terminal_labels))
@@ -387,10 +404,11 @@ pub(crate) fn build_tokenizer_from_exprs(
             profile_labels.map_or(0, |labels| labels.len())
         );
     }
+    let (main_exprs, secondary) = split_secondary_lexer_exprs(exprs);
     let regex = if let Some(labels) = profile_labels {
-        build_regex_with_profile_labels(exprs, labels)
+        build_regex_with_profile_labels(&main_exprs, labels)
     } else {
-        build_regex(exprs)
+        build_regex(&main_exprs)
     };
     if profile_detail {
         eprintln!(
@@ -405,7 +423,48 @@ pub(crate) fn build_tokenizer_from_exprs(
     Tokenizer {
         dfa: regex.dfa,
         num_terminals: exprs.len() as u32,
+        secondary,
         exprs: Some(std::sync::Arc::from(exprs.to_vec())),
+    }
+}
+
+fn split_secondary_lexer_exprs(
+    exprs: &[Expr],
+) -> (Vec<Expr>, Option<std::sync::Arc<crate::automata::lexer::tokenizer::SecondaryLexer>>) {
+    let mut main_exprs = Vec::with_capacity(exprs.len());
+    let mut guard_exprs = Vec::<Expr>::new();
+    let mut terminal_to_guard = Vec::with_capacity(exprs.len());
+
+    for expr in exprs {
+        let (main, guard) = split_secondary_lexer_expr(expr);
+        main_exprs.push(main);
+        if let Some(guard) = guard {
+            let guard_id = guard_exprs.len() as u32;
+            guard_exprs.push(guard);
+            terminal_to_guard.push(Some(guard_id));
+        } else {
+            terminal_to_guard.push(None);
+        }
+    }
+
+    let secondary = if guard_exprs.is_empty() {
+        None
+    } else {
+        Some(std::sync::Arc::new(crate::automata::lexer::tokenizer::SecondaryLexer {
+            dfa: build_regex(&guard_exprs).dfa,
+            terminal_to_guard,
+        }))
+    };
+    (main_exprs, secondary)
+}
+
+fn split_secondary_lexer_expr(expr: &Expr) -> (Expr, Option<Expr>) {
+    match expr {
+        Expr::Shared(inner) => split_secondary_lexer_expr(inner),
+        Expr::WithSecondaryLexer { main, secondary } => {
+            ((*main.clone()).clone(), Some((*secondary.clone()).clone()))
+        }
+        other => (other.clone(), None),
     }
 }
 

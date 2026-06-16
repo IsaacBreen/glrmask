@@ -150,19 +150,22 @@ impl<'a> Lowerer<'a> {
         let mut constraints = Vec::new();
 
         if let Some(pattern) = &schema.pattern
-            && let Some(length_bound_body) = cheap_pattern_length_bound_body_regex(
+            && let Some((guard_min, guard_max)) = cheap_pattern_length_bound(
                 pattern,
-                &self.json_string_char_regex(),
                 schema.min_length,
                 schema.max_length,
                 self.config.preserve_pattern_max_length,
             )
         {
-            constraints.push(quoted_string_body_regex(&length_bound_body));
+            constraints.push(seq(vec![
+                lit("\""),
+                self.string_body_for_length(guard_min, guard_max),
+                lit("\""),
+            ]));
         }
 
         if let Some(format_body_regex) = recognized_string_format_body_regex_for_lowering(schema.format.as_deref()) {
-            constraints.push(quoted_string_body_regex(format_body_regex));
+            constraints.push(GrammarExpr::RawRegex(quoted_string_body_regex(format_body_regex)));
         }
 
         for (index, constraint) in constraints.into_iter().enumerate() {
@@ -171,9 +174,9 @@ impl<'a> Lowerer<'a> {
                 self.add_terminal_rule(&name, expr);
                 expr = r(&name);
             }
-            expr = GrammarExpr::Intersect {
-                expr: Box::new(expr),
-                intersect: Box::new(GrammarExpr::RawRegex(constraint)),
+            expr = GrammarExpr::WithSecondaryLexer {
+                main: Box::new(expr),
+                secondary: Box::new(constraint),
             };
         }
 
@@ -869,6 +872,19 @@ impl<'a> Lowerer<'a> {
             return Ok(seq(vec![
                 self.lower_literal_key_colon_with_prefix(prefix, key),
                 value,
+            ]));
+        }
+
+        if schema.pattern.is_some()
+            && schema.max_length.is_some()
+            && self.config.preserve_pattern_max_length
+        {
+            let value = self.lower_string_property_value_expr(schema)?;
+            let value_name = self.fresh_rule_name("json_string_constrained_value");
+            self.add_terminal_rule(&value_name, value);
+            return Ok(seq(vec![
+                self.lower_literal_key_colon_with_prefix(prefix, key),
+                r(&value_name),
             ]));
         }
 
@@ -1883,6 +1899,31 @@ fn wrap_lowered_string_pattern_branch(lowered: &str, anchored_start: bool, ancho
 
 fn quoted_string_body_regex(body_regex: &str) -> String {
     format!(r#""(?:{body_regex})""#)
+}
+
+fn cheap_pattern_length_bound(
+    pattern: &str,
+    min: usize,
+    max: Option<usize>,
+    preserve_pattern_max_length: bool,
+) -> Option<(usize, Option<usize>)> {
+    if min == 0 && max.is_none() {
+        return None;
+    }
+    let pattern = preprocess_ascii_shorthand(pattern);
+    if pattern_matches_any_string(&pattern) {
+        return Some((min, max));
+    }
+    if preserve_pattern_max_length && max.is_some() {
+        return Some((min, max));
+    }
+    if max.is_some_and(|max| max <= 64) {
+        return Some((min, max));
+    }
+    if min > 0 {
+        return Some((min, None));
+    }
+    None
 }
 
 fn bounded_json_string_body_regex(string_char_regex: &str, min: usize, max: Option<usize>) -> String {

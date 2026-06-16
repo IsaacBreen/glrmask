@@ -351,7 +351,8 @@ fn contains_separated_sequence(expr: &GrammarExpr) -> bool {
         GrammarExpr::Exclude { expr, exclude } => {
             contains_separated_sequence(expr) || contains_separated_sequence(exclude)
         }
-        GrammarExpr::Intersect { expr, intersect } => {
+        GrammarExpr::Intersect { expr, intersect }
+        | GrammarExpr::WithSecondaryLexer { main: expr, secondary: intersect } => {
             contains_separated_sequence(expr) || contains_separated_sequence(intersect)
         }
         GrammarExpr::Ref(_)
@@ -377,7 +378,8 @@ fn contains_expr_nfa(expr: &GrammarExpr) -> bool {
         GrammarExpr::Exclude { expr, exclude } => {
             contains_expr_nfa(expr) || contains_expr_nfa(exclude)
         }
-        GrammarExpr::Intersect { expr, intersect } => {
+        GrammarExpr::Intersect { expr, intersect }
+        | GrammarExpr::WithSecondaryLexer { main: expr, secondary: intersect } => {
             contains_expr_nfa(expr) || contains_expr_nfa(intersect)
         }
         GrammarExpr::SeparatedSequence { items, separator, .. } => {
@@ -406,7 +408,8 @@ fn expr_contains_raw_regex(expr: &GrammarExpr) -> bool {
         GrammarExpr::Exclude { expr, exclude } => {
             expr_contains_raw_regex(expr) || expr_contains_raw_regex(exclude)
         }
-        GrammarExpr::Intersect { expr, intersect } => {
+        GrammarExpr::Intersect { expr, intersect }
+        | GrammarExpr::WithSecondaryLexer { main: expr, secondary: intersect } => {
             expr_contains_raw_regex(expr) || expr_contains_raw_regex(intersect)
         }
         GrammarExpr::SeparatedSequence { items, separator, .. } => {
@@ -1276,7 +1279,8 @@ fn contains_exclude(expr: &GrammarExpr) -> bool {
         GrammarExpr::SeparatedSequence { items, separator, .. } => {
             items.iter().any(|(item, _)| contains_exclude(item)) || contains_exclude(separator)
         }
-        GrammarExpr::Intersect { expr, intersect } => contains_exclude(expr) || contains_exclude(intersect),
+        GrammarExpr::Intersect { expr, intersect }
+        | GrammarExpr::WithSecondaryLexer { main: expr, secondary: intersect } => contains_exclude(expr) || contains_exclude(intersect),
         GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
@@ -1306,7 +1310,8 @@ fn contains_ref_with_prefix(expr: &GrammarExpr, prefix: &str) -> bool {
         GrammarExpr::Exclude { expr, exclude } => {
             contains_ref_with_prefix(expr, prefix) || contains_ref_with_prefix(exclude, prefix)
         }
-        GrammarExpr::Intersect { expr, intersect } => {
+        GrammarExpr::Intersect { expr, intersect }
+        | GrammarExpr::WithSecondaryLexer { main: expr, secondary: intersect } => {
             contains_ref_with_prefix(expr, prefix) || contains_ref_with_prefix(intersect, prefix)
         }
         GrammarExpr::Epsilon
@@ -1385,6 +1390,7 @@ fn contains_intersect(expr: &GrammarExpr) -> bool {
             items.iter().any(|(item, _)| contains_intersect(item)) || contains_intersect(separator)
         }
         GrammarExpr::Exclude { expr, exclude } => contains_intersect(expr) || contains_intersect(exclude),
+        GrammarExpr::WithSecondaryLexer { main, secondary } => contains_intersect(main) || contains_intersect(secondary),
         GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
@@ -1422,6 +1428,10 @@ fn contains_intersect_with_separated_sequence(expr: &GrammarExpr) -> bool {
             contains_intersect_with_separated_sequence(expr)
                 || contains_intersect_with_separated_sequence(exclude)
         }
+        GrammarExpr::WithSecondaryLexer { main, secondary } => {
+            contains_intersect_with_separated_sequence(main)
+                || contains_intersect_with_separated_sequence(secondary)
+        }
         GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
@@ -1451,7 +1461,8 @@ fn contains_ref_named(expr: &GrammarExpr, name: &str) -> bool {
         GrammarExpr::Exclude { expr, exclude } => {
             contains_ref_named(expr, name) || contains_ref_named(exclude, name)
         }
-        GrammarExpr::Intersect { expr, intersect } => {
+        GrammarExpr::Intersect { expr, intersect }
+        | GrammarExpr::WithSecondaryLexer { main: expr, secondary: intersect } => {
             contains_ref_named(expr, name) || contains_ref_named(intersect, name)
         }
         GrammarExpr::Epsilon
@@ -1482,7 +1493,8 @@ fn contains_literal_bytes(expr: &GrammarExpr, bytes: &[u8]) -> bool {
         GrammarExpr::Exclude { expr, exclude } => {
             contains_literal_bytes(expr, bytes) || contains_literal_bytes(exclude, bytes)
         }
-        GrammarExpr::Intersect { expr, intersect } => {
+        GrammarExpr::Intersect { expr, intersect }
+        | GrammarExpr::WithSecondaryLexer { main: expr, secondary: intersect } => {
             contains_literal_bytes(expr, bytes) || contains_literal_bytes(intersect, bytes)
         }
         GrammarExpr::ExprNFA(nfa) => nfa
@@ -1521,7 +1533,8 @@ fn contains_raw_regex_substring(expr: &GrammarExpr, substring: &str) -> bool {
             contains_raw_regex_substring(expr, substring)
                 || contains_raw_regex_substring(exclude, substring)
         }
-        GrammarExpr::Intersect { expr, intersect } => {
+        GrammarExpr::Intersect { expr, intersect }
+        | GrammarExpr::WithSecondaryLexer { main: expr, secondary: intersect } => {
             contains_raw_regex_substring(expr, substring)
                 || contains_raw_regex_substring(intersect, substring)
         }
@@ -2912,13 +2925,13 @@ fn large_pattern_max_length_env_intersects_json_string_length_envelope() {
         .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
         .expect("expected terminalized constrained string rule");
 
-    let GrammarExpr::Intersect { intersect, .. } = &rule.expr else {
-        panic!("expected pattern terminal intersected with length envelope: {:?}", rule.expr);
+    let GrammarExpr::WithSecondaryLexer { main, secondary } = &rule.expr else {
+        panic!("expected pattern terminal with secondary length envelope: {:?}", rule.expr);
     };
-    let GrammarExpr::RawRegex(regex) = intersect.as_ref() else {
-        panic!("expected raw regex length envelope: {:?}", intersect);
-    };
-    assert!(regex.contains("{2,80}"), "{regex}");
+    assert!(matches!(main.as_ref(), GrammarExpr::RawRegex(_)), "{:?}", main);
+    let secondary_debug = format!("{:?}", secondary);
+    assert!(secondary_debug.contains("json_string_char_exact_2"), "{secondary_debug}");
+    assert!(secondary_debug.contains("json_string_char_upto_78"), "{secondary_debug}");
     lower(&grammar).unwrap();
 
     let mut too_short = Vec::from([b'"']);
@@ -2935,6 +2948,25 @@ fn large_pattern_max_length_env_intersects_json_string_length_envelope() {
     too_long.extend(std::iter::repeat_n(b'a', 81));
     too_long.push(b'"');
     assert!(!schema_accepts_bytes(&schema, &too_long));
+}
+
+#[test]
+fn preserved_pattern_max_length_rejects_overlong_runtime_string() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH", "1");
+
+    let schema = json!({
+        "type": "string",
+        "pattern": "^.*$",
+        "minLength": 1,
+        "maxLength": 1
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#""a""#));
+    assert!(schema_accepts_bytes(&schema, br#""\u0061""#));
+    assert!(!schema_accepts_bytes(&schema, br#""aa""#));
+    assert!(schema_mask_allows_token_after_prefix(&schema, b"", 300, br#""a""#));
+    assert!(!schema_mask_allows_token_after_prefix(&schema, b"", 300, br#""aa""#));
 }
 
 #[test]

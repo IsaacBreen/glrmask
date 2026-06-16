@@ -576,6 +576,9 @@ impl Constraint {
     }
 
     pub(crate) fn tokenizer_fast_transition(&self, state: usize, byte: u8) -> usize {
+        if self.tokenizer.has_secondary() {
+            return self.tokenizer.step_runtime_state(state, byte).unwrap_or(usize::MAX);
+        }
         self.tokenizer_fast_transitions.get(state).map_or(usize::MAX, |transitions| {
             let target = transitions[byte as usize];
             if target == u32::MAX { usize::MAX } else { target as usize }

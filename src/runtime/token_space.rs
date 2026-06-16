@@ -9,9 +9,9 @@ use crate::grammar::flat::TerminalID;
 use super::artifact::Constraint;
 
 impl Constraint {
-	pub(crate) fn possible_matches_for_state(
-		&self,
-		tokenizer_state: usize,
+        pub(crate) fn possible_matches_for_state(
+                &self,
+                tokenizer_state: usize,
 	) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
 		let internal_tsid = self.internal_tsid_for_state(tokenizer_state);
 		self.possible_matches
@@ -27,13 +27,13 @@ impl Constraint {
 			.collect()
 	}
 
-	pub(crate) fn internal_tsid_for_state(&self, tokenizer_state: usize) -> u32 {
-        let original_state = self.tokenizer.precompute_state_for_runtime(tokenizer_state);
-        self.state_to_internal_tsid
-            .get(original_state as usize)
-            .copied()
-            .unwrap_or(original_state)
-    }
+        pub(crate) fn internal_tsid_for_state(&self, tokenizer_state: usize) -> u32 {
+                let original_state = self.tokenizer.precompute_state_for_runtime(tokenizer_state);
+                self.state_to_internal_tsid
+                        .get(original_state as usize)
+                        .copied()
+                        .unwrap_or(original_state)
+        }
 
 	pub(crate) fn internal_token_for_original(&self, token_id: u32) -> u32 {
 		self.original_token_to_internal
