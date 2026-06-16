@@ -1397,6 +1397,9 @@ fn all_of_intersection_terminal_safe(expr: &GrammarExpr) -> bool {
         GrammarExpr::Intersect { expr, intersect } | GrammarExpr::Exclude { expr, exclude: intersect } => {
             all_of_intersection_terminal_safe(expr) && all_of_intersection_terminal_safe(intersect)
         }
+        GrammarExpr::WithSecondaryLexer { main, secondary } => {
+            all_of_intersection_terminal_safe(main) && all_of_intersection_terminal_safe(secondary)
+        }
         GrammarExpr::SeparatedSequence { .. } | GrammarExpr::ExprNFA(_) => false,
     }
 }

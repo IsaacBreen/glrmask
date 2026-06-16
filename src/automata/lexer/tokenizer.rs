@@ -13,9 +13,19 @@ use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecondaryLexer {
+    pub(crate) dfa: DFA,
+    pub(crate) terminal_to_guard: Vec<Option<u32>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tokenizer {
     pub(crate) dfa: DFA,
     pub num_terminals: u32,
+    /// Optional secondary guard DFA. Guard finalizer ids are guard ids;
+    /// terminal_to_guard maps primary terminal ids to guard ids.
+    #[serde(default)]
+    pub(crate) secondary: Option<Arc<SecondaryLexer>>,
     /// Per-terminal regex expressions used to (re)build this tokenizer.
     /// Skipped during (de)serialization because they are only needed during
     /// compile-time simplification for active-terminal rebuilds.
@@ -27,16 +37,16 @@ pub struct Tokenizer {
 pub struct TokenizerMatch {
     pub id: TerminalID,
     pub width: usize,
-    pub end_state: u32,
+    pub end_state: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenizerExecResult {
-    pub end_state: Option<u32>,
+    pub end_state: Option<usize>,
     pub matches: Vec<TokenizerMatch>,
 }
 
-fn into_longest_matches(matches: FxHashMap<TerminalID, (usize, u32)>) -> Vec<TokenizerMatch> {
+fn into_longest_matches(matches: FxHashMap<TerminalID, (usize, usize)>) -> Vec<TokenizerMatch> {
     matches
         .into_iter()
         .map(|(id, (width, end_state))| TokenizerMatch {
@@ -65,6 +75,40 @@ struct TerminalFilteredDfa {
 impl Tokenizer {
     pub fn start_state(&self) -> u32 {
         0
+    }
+
+    pub(crate) fn has_secondary(&self) -> bool {
+        self.secondary.is_some()
+    }
+
+    #[inline]
+    pub(crate) fn pack_runtime_state(main: u32, secondary: u32) -> usize {
+        ((secondary as usize) << 32) | main as usize
+    }
+
+    #[inline]
+    pub(crate) fn runtime_primary_state(state: usize) -> u32 {
+        (state & 0xffff_ffff) as u32
+    }
+
+    #[inline]
+    pub(crate) fn runtime_secondary_state(state: usize) -> u32 {
+        (state >> 32) as u32
+    }
+
+    pub(crate) fn step_runtime_state(&self, state: usize, byte: u8) -> Option<usize> {
+        let main = Self::runtime_primary_state(state);
+        let next_main = self.step(main, byte)?;
+        let Some(secondary) = &self.secondary else {
+            return Some(next_main as usize);
+        };
+        let secondary_state = Self::runtime_secondary_state(state);
+        let next_secondary = if secondary_state == u32::MAX {
+            u32::MAX
+        } else {
+            secondary.dfa.step(secondary_state, byte).unwrap_or(u32::MAX)
+        };
+        Some(Self::pack_runtime_state(next_main, next_secondary))
     }
 
     /// Detect nullable terminals (those that match the empty string) by
@@ -114,6 +158,60 @@ impl Tokenizer {
         self.matched_terminals_iter(state).collect()
     }
 
+    pub(crate) fn matched_terminals_runtime(&self, state: usize) -> Vec<TerminalID> {
+        let main = Self::runtime_primary_state(state);
+        let Some(secondary) = &self.secondary else {
+            return self.matched_terminals_iter(main).collect();
+        };
+        let secondary_state = Self::runtime_secondary_state(state);
+        self.dfa
+            .finalizers(main)
+            .iter()
+            .filter_map(|terminal| {
+                let terminal = terminal as TerminalID;
+                match secondary.terminal_to_guard.get(terminal as usize).copied().flatten() {
+                    None => Some(terminal),
+                    Some(guard) => {
+                        if secondary_state != u32::MAX
+                            && secondary.dfa.finalizers(secondary_state).contains(guard as usize)
+                        {
+                            Some(terminal)
+                        } else {
+                            None
+                        }
+                    }
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn possible_future_terminals_runtime(&self, state: usize) -> BitSet {
+        let main = Self::runtime_primary_state(state);
+        let mut futures = self.dfa.possible_future_group_ids(main).clone();
+        let Some(secondary) = &self.secondary else {
+            return futures;
+        };
+        let secondary_state = Self::runtime_secondary_state(state);
+        for terminal in 0..self.num_terminals as usize {
+            let Some(guard) = secondary.terminal_to_guard.get(terminal).copied().flatten() else {
+                continue;
+            };
+            let guard_possible = secondary_state != u32::MAX
+                && secondary
+                    .dfa
+                    .possible_future_group_ids(secondary_state)
+                    .contains(guard as usize);
+            if !guard_possible && terminal < futures.len() {
+                futures.clear(terminal);
+            }
+        }
+        futures
+    }
+
+    pub(crate) fn is_end_runtime(&self, state: usize) -> bool {
+        self.possible_future_terminals_runtime(state).is_empty()
+    }
+
     pub(crate) fn matched_terminals_iter(
         &self,
         state: u32,
@@ -153,7 +251,7 @@ impl Tokenizer {
     pub(crate) fn execute_from_state_all_widths(
         &self,
         input: &[u8],
-        start: u32,
+        start: usize,
     ) -> TokenizerExecResult {
         let mut matches = Vec::new();
         let end_state = self.scan_input(input, start, &mut matches, |tokenizer, matches, state, width| {
@@ -161,13 +259,13 @@ impl Tokenizer {
         });
 
         TokenizerExecResult {
-            end_state: end_state.filter(|&state| !self.is_end(state)),
+            end_state: end_state.filter(|&state| !self.is_end_runtime(state)),
             matches,
         }
     }
 
-    pub fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult {
-        let mut matches = FxHashMap::<TerminalID, (usize, u32)>::default();
+    pub fn execute_from_state(&self, input: &[u8], start: usize) -> TokenizerExecResult {
+        let mut matches = FxHashMap::<TerminalID, (usize, usize)>::default();
         let end_state = self.scan_input(input, start, &mut matches, |tokenizer, matches, state, width| {
             tokenizer.record_longest_matches(matches, state, width);
         });
@@ -178,11 +276,11 @@ impl Tokenizer {
         }
     }
 
-    pub(crate) fn execute_from_state_end_only(&self, input: &[u8], start: u32) -> Option<u32> {
+    pub(crate) fn execute_from_state_end_only(&self, input: &[u8], start: usize) -> Option<usize> {
         self.scan_input(input, start, &mut (), |_, _, _, _| {})
     }
 
-    pub fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult {
+    pub fn execute_all_matches(&self, input: &[u8], start: usize) -> TokenizerResult {
         let exec = self.execute_from_state_all_widths(input, start);
         let end_state = exec.end_state.unwrap_or(start);
         TokenizerResult {
@@ -191,12 +289,16 @@ impl Tokenizer {
         }
     }
 
-    pub fn initial_state(&self) -> u32 {
-        self.start_state()
+    pub fn initial_state(&self) -> usize {
+        if self.secondary.is_some() {
+            Self::pack_runtime_state(self.start_state(), self.start_state())
+        } else {
+            self.start_state() as usize
+        }
     }
 
     pub fn initial_state_id(&self) -> u32 {
-        self.initial_state()
+        self.start_state()
     }
 
     pub fn tokens_accessible_from_state(&self, state: u32) -> &BitSet {
@@ -267,8 +369,8 @@ impl Tokenizer {
             .any(|state| state.transitions.values().any(|&target| target == start))
     }
 
-    fn record_all_matches(&self, matches: &mut Vec<TokenizerMatch>, state: u32, width: usize) {
-        matches.extend(self.matched_terminals_iter(state).map(|id| TokenizerMatch {
+    fn record_all_matches(&self, matches: &mut Vec<TokenizerMatch>, state: usize, width: usize) {
+        matches.extend(self.matched_terminals_runtime(state).into_iter().map(|id| TokenizerMatch {
             id,
             width,
             end_state: state,
@@ -277,11 +379,11 @@ impl Tokenizer {
 
     fn record_longest_matches(
         &self,
-        matches: &mut FxHashMap<TerminalID, (usize, u32)>,
-        state: u32,
+        matches: &mut FxHashMap<TerminalID, (usize, usize)>,
+        state: usize,
         width: usize,
     ) {
-        for terminal in self.matched_terminals_iter(state) {
+        for terminal in self.matched_terminals_runtime(state) {
             matches.insert(terminal, (width, state));
         }
     }
@@ -289,13 +391,13 @@ impl Tokenizer {
     fn scan_input<R>(
         &self,
         input: &[u8],
-        start: u32,
+        start: usize,
         mut matches: &mut R,
-        mut record_matches: impl FnMut(&Self, &mut R, u32, usize),
-    ) -> Option<u32> {
+        mut record_matches: impl FnMut(&Self, &mut R, usize, usize),
+    ) -> Option<usize> {
         let mut state = start;
         for (index, &byte) in input.iter().enumerate() {
-            let next = self.step(state, byte)?;
+            let next = self.step_runtime_state(state, byte)?;
             state = next;
             record_matches(self, &mut matches, state, index + 1);
         }
@@ -423,6 +525,7 @@ impl Tokenizer {
                 Tokenizer {
                     dfa,
                     num_terminals: self.num_terminals,
+                    secondary: self.secondary.clone(),
                     exprs: self.exprs.clone(),
                 },
                 identity,
@@ -443,6 +546,7 @@ impl Tokenizer {
                     Tokenizer {
                         dfa,
                         num_terminals: self.num_terminals,
+                        secondary: self.secondary.clone(),
                         exprs: self.exprs.clone(),
                     },
                     identity,
@@ -465,6 +569,7 @@ impl Tokenizer {
                 Tokenizer {
                     dfa,
                     num_terminals: self.num_terminals,
+                    secondary: self.secondary.clone(),
                     exprs: self.exprs.clone(),
                 },
                 identity,
@@ -478,6 +583,7 @@ impl Tokenizer {
             Tokenizer {
                 dfa: minimized,
                 num_terminals: self.num_terminals,
+                secondary: self.secondary.clone(),
                 exprs: self.exprs.clone(),
             },
             ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
@@ -490,6 +596,6 @@ impl Tokenizer {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenizerResult {
-    pub end_state: u32,
+    pub end_state: usize,
     pub matches: Vec<(usize, BTreeSet<TerminalID>)>,
 }

@@ -720,7 +720,7 @@ impl<'a> ConstraintState<'a> {
             return false;
         }
 
-        let mut paths = SmallVec::<[(u32, TerminalsDisallowed, SmallVec<[u32; 16]>); MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS]>::new();
+        let mut paths = SmallVec::<[(usize, TerminalsDisallowed, SmallVec<[u32; 16]>); MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS]>::new();
         for (&original_tokenizer_state, gss) in &self.state {
             if gss.max_depth() > MASK_SINGLE_PATH_DIRECT_MAX_DEPTH {
                 return false;
@@ -893,7 +893,7 @@ impl<'a> ConstraintState<'a> {
     fn terminals_disallowed_to_dense_acc(
         &self,
         terminals_disallowed: &TerminalsDisallowed,
-        original_tokenizer_state: u32,
+        original_tokenizer_state: usize,
         internal_tsid: u32,
     ) -> Option<DenseMaskAcc> {
         let base = &self.constraint.seed_universe_dense;
@@ -920,7 +920,7 @@ impl<'a> ConstraintState<'a> {
         // original tokenizer states by expanding each internal TSID through
         // `internal_tsid_to_states` during precomputation.
         for &terminal_id in disallowed_in_state {
-            if let Some(mask) = terminal_masks.get(&(original_tokenizer_state, terminal_id)) {
+            if let Some(mask) = terminal_masks.get(&(crate::automata::lexer::tokenizer::Tokenizer::runtime_primary_state(original_tokenizer_state) as u32, terminal_id)) {
                 for (allowed_word, mask_word) in dense.iter_mut().zip(mask.iter()) {
                     *allowed_word &= !mask_word;
                 }
@@ -1676,6 +1676,83 @@ impl<'a> ConstraintState<'a> {
         returned_profile
     }
 
+
+    fn filter_secondary_guarded_mask(&self, buf: &mut [u32]) {
+        if !self.constraint.tokenizer.has_secondary() {
+            return;
+        }
+        let active_states: SmallVec<[usize; 8]> = self
+            .state
+            .iter()
+            .filter_map(|(&state, gss)| (!gss.is_empty()).then_some(state))
+            .collect();
+        if active_states.is_empty() {
+            buf.fill(0);
+            return;
+        }
+        for (word_idx, word) in buf.iter_mut().enumerate() {
+            let mut bits = *word;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                let token_id = (word_idx * 32 + bit) as u32;
+                if !self.secondary_guard_allows_token_from_any_state(token_id, &active_states)
+                    && !self.secondary_guard_commit_probe_allows(token_id)
+                {
+                    *word &= !(1u32 << bit);
+                }
+                bits &= bits - 1;
+            }
+        }
+    }
+
+    fn secondary_guard_commit_probe_allows(&self, token_id: u32) -> bool {
+        let Some(bytes) = self
+            .constraint
+            .token_bytes_dense
+            .get(token_id as usize)
+            .and_then(|bytes| bytes.as_deref())
+            .or_else(|| self.constraint.token_bytes.get(&token_id).map(Vec::as_slice))
+        else {
+            return false;
+        };
+        let mut probe = self.clone();
+        probe.commit_bytes(bytes).is_ok()
+    }
+
+    fn secondary_guard_allows_token_from_any_state(
+        &self,
+        token_id: u32,
+        active_states: &[usize],
+    ) -> bool {
+        let Some(bytes) = self
+            .constraint
+            .token_bytes_dense
+            .get(token_id as usize)
+            .and_then(|bytes| bytes.as_deref())
+            .or_else(|| self.constraint.token_bytes.get(&token_id).map(Vec::as_slice))
+        else {
+            return false;
+        };
+
+        'states: for &start_state in active_states {
+            let mut state = start_state;
+            let mut saw_match = false;
+            for &byte in bytes {
+                let Some(next_state) = self.constraint.tokenizer.step_runtime_state(state, byte) else {
+                    continue 'states;
+                };
+                state = next_state;
+                if !self.constraint.tokenizer.matched_terminals_runtime(state).is_empty() {
+                    saw_match = true;
+                }
+            }
+            if saw_match || !self.constraint.tokenizer.is_end_runtime(state) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn mask(&self) -> Vec<u32> {
         let mut buf = vec![0u32; self.constraint.mask_len()];
         self.fill_mask(&mut buf);
@@ -1698,10 +1775,12 @@ impl<'a> ConstraintState<'a> {
 
     pub fn fill_mask(&self, buf: &mut [u32]) {
         if self.try_fill_mask_from_cache(buf) {
+            self.filter_secondary_guarded_mask(buf);
             return;
         }
 
         self.fill_mask_uncached(buf);
+        self.filter_secondary_guarded_mask(buf);
     }
 
     pub fn fill_mask_timed_ns(&self, buf: &mut [u32]) -> u64 {

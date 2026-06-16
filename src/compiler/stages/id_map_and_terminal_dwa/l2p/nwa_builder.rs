@@ -855,7 +855,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 // Collect matches into reusable buffer
                 matches_buf.clear();
                 for (&id, &(width, end_st)) in match_map_buf.iter() {
-                    matches_buf.push(TokenizerMatch { id, width, end_state: end_st });
+                    matches_buf.push(TokenizerMatch { id, width, end_state: end_st as usize });
                 }
 
                 if let Some(end_state) = end_state {

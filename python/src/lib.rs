@@ -691,7 +691,7 @@ impl PyConstraintState {
     }
 
     /// Return all flattened parser stacks for debugging.
-    fn debug_parser_stacks(&self) -> Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)> {
+    fn debug_parser_stacks(&self) -> Vec<(usize, Vec<(Vec<u32>, Vec<(usize, Vec<u32>)>)>)> {
         self.inner.with_dependent(|_owner, state| state.debug_parser_stacks())
     }
 
