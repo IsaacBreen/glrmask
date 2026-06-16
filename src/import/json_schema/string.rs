@@ -155,6 +155,7 @@ impl<'a> Lowerer<'a> {
                 &self.json_string_char_regex(),
                 schema.min_length,
                 schema.max_length,
+                self.config.preserve_pattern_max_length,
             )
         {
             constraints.push(quoted_string_body_regex(&length_bound_body));
@@ -1900,6 +1901,7 @@ fn cheap_pattern_length_bound_body_regex(
     string_char_regex: &str,
     min: usize,
     max: Option<usize>,
+    preserve_pattern_max_length: bool,
 ) -> Option<String> {
     if min == 0 && max.is_none() {
         return None;
@@ -1907,6 +1909,10 @@ fn cheap_pattern_length_bound_body_regex(
 
     let pattern = preprocess_ascii_shorthand(pattern);
     if pattern_matches_any_string(&pattern) {
+        return Some(bounded_json_string_body_regex(string_char_regex, min, max));
+    }
+
+    if preserve_pattern_max_length && max.is_some() {
         return Some(bounded_json_string_body_regex(string_char_regex, min, max));
     }
 
@@ -1918,8 +1924,9 @@ fn cheap_pattern_length_bound_body_regex(
     }
 
     // For large bounded patterns, keep the cheap lower bound but still drop the
-    // potentially explosive upper bound. This rejects impossible too-short
-    // complete string tokens without rebuilding the old maxLength product.
+    // potentially explosive upper bound unless the explicit opt-in above is set.
+    // This rejects impossible too-short complete string tokens without rebuilding
+    // the old maxLength product by default.
     if min > 0 {
         return Some(bounded_json_string_body_regex(string_char_regex, min, None));
     }

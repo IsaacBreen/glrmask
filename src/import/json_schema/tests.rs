@@ -2870,6 +2870,73 @@ fn oversized_pattern_properties_overlap_check_broadens() {
     lower(&grammar).unwrap();
 }
 
+
+#[test]
+fn large_pattern_max_length_is_dropped_by_default() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH");
+
+    let schema = json!({
+        "type": "string",
+        "pattern": "^[a]+$",
+        "maxLength": 80
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let rule = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
+        .expect("expected terminalized constrained string rule");
+
+    assert!(matches!(rule.expr, GrammarExpr::RawRegex(_)), "{:?}", rule.expr);
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn large_pattern_max_length_env_intersects_json_string_length_envelope() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH", "1");
+
+    let schema = json!({
+        "type": "string",
+        "pattern": "^[a]+$",
+        "minLength": 2,
+        "maxLength": 80
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let rule = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
+        .expect("expected terminalized constrained string rule");
+
+    let GrammarExpr::Intersect { intersect, .. } = &rule.expr else {
+        panic!("expected pattern terminal intersected with length envelope: {:?}", rule.expr);
+    };
+    let GrammarExpr::RawRegex(regex) = intersect.as_ref() else {
+        panic!("expected raw regex length envelope: {:?}", intersect);
+    };
+    assert!(regex.contains("{2,80}"), "{regex}");
+    lower(&grammar).unwrap();
+
+    let mut too_short = Vec::from([b'"']);
+    too_short.push(b'a');
+    too_short.push(b'"');
+    assert!(!schema_accepts_bytes(&schema, &too_short));
+
+    let mut at_limit = Vec::from([b'"']);
+    at_limit.extend(std::iter::repeat_n(b'a', 80));
+    at_limit.push(b'"');
+    assert!(schema_accepts_bytes(&schema, &at_limit));
+
+    let mut too_long = Vec::from([b'"']);
+    too_long.extend(std::iter::repeat_n(b'a', 81));
+    too_long.push(b'"');
+    assert!(!schema_accepts_bytes(&schema, &too_long));
+}
+
 #[test]
 fn medium_bounded_string_terminalizes_with_env_override() {
     let _env_lock = ENV_LOCK.lock().unwrap();

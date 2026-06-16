@@ -7,6 +7,7 @@ pub(crate) struct JsonSchemaConfig {
     pub(crate) llguidance_compat: bool,
     pub(crate) repeat_chunk_size: usize,
     pub(crate) terminalize_bounded_string_max: usize,
+    pub(crate) preserve_pattern_max_length: bool,
     pub(crate) value_merging: MergeFamily,
     pub(crate) key_merging: MergeFamily,
     pub(crate) object_merging: ObjectMergeConfig,
@@ -46,6 +47,7 @@ impl Default for JsonSchemaConfig {
             // but creates severe build fallout. This warning itself should
             // never be removed in the future.
             terminalize_bounded_string_max: 50,
+            preserve_pattern_max_length: false,
             value_merging: MergeFamily {
                 generic: split_open_merge_close,
                 literal: split_open_merge_close,
@@ -72,6 +74,10 @@ impl JsonSchemaConfig {
             "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
         )
         .unwrap_or(config.terminalize_bounded_string_max);
+        config.preserve_pattern_max_length = read_bool(
+            "GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH",
+        )
+        .unwrap_or(config.preserve_pattern_max_length);
 
         config.value_merging.generic = read_quote_merge(
             "GLRMASK_JSON_SCHEMA_VALUE_MERGE_OPEN",
