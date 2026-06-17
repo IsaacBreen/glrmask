@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use super::dwa::{DWA, DWAState};
 use crate::ds::weight::Weight;
@@ -115,8 +115,15 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
     let mut changed = false;
     for &u in topo.iter().rev() {
         let state = &dwa.states()[u];
-        let mut acc = state.final_weight.as_ref().cloned().unwrap_or_else(Weight::empty);
-        let mut acc_full = acc.is_full();
+        let mut reachable_parts: Vec<Weight> = Vec::with_capacity(state.transitions.len() + 1);
+        let mut acc_full = false;
+        if let Some(final_weight) = &state.final_weight {
+            if final_weight.is_full() {
+                acc_full = true;
+            } else if !final_weight.is_empty() {
+                reachable_parts.push(final_weight.clone());
+            }
+        }
         let mut pushed: Vec<(Label, u32, Option<Weight>)> = Vec::new();
         for (&lbl, (target, w)) in &state.transitions {
             let t = *target as usize;
@@ -124,9 +131,13 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
                 continue;
             }
             if reachable[t].is_full() {
-                if !acc_full {
-                    acc = acc.union(w);
-                    acc_full = acc.is_full();
+                if !acc_full && !w.is_empty() {
+                    if w.is_full() {
+                        acc_full = true;
+                        reachable_parts.clear();
+                    } else {
+                        reachable_parts.push(w.clone());
+                    }
                 }
                 // w ∩ all = w, no push needed
             } else if reachable[t].is_empty() {
@@ -135,16 +146,24 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
                 // Contributes nothing to acc
             } else {
                 let new_w = memoized_intersection(&mut intersection_cache, w, &reachable[t]);
-                if !acc_full {
-                    acc = acc.union(&new_w);
-                    acc_full = acc.is_full();
+                if !acc_full && !new_w.is_empty() {
+                    if new_w.is_full() {
+                        acc_full = true;
+                        reachable_parts.clear();
+                    } else {
+                        reachable_parts.push(new_w.clone());
+                    }
                 }
                 if new_w != *w {
                     pushed.push((lbl, *target, if new_w.is_empty() { None } else { Some(new_w) }));
                 }
             }
         }
-        reachable[u] = acc;
+        reachable[u] = if acc_full {
+            Weight::all()
+        } else {
+            Weight::union_all(reachable_parts.iter())
+        };
 
         for (lbl, target, new_w_opt) in pushed {
             if let Some(new_w) = new_w_opt {
@@ -1048,50 +1067,27 @@ fn targets_compatible_with_group_map(
     })
 }
 
-fn transition_weights_compatible_on_overlap(
-    class_weights: &[(Label, Weight)],
-    group_transition_by_label: &FxHashMap<Label, Weight>,
-    overlap: &Weight,
+fn final_weights_compatible_on_domain_intersection(
+    class_final_weight: Option<&Weight>,
+    member_final_weight: Option<&Weight>,
+    class_domain: &Weight,
+    member_domain: &Weight,
 ) -> bool {
-    if overlap.is_empty() {
-        return true;
-    }
-
-    let mut class_labels = FxHashSet::default();
-    class_labels.reserve(class_weights.len());
-
-    for (label, class_weight) in class_weights {
-        class_labels.insert(*label);
-        match group_transition_by_label.get(label) {
-            Some(group_weight) => {
-                if class_weight != group_weight {
-                    let class_disjoint = class_weight.is_disjoint(overlap);
-                    let group_disjoint = group_weight.is_disjoint(overlap);
-                    if class_disjoint != group_disjoint {
-                        return false;
-                    }
-                    if !class_disjoint
-                        && !weights_equal_on_domain(class_weight, group_weight, overlap)
-                    {
-                        return false;
-                    }
-                }
-            }
-            None => {
-                if !class_weight.is_disjoint(overlap) {
-                    return false;
-                }
-            }
+    match (class_final_weight, member_final_weight) {
+        (Some(class_fw), Some(member_fw)) => weights_equal_on_domain_intersection(
+            class_fw,
+            member_fw,
+            class_domain,
+            member_domain,
+        ),
+        (Some(class_fw), None) => {
+            weight_is_disjoint_from_domain_intersection(class_fw, class_domain, member_domain)
         }
-    }
-
-    for (group_label, group_weight) in group_transition_by_label {
-        if !class_labels.contains(group_label) && !group_weight.is_disjoint(overlap) {
-            return false;
+        (None, Some(member_fw)) => {
+            weight_is_disjoint_from_domain_intersection(member_fw, class_domain, member_domain)
         }
+        (None, None) => true,
     }
-
-    true
 }
 
 fn merge_sorted_targets(existing: &mut Vec<(Label, u32)>, add: &[(Label, u32)]) {
@@ -1264,16 +1260,8 @@ fn build_and_color_hybrid(
     // Step 3: Greedy merge of classes, handling both disjoint and overlapping
     // needed sets. Instead of building an O(K²) incompatibility graph, we check
     // each class against only the small number of existing groups (~14 for kb_684).
-    //
-    // For overlapping classes, we maintain "merged weights" per group — the union
-    // of all members' weights. Since all group members were verified compatible
-    // when added, they agree on overlapping TSIDs, so the union weight is a
-    // valid consensus for checking new candidates.
     struct OverlapMergeGroup {
-        needed_union: Weight,
         targets_by_label: FxHashMap<Label, u32>,
-        merged_final_weight: Option<Weight>,
-        transition_by_label: FxHashMap<Label, Weight>,
         member_classes: Vec<usize>,
     }
 
@@ -1292,6 +1280,9 @@ fn build_and_color_hybrid(
     let mut transition_weight_checks = 0usize;
     let mut transition_weight_rejects = 0usize;
     let mut transition_weight_check_ms = 0.0;
+    let mut overlapping_member_scans = 0usize;
+    let mut overlapping_member_hits = 0usize;
+    let mut overlapping_member_scan_ms = 0.0;
     let mut group_update_ms = 0.0;
 
     for class in 0..num_classes {
@@ -1314,73 +1305,68 @@ fn build_and_color_hybrid(
 
             disjoint_checks += 1;
             let disjoint_check_started_at = Instant::now();
-            let is_disjoint = cn.is_disjoint(&g.needed_union);
-            disjoint_check_ms += disjoint_check_started_at.elapsed().as_secs_f64() * 1000.0;
-            if is_disjoint {
-                disjoint_true += 1;
-            }
+            let member_scan_started_at = Instant::now();
+            let mut saw_overlap = false;
+            let mut compatible_with_overlapping_members = true;
+            for &member_class in &g.member_classes {
+                overlapping_member_scans += 1;
+                let member_needed = &class_needed_union[member_class];
+                if cn.is_disjoint(member_needed) {
+                    continue;
+                }
+                saw_overlap = true;
+                overlapping_member_hits += 1;
 
-            if !is_disjoint {
-                let overlap = {
-                    let final_weight_check_started_at = Instant::now();
-                    let overlap = cn.intersection(&g.needed_union);
+                final_weight_checks += 1;
+                let final_weight_check_started_at = Instant::now();
+                let final_weight_ok = final_weights_compatible_on_domain_intersection(
+                    class_profile.final_weight.as_ref(),
+                    class_profiles[member_class].final_weight.as_ref(),
+                    cn,
+                    member_needed,
+                );
+                final_weight_check_ms +=
+                    final_weight_check_started_at.elapsed().as_secs_f64() * 1000.0;
+                if !final_weight_ok {
+                    final_weight_rejects += 1;
+                    compatible_with_overlapping_members = false;
+                    break;
+                }
 
-                    // Check final weights on the exact overlap domain.
-                    final_weight_checks += 1;
-                    let weight_ok = match (&class_profile.final_weight, &g.merged_final_weight) {
-                        (Some(fw), Some(gfw)) => weights_equal_on_domain(fw, gfw, &overlap),
-                        (Some(fw), None) => fw.is_disjoint(&overlap),
-                        (None, Some(gfw)) => gfw.is_disjoint(&overlap),
-                        (None, None) => true,
-                    };
-                    final_weight_check_ms +=
-                        final_weight_check_started_at.elapsed().as_secs_f64() * 1000.0;
-                    if !weight_ok {
-                        final_weight_rejects += 1;
-                        continue;
-                    }
-
-                    overlap
-                };
-
-                // Check weight compatibility on the overlap domain without
-                // materializing per-label domain intersections repeatedly.
                 transition_weight_checks += 1;
                 let transition_weight_check_started_at = Instant::now();
-                let transition_weights_ok = transition_weights_compatible_on_overlap(
+                let transition_weights_ok = sorted_weights_compatible_on_domain_intersection(
                     &class_profile.weights,
-                    &g.transition_by_label,
-                    &overlap,
+                    &class_profiles[member_class].weights,
+                    cn,
+                    member_needed,
                 );
                 transition_weight_check_ms +=
                     transition_weight_check_started_at.elapsed().as_secs_f64() * 1000.0;
                 if !transition_weights_ok {
                     transition_weight_rejects += 1;
-                    continue;
+                    compatible_with_overlapping_members = false;
+                    break;
                 }
+            }
+            let member_scan_elapsed_ms = member_scan_started_at.elapsed().as_secs_f64() * 1000.0;
+            overlapping_member_scan_ms += member_scan_elapsed_ms;
+            disjoint_check_ms += disjoint_check_started_at.elapsed().as_secs_f64() * 1000.0;
+            if !compatible_with_overlapping_members {
+                continue;
+            }
+            if !saw_overlap {
+                disjoint_true += 1;
             }
 
             // Compatible — merge into this group
             let group_update_started_at = Instant::now();
-            g.needed_union = g.needed_union.union(cn);
             for (label, target) in &class_profile.targets {
                 if let Some(existing_target) = g.targets_by_label.get(label) {
                     debug_assert_eq!(*existing_target, *target);
                 } else {
                     g.targets_by_label.insert(*label, *target);
                 }
-            }
-            if let Some(fw) = &class_profile.final_weight {
-                g.merged_final_weight = Some(match g.merged_final_weight.take() {
-                    Some(existing) => existing.union(fw),
-                    None => fw.clone(),
-                });
-            }
-            for (label, weight) in &class_profile.weights {
-                g.transition_by_label
-                    .entry(*label)
-                    .and_modify(|existing| *existing = existing.union(weight))
-                    .or_insert_with(|| weight.clone());
             }
             g.member_classes.push(class);
             group_update_ms += group_update_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1395,17 +1381,8 @@ fn build_and_color_hybrid(
                 targets_by_label.insert(*label, *target);
             }
 
-            let mut transition_by_label = FxHashMap::default();
-            transition_by_label.reserve(class_profile.weights.len());
-            for (label, weight) in &class_profile.weights {
-                transition_by_label.insert(*label, weight.clone());
-            }
-
             groups.push(OverlapMergeGroup {
-                needed_union: cn.clone(),
                 targets_by_label,
-                merged_final_weight: class_profile.final_weight.clone(),
-                transition_by_label,
                 member_classes: vec![class],
             });
         }
@@ -1453,7 +1430,7 @@ fn build_and_color_hybrid(
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
         eprintln!(
-            "[glrmask/profile][weighted_dwa_minimize_hybrid_detail] candidates={} classes={} groups={} group_attempts={} target_checks={} target_rejects={} target_check_ms={:.3} disjoint_checks={} disjoint_true={} disjoint_check_ms={:.3} final_weight_checks={} final_weight_rejects={} final_weight_check_ms={:.3} transition_weight_checks={} transition_weight_rejects={} transition_weight_check_ms={:.3} group_update_ms={:.3} classes_with_final_weight={} min_targets={} max_targets={} avg_targets={:.3} min_weights={} max_weights={} avg_weights={:.3} min_group_size={} max_group_size={}",
+            "[glrmask/profile][weighted_dwa_minimize_hybrid_detail] candidates={} classes={} groups={} group_attempts={} target_checks={} target_rejects={} target_check_ms={:.3} disjoint_checks={} disjoint_true={} disjoint_check_ms={:.3} final_weight_checks={} final_weight_rejects={} final_weight_check_ms={:.3} transition_weight_checks={} transition_weight_rejects={} transition_weight_check_ms={:.3} overlapping_member_scans={} overlapping_member_hits={} overlapping_member_scan_ms={:.3} group_update_ms={:.3} classes_with_final_weight={} min_targets={} max_targets={} avg_targets={:.3} min_weights={} max_weights={} avg_weights={:.3} min_group_size={} max_group_size={}",
             candidates.len(),
             num_classes,
             groups.len(),
@@ -1470,6 +1447,9 @@ fn build_and_color_hybrid(
             transition_weight_checks,
             transition_weight_rejects,
             transition_weight_check_ms,
+            overlapping_member_scans,
+            overlapping_member_hits,
+            overlapping_member_scan_ms,
             group_update_ms,
             classes_with_final_weight,
             min_targets,
@@ -1964,13 +1944,11 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
 #[cfg(test)]
 mod tests {
     use super::{
-        transition_weights_compatible_on_overlap, Label,
         weight_is_disjoint_from_domain_intersection, weights_equal_on_domain,
-        weights_equal_on_domain_intersection,
+        weights_equal_on_domain_intersection, sorted_weights_compatible_on_domain_intersection,
     };
     use crate::ds::weight::Weight;
     use range_set_blaze::RangeSetBlaze;
-    use rustc_hash::FxHashMap;
 
     fn token_set(ranges: &[(u32, u32)]) -> RangeSetBlaze<u32> {
         ranges.iter().copied().map(|(start, end)| start..=end).collect()
@@ -2001,19 +1979,16 @@ mod tests {
         );
     }
 
-    fn transition_map(entries: &[(Label, Weight)]) -> FxHashMap<Label, Weight> {
-        entries.iter().cloned().collect()
-    }
-
     #[test]
     fn transition_compat_accepts_matching_label_equal_on_overlap_but_different_outside() {
         let overlap = weight(&[(1, &[(10, 20)])]);
         let class_weights = vec![(7, weight(&[(1, &[(10, 20)]), (2, &[(30, 30)])]))];
-        let group_weights = transition_map(&[(7, weight(&[(1, &[(10, 20)]), (3, &[(40, 40)])]))]);
+        let group_weights = vec![(7, weight(&[(1, &[(10, 20)]), (3, &[(40, 40)])]))];
 
-        assert!(transition_weights_compatible_on_overlap(
+        assert!(sorted_weights_compatible_on_domain_intersection(
             &class_weights,
             &group_weights,
+            &overlap,
             &overlap,
         ));
     }
@@ -2022,11 +1997,12 @@ mod tests {
     fn transition_compat_rejects_class_only_label_active_on_overlap() {
         let overlap = weight(&[(1, &[(10, 20)])]);
         let class_weights = vec![(7, weight(&[(1, &[(10, 20)])]))];
-        let group_weights = FxHashMap::default();
+        let group_weights = Vec::new();
 
-        assert!(!transition_weights_compatible_on_overlap(
+        assert!(!sorted_weights_compatible_on_domain_intersection(
             &class_weights,
             &group_weights,
+            &overlap,
             &overlap,
         ));
     }
@@ -2035,11 +2011,12 @@ mod tests {
     fn transition_compat_rejects_group_only_label_active_on_overlap() {
         let overlap = weight(&[(1, &[(10, 20)])]);
         let class_weights = Vec::new();
-        let group_weights = transition_map(&[(7, weight(&[(1, &[(10, 20)])]))]);
+        let group_weights = vec![(7, weight(&[(1, &[(10, 20)])]))];
 
-        assert!(!transition_weights_compatible_on_overlap(
+        assert!(!sorted_weights_compatible_on_domain_intersection(
             &class_weights,
             &group_weights,
+            &overlap,
             &overlap,
         ));
     }
@@ -2048,14 +2025,15 @@ mod tests {
     fn transition_compat_rejects_same_target_shape_with_extra_active_label() {
         let overlap = weight(&[(1, &[(10, 20)])]);
         let class_weights = vec![(7, weight(&[(1, &[(10, 20)])]))];
-        let group_weights = transition_map(&[
+        let group_weights = vec![
             (7, weight(&[(1, &[(10, 20)])])),
             (9, weight(&[(1, &[(10, 20)])])),
-        ]);
+        ];
 
-        assert!(!transition_weights_compatible_on_overlap(
+        assert!(!sorted_weights_compatible_on_domain_intersection(
             &class_weights,
             &group_weights,
+            &overlap,
             &overlap,
         ));
     }
@@ -2064,11 +2042,12 @@ mod tests {
     fn transition_compat_accepts_class_and_group_weights_disjoint_from_overlap() {
         let overlap = weight(&[(1, &[(10, 20)])]);
         let class_weights = vec![(7, weight(&[(2, &[(10, 20)])]))];
-        let group_weights = transition_map(&[(9, weight(&[(3, &[(10, 20)])]))]);
+        let group_weights = vec![(9, weight(&[(3, &[(10, 20)])]))];
 
-        assert!(transition_weights_compatible_on_overlap(
+        assert!(sorted_weights_compatible_on_domain_intersection(
             &class_weights,
             &group_weights,
+            &overlap,
             &overlap,
         ));
     }
