@@ -693,17 +693,16 @@ fn compute_pm_vocab_equivalence_map(
 ) -> ManyToOneIdMap {
     let num_states = tokenizer.num_states() as usize;
     let mut byte_transitions = vec![vec![u32::MAX; num_states]; 256];
-    for state_idx in 0..num_states {
-        for byte in 0..=255u8 {
-            byte_transitions[byte as usize][state_idx] =
-                tokenizer.original_state_transition(state_idx as u32, byte);
+    for (state_idx, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
+        for (byte, &target) in dfa_state.transitions.iter() {
+            byte_transitions[byte as usize][state_idx] = target;
         }
     }
 
     let mut matched_terminal_masks = Vec::with_capacity(num_states);
     for state in 0..tokenizer.num_states() {
         let mut mask = 0u128;
-        for terminal in tokenizer.original_state_finalizers(state).iter().map(|terminal| terminal as TerminalID) {
+        for terminal in tokenizer.matched_terminals_iter(state) {
             if terminal < 128 {
                 mask |= 1u128 << terminal;
             }
@@ -730,17 +729,19 @@ fn compute_pm_vocab_equivalence_map_fast(
     tokenizer: &Tokenizer,
     ordered_vocab: &OrderedVocab,
 ) -> ManyToOneIdMap {
-    let num_states = tokenizer.num_states() as usize;
+    let dfa_states = tokenizer.dfa.states();
+    let num_states = dfa_states.len();
     let mut transitions = vec![u32::MAX; num_states * 256];
-    let states = (0..num_states)
-        .map(|state_idx| {
+    let states = dfa_states
+        .iter()
+        .enumerate()
+        .map(|(state_idx, state)| {
             let base = state_idx * 256;
-            for byte in 0..=255u8 {
-                transitions[base + byte as usize] =
-                    tokenizer.original_state_transition(state_idx as u32, byte);
+            for (byte, &target) in state.transitions.iter() {
+                transitions[base + byte as usize] = target;
             }
             FlatDfaState {
-                finalizers: tokenizer.original_state_finalizers(state_idx as u32).iter().collect(),
+                finalizers: state.finalizers.iter().collect(),
                 // PM token equivalence only cares which terminals can be
                 // reached while consuming the token bytes. Terminal-DWA
                 // future-group metadata is deliberately not part of this PM
@@ -752,7 +753,7 @@ fn compute_pm_vocab_equivalence_map_fast(
     let tokenizer_view = TokenizerView {
         flat_dfa: FlatDfa {
             states,
-            start_state: tokenizer.virtual_original_state_for_runtime(tokenizer.initial_state()) as usize,
+            start_state: tokenizer.start_state() as usize,
             transitions: Arc::from(transitions),
         },
     };
@@ -1602,10 +1603,11 @@ fn root_terminal_union_count(tokenizer: &Tokenizer, states: &[u32]) -> usize {
     let mut seen = vec![false; tokenizer.num_terminals as usize];
     let mut count = 0usize;
     for &state in states {
-        let finalizers = tokenizer.original_state_finalizers(state);
-        let futures = tokenizer.original_state_possible_futures(state);
-        for terminal in finalizers.iter().chain(futures.iter()) {
-            let slot = terminal;
+        for terminal in tokenizer
+            .matched_terminals_iter(state)
+            .chain(tokenizer.possible_future_terminals_iter(state))
+        {
+            let slot = terminal as usize;
             if slot < seen.len() && !seen[slot] {
                 seen[slot] = true;
                 count += 1;

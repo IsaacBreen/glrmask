@@ -215,10 +215,6 @@ impl<'a> ExactSubtractionResolver<'a> {
                 expr: Box::new(self.canonical_exact_expr_inner(expr, visiting, memo)),
                 intersect: Box::new(self.canonical_exact_expr_inner(intersect, visiting, memo)),
             },
-            GrammarExpr::WithSecondaryLexer { main, secondary } => GrammarExpr::WithSecondaryLexer {
-                main: Box::new(self.canonical_exact_expr_inner(main, visiting, memo)),
-                secondary: Box::new(self.canonical_exact_expr_inner(secondary, visiting, memo)),
-            },
             GrammarExpr::SeparatedSequence {
                 items,
                 separator,
@@ -291,10 +287,6 @@ impl SiteCollector {
             } => {
                 self.collect_expr(expr, resolver)?;
                 self.collect_expr(exclude, resolver)
-            }
-            GrammarExpr::WithSecondaryLexer { main, secondary } => {
-                self.collect_expr(main, resolver)?;
-                self.collect_expr(secondary, resolver)
             }
             GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => self.collect_expr(expr, resolver),
             GrammarExpr::SeparatedSequence { items, separator, .. } => {
@@ -564,10 +556,6 @@ fn rewrite_expr(
             rewrite_expr(expr, allow_exact_subtractions, resolver, rewrite_targets)?;
             rewrite_expr(exclude, allow_exact_subtractions, resolver, rewrite_targets)
         }
-        GrammarExpr::WithSecondaryLexer { main, secondary } => {
-            rewrite_expr(main, allow_exact_subtractions, resolver, rewrite_targets)?;
-            rewrite_expr(secondary, allow_exact_subtractions, resolver, rewrite_targets)
-        }
         GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => {
             rewrite_expr(expr, allow_exact_subtractions, resolver, rewrite_targets)
         }
@@ -765,8 +753,7 @@ mod tests {
             GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
                 items.iter().any(contains_exclude)
             }
-            GrammarExpr::Intersect { expr, intersect }
-            | GrammarExpr::WithSecondaryLexer { main: expr, secondary: intersect } => {
+            GrammarExpr::Intersect { expr, intersect } => {
                 contains_exclude(expr) || contains_exclude(intersect)
             }
             GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => contains_exclude(expr),

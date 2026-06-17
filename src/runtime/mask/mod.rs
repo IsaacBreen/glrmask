@@ -720,7 +720,7 @@ impl<'a> ConstraintState<'a> {
             return false;
         }
 
-        let mut paths = SmallVec::<[(usize, TerminalsDisallowed, SmallVec<[u32; 16]>); MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS]>::new();
+        let mut paths = SmallVec::<[(u32, TerminalsDisallowed, SmallVec<[u32; 16]>); MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS]>::new();
         for (&original_tokenizer_state, gss) in &self.state {
             if gss.max_depth() > MASK_SINGLE_PATH_DIRECT_MAX_DEPTH {
                 return false;
@@ -893,7 +893,7 @@ impl<'a> ConstraintState<'a> {
     fn terminals_disallowed_to_dense_acc(
         &self,
         terminals_disallowed: &TerminalsDisallowed,
-        original_tokenizer_state: usize,
+        original_tokenizer_state: u32,
         internal_tsid: u32,
     ) -> Option<DenseMaskAcc> {
         let base = &self.constraint.seed_universe_dense;
@@ -920,7 +920,7 @@ impl<'a> ConstraintState<'a> {
         // original tokenizer states by expanding each internal TSID through
         // `internal_tsid_to_states` during precomputation.
         for &terminal_id in disallowed_in_state {
-            if let Some(mask) = terminal_masks.get(&(self.constraint.tokenizer.virtual_original_state_for_runtime(original_tokenizer_state) as u32, terminal_id)) {
+            if let Some(mask) = terminal_masks.get(&(original_tokenizer_state, terminal_id)) {
                 for (allowed_word, mask_word) in dense.iter_mut().zip(mask.iter()) {
                     *allowed_word &= !mask_word;
                 }
@@ -1675,8 +1675,6 @@ impl<'a> ConstraintState<'a> {
 
         returned_profile
     }
-
-
 
     pub fn mask(&self) -> Vec<u32> {
         let mut buf = vec![0u32; self.constraint.mask_len()];

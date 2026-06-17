@@ -597,26 +597,6 @@ fn expand_lark_expr(
                 visiting,
             )?,
         },
-        GrammarExpr::WithSecondaryLexer { main, secondary } => GrammarExpr::WithSecondaryLexer {
-            main: expand_lark_boxed_expr(
-                main,
-                in_terminal_rule,
-                rule_map,
-                terminal_names,
-                parser_names,
-                memo,
-                visiting,
-            )?,
-            secondary: expand_lark_boxed_expr(
-                secondary,
-                in_terminal_rule,
-                rule_map,
-                terminal_names,
-                parser_names,
-                memo,
-                visiting,
-            )?,
-        },
         GrammarExpr::Quantified(inner, Quantifier::Optional) => GrammarExpr::Quantified(expand_lark_boxed_expr(
             inner,
             in_terminal_rule,

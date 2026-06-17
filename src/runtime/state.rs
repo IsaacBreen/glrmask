@@ -26,13 +26,13 @@ pub(crate) struct MaskScratch {
 #[derive(Debug, Default)]
 pub(crate) struct CommitBuffers {
     pub advance_result_cache: FxHashMap<(usize, u32), (ParserGSS, ParserGSS)>,
-    pub pending_state: FxHashMap<usize, ParserGSS>,
+    pub pending_state: FxHashMap<u32, ParserGSS>,
     pub seen_matches: FxHashSet<(usize, u32)>,
     pub terminal_result_cache: FxHashMap<u32, ParserGSS>,
-    pub exec_results: FxHashMap<usize, crate::automata::lexer::tokenizer::TokenizerExecResult>,
-    pub remapped_tokenizer_states: FxHashMap<usize, usize>,
-    pub accepted_terminals: FxHashMap<usize, FxHashSet<u32>>,
-    pub processing_queue: Vec<FxHashMap<usize, ParserGSS>>,
+    pub exec_results: FxHashMap<u32, crate::automata::lexer::tokenizer::TokenizerExecResult>,
+    pub remapped_tokenizer_states: FxHashMap<u32, u32>,
+    pub accepted_terminals: FxHashMap<u32, FxHashSet<u32>>,
+    pub processing_queue: Vec<FxHashMap<u32, ParserGSS>>,
 }
 
 impl Clone for CommitBuffers {
@@ -59,7 +59,7 @@ impl CommitBuffers {
 
 pub struct ConstraintState<'a> {
     pub(crate) constraint: &'a Constraint,
-    pub(crate) state: BTreeMap<usize, ParserGSS>,
+    pub(crate) state: BTreeMap<u32, ParserGSS>,
     pub(crate) buffers: CommitBuffers,
     /// Monotonically increasing counter, bumped on every commit.
     /// Used for cheap cache invalidation in fill_mask.
@@ -132,11 +132,11 @@ impl<'a> ConstraintState<'a> {
 
     /// Return all flattened parser stacks for debugging.
     /// Each entry is (tokenizer_state, Vec<(stack_of_parser_states, disallowed_terminals)>).
-    pub fn debug_parser_stacks(&self) -> Vec<(usize, Vec<(Vec<u32>, Vec<(usize, Vec<u32>)>)>)> {
+    pub fn debug_parser_stacks(&self) -> Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)> {
         self.state.iter().map(|(&ts, gss)| {
             let stacks = gss.to_stacks();
-            let formatted: Vec<(Vec<u32>, Vec<(usize, Vec<u32>)>)> = stacks.into_iter().map(|(stack, acc)| {
-                let disallowed: Vec<(usize, Vec<u32>)> = acc.0.iter().map(|(&k, v)| {
+            let formatted: Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)> = stacks.into_iter().map(|(stack, acc)| {
+                let disallowed: Vec<(u32, Vec<u32>)> = acc.0.iter().map(|(&k, v)| {
                     (k, v.iter().copied().collect())
                 }).collect();
                 (stack, disallowed)

@@ -561,27 +561,18 @@ impl Constraint {
 
     fn compute_tokenizer_fast_transitions(&self) -> FastTokenizerTransitions {
         let build = |state| {
-            let mut flat = Box::new([u32::MAX; 256]);
-            for byte in 0..=255u8 {
-                flat[byte as usize] = self.tokenizer.original_state_transition(state, byte);
-            }
-            flat
-        };
+                let dfa_state = &self.tokenizer.dfa.states()[state as usize];
+                let mut flat = Box::new([u32::MAX; 256]);
+                for (byte, &target) in dfa_state.transitions.iter() {
+                    flat[byte as usize] = target;
+                }
+                flat
+            };
         if rayon::current_num_threads() == 1 {
             (0..self.tokenizer.num_states()).map(build).collect()
         } else {
             (0..self.tokenizer.num_states()).into_par_iter().map(build).collect()
         }
-    }
-
-    pub(crate) fn tokenizer_fast_transition(&self, state: usize, byte: u8) -> usize {
-        if self.tokenizer.has_secondary() {
-            return self.tokenizer.step_runtime_state(state, byte).unwrap_or(usize::MAX);
-        }
-        self.tokenizer_fast_transitions.get(state).map_or(usize::MAX, |transitions| {
-            let target = transitions[byte as usize];
-            if target == u32::MAX { usize::MAX } else { target as usize }
-        })
     }
 
     fn compute_buf_masks(&self) -> Vec<InternalTokenBufMasks> {
@@ -1197,7 +1188,7 @@ impl Constraint {
 
     pub(crate) fn possible_matches_for_state_internal(
         &self,
-        tokenizer_state: usize,
+        tokenizer_state: u32,
     ) -> Option<BTreeMap<TerminalID, RangeSetBlaze<u32>>> {
         // Return possible_matches in the final shared constraint-internal vocab
         // space. These ids match parser-DWA weight token ids after reconciliation.

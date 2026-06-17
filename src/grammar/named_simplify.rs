@@ -302,10 +302,6 @@ fn collect_ref_counts(expr: &GrammarExpr, counts: &mut HashMap<String, usize>) {
             collect_ref_counts(expr, counts);
             collect_ref_counts(intersect, counts);
         }
-        GrammarExpr::WithSecondaryLexer { main, secondary } => {
-            collect_ref_counts(main, counts);
-            collect_ref_counts(secondary, counts);
-        }
         GrammarExpr::Quantified(inner, Quantifier::Optional) | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
             collect_ref_counts(inner, counts);
         }
@@ -377,10 +373,6 @@ fn inline_refs_in_expr(
         GrammarExpr::Intersect { expr, intersect } => {
             inline_refs_in_expr(expr, rule_exprs, ref_counts, protected, removed, stats);
             inline_refs_in_expr(intersect, rule_exprs, ref_counts, protected, removed, stats);
-        }
-        GrammarExpr::WithSecondaryLexer { main, secondary } => {
-            inline_refs_in_expr(main, rule_exprs, ref_counts, protected, removed, stats);
-            inline_refs_in_expr(secondary, rule_exprs, ref_counts, protected, removed, stats);
         }
         GrammarExpr::Quantified(inner, Quantifier::Optional) | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
             inline_refs_in_expr(inner, rule_exprs, ref_counts, protected, removed, stats);

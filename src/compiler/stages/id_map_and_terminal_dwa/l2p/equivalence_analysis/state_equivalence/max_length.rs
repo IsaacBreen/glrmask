@@ -64,7 +64,7 @@ fn build_filtered_finalizer_labels(
 ) -> Vec<Vec<usize>> {
     (0..tokenizer.num_states() as usize)
         .into_par_iter()
-        .map(|state| filtered_terminals(tokenizer.original_state_finalizers(state as u32).iter().map(|terminal| terminal as u32), active_groups))
+        .map(|state| filtered_terminals(tokenizer.matched_terminals_iter(state as u32), active_groups))
         .collect()
 }
 
@@ -75,15 +75,17 @@ fn build_filtered_possible_future_labels(
     (0..tokenizer.num_states() as usize)
         .into_par_iter()
         .map(|state| {
-            filtered_terminals(tokenizer.original_state_possible_futures(state as u32).iter().map(|terminal| terminal as u32), active_groups)
+            filtered_terminals(tokenizer.possible_future_terminals_iter(state as u32), active_groups)
         })
         .collect()
 }
 
 fn build_has_any_transition_labels(tokenizer: &Tokenizer) -> Vec<bool> {
-    (0..tokenizer.num_states() as usize)
-        .into_par_iter()
-        .map(|state| (0..=255u8).any(|byte| tokenizer.original_state_transition(state as u32, byte) != u32::MAX))
+    tokenizer
+        .dfa
+        .states()
+        .par_iter()
+        .map(|state| !state.transitions.is_empty())
         .collect()
 }
 
@@ -168,7 +170,7 @@ fn compute_byte_classes(tokenizer: &Tokenizer) -> [u8; 256] {
         for byte in 0..256usize {
             column_hashes[byte] = column_hashes[byte]
                 .wrapping_mul(0x517cc1b727220a95)
-                .wrapping_add(tokenizer.original_state_transition(state as u32, byte as u8) as u64);
+                .wrapping_add(tokenizer.get_transition(state as u32, byte as u8) as u64);
         }
     }
 
@@ -195,8 +197,8 @@ fn compute_byte_classes(tokenizer: &Tokenizer) -> [u8; 256] {
                 break;
             }
             let same = (0..num_states).all(|state| {
-                tokenizer.original_state_transition(state as u32, curr)
-                    == tokenizer.original_state_transition(state as u32, prev)
+                tokenizer.get_transition(state as u32, curr)
+                    == tokenizer.get_transition(state as u32, prev)
             });
             if same {
                 byte_to_class[curr as usize] = byte_to_class[prev as usize];
@@ -262,7 +264,7 @@ fn refine_once_sorted(
         .for_each(|(state, (row, row_hash))| {
             row[0] = label_ids[state];
             for (slot, &byte) in active_bytes.iter().enumerate() {
-                let target = tokenizer.original_state_transition(state as u32, byte);
+                let target = tokenizer.get_transition(state as u32, byte);
                 row[slot + 1] = if target == u32::MAX {
                     MISSING_BLOCK
                 } else {
@@ -446,7 +448,6 @@ pub(crate) fn compute_state_map(
             .representative_original_ids
             .iter()
             .map(|&state| state as usize)
-            .filter(|&state| state < num_states)
             .collect(),
         None => (0..num_states).collect(),
     };

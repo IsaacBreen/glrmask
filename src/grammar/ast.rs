@@ -70,16 +70,6 @@ pub enum GrammarExpr {
         expr: Box<GrammarExpr>,
         intersect: Box<GrammarExpr>,
     },
-    /// Match `main` and `secondary` over the same consumed lexer span.
-    ///
-    /// Only `main` is grammar-visible; `secondary` is a pure lexer guard.
-    /// The tokenizer compiler keeps this as a separate guarded component so
-    /// bounded secondary constraints do not force ordinary DFA product
-    /// construction.
-    WithSecondaryLexer {
-        main: Box<GrammarExpr>,
-        secondary: Box<GrammarExpr>,
-    },
     Quantified(Box<GrammarExpr>, Quantifier),
     Literal(Vec<u8>),
     CharClass { def: String, negate: bool, utf8: bool },
@@ -187,9 +177,6 @@ impl NamedGrammar {
                 }
                 GrammarExpr::Intersect { expr, intersect } => {
                     collect_refs(expr, out); collect_refs(intersect, out);
-                }
-                GrammarExpr::WithSecondaryLexer { main, secondary } => {
-                    collect_refs(main, out); collect_refs(secondary, out);
                 }
                 GrammarExpr::Quantified(e, Quantifier::Optional) | GrammarExpr::Quantified(e, Quantifier::ZeroPlus) | GrammarExpr::Quantified(e, Quantifier::OnePlus) => {
                     collect_refs(e, out);
@@ -397,13 +384,6 @@ fn grammar_expr_to_lark_with_indent(
             grammar_expr_to_lark_with_indent(inner, out, false, indent);
             write!(out, " & ").unwrap();
             grammar_expr_to_lark_with_indent(intersect, out, false, indent);
-            write!(out, ")*/").unwrap();
-        }
-        GrammarExpr::WithSecondaryLexer { main, secondary } => {
-            write!(out, "/*WithSecondaryLexer(main=").unwrap();
-            grammar_expr_to_lark_with_indent(main, out, false, indent);
-            write!(out, ", secondary=").unwrap();
-            grammar_expr_to_lark_with_indent(secondary, out, false, indent);
             write!(out, ")*/").unwrap();
         }
         GrammarExpr::CharClass { def, negate, utf8 } => {
@@ -703,10 +683,6 @@ impl Lowerer {
                 expr: Box::new(self.canonical_exact_expr_inner(expr, visiting, memo)),
                 intersect: Box::new(self.canonical_exact_expr_inner(intersect, visiting, memo)),
             },
-            GrammarExpr::WithSecondaryLexer { main, secondary } => GrammarExpr::WithSecondaryLexer {
-                main: Box::new(self.canonical_exact_expr_inner(main, visiting, memo)),
-                secondary: Box::new(self.canonical_exact_expr_inner(secondary, visiting, memo)),
-            },
             GrammarExpr::Quantified(inner, quantifier) => GrammarExpr::Quantified(
                 Box::new(self.canonical_exact_expr_inner(inner, visiting, memo)),
                 quantifier.clone(),
@@ -823,8 +799,7 @@ impl Lowerer {
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte
             | GrammarExpr::Exclude { .. }
-            | GrammarExpr::Intersect { .. }
-            | GrammarExpr::WithSecondaryLexer { .. } => {
+            | GrammarExpr::Intersect { .. } => {
                 let expr = self.resolve_terminal_expr(None, expr)?;
                 let expr = if expr.is_nullable() {
                     Expr::Exclude {
@@ -913,8 +888,7 @@ impl Lowerer {
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte
-            | GrammarExpr::Intersect { .. }
-            | GrammarExpr::WithSecondaryLexer { .. } => self.nonnullable_terminal_symbol(expr),
+            | GrammarExpr::Intersect { .. } => self.nonnullable_terminal_symbol(expr),
             _ => {
                 let (_, nt) = self.fresh_nonterminal("nonnullable_expr");
                 self.emit_nonnullable_expr(nt, expr)?;
@@ -980,8 +954,7 @@ impl Lowerer {
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
             | GrammarExpr::AnyByte
-            | GrammarExpr::Intersect { .. }
-            | GrammarExpr::WithSecondaryLexer { .. } => {
+            | GrammarExpr::Intersect { .. } => {
                 if let Some(symbol) = self.nonnullable_terminal_symbol(expr)? {
                     self.rules.push(Rule { lhs, rhs: vec![symbol] });
                 }
@@ -1718,9 +1691,7 @@ impl Lowerer {
                 self.rules.push(Rule { lhs: nt, rhs: Vec::new() });
                 Symbol::Nonterminal(nt)
             }
-            GrammarExpr::Exclude { .. }
-            | GrammarExpr::Intersect { .. }
-            | GrammarExpr::WithSecondaryLexer { .. } => {
+            GrammarExpr::Exclude { .. } | GrammarExpr::Intersect { .. } => {
                 if let Some(lowered) = self.exact_nonterminal_subtraction_expr(expr)? {
                     return Ok(self.lower_expr(&lowered));
                 }
@@ -1996,10 +1967,6 @@ fn grammar_expr_to_expr(
             expr: Box::new(grammar_expr_to_expr(expr, terminal_bodies, terminal_expr_cache, visiting)?),
             intersect: Box::new(grammar_expr_to_expr(intersect, terminal_bodies, terminal_expr_cache, visiting)?),
         },
-        GrammarExpr::WithSecondaryLexer { main, secondary } => Expr::WithSecondaryLexer {
-            main: Box::new(grammar_expr_to_expr(main, terminal_bodies, terminal_expr_cache, visiting)?),
-            secondary: Box::new(grammar_expr_to_expr(secondary, terminal_bodies, terminal_expr_cache, visiting)?),
-        },
         GrammarExpr::Quantified(inner, Quantifier::Optional) => Expr::Repeat {
             expr: Box::new(grammar_expr_to_expr(inner, terminal_bodies, terminal_expr_cache, visiting)?),
             min: 0,
@@ -2073,10 +2040,6 @@ fn grammar_expr_is_nullable(
         GrammarExpr::Intersect { expr, intersect } => {
             grammar_expr_is_nullable(expr, rule_nullable)
                 && grammar_expr_is_nullable(intersect, rule_nullable)
-        }
-        GrammarExpr::WithSecondaryLexer { main, secondary } => {
-            grammar_expr_is_nullable(main, rule_nullable)
-                && grammar_expr_is_nullable(secondary, rule_nullable)
         }
         GrammarExpr::Quantified(_, Quantifier::Optional) | GrammarExpr::Quantified(_, Quantifier::ZeroPlus) => true,
         GrammarExpr::Quantified(inner, Quantifier::OnePlus) => grammar_expr_is_nullable(inner, rule_nullable),
@@ -2177,10 +2140,6 @@ fn validate_expr_nfa_placement(grammar: &NamedGrammar) -> Result<(), GlrMaskErro
                     walk(part, false, rule_name)?;
                 }
             }
-            GrammarExpr::WithSecondaryLexer { main, secondary } => {
-                walk(main, false, rule_name)?;
-                walk(secondary, false, rule_name)?;
-            }
             GrammarExpr::Grouped(inner) => {
                 walk(inner, false, rule_name)?;
             }
@@ -2266,10 +2225,6 @@ pub fn expr_to_grammar_expr(expr: &Expr) -> GrammarExpr {
         Expr::Intersect { expr, intersect } => GrammarExpr::Intersect {
             expr: Box::new(expr_to_grammar_expr(expr)),
             intersect: Box::new(expr_to_grammar_expr(intersect)),
-        },
-        Expr::WithSecondaryLexer { main, secondary } => GrammarExpr::WithSecondaryLexer {
-            main: Box::new(expr_to_grammar_expr(main)),
-            secondary: Box::new(expr_to_grammar_expr(secondary)),
         },
         Expr::Repeat { expr: inner, min, max } => {
             let g = expr_to_grammar_expr(inner);

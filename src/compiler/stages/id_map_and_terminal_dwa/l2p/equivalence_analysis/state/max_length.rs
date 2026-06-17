@@ -228,8 +228,7 @@ fn build_active_transition_table(dfa: &FlatDfa, active_bytes: &[u8]) -> ActiveTr
         .enumerate()
         .for_each(|(state, row)| {
             for (slot, &byte) in active_bytes.iter().enumerate() {
-                let target = dfa.trans(state, byte as usize);
-                row[slot] = if target as usize >= n { MISSING_BLOCK } else { target };
+                row[slot] = dfa.trans(state, byte as usize);
             }
         });
 
@@ -262,7 +261,7 @@ fn refine_once_sorted(
             let targets =
                 &active_targets.targets_flat[target_start..target_start + active_targets.width];
             for (i, &target) in targets.iter().enumerate() {
-                row[i + 1] = if target == MISSING_BLOCK || target as usize >= n {
+                row[i + 1] = if target == MISSING_BLOCK {
                     MISSING_BLOCK
                 } else {
                     prev_blocks[target as usize]
@@ -322,7 +321,7 @@ fn row_hash(
     let start = state * active_targets.width;
     let end = start + active_targets.width;
     for &target in &active_targets.targets_flat[start..end] {
-        let block = if target == MISSING_BLOCK || target as usize >= prev_blocks.len() {
+        let block = if target == MISSING_BLOCK {
             MISSING_BLOCK
         } else {
             prev_blocks[target as usize]
@@ -349,12 +348,12 @@ fn rows_equal(
     for slot in 0..active_targets.width {
         let target_a = active_targets.targets_flat[start_a + slot];
         let target_b = active_targets.targets_flat[start_b + slot];
-        let block_a = if target_a == MISSING_BLOCK || target_a as usize >= prev_blocks.len() {
+        let block_a = if target_a == MISSING_BLOCK {
             MISSING_BLOCK
         } else {
             prev_blocks[target_a as usize]
         };
-        let block_b = if target_b == MISSING_BLOCK || target_b as usize >= prev_blocks.len() {
+        let block_b = if target_b == MISSING_BLOCK {
             MISSING_BLOCK
         } else {
             prev_blocks[target_b as usize]
@@ -493,9 +492,7 @@ fn build_subset_mapping(states: &[usize], blocks: &[u32]) -> Vec<usize> {
     let mut indexed_blocks: Vec<(u32, usize, usize)> = states
         .par_iter()
         .enumerate()
-        .filter_map(|(position, &state_id)| {
-            (state_id < blocks.len()).then_some((blocks[state_id], state_id, position))
-        })
+        .map(|(position, &state_id)| (blocks[state_id], state_id, position))
         .collect();
 
     indexed_blocks.par_sort_unstable_by(|left, right| {

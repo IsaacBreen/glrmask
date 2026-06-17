@@ -243,13 +243,6 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
                 dump_set_operand(intersect)
             )
         }
-        GrammarExpr::WithSecondaryLexer { main, secondary } => {
-            format!(
-                "with_secondary({}, {})",
-                dump_set_operand(main),
-                dump_set_operand(secondary)
-            )
-        }
         GrammarExpr::SeparatedSequence { items, separator, allow_empty } => {
             let sep_str = dump_nt_atom(separator);
             let items_str = items.iter()
@@ -289,10 +282,7 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
 
 fn dump_set_operand(expr: &GrammarExpr) -> String {
     match expr {
-        GrammarExpr::Choice(_)
-        | GrammarExpr::Exclude { .. }
-        | GrammarExpr::Intersect { .. }
-        | GrammarExpr::WithSecondaryLexer { .. } => {
+        GrammarExpr::Choice(_) | GrammarExpr::Exclude { .. } | GrammarExpr::Intersect { .. } => {
             format!("({})", dump_nt_expr(expr, false))
         }
         _ => dump_nt_expr(expr, false),
