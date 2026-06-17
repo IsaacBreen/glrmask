@@ -676,6 +676,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         // Group alive pairs by (representative_state, ending_state) to batch future leaves.
         let mut future_groups: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
         let phase1_start = std::time::Instant::now();
+        let mut total_alive: u64 = 0;
+        let mut total_pairs: u64 = 0;
 
         for &(internal_token_id, ref bytes) in internal_vocab {
             for (_tsid_idx, representative_state) in
@@ -689,6 +691,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 if source_nodes.is_empty() {
                     continue;
                 }
+
+                total_pairs += 1;
 
                 // Walk bytes using O(1) flat transition table.
                 let mut scan_state = representative_state;
@@ -711,6 +715,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 }
 
                 if alive {
+                    total_alive += 1;
                     // Terminal matches at the exact token endpoint.
                     let finalizers = self.tokenizer.dfa.finalizers(scan_state);
                     for t in finalizers.iter() {

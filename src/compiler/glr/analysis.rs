@@ -215,22 +215,12 @@ impl AnalyzedGrammar {
             &reachable,
         );
         if let Some(cycle) = find_indirect_rr_cycle(&rr_graph) {
-            let named_cycle: Vec<String> = cycle
-                .iter()
-                .map(|&nonterminal| {
-                    self.nonterminal_display_names
-                        .get(nonterminal as usize)
-                        .cloned()
-                        .unwrap_or_else(|| format!("N{nonterminal}"))
-                })
-                .collect();
             violations.push(format!(
-                "right-recursive cycle detected: {:?} names={:?}. \
+                "right-recursive cycle detected: {:?}. \
                  Right recursion causes unbounded reduce chains in \
                  terminal characterisation. Convert to left recursion \
                  or inline the cycle.",
                 cycle,
-                named_cycle,
             ));
         }
 
@@ -285,9 +275,23 @@ pub(crate) fn eliminate_right_recursion(
     rules: &mut Vec<Rule>,
     fresh_nt: &mut impl FnMut() -> NonterminalID,
 ) {
-    // Avoid indirect right-recursion inlining here. For large GLR grammars the
-    // SCC expansion can grow combinatorially; direct right recursion is still
-    // rewritten because that is local and bounded.
+    // Resolve indirect right recursion by inlining right ends.
+    const MAX_INDIRECT_ROUNDS: usize = 200;
+    for _ in 0..MAX_INDIRECT_ROUNDS {
+        let num_nt = max_nt_id(rules) + 1;
+        let nullable = compute_nullable(rules, num_nt);
+        let graph = build_right_reachability_graph(rules, &nullable);
+        match find_cycle_excluding_self_loops(&graph) {
+            Some(cycle) => {
+                let from = cycle[0];
+                let to = cycle[1 % cycle.len()];
+                inline_right_end(rules, from, to, &nullable);
+            }
+            None => break,
+        }
+    }
+
+    // Resolve direct right recursion for all nonterminals in a single pass.
     let rr_nts: BTreeMap<NonterminalID, NonterminalID> = rules
         .iter()
         .filter(|r| is_direct_right_recursive(r))
@@ -2138,7 +2142,9 @@ pub(crate) fn merge_identical_nonterminals(
     };
 
     // Refine until stable, using depth-ordered in-place (Gauss-Seidel) updates.
+    let mut iters = 0u32;
     loop {
+        iters += 1;
         let prev_class_of = class_of.clone();
         // In-place update: process NTs in depth order so that deeper NTs
         // (which depend on shallower ones) see already-updated classes.
