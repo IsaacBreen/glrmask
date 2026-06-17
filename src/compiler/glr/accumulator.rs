@@ -9,7 +9,7 @@ use crate::ds::leveled_gss::Merge;
 /// so that Clone is O(1) (reference-count increment) instead of O(n).
 /// Mutation is done by cloning the inner map on write.
 #[derive(Clone, Debug)]
-pub struct TerminalsDisallowed(pub(crate) Arc<BTreeMap<usize, BTreeSet<u32>>>);
+pub struct TerminalsDisallowed(pub(crate) Arc<BTreeMap<u32, BTreeSet<u32>>>);
 
 impl TerminalsDisallowed {
     pub fn new() -> Self {
@@ -35,7 +35,7 @@ impl TerminalsDisallowed {
     }
 
     /// Return a new TerminalsDisallowed with an additional entry inserted.
-    pub fn with_insert(&self, state: usize, terminal: u32) -> Self {
+    pub fn with_insert(&self, state: u32, terminal: u32) -> Self {
         let mut inner = (*self.0).clone();
         inner.entry(state).or_default().insert(terminal);
         TerminalsDisallowed(Arc::new(inner))
@@ -44,7 +44,7 @@ impl TerminalsDisallowed {
 
 /// Deref to BTreeMap for transparent read-only access to all BTreeMap methods.
 impl Deref for TerminalsDisallowed {
-    type Target = BTreeMap<usize, BTreeSet<u32>>;
+    type Target = BTreeMap<u32, BTreeSet<u32>>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }

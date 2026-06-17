@@ -28,9 +28,6 @@ fn contains_regex_features(expr: &GrammarExpr) -> bool {
         GrammarExpr::Intersect { expr, intersect } => {
             contains_regex_features(expr) || contains_regex_features(intersect)
         }
-        GrammarExpr::WithSecondaryLexer { main, secondary } => {
-            contains_regex_features(main) || contains_regex_features(secondary)
-        }
         GrammarExpr::Quantified(inner, Quantifier::Optional)
         | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
         | GrammarExpr::Quantified(inner, Quantifier::OnePlus)
@@ -254,10 +251,6 @@ impl ChoiceFactorer {
                 Self::collect_refs_impl(expr, refs);
                 Self::collect_refs_impl(intersect, refs);
             }
-            GrammarExpr::WithSecondaryLexer { main, secondary } => {
-                Self::collect_refs_impl(main, refs);
-                Self::collect_refs_impl(secondary, refs);
-            }
             GrammarExpr::Quantified(expr, Quantifier::Optional)
             | GrammarExpr::Quantified(expr, Quantifier::ZeroPlus)
             | GrammarExpr::Quantified(expr, Quantifier::OnePlus)
@@ -408,10 +401,6 @@ impl ChoiceFactorer {
             GrammarExpr::Intersect { expr, intersect } => {
                 Self::collect_refs_static(expr, refs);
                 Self::collect_refs_static(intersect, refs);
-            }
-            GrammarExpr::WithSecondaryLexer { main, secondary } => {
-                Self::collect_refs_static(main, refs);
-                Self::collect_refs_static(secondary, refs);
             }
             GrammarExpr::Quantified(expr, Quantifier::Optional)
             | GrammarExpr::Quantified(expr, Quantifier::ZeroPlus)

@@ -22,15 +22,6 @@ pub enum Expr {
         expr: Box<Expr>,
         intersect: Box<Expr>,
     },
-    /// Match `main` and `secondary` over the same consumed span.
-    ///
-    /// `main` is the tokenizer-visible component; `secondary` is a pure guard
-    /// that must be compiled separately rather than lowered to ordinary
-    /// intersection/product construction.
-    WithSecondaryLexer {
-        main: Box<Expr>,
-        secondary: Box<Expr>,
-    },
     Seq(Vec<Expr>),
     Choice(Vec<Expr>),
     Exclude {
@@ -81,13 +72,6 @@ pub fn intersect(expr: impl Into<Expr>, other: impl Into<Expr>) -> Expr {
     Expr::Intersect {
         expr: Box::new(expr.into()),
         intersect: Box::new(other.into()),
-    }
-}
-
-pub fn with_secondary_lexer(main: impl Into<Expr>, secondary: impl Into<Expr>) -> Expr {
-    Expr::WithSecondaryLexer {
-        main: Box::new(main.into()),
-        secondary: Box::new(secondary.into()),
     }
 }
 
@@ -206,7 +190,6 @@ impl Expr {
             Expr::U8Class(_) => false,
             Expr::Dfa(dfa) => !dfa.finalizers(0).is_empty(),
             Expr::Intersect { expr, intersect } => expr.is_nullable() && intersect.is_nullable(),
-            Expr::WithSecondaryLexer { main, secondary } => main.is_nullable() && secondary.is_nullable(),
             Expr::Seq(parts) => parts.iter().all(Expr::is_nullable),
             Expr::Choice(options) => options.iter().any(Expr::is_nullable),
             Expr::Exclude { expr, exclude } => expr.is_nullable() && !exclude.is_nullable(),
@@ -225,10 +208,6 @@ impl Expr {
             Expr::Intersect { expr, intersect } => Expr::Intersect {
                 expr: Box::new(expr.optimize()),
                 intersect: Box::new(intersect.optimize()),
-            },
-            Expr::WithSecondaryLexer { main, secondary } => Expr::WithSecondaryLexer {
-                main: Box::new(main.optimize()),
-                secondary: Box::new(secondary.optimize()),
             },
             Expr::Exclude { expr, exclude } => Expr::Exclude {
                 expr: Box::new(expr.optimize()),

@@ -73,15 +73,7 @@ fn build_state_map(
 
     for class in state_classes {
         let internal_id = internal_to_originals.len() as u32;
-        let originals: Vec<u32> = class
-            .iter()
-            .copied()
-            .filter(|&state| state < num_dfa_states)
-            .map(|state| state as u32)
-            .collect();
-        if originals.is_empty() {
-            continue;
-        }
+        let originals: Vec<u32> = class.iter().map(|&state| state as u32).collect();
         for &state in &originals {
             original_to_internal[state as usize] = internal_id;
         }
@@ -106,15 +98,7 @@ fn build_state_map_composed(
     let mut new_internal_to_originals: Vec<Vec<u32>> = Vec::new();
     for class in state_classes {
         let internal_id = new_internal_to_originals.len() as u32;
-        let originals: Vec<u32> = class
-            .iter()
-            .copied()
-            .filter(|&state| state < num_dfa_states)
-            .map(|state| state as u32)
-            .collect();
-        if originals.is_empty() {
-            continue;
-        }
+        let originals: Vec<u32> = class.iter().map(|&state| state as u32).collect();
         for &state in &originals {
             rep_to_new_internal[state as usize] = internal_id;
         }
@@ -132,9 +116,6 @@ fn build_state_map_composed(
             continue;
         }
         let init_rep = initial_state_map.representative_original_ids[init_internal as usize] as usize;
-        if init_rep >= rep_to_new_internal.len() {
-            continue;
-        }
         let new_internal = rep_to_new_internal[init_rep];
         if new_internal != u32::MAX {
             composed_original_to_internal[orig_state] = new_internal;
@@ -214,15 +195,9 @@ fn prepare_equivalence_inputs<'a>(
         token_bytes.push(bytes.as_slice());
     }
 
-    let num_states = tokenizer.num_states() as usize;
     let initial_states = match initial_state_map {
-        Some(map) => map
-            .representative_original_ids
-            .iter()
-            .map(|&s| s as usize)
-            .filter(|&s| s < num_states)
-            .collect(),
-        None => (0..num_states).collect(),
+        Some(map) => map.representative_original_ids.iter().map(|&s| s as usize).collect(),
+        None => (0..tokenizer.num_states() as usize).collect(),
     };
 
     PreparedEquivalenceInputs {
@@ -449,7 +424,6 @@ fn analyze_equivalences_impl(
         .representative_original_ids
         .iter()
         .map(|&state| state as usize)
-        .filter(|&state| state < tokenizer.num_states() as usize)
         .collect();
     let normalized_disallowed_follows =
         normalize_disallowed_follows(tokenizer_group_count(&tokenizer_view), effective_disallowed);
@@ -498,15 +472,10 @@ fn analyze_equivalences_impl(
         .collect();
     let representative_states = prepared.initial_states
         .iter()
-        .filter_map(|&state| {
-            let pre_internal = *pre_state_map.original_to_internal.get(state)?;
-            if pre_internal == u32::MAX
-                || (pre_internal as usize) >= pre_state_map.representative_original_ids.len()
-            {
-                return None;
-            }
+        .map(|&state| {
+            let pre_internal = pre_state_map.original_to_internal[state];
             let pre_rep = pre_state_map.representative_original_ids[pre_internal as usize] as usize;
-            rep_to_final.get(&pre_rep).copied()
+            rep_to_final[&pre_rep]
         })
         .collect::<Vec<_>>();
 

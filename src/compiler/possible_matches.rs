@@ -63,9 +63,10 @@ impl<'a> PossibleMatchesComputer<'a> {
     fn fast_step(&mut self, state: u32, byte: u8) -> Option<u32> {
         let state_idx = state as usize;
         if self.flat_transitions[state_idx].is_none() {
+            let dfa_state = &self.tokenizer.dfa.states()[state_idx];
             let mut flat = Box::new([u32::MAX; 256]);
-            for byte in 0..=255u8 {
-                flat[byte as usize] = self.tokenizer.original_state_transition(state, byte);
+            for (b, &target) in dfa_state.transitions.iter() {
+                flat[b as usize] = target;
             }
             self.flat_transitions[state_idx] = Some(flat);
         }
@@ -90,9 +91,10 @@ impl<'a> PossibleMatchesComputer<'a> {
         tokenizer_state: u32,
     ) -> bool {
         let self_loop_bytes = self.self_loop_bytes.entry(tokenizer_state).or_insert_with(|| {
+            let state = &self.tokenizer.dfa.states()[tokenizer_state as usize];
             let mut bytes = U8Set::empty();
-            for byte in 0..=255u8 {
-                if self.tokenizer.original_state_transition(tokenizer_state, byte) == tokenizer_state {
+            for (byte, &target) in state.transitions.iter() {
+                if target == tokenizer_state {
                     bytes.insert(byte);
                 }
             }
@@ -118,8 +120,8 @@ impl<'a> PossibleMatchesComputer<'a> {
         // continuations.
         if node.has_token() {
             let token_id = node.token_id() as u32;
-            for terminal in self.tokenizer.original_state_finalizers(tokenizer_state).iter() {
-                result.entry(terminal as TerminalID).or_default().insert(token_id);
+            for terminal in self.tokenizer.matched_terminals_iter(tokenizer_state) {
+                result.entry(terminal).or_default().insert(token_id);
             }
         }
 
@@ -134,13 +136,13 @@ impl<'a> PossibleMatchesComputer<'a> {
                     break;
                 };
                 current_state = next_state;
-                for terminal in self.tokenizer.original_state_finalizers(current_state).iter() {
-                    let existing = result.entry(terminal as TerminalID).or_default();
+                for terminal in self.tokenizer.matched_terminals_iter(current_state) {
+                    let existing = result.entry(terminal).or_default();
                     merge_token_ids(existing, reachable.as_ref());
                 }
             }
 
-            if !segment_blocked && !self.tokenizer.original_state_possible_futures(current_state).is_empty() {
+            if !segment_blocked && !self.tokenizer.is_end(current_state) {
                 let descend_state = self
                     .canonical_state
                     .and_then(|map| map.get(current_state as usize).copied())

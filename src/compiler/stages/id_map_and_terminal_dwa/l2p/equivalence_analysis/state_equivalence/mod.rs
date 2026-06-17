@@ -29,9 +29,6 @@ pub(crate) fn build_state_map_from_subset_representatives(
     let mut next_internal = 0u32;
 
     for &rep in representative_states {
-        if rep >= num_states {
-            continue;
-        }
         if rep_to_internal[rep] == u32::MAX {
             rep_to_internal[rep] = next_internal;
             next_internal += 1;
@@ -46,9 +43,7 @@ pub(crate) fn build_state_map_from_subset_representatives(
             let mut init_rep_to_new_internal = vec![u32::MAX; num_states];
 
             for (&state, &rep) in states.iter().zip(representative_states.iter()) {
-                if state < num_states && rep < num_states {
-                    init_rep_to_new_internal[state] = rep_to_internal[rep];
-                }
+                init_rep_to_new_internal[state] = rep_to_internal[rep];
             }
 
             for (orig_state, &init_internal) in initial_state_map.original_to_internal.iter().enumerate() {
@@ -58,9 +53,6 @@ pub(crate) fn build_state_map_from_subset_representatives(
                     continue;
                 }
                 let init_rep = initial_state_map.representative_original_ids[init_internal as usize] as usize;
-                if init_rep >= init_rep_to_new_internal.len() {
-                    continue;
-                }
                 let new_internal = init_rep_to_new_internal[init_rep];
                 if new_internal == u32::MAX {
                     continue;
@@ -85,13 +77,7 @@ pub(crate) fn build_state_map_from_subset_representatives(
             let mut representative_original_ids = vec![u32::MAX; next_internal as usize];
 
             for (&state, &rep) in states.iter().zip(representative_states.iter()) {
-                if state >= num_states || rep >= num_states {
-                    continue;
-                }
                 let internal = rep_to_internal[rep];
-                if internal == u32::MAX {
-                    continue;
-                }
                 original_to_internal[state] = internal;
                 let bucket = &mut internal_to_originals[internal as usize];
                 if bucket.is_empty() {

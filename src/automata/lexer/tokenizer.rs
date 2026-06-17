@@ -1,6 +1,6 @@
 //! Runtime-facing tokenizer API built on top of the lexer DFA.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -13,74 +13,9 @@ use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SecondaryLexer {
-    pub(crate) dfa: DFA,
-    pub(crate) terminal_to_guard: Vec<Option<u32>>,
-}
-
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SecondaryVirtualStateSpace {
-    pub(crate) main_representatives: Vec<u32>,
-    pub(crate) main_state_to_rep_index: Vec<u32>,
-    pub(crate) secondary_representatives: Vec<u32>,
-    pub(crate) secondary_state_to_rep_index: Vec<u32>,
-    pub(crate) dead_rep_index: u32,
-    pub(crate) product_pairs: Vec<(u32, u32)>,
-    pub(crate) pair_to_state: BTreeMap<(u32, u32), u32>,
-}
-
-impl SecondaryVirtualStateSpace {
-    #[inline]
-    pub(crate) fn state_id_for_pair(&self, main_rep_index: u32, secondary_rep_index: u32) -> u32 {
-        *self
-            .pair_to_state
-            .get(&(main_rep_index, secondary_rep_index))
-            .unwrap_or_else(|| {
-                panic!(
-                    "secondary virtual product pair was not enumerated: main_rep_index={} secondary_rep_index={} product_pairs={}",
-                    main_rep_index,
-                    secondary_rep_index,
-                    self.product_pairs.len()
-                )
-            })
-    }
-
-    #[inline]
-    pub(crate) fn decode(&self, state: u32) -> (u32, u32) {
-        self.product_pairs[state as usize]
-    }
-
-    #[inline]
-    pub(crate) fn state_count(&self) -> u32 {
-        self.product_pairs.len() as u32
-    }
-
-    #[inline]
-    pub(crate) fn rep_index_for_main_state(&self, main_state: u32) -> u32 {
-        self.main_state_to_rep_index[main_state as usize]
-    }
-
-    #[inline]
-    pub(crate) fn rep_index_for_secondary_state(&self, secondary_state: u32) -> u32 {
-        if secondary_state == u32::MAX {
-            self.dead_rep_index
-        } else {
-            self.secondary_state_to_rep_index[secondary_state as usize]
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tokenizer {
     pub(crate) dfa: DFA,
     pub num_terminals: u32,
-    /// Optional secondary guard DFA. Guard finalizer ids are guard ids;
-    /// terminal_to_guard maps primary terminal ids to guard ids.
-    #[serde(default)]
-    pub(crate) secondary: Option<Arc<SecondaryLexer>>,
-    #[serde(default)]
-    pub(crate) secondary_virtual: Option<Arc<SecondaryVirtualStateSpace>>,
     /// Per-terminal regex expressions used to (re)build this tokenizer.
     /// Skipped during (de)serialization because they are only needed during
     /// compile-time simplification for active-terminal rebuilds.
@@ -92,16 +27,16 @@ pub struct Tokenizer {
 pub struct TokenizerMatch {
     pub id: TerminalID,
     pub width: usize,
-    pub end_state: usize,
+    pub end_state: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenizerExecResult {
-    pub end_state: Option<usize>,
+    pub end_state: Option<u32>,
     pub matches: Vec<TokenizerMatch>,
 }
 
-fn into_longest_matches(matches: FxHashMap<TerminalID, (usize, usize)>) -> Vec<TokenizerMatch> {
+fn into_longest_matches(matches: FxHashMap<TerminalID, (usize, u32)>) -> Vec<TokenizerMatch> {
     matches
         .into_iter()
         .map(|(id, (width, end_state))| TokenizerMatch {
@@ -130,90 +65,6 @@ struct TerminalFilteredDfa {
 impl Tokenizer {
     pub fn start_state(&self) -> u32 {
         0
-    }
-
-    pub(crate) fn has_secondary(&self) -> bool {
-        self.secondary.is_some()
-    }
-
-    pub(crate) fn has_secondary_virtual_state_space(&self) -> bool {
-        self.secondary_virtual.is_some()
-    }
-
-    pub(crate) fn set_secondary_virtual_state_space(
-        &mut self,
-        main_representatives: Vec<u32>,
-        main_state_to_rep_index: Vec<u32>,
-        secondary_representatives: Vec<u32>,
-        secondary_state_to_rep_index: Vec<u32>,
-        dead_rep_index: u32,
-        product_pairs: Vec<(u32, u32)>,
-        pair_to_state: BTreeMap<(u32, u32), u32>,
-    ) {
-        self.secondary_virtual = Some(Arc::new(SecondaryVirtualStateSpace {
-            main_representatives,
-            main_state_to_rep_index,
-            secondary_representatives,
-            secondary_state_to_rep_index,
-            dead_rep_index,
-            product_pairs,
-            pair_to_state,
-        }));
-    }
-
-    pub(crate) fn virtual_original_state_for_runtime(&self, state: usize) -> usize {
-        let Some(space) = &self.secondary_virtual else {
-            return state;
-        };
-        let main = Self::runtime_primary_state(state);
-        let secondary = Self::runtime_secondary_state(state);
-        let main_rep_index = space.rep_index_for_main_state(main);
-        let secondary_rep_index = space.rep_index_for_secondary_state(secondary);
-        space.state_id_for_pair(main_rep_index, secondary_rep_index) as usize
-    }
-
-    pub(crate) fn decode_virtual_original_state(&self, state: u32) -> Option<(u32, u32)> {
-        let space = self.secondary_virtual.as_ref()?;
-        let (main_rep_index, secondary_rep_index) = space.decode(state);
-        let main = space.main_representatives[main_rep_index as usize];
-        let secondary = space.secondary_representatives[secondary_rep_index as usize];
-        Some((main, secondary))
-    }
-
-    #[inline]
-    pub(crate) fn pack_runtime_state(main: u32, secondary: u32) -> usize {
-        ((secondary as usize) << 32) | main as usize
-    }
-
-    #[inline]
-    pub(crate) fn runtime_primary_state(state: usize) -> u32 {
-        (state & 0xffff_ffff) as u32
-    }
-
-    #[inline]
-    pub(crate) fn runtime_secondary_state(state: usize) -> u32 {
-        (state >> 32) as u32
-    }
-
-    #[inline]
-    pub(crate) fn precompute_state_for_runtime(&self, state: usize) -> u32 {
-        u32::try_from(self.virtual_original_state_for_runtime(state))
-            .expect("virtual tokenizer state does not fit in u32")
-    }
-
-    pub(crate) fn step_runtime_state(&self, state: usize, byte: u8) -> Option<usize> {
-        let main = Self::runtime_primary_state(state);
-        let next_main = self.step(main, byte)?;
-        let Some(secondary) = &self.secondary else {
-            return Some(next_main as usize);
-        };
-        let secondary_state = Self::runtime_secondary_state(state);
-        let next_secondary = if secondary_state == u32::MAX {
-            u32::MAX
-        } else {
-            secondary.dfa.step(secondary_state, byte).unwrap_or(u32::MAX)
-        };
-        Some(Self::pack_runtime_state(next_main, next_secondary))
     }
 
     /// Detect nullable terminals (those that match the empty string) by
@@ -252,32 +103,6 @@ impl Tokenizer {
         self.dfa.get_transition(state, byte)
     }
 
-    pub(crate) fn original_state_transition(&self, state: u32, byte: u8) -> u32 {
-        let Some(space) = &self.secondary_virtual else {
-            return self.dfa.get_transition(state, byte);
-        };
-        let Some(secondary) = &self.secondary else {
-            return self.dfa.get_transition(state, byte);
-        };
-        let (main_rep_index, secondary_rep_index) = space.decode(state);
-        let main = space.main_representatives[main_rep_index as usize];
-        let next_main = self.dfa.get_transition(main, byte);
-        if next_main == u32::MAX {
-            return u32::MAX;
-        }
-        let next_main_rep_index = space.rep_index_for_main_state(next_main);
-        let secondary_rep_state = space.secondary_representatives[secondary_rep_index as usize];
-        let next_secondary_rep_index = if secondary_rep_state == u32::MAX {
-            space.dead_rep_index
-        } else {
-            secondary
-                .dfa
-                .step(secondary_rep_state, byte)
-                .map(|s| space.secondary_state_to_rep_index[s as usize])
-                .unwrap_or(space.dead_rep_index)
-        };
-        space.state_id_for_pair(next_main_rep_index, next_secondary_rep_index)
-    }
     pub fn run(&self, input: &[u8]) -> u32 {
         input
             .iter()
@@ -285,113 +110,8 @@ impl Tokenizer {
             .unwrap_or(self.start_state())
     }
 
-    pub(crate) fn original_state_finalizers(&self, state: u32) -> BitSet {
-        let Some(space) = &self.secondary_virtual else {
-            return self.dfa.finalizers(state).clone();
-        };
-        let Some(secondary) = &self.secondary else {
-            return self.dfa.finalizers(state).clone();
-        };
-        let (main_rep_index, secondary_rep_index) = space.decode(state);
-        let main = space.main_representatives[main_rep_index as usize];
-        let secondary_rep_state = space.secondary_representatives[secondary_rep_index as usize];
-        let mut out = BitSet::new(self.num_terminals as usize);
-        for terminal in self.dfa.finalizers(main).iter() {
-            match secondary.terminal_to_guard.get(terminal).copied().flatten() {
-                None => out.set(terminal),
-                Some(guard) => {
-                    if secondary_rep_state != u32::MAX
-                        && secondary.dfa.finalizers(secondary_rep_state).contains(guard as usize)
-                    {
-                        out.set(terminal);
-                    }
-                }
-            }
-        }
-        out
-    }
-    pub(crate) fn original_state_possible_futures(&self, state: u32) -> BitSet {
-        let Some(space) = &self.secondary_virtual else {
-            return self.dfa.possible_future_group_ids(state).clone();
-        };
-        let Some(secondary) = &self.secondary else {
-            return self.dfa.possible_future_group_ids(state).clone();
-        };
-        let (main_rep_index, secondary_rep_index) = space.decode(state);
-        let main = space.main_representatives[main_rep_index as usize];
-        let secondary_rep_state = space.secondary_representatives[secondary_rep_index as usize];
-        let mut out = self.dfa.possible_future_group_ids(main).clone();
-        for terminal in 0..self.num_terminals as usize {
-            let Some(guard) = secondary.terminal_to_guard.get(terminal).copied().flatten() else {
-                continue;
-            };
-            let possible = secondary_rep_state != u32::MAX
-                && secondary
-                    .dfa
-                    .possible_future_group_ids(secondary_rep_state)
-                    .contains(guard as usize);
-            if !possible && terminal < out.len() {
-                out.clear(terminal);
-            }
-        }
-        out
-    }
     pub fn matched_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
         self.matched_terminals_iter(state).collect()
-    }
-
-    pub(crate) fn matched_terminals_runtime(&self, state: usize) -> Vec<TerminalID> {
-        let main = Self::runtime_primary_state(state);
-        let Some(secondary) = &self.secondary else {
-            return self.matched_terminals_iter(main).collect();
-        };
-        let secondary_state = Self::runtime_secondary_state(state);
-        self.dfa
-            .finalizers(main)
-            .iter()
-            .filter_map(|terminal| {
-                let terminal = terminal as TerminalID;
-                match secondary.terminal_to_guard.get(terminal as usize).copied().flatten() {
-                    None => Some(terminal),
-                    Some(guard) => {
-                        if secondary_state != u32::MAX
-                            && secondary.dfa.finalizers(secondary_state).contains(guard as usize)
-                        {
-                            Some(terminal)
-                        } else {
-                            None
-                        }
-                    }
-                }
-            })
-            .collect()
-    }
-
-    pub(crate) fn possible_future_terminals_runtime(&self, state: usize) -> BitSet {
-        let main = Self::runtime_primary_state(state);
-        let mut futures = self.dfa.possible_future_group_ids(main).clone();
-        let Some(secondary) = &self.secondary else {
-            return futures;
-        };
-        let secondary_state = Self::runtime_secondary_state(state);
-        for terminal in 0..self.num_terminals as usize {
-            let Some(guard) = secondary.terminal_to_guard.get(terminal).copied().flatten() else {
-                continue;
-            };
-            let guard_possible = secondary_state != u32::MAX
-                && secondary
-                    .dfa
-                    .possible_future_group_ids(secondary_state)
-                    .contains(guard as usize);
-            if !guard_possible && terminal < futures.len() {
-                futures.clear(terminal);
-            }
-        }
-        futures
-    }
-
-    pub(crate) fn is_end_runtime(&self, state: usize) -> bool {
-        self.possible_future_terminals_runtime(state).is_empty()
     }
 
     pub(crate) fn matched_terminals_iter(
@@ -423,9 +143,7 @@ impl Tokenizer {
     }
 
     pub fn num_states(&self) -> u32 {
-        self.secondary_virtual
-            .as_ref()
-            .map_or(self.dfa.num_states() as u32, |space| space.state_count())
+        self.dfa.num_states() as u32
     }
 
     pub(crate) fn num_forced_minimized_states(&self) -> usize {
@@ -435,7 +153,7 @@ impl Tokenizer {
     pub(crate) fn execute_from_state_all_widths(
         &self,
         input: &[u8],
-        start: usize,
+        start: u32,
     ) -> TokenizerExecResult {
         let mut matches = Vec::new();
         let end_state = self.scan_input(input, start, &mut matches, |tokenizer, matches, state, width| {
@@ -443,13 +161,13 @@ impl Tokenizer {
         });
 
         TokenizerExecResult {
-            end_state: end_state.filter(|&state| !self.is_end_runtime(state)),
+            end_state: end_state.filter(|&state| !self.is_end(state)),
             matches,
         }
     }
 
-    pub fn execute_from_state(&self, input: &[u8], start: usize) -> TokenizerExecResult {
-        let mut matches = FxHashMap::<TerminalID, (usize, usize)>::default();
+    pub fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult {
+        let mut matches = FxHashMap::<TerminalID, (usize, u32)>::default();
         let end_state = self.scan_input(input, start, &mut matches, |tokenizer, matches, state, width| {
             tokenizer.record_longest_matches(matches, state, width);
         });
@@ -460,11 +178,11 @@ impl Tokenizer {
         }
     }
 
-    pub(crate) fn execute_from_state_end_only(&self, input: &[u8], start: usize) -> Option<usize> {
+    pub(crate) fn execute_from_state_end_only(&self, input: &[u8], start: u32) -> Option<u32> {
         self.scan_input(input, start, &mut (), |_, _, _, _| {})
     }
 
-    pub fn execute_all_matches(&self, input: &[u8], start: usize) -> TokenizerResult {
+    pub fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult {
         let exec = self.execute_from_state_all_widths(input, start);
         let end_state = exec.end_state.unwrap_or(start);
         TokenizerResult {
@@ -473,16 +191,12 @@ impl Tokenizer {
         }
     }
 
-    pub fn initial_state(&self) -> usize {
-        if self.secondary.is_some() {
-            Self::pack_runtime_state(self.start_state(), self.start_state())
-        } else {
-            self.start_state() as usize
-        }
+    pub fn initial_state(&self) -> u32 {
+        self.start_state()
     }
 
     pub fn initial_state_id(&self) -> u32 {
-        self.start_state()
+        self.initial_state()
     }
 
     pub fn tokens_accessible_from_state(&self, state: u32) -> &BitSet {
@@ -553,8 +267,8 @@ impl Tokenizer {
             .any(|state| state.transitions.values().any(|&target| target == start))
     }
 
-    fn record_all_matches(&self, matches: &mut Vec<TokenizerMatch>, state: usize, width: usize) {
-        matches.extend(self.matched_terminals_runtime(state).into_iter().map(|id| TokenizerMatch {
+    fn record_all_matches(&self, matches: &mut Vec<TokenizerMatch>, state: u32, width: usize) {
+        matches.extend(self.matched_terminals_iter(state).map(|id| TokenizerMatch {
             id,
             width,
             end_state: state,
@@ -563,11 +277,11 @@ impl Tokenizer {
 
     fn record_longest_matches(
         &self,
-        matches: &mut FxHashMap<TerminalID, (usize, usize)>,
-        state: usize,
+        matches: &mut FxHashMap<TerminalID, (usize, u32)>,
+        state: u32,
         width: usize,
     ) {
-        for terminal in self.matched_terminals_runtime(state) {
+        for terminal in self.matched_terminals_iter(state) {
             matches.insert(terminal, (width, state));
         }
     }
@@ -575,13 +289,13 @@ impl Tokenizer {
     fn scan_input<R>(
         &self,
         input: &[u8],
-        start: usize,
+        start: u32,
         mut matches: &mut R,
-        mut record_matches: impl FnMut(&Self, &mut R, usize, usize),
-    ) -> Option<usize> {
+        mut record_matches: impl FnMut(&Self, &mut R, u32, usize),
+    ) -> Option<u32> {
         let mut state = start;
         for (index, &byte) in input.iter().enumerate() {
-            let next = self.step_runtime_state(state, byte)?;
+            let next = self.step(state, byte)?;
             state = next;
             record_matches(self, &mut matches, state, index + 1);
         }
@@ -709,8 +423,6 @@ impl Tokenizer {
                 Tokenizer {
                     dfa,
                     num_terminals: self.num_terminals,
-                    secondary: self.secondary.clone(),
-                    secondary_virtual: self.secondary_virtual.clone(),
                     exprs: self.exprs.clone(),
                 },
                 identity,
@@ -731,8 +443,6 @@ impl Tokenizer {
                     Tokenizer {
                         dfa,
                         num_terminals: self.num_terminals,
-                        secondary: self.secondary.clone(),
-                        secondary_virtual: self.secondary_virtual.clone(),
                         exprs: self.exprs.clone(),
                     },
                     identity,
@@ -755,8 +465,6 @@ impl Tokenizer {
                 Tokenizer {
                     dfa,
                     num_terminals: self.num_terminals,
-                    secondary: self.secondary.clone(),
-                    secondary_virtual: self.secondary_virtual.clone(),
                     exprs: self.exprs.clone(),
                 },
                 identity,
@@ -770,8 +478,6 @@ impl Tokenizer {
             Tokenizer {
                 dfa: minimized,
                 num_terminals: self.num_terminals,
-                secondary: self.secondary.clone(),
-                secondary_virtual: self.secondary_virtual.clone(),
                 exprs: self.exprs.clone(),
             },
             ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
@@ -784,6 +490,6 @@ impl Tokenizer {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenizerResult {
-    pub end_state: usize,
+    pub end_state: u32,
     pub matches: Vec<(usize, BTreeSet<TerminalID>)>,
 }

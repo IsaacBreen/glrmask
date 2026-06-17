@@ -357,35 +357,18 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
             grammar.terminals.len()
         );
         for (index, expr) in exprs.iter().enumerate() {
-            let (main_expr, secondary_expr) = split_secondary_lexer_expr(expr);
             let started_at = Instant::now();
-            let regex = build_regex(std::slice::from_ref(&main_expr));
-            let guard_regex = secondary_expr
-                .as_ref()
-                .map(|guard| build_regex(std::slice::from_ref(guard)));
+            let regex = build_regex(std::slice::from_ref(expr));
             let elapsed = elapsed_ms(started_at);
             let name = grammar.terminal_display_name(index as u32);
-            if let Some(guard_regex) = guard_regex {
-                eprintln!(
-                    "[glrmask/profile][tokenizer] terminal id={} name={:?} final_states={} final_transitions={} secondary_states={} secondary_transitions={} alone_ms={:.3}",
-                    index,
-                    name,
-                    regex.num_states(),
-                    regex.num_transitions(),
-                    guard_regex.num_states(),
-                    guard_regex.num_transitions(),
-                    elapsed
-                );
-            } else {
-                eprintln!(
-                    "[glrmask/profile][tokenizer] terminal id={} name={:?} final_states={} final_transitions={} alone_ms={:.3}",
-                    index,
-                    name,
-                    regex.num_states(),
-                    regex.num_transitions(),
-                    elapsed
-                );
-            }
+            eprintln!(
+                "[glrmask/profile][tokenizer] terminal id={} name={:?} final_states={} final_transitions={} alone_ms={:.3}",
+                index,
+                name,
+                regex.num_states(),
+                regex.num_transitions(),
+                elapsed
+            );
         }
     }
     build_tokenizer_from_exprs(&exprs, Some(&terminal_labels))
@@ -404,11 +387,10 @@ pub(crate) fn build_tokenizer_from_exprs(
             profile_labels.map_or(0, |labels| labels.len())
         );
     }
-    let (main_exprs, secondary) = split_secondary_lexer_exprs(exprs);
     let regex = if let Some(labels) = profile_labels {
-        build_regex_with_profile_labels(&main_exprs, labels)
+        build_regex_with_profile_labels(exprs, labels)
     } else {
-        build_regex(&main_exprs)
+        build_regex(exprs)
     };
     if profile_detail {
         eprintln!(
@@ -423,49 +405,7 @@ pub(crate) fn build_tokenizer_from_exprs(
     Tokenizer {
         dfa: regex.dfa,
         num_terminals: exprs.len() as u32,
-        secondary,
-        secondary_virtual: None,
         exprs: Some(std::sync::Arc::from(exprs.to_vec())),
-    }
-}
-
-fn split_secondary_lexer_exprs(
-    exprs: &[Expr],
-) -> (Vec<Expr>, Option<std::sync::Arc<crate::automata::lexer::tokenizer::SecondaryLexer>>) {
-    let mut main_exprs = Vec::with_capacity(exprs.len());
-    let mut guard_exprs = Vec::<Expr>::new();
-    let mut terminal_to_guard = Vec::with_capacity(exprs.len());
-
-    for expr in exprs {
-        let (main, guard) = split_secondary_lexer_expr(expr);
-        main_exprs.push(main);
-        if let Some(guard) = guard {
-            let guard_id = guard_exprs.len() as u32;
-            guard_exprs.push(guard);
-            terminal_to_guard.push(Some(guard_id));
-        } else {
-            terminal_to_guard.push(None);
-        }
-    }
-
-    let secondary = if guard_exprs.is_empty() {
-        None
-    } else {
-        Some(std::sync::Arc::new(crate::automata::lexer::tokenizer::SecondaryLexer {
-            dfa: build_regex(&guard_exprs).dfa,
-            terminal_to_guard,
-        }))
-    };
-    (main_exprs, secondary)
-}
-
-fn split_secondary_lexer_expr(expr: &Expr) -> (Expr, Option<Expr>) {
-    match expr {
-        Expr::Shared(inner) => split_secondary_lexer_expr(inner),
-        Expr::WithSecondaryLexer { main, secondary } => {
-            ((*main.clone()).clone(), Some((*secondary.clone()).clone()))
-        }
-        other => (other.clone(), None),
     }
 }
 
@@ -501,7 +441,7 @@ fn compile_prepared_with_profile(
 
         let analysis_started_at = Instant::now();
         let (
-            (mut tokenizer, tokenizer_build_ms),
+            (tokenizer, tokenizer_build_ms),
             (
                 analyzed_grammar,
                 analyze_grammar_ms,
@@ -568,10 +508,6 @@ fn compile_prepared_with_profile(
         profile.terminal_coloring_ms = terminal_coloring_ms;
         profile.disallowed_follows_ms = disallowed_follows_ms;
         profile.analysis_wall_ms = elapsed_ms(analysis_started_at);
-        crate::compiler::stages::id_map_and_terminal_dwa::install_secondary_virtual_state_space(
-            &mut tokenizer,
-            vocab,
-        );
 
         let disallowed_follows_for_classification = &disallowed_follows;
         let shared_classify_cache = SharedClassifyCache::new();

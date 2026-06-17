@@ -60,7 +60,7 @@ fn total_parser_stack_count(state: &glrmask::ConstraintState<'_>) -> usize {
         .sum()
 }
 
-fn total_final_stack_count(stacks: &[(usize, Vec<Vec<u32>>)]) -> usize {
+fn total_final_stack_count(stacks: &[(u32, Vec<Vec<u32>>)]) -> usize {
     stacks.iter().map(|(_, stacks)| stacks.len()).sum()
 }
 
