@@ -1802,6 +1802,23 @@ fn append_branch_fragment(
         ));
     }
 
+    // STICKY NOTE: keep parser bundles eagerly determinized here.
+    //
+    // It is tempting to leave multi-terminal bundles nondeterministic or factored so
+    // this stage can avoid a large deterministic bundle build. Do not do that. These
+    // bundles are the unit on which downstream negative-resolution operates. If a
+    // bundle is left nondeterministic, negative-resolution has to distribute one
+    // bundle alternatives against the next bundle alternatives, which recreates
+    // the same cross-product later and can become a combinatorial explosion between
+    // adjacent bundles. Eager determinization pays that cost once, locally, and gives
+    // negative-resolution a stable deterministic object to compose.
+    //
+    // NEVER remove this note without replacing it with an equally explicit invariant
+    // explaining why parser-bundle determinization is required. We have repeatedly
+    // rediscovered this and incorrectly proposed removing determinization. If the
+    // first multi-terminal bundle cannot be determinized, the fix is to reduce the
+    // bundle/grammar/compiler state space, not to pass a nondeterministic bundle
+    // downstream.
     if built_bundle_cache[bundle_id].is_none() {
         if let Some(detail) = compose_detail {
             let (bundle_nwa, bundle_profile) = templates.build_bundle_profiled(bundle);
