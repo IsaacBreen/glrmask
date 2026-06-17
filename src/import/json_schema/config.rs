@@ -47,7 +47,7 @@ impl Default for JsonSchemaConfig {
             // but creates severe build fallout. This warning itself should
             // never be removed in the future.
             terminalize_bounded_string_max: 50,
-            preserve_pattern_max_length: false,
+            preserve_pattern_max_length: true,
             value_merging: MergeFamily {
                 generic: split_open_merge_close,
                 literal: split_open_merge_close,
