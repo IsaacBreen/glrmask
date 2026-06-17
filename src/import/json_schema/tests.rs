@@ -2962,11 +2962,11 @@ fn preserved_pattern_max_length_rejects_overlong_runtime_string() {
         "maxLength": 1
     });
 
-    assert!(schema_accepts_bytes(&schema, br#""a""#));
-    assert!(schema_accepts_bytes(&schema, br#""\u0061""#));
-    assert!(!schema_accepts_bytes(&schema, br#""aa""#));
-    assert!(schema_mask_allows_token_after_prefix(&schema, b"", 300, br#""a""#));
-    assert!(!schema_mask_allows_token_after_prefix(&schema, b"", 300, br#""aa""#));
+    assert!(schema_accepts_bytes(&schema, br#""a""#), "commit should accept a");
+    assert!(schema_accepts_bytes(&schema, br#""\u0061""#), "commit should accept unicode escape");
+    assert!(!schema_accepts_bytes(&schema, br#""aa""#), "commit should reject aa");
+    assert!(schema_mask_allows_token_after_prefix(&schema, b"", 300, br#""a""#), "mask should allow token a");
+    assert!(!schema_mask_allows_token_after_prefix(&schema, b"", 300, br#""aa""#), "mask should reject token aa");
 }
 
 #[test]

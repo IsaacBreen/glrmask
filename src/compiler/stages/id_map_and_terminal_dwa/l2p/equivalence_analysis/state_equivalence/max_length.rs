@@ -64,7 +64,7 @@ fn build_filtered_finalizer_labels(
 ) -> Vec<Vec<usize>> {
     (0..tokenizer.num_states() as usize)
         .into_par_iter()
-        .map(|state| filtered_terminals(tokenizer.matched_terminals_iter(state as u32), active_groups))
+        .map(|state| filtered_terminals(tokenizer.original_state_finalizers(state as u32).iter().map(|terminal| terminal as u32), active_groups))
         .collect()
 }
 
@@ -75,17 +75,15 @@ fn build_filtered_possible_future_labels(
     (0..tokenizer.num_states() as usize)
         .into_par_iter()
         .map(|state| {
-            filtered_terminals(tokenizer.possible_future_terminals_iter(state as u32), active_groups)
+            filtered_terminals(tokenizer.original_state_possible_futures(state as u32).iter().map(|terminal| terminal as u32), active_groups)
         })
         .collect()
 }
 
 fn build_has_any_transition_labels(tokenizer: &Tokenizer) -> Vec<bool> {
-    tokenizer
-        .dfa
-        .states()
-        .par_iter()
-        .map(|state| !state.transitions.is_empty())
+    (0..tokenizer.num_states() as usize)
+        .into_par_iter()
+        .map(|state| (0..=255u8).any(|byte| tokenizer.original_state_transition(state as u32, byte) != u32::MAX))
         .collect()
 }
 

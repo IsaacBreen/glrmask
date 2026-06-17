@@ -161,10 +161,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     fn fast_step(&mut self, state: u32, byte: u8) -> Option<u32> {
         let state_idx = state as usize;
         if self.flat_transitions[state_idx].is_none() {
-            let dfa_state = &self.tokenizer.dfa.states()[state_idx];
             let mut flat = Box::new([u32::MAX; 256]);
-            for (b, &target) in dfa_state.transitions.iter() {
-                flat[b as usize] = target;
+            for byte in 0..=255u8 {
+                flat[byte as usize] = self.tokenizer.original_state_transition(state, byte);
             }
             self.flat_transitions[state_idx] = Some(flat);
         }
@@ -196,7 +195,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             .entry(tokenizer_state)
             .or_insert_with(|| {
                 self.tokenizer
-                    .possible_future_terminals_iter(tokenizer_state)
+                    .original_state_possible_futures(tokenizer_state)
+                    .iter()
+                    .map(|terminal| terminal as TerminalID)
                     .collect()
             })
             .clone()
@@ -211,7 +212,12 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let mut colors = SmallVec::<[ColorId; 8]>::new();
         let mut ignore_present = false;
 
-        for terminal_id in self.tokenizer.possible_future_terminals_iter(tokenizer_state) {
+        for terminal_id in self
+            .tokenizer
+            .original_state_possible_futures(tokenizer_state)
+            .iter()
+            .map(|terminal| terminal as TerminalID)
+        {
             if Some(terminal_id) == self.ignore_terminal {
                 ignore_present = true;
                 continue;
@@ -461,10 +467,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         tokenizer_state: TokenizerState,
     ) -> bool {
         let self_loop_bytes = self.self_loop_bytes.entry(tokenizer_state).or_insert_with(|| {
-            let state = &self.tokenizer.dfa.states()[tokenizer_state as usize];
             let mut bytes = U8Set::empty();
-            for (byte, &target) in state.transitions.iter() {
-                if target == tokenizer_state {
+            for byte in 0..=255u8 {
+                if self.tokenizer.original_state_transition(tokenizer_state, byte) == tokenizer_state {
                     bytes.insert(byte);
                 }
             }
@@ -663,10 +668,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let num_states = self.tokenizer.num_states() as usize;
         for state_idx in 0..num_states {
             if self.flat_transitions[state_idx].is_none() {
-                let dfa_state = &self.tokenizer.dfa.states()[state_idx];
                 let mut flat = Box::new([u32::MAX; 256]);
-                for (b, &target) in dfa_state.transitions.iter() {
-                    flat[b as usize] = target;
+                for byte in 0..=255u8 {
+                    flat[byte as usize] = self.tokenizer.original_state_transition(state_idx as u32, byte);
                 }
                 self.flat_transitions[state_idx] = Some(flat);
             }
@@ -717,9 +721,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 if alive {
                     total_alive += 1;
                     // Terminal matches at the exact token endpoint.
-                    let finalizers = self.tokenizer.dfa.finalizers(scan_state);
-                    for t in finalizers.iter() {
-                        let terminal = t as TerminalID;
+                    let finalizers = self.tokenizer.original_state_finalizers(scan_state);
+                    for terminal in finalizers.iter().map(|t| t as TerminalID) {
                         self.profile.match_transition_additions += source_nodes.len() as u64;
                         self.add_leaf_token_from_sources(
                             source_nodes,
@@ -836,7 +839,12 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     if let Some(next) = self.fast_step(scan_state, byte) {
                         scan_state = next;
                         // Record longest match per terminal
-                        for terminal in self.tokenizer.matched_terminals_iter(scan_state) {
+                        for terminal in self
+                            .tokenizer
+                            .original_state_finalizers(scan_state)
+                            .iter()
+                            .map(|terminal| terminal as TerminalID)
+                        {
                             // Skip non-active terminals when filtering
                             if let Some(ref active) = self.active_terminals {
                                 if !active.get(terminal as usize).copied().unwrap_or(false) {

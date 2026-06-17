@@ -2099,6 +2099,7 @@ mod tests {
             dfa: regex.dfa,
             num_terminals: 1,
             secondary: None,
+            secondary_virtual: None,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
         };
         let exec = tokenizer.execute_from_state(input, tokenizer.initial_state());
@@ -2224,6 +2225,7 @@ mod tests {
             dfa: regex.dfa,
             num_terminals: 1,
             secondary: None,
+            secondary_virtual: None,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
         };
 
@@ -2260,6 +2262,7 @@ mod tests {
             dfa: regex.dfa,
             num_terminals: 2,
             secondary: None,
+            secondary_virtual: None,
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
         };
 
@@ -2296,6 +2299,7 @@ mod tests {
             dfa: regex.dfa,
             num_terminals: 2,
             secondary: None,
+            secondary_virtual: None,
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
         };
 
@@ -2354,6 +2358,7 @@ mod tests {
             dfa: regex.dfa,
             num_terminals: exprs.len() as u32,
             secondary: None,
+            secondary_virtual: None,
             exprs: Some(Arc::from(exprs.into_boxed_slice())),
         };
 
@@ -2399,6 +2404,7 @@ mod tests {
             dfa,
             num_terminals: 1,
             secondary: None,
+            secondary_virtual: None,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
         };
 
@@ -2454,6 +2460,7 @@ mod tests {
             dfa,
             num_terminals: 1,
             secondary: None,
+            secondary_virtual: None,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
         };
 
@@ -2598,6 +2605,7 @@ mod tests {
             dfa: regex.dfa,
             num_terminals: 1,
             secondary: None,
+            secondary_virtual: None,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
         };
 

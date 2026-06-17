@@ -28,13 +28,18 @@ impl Constraint {
 	}
 
         pub(crate) fn internal_tsid_for_state(&self, tokenizer_state: usize) -> u32 {
-                let original_state = self.tokenizer.precompute_state_for_runtime(tokenizer_state);
-                self.state_to_internal_tsid
-                        .get(original_state as usize)
-                        .copied()
-                        .unwrap_or(original_state)
+                let original_state = self.tokenizer.virtual_original_state_for_runtime(tokenizer_state);
+                let internal = *self
+                        .state_to_internal_tsid
+                        .get(original_state)
+                        .expect("runtime tokenizer state has no precomputed internal TSID");
+                assert_ne!(
+                        internal,
+                        u32::MAX,
+                        "runtime tokenizer state maps to unmapped internal TSID"
+                );
+                internal
         }
-
 	pub(crate) fn internal_token_for_original(&self, token_id: u32) -> u32 {
 		self.original_token_to_internal
 			.get(token_id as usize)

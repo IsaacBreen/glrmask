@@ -673,11 +673,20 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
     entries: &[u32],
     canonical_state: Option<&[u32]>,
 ) -> (TrieClassBuildResult, PossibleMatchesProfile) {
-    let matched_terminals: Vec<Box<[TerminalID]>> = (0..tokenizer.num_states()).map(|state| tokenizer.matched_terminals_iter(state).collect::<Vec<_>>().into_boxed_slice()).collect();
+    let matched_terminals: Vec<Box<[TerminalID]>> = (0..tokenizer.num_states())
+        .map(|state| {
+            tokenizer
+                .original_state_finalizers(state)
+                .iter()
+                .map(|terminal| terminal as TerminalID)
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        })
+        .collect();
     let matched_terminal_masks: Option<Vec<u128>> = if tokenizer.num_terminals <= 128 {
         Some((0..tokenizer.num_states()).map(|state| {
             let mut mask = 0u128;
-            for terminal in tokenizer.matched_terminals_iter(state) {
+            for terminal in tokenizer.original_state_finalizers(state).iter() {
                 mask |= 1u128 << terminal;
             }
             mask
@@ -685,17 +694,27 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
     } else {
         None
     };
-    let is_end: Vec<bool> = (0..tokenizer.num_states()).map(|state| tokenizer.is_end(state)).collect();
+    let is_end: Vec<bool> = (0..tokenizer.num_states())
+        .map(|state| tokenizer.original_state_possible_futures(state).is_empty())
+        .collect();
     let mut byte_transitions = vec![vec![u32::MAX; tokenizer.num_states() as usize]; 256];
-    for (state_idx, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
-        for (byte, &target) in dfa_state.transitions.iter() { byte_transitions[byte as usize][state_idx] = target; }
+    for state_idx in 0..tokenizer.num_states() as usize {
+        for byte in 0..=255u8 {
+            byte_transitions[byte as usize][state_idx] =
+                tokenizer.original_state_transition(state_idx as u32, byte);
+        }
     }
-    let self_loop_bytes: Vec<U8Set> = (0..tokenizer.num_states() as usize).map(|state_idx| {
-        let dfa_state = &tokenizer.dfa.states()[state_idx];
-        let mut bytes = U8Set::empty();
-        for (byte, &target) in dfa_state.transitions.iter() { if target == state_idx as u32 { bytes.insert(byte); } }
-        bytes
-    }).collect();
+    let self_loop_bytes: Vec<U8Set> = (0..tokenizer.num_states() as usize)
+        .map(|state_idx| {
+            let mut bytes = U8Set::empty();
+            for byte in 0..=255u8 {
+                if tokenizer.original_state_transition(state_idx as u32, byte) == state_idx as u32 {
+                    bytes.insert(byte);
+                }
+            }
+            bytes
+        })
+        .collect();
     let mut terminal_sets = TerminalSetInterner::default();
     let empty_terminals_id = terminal_sets.intern_slice(&[]);
     let node_terminal_ids: Vec<u32> = if let Some(matched_terminal_masks) = matched_terminal_masks.as_ref() {
