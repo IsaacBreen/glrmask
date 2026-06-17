@@ -424,6 +424,7 @@ pub(crate) fn build_tokenizer_from_exprs(
         dfa: regex.dfa,
         num_terminals: exprs.len() as u32,
         secondary,
+        secondary_virtual: None,
         exprs: Some(std::sync::Arc::from(exprs.to_vec())),
     }
 }
@@ -500,7 +501,7 @@ fn compile_prepared_with_profile(
 
         let analysis_started_at = Instant::now();
         let (
-            (tokenizer, tokenizer_build_ms),
+            (mut tokenizer, tokenizer_build_ms),
             (
                 analyzed_grammar,
                 analyze_grammar_ms,
@@ -567,6 +568,10 @@ fn compile_prepared_with_profile(
         profile.terminal_coloring_ms = terminal_coloring_ms;
         profile.disallowed_follows_ms = disallowed_follows_ms;
         profile.analysis_wall_ms = elapsed_ms(analysis_started_at);
+        crate::compiler::stages::id_map_and_terminal_dwa::install_secondary_virtual_state_space(
+            &mut tokenizer,
+            vocab,
+        );
 
         let disallowed_follows_for_classification = &disallowed_follows;
         let shared_classify_cache = SharedClassifyCache::new();

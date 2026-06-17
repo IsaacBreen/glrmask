@@ -920,7 +920,7 @@ impl<'a> ConstraintState<'a> {
         // original tokenizer states by expanding each internal TSID through
         // `internal_tsid_to_states` during precomputation.
         for &terminal_id in disallowed_in_state {
-            if let Some(mask) = terminal_masks.get(&(crate::automata::lexer::tokenizer::Tokenizer::runtime_primary_state(original_tokenizer_state) as u32, terminal_id)) {
+            if let Some(mask) = terminal_masks.get(&(self.constraint.tokenizer.virtual_original_state_for_runtime(original_tokenizer_state) as u32, terminal_id)) {
                 for (allowed_word, mask_word) in dense.iter_mut().zip(mask.iter()) {
                     *allowed_word &= !mask_word;
                 }

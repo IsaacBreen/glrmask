@@ -28,13 +28,12 @@ impl Constraint {
 	}
 
         pub(crate) fn internal_tsid_for_state(&self, tokenizer_state: usize) -> u32 {
-                let tokenizer_state = crate::automata::lexer::tokenizer::Tokenizer::runtime_primary_state(tokenizer_state);
+                let original_state = self.tokenizer.virtual_original_state_for_runtime(tokenizer_state);
                 self.state_to_internal_tsid
-                        .get(tokenizer_state as usize)
-			.copied()
-			.unwrap_or(tokenizer_state)
-	}
-
+                        .get(original_state)
+                        .copied()
+                        .unwrap_or(u32::MAX)
+        }
 	pub(crate) fn internal_token_for_original(&self, token_id: u32) -> u32 {
 		self.original_token_to_internal
 			.get(token_id as usize)

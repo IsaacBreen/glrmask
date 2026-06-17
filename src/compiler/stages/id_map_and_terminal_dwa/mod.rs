@@ -12,7 +12,7 @@ pub(crate) mod merge;
 pub(crate) mod partition;
 pub(crate) mod types;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -132,6 +132,137 @@ fn build_char_type_sub_vocabs(vocab: &Vocab) -> Arc<[Vocab]> {
         sub_vocabs: Arc::clone(&sub_vocabs),
     }));
     sub_vocabs
+}
+
+pub(crate) fn install_secondary_virtual_state_space(tokenizer: &mut Tokenizer, vocab: &Vocab) {
+    if tokenizer.has_secondary_virtual_state_space() {
+        return;
+    }
+    let Some(secondary) = tokenizer.secondary.clone() else {
+        return;
+    };
+    let token_bytes: Vec<&[u8]> = vocab.entries.values().map(|bytes| bytes.as_slice()).collect();
+    let mut relevant_bytes = [false; 256];
+    for bytes in &token_bytes {
+        for &byte in *bytes {
+            relevant_bytes[byte as usize] = true;
+        }
+    }
+    let main_view = l2p::equivalence_analysis::compat::TokenizerView::new(tokenizer);
+    let main_states: Vec<usize> = (0..tokenizer.dfa.num_states()).collect();
+    let main_mapping = l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted(
+        &main_view,
+        &token_bytes,
+        &main_states,
+        None,
+        None,
+        Some(&relevant_bytes),
+    );
+    let mut main_reps = main_mapping.clone();
+    main_reps.sort_unstable();
+    main_reps.dedup();
+    let mut main_rep_to_index = rustc_hash::FxHashMap::<usize, u32>::default();
+    let mut main_representatives = Vec::<u32>::new();
+    for rep in main_reps {
+        let idx = main_representatives.len() as u32;
+        main_rep_to_index.insert(rep, idx);
+        main_representatives.push(rep as u32);
+    }
+    let main_state_to_rep_index = main_mapping
+        .into_iter()
+        .map(|rep| main_rep_to_index[&rep])
+        .collect::<Vec<_>>();
+
+    let secondary_view = l2p::equivalence_analysis::compat::TokenizerView {
+        flat_dfa: l2p::equivalence_analysis::compat::FlatDfa::from_dfa(&secondary.dfa),
+    };
+    let secondary_states: Vec<usize> = (0..secondary.dfa.num_states()).collect();
+    let secondary_mapping = l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted(
+        &secondary_view,
+        &token_bytes,
+        &secondary_states,
+        None,
+        None,
+        Some(&relevant_bytes),
+    );
+    let mut secondary_reps = secondary_mapping.clone();
+    secondary_reps.sort_unstable();
+    secondary_reps.dedup();
+    let mut secondary_rep_to_index = rustc_hash::FxHashMap::<usize, u32>::default();
+    let mut secondary_representatives = Vec::<u32>::new();
+    for rep in secondary_reps {
+        let idx = secondary_representatives.len() as u32;
+        secondary_rep_to_index.insert(rep, idx);
+        secondary_representatives.push(rep as u32);
+    }
+    let dead_rep_index = secondary_representatives.len() as u32;
+    secondary_representatives.push(u32::MAX);
+    let secondary_state_to_rep_index = secondary_mapping
+        .into_iter()
+        .map(|rep| secondary_rep_to_index[&rep])
+        .collect::<Vec<_>>();
+
+    let active_bytes = relevant_bytes
+        .iter()
+        .enumerate()
+        .filter_map(|(byte, &active)| active.then_some(byte as u8))
+        .collect::<Vec<_>>();
+    let mut product_pairs = Vec::<(u32, u32)>::new();
+    let mut pair_to_state = BTreeMap::<(u32, u32), u32>::new();
+    let mut queue = VecDeque::<(u32, u32)>::new();
+    let start_pair = (
+        main_state_to_rep_index[tokenizer.start_state() as usize],
+        secondary_state_to_rep_index[0],
+    );
+    pair_to_state.insert(start_pair, 0);
+    product_pairs.push(start_pair);
+    queue.push_back(start_pair);
+    while let Some((main_rep_index, secondary_rep_index)) = queue.pop_front() {
+        let main_state = main_representatives[main_rep_index as usize];
+        let secondary_state = secondary_representatives[secondary_rep_index as usize];
+        for &byte in &active_bytes {
+            let next_main = tokenizer.dfa.get_transition(main_state, byte);
+            if next_main == u32::MAX {
+                continue;
+            }
+            let next_main_rep_index = main_state_to_rep_index[next_main as usize];
+            let next_secondary_rep_index = if secondary_state == u32::MAX {
+                dead_rep_index
+            } else {
+                secondary
+                    .dfa
+                    .step(secondary_state, byte)
+                    .map(|state| secondary_state_to_rep_index[state as usize])
+                    .unwrap_or(dead_rep_index)
+            };
+            let pair = (next_main_rep_index, next_secondary_rep_index);
+            if !pair_to_state.contains_key(&pair) {
+                let state_id = product_pairs.len() as u32;
+                pair_to_state.insert(pair, state_id);
+                product_pairs.push(pair);
+                queue.push_back(pair);
+            }
+        }
+    }
+    if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+        eprintln!(
+            "[glrmask/profile][secondary_virtual] main_states={} main_reps={} secondary_states={} secondary_reps={} virtual_states={}",
+            tokenizer.dfa.num_states(),
+            main_representatives.len(),
+            secondary.dfa.num_states(),
+            secondary_representatives.len(),
+            product_pairs.len(),
+        );
+    }
+    tokenizer.set_secondary_virtual_state_space(
+        main_representatives,
+        main_state_to_rep_index,
+        secondary_representatives,
+        secondary_state_to_rep_index,
+        dead_rep_index,
+        product_pairs,
+        pair_to_state,
+    );
 }
 
 pub(crate) fn prepare_vocab_for_terminal_dwa(vocab: &Vocab) {
