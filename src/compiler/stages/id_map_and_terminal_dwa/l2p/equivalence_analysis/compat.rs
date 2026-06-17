@@ -99,7 +99,15 @@ impl FlatDfa {
     /// Get the transition target for a given state and byte.
     #[inline]
     pub fn trans(&self, state: usize, byte: usize) -> u32 {
-        self.transitions[state * 256 + byte]
+        if state >= self.states.len() {
+            return u32::MAX;
+        }
+        let target = self.transitions[state * 256 + byte];
+        if target as usize >= self.states.len() {
+            u32::MAX
+        } else {
+            target
+        }
     }
 
     /// Get the 256-entry transition slice for a given state.
@@ -118,7 +126,7 @@ impl FlatDfa {
             .map(|(i, state)| {
                 let base = i * 256;
                 for (byte, &target) in state.transitions.iter() {
-                    transitions[base + byte as usize] = target;
+                    transitions[base + byte as usize] = if target as usize >= num_states { u32::MAX } else { target };
                 }
                 FlatDfaState {
                     finalizers: collect_group_ids(state.finalizers.iter()),
@@ -143,7 +151,8 @@ impl FlatDfa {
             .map(|i| {
                 let base = i * 256;
                 for byte in 0..=255u8 {
-                    transitions[base + byte as usize] = tokenizer.original_state_transition(i as u32, byte);
+                    let target = tokenizer.original_state_transition(i as u32, byte);
+                    transitions[base + byte as usize] = if target as usize >= num_states { u32::MAX } else { target };
                 }
                 let finalizers = collect_group_ids(tokenizer.original_state_finalizers(i as u32).iter());
                 let possible_future_group_ids =
@@ -173,7 +182,8 @@ impl FlatDfa {
             .map(|i| {
                 let base = i * 256;
                 for byte in 0..=255u8 {
-                    transitions[base + byte as usize] = tokenizer.original_state_transition(i as u32, byte);
+                    let target = tokenizer.original_state_transition(i as u32, byte);
+                    transitions[base + byte as usize] = if target as usize >= num_states { u32::MAX } else { target };
                 }
                 let finalizers: Vec<usize> = tokenizer.original_state_finalizers(i as u32).iter()
                     .filter(|&gid| gid < num_groups && active_groups[gid])

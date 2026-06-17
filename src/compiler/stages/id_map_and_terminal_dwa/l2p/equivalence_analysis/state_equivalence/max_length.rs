@@ -168,7 +168,7 @@ fn compute_byte_classes(tokenizer: &Tokenizer) -> [u8; 256] {
         for byte in 0..256usize {
             column_hashes[byte] = column_hashes[byte]
                 .wrapping_mul(0x517cc1b727220a95)
-                .wrapping_add(tokenizer.get_transition(state as u32, byte as u8) as u64);
+                .wrapping_add(tokenizer.original_state_transition(state as u32, byte as u8) as u64);
         }
     }
 
@@ -195,8 +195,8 @@ fn compute_byte_classes(tokenizer: &Tokenizer) -> [u8; 256] {
                 break;
             }
             let same = (0..num_states).all(|state| {
-                tokenizer.get_transition(state as u32, curr)
-                    == tokenizer.get_transition(state as u32, prev)
+                tokenizer.original_state_transition(state as u32, curr)
+                    == tokenizer.original_state_transition(state as u32, prev)
             });
             if same {
                 byte_to_class[curr as usize] = byte_to_class[prev as usize];
@@ -262,7 +262,7 @@ fn refine_once_sorted(
         .for_each(|(state, (row, row_hash))| {
             row[0] = label_ids[state];
             for (slot, &byte) in active_bytes.iter().enumerate() {
-                let target = tokenizer.get_transition(state as u32, byte);
+                let target = tokenizer.original_state_transition(state as u32, byte);
                 row[slot + 1] = if target == u32::MAX {
                     MISSING_BLOCK
                 } else {
@@ -446,6 +446,7 @@ pub(crate) fn compute_state_map(
             .representative_original_ids
             .iter()
             .map(|&state| state as usize)
+            .filter(|&state| state < num_states)
             .collect(),
         None => (0..num_states).collect(),
     };
