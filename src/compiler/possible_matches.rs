@@ -63,10 +63,9 @@ impl<'a> PossibleMatchesComputer<'a> {
     fn fast_step(&mut self, state: u32, byte: u8) -> Option<u32> {
         let state_idx = state as usize;
         if self.flat_transitions[state_idx].is_none() {
-            let dfa_state = &self.tokenizer.dfa.states()[state_idx];
             let mut flat = Box::new([u32::MAX; 256]);
-            for (b, &target) in dfa_state.transitions.iter() {
-                flat[b as usize] = target;
+            for byte in 0..=255u8 {
+                flat[byte as usize] = self.tokenizer.original_state_transition(state, byte);
             }
             self.flat_transitions[state_idx] = Some(flat);
         }

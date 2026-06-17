@@ -499,7 +499,15 @@ fn build_local_to_global_tsid_map(
         .iter()
         .enumerate()
     {
-        let global_tsid = global_id_map.tokenizer_states.original_to_internal[state];
+        if local_tsid == u32::MAX || (local_tsid as usize) >= num_local {
+            continue;
+        }
+        let Some(&global_tsid) = global_id_map.tokenizer_states.original_to_internal.get(state) else {
+            continue;
+        };
+        if global_tsid == u32::MAX {
+            continue;
+        }
         local_to_global[local_tsid as usize].insert(global_tsid);
     }
 

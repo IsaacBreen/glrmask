@@ -99,7 +99,15 @@ impl FlatDfa {
     /// Get the transition target for a given state and byte.
     #[inline]
     pub fn trans(&self, state: usize, byte: usize) -> u32 {
-        self.transitions[state * 256 + byte]
+        if state >= self.states.len() {
+            return u32::MAX;
+        }
+        let target = self.transitions[state * 256 + byte];
+        if target as usize >= self.states.len() {
+            u32::MAX
+        } else {
+            target
+        }
     }
 
     /// Get the 256-entry transition slice for a given state.
@@ -108,23 +116,47 @@ impl FlatDfa {
         let base = state * 256;
         &self.transitions[base..base + 256]
     }
-    pub fn from_tokenizer(tokenizer: &Tokenizer) -> Self {
-        let dfa = &tokenizer.dfa;
-        let dfa_states = dfa.states();
-        let start_state = tokenizer.start_state() as usize;
-        let num_states = dfa_states.len();
+    pub(crate) fn from_dfa(dfa: &crate::automata::dfa::DFA) -> Self {
+        let num_states = dfa.states().len();
         let mut transitions = vec![u32::MAX; num_states * 256];
-        let states: Vec<FlatDfaState> = dfa_states
+        let states: Vec<FlatDfaState> = dfa
+            .states()
             .iter()
             .enumerate()
             .map(|(i, state)| {
                 let base = i * 256;
                 for (byte, &target) in state.transitions.iter() {
-                    transitions[base + byte as usize] = target;
+                    transitions[base + byte as usize] = if target as usize >= num_states { u32::MAX } else { target };
                 }
-                let finalizers = collect_group_ids(state.finalizers.iter());
+                FlatDfaState {
+                    finalizers: collect_group_ids(state.finalizers.iter()),
+                    possible_future_group_ids: collect_group_ids(
+                        dfa.possible_future_group_ids(i as u32).iter(),
+                    ),
+                }
+            })
+            .collect();
+        FlatDfa {
+            states,
+            start_state: 0,
+            transitions: Arc::from(transitions),
+        }
+    }
+
+    pub fn from_tokenizer(tokenizer: &Tokenizer) -> Self {
+        let start_state = tokenizer.virtual_original_state_for_runtime(tokenizer.initial_state()) as usize;
+        let num_states = tokenizer.num_states() as usize;
+        let mut transitions = vec![u32::MAX; num_states * 256];
+        let states: Vec<FlatDfaState> = (0..num_states)
+            .map(|i| {
+                let base = i * 256;
+                for byte in 0..=255u8 {
+                    let target = tokenizer.original_state_transition(i as u32, byte);
+                    transitions[base + byte as usize] = if target as usize >= num_states { u32::MAX } else { target };
+                }
+                let finalizers = collect_group_ids(tokenizer.original_state_finalizers(i as u32).iter());
                 let possible_future_group_ids =
-                    collect_group_ids(dfa.possible_future_group_ids(i as u32).iter());
+                    collect_group_ids(tokenizer.original_state_possible_futures(i as u32).iter());
 
                 FlatDfaState {
                     finalizers,
@@ -142,25 +174,22 @@ impl FlatDfa {
 
     /// Build a FlatDfa filtering finalizers and futures to only active groups.
     pub fn from_tokenizer_filtered(tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
-        let dfa = &tokenizer.dfa;
-        let dfa_states = dfa.states();
-        let start_state = tokenizer.start_state() as usize;
+        let start_state = tokenizer.virtual_original_state_for_runtime(tokenizer.initial_state()) as usize;
         let num_groups = active_groups.len();
-        let num_states = dfa_states.len();
+        let num_states = tokenizer.num_states() as usize;
         let mut transitions = vec![u32::MAX; num_states * 256];
-        let states: Vec<FlatDfaState> = dfa_states
-            .iter()
-            .enumerate()
-            .map(|(i, state)| {
+        let states: Vec<FlatDfaState> = (0..num_states)
+            .map(|i| {
                 let base = i * 256;
-                for (byte, &target) in state.transitions.iter() {
-                    transitions[base + byte as usize] = target;
+                for byte in 0..=255u8 {
+                    let target = tokenizer.original_state_transition(i as u32, byte);
+                    transitions[base + byte as usize] = if target as usize >= num_states { u32::MAX } else { target };
                 }
-                let finalizers: Vec<usize> = state.finalizers.iter()
+                let finalizers: Vec<usize> = tokenizer.original_state_finalizers(i as u32).iter()
                     .filter(|&gid| gid < num_groups && active_groups[gid])
                     .collect();
-                let possible_future_group_ids: Vec<usize> = dfa
-                    .possible_future_group_ids(i as u32)
+                let possible_future_group_ids: Vec<usize> = tokenizer
+                    .original_state_possible_futures(i as u32)
                     .iter()
                     .filter(|&gid| gid < num_groups && active_groups[gid])
                     .collect();
@@ -185,16 +214,12 @@ impl FlatDfa {
         flat_trans: &Arc<[u32]>,
         tokenizer: &Tokenizer,
     ) -> Self {
-        let dfa = &tokenizer.dfa;
-        let dfa_states = dfa.states();
-        let start_state = tokenizer.start_state() as usize;
-        let states: Vec<FlatDfaState> = dfa_states
-            .iter()
-            .enumerate()
-            .map(|(i, state)| {
-                let finalizers = collect_group_ids(state.finalizers.iter());
+        let start_state = tokenizer.virtual_original_state_for_runtime(tokenizer.initial_state()) as usize;
+        let states: Vec<FlatDfaState> = (0..tokenizer.num_states() as usize)
+            .map(|i| {
+                let finalizers = collect_group_ids(tokenizer.original_state_finalizers(i as u32).iter());
                 let possible_future_group_ids =
-                    collect_group_ids(dfa.possible_future_group_ids(i as u32).iter());
+                    collect_group_ids(tokenizer.original_state_possible_futures(i as u32).iter());
                 FlatDfaState {
                     finalizers,
                     possible_future_group_ids,
@@ -211,19 +236,15 @@ impl FlatDfa {
         tokenizer: &Tokenizer,
         active_groups: &[bool],
     ) -> Self {
-        let dfa = &tokenizer.dfa;
-        let dfa_states = dfa.states();
-        let start_state = tokenizer.start_state() as usize;
+        let start_state = tokenizer.virtual_original_state_for_runtime(tokenizer.initial_state()) as usize;
         let num_groups = active_groups.len();
-        let states: Vec<FlatDfaState> = dfa_states
-            .iter()
-            .enumerate()
-            .map(|(i, state)| {
-                let finalizers: Vec<usize> = state.finalizers.iter()
+        let states: Vec<FlatDfaState> = (0..tokenizer.num_states() as usize)
+            .map(|i| {
+                let finalizers: Vec<usize> = tokenizer.original_state_finalizers(i as u32).iter()
                     .filter(|&gid| gid < num_groups && active_groups[gid])
                     .collect();
-                let possible_future_group_ids: Vec<usize> = dfa
-                    .possible_future_group_ids(i as u32)
+                let possible_future_group_ids: Vec<usize> = tokenizer
+                    .original_state_possible_futures(i as u32)
                     .iter()
                     .filter(|&gid| gid < num_groups && active_groups[gid])
                     .collect();

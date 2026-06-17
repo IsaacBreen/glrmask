@@ -561,13 +561,12 @@ impl Constraint {
 
     fn compute_tokenizer_fast_transitions(&self) -> FastTokenizerTransitions {
         let build = |state| {
-                let dfa_state = &self.tokenizer.dfa.states()[state as usize];
-                let mut flat = Box::new([u32::MAX; 256]);
-                for (byte, &target) in dfa_state.transitions.iter() {
-                    flat[byte as usize] = target;
-                }
-                flat
-            };
+            let mut flat = Box::new([u32::MAX; 256]);
+            for byte in 0..=255u8 {
+                flat[byte as usize] = self.tokenizer.original_state_transition(state, byte);
+            }
+            flat
+        };
         if rayon::current_num_threads() == 1 {
             (0..self.tokenizer.num_states()).map(build).collect()
         } else {
@@ -576,6 +575,9 @@ impl Constraint {
     }
 
     pub(crate) fn tokenizer_fast_transition(&self, state: usize, byte: u8) -> usize {
+        if self.tokenizer.has_secondary() {
+            return self.tokenizer.step_runtime_state(state, byte).unwrap_or(usize::MAX);
+        }
         self.tokenizer_fast_transitions.get(state).map_or(usize::MAX, |transitions| {
             let target = transitions[byte as usize];
             if target == u32::MAX { usize::MAX } else { target as usize }
