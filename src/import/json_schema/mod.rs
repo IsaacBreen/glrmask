@@ -15,7 +15,7 @@ mod tests;
 
 use std::env;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::GlrMaskError;
 use crate::import::ast::NamedGrammar;
@@ -35,9 +35,119 @@ use self::lower::lower_document;
 /// is not forced to carry partially-understood JSON values.
 pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskError> {
     let config = JsonSchemaConfig::from_env();
-    preflight::check_schema_preflight(schema).map_err(GlrMaskError::from)?;
-    let document = load_document(schema).map_err(GlrMaskError::from)?;
+    let imported_schema = if config.coerce_one_of_to_any_of {
+        coerce_one_of_to_any_of_schema(schema)
+    } else {
+        schema.clone()
+    };
+    preflight::check_schema_preflight(&imported_schema).map_err(GlrMaskError::from)?;
+    let document = load_document(&imported_schema).map_err(GlrMaskError::from)?;
     lower_document(&document, config).map_err(GlrMaskError::from)
+}
+
+fn coerce_one_of_to_any_of_schema(schema: &Value) -> Value {
+    coerce_one_of_to_any_of_schema_node(schema)
+}
+
+fn coerce_one_of_to_any_of_schema_node(node: &Value) -> Value {
+    let Value::Object(object) = node else {
+        return node.clone();
+    };
+
+    let mut out = Map::new();
+    for (key, value) in object {
+        if key == "oneOf" {
+            continue;
+        }
+        out.insert(key.clone(), coerce_one_of_child(key, value));
+    }
+
+    let Some(Value::Array(one_of)) = object.get("oneOf") else {
+        if let Some(value) = object.get("oneOf") {
+            out.insert("oneOf".to_string(), value.clone());
+        }
+        return Value::Object(out);
+    };
+
+    let coerced = Value::Array(
+        one_of
+            .iter()
+            .map(coerce_one_of_to_any_of_schema_node)
+            .collect(),
+    );
+    if out.contains_key("anyOf") {
+        match out.get_mut("allOf") {
+            Some(Value::Array(all_of)) => all_of.push(Value::Object(Map::from_iter([(
+                "anyOf".to_string(),
+                coerced,
+            )]))),
+            _ => {
+                out.insert(
+                    "allOf".to_string(),
+                    Value::Array(vec![Value::Object(Map::from_iter([(
+                        "anyOf".to_string(),
+                        coerced,
+                    )]))]),
+                );
+            }
+        }
+    } else {
+        out.insert("anyOf".to_string(), coerced);
+    }
+    Value::Object(out)
+}
+
+fn coerce_one_of_child(key: &str, value: &Value) -> Value {
+    match key {
+        "const" | "default" | "enum" | "examples" => value.clone(),
+        "$defs" | "definitions" | "dependentSchemas" | "dependencies"
+        | "patternProperties" | "properties" => coerce_one_of_schema_map(value),
+        "additionalItems" | "additionalProperties" | "contains" | "contentSchema"
+        | "else" | "if" | "items" | "not" | "propertyNames" | "then"
+        | "unevaluatedItems" | "unevaluatedProperties" => coerce_one_of_schema_or_tuple(value),
+        "allOf" | "anyOf" | "prefixItems" => coerce_one_of_schema_array(value),
+        _ => coerce_one_of_extension_value(value),
+    }
+}
+
+fn coerce_one_of_schema_map(value: &Value) -> Value {
+    let Value::Object(object) = value else {
+        return value.clone();
+    };
+    Value::Object(Map::from_iter(object.iter().map(|(key, child)| {
+        (key.clone(), coerce_one_of_to_any_of_schema_node(child))
+    })))
+}
+
+fn coerce_one_of_schema_array(value: &Value) -> Value {
+    let Value::Array(items) = value else {
+        return value.clone();
+    };
+    Value::Array(items.iter().map(coerce_one_of_to_any_of_schema_node).collect())
+}
+
+fn coerce_one_of_schema_or_tuple(value: &Value) -> Value {
+    match value {
+        Value::Object(_) => coerce_one_of_to_any_of_schema_node(value),
+        Value::Array(_) => coerce_one_of_schema_array(value),
+        _ => value.clone(),
+    }
+}
+
+fn coerce_one_of_extension_value(value: &Value) -> Value {
+    match value {
+        Value::Object(_) => coerce_one_of_to_any_of_schema_node(value),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|child| match child {
+                    Value::Object(_) => coerce_one_of_to_any_of_schema_node(child),
+                    _ => child.clone(),
+                })
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
 }
 
 /// The new importer deliberately does not depend on the old post-import grammar
