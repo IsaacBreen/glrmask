@@ -8,7 +8,7 @@ const UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES_ENV: &str =
     "GLRMASK_UNIT_REDUCTION_INLINE_MAX_PRE_MERGE_STATES";
 const DEFAULT_UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES: u32 = 20_000;
 
-fn glr_table_construction() -> GlrTableConstruction {
+fn glr_table_construction(default: GlrTableConstruction) -> GlrTableConstruction {
     match std::env::var(GLR_TABLE_CONSTRUCTION_ENV) {
         Ok(value) if value.trim().eq_ignore_ascii_case("legacy")
             || value.trim().eq_ignore_ascii_case("legacy-row-bisim")
@@ -22,11 +22,7 @@ fn glr_table_construction() -> GlrTableConstruction {
         Ok(value) if value.trim().eq_ignore_ascii_case("core-lac") => {
             GlrTableConstruction::ExperimentalCoreMerged
         }
-        // The canonical-LR row-bisim table is exact but can split one LR(0)
-        // core into thousands of states on real programming-language grammars.
-        // Prefer the core-merged table with exact admission simulation; keep the
-        // legacy table available for diagnostics and fallback.
-        _ => GlrTableConstruction::ExperimentalCoreMerged,
+        _ => default,
     }
 }
 
@@ -55,8 +51,15 @@ fn unit_reduction_inlining_max_pre_merge_states() -> Option<u32> {
 }
 
 pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
+    build_table_with_default_construction(grammar, GlrTableConstruction::ExperimentalCoreMerged)
+}
+
+pub(super) fn build_table_with_default_construction(
+    grammar: &AnalyzedGrammar,
+    default_construction: GlrTableConstruction,
+) -> GLRTable {
     let t1 = std::time::Instant::now();
-    let construction = glr_table_construction();
+    let construction = glr_table_construction(default_construction);
     let mut lr1_ms = 0.0;
     let mut table = match construction {
         GlrTableConstruction::LegacyRowBisim => {
@@ -1579,7 +1582,10 @@ fn grouped_item_lookahead_counts(grammar: &AnalyzedGrammar) -> Vec<Vec<(u32, u32
 
 #[cfg(test)]
 mod tests {
-    use super::{build_lalr_table, build_table, grouped_item_lookahead_counts};
+    use super::{
+        build_lalr_table, build_table, build_table_with_default_construction,
+        grouped_item_lookahead_counts,
+    };
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::glr::table::{Action, AdmissionPolicy, GlrTableConstruction};
     use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
@@ -1699,6 +1705,30 @@ mod tests {
                 && matches!(row.get(&2), Some(Action::Shift(_, true)))
                 && matches!(row.get(&3), Some(Action::Shift(_, true)))
         }));
+    }
+
+    #[test]
+    fn default_build_uses_core_merged_exact_admission() {
+        let grammar = multi_lookahead_grammar();
+        let table = build_table(&grammar);
+
+        assert_eq!(
+            table.construction,
+            GlrTableConstruction::ExperimentalCoreMerged
+        );
+        assert_eq!(table.admission_policy, AdmissionPolicy::ExactSimulation);
+    }
+
+    #[test]
+    fn legacy_row_bisim_can_be_requested_as_default() {
+        let grammar = multi_lookahead_grammar();
+        let table = build_table_with_default_construction(
+            &grammar,
+            GlrTableConstruction::LegacyRowBisim,
+        );
+
+        assert_eq!(table.construction, GlrTableConstruction::LegacyRowBisim);
+        assert_eq!(table.admission_policy, AdmissionPolicy::RowPresenceExact);
     }
 
     #[test]

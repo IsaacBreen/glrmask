@@ -14,7 +14,7 @@ mod row;
 
 pub use action::{Action, GuardedStackShift, StackShift, StackShiftGuard};
 
-use build::{build_table, Item, PendingAction};
+use build::{build_table, build_table_with_default_construction, Item, PendingAction};
 use optimize::merge_same_core_lr1_states;
 
 use row::{ActionRow, GotoRow};
@@ -189,6 +189,13 @@ fn action_ambiguity(action: &Action) -> Option<(TableAmbiguityKind, usize)> {
 impl GLRTable {
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
         build_table(grammar)
+    }
+
+    pub fn build_with_default_construction(
+        grammar: &AnalyzedGrammar,
+        default_construction: GlrTableConstruction,
+    ) -> Self {
+        build_table_with_default_construction(grammar, default_construction)
     }
 
     #[inline]

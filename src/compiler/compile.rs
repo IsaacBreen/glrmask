@@ -1,6 +1,7 @@
 pub(crate) use super::pipeline::{
     compile_owned,
-    compile_owned_profiled,
+    compile_owned_profiled_with_table_construction,
+    compile_owned_with_table_construction,
     compile_profile_enabled,
     emit_compile_profile_summary,
 };

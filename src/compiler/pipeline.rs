@@ -15,7 +15,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::regex::Expr;
 use crate::compiler::constraint_possible_matches as cpm;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::glr::table::GLRTable;
+use crate::compiler::glr::table::{GLRTable, GlrTableConstruction};
 use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     SharedClassifyCache,
@@ -435,6 +435,18 @@ fn compile_prepared_with_profile(
     prepared_grammar: GrammarDef,
     vocab: &Vocab,
 ) -> (Constraint, CompilePhaseProfile) {
+    compile_prepared_with_profile_and_table_construction(
+        prepared_grammar,
+        vocab,
+        GlrTableConstruction::ExperimentalCoreMerged,
+    )
+}
+
+fn compile_prepared_with_profile_and_table_construction(
+    prepared_grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+) -> (Constraint, CompilePhaseProfile) {
     run_with_compile_thread_pool(|| {
         let compile_started_at = Instant::now();
         let mut profile = CompilePhaseProfile::default();
@@ -469,7 +481,10 @@ fn compile_prepared_with_profile(
                 }
 
                 let table_started_at = Instant::now();
-                let table = GLRTable::build(&analyzed_grammar);
+                let table = GLRTable::build_with_default_construction(
+                    &analyzed_grammar,
+                    default_table_construction,
+                );
                 let glr_table_ms = elapsed_ms(table_started_at);
                 if std::env::var_os("GLRMASK_STOP_AFTER_GLR_TABLE").is_some() {
                     panic!("[glrmask] stopped after GLR table build by GLRMASK_STOP_AFTER_GLR_TABLE");
@@ -888,26 +903,68 @@ pub(crate) fn compile_prepared(prepared_grammar: GrammarDef, vocab: &Vocab) -> C
 }
 
 pub(crate) fn compile_owned(grammar: GrammarDef, vocab: &Vocab) -> Constraint {
+    compile_owned_with_table_construction(
+        grammar,
+        vocab,
+        GlrTableConstruction::ExperimentalCoreMerged,
+    )
+}
+
+pub(crate) fn compile_owned_with_table_construction(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+) -> Constraint {
     if compile_profile_summary_enabled() {
-        let (constraint, profile) = compile_owned_profiled(grammar, vocab);
+        let (constraint, profile) =
+            compile_owned_profiled_with_table_construction(grammar, vocab, default_table_construction);
         emit_compile_profile_summary(None, None, &profile);
         return constraint;
     }
 
     let prepared_grammar = prepare_grammar_transforms_only(grammar);
-    compile_prepared(prepared_grammar, vocab)
+    compile_prepared_with_table_construction(prepared_grammar, vocab, default_table_construction)
+}
+
+pub(crate) fn compile_prepared_with_table_construction(
+    prepared_grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+) -> Constraint {
+    compile_prepared_with_profile_and_table_construction(
+        prepared_grammar,
+        vocab,
+        default_table_construction,
+    )
+    .0
 }
 
 pub(crate) fn compile_owned_profiled(
     grammar: GrammarDef,
     vocab: &Vocab,
 ) -> (Constraint, CompilePhaseProfile) {
+    compile_owned_profiled_with_table_construction(
+        grammar,
+        vocab,
+        GlrTableConstruction::ExperimentalCoreMerged,
+    )
+}
+
+pub(crate) fn compile_owned_profiled_with_table_construction(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+) -> (Constraint, CompilePhaseProfile) {
     let total_started_at = Instant::now();
     let prepare_started_at = Instant::now();
     let prepared_grammar = prepare_grammar_transforms_only(grammar);
     let prepare_ms = elapsed_ms(prepare_started_at);
 
-    let (constraint, mut profile) = compile_prepared_with_profile(prepared_grammar, vocab);
+    let (constraint, mut profile) = compile_prepared_with_profile_and_table_construction(
+        prepared_grammar,
+        vocab,
+        default_table_construction,
+    );
     profile.prepare_ms = prepare_ms;
     profile.total_ms = elapsed_ms(total_started_at);
     (constraint, profile)
