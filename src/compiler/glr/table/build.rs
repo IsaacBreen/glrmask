@@ -10,13 +10,23 @@ const DEFAULT_UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES: u32 = 20_000;
 
 fn glr_table_construction() -> GlrTableConstruction {
     match std::env::var(GLR_TABLE_CONSTRUCTION_ENV) {
+        Ok(value) if value.trim().eq_ignore_ascii_case("legacy")
+            || value.trim().eq_ignore_ascii_case("legacy-row-bisim")
+            || value.trim().eq_ignore_ascii_case("row-bisim") =>
+        {
+            GlrTableConstruction::LegacyRowBisim
+        }
         Ok(value) if value.trim().eq_ignore_ascii_case("lalr") => {
             GlrTableConstruction::Lalr
         }
         Ok(value) if value.trim().eq_ignore_ascii_case("core-lac") => {
             GlrTableConstruction::ExperimentalCoreMerged
         }
-        _ => GlrTableConstruction::LegacyRowBisim,
+        // The canonical-LR row-bisim table is exact but can split one LR(0)
+        // core into thousands of states on real programming-language grammars.
+        // Prefer the core-merged table with exact admission simulation; keep the
+        // legacy table available for diagnostics and fallback.
+        _ => GlrTableConstruction::ExperimentalCoreMerged,
     }
 }
 
@@ -60,12 +70,11 @@ pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
             let t0 = std::time::Instant::now();
             let (item_sets, transitions) = build_lr1_item_sets(grammar);
             lr1_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            build_experimental_core_merged_table(grammar, &item_sets, &transitions).expect(
-                "GLRMASK_GLR_TABLE_CONSTRUCTION=core-lac could not build a compatible experimental core-merged table",
-            )
+            build_experimental_core_merged_table(grammar, &item_sets, &transitions)
+                .unwrap_or_else(|| build_legacy_row_bisim_table(grammar, &item_sets, &transitions))
         }
     };
-    table.construction = construction;
+    let construction = table.construction;
     let construction_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
     let pre_merge_states = table.num_states;
