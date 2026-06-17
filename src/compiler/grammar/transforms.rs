@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::automata::regex::Expr;
 use crate::automata::lexer::regex::parse_regex;
-use crate::compiler::glr::analysis::{merge_identical_nonterminals, normalize_grammar};
+use crate::compiler::glr::analysis::{eliminate_right_recursion, merge_identical_nonterminals, normalize_grammar};
 use crate::grammar::flat::{GrammarDef, NonterminalID, Terminal};
 use crate::grammar::flat::{Rule, Symbol, TerminalID};
 
@@ -812,6 +812,25 @@ fn prepare_grammar_transforms_impl(
         if normalized.rules.len() == prev_len {
             break;
         }
+    }
+
+    let post_merge_rr_rules_before = normalized.rules.len();
+    let post_merge_rr_started_at = profiling.then(Instant::now);
+    let mut next_nt = normalized.num_nonterminals();
+    let mut fresh_nt = || {
+        let id = next_nt;
+        next_nt += 1;
+        id
+    };
+    eliminate_right_recursion(&mut normalized.rules, &mut fresh_nt);
+    if let Some(started_at) = post_merge_rr_started_at {
+        emit_grammar_transform_profile(
+            "eliminate_right_recursion",
+            elapsed_ms(started_at),
+            post_merge_rr_rules_before,
+            normalized.rules.len(),
+            " pass=post_merge",
+        );
     }
 
     let compact_rules_before = normalized.rules.len();

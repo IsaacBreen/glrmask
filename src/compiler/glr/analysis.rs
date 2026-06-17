@@ -12,6 +12,7 @@ fn compile_profile_enabled() -> bool {
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
 }
 
+
 fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
 }
@@ -292,6 +293,7 @@ pub(crate) fn eliminate_right_recursion(
     }
 
     // Resolve direct right recursion for all nonterminals in a single pass.
+
     let rr_nts: BTreeMap<NonterminalID, NonterminalID> = rules
         .iter()
         .filter(|r| is_direct_right_recursive(r))
