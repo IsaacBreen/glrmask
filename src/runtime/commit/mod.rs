@@ -34,7 +34,7 @@ use self::template_advance::{
 };
 use self::tokenizer_scan::{execute_tokenizer_from_state_small, InitialCommitScan};
 
-type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
+type ParserStatesByTokenizer = FxHashMap<usize, ParserGSS>;
 
 const SMALL_NORMALIZED_MATCH_LINEAR_SCAN_MAX: usize = 8;
 
@@ -147,7 +147,7 @@ fn advance_parser_stacks_profiled(
 /// address reuse (ABA problem) within a single `commit_bytes_impl` call.
 type AdvanceResultCache = FxHashMap<(usize, u32), (ParserGSS, ParserGSS)>;
 
-fn state_has_nonempty_accumulators(state: &BTreeMap<u32, ParserGSS>) -> bool {
+fn state_has_nonempty_accumulators(state: &BTreeMap<usize, ParserGSS>) -> bool {
     state
         .values()
         .any(|gss| !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()))
@@ -236,12 +236,12 @@ fn assert_mask_commit_equivalence(
 }
 
 #[inline]
-fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, end_state: u32) -> bool {
+fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, end_state: usize) -> bool {
     end_state == constraint.tokenizer.initial_state()
         || stack_may_advance_on_any(
             &constraint.table,
             gss,
-            constraint.tokenizer.possible_future_terminals(end_state),
+            &constraint.tokenizer.possible_future_terminals_runtime(end_state),
         )
 }
 
@@ -277,13 +277,13 @@ impl ActionableTerminals {
 impl InitialCommitScan {
     fn collect(
         constraint: &Constraint,
-        state: &BTreeMap<u32, ParserGSS>,
+        state: &BTreeMap<usize, ParserGSS>,
         bytes: &[u8],
     ) -> Self {
         let ignore_terminal = constraint.ignore_terminal;
         let mut exec_results = FxHashMap::default();
         let mut remapped_tokenizer_states = FxHashMap::default();
-        let mut accepted_terminals = FxHashMap::<u32, FxHashSet<u32>>::default();
+        let mut accepted_terminals = FxHashMap::<usize, FxHashSet<u32>>::default();
 
         for (&tokenizer_state, parser_gss) in state {
             let actionable_terminals = ActionableTerminals::from_gss(constraint, parser_gss);
@@ -320,7 +320,7 @@ impl InitialCommitScan {
         }
     }
 
-    fn take_exec_result(&mut self, tokenizer_state: u32) -> Option<TokenizerExecResult> {
+    fn take_exec_result(&mut self, tokenizer_state: usize) -> Option<TokenizerExecResult> {
         self.exec_results.remove(&tokenizer_state)
     }
 }
@@ -405,9 +405,9 @@ fn collect_unique_actionable_matches(
 }
 
 fn prune_initial_states(
-    state: &mut BTreeMap<u32, ParserGSS>,
-    accepted_terminals: &FxHashMap<u32, FxHashSet<u32>>,
-    remapped_tokenizer_states: &FxHashMap<u32, u32>,
+    state: &mut BTreeMap<usize, ParserGSS>,
+    accepted_terminals: &FxHashMap<usize, FxHashSet<u32>>,
+    remapped_tokenizer_states: &FxHashMap<usize, usize>,
 ) {
     if accepted_terminals.is_empty()
         && state
@@ -450,7 +450,7 @@ fn prune_initial_states(
 fn prune_single_initial_state_for_exec(
     constraint: &Constraint,
     gss: ParserGSS,
-    tokenizer_state: u32,
+    tokenizer_state: usize,
     exec_result: &TokenizerExecResult,
 ) -> ParserGSS {
     let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss);
@@ -503,9 +503,9 @@ fn prune_single_initial_state_for_exec(
 
 fn prune_single_initial_state_for_terminal(
     gss: ParserGSS,
-    tokenizer_state: u32,
+    tokenizer_state: usize,
     terminal: u32,
-    end_state: Option<u32>,
+    end_state: Option<usize>,
 ) -> ParserGSS {
     if end_state.is_none()
         && gss.all_accs_satisfy(|td: &TerminalsDisallowed| {
@@ -541,7 +541,7 @@ fn prune_single_initial_state_for_terminal(
 
 fn merge_parser_state(
     states: &mut ParserStatesByTokenizer,
-    tokenizer_state: u32,
+    tokenizer_state: usize,
     gss: ParserGSS,
 ) {
     states
@@ -555,7 +555,7 @@ fn queue_parser_state(
     pending_state: &mut ParserStatesByTokenizer,
     new_offset: usize,
     total_len: usize,
-    tokenizer_state: u32,
+    tokenizer_state: usize,
     gss: ParserGSS,
 ) {
     if new_offset == total_len {
@@ -565,7 +565,7 @@ fn queue_parser_state(
     }
 }
 
-fn finalize_pending_state(mut pending_state: ParserStatesByTokenizer) -> BTreeMap<u32, ParserGSS> {
+fn finalize_pending_state(mut pending_state: ParserStatesByTokenizer) -> BTreeMap<usize, ParserGSS> {
     match pending_state.len() {
         0 => BTreeMap::new(),
         1 => {
@@ -580,7 +580,7 @@ fn finalize_pending_state(mut pending_state: ParserStatesByTokenizer) -> BTreeMa
             }
         }
         _ => {
-            let mut new_state: BTreeMap<u32, ParserGSS> = pending_state.into_iter().collect();
+            let mut new_state: BTreeMap<usize, ParserGSS> = pending_state.into_iter().collect();
             for parser_state in new_state.values_mut() {
                 *parser_state = parser_state.fuse(Some(1));
             }
@@ -605,8 +605,7 @@ fn apply_future_terminal_disallow(
     };
     if !constraint
         .tokenizer
-        .dfa
-        .possible_future_group_ids(end_state)
+        .possible_future_terminals_runtime(end_state)
         .contains(terminal as usize)
     {
         return gss;
@@ -874,9 +873,9 @@ fn advance_terminal_match(
 /// `exec_result` is the pre-computed tokenizer output for the single state.
 fn commit_bytes_fast_path(
     constraint: &Constraint,
-    state: &mut BTreeMap<u32, ParserGSS>,
+    state: &mut BTreeMap<usize, ParserGSS>,
     bytes: &[u8],
-    tokenizer_state: u32,
+    tokenizer_state: usize,
     exec_result: &TokenizerExecResult,
 ) -> Option<Result<(), String>> {
     let gss = state.values().next().unwrap();
@@ -1014,7 +1013,7 @@ fn commit_bytes_fast_path(
 
 fn commit_bytes_full_width_fast_path(
     constraint: &Constraint,
-    state: &mut BTreeMap<u32, ParserGSS>,
+    state: &mut BTreeMap<usize, ParserGSS>,
     bytes: &[u8],
 ) -> Option<Result<(), String>> {
     if state.len() > 2 {
@@ -1116,8 +1115,8 @@ fn commit_bytes_full_width_fast_path(
 }
 
 fn merge_small_parser_state(
-    states: &mut SmallVec<[(u32, ParserGSS); 4]>,
-    tokenizer_state: u32,
+    states: &mut SmallVec<[(usize, ParserGSS); 4]>,
+    tokenizer_state: usize,
     gss: ParserGSS,
 ) {
     for (existing_state, existing_gss) in states.iter_mut() {
@@ -1131,14 +1130,14 @@ fn merge_small_parser_state(
 
 fn commit_bytes_small_queue_fast_path(
     constraint: &Constraint,
-    state: &mut BTreeMap<u32, ParserGSS>,
+    state: &mut BTreeMap<usize, ParserGSS>,
     bytes: &[u8],
 ) -> Option<Result<(), String>> {
       if bytes.len() > 8 || state.len() > 2 {
           return None;
       }
 
-      let mut processing_queue: Vec<SmallVec<[(u32, ParserGSS); 4]>> =
+      let mut processing_queue: Vec<SmallVec<[(usize, ParserGSS); 4]>> =
           (0..=bytes.len()).map(|_| SmallVec::new()).collect();
     for (&tokenizer_state, gss) in state.iter() {
         processing_queue[0].push((tokenizer_state, gss.clone()));
@@ -1306,14 +1305,14 @@ struct DirectLinearStep {
     width: usize,
     terminal: u32,
     ignored: bool,
-    end_state: Option<u32>,
+    end_state: Option<usize>,
 }
 
 fn choose_direct_linear_step(
     constraint: &Constraint,
     gss: &ParserGSS,
     bytes: &[u8],
-    start_state: u32,
+    start_state: usize,
     carried_top_state: Option<u32>,
 ) -> Option<DirectLinearStep> {
     let ignore_terminal = constraint.ignore_terminal;
@@ -1323,11 +1322,8 @@ fn choose_direct_linear_step(
     let mut actionable_terminals = carried_top_state.map(ActionableTerminals::SingleState);
 
     for (index, &byte) in bytes.iter().enumerate() {
-        let next_state = constraint
-            .tokenizer_fast_transitions
-            .get(tokenizer_state as usize)
-            .map_or(u32::MAX, |transitions| transitions[byte as usize]);
-        if next_state == u32::MAX {
+        let next_state = constraint.tokenizer_fast_transition(tokenizer_state, byte);
+        if next_state == usize::MAX {
             consumed_all = false;
             break;
         };
@@ -1335,7 +1331,7 @@ fn choose_direct_linear_step(
         let width = index + 1;
         let mut chosen_at_width = false;
 
-        for terminal in constraint.tokenizer.matched_terminals_iter(tokenizer_state) {
+        for terminal in constraint.tokenizer.matched_terminals_runtime(tokenizer_state) {
             let ignored = is_ignored_terminal(ignore_terminal, terminal);
             if !ignored {
                 if actionable_terminals.is_none() {
@@ -1373,11 +1369,8 @@ fn choose_direct_linear_step(
             && index + 1 < bytes.len()
         {
             let next_byte = bytes[index + 1];
-            let next_state = constraint
-                .tokenizer_fast_transitions
-                .get(tokenizer_state as usize)
-                .map_or(u32::MAX, |transitions| transitions[next_byte as usize]);
-            if next_state == u32::MAX {
+            let next_state = constraint.tokenizer_fast_transition(tokenizer_state, next_byte);
+            if next_state == usize::MAX {
                 let (_, terminal, _) = chosen.unwrap();
                 return Some(DirectLinearStep {
                     width,
@@ -1404,7 +1397,7 @@ fn commit_bytes_direct_linear_fast_path(
     constraint: &Constraint,
     start_gss: ParserGSS,
     bytes: &[u8],
-    start_tokenizer_state: u32,
+    start_tokenizer_state: usize,
     mut profile: Option<&mut CommitProfile>,
 ) -> Option<LinearFastPathResult> {
     let mut gss = start_gss;
@@ -1447,12 +1440,11 @@ fn commit_bytes_direct_linear_fast_path(
                 end_state != constraint.tokenizer.initial_state()
                     && !constraint.table.advance_row_intersects(
                         top_state,
-                        constraint.tokenizer.possible_future_terminals(end_state),
+                        &constraint.tokenizer.possible_future_terminals_runtime(end_state),
                     )
                     && !constraint
                         .tokenizer
-                        .dfa
-                        .possible_future_group_ids(end_state)
+                        .possible_future_terminals_runtime(end_state)
                         .contains(step.terminal as usize)
             });
             if let (Some(profile), Some(start)) = (profile.as_deref_mut(), carried_gate_start) {
@@ -1537,12 +1529,11 @@ fn commit_bytes_direct_linear_fast_path(
                     end_state != constraint.tokenizer.initial_state()
                         && !constraint.table.advance_row_intersects(
                             top_state,
-                            constraint.tokenizer.possible_future_terminals(end_state),
+                            &constraint.tokenizer.possible_future_terminals_runtime(end_state),
                         )
                         && !constraint
                             .tokenizer
-                            .dfa
-                            .possible_future_group_ids(end_state)
+                            .possible_future_terminals_runtime(end_state)
                             .contains(step.terminal as usize)
                 })
             {
@@ -1715,7 +1706,7 @@ fn commit_bytes_direct_linear_fast_path(
 
 fn record_per_advance_entry(
     advances: &mut Vec<PerAdvanceEntry>,
-    tokenizer_state: u32,
+    tokenizer_state: usize,
     terminal_id: u32,
     before_gss: &ParserGSS,
     after_gss: &ParserGSS,
@@ -1753,9 +1744,9 @@ fn record_per_advance_entry(
 
 fn commit_bytes_fast_path_profiled(
     constraint: &Constraint,
-    state: &mut BTreeMap<u32, ParserGSS>,
+    state: &mut BTreeMap<usize, ParserGSS>,
     bytes: &[u8],
-    tokenizer_state: u32,
+    tokenizer_state: usize,
     exec_result: &TokenizerExecResult,
     advances: Option<&mut Vec<PerAdvanceEntry>>,
     profile: &mut CommitProfile,
@@ -2000,7 +1991,7 @@ fn commit_bytes_fast_path_profiled(
 
 fn commit_bytes_impl_profiled(
     constraint: &Constraint,
-    state: &mut BTreeMap<u32, ParserGSS>,
+    state: &mut BTreeMap<usize, ParserGSS>,
     bytes: &[u8],
     bufs: &mut CommitBuffers,
     mut advances: Option<&mut Vec<PerAdvanceEntry>>,
@@ -2507,7 +2498,7 @@ fn commit_bytes_impl_profiled(
     Ok(profile)
 }
 
-fn final_stacks(state: &BTreeMap<u32, ParserGSS>) -> Vec<(u32, Vec<Vec<u32>>)> {
+fn final_stacks(state: &BTreeMap<usize, ParserGSS>) -> Vec<(usize, Vec<Vec<u32>>)> {
     state.iter().map(|(&tokenizer_state, gss)| {
         (tokenizer_state, parser_stacks_only(gss))
     }).collect()
@@ -2574,12 +2565,11 @@ fn commit_bytes_linear_fast_path(
                 end_state != constraint.tokenizer.initial_state()
                     && !constraint.table.advance_row_intersects(
                         top_state,
-                        constraint.tokenizer.possible_future_terminals(end_state),
+                        &constraint.tokenizer.possible_future_terminals_runtime(end_state),
                     )
                     && !constraint
                         .tokenizer
-                        .dfa
-                        .possible_future_group_ids(end_state)
+                        .possible_future_terminals_runtime(end_state)
                         .contains(terminal as usize)
             });
             if !keep_carried {
@@ -2607,12 +2597,11 @@ fn commit_bytes_linear_fast_path(
                     end_state != constraint.tokenizer.initial_state()
                         && !constraint.table.advance_row_intersects(
                             top_state,
-                            constraint.tokenizer.possible_future_terminals(end_state),
+                            &constraint.tokenizer.possible_future_terminals_runtime(end_state),
                         )
                         && !constraint
                             .tokenizer
-                            .dfa
-                            .possible_future_group_ids(end_state)
+                            .possible_future_terminals_runtime(end_state)
                             .contains(terminal as usize)
                 })
             {
@@ -2901,7 +2890,7 @@ fn commit_bytes_linear_fast_path_profiled(
 
 fn commit_bytes_impl(
     constraint: &Constraint,
-    state: &mut BTreeMap<u32, ParserGSS>,
+    state: &mut BTreeMap<usize, ParserGSS>,
     bytes: &[u8],
     bufs: &mut CommitBuffers,
 ) -> Result<(), String> {
@@ -3359,7 +3348,7 @@ impl<'a> ConstraintState<'a> {
     pub fn commit_token_per_advance(
         &mut self,
         token_id: u32,
-    ) -> Result<(Vec<PerAdvanceEntry>, Vec<(u32, Vec<Vec<u32>>)>, CommitProfile), String> {
+    ) -> Result<(Vec<PerAdvanceEntry>, Vec<(usize, Vec<Vec<u32>>)>, CommitProfile), String> {
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id)
             .ok_or_else(|| format!("commit_token: token_id {token_id} not in vocabulary"))?;

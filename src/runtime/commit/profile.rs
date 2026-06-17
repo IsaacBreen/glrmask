@@ -86,7 +86,7 @@ pub struct CommitProfile {
 #[derive(Clone, Debug)]
 pub struct PerAdvanceEntry {
 	pub terminal_id: u32,
-	pub tokenizer_state: u32,
+	pub tokenizer_state: usize,
 	pub gss_stacks_before: Vec<Vec<u32>>,
 	pub gss_stacks_after: Vec<Vec<u32>>,
 	pub gss_summary_before: GssProfileSummary,

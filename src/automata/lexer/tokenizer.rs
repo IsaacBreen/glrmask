@@ -27,16 +27,16 @@ pub struct Tokenizer {
 pub struct TokenizerMatch {
     pub id: TerminalID,
     pub width: usize,
-    pub end_state: u32,
+    pub end_state: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenizerExecResult {
-    pub end_state: Option<u32>,
+    pub end_state: Option<usize>,
     pub matches: Vec<TokenizerMatch>,
 }
 
-fn into_longest_matches(matches: FxHashMap<TerminalID, (usize, u32)>) -> Vec<TokenizerMatch> {
+fn into_longest_matches(matches: FxHashMap<TerminalID, (usize, usize)>) -> Vec<TokenizerMatch> {
     matches
         .into_iter()
         .map(|(id, (width, end_state))| TokenizerMatch {
@@ -65,6 +65,33 @@ struct TerminalFilteredDfa {
 impl Tokenizer {
     pub fn start_state(&self) -> u32 {
         0
+    }
+
+    #[inline]
+    pub(crate) fn runtime_primary_state(state: usize) -> u32 {
+        u32::try_from(state).expect("ordinary tokenizer runtime state does not fit in u32")
+    }
+
+    #[inline]
+    pub(crate) fn precompute_state_for_runtime(&self, state: usize) -> u32 {
+        Self::runtime_primary_state(state)
+    }
+
+    #[inline]
+    pub(crate) fn step_runtime_state(&self, state: usize, byte: u8) -> Option<usize> {
+        self.step(Self::runtime_primary_state(state), byte).map(|next| next as usize)
+    }
+
+    pub(crate) fn matched_terminals_runtime(&self, state: usize) -> Vec<TerminalID> {
+        self.matched_terminals_iter(Self::runtime_primary_state(state)).collect()
+    }
+
+    pub(crate) fn possible_future_terminals_runtime(&self, state: usize) -> BitSet {
+        self.possible_future_terminals(Self::runtime_primary_state(state)).clone()
+    }
+
+    pub(crate) fn is_end_runtime(&self, state: usize) -> bool {
+        self.possible_future_terminals_runtime(state).is_empty()
     }
 
     /// Detect nullable terminals (those that match the empty string) by
@@ -153,7 +180,7 @@ impl Tokenizer {
     pub(crate) fn execute_from_state_all_widths(
         &self,
         input: &[u8],
-        start: u32,
+        start: usize,
     ) -> TokenizerExecResult {
         let mut matches = Vec::new();
         let end_state = self.scan_input(input, start, &mut matches, |tokenizer, matches, state, width| {
@@ -161,13 +188,13 @@ impl Tokenizer {
         });
 
         TokenizerExecResult {
-            end_state: end_state.filter(|&state| !self.is_end(state)),
+            end_state: end_state.filter(|&state| !self.is_end_runtime(state)),
             matches,
         }
     }
 
-    pub fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult {
-        let mut matches = FxHashMap::<TerminalID, (usize, u32)>::default();
+    pub fn execute_from_state(&self, input: &[u8], start: usize) -> TokenizerExecResult {
+        let mut matches = FxHashMap::<TerminalID, (usize, usize)>::default();
         let end_state = self.scan_input(input, start, &mut matches, |tokenizer, matches, state, width| {
             tokenizer.record_longest_matches(matches, state, width);
         });
@@ -178,11 +205,11 @@ impl Tokenizer {
         }
     }
 
-    pub(crate) fn execute_from_state_end_only(&self, input: &[u8], start: u32) -> Option<u32> {
+    pub(crate) fn execute_from_state_end_only(&self, input: &[u8], start: usize) -> Option<usize> {
         self.scan_input(input, start, &mut (), |_, _, _, _| {})
     }
 
-    pub fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult {
+    pub fn execute_all_matches(&self, input: &[u8], start: usize) -> TokenizerResult {
         let exec = self.execute_from_state_all_widths(input, start);
         let end_state = exec.end_state.unwrap_or(start);
         TokenizerResult {
@@ -191,12 +218,12 @@ impl Tokenizer {
         }
     }
 
-    pub fn initial_state(&self) -> u32 {
-        self.start_state()
+    pub fn initial_state(&self) -> usize {
+        self.start_state() as usize
     }
 
     pub fn initial_state_id(&self) -> u32 {
-        self.initial_state()
+        self.start_state()
     }
 
     pub fn tokens_accessible_from_state(&self, state: u32) -> &BitSet {
@@ -267,8 +294,8 @@ impl Tokenizer {
             .any(|state| state.transitions.values().any(|&target| target == start))
     }
 
-    fn record_all_matches(&self, matches: &mut Vec<TokenizerMatch>, state: u32, width: usize) {
-        matches.extend(self.matched_terminals_iter(state).map(|id| TokenizerMatch {
+    fn record_all_matches(&self, matches: &mut Vec<TokenizerMatch>, state: usize, width: usize) {
+        matches.extend(self.matched_terminals_runtime(state).into_iter().map(|id| TokenizerMatch {
             id,
             width,
             end_state: state,
@@ -277,11 +304,11 @@ impl Tokenizer {
 
     fn record_longest_matches(
         &self,
-        matches: &mut FxHashMap<TerminalID, (usize, u32)>,
-        state: u32,
+        matches: &mut FxHashMap<TerminalID, (usize, usize)>,
+        state: usize,
         width: usize,
     ) {
-        for terminal in self.matched_terminals_iter(state) {
+        for terminal in self.matched_terminals_runtime(state) {
             matches.insert(terminal, (width, state));
         }
     }
@@ -289,13 +316,13 @@ impl Tokenizer {
     fn scan_input<R>(
         &self,
         input: &[u8],
-        start: u32,
+        start: usize,
         mut matches: &mut R,
-        mut record_matches: impl FnMut(&Self, &mut R, u32, usize),
-    ) -> Option<u32> {
+        mut record_matches: impl FnMut(&Self, &mut R, usize, usize),
+    ) -> Option<usize> {
         let mut state = start;
         for (index, &byte) in input.iter().enumerate() {
-            let next = self.step(state, byte)?;
+            let next = self.step_runtime_state(state, byte)?;
             state = next;
             record_matches(self, &mut matches, state, index + 1);
         }
@@ -490,6 +517,6 @@ impl Tokenizer {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenizerResult {
-    pub end_state: u32,
+    pub end_state: usize,
     pub matches: Vec<(usize, BTreeSet<TerminalID>)>,
 }

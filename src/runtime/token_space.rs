@@ -11,7 +11,7 @@ use super::artifact::Constraint;
 impl Constraint {
 	pub(crate) fn possible_matches_for_state(
 		&self,
-		tokenizer_state: u32,
+		tokenizer_state: usize,
 	) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
 		let internal_tsid = self.internal_tsid_for_state(tokenizer_state);
 		self.possible_matches
@@ -27,12 +27,13 @@ impl Constraint {
 			.collect()
 	}
 
-	pub(crate) fn internal_tsid_for_state(&self, tokenizer_state: u32) -> u32 {
-		self.state_to_internal_tsid
-			.get(tokenizer_state as usize)
-			.copied()
-			.unwrap_or(tokenizer_state)
-	}
+	pub(crate) fn internal_tsid_for_state(&self, tokenizer_state: usize) -> u32 {
+        let original_state = self.tokenizer.precompute_state_for_runtime(tokenizer_state);
+        self.state_to_internal_tsid
+            .get(original_state as usize)
+            .copied()
+            .unwrap_or(original_state)
+    }
 
 	pub(crate) fn internal_token_for_original(&self, token_id: u32) -> u32 {
 		self.original_token_to_internal
@@ -81,7 +82,7 @@ impl Constraint {
 		Self::range_set_from_sorted_ids(&all_ids)
 	}
 
-	pub(crate) fn initial_state_map(&self) -> BTreeMap<u32, ParserGSS> {
+	pub(crate) fn initial_state_map(&self) -> BTreeMap<usize, ParserGSS> {
 		let initial_tok_state = self.tokenizer.initial_state();
 		let parser_gss = ParserGSS::from_stacks(&[(vec![0u32], TerminalsDisallowed::new())]);
 		BTreeMap::from([(initial_tok_state, parser_gss)])
