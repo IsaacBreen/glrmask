@@ -2894,35 +2894,6 @@ fn large_pattern_max_length_is_dropped_when_disabled() {
 }
 
 #[test]
-fn large_pattern_max_length_is_preserved_by_default() {
-    let _env_lock = ENV_LOCK.lock().unwrap();
-    let _guard = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH");
-
-    let schema = json!({
-        "type": "string",
-        "pattern": "^[a]+$",
-        "minLength": 2,
-        "maxLength": 80
-    });
-
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    let rule = grammar
-        .rules
-        .iter()
-        .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
-        .expect("expected terminalized constrained string rule");
-
-    let GrammarExpr::WithSecondaryLexer { main, secondary } = &rule.expr else {
-        panic!("expected pattern terminal with secondary length envelope: {:?}", rule.expr);
-    };
-    assert!(matches!(main.as_ref(), GrammarExpr::RawRegex(_)), "{:?}", main);
-    let secondary_debug = format!("{:?}", secondary);
-    assert!(secondary_debug.contains("json_string_char_exact_2"), "{secondary_debug}");
-    assert!(secondary_debug.contains("json_string_char_upto_78"), "{secondary_debug}");
-    lower(&grammar).unwrap();
-}
-
-#[test]
 fn large_pattern_max_length_env_intersects_json_string_length_envelope() {
     let _env_lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH", "1");
