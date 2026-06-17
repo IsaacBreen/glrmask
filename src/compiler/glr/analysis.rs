@@ -12,6 +12,17 @@ fn compile_profile_enabled() -> bool {
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
 }
 
+fn bounded_indirect_right_recursion_enabled() -> bool {
+    std::env::var_os("GLRMASK_DISABLE_BOUNDED_INDIRECT_RR").is_none()
+}
+
+fn bounded_indirect_right_recursion_rule_cap() -> usize {
+    std::env::var("GLRMASK_BOUNDED_INDIRECT_RR_RULE_CAP")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(50_000)
+}
+
 fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
 }
@@ -285,9 +296,36 @@ pub(crate) fn eliminate_right_recursion(
     rules: &mut Vec<Rule>,
     fresh_nt: &mut impl FnMut() -> NonterminalID,
 ) {
-    // Avoid indirect right-recursion inlining here. For large GLR grammars the
-    // SCC expansion can grow combinatorially; direct right recursion is still
-    // rewritten because that is local and bounded.
+    if bounded_indirect_right_recursion_enabled() {
+        let rule_cap = bounded_indirect_right_recursion_rule_cap();
+        loop {
+            let num_nt = max_nt_id(rules) + 1;
+            let nullable = compute_nullable(rules, num_nt);
+            let graph = build_right_reachability_graph(rules, &nullable);
+            let Some(cycle) = find_cycle_excluding_self_loops(&graph) else {
+                break;
+            };
+            let from = cycle[0];
+            let to = cycle[1 % cycle.len()];
+            let before = rules.len();
+            inline_right_end(rules, from, to, &nullable);
+            if rules.len() > rule_cap {
+                panic!(
+                    "bounded indirect right-recursion expansion exceeded rule cap: before={} after={} cap={} cycle={:?}",
+                    before,
+                    rules.len(),
+                    rule_cap,
+                    cycle,
+                );
+            }
+            if rules.len() == before {
+                break;
+            }
+        }
+    }
+
+    // Direct right recursion is local and bounded. Indirect right-recursion
+    // inlining remains opt-in because large SCCs can grow combinatorially.
     let rr_nts: BTreeMap<NonterminalID, NonterminalID> = rules
         .iter()
         .filter(|r| is_direct_right_recursive(r))
