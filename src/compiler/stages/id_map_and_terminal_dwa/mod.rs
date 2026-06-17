@@ -210,13 +210,111 @@ pub(crate) fn install_secondary_virtual_state_space(tokenizer: &mut Tokenizer, v
     let mut product_pairs = Vec::<(u32, u32)>::new();
     let mut pair_to_state = BTreeMap::<(u32, u32), u32>::new();
     let mut queue = VecDeque::<(u32, u32)>::new();
-    let start_pair = (
-        main_state_to_rep_index[tokenizer.start_state() as usize],
-        secondary_state_to_rep_index[0],
-    );
-    pair_to_state.insert(start_pair, 0);
-    product_pairs.push(start_pair);
-    queue.push_back(start_pair);
+
+    let insert_pair = |pair: (u32, u32),
+                           product_pairs: &mut Vec<(u32, u32)>,
+                           pair_to_state: &mut BTreeMap<(u32, u32), u32>,
+                           queue: &mut VecDeque<(u32, u32)>| {
+        if !pair_to_state.contains_key(&pair) {
+            let state_id = product_pairs.len() as u32;
+            pair_to_state.insert(pair, state_id);
+            product_pairs.push(pair);
+            queue.push_back(pair);
+        }
+    };
+
+    // Seed the quotient product with exact runtime reachability, but without
+    // enumerating the raw product pairs individually. Runtime states are exact
+    // `(main_state, secondary_state)` pairs. Precompute states are their
+    // quotient projections `(main_rep, secondary_rep)`. Following only chosen
+    // representatives is not sufficient: a raw main state in a quotient class
+    // can be reachable even when that class representative is not reached by
+    // the representative transition graph. Track exact reachability as a set
+    // of primary states for each secondary state, then project the result.
+    let main_state_count = tokenizer.dfa.num_states();
+    let secondary_state_count = secondary.dfa.num_states();
+    let dead_secondary_idx = secondary_state_count;
+    let secondary_bucket_count = secondary_state_count + 1;
+    let words_per_main_set = main_state_count.div_ceil(64);
+
+    let mut reachable = vec![vec![0u64; words_per_main_set]; secondary_bucket_count];
+    let mut frontier = vec![vec![0u64; words_per_main_set]; secondary_bucket_count];
+    let mut next_frontier = vec![vec![0u64; words_per_main_set]; secondary_bucket_count];
+
+    let set_bit = |sets: &mut [Vec<u64>], secondary_idx: usize, main_state: u32| -> bool {
+        let word = main_state as usize / 64;
+        let bit = main_state as usize % 64;
+        let mask = 1u64 << bit;
+        let slot = &mut sets[secondary_idx][word];
+        let was_clear = (*slot & mask) == 0;
+        *slot |= mask;
+        was_clear
+    };
+
+    set_bit(&mut reachable, tokenizer.start_state() as usize, tokenizer.start_state());
+    set_bit(&mut frontier, tokenizer.start_state() as usize, tokenizer.start_state());
+
+    while frontier.iter().any(|bits| bits.iter().any(|&word| word != 0)) {
+        for secondary_idx in 0..secondary_bucket_count {
+            let current = std::mem::take(&mut frontier[secondary_idx]);
+            if current.iter().all(|&word| word == 0) {
+                frontier[secondary_idx] = current;
+                continue;
+            }
+            for &byte in &active_bytes {
+                let next_secondary_idx = if secondary_idx == dead_secondary_idx {
+                    dead_secondary_idx
+                } else {
+                    secondary
+                        .dfa
+                        .step(secondary_idx as u32, byte)
+                        .map_or(dead_secondary_idx, |state| state as usize)
+                };
+                for (word_idx, mut word) in current.iter().copied().enumerate() {
+                    while word != 0 {
+                        let bit = word.trailing_zeros() as usize;
+                        word &= word - 1;
+                        let main_state = (word_idx * 64 + bit) as u32;
+                        let next_main = tokenizer.dfa.get_transition(main_state, byte);
+                        if next_main == u32::MAX {
+                            continue;
+                        }
+                        if set_bit(&mut reachable, next_secondary_idx, next_main) {
+                            set_bit(&mut next_frontier, next_secondary_idx, next_main);
+                        }
+                    }
+                }
+            }
+            frontier[secondary_idx] = vec![0u64; words_per_main_set];
+        }
+        std::mem::swap(&mut frontier, &mut next_frontier);
+        for bits in &mut next_frontier {
+            bits.fill(0);
+        }
+    }
+
+    for (secondary_idx, main_bits) in reachable.iter().enumerate() {
+        let secondary_rep_index = if secondary_idx == dead_secondary_idx {
+            dead_rep_index
+        } else {
+            secondary_state_to_rep_index[secondary_idx]
+        };
+        for (word_idx, mut word) in main_bits.iter().copied().enumerate() {
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                word &= word - 1;
+                let main_state = (word_idx * 64 + bit) as u32;
+                let main_rep_index = main_state_to_rep_index[main_state as usize];
+                insert_pair(
+                    (main_rep_index, secondary_rep_index),
+                    &mut product_pairs,
+                    &mut pair_to_state,
+                    &mut queue,
+                );
+            }
+        }
+    }
+
     while let Some((main_rep_index, secondary_rep_index)) = queue.pop_front() {
         let main_state = main_representatives[main_rep_index as usize];
         let secondary_state = secondary_representatives[secondary_rep_index as usize];
@@ -236,12 +334,7 @@ pub(crate) fn install_secondary_virtual_state_space(tokenizer: &mut Tokenizer, v
                     .unwrap_or(dead_rep_index)
             };
             let pair = (next_main_rep_index, next_secondary_rep_index);
-            if !pair_to_state.contains_key(&pair) {
-                let state_id = product_pairs.len() as u32;
-                pair_to_state.insert(pair, state_id);
-                product_pairs.push(pair);
-                queue.push_back(pair);
-            }
+            insert_pair(pair, &mut product_pairs, &mut pair_to_state, &mut queue);
         }
     }
     if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
