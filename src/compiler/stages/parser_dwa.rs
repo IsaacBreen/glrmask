@@ -1958,7 +1958,7 @@ fn build_parser_nwa_from_terminal_dwa(
             continue;
         }
         let from = continuation_states[state_id];
-        debug_assert_ne!(from, u32::MAX);
+        assert_ne!(from, u32::MAX, "missing parser-DWA continuation state");
 
         for branch in &state.branches {
             let target_idx = branch.target as usize;
@@ -1974,7 +1974,11 @@ fn build_parser_nwa_from_terminal_dwa(
             compose_detail.productive_branches += 1;
 
             let target_continuation = continuation_states[target_idx];
-            debug_assert_ne!(target_continuation, u32::MAX);
+            assert_ne!(
+                target_continuation,
+                u32::MAX,
+                "missing parser-DWA target continuation state",
+            );
             let fragment_key = (branch.bundle_id, branch.target);
             let fragment = if let Some(existing) = branch_fragment_memo.get(&fragment_key) {
                 if compose_detail_enabled {
@@ -2025,7 +2029,7 @@ fn build_parser_nwa_from_terminal_dwa(
     compose_detail.branch_walk_ms = elapsed_ms(branch_walk_started_at);
 
     let start = continuation_states[terminal_dwa.start_state() as usize];
-    debug_assert_ne!(start, u32::MAX);
+    assert_ne!(start, u32::MAX, "missing parser-DWA start continuation state");
     arena.set_start_states(vec![start]);
     let compose_state_ms = elapsed_ms(graph_started_at);
 
