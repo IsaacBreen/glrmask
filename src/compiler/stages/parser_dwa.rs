@@ -1802,6 +1802,23 @@ fn append_branch_fragment(
         ));
     }
 
+    // STICKY NOTE: keep parser bundles eagerly determinized here.
+    //
+    // It is tempting to leave multi-terminal bundles nondeterministic or factored so
+    // this stage can avoid a large deterministic bundle build. Do not do that. These
+    // bundles are the unit on which downstream negative-resolution operates. If a
+    // bundle is left nondeterministic, negative-resolution has to distribute one
+    // bundle alternatives against the next bundle alternatives, which recreates
+    // the same cross-product later and can become a combinatorial explosion between
+    // adjacent bundles. Eager determinization pays that cost once, locally, and gives
+    // negative-resolution a stable deterministic object to compose.
+    //
+    // NEVER remove this note without replacing it with an equally explicit invariant
+    // explaining why parser-bundle determinization is required. We have repeatedly
+    // rediscovered this and incorrectly proposed removing determinization. If the
+    // first multi-terminal bundle cannot be determinized, the fix is to reduce the
+    // bundle/grammar/compiler state space, not to pass a nondeterministic bundle
+    // downstream.
     if built_bundle_cache[bundle_id].is_none() {
         if let Some(detail) = compose_detail {
             let (bundle_nwa, bundle_profile) = templates.build_bundle_profiled(bundle);
@@ -1958,7 +1975,7 @@ fn build_parser_nwa_from_terminal_dwa(
             continue;
         }
         let from = continuation_states[state_id];
-        debug_assert_ne!(from, u32::MAX);
+        assert_ne!(from, u32::MAX, "missing parser-DWA continuation state");
 
         for branch in &state.branches {
             let target_idx = branch.target as usize;
@@ -1974,7 +1991,11 @@ fn build_parser_nwa_from_terminal_dwa(
             compose_detail.productive_branches += 1;
 
             let target_continuation = continuation_states[target_idx];
-            debug_assert_ne!(target_continuation, u32::MAX);
+            assert_ne!(
+                target_continuation,
+                u32::MAX,
+                "missing parser-DWA target continuation state",
+            );
             let fragment_key = (branch.bundle_id, branch.target);
             let fragment = if let Some(existing) = branch_fragment_memo.get(&fragment_key) {
                 if compose_detail_enabled {
@@ -2025,7 +2046,7 @@ fn build_parser_nwa_from_terminal_dwa(
     compose_detail.branch_walk_ms = elapsed_ms(branch_walk_started_at);
 
     let start = continuation_states[terminal_dwa.start_state() as usize];
-    debug_assert_ne!(start, u32::MAX);
+    assert_ne!(start, u32::MAX, "missing parser-DWA start continuation state");
     arena.set_start_states(vec![start]);
     let compose_state_ms = elapsed_ms(graph_started_at);
 
