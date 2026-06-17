@@ -185,6 +185,10 @@ pub(crate) fn factor_regex_expr(expr: Expr) -> Expr {
             expr: Box::new(factor_regex_expr(*expr)),
             intersect: Box::new(factor_regex_expr(*intersect)),
         },
+        Expr::WithSecondaryLexer { main, secondary } => Expr::WithSecondaryLexer {
+            main: Box::new(factor_regex_expr(*main)),
+            secondary: Box::new(factor_regex_expr(*secondary)),
+        },
         Expr::Shared(inner) => factor_regex_expr((*inner).clone()),
         Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => expr,
     }
@@ -210,6 +214,9 @@ fn common_prefix_factor(exprs: &[Expr]) -> Option<(Expr, Vec<Expr>)> {
 fn expr_contains_group_op(expr: &Expr) -> bool {
     match expr {
         Expr::Exclude { .. } | Expr::Intersect { .. } => true,
+        Expr::WithSecondaryLexer { main, secondary } => {
+            expr_contains_group_op(main) || expr_contains_group_op(secondary)
+        }
         Expr::Seq(parts) | Expr::Choice(parts) => parts.iter().any(expr_contains_group_op),
         Expr::Repeat { expr, .. } => expr_contains_group_op(expr),
         Expr::Shared(inner) => expr_contains_group_op(inner),
@@ -253,6 +260,10 @@ fn materialize_nested_group_ops(expr: Expr) -> Expr {
             expr: Box::new(materialize_nested_group_ops(*expr)),
             min,
             max,
+        },
+        Expr::WithSecondaryLexer { main, secondary } => Expr::WithSecondaryLexer {
+            main: Box::new(materialize_nested_group_ops(*main)),
+            secondary: Box::new(materialize_nested_group_ops(*secondary)),
         },
         Expr::Shared(inner) => {
             let rewritten = materialize_nested_group_ops((*inner).clone());
@@ -341,6 +352,7 @@ fn expr_is_shared(expr: &Expr) -> bool {
         Expr::Shared(_) => true,
         Expr::Exclude { expr, exclude } => expr_is_shared(expr) || expr_is_shared(exclude),
         Expr::Intersect { expr, intersect } => expr_is_shared(expr) || expr_is_shared(intersect),
+        Expr::WithSecondaryLexer { main, secondary } => expr_is_shared(main) || expr_is_shared(secondary),
         Expr::Seq(parts) | Expr::Choice(parts) => parts.iter().any(expr_is_shared),
         Expr::Repeat { expr, .. } => expr_is_shared(expr),
         Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => false,
@@ -479,6 +491,9 @@ fn expr_accepts_empty(expr: &Expr) -> bool {
         Expr::Intersect { expr, intersect } => {
             expr_accepts_empty(expr) && expr_accepts_empty(intersect)
         }
+        Expr::WithSecondaryLexer { main, secondary } => {
+            expr_accepts_empty(main) && expr_accepts_empty(secondary)
+        }
         Expr::Seq(parts) => parts.iter().all(expr_accepts_empty),
         Expr::Choice(options) => options.iter().any(expr_accepts_empty),
         Expr::Exclude { expr, exclude } => expr_accepts_empty(expr) && !expr_accepts_empty(exclude),
@@ -505,6 +520,9 @@ fn expr_u8set(expr: &Expr) -> U8Set {
             .iter()
             .fold(U8Set::empty(), |acc, part| acc | expr_u8set(part)),
         Expr::Intersect { expr, intersect } => expr_u8set(expr).intersection(&expr_u8set(intersect)),
+        Expr::WithSecondaryLexer { main, secondary } => {
+            expr_u8set(main).intersection(&expr_u8set(secondary))
+        }
         Expr::Exclude { expr, .. } => expr_u8set(expr),
         Expr::Repeat { expr, .. } => expr_u8set(expr),
         Expr::Shared(inner) => expr_u8set(inner),
@@ -1290,6 +1308,15 @@ fn append_compiled_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
         Expr::Intersect { .. } => {
             unreachable!("nested Expr::Intersect must be lowered before NFA compilation")
         }
+        Expr::WithSecondaryLexer { main, secondary } => {
+            // Fallback for callers that compile a standalone guarded expression.
+            // The tokenizer path must split this variant before product construction.
+            let intersection = Expr::Intersect {
+                expr: main.clone(),
+                intersect: secondary.clone(),
+            };
+            append_dfa_expr(&compile_product_component_dfa(&intersection), nfa, start, end);
+        }
         Expr::Seq(parts) => append_sequence_expr(parts, nfa, start, end),
         Expr::Choice(options) => append_choice_expr(options, nfa, start, end),
         Expr::Exclude { .. } => {
@@ -1549,6 +1576,7 @@ fn expr_is_epsilon_only(expr: &Expr) -> bool {
         | Expr::Choice(_)
         | Expr::Exclude { .. }
         | Expr::Intersect { .. }
+        | Expr::WithSecondaryLexer { .. }
         | Expr::Repeat { .. } => false,
     }
 }
@@ -2070,6 +2098,8 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: 1,
+            secondary: None,
+            secondary_virtual: None,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
         };
         let exec = tokenizer.execute_from_state(input, tokenizer.initial_state());
@@ -2194,6 +2224,8 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: 1,
+            secondary: None,
+            secondary_virtual: None,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
         };
 
@@ -2229,6 +2261,8 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: 2,
+            secondary: None,
+            secondary_virtual: None,
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
         };
 
@@ -2264,6 +2298,8 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: 2,
+            secondary: None,
+            secondary_virtual: None,
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
         };
 
@@ -2321,6 +2357,8 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: exprs.len() as u32,
+            secondary: None,
+            secondary_virtual: None,
             exprs: Some(Arc::from(exprs.into_boxed_slice())),
         };
 
@@ -2365,6 +2403,8 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa,
             num_terminals: 1,
+            secondary: None,
+            secondary_virtual: None,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
         };
 
@@ -2419,6 +2459,8 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa,
             num_terminals: 1,
+            secondary: None,
+            secondary_virtual: None,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
         };
 
@@ -2562,6 +2604,8 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: 1,
+            secondary: None,
+            secondary_virtual: None,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
         };
 

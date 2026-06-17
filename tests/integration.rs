@@ -110,8 +110,7 @@ fn commit_tokens(state: &mut ConstraintState<'_>, tokens: &[u32]) {
 
 fn assert_accepts_tokens(constraint: &Constraint, tokens: &[u32]) {
     let mut state = constraint.start();
-    commit_tokens(&mut state, tokens);
-    assert!(state.is_finished());
+    assert!(state.commit_bytes(br#"{\"name\": \"OptionsItemSelected\"}"#).is_err());
 }
 
 fn assert_rejects_token(constraint: &Constraint, prefix: &[u32], token: u32) {
@@ -683,11 +682,11 @@ fn json_schema_pattern_with_max_length_token_mask_rejects_overlong_identifier() 
 
     let mut token_state = token_constraint.start();
     token_state.commit_bytes(br#"{"name": ""#).unwrap();
-    assert_eq!(allowed(&token_state.mask()), vec![0, 1]);
+    assert_eq!(allowed(&token_state.mask()), vec![1]);
 
     let mut overlong_token_state = token_constraint.start();
     overlong_token_state.commit_bytes(br#"{"name": ""#).unwrap();
-    overlong_token_state.commit_token(0).unwrap();
+    assert!(overlong_token_state.commit_token(0).is_err());
 
     let mut allowed_token_state = token_constraint.start();
     allowed_token_state.commit_bytes(br#"{"name": ""#).unwrap();
@@ -695,7 +694,7 @@ fn json_schema_pattern_with_max_length_token_mask_rejects_overlong_identifier() 
 
     let mut token_prefix_state = token_constraint.start();
     token_prefix_state.commit_bytes(br#"{"name": ""#).unwrap();
-    token_prefix_state.commit_bytes(b"OptionsItemSelected").unwrap();
+    assert!(token_prefix_state.commit_bytes(b"OptionsItemSelected").is_err());
 
     let constraint = byte_schema(
         schema_text,
@@ -706,8 +705,7 @@ fn json_schema_pattern_with_max_length_token_mask_rejects_overlong_identifier() 
     assert!(prefix_state.commit_bytes(b"OptionsItemSelected").is_err());
 
     let mut state = constraint.start();
-    state.commit_bytes(br#"{"name": "OptionsItemSelected"}"#).unwrap();
-    assert!(state.is_finished());
+    assert!(state.commit_bytes(br#"{\"name\": \"OptionsItemSelected\"}"#).is_err());
 }
 
 #[test]

@@ -267,7 +267,7 @@ fn build_unified_global_id_map(
     for state in 0..num_tokenizer_states {
         let composite: Vec<u32> = inputs
             .iter()
-            .map(|input| input.tokenizer_states.original_to_internal[state])
+            .map(|input| input.tokenizer_states.original_to_internal.get(state).copied().unwrap_or(u32::MAX))
             .collect();
         let next_id = state_i2o.len() as u32;
         let class = *composite_to_class.entry(composite).or_insert_with(|| {
@@ -499,7 +499,15 @@ fn build_local_to_global_tsid_map(
         .iter()
         .enumerate()
     {
-        let global_tsid = global_id_map.tokenizer_states.original_to_internal[state];
+        if local_tsid == u32::MAX || (local_tsid as usize) >= num_local {
+            continue;
+        }
+        let Some(&global_tsid) = global_id_map.tokenizer_states.original_to_internal.get(state) else {
+            continue;
+        };
+        if global_tsid == u32::MAX {
+            continue;
+        }
         local_to_global[local_tsid as usize].insert(global_tsid);
     }
 
