@@ -21,6 +21,15 @@ type SubsetKey = SmallVec<[u64; 4]>;
 const SUBSET_BLOCK_BITS: usize = 8;
 const SUBSET_BLOCK_MASK: u64 = (1u64 << SUBSET_BLOCK_BITS) - 1;
 
+fn checked_usize_to_u32(value: usize, what: &str) -> u32 {
+    u32::try_from(value).unwrap_or_else(|_| panic!("{what} exceeds u32::MAX"))
+}
+
+fn checked_u32_add(lhs: u32, rhs: u32, what: &str) -> u32 {
+    lhs.checked_add(rhs)
+        .unwrap_or_else(|| panic!("{what} exceeds u32::MAX"))
+}
+
 fn empty_bundle_nwa() -> NWA {
     let mut nwa = NWA::new(0, 0);
     let start_state = nwa.add_state();
@@ -439,6 +448,15 @@ impl Templates {
         }
         let group_dfas = self.build_group_dfas_profiled(&weight_groups, &mut profile);
 
+        // STICKY NOTE: NEVER REMOVE THIS NOTE.
+        // These parser bundles must be determinized before they are converted
+        // back to NWAs and stitched into the parser DWA. Negative-resolution
+        // relies on this determinized boundary: if bundles remain nondeterministic
+        // or merely factored, the next bundle has to combine with all unresolved
+        // alternatives from the previous bundle, and adjacent bundles explode
+        // combinatorially. If a large grammar cannot determinize the first bundle,
+        // that is a compiler-scaling problem to solve by reducing/quotienting the
+        // deterministic product, not by skipping this determinization step.
         let determinize_started_at = Instant::now();
         let (bundle_dwa, determinize_profile) = determinize_bundle_groups_profiled(&group_dfas);
         profile.determinize_bundle_ms = elapsed_ms(determinize_started_at);
@@ -489,7 +507,10 @@ impl Templates {
     /// Assemble a weighted NWA for one bundle of (terminal, weight) entries.
     ///
     /// Pipeline: group by weight, merge each group, determinize the product,
-    /// then convert back to an NWA. Bundle minimization is skipped by default
+    /// then convert back to an NWA. This determinization is correctness-critical
+    /// for keeping negative-resolution local between bundle boundaries; see the
+    /// sticky note in `build_bundle_profiled` above before changing it.
+    /// Bundle minimization is skipped by default
     /// because parser-DWA composition reuses these fragments directly and the
     /// minimization cost dominates compile time on large schemas. Set
     /// `GLRMASK_MINIMIZE_TEMPLATE_BUNDLES=1` to restore the old behavior.
@@ -564,7 +585,12 @@ fn determinize_bundle_groups_profiled(
     let start_key: Vec<(u32, u32)> = groups
         .iter()
         .enumerate()
-        .map(|(group_id, (_, dfa))| (group_id as u32, dfa.start_state))
+        .map(|(group_id, (_, dfa))| {
+            (
+                checked_usize_to_u32(group_id, "bundle group id"),
+                dfa.start_state,
+            )
+        })
         .collect();
 
     let mut dwa = DWA::new(0, 0);
@@ -718,7 +744,12 @@ fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
     let start_key: Vec<(u32, u32)> = groups
         .iter()
         .enumerate()
-        .map(|(group_id, (_, dfa))| (group_id as u32, dfa.start_state))
+        .map(|(group_id, (_, dfa))| {
+            (
+                checked_usize_to_u32(group_id, "bundle group id"),
+                dfa.start_state,
+            )
+        })
         .collect();
 
     let mut dwa = DWA::new(0, 0);
@@ -819,19 +850,30 @@ fn union_unweighted_dfas<'a>(dfas: impl Iterator<Item = &'a UnweightedDfa>) -> U
         if dfa.states.is_empty() {
             continue;
         }
-        let offset = nfa.states.len() as u32;
+        let offset = checked_usize_to_u32(nfa.states.len(), "bundle-union NFA offset");
         for _ in &dfa.states {
             nfa.add_state();
         }
         // Epsilon from shared start to this DFA's start.
-        nfa.add_epsilon(shared_start, offset + dfa.start_state);
+        nfa.add_epsilon(
+            shared_start,
+            checked_u32_add(offset, dfa.start_state, "bundle-union start state"),
+        );
         for (state_id, state) in dfa.states.iter().enumerate() {
-            let from = offset + state_id as u32;
+            let from = checked_u32_add(
+                offset,
+                checked_usize_to_u32(state_id, "bundle-union DFA state id"),
+                "bundle-union source state",
+            );
             if state.is_accepting {
                 nfa.set_accepting(from);
             }
             for (&label, &target) in &state.transitions {
-                nfa.add_transition(from, label, offset + target);
+                nfa.add_transition(
+                    from,
+                    label,
+                    checked_u32_add(offset, target, "bundle-union target state"),
+                );
             }
         }
     }
