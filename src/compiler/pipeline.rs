@@ -573,7 +573,6 @@ fn compile_prepared_with_profile_and_table_construction(
                             prepared_grammar.ignore_terminal,
                             &analyzed_grammar,
                             &disallowed_follows,
-                            disallowed_follows_for_classification,
                             Arc::clone(&flat_trans),
                             &global_max_length_state_map,
                             Some(&shared_classify_cache),

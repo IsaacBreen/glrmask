@@ -5,6 +5,7 @@ use std::time::Instant;
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::ignore_transparent_disallowed_follows;
 use super::state_equivalence::{
     resolve_l2p_pipeline_config, run_state_equivalence_pipeline, StateEquivalenceScope,
 };
@@ -315,14 +316,14 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    token_path_disallowed_follows: &BTreeMap<u32, BitSet>,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
-    analyze_equivalences_impl(partition_label, tokenizer, vocab, token_path_disallowed_follows, ignore_terminal, active_groups, shared_vocab_dfa_cache, flat_trans, initial_state_map)
+    analyze_equivalences_impl(partition_label, tokenizer, vocab, disallowed_follows, ignore_terminal, active_groups, shared_vocab_dfa_cache, flat_trans, initial_state_map)
 }
 
 /// Combined equivalence analysis over a flattened tokenizer DFA.
@@ -333,14 +334,16 @@ fn analyze_equivalences_impl(
     partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    token_path_disallowed_follows: &BTreeMap<u32, BitSet>,
-    _ignore_terminal: Option<u32>,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
-    let effective_disallowed = token_path_disallowed_follows;
+    let token_path_disallowed_follows =
+        ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal);
+    let effective_disallowed = &token_path_disallowed_follows;
     // Only use shared flat_trans when state count matches the (possibly
     // simplified) tokenizer. If simplify_for_terminals minimized the DFA,
     // the original flat_trans has different state numbering and must be

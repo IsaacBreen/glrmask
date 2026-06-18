@@ -12,6 +12,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::classify_terminal_path_lengths;
+use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::ignore_transparent_disallowed_follows;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::{
     LocalIdMapTerminalDwa, TerminalColoring, TerminalPathLength, compile_profile_enabled,
 };
@@ -36,8 +37,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     use_terminal_coloring: bool,
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
-    parser_disallowed_follows: &BTreeMap<u32, BitSet>,
-    token_path_disallowed_follows: &BTreeMap<u32, BitSet>,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
     flat_trans: &Arc<[u32]>,
     initial_state_map: Option<&ManyToOneIdMap>,
     _shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
@@ -55,6 +55,9 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     // Set GLRMASK_FORCE_ALL_L2P=1 to skip L1 and route everything through L2P.
     let force_all_l2p = std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
 
+    let token_path_disallowed_follows =
+        ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal);
+
     let classify_started_at = Instant::now();
     let terminal_path_lengths = if force_all_l2p {
         vec![TerminalPathLength::TwoPlus; num_terminals as usize]
@@ -62,7 +65,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         classify_terminal_path_lengths(
             tokenizer,
             vocab,
-            token_path_disallowed_follows,
+            &token_path_disallowed_follows,
             num_terminals,
             shared_classify_cache,
         )
@@ -128,8 +131,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     ignore_terminal,
                     grammar,
                     &l2p_mask,
-                    parser_disallowed_follows,
-                    token_path_disallowed_follows,
+                    disallowed_follows,
                     _shared_vocab_dfa_cache,
                     shared_simplify_cache,
                     shared_disallowed_follow_dfa_cache,
