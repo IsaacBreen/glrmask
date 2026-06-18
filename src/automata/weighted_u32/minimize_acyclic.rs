@@ -278,6 +278,37 @@ fn compute_productive_transitions(dwa: &DWA, needed: &[Weight]) -> Vec<Vec<Produ
     result
 }
 
+#[cfg(debug_assertions)]
+fn debug_assert_pushed_weights_within_needed(dwa: &DWA, needed: &[Weight]) {
+    debug_assert_eq!(dwa.states().len(), needed.len());
+
+    let n = dwa.states().len();
+    for (state_id, state) in dwa.states().iter().enumerate() {
+        let source_needed = &needed[state_id];
+        if let Some(final_weight) = &state.final_weight {
+            debug_assert!(
+                final_weight.is_subset(source_needed),
+                "pushed DWA invariant violated: final weight at state {state_id} is not contained in needed[state]",
+            );
+        }
+
+        for (&label, (target, weight)) in &state.transitions {
+            let target_id = *target as usize;
+            if target_id >= n {
+                continue;
+            }
+            debug_assert!(
+                weight.is_subset(source_needed),
+                "pushed DWA invariant violated: transition weight at state {state_id}, label {label} is not contained in needed[source]",
+            );
+            debug_assert!(
+                weight.is_subset(&needed[target_id]),
+                "pushed DWA invariant violated: transition weight at state {state_id}, label {label} is not contained in needed[target]",
+            );
+        }
+    }
+}
+
 // Incompatibility graph and coloring.
 
 /// Check if `w_a.intersection(domain) == w_b.intersection(domain)` without
@@ -1803,6 +1834,8 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
     // Both produce identical results, so we skip the redundant recomputation.
     let start_state = pushed.start_state() as usize;
     let needed = reachable_from_push;
+    #[cfg(debug_assertions)]
+    debug_assert_pushed_weights_within_needed(&pushed, &needed);
     if needed[start_state].is_empty() {
         return canonical_dead_dwa();
     }
@@ -1987,9 +2020,11 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
 #[cfg(test)]
 mod tests {
     use super::{
+        push_weights, sorted_weights_compatible_on_domain_intersection,
         weight_is_disjoint_from_domain_intersection, weights_equal_on_domain,
-        weights_equal_on_domain_intersection, sorted_weights_compatible_on_domain_intersection,
+        weights_equal_on_domain_intersection,
     };
+    use crate::automata::weighted_u32::dwa::{DWA, DWAState};
     use crate::ds::weight::Weight;
     use range_set_blaze::RangeSetBlaze;
 
@@ -2019,6 +2054,32 @@ mod tests {
         assert_eq!(
             weights_equal_on_domain_intersection(a, b, left, right),
             weights_equal_on_domain(a, b, &overlap),
+        );
+    }
+
+    #[test]
+    fn push_weights_maintains_needed_containment_invariant() {
+        let mut source = DWAState::default();
+        source.transitions.insert(
+            42,
+            (1, Weight::from_uniform(1..=1, token_set(&[(10, 20)]))),
+        );
+        let mut target = DWAState::default();
+        target.final_weight = Some(Weight::from_uniform(1..=1, token_set(&[(12, 14)])));
+
+        let mut dwa = DWA::from_parts(vec![source, target], 0);
+        let (_, topo, needed) = push_weights(&mut dwa);
+        assert!(topo.is_some());
+
+        let transition_weight = &dwa.states()[0].transitions.get(&42).unwrap().1;
+        let target_final_weight = dwa.states()[1].final_weight.as_ref().unwrap();
+
+        assert!(target_final_weight.is_subset(&needed[1]));
+        assert!(transition_weight.is_subset(&needed[0]));
+        assert!(transition_weight.is_subset(&needed[1]));
+        assert_eq!(
+            transition_weight,
+            &Weight::from_uniform(1..=1, token_set(&[(12, 14)]))
         );
     }
 
