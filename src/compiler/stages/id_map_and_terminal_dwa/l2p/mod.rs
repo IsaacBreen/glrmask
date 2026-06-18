@@ -153,6 +153,18 @@ fn project_initial_state_map_enabled() -> bool {
     })
 }
 
+fn l2p_tokenizer_simplify_disabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_L2P_DISABLE_TOKENIZER_SIMPLIFY")
+            .map(|value| {
+                let trimmed = value.trim();
+                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(true)
+    })
+}
+
 #[derive(Clone, Copy)]
 struct L2PTokenLengthStats {
     max_len: usize,
@@ -406,7 +418,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // `fill_unmapped_with_new_class` after composition, so we always
     // use the simplified tokenizer.
     let simplify_started_at = Instant::now();
-    let can_skip_simplify = num_active_terminals == active_terminals.len();
+    let can_skip_simplify = l2p_tokenizer_simplify_disabled() || num_active_terminals == active_terminals.len();
     let (simplified_tok_storage, simplify_state_map, simplify_cache_hit) = if can_skip_simplify {
         (None, None, false)
     } else if let Some(cache) = shared_simplify_cache {
@@ -498,7 +510,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             vocab,
             disallowed_follows,
             ignore_terminal,
-            None,
+            if use_simplified_tok { None } else { Some(active_terminals) },
             shared_vocab_dfa_cache,
             if use_simplified_tok { None } else { flat_trans },
             equivalence_initial_state_map,

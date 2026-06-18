@@ -73,6 +73,8 @@ pub struct SharedVocabDfaBase {
     trans_by_class: Vec<u32>,
     self_loop_bytes: Vec<U8Set>,
     none_completion_hash: u64,
+    transition_ptr: usize,
+    transition_len: usize,
     /// Hash of the full transition table used to build this cache.
     /// Used to detect incompatible DFAs that happen to share the same state count.
     transition_hash: u64,
@@ -139,6 +141,8 @@ impl SharedVocabDfaBase {
             trans_by_class,
             self_loop_bytes,
             none_completion_hash,
+            transition_ptr: dfa.transitions.as_ptr() as usize,
+            transition_len: dfa.transitions.len(),
             transition_hash,
         }
     }
@@ -155,8 +159,12 @@ impl SharedVocabDfaBase {
         let num_dfa_states = dfa.states.len();
         if self.trans_by_class.len() != self.num_classes * num_dfa_states
             || self.self_loop_bytes.len() != num_dfa_states
+            || self.transition_len != dfa.transitions.len()
         {
             return false;
+        }
+        if self.transition_ptr == dfa.transitions.as_ptr() as usize {
+            return true;
         }
         let mut h = new_hasher();
         for s in 0..num_dfa_states {
