@@ -509,7 +509,7 @@ fn expand_transition_closure(
 }
 
 impl NFA {
-    pub fn to_dfa(&self) -> DFA {
+    pub(super) fn to_dfa(&self) -> DFA {
         let group_count = self
             .states
             .iter()

@@ -399,8 +399,8 @@ fn grammar_expr_to_lark_with_indent(
         GrammarExpr::RawRegex(pattern) => {
             write!(out, "/{}/", pattern).unwrap();
         }
-        GrammarExpr::LexerDfa(dfa) => {
-            write!(out, "/*LexerDfa(states={})*/", dfa.num_states()).unwrap();
+        GrammarExpr::LexerDfa(_) => {
+            write!(out, "/*LexerDfa*/").unwrap();
         }
         GrammarExpr::AnyByte => {
             out.push_str("/./ /*AnyByte*/");
@@ -2051,7 +2051,7 @@ fn grammar_expr_is_nullable(
             parse_regex(&char_class_pattern(def, *negate), *utf8).is_nullable()
         }
         GrammarExpr::RawRegex(pattern) => parse_regex(pattern, true).is_nullable(),
-        GrammarExpr::LexerDfa(dfa) => !dfa.finalizers(0).is_empty(),
+        GrammarExpr::LexerDfa(dfa) => Expr::Dfa(dfa.clone()).is_nullable(),
         GrammarExpr::AnyByte => false,
         GrammarExpr::SeparatedSequence { items, allow_empty, .. } => {
             *allow_empty

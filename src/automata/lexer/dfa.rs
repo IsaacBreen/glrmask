@@ -8,8 +8,8 @@ use crate::ds::char_transitions::CharTransitions;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 
-pub type GroupId = u32;
-pub const DEAD: u32 = u32::MAX;
+pub(super) type GroupId = u32;
+pub(super) const DEAD: u32 = u32::MAX;
 
 fn resized_bitset(bits: &BitSet, num_groups: usize) -> BitSet {
     let mut resized = BitSet::new(num_groups);
@@ -68,27 +68,33 @@ fn intersection_missing_group_indices(
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct DFAState {
-    pub transitions: CharTransitions<u32>,
-    pub finalizers: BitSet,
+pub(super) struct DFAState {
+    pub(super) transitions: CharTransitions<u32>,
+    pub(super) finalizers: BitSet,
     possible_future_group_ids: BitSet,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DFA {
     states: Vec<DFAState>,
     group_id_to_u8set: Vec<U8Set>,
 }
 
+impl std::fmt::Debug for DFA {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DFA { .. }")
+    }
+}
+
 impl DFA {
-    pub fn new(num_states: usize) -> Self {
+    pub(super) fn new(num_states: usize) -> Self {
         Self {
             states: vec![DFAState::default(); num_states],
             group_id_to_u8set: Vec::new(),
         }
     }
 
-    pub fn num_states(&self) -> usize {
+    pub(super) fn num_states(&self) -> usize {
         self.states.len()
     }
 
@@ -155,13 +161,13 @@ impl DFA {
         }
     }
 
-    pub fn step(&self, state: u32, byte: u8) -> Option<u32> {
+    pub(super) fn step(&self, state: u32, byte: u8) -> Option<u32> {
         self.states
             .get(state as usize)
             .and_then(|state| state.transitions.get(byte).copied())
     }
 
-    pub fn get_u8set(&self, state: u32) -> U8Set {
+    pub(super) fn get_u8set(&self, state: u32) -> U8Set {
         let mut out = U8Set::empty();
         if let Some(state) = self.states.get(state as usize) {
             for (byte, _) in state.transitions.iter() {
@@ -171,15 +177,15 @@ impl DFA {
         out
     }
 
-    pub fn get_transition(&self, state: u32, byte: u8) -> u32 {
+    pub(super) fn get_transition(&self, state: u32, byte: u8) -> u32 {
         self.step(state, byte).unwrap_or(DEAD)
     }
 
-    pub fn group_id_to_u8set(&self, group_id: GroupId) -> &U8Set {
+    pub(super) fn group_id_to_u8set(&self, group_id: GroupId) -> &U8Set {
         &self.group_id_to_u8set[group_id as usize]
     }
 
-    pub fn finalizers(&self, state: u32) -> &BitSet {
+    pub(super) fn finalizers(&self, state: u32) -> &BitSet {
         &self.states[state as usize].finalizers
     }
 

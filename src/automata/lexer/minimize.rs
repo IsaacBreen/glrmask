@@ -506,14 +506,14 @@ impl DFA {
 
     /// Minimize this DFA using Hopcroft's algorithm.
     /// Returns a new, minimized DFA.  State 0 remains the start state.
-    pub fn minimize(&self) -> DFA {
+    pub(super) fn minimize(&self) -> DFA {
         self.minimize_impl(true).0
     }
 
     /// Minimize this DFA and return the mapping from original states to
     /// minimized states.  `mapping[old_state] = new_state`.
     /// Unreachable original states map to `u32::MAX`.
-    pub fn minimize_with_state_mapping(&self) -> (DFA, Vec<u32>) {
+    pub(super) fn minimize_with_state_mapping(&self) -> (DFA, Vec<u32>) {
         self.minimize_impl(true)
     }
 
@@ -523,7 +523,7 @@ impl DFA {
     /// This is useful when callers still need mappings for continuation states
     /// that are only reachable after resuming from inside a partially matched
     /// terminal.
-    pub fn minimize_with_state_mapping_preserve_all_states(&self) -> (DFA, Vec<u32>) {
+    pub(super) fn minimize_with_state_mapping_preserve_all_states(&self) -> (DFA, Vec<u32>) {
         self.minimize_impl(false)
     }
 
