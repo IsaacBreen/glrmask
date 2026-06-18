@@ -22,6 +22,18 @@ use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
+#[derive(Debug, Clone)]
+pub(crate) struct PartitionIdMapTerminalDwaSplits {
+    pub(crate) l1: Option<LocalIdMapTerminalDwa>,
+    pub(crate) l2p: Option<LocalIdMapTerminalDwa>,
+}
+
+impl PartitionIdMapTerminalDwaSplits {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.l1.is_none() && self.l2p.is_none()
+    }
+}
+
 /// Build an id_map and terminal DWA for a single vocab partition.
 ///
 /// 1. Classify terminal path lengths into L1 / L2+ masks.
@@ -30,7 +42,7 @@ use crate::Vocab;
 /// 4. Return a single `(InternalIdMap, DWA)`.
 ///
 /// Returns `None` if the vocab is empty.
-pub(crate) fn build_partition_id_map_and_terminal_dwa(
+pub(crate) fn build_partition_id_map_and_terminal_dwa_splits(
     partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -45,7 +57,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     shared_simplify_cache: Option<&super::l2p::SharedSimplifyCache>,
     shared_disallowed_follow_dfa_cache: Option<&super::l2p::postprocess::SharedDisallowedFollowDfaCache>,
     shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
-) -> Option<LocalIdMapTerminalDwa> {
+) -> Option<PartitionIdMapTerminalDwaSplits> {
     if vocab.is_empty() {
         return None;
     }
@@ -98,7 +110,10 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         }
     }
 
-    // Build L1 and L2+ terminal DWAs in parallel.
+    // Build L1 and L2+ terminal DWAs in parallel, but do not merge them here.
+    // The global build path merges all L1 partitions into one L1 terminal DWA,
+    // all L2+ partitions into one L2P terminal DWA, and then builds parser DWAs
+    // once per global split.
     let (l1_result, l2p_result) = rayon::join(
         || {
             if has_l1 {
@@ -150,39 +165,13 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
 
     let (l1_pair, l1_ms) = l1_result;
     let (l2p_pair, l2p_ms) = l2p_result;
-    let dominant_branch_profile = match (l1_pair.as_ref(), l2p_pair.as_ref()) {
-        (Some(l1), Some(l2p)) => {
-            if l1_ms >= l2p_ms { l1.profile } else { l2p.profile }
-        }
-        (Some(l1), None) => l1.profile,
-        (None, Some(l2p)) => l2p.profile,
-        (None, None) => return None,
-    };
-
-    // Collect non-None results and merge.
-    let mut pairs = Vec::new();
-    if let Some(l1) = l1_pair {
-        pairs.push(l1);
+    if l1_pair.is_none() && l2p_pair.is_none() {
+        return None;
     }
-    if let Some(l2p) = l2p_pair {
-        pairs.push(l2p);
-    }
-
-    let num_tokenizer_states = tokenizer.num_states() as usize;
-    let max_token_id = vocab.max_token_id();
-    let merge_started_at = Instant::now();
-    let mut merged = merge_local_id_maps_and_terminal_dwas(
-        pairs,
-        num_tokenizer_states,
-        max_token_id,
-    );
-    merged.profile.add_assign(dominant_branch_profile);
-    merged.profile.id_map_ms += classify_ms;
-    let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][partition] label={} vocab_tokens={} length0={} length1={} length2plus={} classify_ms={:.3} l1_ms={:.3} l2p_ms={:.3} merge_ms={:.3} accounted_id_map_ms={:.3} accounted_terminal_dwa_ms={:.3} accounted_compact_ms={:.3} accounted_total_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][partition] label={} vocab_tokens={} length0={} length1={} length2plus={} classify_ms={:.3} l1_ms={:.3} l2p_ms={:.3} merge_ms=0.000 accounted_id_map_ms={:.3} accounted_terminal_dwa_ms={:.3} accounted_compact_ms={:.3} accounted_total_ms={:.3} total_ms={:.3}",
             partition_label,
             vocab.entries.len(),
             num_zero,
@@ -191,14 +180,63 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             classify_ms,
             l1_ms,
             l2p_ms,
-            merge_ms,
-            merged.profile.id_map_ms,
-            merged.profile.terminal_dwa_ms,
-            merged.profile.compact_ms,
-            merged.profile.total_ms(),
+            classify_ms,
+            0.0,
+            0.0,
+            classify_ms,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
 
-    Some(merged)
+    Some(PartitionIdMapTerminalDwaSplits { l1: l1_pair, l2p: l2p_pair })
+}
+
+/// Build an id_map and terminal DWA for a single vocab partition.
+///
+/// This compatibility wrapper preserves the old partition-local merge shape.
+pub(crate) fn build_partition_id_map_and_terminal_dwa(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    flat_trans: &Arc<[u32]>,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    shared_simplify_cache: Option<&super::l2p::SharedSimplifyCache>,
+    shared_disallowed_follow_dfa_cache: Option<&super::l2p::postprocess::SharedDisallowedFollowDfaCache>,
+    shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
+) -> Option<LocalIdMapTerminalDwa> {
+    let splits = build_partition_id_map_and_terminal_dwa_splits(
+        partition_label,
+        tokenizer,
+        vocab,
+        terminal_coloring,
+        use_terminal_coloring,
+        ignore_terminal,
+        grammar,
+        disallowed_follows,
+        flat_trans,
+        initial_state_map,
+        shared_vocab_dfa_cache,
+        shared_simplify_cache,
+        shared_disallowed_follow_dfa_cache,
+        shared_classify_cache,
+    )?;
+
+    let mut pairs = Vec::new();
+    if let Some(l1) = splits.l1 {
+        pairs.push(l1);
+    }
+    if let Some(l2p) = splits.l2p {
+        pairs.push(l2p);
+    }
+    Some(merge_local_id_maps_and_terminal_dwas(
+        pairs,
+        tokenizer.num_states() as usize,
+        vocab.max_token_id(),
+    ))
 }

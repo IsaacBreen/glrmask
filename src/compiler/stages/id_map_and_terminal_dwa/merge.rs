@@ -105,6 +105,35 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     num_tokenizer_states: usize,
     max_token_id: u32,
 ) -> LocalIdMapTerminalDwa {
+    merge_id_maps_and_terminal_dwas_impl(
+        inputs,
+        num_tokenizer_states,
+        max_token_id,
+        compact_merged_terminal_dwa_enabled(),
+    )
+}
+
+/// Merge DWA/id-map artifacts without compacting the resulting weight ID space.
+///
+/// Parser-DWA split merging needs the exact same pre-compaction ID map as the
+/// merged terminal DWA so the later terminal/possible-matches compaction plan can
+/// be applied to all three artifacts. Minimization is still exact and safe here;
+/// only ID-space compaction is skipped.
+pub(crate) fn merge_id_maps_and_terminal_dwas_without_compaction(
+    inputs: Vec<LocalIdMapTerminalDwa>,
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> LocalIdMapTerminalDwa {
+    merge_id_maps_and_terminal_dwas_impl(inputs, num_tokenizer_states, max_token_id, false)
+}
+
+
+fn merge_id_maps_and_terminal_dwas_impl(
+    inputs: Vec<LocalIdMapTerminalDwa>,
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+    compact_enabled: bool,
+) -> LocalIdMapTerminalDwa {
     assert!(!inputs.is_empty(), "merge_id_maps_and_terminal_dwas called with empty inputs");
 
     if inputs.len() == 1 {
@@ -179,7 +208,6 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     let before_compact_range_counts = profiling.then(|| mapped_dwa.interned_range_counts());
     let before_num_tsids = profiling.then(|| mapped_dwa.id_map().num_tsids());
     let before_num_tokens = profiling.then(|| mapped_dwa.id_map().num_internal_tokens());
-    let compact_enabled = compact_merged_terminal_dwa_enabled();
     let (compact_report, compact_ms) = if compact_enabled {
         let compact_started_at = Instant::now();
         let compact_report = if profiling {

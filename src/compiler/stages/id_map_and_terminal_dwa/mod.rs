@@ -34,6 +34,38 @@ use types::{
     compile_profile_enabled, LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaPhaseProfile,
 };
 
+#[derive(Debug, Clone)]
+pub(crate) struct IdMapAndTerminalDwaBuildResult {
+    pub(crate) terminal_dwa: MappedArtifact<DWA>,
+    /// Global L1 and L2P terminal DWAs, after cross-partition merge inside each split.
+    /// The parser-DWA experiment builds one parser DWA per entry, then merges those
+    /// parser DWAs. This is intentionally not one parser DWA per vocab partition.
+    pub(crate) parser_terminal_dwa_splits: Vec<MappedArtifact<DWA>>,
+    pub(crate) profile: TerminalDwaPhaseProfile,
+}
+
+fn local_to_mapped(local: LocalIdMapTerminalDwa) -> MappedArtifact<DWA> {
+    MappedArtifact::new(local.dwa, local.id_map)
+}
+
+fn merge_global_branch_id_maps_and_terminal_dwas(
+    inputs: Vec<LocalIdMapTerminalDwa>,
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> Option<LocalIdMapTerminalDwa> {
+    if inputs.is_empty() {
+        None
+    } else if inputs.len() == 1 {
+        inputs.into_iter().next()
+    } else {
+        Some(merge::merge_id_maps_and_terminal_dwas(
+            inputs,
+            num_tokenizer_states,
+            max_token_id,
+        ))
+    }
+}
+
 fn l2p_partition_cost_fn_from_env() -> classify::L2pPartitionCostFn {
     match std::env::var("GLRMASK_L2P_COST_FN").as_deref() {
         Ok("size") | Err(_) => classify::L2pPartitionCostFn::Size,
@@ -262,7 +294,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     flat_trans: Arc<[u32]>,
     global_max_length_state_map: &ManyToOneIdMap,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
-) -> (MappedArtifact<DWA>, TerminalDwaPhaseProfile) {
+) -> IdMapAndTerminalDwaBuildResult {
     let total_started_at = Instant::now();
     let mut profile = TerminalDwaPhaseProfile::default();
 
@@ -447,13 +479,13 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     let shared_disallowed_follow_dfa_cache = l2p::postprocess::SharedDisallowedFollowDfaCache::new();
 
     use rayon::prelude::*;
-    let partition_results: Vec<(Option<(LocalIdMapTerminalDwa, f64)>, usize)> = sub_vocabs
+    let partition_results: Vec<(Option<(partition::PartitionIdMapTerminalDwaSplits, f64)>, usize)> = sub_vocabs
         .par_iter()
         .enumerate()
         .map(|(idx, sub_vocab)| {
             let started_at = Instant::now();
             let label = format!("p{}", idx);
-            let result = partition::build_partition_id_map_and_terminal_dwa(
+            let result = partition::build_partition_id_map_and_terminal_dwa_splits(
                 &label,
                 tokenizer,
                 sub_vocab,
@@ -469,7 +501,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
                 Some(&shared_disallowed_follow_dfa_cache),
                 Some(&shared_classify_cache),
             )
-            .map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
+            .map(|splits| (splits, started_at.elapsed().as_secs_f64() * 1000.0));
             (result, idx)
         })
         .collect();
@@ -481,22 +513,39 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
         }
         ms
     };
-    let dominant_partition_profile = partition_results
-        .iter()
-        .filter_map(|(result, _)| result.as_ref().map(|(pair, ms)| (pair.profile, *ms)))
-        .max_by(|(_, left_ms), (_, right_ms)| left_ms.total_cmp(right_ms))
-        .map(|(phase_profile, _)| phase_profile)
-        .unwrap_or_default();
 
-    // Collect non-None results.
-    let mut pairs: Vec<LocalIdMapTerminalDwa> = Vec::new();
+    let mut l1_pairs: Vec<LocalIdMapTerminalDwa> = Vec::new();
+    let mut l2p_pairs: Vec<LocalIdMapTerminalDwa> = Vec::new();
+    let mut dominant_partition_profile = TerminalDwaPhaseProfile::default();
+    let mut dominant_partition_ms = 0.0;
     for (result, _idx) in partition_results {
-        if let Some((pair, _)) = result {
-            pairs.push(pair);
+        if let Some((splits, partition_ms)) = result {
+            let local_dominant_profile = match (splits.l1.as_ref(), splits.l2p.as_ref()) {
+                (Some(l1), Some(l2p)) => {
+                    if l1.profile.total_ms() >= l2p.profile.total_ms() {
+                        l1.profile
+                    } else {
+                        l2p.profile
+                    }
+                }
+                (Some(l1), None) => l1.profile,
+                (None, Some(l2p)) => l2p.profile,
+                (None, None) => TerminalDwaPhaseProfile::default(),
+            };
+            if let Some(l1) = splits.l1 {
+                l1_pairs.push(l1);
+            }
+            if let Some(l2p) = splits.l2p {
+                l2p_pairs.push(l2p);
+            }
+            if partition_ms >= dominant_partition_ms {
+                dominant_partition_ms = partition_ms;
+                dominant_partition_profile = local_dominant_profile;
+            }
         }
     }
 
-    if pairs.is_empty() {
+    if l1_pairs.is_empty() && l2p_pairs.is_empty() {
         let num_states = tokenizer.num_states() as usize;
         let empty_map = InternalIdMap {
             tokenizer_states: ManyToOneIdMap {
@@ -510,30 +559,61 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
                 representative_original_ids: Vec::new(),
             },
         };
-        return (MappedArtifact::new(DWA::new(1, 0), empty_map), profile);
+        return IdMapAndTerminalDwaBuildResult {
+            terminal_dwa: MappedArtifact::new(DWA::new(1, 0), empty_map),
+            parser_terminal_dwa_splits: Vec::new(),
+            profile,
+        };
     }
 
     let num_tokenizer_states = tokenizer.num_states() as usize;
     let max_token_id = vocab.max_token_id();
 
-    let did_global_merge = pairs.len() > 1;
     let merge_started_at = Instant::now();
+    let l1_global = merge_global_branch_id_maps_and_terminal_dwas(
+        l1_pairs,
+        num_tokenizer_states,
+        max_token_id,
+    );
+    let l2p_global = merge_global_branch_id_maps_and_terminal_dwas(
+        l2p_pairs,
+        num_tokenizer_states,
+        max_token_id,
+    );
+
+    let mut global_split_pairs = Vec::new();
+    if let Some(l1) = l1_global {
+        global_split_pairs.push(l1);
+    }
+    if let Some(l2p) = l2p_global {
+        global_split_pairs.push(l2p);
+    }
+
+    let parser_terminal_dwa_splits = global_split_pairs
+        .iter()
+        .cloned()
+        .map(local_to_mapped)
+        .collect::<Vec<_>>();
+
+    let did_global_merge = global_split_pairs.len() > 1;
     let (merged, global_merge_profile) = if !did_global_merge {
-        // Single partition — already compacted by partition merge. Skip redundant global compact.
         (
-            pairs.into_iter().next().unwrap(),
+            global_split_pairs.into_iter().next().unwrap(),
             TerminalDwaPhaseProfile::default(),
         )
     } else {
-        let merged =
-            merge::merge_id_maps_and_terminal_dwas(pairs, num_tokenizer_states, max_token_id);
+        let merged = merge::merge_id_maps_and_terminal_dwas(
+            global_split_pairs,
+            num_tokenizer_states,
+            max_token_id,
+        );
         let global_merge_profile = merged.profile;
         (merged, global_merge_profile)
     };
     let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
     profile.add_assign(dominant_partition_profile);
     profile.add_assign(global_merge_profile);
-    profile.global_merge_ms = if did_global_merge { merge_ms } else { 0.0 };
+    profile.global_merge_ms = merge_ms;
     let split_terminal_dwa_total_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
     profile.split_terminal_dwa_total_ms = split_terminal_dwa_total_ms;
 
@@ -553,9 +633,10 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             .collect::<Vec<_>>()
             .join(" ");
         eprintln!(
-            "[glrmask/profile][split_terminal_dwa] partition_vocab_ms={:.3} {} global_merge_ms={:.3} split_terminal_dwa_total_ms={:.3} accounted_id_map_ms={:.3} accounted_terminal_dwa_ms={:.3} accounted_compact_ms={:.3} accounted_total_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][split_terminal_dwa] partition_vocab_ms={:.3} {} parser_splits={} global_merge_ms={:.3} split_terminal_dwa_total_ms={:.3} accounted_id_map_ms={:.3} accounted_terminal_dwa_ms={:.3} accounted_compact_ms={:.3} accounted_total_ms={:.3} total_ms={:.3}",
             partition_vocab_ms,
             partition_detail,
+            parser_terminal_dwa_splits.len(),
             merge_ms,
             split_terminal_dwa_total_ms,
             profile.id_map_ms,
@@ -566,7 +647,11 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
         );
     }
 
-    (MappedArtifact::new(merged.dwa, merged.id_map), profile)
+    IdMapAndTerminalDwaBuildResult {
+        terminal_dwa: MappedArtifact::new(merged.dwa, merged.id_map),
+        parser_terminal_dwa_splits,
+        profile,
+    }
 }
 
 pub(crate) fn build_id_map_and_terminal_dwa(
@@ -590,8 +675,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
         build_global_max_length_state_map(tokenizer, vocab, &flat_trans);
     let global_max_length_ms = global_max_length_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let (mapped_dwa, mut inner_profile) =
-        build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
+    let mut build_result = build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             tokenizer,
             vocab,
             terminal_coloring,
@@ -603,9 +687,9 @@ pub(crate) fn build_id_map_and_terminal_dwa(
             &global_max_length_state_map,
             external_classify_cache,
         );
-    inner_profile.terminal_dwa_ms += flat_trans_ms;
-    inner_profile.id_map_ms += global_max_length_ms;
-    profile.add_assign(inner_profile);
+    build_result.profile.terminal_dwa_ms += flat_trans_ms;
+    build_result.profile.id_map_ms += global_max_length_ms;
+    profile.add_assign(build_result.profile);
 
-    (mapped_dwa, profile, global_max_length_state_map)
+    (build_result.terminal_dwa, profile, global_max_length_state_map)
 }
