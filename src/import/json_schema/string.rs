@@ -156,6 +156,7 @@ impl<'a> Lowerer<'a> {
                 schema.min_length,
                 schema.max_length,
                 self.config.preserve_pattern_max_length,
+                self.config.pattern_max_length_complexity_limit,
             )
         {
             constraints.push(quoted_string_body_regex(&length_bound_body));
@@ -1902,6 +1903,7 @@ fn cheap_pattern_length_bound_body_regex(
     min: usize,
     max: Option<usize>,
     preserve_pattern_max_length: bool,
+    pattern_max_length_complexity_limit: usize,
 ) -> Option<String> {
     if min == 0 && max.is_none() {
         return None;
@@ -1912,15 +1914,18 @@ fn cheap_pattern_length_bound_body_regex(
         return Some(bounded_json_string_body_regex(string_char_regex, min, max));
     }
 
-    if preserve_pattern_max_length && max.is_some() {
-        return Some(bounded_json_string_body_regex(string_char_regex, min, max));
-    }
-
-    // Preserve short finite bounds: these are the common JSON-Schema idioms like
-    // `[0-9]{10}` plus `minLength=maxLength=10`, and they do not trigger the
-    // severe pattern/length product blowups that motivated the broad policy.
-    if max.is_some_and(|max| max <= 64) {
-        return Some(bounded_json_string_body_regex(string_char_regex, min, max));
+    if let Some(max) = max {
+        // Preserve short finite bounds: these are the common JSON-Schema idioms
+        // like `[0-9]{10}` plus `minLength=maxLength=10`, and they do not
+        // trigger the severe pattern/length product blowups that motivated the
+        // broader guard.
+        let preserve_upper_bound = max <= 64
+            || (preserve_pattern_max_length
+                && pattern_max_length_complexity_score(&pattern, max)
+                    <= pattern_max_length_complexity_limit);
+        if preserve_upper_bound {
+            return Some(bounded_json_string_body_regex(string_char_regex, min, Some(max)));
+        }
     }
 
     // For large bounded patterns, keep the cheap lower bound but still drop the
@@ -1932,6 +1937,167 @@ fn cheap_pattern_length_bound_body_regex(
     }
 
     None
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PatternLengthComplexity {
+    score: usize,
+    variable_repetitions: usize,
+    variable_length: bool,
+    min_chars: usize,
+    max_chars: Option<usize>,
+}
+
+fn pattern_max_length_complexity_score(pattern: &str, max_length: usize) -> usize {
+    let Ok(hir) = Parser::new().parse(pattern) else {
+        return usize::MAX;
+    };
+    let (hir, _, _) = strip_outer_anchors(hir);
+    pattern_hir_length_complexity(&hir, max_length).score
+}
+
+fn pattern_hir_length_complexity(hir: &Hir, max_length: usize) -> PatternLengthComplexity {
+    match hir.kind() {
+        HirKind::Empty | HirKind::Look(_) => fixed_pattern_length_complexity(0),
+        HirKind::Literal(_) | HirKind::Class(_) => fixed_pattern_length_complexity(1),
+        HirKind::Capture(capture) => pattern_hir_length_complexity(&capture.sub, max_length),
+        HirKind::Alternation(parts) => {
+            let mut min_chars = usize::MAX;
+            let mut max_chars = Some(0usize);
+            let mut score = parts.len().saturating_sub(1);
+            let mut variable_repetitions = 0usize;
+            let mut variable_length = false;
+            for part in parts {
+                let stats = pattern_hir_length_complexity(part, max_length);
+                score = score.saturating_add(stats.score);
+                variable_repetitions = variable_repetitions.saturating_add(stats.variable_repetitions);
+                variable_length |= stats.variable_length;
+                min_chars = min_chars.min(stats.min_chars);
+                max_chars = option_max_sum(max_chars, stats.max_chars);
+            }
+            if min_chars == usize::MAX {
+                min_chars = 0;
+            }
+            PatternLengthComplexity {
+                score,
+                variable_repetitions,
+                variable_length,
+                min_chars,
+                max_chars,
+            }
+        }
+        HirKind::Concat(parts) => {
+            let mut score = 0usize;
+            let mut variable_repetitions = 0usize;
+            let mut variable_children = 0usize;
+            let mut variable_length = false;
+            let mut min_chars = 0usize;
+            let mut max_chars = Some(0usize);
+            for part in parts {
+                let stats = pattern_hir_length_complexity(part, max_length);
+                score = score.saturating_add(stats.score);
+                variable_repetitions = variable_repetitions.saturating_add(stats.variable_repetitions);
+                if stats.variable_length {
+                    variable_children += 1;
+                }
+                variable_length |= stats.variable_length;
+                min_chars = min_chars.saturating_add(stats.min_chars);
+                max_chars = option_sum(max_chars, stats.max_chars);
+            }
+            if variable_children > 1 {
+                // Multiple variable-length pieces in sequence compete for the
+                // same maxLength budget. The actual DFA growth can be lower for
+                // simple disjoint phases, but this is exactly the class where
+                // nested repeats become dangerous once repeated again.
+                score = score.saturating_add(
+                    variable_children
+                        .saturating_mul(variable_children)
+                        .saturating_mul(max_length.saturating_add(1)),
+                );
+            }
+            PatternLengthComplexity {
+                score,
+                variable_repetitions,
+                variable_length,
+                min_chars,
+                max_chars,
+            }
+        }
+        HirKind::Repetition(repetition) => {
+            let sub = pattern_hir_length_complexity(&repetition.sub, max_length);
+            let min_reps = repetition.min as usize;
+            let max_reps = repetition.max.map(|value| value as usize);
+            let fixed_repetition = max_reps == Some(min_reps);
+            let choices = repetition_choice_count(repetition, sub.min_chars, max_length);
+            let variable_length = !fixed_repetition || sub.variable_length;
+            let mut score = sub.score.saturating_mul(choices.max(1));
+            let mut variable_repetitions = sub.variable_repetitions;
+
+            if !fixed_repetition && sub.min_chars != 0 {
+                score = score.saturating_add(choices);
+                variable_repetitions = variable_repetitions.saturating_add(1);
+            }
+            if !fixed_repetition && sub.variable_repetitions > 0 {
+                // Repeating an already variable-length expression is the cheap
+                // static proxy for cases like `(?:a+b+){0,100}`. We deliberately
+                // charge by the external length budget so a large maxLength can
+                // disable this intersection before tokenizer DFA construction.
+                score = score.saturating_add(
+                    choices
+                        .saturating_mul(sub.variable_repetitions.saturating_add(1))
+                        .saturating_mul(max_length.saturating_add(1)),
+                );
+            }
+
+            PatternLengthComplexity {
+                score,
+                variable_repetitions,
+                variable_length,
+                min_chars: sub.min_chars.saturating_mul(min_reps),
+                max_chars: max_reps.and_then(|reps| {
+                    sub.max_chars
+                        .map(|sub_max| sub_max.saturating_mul(reps))
+                }),
+            }
+        }
+    }
+}
+
+fn fixed_pattern_length_complexity(chars: usize) -> PatternLengthComplexity {
+    PatternLengthComplexity {
+        score: 0,
+        variable_repetitions: 0,
+        variable_length: false,
+        min_chars: chars,
+        max_chars: Some(chars),
+    }
+}
+
+fn repetition_choice_count(
+    repetition: &Repetition,
+    sub_min_chars: usize,
+    max_length: usize,
+) -> usize {
+    let min = repetition.min as usize;
+    let max_by_syntax = repetition.max.map(|value| value as usize);
+    let max_by_length = if sub_min_chars == 0 {
+        max_length
+    } else {
+        max_length / sub_min_chars
+    };
+    let effective_max = max_by_syntax.unwrap_or(max_by_length).min(max_by_length);
+    effective_max.saturating_sub(min).saturating_add(1).max(1)
+}
+
+fn option_sum(left: Option<usize>, right: Option<usize>) -> Option<usize> {
+    Some(left?.saturating_add(right?))
+}
+
+fn option_max_sum(left: Option<usize>, right: Option<usize>) -> Option<usize> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        _ => None,
+    }
 }
 
 const DATE_FORMAT_BODY_REGEX: &str = r#"(?:[0-9]{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12][0-9]|3[01])|(?:0[469]|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8]))|(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:[02468][048]|[13579][26])00)-02-29)"#;

@@ -9,6 +9,7 @@ pub(crate) struct JsonSchemaConfig {
     pub(crate) repeat_chunk_size: usize,
     pub(crate) terminalize_bounded_string_max: usize,
     pub(crate) preserve_pattern_max_length: bool,
+    pub(crate) pattern_max_length_complexity_limit: usize,
     pub(crate) value_merging: MergeFamily,
     pub(crate) key_merging: MergeFamily,
     pub(crate) object_merging: ObjectMergeConfig,
@@ -50,6 +51,9 @@ impl Default for JsonSchemaConfig {
             // never be removed in the future.
             terminalize_bounded_string_max: 50,
             preserve_pattern_max_length: true,
+            // Static regex-HIR budget for preserving maxLength on patterned strings.
+            // This guards pattern/length intersections before terminal DFA construction.
+            pattern_max_length_complexity_limit: 50_000,
             value_merging: MergeFamily {
                 generic: split_open_merge_close,
                 literal: split_open_merge_close,
@@ -84,6 +88,10 @@ impl JsonSchemaConfig {
             "GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH",
         )
         .unwrap_or(config.preserve_pattern_max_length);
+        config.pattern_max_length_complexity_limit = read_usize(
+            "GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_COMPLEXITY_LIMIT",
+        )
+        .unwrap_or(config.pattern_max_length_complexity_limit);
 
         config.value_merging.generic = read_quote_merge(
             "GLRMASK_JSON_SCHEMA_VALUE_MERGE_OPEN",

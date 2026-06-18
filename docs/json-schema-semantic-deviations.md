@@ -4,10 +4,14 @@ This document records intentional places where the JSON Schema importer does not
 fully enforce the source schema semantics. Each entry must include the reason and
 the expected impact.
 
-## Patterned strings ignore length bounds
+## Patterned strings may drop expensive upper length bounds
 
 When a string schema has `pattern`, the importer compiles the pattern constraint
-and intentionally ignores sibling `minLength` and `maxLength` constraints.
+and preserves sibling `minLength`/`maxLength` only when doing so is cheap enough.
+The `maxLength` envelope is kept for short bounds and for patterns whose static
+regex-HIR complexity score is under
+`GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_COMPLEXITY_LIMIT`; otherwise the importer
+keeps any cheap lower-bound check and drops the upper length envelope.
 
 This is a deliberate performance tradeoff. Combining a broad JSON-string length
 counter with a complex string pattern can create very large terminal DFAs. One
@@ -19,9 +23,9 @@ representative schema, `Github_hard---o62060`, contains:
 
 Compiling the `maxLength` counter intersected with the `{0,49}` word-count
 pattern produced a tokenizer/terminal DFA with about 253k states and caused
-large build-time regressions. Ignoring the sibling length bound keeps the
-pattern enforcement, avoids that product construction, and may accept strings
-that match the pattern but violate the ignored length bound.
+large build-time regressions. Dropping only the expensive upper length bound
+keeps the pattern enforcement, avoids that product construction, and may accept
+strings that match the pattern but exceed the ignored `maxLength`.
 
 ## Additional and pattern properties are tail-only in objects
 
