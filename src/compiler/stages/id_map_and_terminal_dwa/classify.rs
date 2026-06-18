@@ -430,33 +430,10 @@ fn token_l2p_terminals(
     l2p_set
 }
 
-fn token_has_active_l2p_boundary(
-    bytes: &[u8],
-    byte_to_last: &[Vec<usize>],
-    byte_to_first: &[Vec<usize>],
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-) -> bool {
-    let mut seen = [false; 256];
-    let mut last_set = Vec::<usize>::new();
-    let mut first_set = Vec::<usize>::new();
-
-    for &byte in bytes {
-        if !seen[byte as usize] {
-            seen[byte as usize] = true;
-            last_set.extend(byte_to_last[byte as usize].iter().copied());
-            first_set.extend(byte_to_first[byte as usize].iter().copied());
-        }
-    }
-
-    for terminal_1 in last_set {
-        let disallowed = disallowed_follows.get(&(terminal_1 as u32));
-        for &terminal_2 in &first_set {
-            if !disallowed.map_or(false, |blocked| blocked.contains(terminal_2)) {
-                return true;
-            }
-        }
-    }
-    false
+fn token_has_active_l2p_boundary(bytes: &[u8], allowed_boundary_pairs: &[U8Set; 256]) -> bool {
+    bytes
+        .windows(2)
+        .any(|pair| allowed_boundary_pairs[pair[0] as usize].contains(pair[1]))
 }
 
 pub(crate) fn split_vocab_for_active_l2p_terminals(
@@ -475,22 +452,36 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
         owned_bytesets.as_ref().unwrap()
     };
 
-    let nt = num_terminals as usize;
-    let mut byte_to_last: Vec<Vec<usize>> = vec![Vec::new(); 256];
-    let mut byte_to_first: Vec<Vec<usize>> = vec![Vec::new(); 256];
+    let active: Vec<usize> = active_terminals
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, active)| active.then_some(terminal))
+        .collect();
+    let mut allowed_boundary_pairs = [U8Set::empty(); 256];
     let mut active_reachable = U8Set::empty();
 
-    for terminal in 0..nt {
-        if !active_terminals.get(terminal).copied().unwrap_or(false) {
+    for &terminal in &active {
+        active_reachable = active_reachable.union(&bytesets.reachable_bytes[terminal]);
+    }
+
+    for &terminal_1 in &active {
+        let last_bytes = bytesets.last_bytes[terminal_1];
+        if last_bytes.is_empty() {
             continue;
         }
-        active_reachable = active_reachable.union(&bytesets.reachable_bytes[terminal]);
-        for byte in 0u8..=255 {
-            if bytesets.last_bytes[terminal].contains(byte) {
-                byte_to_last[byte as usize].push(terminal);
+        let disallowed = disallowed_follows.get(&(terminal_1 as u32));
+        for &terminal_2 in &active {
+            if disallowed.map_or(false, |blocked| blocked.contains(terminal_2)) {
+                continue;
             }
-            if bytesets.first_bytes[terminal].contains(byte) {
-                byte_to_first[byte as usize].push(terminal);
+            let first_bytes = bytesets.first_bytes[terminal_2];
+            if first_bytes.is_empty() {
+                continue;
+            }
+            for last_byte in last_bytes.iter() {
+                for first_byte in first_bytes.iter() {
+                    allowed_boundary_pairs[last_byte as usize].insert(first_byte);
+                }
             }
         }
     }
@@ -500,7 +491,7 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
     let mut irrelevant_tokens = 0usize;
 
     for (&token_id, bytes) in vocab.entries.iter() {
-        if token_has_active_l2p_boundary(bytes, &byte_to_last, &byte_to_first, disallowed_follows) {
+        if token_has_active_l2p_boundary(bytes, &allowed_boundary_pairs) {
             boundary_entries.push((token_id, bytes.clone()));
             continue;
         }
