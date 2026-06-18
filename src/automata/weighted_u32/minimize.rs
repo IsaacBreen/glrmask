@@ -16,6 +16,18 @@ fn minimize_if_acyclic(dwa: &DWA, minimize: impl FnOnce(&DWA) -> DWA) -> DWA {
     minimize(dwa)
 }
 
+fn minimize_owned_if_acyclic(dwa: DWA, minimize: impl FnOnce(DWA) -> DWA) -> DWA {
+    if should_skip_minimization(&dwa) {
+        return dwa;
+    }
+
+    minimize(dwa)
+}
+
 pub fn minimize(dwa: &DWA) -> DWA {
     minimize_if_acyclic(dwa, super::minimize_acyclic::minimize_acyclic)
+}
+
+pub fn minimize_owned(dwa: DWA) -> DWA {
+    minimize_owned_if_acyclic(dwa, super::minimize_acyclic::minimize_acyclic_owned)
 }

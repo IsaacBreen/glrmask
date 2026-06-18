@@ -1143,6 +1143,34 @@ fn merge_tsid_coverage(
     }
 }
 
+const TSID_MEMBER_INDEX_ENUMERATION_LIMIT: usize = 256;
+
+fn enumerate_tsid_coverage_limited(
+    coverage: &Option<RangeSetBlaze<u32>>,
+    limit: usize,
+    mut visit: impl FnMut(u32),
+) -> bool {
+    let Some(coverage) = coverage else {
+        return false;
+    };
+    let mut count = 0usize;
+    for range in coverage.ranges() {
+        let mut tsid = *range.start();
+        loop {
+            count += 1;
+            if count > limit {
+                return false;
+            }
+            visit(tsid);
+            if tsid == *range.end() {
+                break;
+            }
+            tsid += 1;
+        }
+    }
+    true
+}
+
 fn merge_sorted_targets(existing: &mut Vec<(Label, u32)>, add: &[(Label, u32)]) {
     if add.is_empty() {
         return;
@@ -1320,6 +1348,8 @@ fn build_and_color_hybrid(
     struct OverlapMergeGroup {
         targets_by_label: FxHashMap<Label, u32>,
         needed_tsid_coverage: Option<RangeSetBlaze<u32>>,
+        indexed_members_by_tsid: FxHashMap<u32, Vec<usize>>,
+        unindexed_member_classes: Vec<usize>,
         member_classes: Vec<usize>,
     }
 
@@ -1341,8 +1371,13 @@ fn build_and_color_hybrid(
     let mut overlapping_member_scans = 0usize;
     let mut overlapping_member_hits = 0usize;
     let mut overlapping_member_scan_ms = 0.0;
+    let mut indexed_member_scans = 0usize;
+    let mut indexed_member_scan_fallbacks = 0usize;
     let mut tsid_coverage_rejects = 0usize;
     let mut group_update_ms = 0.0;
+    let mut overlap_candidate_marks = vec![0u32; num_classes];
+    let mut overlap_candidate_mark = 0u32;
+    let mut overlap_candidate_members = Vec::<usize>::new();
 
     for class in 0..num_classes {
         let cn = &class_needed_union[class];
@@ -1364,19 +1399,64 @@ fn build_and_color_hybrid(
 
             disjoint_checks += 1;
             let disjoint_check_started_at = Instant::now();
-            let tsid_disjoint =
-                tsid_coverage_disjoint(&class_tsid_coverage[class], &g.needed_tsid_coverage);
-            if tsid_disjoint {
-                tsid_coverage_rejects += 1;
-                disjoint_true += 1;
-                disjoint_check_ms += disjoint_check_started_at.elapsed().as_secs_f64() * 1000.0;
-            }
-
             let mut saw_overlap = false;
             let mut compatible_with_overlapping_members = true;
+            let mut tsid_disjoint = false;
+
+            overlap_candidate_members.clear();
+            overlap_candidate_mark = overlap_candidate_mark.wrapping_add(1);
+            if overlap_candidate_mark == 0 {
+                overlap_candidate_marks.fill(0);
+                overlap_candidate_mark = 1;
+            }
+            let mut used_index = true;
+            for &member_class in &g.unindexed_member_classes {
+                overlap_candidate_marks[member_class] = overlap_candidate_mark;
+                overlap_candidate_members.push(member_class);
+            }
+            if !enumerate_tsid_coverage_limited(
+                &class_tsid_coverage[class],
+                TSID_MEMBER_INDEX_ENUMERATION_LIMIT,
+                |tsid| {
+                    if let Some(members) = g.indexed_members_by_tsid.get(&tsid) {
+                        for &member_class in members {
+                            if overlap_candidate_marks[member_class] != overlap_candidate_mark {
+                                overlap_candidate_marks[member_class] = overlap_candidate_mark;
+                                overlap_candidate_members.push(member_class);
+                            }
+                        }
+                    }
+                },
+            ) {
+                used_index = false;
+                indexed_member_scan_fallbacks += 1;
+            }
+
+            if used_index {
+                indexed_member_scans += 1;
+                if overlap_candidate_members.is_empty() {
+                    tsid_disjoint = true;
+                    tsid_coverage_rejects += 1;
+                    disjoint_true += 1;
+                }
+            } else {
+                tsid_disjoint =
+                    tsid_coverage_disjoint(&class_tsid_coverage[class], &g.needed_tsid_coverage);
+                if tsid_disjoint {
+                    tsid_coverage_rejects += 1;
+                    disjoint_true += 1;
+                }
+            }
+
             if !tsid_disjoint {
                 let member_scan_started_at = Instant::now();
-                for &member_class in &g.member_classes {
+                let scan_members: &[usize] = if used_index {
+                    &overlap_candidate_members
+                } else {
+                    &g.member_classes
+                };
+
+                for &member_class in scan_members {
                     overlapping_member_scans += 1;
                     let member_needed = &class_needed_union[member_class];
                     if cn.is_disjoint(member_needed) {
@@ -1440,6 +1520,17 @@ fn build_and_color_hybrid(
                 }
             }
             merge_tsid_coverage(&mut g.needed_tsid_coverage, &class_tsid_coverage[class]);
+            if enumerate_tsid_coverage_limited(
+                &class_tsid_coverage[class],
+                TSID_MEMBER_INDEX_ENUMERATION_LIMIT,
+                |tsid| {
+                    g.indexed_members_by_tsid.entry(tsid).or_default().push(class);
+                },
+            ) {
+                // indexed above
+            } else {
+                g.unindexed_member_classes.push(class);
+            }
             g.member_classes.push(class);
             group_update_ms += group_update_started_at.elapsed().as_secs_f64() * 1000.0;
             placed = true;
@@ -1456,6 +1547,34 @@ fn build_and_color_hybrid(
             groups.push(OverlapMergeGroup {
                 targets_by_label,
                 needed_tsid_coverage: class_tsid_coverage[class].clone(),
+                indexed_members_by_tsid: {
+                    let mut by_tsid = FxHashMap::default();
+                    let mut unindexed = false;
+                    if !enumerate_tsid_coverage_limited(
+                        &class_tsid_coverage[class],
+                        TSID_MEMBER_INDEX_ENUMERATION_LIMIT,
+                        |tsid| {
+                            by_tsid.entry(tsid).or_insert_with(Vec::new).push(class);
+                        },
+                    ) {
+                        unindexed = true;
+                    }
+                    if unindexed {
+                        by_tsid.clear();
+                    }
+                    by_tsid
+                },
+                unindexed_member_classes: {
+                    if enumerate_tsid_coverage_limited(
+                        &class_tsid_coverage[class],
+                        TSID_MEMBER_INDEX_ENUMERATION_LIMIT,
+                        |_| {},
+                    ) {
+                        Vec::new()
+                    } else {
+                        vec![class]
+                    }
+                },
                 member_classes: vec![class],
             });
         }
@@ -1503,7 +1622,7 @@ fn build_and_color_hybrid(
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
         eprintln!(
-            "[glrmask/profile][weighted_dwa_minimize_hybrid_detail] candidates={} classes={} groups={} group_attempts={} target_checks={} target_rejects={} target_check_ms={:.3} disjoint_checks={} disjoint_true={} tsid_coverage_rejects={} disjoint_check_ms={:.3} final_weight_checks={} final_weight_rejects={} final_weight_check_ms={:.3} transition_weight_checks={} transition_weight_rejects={} transition_weight_check_ms={:.3} overlapping_member_scans={} overlapping_member_hits={} overlapping_member_scan_ms={:.3} group_update_ms={:.3} classes_with_final_weight={} min_targets={} max_targets={} avg_targets={:.3} min_weights={} max_weights={} avg_weights={:.3} min_group_size={} max_group_size={}",
+            "[glrmask/profile][weighted_dwa_minimize_hybrid_detail] candidates={} classes={} groups={} group_attempts={} target_checks={} target_rejects={} target_check_ms={:.3} disjoint_checks={} disjoint_true={} tsid_coverage_rejects={} disjoint_check_ms={:.3} final_weight_checks={} final_weight_rejects={} final_weight_check_ms={:.3} transition_weight_checks={} transition_weight_rejects={} transition_weight_check_ms={:.3} overlapping_member_scans={} overlapping_member_hits={} overlapping_member_scan_ms={:.3} indexed_member_scans={} indexed_member_scan_fallbacks={} group_update_ms={:.3} classes_with_final_weight={} min_targets={} max_targets={} avg_targets={:.3} min_weights={} max_weights={} avg_weights={:.3} min_group_size={} max_group_size={}",
             candidates.len(),
             num_classes,
             groups.len(),
@@ -1524,6 +1643,8 @@ fn build_and_color_hybrid(
             overlapping_member_scans,
             overlapping_member_hits,
             overlapping_member_scan_ms,
+            indexed_member_scans,
+            indexed_member_scan_fallbacks,
             group_update_ms,
             classes_with_final_weight,
             min_targets,
@@ -1705,27 +1826,6 @@ impl MergedStateBuilder {
         }
     }
 
-    fn finalize_for_reuse(&mut self) {
-        if self.final_weights_pending.len() <= 1 {
-            return;
-        }
-        let pending = std::mem::take(&mut self.final_weights_pending);
-        let built = batch_build_weight(pending);
-        if !built.is_empty() {
-            self.final_weights_pending.push(built);
-        }
-
-        for (_, pending_weights) in self.transitions_pending.values_mut() {
-            if pending_weights.len() <= 1 {
-                continue;
-            }
-            let pending = std::mem::take(pending_weights);
-            let built = batch_build_weight(pending);
-            if !built.is_empty() {
-                pending_weights.push(built);
-            }
-        }
-    }
 }
 
 /// Batch-build a Weight from a Vec of pending weights using a hybrid strategy.
@@ -1818,25 +1918,28 @@ fn canonical_dead_dwa() -> DWA {
 ///
 /// Falls back to the caller's DWA unchanged if the input is cyclic.
 pub fn minimize_acyclic(dwa: &DWA) -> DWA {
-    if dwa.states().is_empty() {
-        return dwa.clone();
+    minimize_acyclic_owned(dwa.clone())
+}
+
+pub fn minimize_acyclic_owned(mut pushed: DWA) -> DWA {
+    if pushed.states().is_empty() {
+        return pushed;
     }
 
     let profile_enabled = weighted_dwa_minimize_profile_enabled();
     let total_started_at = Instant::now();
-    let input_states = dwa.num_states();
-    let input_transitions = dwa.num_transitions();
+    let input_states = pushed.num_states();
+    let input_transitions = pushed.num_transitions();
 
-    // Clone and push weights
+    // Push weights in-place on the owned determinized DWA.
     let push_started_at = Instant::now();
-    let mut pushed = dwa.clone();
     let (_, topo_from_push, reachable_from_push) = push_weights(&mut pushed);
     let push_ms = push_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // Reuse topo order from push_weights (graph structure unchanged by push).
     let topo = match topo_from_push {
         Some(t) => t,
-        None => return dwa.clone(), // cyclic — fall back
+        None => return pushed, // cyclic — fall back
     };
 
     // Reuse backward-reachable token sets from push_weights as needed sets.
@@ -1924,9 +2027,6 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
                         builders,
                     );
                 }
-                for builder in builders.iter_mut() {
-                    builder.finalize_for_reuse();
-                }
                 let height_merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
                 color_ms_total += height_color_ms;
                 merge_ms_total += height_merge_ms;
@@ -1978,9 +2078,6 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
                 &old_to_new,
                 builders,
             );
-        }
-        for builder in builders.iter_mut() {
-            builder.finalize_for_reuse();
         }
         let height_merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
         color_ms_total += height_color_ms;

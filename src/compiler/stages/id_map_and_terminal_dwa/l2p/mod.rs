@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::determinize::determinize;
-use crate::automata::weighted::minimize::minimize;
+use crate::automata::weighted::minimize::minimize_owned;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
@@ -648,7 +648,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                     trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
                 })
                 .unwrap_or(false);
-            let dwa = if skip_minimize { det } else { minimize(&det) };
+            let dwa = if skip_minimize { det } else { minimize_owned(det) };
             let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
             let dwa_stats_before_compact = dwa.stats();
             let dwa_stats_after_compact = dwa.stats();
