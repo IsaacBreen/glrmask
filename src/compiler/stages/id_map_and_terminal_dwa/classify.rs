@@ -24,6 +24,14 @@ pub struct SharedClassifyBytesets {
 /// Cache type for lazy `SharedClassifyBytesets` initialization across partitions.
 pub type SharedClassifyCache = std::sync::OnceLock<SharedClassifyBytesets>;
 
+pub(crate) struct L2pVocabBoundarySplit {
+    pub(crate) boundary_vocab: Vocab,
+    pub(crate) single_vocab: Vocab,
+    pub(crate) boundary_tokens: usize,
+    pub(crate) single_tokens: usize,
+    pub(crate) irrelevant_tokens: usize,
+}
+
 #[derive(Debug)]
 struct VocabByteSet {
     bytes: U8Set,
@@ -420,6 +428,99 @@ fn token_l2p_terminals(
     }
 
     l2p_set
+}
+
+fn token_has_active_l2p_boundary(
+    bytes: &[u8],
+    byte_to_last: &[Vec<usize>],
+    byte_to_first: &[Vec<usize>],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+) -> bool {
+    let mut seen = [false; 256];
+    let mut last_set = Vec::<usize>::new();
+    let mut first_set = Vec::<usize>::new();
+
+    for &byte in bytes {
+        if !seen[byte as usize] {
+            seen[byte as usize] = true;
+            last_set.extend(byte_to_last[byte as usize].iter().copied());
+            first_set.extend(byte_to_first[byte as usize].iter().copied());
+        }
+    }
+
+    for terminal_1 in last_set {
+        let disallowed = disallowed_follows.get(&(terminal_1 as u32));
+        for &terminal_2 in &first_set {
+            if !disallowed.map_or(false, |blocked| blocked.contains(terminal_2)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub(crate) fn split_vocab_for_active_l2p_terminals(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: u32,
+    active_terminals: &[bool],
+    shared_classify_cache: Option<&SharedClassifyCache>,
+) -> L2pVocabBoundarySplit {
+    let owned_bytesets: Option<SharedClassifyBytesets>;
+    let bytesets = if let Some(cache) = shared_classify_cache {
+        cache.get_or_init(|| SharedClassifyBytesets::build(tokenizer, num_terminals))
+    } else {
+        owned_bytesets = Some(SharedClassifyBytesets::build(tokenizer, num_terminals));
+        owned_bytesets.as_ref().unwrap()
+    };
+
+    let nt = num_terminals as usize;
+    let mut byte_to_last: Vec<Vec<usize>> = vec![Vec::new(); 256];
+    let mut byte_to_first: Vec<Vec<usize>> = vec![Vec::new(); 256];
+    let mut active_reachable = U8Set::empty();
+
+    for terminal in 0..nt {
+        if !active_terminals.get(terminal).copied().unwrap_or(false) {
+            continue;
+        }
+        active_reachable = active_reachable.union(&bytesets.reachable_bytes[terminal]);
+        for byte in 0u8..=255 {
+            if bytesets.last_bytes[terminal].contains(byte) {
+                byte_to_last[byte as usize].push(terminal);
+            }
+            if bytesets.first_bytes[terminal].contains(byte) {
+                byte_to_first[byte as usize].push(terminal);
+            }
+        }
+    }
+
+    let mut boundary_entries = Vec::<(u32, Vec<u8>)>::new();
+    let mut single_entries = Vec::<(u32, Vec<u8>)>::new();
+    let mut irrelevant_tokens = 0usize;
+
+    for (&token_id, bytes) in vocab.entries.iter() {
+        if token_has_active_l2p_boundary(bytes, &byte_to_last, &byte_to_first, disallowed_follows) {
+            boundary_entries.push((token_id, bytes.clone()));
+            continue;
+        }
+
+        if bytes.iter().any(|&byte| active_reachable.contains(byte)) {
+            single_entries.push((token_id, bytes.clone()));
+        } else {
+            irrelevant_tokens += 1;
+        }
+    }
+
+    let boundary_tokens = boundary_entries.len();
+    let single_tokens = single_entries.len();
+    L2pVocabBoundarySplit {
+        boundary_vocab: Vocab::new(boundary_entries, None),
+        single_vocab: Vocab::new(single_entries, None),
+        boundary_tokens,
+        single_tokens,
+        irrelevant_tokens,
+    }
 }
 
 fn compute_partition_cost(
