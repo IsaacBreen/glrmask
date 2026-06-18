@@ -7,3 +7,5 @@ pub mod minimize;
 pub mod nfa;
 pub mod tokenizer;
 pub mod regex;
+
+pub(crate) use tokenizer::Lexer;

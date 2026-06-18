@@ -1,5 +1,6 @@
 //! Possible-match tables for tokenizer states and vocab-prefix subtrees.
 
+use crate::automata::lexer::Lexer;
 use std::rc::Rc;
 
 use range_set_blaze::RangeSetBlaze;

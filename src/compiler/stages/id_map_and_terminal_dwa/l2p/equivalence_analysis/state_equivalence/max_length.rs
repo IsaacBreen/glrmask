@@ -1,3 +1,4 @@
+use crate::automata::lexer::Lexer;
 use rayon::prelude::*;
 
 use crate::Vocab;

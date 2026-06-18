@@ -1,3 +1,4 @@
+use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
@@ -403,8 +404,7 @@ pub(crate) fn build_tokenizer_from_exprs(
         );
     }
 
-    Tokenizer::from_parts(
-        regex.dfa,
+    regex.into_tokenizer(
         exprs.len() as u32,
         Some(std::sync::Arc::from(exprs.to_vec())),
     )

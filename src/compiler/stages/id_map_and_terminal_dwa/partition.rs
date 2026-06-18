@@ -4,6 +4,7 @@
 //! and L2+, build those two pieces independently, then merge them into a
 //! single `(InternalIdMap, DWA)` for the partition.
 
+use crate::automata::lexer::Lexer;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;

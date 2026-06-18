@@ -1,3 +1,4 @@
+use crate::automata::lexer::Lexer;
 use std::time::Instant;
 
 use crate::Vocab;

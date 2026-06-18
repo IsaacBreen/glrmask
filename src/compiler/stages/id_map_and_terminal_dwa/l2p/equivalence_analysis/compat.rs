@@ -1,5 +1,6 @@
 //! Flattened tokenizer-DFA views for the equivalence-analysis passes.
 
+use crate::automata::lexer::Lexer;
 use std::sync::Arc;
 
 use crate::automata::lexer::tokenizer::Tokenizer;

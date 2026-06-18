@@ -1,6 +1,7 @@
 //! L1 terminal DWA: direct 2-state construction for terminals with max path
 //! length ≤ 1.
 
+use crate::automata::lexer::Lexer;
 pub(crate) mod max_length;
 
 use std::hash::{Hash, Hasher};

@@ -1,3 +1,4 @@
+use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::OnceLock;
 use std::time::Instant;

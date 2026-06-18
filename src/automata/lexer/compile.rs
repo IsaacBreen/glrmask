@@ -10,6 +10,7 @@ use smallvec::SmallVec;
 use crate::ds::{bitset::BitSet, u8set::U8Set};
 
 use super::ast::Expr;
+use super::tokenizer::Tokenizer;
 use super::dfa::DFA;
 use super::nfa::NFA;
 
@@ -1306,10 +1307,18 @@ fn append_compiled_expr(expr: &Expr, nfa: &mut NFA, start: u32, end: u32) {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Regex {
-    pub(crate) dfa: DFA,
+    pub(super) dfa: DFA,
 }
 
 impl Regex {
+    pub(crate) fn into_tokenizer(self, num_terminals: u32, exprs: Option<std::sync::Arc<[Expr]>>) -> Tokenizer {
+        Tokenizer {
+            dfa: self.dfa,
+            num_terminals,
+            exprs,
+        }
+    }
+
     pub fn num_states(&self) -> usize {
         self.dfa.num_states()
     }
@@ -2009,7 +2018,7 @@ fn refine_u8_partitions(partitions: Vec<U8Set>, split: U8Set) -> Vec<U8Set> {
 /// Compile multiple expressions into a single NFA (without determinization).
 ///
 /// Each expression's index becomes its group ID.
-pub fn build_regex_nfa(exprs: &[Expr]) -> NFA {
+fn build_regex_nfa(exprs: &[Expr]) -> NFA {
     build_regex_nfa_impl(exprs)
 }
 
@@ -2048,6 +2057,7 @@ fn build_regex_nfa_impl(exprs: &[Expr]) -> NFA {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Lexer;
     use super::build_regex;
     use super::compile_product_component_dfa_direct;
     use super::factor_regex_expr;

@@ -1,3 +1,4 @@
+use crate::automata::lexer::Lexer;
 use std::collections::BTreeMap;
 
 use range_set_blaze::RangeSetBlaze;

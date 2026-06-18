@@ -1,3 +1,4 @@
+use crate::automata::lexer::Lexer;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 

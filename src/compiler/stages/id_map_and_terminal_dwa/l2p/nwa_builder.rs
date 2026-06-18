@@ -3,6 +3,7 @@
 //! Contains the core `TerminalNwaBuilder` that walks the vocab prefix trie
 //! and constructs NWA transitions for each (byte, tokenizer-state) pair.
 
+use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, HashMap};
 
 use range_set_blaze::RangeSetBlaze;

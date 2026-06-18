@@ -103,7 +103,7 @@ impl DFA {
         id
     }
 
-    pub(crate) fn ensure_group_capacity(&mut self, num_groups: usize) {
+    pub(super) fn ensure_group_capacity(&mut self, num_groups: usize) {
         if self.group_id_to_u8set.len() < num_groups {
             self.group_id_to_u8set.resize(num_groups, U8Set::empty());
         }
@@ -118,7 +118,7 @@ impl DFA {
         }
     }
 
-    pub(crate) fn set_transitions_from_sorted_entries(
+    pub(super) fn set_transitions_from_sorted_entries(
         &mut self,
         state: u32,
         entries: Vec<(u8, u32)>,
@@ -137,7 +137,7 @@ impl DFA {
         }
     }
 
-    pub(crate) fn overwrite_state_metadata(
+    pub(super) fn overwrite_state_metadata(
         &mut self,
         state: u32,
         finalizers: BitSet,
@@ -149,7 +149,7 @@ impl DFA {
         }
     }
 
-    pub(crate) fn set_group_u8set(&mut self, group_id: GroupId, set: U8Set) {
+    pub(super) fn set_group_u8set(&mut self, group_id: GroupId, set: U8Set) {
         if let Some(entry) = self.group_id_to_u8set.get_mut(group_id as usize) {
             *entry = set;
         }
@@ -183,7 +183,7 @@ impl DFA {
         &self.states[state as usize].finalizers
     }
 
-    pub(crate) fn possible_future_group_ids(&self, state: u32) -> &BitSet {
+    pub(super) fn possible_future_group_ids(&self, state: u32) -> &BitSet {
         &self.states[state as usize].possible_future_group_ids
     }
 
@@ -205,7 +205,7 @@ impl DFA {
         }
     }
     /// Mask all states' possible_future_group_ids with the given bitset.
-    pub(crate) fn mask_possible_futures(&mut self, mask: &BitSet) {
+    pub(super) fn mask_possible_futures(&mut self, mask: &BitSet) {
         for state in &mut self.states {
             state.possible_future_group_ids.intersect_with(mask);
         }
@@ -231,7 +231,7 @@ impl DFA {
         }
     }
 
-    pub(crate) fn apply_group_exclusions(
+    pub(super) fn apply_group_exclusions(
         &mut self,
         excludes: &BTreeMap<GroupId, BTreeSet<GroupId>>,
     ) -> bool {
@@ -251,7 +251,7 @@ impl DFA {
         changed
     }
 
-    pub(crate) fn apply_group_intersections(
+    pub(super) fn apply_group_intersections(
         &mut self,
         intersections: &BTreeMap<GroupId, BTreeSet<GroupId>>,
     ) -> bool {
@@ -267,7 +267,7 @@ impl DFA {
         changed
     }
 
-    pub(crate) fn project_groups(&self, num_groups: usize) -> DFA {
+    pub(super) fn project_groups(&self, num_groups: usize) -> DFA {
         let mut projected = DFA::new(self.num_states());
         projected.ensure_group_capacity(num_groups);
 

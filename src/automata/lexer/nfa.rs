@@ -26,15 +26,15 @@ impl NFAState {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CompactNFA {
+pub(super) struct CompactNFA {
     pub epsilon_offsets: Vec<u32>,
     pub epsilon_targets: Vec<u32>,
 }
 
 #[derive(Debug, Clone)]
 pub struct NFA {
-    pub(crate) states: Vec<NFAState>,
-    pub(crate) start_state: u32,
+    pub(super) states: Vec<NFAState>,
+    pub(super) start_state: u32,
 }
 
 fn build_states(count: usize) -> Vec<NFAState> {
@@ -172,7 +172,7 @@ impl NFA {
         self.start_state = scc_map[self.start_state as usize] as u32;
     }
 
-    pub(crate) fn build_compact_nfa(&self) -> CompactNFA {
+    pub(super) fn build_compact_nfa(&self) -> CompactNFA {
         let mut epsilon_offsets = Vec::with_capacity(self.states.len() + 1);
         let mut epsilon_targets = Vec::new();
 
@@ -188,7 +188,7 @@ impl NFA {
         }
     }
 
-    pub(crate) fn compute_equivalence_classes(&self) -> (Vec<u8>, usize, Vec<Vec<u8>>) {
+    pub(super) fn compute_equivalence_classes(&self) -> (Vec<u8>, usize, Vec<Vec<u8>>) {
         let mut partitions = vec![U8Set::all()];
         let mut seen_sets = FxHashSet::default();
 

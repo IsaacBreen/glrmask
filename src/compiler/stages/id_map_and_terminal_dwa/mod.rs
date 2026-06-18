@@ -4,6 +4,7 @@
 //! builds a per-partition `(InternalIdMap, DWA)`, and merges the results into
 //! the final global `(InternalIdMap, DWA)`.
 
+use crate::automata::lexer::Lexer;
 pub(crate) mod classify;
 pub(crate) mod grammar_helpers;
 pub(crate) mod l1;

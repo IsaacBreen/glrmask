@@ -1,3 +1,4 @@
+use crate::automata::lexer::Lexer;
 pub(crate) mod profile;
 mod template_advance;
 pub(crate) mod tokenizer_scan;

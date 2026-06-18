@@ -480,7 +480,7 @@ impl DFA {
     /// This is a LOWER bound on the number of truly distinct states (hash
     /// collisions can only reduce the count). Useful for predicting whether
     /// minimize would produce any reduction.
-    pub(crate) fn distinct_fingerprint_count(&self) -> usize {
+    pub(super) fn distinct_fingerprint_count(&self) -> usize {
         let n = self.states().len();
         if n <= 1 {
             return n;
@@ -650,7 +650,7 @@ impl DFA {
     }
 
     /// Recompute `possible_future_group_ids` for all states via fixpoint.
-    pub(crate) fn recompute_possible_futures(&mut self) {
+    pub(super) fn recompute_possible_futures(&mut self) {
         let n = self.states().len();
         let num_groups = self.num_groups();
         if n == 0 {

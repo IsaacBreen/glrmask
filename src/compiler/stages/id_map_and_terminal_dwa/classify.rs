@@ -1,5 +1,6 @@
 //! Vocab and terminal classification utilities.
 
+use crate::automata::lexer::Lexer;
 use std::collections::BTreeMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;

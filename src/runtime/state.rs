@@ -1,3 +1,4 @@
+use crate::automata::lexer::Lexer;
 use std::sync::Mutex;
 use std::collections::BTreeMap;
 

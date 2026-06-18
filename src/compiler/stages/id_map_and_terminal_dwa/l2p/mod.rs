@@ -8,6 +8,7 @@
 //! The only structural difference from the old code is `active_terminals`
 //! filtering: terminals not in the L2+ set are skipped during the trie walk.
 
+use crate::automata::lexer::Lexer;
 pub(crate) mod equivalence_analysis;
 pub(crate) mod nwa_builder;
 pub(crate) mod postprocess;

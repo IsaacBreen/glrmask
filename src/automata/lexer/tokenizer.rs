@@ -21,7 +21,7 @@ pub struct Tokenizer {
     /// Skipped during (de)serialization because they are only needed during
     /// compile-time simplification for active-terminal rebuilds.
     #[serde(default, skip)]
-    pub(crate) exprs: Option<Arc<[Expr]>>,
+    pub(super) exprs: Option<Arc<[Expr]>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +35,81 @@ pub struct TokenizerMatch {
 pub struct TokenizerExecResult {
     pub end_state: Option<u32>,
     pub matches: Vec<TokenizerMatch>,
+}
+
+pub(crate) trait Lexer {
+    fn start_state(&self) -> u32;
+    fn num_terminals(&self) -> u32;
+    fn transitions_from(&self, state: u32) -> impl Iterator<Item = (u8, u32)> + '_;
+
+    fn fill_transition_row(&self, state: u32, row: &mut [u32; 256]) {
+        row.fill(u32::MAX);
+        for (byte, target) in self.transitions_from(state) {
+            row[byte as usize] = target;
+        }
+    }
+
+    fn transition_row(&self, state: u32) -> Box<[u32; 256]> {
+        let mut row = Box::new([u32::MAX; 256]);
+        self.fill_transition_row(state, &mut row);
+        row
+    }
+
+    fn self_loop_bytes(&self, state: u32) -> U8Set {
+        let mut bytes = U8Set::empty();
+        for (byte, target) in self.transitions_from(state) {
+            if target == state {
+                bytes.insert(byte);
+            }
+        }
+        bytes
+    }
+
+    fn transition_count(&self) -> usize {
+        (0..self.num_states())
+            .map(|state| self.transitions_from(state).count())
+            .sum()
+    }
+
+    fn step(&self, state: u32, byte: u8) -> Option<u32>;
+    fn get_transition(&self, state: u32, byte: u8) -> u32;
+    fn matched_terminals_iter(&self, state: u32) -> impl Iterator<Item = TerminalID> + '_;
+    fn possible_future_terminals_iter(&self, state: u32) -> impl Iterator<Item = TerminalID> + '_;
+    fn possible_future_terminals(&self, state: u32) -> &BitSet;
+
+    fn is_end(&self, state: u32) -> bool {
+        self.possible_future_terminals(state).is_empty()
+    }
+
+    fn num_states(&self) -> u32;
+    fn num_forced_minimized_states(&self) -> usize;
+    fn execute_from_state_all_widths(
+        &self,
+        input: &[u8],
+        start: u32,
+    ) -> TokenizerExecResult;
+    fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult;
+    fn execute_from_state_end_only(&self, input: &[u8], start: u32) -> Option<u32>;
+    fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult;
+
+    fn initial_state(&self) -> u32 {
+        self.start_state()
+    }
+
+    fn initial_state_id(&self) -> u32 {
+        self.initial_state()
+    }
+
+    fn tokens_accessible_from_state(&self, state: u32) -> &BitSet {
+        self.possible_future_terminals(state)
+    }
+
+    fn scan_terminal_matches_from_state(
+        &self,
+        input: &[u8],
+        start: u32,
+        terminals_of_interest: &BitSet,
+    ) -> (BitSet, Option<u32>);
 }
 
 fn into_longest_matches(matches: FxHashMap<TerminalID, (usize, u32)>) -> Vec<TokenizerMatch> {
@@ -64,7 +139,7 @@ struct TerminalFilteredDfa {
 }
 
 impl Tokenizer {
-    pub(crate) fn from_parts(
+    pub(super) fn from_parts(
         dfa: DFA,
         num_terminals: u32,
         exprs: Option<Arc<[Expr]>>,
@@ -76,15 +151,15 @@ impl Tokenizer {
         }
     }
 
-    pub fn start_state(&self) -> u32 {
+    fn start_state(&self) -> u32 {
         0
     }
 
-    pub fn num_terminals(&self) -> u32 {
+    fn num_terminals(&self) -> u32 {
         self.num_terminals
     }
 
-    pub(crate) fn transitions_from(&self, state: u32) -> impl Iterator<Item = (u8, u32)> + '_ {
+    fn transitions_from(&self, state: u32) -> impl Iterator<Item = (u8, u32)> + '_ {
         self.dfa
             .states()
             .get(state as usize)
@@ -92,20 +167,20 @@ impl Tokenizer {
             .flat_map(|state| state.transitions.iter().map(|(byte, &target)| (byte, target)))
     }
 
-    pub(crate) fn fill_transition_row(&self, state: u32, row: &mut [u32; 256]) {
+    fn fill_transition_row(&self, state: u32, row: &mut [u32; 256]) {
         row.fill(u32::MAX);
         for (byte, target) in self.transitions_from(state) {
             row[byte as usize] = target;
         }
     }
 
-    pub(crate) fn transition_row(&self, state: u32) -> Box<[u32; 256]> {
+    fn transition_row(&self, state: u32) -> Box<[u32; 256]> {
         let mut row = Box::new([u32::MAX; 256]);
         self.fill_transition_row(state, &mut row);
         row
     }
 
-    pub(crate) fn self_loop_bytes(&self, state: u32) -> U8Set {
+    fn self_loop_bytes(&self, state: u32) -> U8Set {
         let mut bytes = U8Set::empty();
         for (byte, target) in self.transitions_from(state) {
             if target == state {
@@ -115,7 +190,7 @@ impl Tokenizer {
         bytes
     }
 
-    pub(crate) fn transition_count(&self) -> usize {
+    fn transition_count(&self) -> usize {
         (0..self.num_states())
             .map(|state| self.transitions_from(state).count())
             .sum()
@@ -149,11 +224,11 @@ impl Tokenizer {
         self.dfa.redirect_transitions(start, clone_id);
     }
 
-    pub fn step(&self, state: u32, byte: u8) -> Option<u32> {
+    fn step(&self, state: u32, byte: u8) -> Option<u32> {
         self.dfa.step(state, byte)
     }
 
-    pub fn get_transition(&self, state: u32, byte: u8) -> u32 {
+    fn get_transition(&self, state: u32, byte: u8) -> u32 {
         self.dfa.get_transition(state, byte)
     }
 
@@ -168,7 +243,7 @@ impl Tokenizer {
         self.matched_terminals_iter(state).collect()
     }
 
-    pub(crate) fn matched_terminals_iter(
+    fn matched_terminals_iter(
         &self,
         state: u32,
     ) -> impl Iterator<Item = TerminalID> + '_ {
@@ -178,7 +253,7 @@ impl Tokenizer {
             .map(|terminal| terminal as TerminalID)
     }
 
-    pub(crate) fn possible_future_terminals_iter(
+    fn possible_future_terminals_iter(
         &self,
         state: u32,
     ) -> impl Iterator<Item = TerminalID> + '_ {
@@ -188,23 +263,23 @@ impl Tokenizer {
             .map(|terminal| terminal as TerminalID)
     }
 
-    pub fn possible_future_terminals(&self, state: u32) -> &BitSet {
+    fn possible_future_terminals(&self, state: u32) -> &BitSet {
         self.dfa.possible_future_group_ids(state)
     }
 
-    pub fn is_end(&self, state: u32) -> bool {
+    fn is_end(&self, state: u32) -> bool {
         self.possible_future_terminals(state).is_empty()
     }
 
-    pub fn num_states(&self) -> u32 {
+    fn num_states(&self) -> u32 {
         self.dfa.num_states() as u32
     }
 
-    pub(crate) fn num_forced_minimized_states(&self) -> usize {
+    fn num_forced_minimized_states(&self) -> usize {
         self.dfa.minimize().num_states()
     }
 
-    pub(crate) fn execute_from_state_all_widths(
+    fn execute_from_state_all_widths(
         &self,
         input: &[u8],
         start: u32,
@@ -220,7 +295,7 @@ impl Tokenizer {
         }
     }
 
-    pub fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult {
+    fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult {
         let mut matches = FxHashMap::<TerminalID, (usize, u32)>::default();
         let end_state = self.scan_input(input, start, &mut matches, |tokenizer, matches, state, width| {
             tokenizer.record_longest_matches(matches, state, width);
@@ -232,11 +307,11 @@ impl Tokenizer {
         }
     }
 
-    pub(crate) fn execute_from_state_end_only(&self, input: &[u8], start: u32) -> Option<u32> {
+    fn execute_from_state_end_only(&self, input: &[u8], start: u32) -> Option<u32> {
         self.scan_input(input, start, &mut (), |_, _, _, _| {})
     }
 
-    pub fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult {
+    fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult {
         let exec = self.execute_from_state_all_widths(input, start);
         let end_state = exec.end_state.unwrap_or(start);
         TokenizerResult {
@@ -245,15 +320,15 @@ impl Tokenizer {
         }
     }
 
-    pub fn initial_state(&self) -> u32 {
+    fn initial_state(&self) -> u32 {
         self.start_state()
     }
 
-    pub fn initial_state_id(&self) -> u32 {
+    fn initial_state_id(&self) -> u32 {
         self.initial_state()
     }
 
-    pub fn tokens_accessible_from_state(&self, state: u32) -> &BitSet {
+    fn tokens_accessible_from_state(&self, state: u32) -> &BitSet {
         self.possible_future_terminals(state)
     }
 
@@ -278,7 +353,7 @@ impl Tokenizer {
     /// Only post-byte finalizers count.
     ///
     /// `terminals_of_interest` must have length equal to `self.num_terminals`.
-    pub fn scan_terminal_matches_from_state(
+    fn scan_terminal_matches_from_state(
         &self,
         input: &[u8],
         start: u32,
@@ -539,6 +614,34 @@ impl Tokenizer {
                 post_minimize_states as u32,
             ),
         )
+    }
+}
+
+impl Lexer for Tokenizer {
+    fn start_state(&self) -> u32 { self.start_state() }
+    fn num_terminals(&self) -> u32 { self.num_terminals() }
+    fn transitions_from(&self, state: u32) -> impl Iterator<Item = (u8, u32)> + '_ { self.transitions_from(state) }
+    fn fill_transition_row(&self, state: u32, row: &mut [u32; 256]) { self.fill_transition_row(state, row); }
+    fn transition_row(&self, state: u32) -> Box<[u32; 256]> { self.transition_row(state) }
+    fn self_loop_bytes(&self, state: u32) -> U8Set { self.self_loop_bytes(state) }
+    fn transition_count(&self) -> usize { self.transition_count() }
+    fn step(&self, state: u32, byte: u8) -> Option<u32> { self.step(state, byte) }
+    fn get_transition(&self, state: u32, byte: u8) -> u32 { self.get_transition(state, byte) }
+    fn matched_terminals_iter(&self, state: u32) -> impl Iterator<Item = TerminalID> + '_ { self.matched_terminals_iter(state) }
+    fn possible_future_terminals_iter(&self, state: u32) -> impl Iterator<Item = TerminalID> + '_ { self.possible_future_terminals_iter(state) }
+    fn possible_future_terminals(&self, state: u32) -> &BitSet { self.possible_future_terminals(state) }
+    fn is_end(&self, state: u32) -> bool { self.is_end(state) }
+    fn num_states(&self) -> u32 { self.num_states() }
+    fn num_forced_minimized_states(&self) -> usize { self.num_forced_minimized_states() }
+    fn execute_from_state_all_widths(&self, input: &[u8], start: u32) -> TokenizerExecResult { self.execute_from_state_all_widths(input, start) }
+    fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult { self.execute_from_state(input, start) }
+    fn execute_from_state_end_only(&self, input: &[u8], start: u32) -> Option<u32> { self.execute_from_state_end_only(input, start) }
+    fn execute_all_matches(&self, input: &[u8], start: u32) -> TokenizerResult { self.execute_all_matches(input, start) }
+    fn initial_state(&self) -> u32 { self.initial_state() }
+    fn initial_state_id(&self) -> u32 { self.initial_state_id() }
+    fn tokens_accessible_from_state(&self, state: u32) -> &BitSet { self.tokens_accessible_from_state(state) }
+    fn scan_terminal_matches_from_state(&self, input: &[u8], start: u32, terminals_of_interest: &BitSet) -> (BitSet, Option<u32>) {
+        self.scan_terminal_matches_from_state(input, start, terminals_of_interest)
     }
 }
 

@@ -62,7 +62,7 @@ pub fn parse_regex(pattern: &str, utf8: bool) -> Expr {
     }
 }
 
-pub(crate) fn unescape_literal(input: &[u8]) -> Vec<u8> {
+fn unescape_literal(input: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(input.len());
     let mut index = 0;
     while index < input.len() {

@@ -5,6 +5,7 @@
 //! byte-sorted leaf ordinals, so every subtree is normally one contiguous token
 //! interval.
 
+use crate::automata::lexer::Lexer;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
