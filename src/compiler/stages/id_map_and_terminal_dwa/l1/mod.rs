@@ -879,6 +879,8 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     if states.len() <= 1 {
         return states.to_vec();
     }
+    let profile_enabled = compile_profile_enabled();
+    let total_started_at = profile_enabled.then(Instant::now);
 
     // Exact L1 equivalence has a useful factorization.  For a non-empty token
     // b·suffix, the contribution of a start state s depends on s only through
@@ -889,8 +891,12 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     // then classify a start state by the small vector of profile IDs reached by
     // its first-byte transitions.
     let sorted_entries = vocab_order.token_entries_sorted.as_ref();
+    let terminal_signature_started_at = profile_enabled.then(Instant::now);
     let state_to_terminal_signature =
         build_l1_state_to_terminal_signature(tokenizer, active_terminals);
+    let terminal_signature_ms = terminal_signature_started_at.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
     let token_buckets = &vocab_order.token_buckets;
     let dead = u32::MAX;
 
@@ -901,6 +907,7 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         .filter_map(|(byte, token_ids)| (!token_ids.is_empty()).then_some(byte))
         .collect();
 
+    let unique_targets_started_at = profile_enabled.then(Instant::now);
     let mut unique_targets = FxHashSet::<(u8, u32)>::default();
     for &state in states {
         let base = state * 256;
@@ -914,26 +921,47 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
 
     let mut unique_targets: Vec<(u8, u32)> = unique_targets.into_iter().collect();
     unique_targets.sort_unstable();
+    let unique_targets_len = unique_targets.len();
+    let unique_targets_ms = unique_targets_started_at.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
 
-    let build_target_profile = |&(byte, target): &(u8, u32)| {
-        let byte_idx = byte as usize;
-        let profile = l1_bucket_suffix_signature_profile(
-            target,
+    let target_profiles_started_at = profile_enabled.then(Instant::now);
+    let mut targets_by_first_byte = vec![Vec::<u32>::new(); 256];
+    for (byte, target) in unique_targets {
+        targets_by_first_byte[byte as usize].push(target);
+    }
+    let byte_target_groups: Vec<(u8, Vec<u32>)> = targets_by_first_byte
+        .into_iter()
+        .enumerate()
+        .filter_map(|(byte, targets)| (!targets.is_empty()).then_some((byte as u8, targets)))
+        .collect();
+    let build_byte_profiles = |(byte, targets): &(u8, Vec<u32>)| {
+        let byte_idx = *byte as usize;
+        l1_bucket_suffix_signature_profiles_batched(
+            *byte,
+            targets,
             sorted_entries,
             &token_buckets.token_indices_by_first_byte[byte_idx],
             &token_buckets.suffix_lcps_by_first_byte[byte_idx],
+            &token_buckets.suffix_subtree_bytes[byte_idx],
             &state_to_terminal_signature,
             flat_trans,
-        );
-        ((byte, target), profile)
+        )
     };
-    let target_profiles: Vec<((u8, u32), Vec<(u32, u32, u32)>)> =
+    let target_profile_batches: Vec<Vec<((u8, u32), Vec<(u32, u32, u32)>)>> =
         if rayon::current_num_threads() == 1 {
-            unique_targets.iter().map(build_target_profile).collect()
+            byte_target_groups.iter().map(build_byte_profiles).collect()
         } else {
-            unique_targets.par_iter().map(build_target_profile).collect()
+            byte_target_groups.par_iter().map(build_byte_profiles).collect()
         };
+    let target_profiles: Vec<((u8, u32), Vec<(u32, u32, u32)>)> =
+        target_profile_batches.into_iter().flatten().collect();
+    let target_profiles_ms = target_profiles_started_at.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
 
+    let profile_intern_started_at = profile_enabled.then(Instant::now);
     let mut profile_to_id = FxHashMap::<Vec<(u32, u32, u32)>, u32>::default();
     profile_to_id.insert(Vec::new(), 0);
     let mut next_profile_id = 1u32;
@@ -946,7 +974,12 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         });
         target_to_profile_id.insert(target_key, profile_id);
     }
+    let profile_ids_len = next_profile_id as usize;
+    let profile_intern_ms = profile_intern_started_at.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
 
+    let state_keys_started_at = profile_enabled.then(Instant::now);
     let build_state_key = |&state: &usize| {
         let mut key = Vec::<(u16, u32)>::with_capacity(nonempty_first_bytes.len() + 1);
 
@@ -979,72 +1012,144 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     } else {
         states.par_iter().map(build_state_key).collect()
     };
-
-    let mut order: Vec<usize> = (0..states.len()).collect();
-    order.sort_unstable_by(|&left, &right| {
-        state_keys[left]
-            .cmp(&state_keys[right])
-            .then_with(|| states[left].cmp(&states[right]))
+    let state_keys_ms = state_keys_started_at.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
     });
 
-    let mut mapping = vec![0usize; states.len()];
-    let mut current_rep = states[order[0]];
-    mapping[order[0]] = current_rep;
-    for pair in order.windows(2) {
-        let previous = pair[0];
-        let current = pair[1];
-        if state_keys[current] != state_keys[previous] {
-            current_rep = states[current];
-        }
-        mapping[current] = current_rep;
+    let group_started_at = profile_enabled.then(Instant::now);
+    let mut key_to_rep = FxHashMap::<Vec<(u16, u32)>, usize>::default();
+    let mut mapping = Vec::<usize>::with_capacity(states.len());
+    for (&state, key) in states.iter().zip(state_keys) {
+        let rep = *key_to_rep.entry(key).or_insert(state);
+        mapping.push(rep);
+    }
+    let groups_len = key_to_rep.len();
+    let group_ms = group_started_at.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
+
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][l1_exact_equiv_detail] states={} first_bytes={} unique_targets={} profile_ids={} groups={} terminal_signature_ms={:.3} unique_targets_ms={:.3} target_profiles_ms={:.3} profile_intern_ms={:.3} state_keys_ms={:.3} group_ms={:.3} total_ms={:.3}",
+            states.len(),
+            nonempty_first_bytes.len(),
+            unique_targets_len,
+            profile_ids_len,
+            groups_len,
+            terminal_signature_ms,
+            unique_targets_ms,
+            target_profiles_ms,
+            profile_intern_ms,
+            state_keys_ms,
+            group_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
     }
 
     mapping
 }
 
-fn l1_bucket_suffix_signature_profile(
-    first_target: u32,
+fn l1_target_self_loop_covers_suffix_subtree(
+    target: u32,
+    suffix_subtree: &[u64; 4],
+    flat_trans: &[u32],
+) -> bool {
+    for word in 0..4usize {
+        let mut bits = suffix_subtree[word];
+        while bits != 0 {
+            let offset = bits.trailing_zeros() as usize;
+            let byte = word * 64 + offset;
+            if flat_trans[target as usize * 256 + byte] != target {
+                return false;
+            }
+            bits &= bits - 1;
+        }
+    }
+    true
+}
+
+fn l1_bucket_suffix_signature_profiles_batched(
+    first_byte: u8,
+    targets: &[u32],
     sorted_entries: &[(u32, Arc<[u8]>)],
     token_ids: &[usize],
     suffix_lcps: &[usize],
+    suffix_subtree: &[u64; 4],
     state_to_terminal_signature: &[u32],
     flat_trans: &[u32],
-) -> Vec<(u32, u32, u32)> {
+) -> Vec<((u8, u32), Vec<(u32, u32, u32)>)> {
     let dead = u32::MAX;
-    let mut profile = Vec::<(u32, u32, u32)>::new();
-    let mut suffix_states = vec![first_target];
+    let mut results = Vec::<((u8, u32), Vec<(u32, u32, u32)>)>::with_capacity(targets.len());
+    if token_ids.is_empty() {
+        for &target in targets {
+            results.push(((first_byte, target), Vec::new()));
+        }
+        return results;
+    }
 
-    for (bucket_pos, &internal_token_id) in token_ids.iter().enumerate() {
-        let suffix_bytes = &sorted_entries[internal_token_id].1[1..];
-        let lcp_len = suffix_lcps[bucket_pos].min(suffix_states.len().saturating_sub(1));
-        suffix_states.truncate(lcp_len + 1);
-
-        let mut state = *suffix_states.last().unwrap_or(&first_target);
-        if state == dead {
-            suffix_states.resize(suffix_bytes.len() + 1, dead);
-        } else {
-            for &byte in &suffix_bytes[lcp_len..] {
-                state = flat_trans[state as usize * 256 + byte as usize];
-                suffix_states.push(state);
-                if state == dead {
-                    suffix_states.resize(suffix_bytes.len() + 1, dead);
-                    break;
+    let mut walk_targets = Vec::<u32>::new();
+    for &target in targets {
+        if l1_target_self_loop_covers_suffix_subtree(target, suffix_subtree, flat_trans) {
+            let mut profile = Vec::<(u32, u32, u32)>::new();
+            let sig_id = state_to_terminal_signature[target as usize];
+            if sig_id != 0 {
+                if let (Some(&first), Some(&last)) = (token_ids.first(), token_ids.last()) {
+                    profile.push((sig_id, first as u32, last as u32));
                 }
             }
-        }
-
-        let final_state = suffix_states[suffix_bytes.len()];
-        if final_state == dead {
-            continue;
-        }
-        let sig_id = state_to_terminal_signature[final_state as usize];
-        if sig_id != 0 {
-            append_l1_signature_profile_run(&mut profile, sig_id, internal_token_id as u32);
+            results.push(((first_byte, target), profile));
+        } else {
+            walk_targets.push(target);
         }
     }
 
-    profile
+    if walk_targets.is_empty() {
+        return results;
+    }
+
+    let num_walk = walk_targets.len();
+    let mut profiles = vec![Vec::<(u32, u32, u32)>::new(); num_walk];
+    let mut suffix_states = walk_targets.clone();
+
+    for (bucket_pos, &internal_token_id) in token_ids.iter().enumerate() {
+        let suffix_bytes = &sorted_entries[internal_token_id].1[1..];
+        let lcp_len = suffix_lcps[bucket_pos].min(suffix_states.len() / num_walk - 1);
+        suffix_states.truncate((lcp_len + 1) * num_walk);
+
+        for byte_pos in lcp_len..suffix_bytes.len() {
+            let byte = suffix_bytes[byte_pos];
+            let base = byte_pos * num_walk;
+            for target_idx in 0..num_walk {
+                let previous_state = suffix_states[base + target_idx];
+                let next_state = if previous_state == dead {
+                    dead
+                } else {
+                    flat_trans[previous_state as usize * 256 + byte as usize]
+                };
+                suffix_states.push(next_state);
+            }
+        }
+
+        let end_base = suffix_bytes.len() * num_walk;
+        let token_id = internal_token_id as u32;
+        for target_idx in 0..num_walk {
+            let final_state = suffix_states[end_base + target_idx];
+            if final_state == dead {
+                continue;
+            }
+            let sig_id = state_to_terminal_signature[final_state as usize];
+            if sig_id != 0 {
+                append_l1_signature_profile_run(&mut profiles[target_idx], sig_id, token_id);
+            }
+        }
+    }
+
+    for (target, profile) in walk_targets.into_iter().zip(profiles) {
+        results.push(((first_byte, target), profile));
+    }
+    results
 }
+
 
 #[derive(Debug)]
 struct L1SortedTokenBuckets {

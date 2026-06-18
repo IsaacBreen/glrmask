@@ -308,8 +308,7 @@ pub(super) fn plan_compaction_for_weight_refs(
     let unique_weights = collect_unique_weights_from_weight_refs(weights);
     let unique_ms = unique_started_at.map_or(0.0, elapsed_ms);
     let build_started_at = profile_compaction.then(Instant::now);
-    let use_thread_pool = allow_expensive_layout
-        || unique_weights.len() >= MIN_UNIQUE_WEIGHTS_FOR_COMPACTION_POOL;
+    let use_thread_pool = allow_expensive_layout;
     let build_compaction = || {
         build_dimension_compaction(
             &unique_weights,
@@ -369,7 +368,7 @@ pub(super) fn apply_compaction_plan_to_weight_refs(
     let unique_ms = unique_started_at.map_or(0.0, elapsed_ms);
 
     let apply_weights_started_at = profile_compaction.then(Instant::now);
-    let use_thread_pool = unique_weights.len() >= MIN_UNIQUE_WEIGHTS_FOR_COMPACTION_POOL;
+    let use_thread_pool = false;
     if !plan.is_identity(num_tsids, num_tokens) {
         let mut apply_compaction = || {
             apply_permutations_to_weight_refs(
@@ -483,10 +482,15 @@ fn build_default_dimension_compaction(
     use_default_layout: bool,
     adaptive_layout: bool,
 ) -> DimensionCompaction {
+    let profile_compaction = env_flag("GLRMASK_PROFILE_COMPILE");
+    let total_started_at = profile_compaction.then(Instant::now);
     let original_weight_refs = weight_refs(unique_weights);
 
+    let token_merge_started_at = profile_compaction.then(Instant::now);
     let (token_merge_perm, merged_num_tokens) =
         build_exact_token_merge_permutation(&original_weight_refs, num_tokens);
+    let token_merge_ms = token_merge_started_at.map_or(0.0, elapsed_ms);
+    let token_order_started_at = profile_compaction.then(Instant::now);
     let token_perm = if use_default_layout {
         if adaptive_layout {
             order_token_groups_exact_profile(unique_weights, token_merge_perm, merged_num_tokens)
@@ -496,12 +500,18 @@ fn build_default_dimension_compaction(
     } else {
         token_merge_perm
     };
+    let token_order_ms = token_order_started_at.map_or(0.0, elapsed_ms);
 
+    let apply_token_started_at = profile_compaction.then(Instant::now);
     let token_compacted_weights =
         apply_permutations_to_weight_set(unique_weights, &identity_perm(num_tsids), &token_perm);
+    let apply_token_ms = apply_token_started_at.map_or(0.0, elapsed_ms);
     let token_compacted_refs = weight_refs(&token_compacted_weights);
+    let tsid_merge_started_at = profile_compaction.then(Instant::now);
     let (tsid_merge_perm, merged_num_tsids) =
         build_exact_tsid_merge_permutation(&token_compacted_refs, num_tsids);
+    let tsid_merge_ms = tsid_merge_started_at.map_or(0.0, elapsed_ms);
+    let tsid_order_started_at = profile_compaction.then(Instant::now);
     let tsid_perm = if merged_num_tsids == num_tsids || !use_default_layout {
         tsid_merge_perm
     } else {
@@ -521,6 +531,24 @@ fn build_default_dimension_compaction(
             )
         }
     };
+    let tsid_order_ms = tsid_order_started_at.map_or(0.0, elapsed_ms);
+
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][mapped_compaction_default_detail] unique_weights={} num_tsids={} num_tokens={} merged_tokens={} merged_tsids={} token_merge_ms={:.3} token_order_ms={:.3} apply_token_ms={:.3} tsid_merge_ms={:.3} tsid_order_ms={:.3} total_ms={:.3}",
+            unique_weights.len(),
+            num_tsids,
+            num_tokens,
+            merged_num_tokens,
+            merged_num_tsids,
+            token_merge_ms,
+            token_order_ms,
+            apply_token_ms,
+            tsid_merge_ms,
+            tsid_order_ms,
+            elapsed_ms(total_started_at),
+        );
+    }
 
     DimensionCompaction {
         tsid_perm,
