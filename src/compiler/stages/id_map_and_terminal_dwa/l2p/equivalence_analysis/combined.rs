@@ -230,7 +230,7 @@ struct TokenLengthStats {
 }
 
 fn skip_max_length_for_partition(partition_label: &str) -> bool {
-    if partition_label == "p5" {
+    if matches!(partition_label, "p5" | "p7") {
         return true;
     }
     static SKIPPED_PARTITIONS: OnceLock<Vec<String>> = OnceLock::new();

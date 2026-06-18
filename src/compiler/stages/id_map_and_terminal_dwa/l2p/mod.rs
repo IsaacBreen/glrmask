@@ -642,7 +642,13 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let minimize_started_at = Instant::now();
-            let dwa = minimize(&det);
+            let skip_minimize = std::env::var("GLRMASK_SKIP_L2P_MINIMIZE")
+                .map(|value| {
+                    let trimmed = value.trim();
+                    trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+                })
+                .unwrap_or(true);
+            let dwa = if skip_minimize { det } else { minimize(&det) };
             let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
             let dwa_stats_before_compact = dwa.stats();
             let dwa_stats_after_compact = dwa.stats();
