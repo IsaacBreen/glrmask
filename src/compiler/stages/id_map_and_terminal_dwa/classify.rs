@@ -1,7 +1,7 @@
 //! Vocab and terminal classification utilities.
 
 use crate::automata::lexer::Lexer;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::ds::bitset::BitSet;
@@ -28,6 +28,7 @@ pub type SharedClassifyCache = std::sync::OnceLock<SharedClassifyBytesets>;
 pub(crate) struct L2pVocabBoundarySplit {
     pub(crate) boundary_vocab: Vocab,
     pub(crate) single_vocab: Vocab,
+    pub(crate) adjacent_tokens: usize,
     pub(crate) boundary_tokens: usize,
     pub(crate) single_tokens: usize,
     pub(crate) irrelevant_tokens: usize,
@@ -436,6 +437,125 @@ fn token_has_active_l2p_boundary(bytes: &[u8], allowed_boundary_pairs: &[U8Set; 
         .any(|pair| allowed_boundary_pairs[pair[0] as usize].contains(pair[1]))
 }
 
+fn exact_l2p_boundary_filter_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_EXACT_L2P_BOUNDARY_FILTER")
+            .map(|value| {
+                let trimmed = value.trim();
+                trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+            })
+            .unwrap_or(true)
+    })
+}
+
+fn suffix_has_allowed_l2p_follow(
+    tokenizer: &Tokenizer,
+    terminal_1: usize,
+    suffix: &[u8],
+    active_bitset: &BitSet,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+) -> bool {
+    let allowed_after = disallowed_follows
+        .get(&(terminal_1 as u32))
+        .map_or_else(|| active_bitset.clone(), |blocked| active_bitset.difference(blocked));
+    if allowed_after.is_empty() {
+        return false;
+    }
+
+    let mut state = tokenizer.initial_state_id();
+    for &byte in suffix {
+        if tokenizer
+            .possible_future_terminals(state)
+            .is_disjoint(&allowed_after)
+        {
+            return false;
+        }
+        let Some(next) = tokenizer.step(state, byte) else {
+            return false;
+        };
+        state = next;
+        for terminal in tokenizer.matched_terminals_iter(state) {
+            if allowed_after.contains(terminal as usize) {
+                return true;
+            }
+        }
+    }
+
+    !tokenizer
+        .possible_future_terminals(state)
+        .is_disjoint(&allowed_after)
+}
+
+fn token_has_exact_active_l2p_boundary(
+    tokenizer: &Tokenizer,
+    bytes: &[u8],
+    active_bitset: &BitSet,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    active_start_states: &[u32],
+) -> bool {
+    if bytes.len() < 2 {
+        return false;
+    }
+
+    let mut current_states = active_start_states.to_vec();
+    let mut next_states = Vec::<u32>::new();
+    let mut seen = vec![0u32; tokenizer.num_states() as usize];
+    let mut seen_stamp = 0u32;
+    let mut suffix_cache = HashMap::<(usize, usize), bool>::new();
+
+    for split_after in 0..bytes.len() - 1 {
+        seen_stamp = seen_stamp.wrapping_add(1);
+        if seen_stamp == 0 {
+            seen.fill(0);
+            seen_stamp = 1;
+        }
+        next_states.clear();
+
+        for &state in &current_states {
+            let Some(next) = tokenizer.step(state, bytes[split_after]) else {
+                continue;
+            };
+            let slot = &mut seen[next as usize];
+            if *slot == seen_stamp {
+                continue;
+            }
+            *slot = seen_stamp;
+            next_states.push(next);
+        }
+
+        if next_states.is_empty() {
+            return false;
+        }
+
+        for &state in &next_states {
+            for terminal_1 in tokenizer.matched_terminals_iter(state) {
+                let terminal_1 = terminal_1 as usize;
+                if !active_bitset.contains(terminal_1) {
+                    continue;
+                }
+                let suffix_start = split_after + 1;
+                let has_follow = *suffix_cache.entry((terminal_1, suffix_start)).or_insert_with(|| {
+                    suffix_has_allowed_l2p_follow(
+                        tokenizer,
+                        terminal_1,
+                        &bytes[suffix_start..],
+                        active_bitset,
+                        disallowed_follows,
+                    )
+                });
+                if has_follow {
+                    return true;
+                }
+            }
+        }
+
+        std::mem::swap(&mut current_states, &mut next_states);
+    }
+
+    false
+}
+
 pub(crate) fn split_vocab_for_active_l2p_terminals(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -456,6 +576,17 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
         .iter()
         .enumerate()
         .filter_map(|(terminal, active)| active.then_some(terminal))
+        .collect();
+    let mut active_bitset = BitSet::new(num_terminals as usize);
+    for &terminal in &active {
+        active_bitset.set(terminal);
+    }
+    let active_start_states: Vec<u32> = (0..tokenizer.num_states())
+        .filter(|&state| {
+            !tokenizer
+                .possible_future_terminals(state)
+                .is_disjoint(&active_bitset)
+        })
         .collect();
     let mut allowed_boundary_pairs = [U8Set::empty(); 256];
     let mut active_reachable = U8Set::empty();
@@ -488,11 +619,27 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
 
     let mut boundary_entries = Vec::<(u32, Vec<u8>)>::new();
     let mut single_entries = Vec::<(u32, Vec<u8>)>::new();
+    let mut adjacent_tokens = 0usize;
     let mut irrelevant_tokens = 0usize;
+    let use_exact_boundary_filter = exact_l2p_boundary_filter_enabled();
 
     for (&token_id, bytes) in vocab.entries.iter() {
         if token_has_active_l2p_boundary(bytes, &allowed_boundary_pairs) {
-            boundary_entries.push((token_id, bytes.clone()));
+            adjacent_tokens += 1;
+            if !use_exact_boundary_filter
+                || token_has_exact_active_l2p_boundary(
+                tokenizer,
+                bytes,
+                &active_bitset,
+                disallowed_follows,
+                &active_start_states,
+            ) {
+                boundary_entries.push((token_id, bytes.clone()));
+            } else if bytes.iter().any(|&byte| active_reachable.contains(byte)) {
+                single_entries.push((token_id, bytes.clone()));
+            } else {
+                irrelevant_tokens += 1;
+            }
             continue;
         }
 
@@ -508,6 +655,7 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
     L2pVocabBoundarySplit {
         boundary_vocab: Vocab::new(boundary_entries, None),
         single_vocab: Vocab::new(single_entries, None),
+        adjacent_tokens,
         boundary_tokens,
         single_tokens,
         irrelevant_tokens,

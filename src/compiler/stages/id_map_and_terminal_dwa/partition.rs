@@ -236,9 +236,10 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                 }
                 if compile_profile_enabled() {
                     eprintln!(
-                        "[glrmask/profile][l2p_vocab_split] partition={} total_tokens={} boundary_tokens={} single_tokens={} irrelevant_tokens={} boundary_ms={:.3} single_ms={:.3}",
+                        "[glrmask/profile][l2p_vocab_split] partition={} total_tokens={} adjacent_tokens={} boundary_tokens={} single_tokens={} irrelevant_tokens={} boundary_ms={:.3} single_ms={:.3}",
                         partition_label,
                         vocab.entries.len(),
+                        split.adjacent_tokens,
                         split.boundary_tokens,
                         split.single_tokens,
                         split.irrelevant_tokens,
