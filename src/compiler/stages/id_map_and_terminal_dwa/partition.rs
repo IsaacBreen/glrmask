@@ -124,6 +124,19 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             shared_classify_cache,
         )
     });
+    let combine_no_boundary_l2p_single_with_l1 = has_l1
+        && l2p_vocab_split
+            .as_ref()
+            .is_some_and(|split| split.boundary_vocab.is_empty() && !split.single_vocab.is_empty());
+    let l1_build_mask: Vec<bool> = if combine_no_boundary_l2p_single_with_l1 {
+        l1_mask
+            .iter()
+            .zip(&l2p_mask)
+            .map(|(&is_l1, &is_l2p)| is_l1 || is_l2p)
+            .collect()
+    } else {
+        l1_mask.clone()
+    };
 
     // Build L1 and L2+ terminal DWAs in parallel. L2+ terminals get an
     // additional token split: only tokens that can actually cross an active
@@ -142,7 +155,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     use_terminal_coloring,
                     ignore_terminal,
                     grammar,
-                    &l1_mask,
+                    &l1_build_mask,
                     flat_trans,
                     initial_state_map,
                 );
@@ -178,6 +191,22 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                         started_at.elapsed().as_secs_f64() * 1000.0,
                     );
                 };
+                if combine_no_boundary_l2p_single_with_l1 {
+                    if compile_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][l2p_vocab_split] partition={} total_tokens={} adjacent_tokens={} boundary_tokens={} single_tokens={} irrelevant_tokens={} boundary_ms={:.3} single_ms={:.3} combined_with_l1=true",
+                            partition_label,
+                            vocab.entries.len(),
+                            split.adjacent_tokens,
+                            split.boundary_tokens,
+                            split.single_tokens,
+                            split.irrelevant_tokens,
+                            0.0,
+                            0.0,
+                        );
+                    }
+                    return (Vec::new(), 0.0);
+                }
                 let ((boundary_result, boundary_ms), (single_result, single_ms)) = rayon::join(
                     || {
                         if split.boundary_vocab.is_empty() {
