@@ -445,7 +445,7 @@ fn exact_l2p_boundary_filter_enabled() -> bool {
                 let trimmed = value.trim();
                 trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
             })
-            .unwrap_or(true)
+            .unwrap_or(false)
     })
 }
 
