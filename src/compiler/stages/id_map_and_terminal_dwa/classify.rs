@@ -325,7 +325,7 @@ fn structural_boundary_lexical_partition_enabled() -> bool {
                 let trimmed = value.trim();
                 trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
