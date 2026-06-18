@@ -137,10 +137,10 @@ fn dwa_possible_matches_mode() -> DwaPossibleMatchesMode {
             _ => DwaPossibleMatchesMode::TerminalReconcile,
         },
         Err(_) => {
-            // Parser-side PM compaction remains available via `GLRMASK_DWA_PM_MODE=both`
-            // and the parser compact modes, but it is not the default because large
-            // schemas can pay several extra compile seconds for small artifact-size wins.
-            DwaPossibleMatchesMode::TerminalReconcileAndCompact
+            // PM compaction remains available via `GLRMASK_DWA_PM_MODE=terminal_compact`,
+            // `parser_pm_compact`, and `both`, but it is not the default because large
+            // schemas can pay substantial compile time for small artifact-size wins.
+            DwaPossibleMatchesMode::TerminalReconcile
         }
     }
 }
