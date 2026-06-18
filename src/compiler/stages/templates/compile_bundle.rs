@@ -284,6 +284,15 @@ fn minimize_template_bundles_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn template_bundle_subset_union_index_enabled() -> bool {
+    std::env::var("GLRMASK_TEMPLATE_BUNDLE_SUBSET_UNION_INDEX")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
 fn count_unweighted_dfa_transitions(dfa: &UnweightedDfa) -> usize {
     dfa.states.iter().map(|state| state.transitions.len()).sum()
 }
@@ -580,7 +589,7 @@ fn determinize_bundle_groups_profiled(
         .collect::<Option<Vec<_>>>();
 
     let mut subset_union_cache: FxHashMap<SubsetKey, Weight> = FxHashMap::default();
-    let subset_unions = (n >= 32).then(|| SubsetUnionIndex::new(&group_weights));
+    let subset_unions = template_bundle_subset_union_index_enabled().then(|| SubsetUnionIndex::new(&group_weights));
 
     let start_key: Vec<(u32, u32)> = groups
         .iter()
@@ -739,7 +748,7 @@ fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
         .collect::<Option<Vec<_>>>();
 
     let mut subset_union_cache: FxHashMap<SubsetKey, Weight> = FxHashMap::default();
-    let subset_unions = (n >= 32).then(|| SubsetUnionIndex::new(&group_weights));
+    let subset_unions = template_bundle_subset_union_index_enabled().then(|| SubsetUnionIndex::new(&group_weights));
 
     let start_key: Vec<(u32, u32)> = groups
         .iter()
