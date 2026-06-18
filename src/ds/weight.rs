@@ -1738,6 +1738,16 @@ impl Weight {
         self.0.ranges().count()
     }
 
+    /// Return the set of TSID ranges covered by this weight, ignoring token
+    /// subranges. `None` denotes the mathematical full weight, whose TSID
+    /// coverage may overlap any finite TSID set.
+    pub(crate) fn tsid_coverage(&self) -> Option<RangeSetBlaze<u32>> {
+        if self.is_full() {
+            return None;
+        }
+        Some(self.0.ranges().collect())
+    }
+
     pub fn union(&self, other: &Self) -> Self {
         if self.is_full() || other.is_full() {
             return Self::all();
