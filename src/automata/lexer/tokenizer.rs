@@ -6,7 +6,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::automata::dfa::DFA;
+use super::dfa::DFA;
 use crate::automata::regex::Expr;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::ds::bitset::BitSet;

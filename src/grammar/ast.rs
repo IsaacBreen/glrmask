@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr;
-use crate::automata::lexer::dfa::DFA as LexerDFA;
+use crate::automata::lexer::DFA as LexerDFA;
 use crate::automata::unweighted_u32::dfa::DFA;
 use crate::automata::lexer::regex::parse_regex;
 use crate::ds::u8set::U8Set;
