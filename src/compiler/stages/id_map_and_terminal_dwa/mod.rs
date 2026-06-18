@@ -25,6 +25,7 @@ use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
 use classify::classify_vocab_char_type;
+use grammar_helpers::ignore_transparent_disallowed_follows;
 use l2p::equivalence_analysis::state_equivalence::{
     resolve_global_pipeline_config, run_state_equivalence_pipeline, StateEquivalenceScope,
 };
@@ -256,7 +257,8 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     use_terminal_coloring: bool,
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
+    parser_disallowed_follows: &BTreeMap<u32, BitSet>,
+    token_path_disallowed_follows: &BTreeMap<u32, BitSet>,
     flat_trans: Arc<[u32]>,
     global_max_length_state_map: &ManyToOneIdMap,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
@@ -288,7 +290,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             let partitioning = classify::partition_vocab_by_l2p_cost(
                 vocab,
                 bytesets,
-                disallowed_follows,
+                token_path_disallowed_follows,
                 grammar.num_terminals,
                 num_partitions,
                 cost_fn,
@@ -328,7 +330,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
                         objective.as_str(),
                         num_partitions,
                         grammar.num_terminals,
-                        disallowed_follows.len(),
+                        token_path_disallowed_follows.len(),
                         min_grammar_terminals_limit,
                         char_partition_sizes,
                     );
@@ -348,7 +350,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
                     classify::partition_vocab_by_l2p_cost_with_token_map(
                         vocab,
                         bytesets,
-                        disallowed_follows,
+                        token_path_disallowed_follows,
                         grammar.num_terminals,
                         num_partitions,
                         cost_fn,
@@ -403,7 +405,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
                         char_score,
                         second_largest,
                         second_largest_limit,
-                        disallowed_follows.len(),
+                        token_path_disallowed_follows.len(),
                         max_estimated_l2p_terminals,
                         min_estimated_l2p_terminals_limit,
                         max_estimated_l2p_terminals_limit,
@@ -457,7 +459,8 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
                 use_terminal_coloring,
                 ignore_terminal,
                 grammar,
-                disallowed_follows,
+                parser_disallowed_follows,
+                token_path_disallowed_follows,
                 &flat_trans,
                 Some(global_max_length_state_map),
                 Some(&shared_vocab_dfa_cache),
@@ -586,6 +589,9 @@ pub(crate) fn build_id_map_and_terminal_dwa(
         build_global_max_length_state_map(tokenizer, vocab, &flat_trans);
     let global_max_length_ms = global_max_length_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let token_path_disallowed_follows =
+        ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal);
+
     let (mapped_dwa, mut inner_profile) =
         build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             tokenizer,
@@ -595,6 +601,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
             ignore_terminal,
             grammar,
             disallowed_follows,
+            &token_path_disallowed_follows,
             flat_trans,
             &global_max_length_state_map,
             external_classify_cache,

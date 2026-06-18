@@ -362,7 +362,8 @@ fn project_initial_state_map_for_simplified_tokenizer(
 /// 6. Postprocess: always_allowed → collapse → disallowed → prune → canonicalize
 /// 7. Determinize → minimize
 ///
-/// `disallowed_follows` is threaded explicitly for id_map building.
+/// Parser-visible disallowed follows are used for visible-label postprocess.
+/// Ignore-transparent token-path disallowed follows are used for id_map/equivalence.
 ///
 /// Returns `None` if the vocab is empty.
 pub(crate) fn build_l2p_id_map_and_terminal_dwa(
@@ -374,7 +375,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     active_terminals: &[bool],
-    disallowed_follows: &BTreeMap<u32, BitSet>,
+    parser_disallowed_follows: &BTreeMap<u32, BitSet>,
+    token_path_disallowed_follows: &BTreeMap<u32, BitSet>,
     shared_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_simplify_cache: Option<&SharedSimplifyCache>,
     shared_disallowed_follow_dfa_cache: Option<&SharedDisallowedFollowDfaCache>,
@@ -495,7 +497,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             partition_label,
             tokenizer_for_build,
             vocab,
-            disallowed_follows,
+            token_path_disallowed_follows,
             ignore_terminal,
             None,
             shared_vocab_dfa_cache,
@@ -619,7 +621,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let disallowed_started_at = Instant::now();
             apply_disallowed_follow_constraints(
                 &mut nwa,
-                disallowed_follows,
+                parser_disallowed_follows,
                 grammar.num_terminals as usize,
                 shared_disallowed_follow_dfa_cache,
             );

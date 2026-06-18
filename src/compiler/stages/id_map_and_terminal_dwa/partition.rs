@@ -36,7 +36,8 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     use_terminal_coloring: bool,
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
+    parser_disallowed_follows: &BTreeMap<u32, BitSet>,
+    token_path_disallowed_follows: &BTreeMap<u32, BitSet>,
     flat_trans: &Arc<[u32]>,
     initial_state_map: Option<&ManyToOneIdMap>,
     _shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
@@ -58,7 +59,13 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     let terminal_path_lengths = if force_all_l2p {
         vec![TerminalPathLength::TwoPlus; num_terminals as usize]
     } else {
-        classify_terminal_path_lengths(tokenizer, vocab, disallowed_follows, num_terminals, shared_classify_cache)
+        classify_terminal_path_lengths(
+            tokenizer,
+            vocab,
+            token_path_disallowed_follows,
+            num_terminals,
+            shared_classify_cache,
+        )
     };
     let classify_ms = classify_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -121,7 +128,8 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     ignore_terminal,
                     grammar,
                     &l2p_mask,
-                    disallowed_follows,
+                    parser_disallowed_follows,
+                    token_path_disallowed_follows,
                     _shared_vocab_dfa_cache,
                     shared_simplify_cache,
                     shared_disallowed_follow_dfa_cache,

@@ -64,6 +64,40 @@ fn total_final_stack_count(stacks: &[(u32, Vec<Vec<u32>>)]) -> usize {
     stacks.iter().map(|(_, stacks)| stacks.len()).sum()
 }
 
+
+#[test]
+fn glrm_ignore_prefix_token_is_mask_commit_equivalent() {
+    let vocab = Vocab::new(
+        vec![
+            (0, b"if".to_vec()),
+            (1, b"(".to_vec()),
+            (2, b" (".to_vec()),
+            (3, b"true".to_vec()),
+            (4, b")".to_vec()),
+            (5, b" ".to_vec()),
+        ],
+        None,
+    );
+    let grammar = r#"
+start start;
+ignore WS;
+t WS ::= ' '+ ;
+nt start ::= 'if' '(' 'true' ')' ;
+"#;
+
+    let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+    let mut state = constraint.start();
+    state.commit_token(0).unwrap();
+
+    let mask = state.mask();
+    assert!(
+        token_allowed(&mask, 2),
+        "token b\" (\" should be admitted after b\"if\" because it is WS followed by '('"
+    );
+
+    state.commit_token(2).unwrap();
+}
+
 fn byte_vocab_with_separator_token() -> (Vocab, u32) {
     let mut entries: Vec<(u32, Vec<u8>)> = (0u32..=255).map(|byte| (byte, vec![byte as u8])).collect();
     let separator_token_id = 256;

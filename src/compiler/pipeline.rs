@@ -24,6 +24,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
 use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::{
     compute_ever_allowed_follows,
     compute_terminal_coloring,
+    ignore_transparent_disallowed_follows,
 };
 use crate::compiler::stages::mapped_artifact::{
     MappedArtifact,
@@ -524,7 +525,11 @@ fn compile_prepared_with_profile_and_table_construction(
         profile.disallowed_follows_ms = disallowed_follows_ms;
         profile.analysis_wall_ms = elapsed_ms(analysis_started_at);
 
-        let disallowed_follows_for_classification = &disallowed_follows;
+        let token_path_disallowed_follows = ignore_transparent_disallowed_follows(
+            &disallowed_follows,
+            prepared_grammar.ignore_terminal,
+        );
+        let disallowed_follows_for_classification = &token_path_disallowed_follows;
         let shared_classify_cache = SharedClassifyCache::new();
         let classify_started_at = Instant::now();
         let _terminal_path_lengths = classify_terminal_path_lengths(
@@ -567,6 +572,7 @@ fn compile_prepared_with_profile_and_table_construction(
                             true,
                             prepared_grammar.ignore_terminal,
                             &analyzed_grammar,
+                            &disallowed_follows,
                             disallowed_follows_for_classification,
                             Arc::clone(&flat_trans),
                             &global_max_length_state_map,

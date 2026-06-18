@@ -1,12 +1,38 @@
 //! Grammar analysis helpers: terminal coloring, follow-set computations.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::GLRTable;
+use crate::ds::bitset::BitSet;
 use crate::grammar::flat::{Symbol, TerminalID};
 
 use super::types::{ColorId, TerminalColoring};
+
+/// Convert parser-visible disallowed follows into a token-path relation where
+/// the ignore terminal is transparent: ignore may follow anything, anything may
+/// follow ignore, and ignore may follow itself.
+///
+/// Keep parser-visible follow tables raw for grammar/table semantics. Use this
+/// only for byte/tokenizer path analysis.
+pub(crate) fn ignore_transparent_disallowed_follows(
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<TerminalID>,
+) -> BTreeMap<u32, BitSet> {
+    let Some(ignore_terminal) = ignore_terminal else {
+        return disallowed_follows.clone();
+    };
+
+    let mut adjusted = disallowed_follows.clone();
+    adjusted.remove(&ignore_terminal);
+    for bits in adjusted.values_mut() {
+        if (ignore_terminal as usize) < bits.len() {
+            bits.clear(ignore_terminal as usize);
+        }
+    }
+    adjusted.retain(|_, bits| !bits.is_zero());
+    adjusted
+}
 
 /// Compute terminal colors so terminals in the same action row get different
 /// colors.

@@ -47,22 +47,6 @@ fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
     }
 }
 
-fn adjust_disallowed_follows(
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-    ignore_terminal: Option<u32>,
-) -> Option<BTreeMap<u32, BitSet>> {
-    let ignore_terminal = ignore_terminal?;
-    let mut adjusted = disallowed_follows.clone();
-    adjusted.remove(&ignore_terminal);
-    for bits in adjusted.values_mut() {
-        if (ignore_terminal as usize) < bits.len() {
-            bits.clear(ignore_terminal as usize);
-        }
-    }
-    adjusted.retain(|_, bits| !bits.is_zero());
-    Some(adjusted)
-}
-
 fn build_state_map(
     state_classes: &BTreeSet<BTreeSet<usize>>,
     num_dfa_states: usize,
@@ -331,14 +315,14 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
+    token_path_disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
-    analyze_equivalences_impl(partition_label, tokenizer, vocab, disallowed_follows, ignore_terminal, active_groups, shared_vocab_dfa_cache, flat_trans, initial_state_map)
+    analyze_equivalences_impl(partition_label, tokenizer, vocab, token_path_disallowed_follows, ignore_terminal, active_groups, shared_vocab_dfa_cache, flat_trans, initial_state_map)
 }
 
 /// Combined equivalence analysis over a flattened tokenizer DFA.
@@ -349,15 +333,14 @@ fn analyze_equivalences_impl(
     partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-    ignore_terminal: Option<u32>,
+    token_path_disallowed_follows: &BTreeMap<u32, BitSet>,
+    _ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
-    let adjusted_disallowed = adjust_disallowed_follows(disallowed_follows, ignore_terminal);
-    let effective_disallowed = adjusted_disallowed.as_ref().unwrap_or(disallowed_follows);
+    let effective_disallowed = token_path_disallowed_follows;
     // Only use shared flat_trans when state count matches the (possibly
     // simplified) tokenizer. If simplify_for_terminals minimized the DFA,
     // the original flat_trans has different state numbering and must be
