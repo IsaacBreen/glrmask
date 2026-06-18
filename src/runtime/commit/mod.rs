@@ -605,8 +605,7 @@ fn apply_future_terminal_disallow(
     };
     if !constraint
         .tokenizer
-        .dfa
-        .possible_future_group_ids(end_state)
+        .possible_future_terminals(end_state)
         .contains(terminal as usize)
     {
         return gss;
@@ -1451,8 +1450,7 @@ fn commit_bytes_direct_linear_fast_path(
                     )
                     && !constraint
                         .tokenizer
-                        .dfa
-                        .possible_future_group_ids(end_state)
+                        .possible_future_terminals(end_state)
                         .contains(step.terminal as usize)
             });
             if let (Some(profile), Some(start)) = (profile.as_deref_mut(), carried_gate_start) {
@@ -1541,8 +1539,7 @@ fn commit_bytes_direct_linear_fast_path(
                         )
                         && !constraint
                             .tokenizer
-                            .dfa
-                            .possible_future_group_ids(end_state)
+                            .possible_future_terminals(end_state)
                             .contains(step.terminal as usize)
                 })
             {
@@ -2578,8 +2575,7 @@ fn commit_bytes_linear_fast_path(
                     )
                     && !constraint
                         .tokenizer
-                        .dfa
-                        .possible_future_group_ids(end_state)
+                        .possible_future_terminals(end_state)
                         .contains(terminal as usize)
             });
             if !keep_carried {
@@ -2611,8 +2607,7 @@ fn commit_bytes_linear_fast_path(
                         )
                         && !constraint
                             .tokenizer
-                            .dfa
-                            .possible_future_group_ids(end_state)
+                            .possible_future_terminals(end_state)
                             .contains(terminal as usize)
                 })
             {

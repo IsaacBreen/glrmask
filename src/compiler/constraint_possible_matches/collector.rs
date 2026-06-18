@@ -548,7 +548,7 @@ fn build_node(
                 let mut local_stamp_gen = 0u32;
                 let mut local_active_seen_gen = 0u32;
                 let stamp_alloc_started_at = Instant::now();
-                let mut local_terminal_stamps = vec![0u32; tokenizer.num_terminals as usize];
+                let mut local_terminal_stamps = vec![0u32; tokenizer.num_terminals() as usize];
                 let mut local_active_seen_stamps = vec![0u32; tokenizer.num_states() as usize];
                 let mut local_active_seen_positions = vec![0u32; tokenizer.num_states() as usize];
                 local_timings.parallel_stamp_alloc_ms += elapsed_ms(stamp_alloc_started_at);
@@ -674,7 +674,7 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
     canonical_state: Option<&[u32]>,
 ) -> (TrieClassBuildResult, PossibleMatchesProfile) {
     let matched_terminals: Vec<Box<[TerminalID]>> = (0..tokenizer.num_states()).map(|state| tokenizer.matched_terminals_iter(state).collect::<Vec<_>>().into_boxed_slice()).collect();
-    let matched_terminal_masks: Option<Vec<u128>> = if tokenizer.num_terminals <= 128 {
+    let matched_terminal_masks: Option<Vec<u128>> = if tokenizer.num_terminals() <= 128 {
         Some((0..tokenizer.num_states()).map(|state| {
             let mut mask = 0u128;
             for terminal in tokenizer.matched_terminals_iter(state) {
@@ -687,15 +687,14 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
     };
     let is_end: Vec<bool> = (0..tokenizer.num_states()).map(|state| tokenizer.is_end(state)).collect();
     let mut byte_transitions = vec![vec![u32::MAX; tokenizer.num_states() as usize]; 256];
-    for (state_idx, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
-        for (byte, &target) in dfa_state.transitions.iter() { byte_transitions[byte as usize][state_idx] = target; }
+    for state_idx in 0..tokenizer.num_states() as usize {
+        for (byte, target) in tokenizer.transitions_from(state_idx as u32) {
+            byte_transitions[byte as usize][state_idx] = target;
+        }
     }
-    let self_loop_bytes: Vec<U8Set> = (0..tokenizer.num_states() as usize).map(|state_idx| {
-        let dfa_state = &tokenizer.dfa.states()[state_idx];
-        let mut bytes = U8Set::empty();
-        for (byte, &target) in dfa_state.transitions.iter() { if target == state_idx as u32 { bytes.insert(byte); } }
-        bytes
-    }).collect();
+    let self_loop_bytes: Vec<U8Set> = (0..tokenizer.num_states() as usize)
+        .map(|state_idx| tokenizer.self_loop_bytes(state_idx as u32))
+        .collect();
     let mut terminal_sets = TerminalSetInterner::default();
     let empty_terminals_id = terminal_sets.intern_slice(&[]);
     let node_terminal_ids: Vec<u32> = if let Some(matched_terminal_masks) = matched_terminal_masks.as_ref() {
@@ -717,7 +716,7 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
     let mut segment_cache: FxHashMap<Vec<u8>, usize> = FxHashMap::default();
     let mut segment_outcome_tables = Vec::<SegmentOutcomeCache>::new();
     let mut stamp_gen = 0u32;
-    let mut terminal_stamps = vec![0u32; tokenizer.num_terminals as usize];
+    let mut terminal_stamps = vec![0u32; tokenizer.num_terminals() as usize];
     let mut active_seen_gen = 0u32;
     let mut active_seen_stamps = vec![0u32; tokenizer.num_states() as usize];
     let mut active_seen_positions = vec![0u32; tokenizer.num_states() as usize];

@@ -693,8 +693,8 @@ fn compute_pm_vocab_equivalence_map(
 ) -> ManyToOneIdMap {
     let num_states = tokenizer.num_states() as usize;
     let mut byte_transitions = vec![vec![u32::MAX; num_states]; 256];
-    for (state_idx, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
-        for (byte, &target) in dfa_state.transitions.iter() {
+    for state_idx in 0..num_states {
+        for (byte, target) in tokenizer.transitions_from(state_idx as u32) {
             byte_transitions[byte as usize][state_idx] = target;
         }
     }
@@ -729,19 +729,19 @@ fn compute_pm_vocab_equivalence_map_fast(
     tokenizer: &Tokenizer,
     ordered_vocab: &OrderedVocab,
 ) -> ManyToOneIdMap {
-    let dfa_states = tokenizer.dfa.states();
-    let num_states = dfa_states.len();
+    let num_states = tokenizer.num_states() as usize;
     let mut transitions = vec![u32::MAX; num_states * 256];
-    let states = dfa_states
-        .iter()
-        .enumerate()
-        .map(|(state_idx, state)| {
+    let states = (0..num_states)
+        .map(|state_idx| {
             let base = state_idx * 256;
-            for (byte, &target) in state.transitions.iter() {
+            for (byte, target) in tokenizer.transitions_from(state_idx as u32) {
                 transitions[base + byte as usize] = target;
             }
             FlatDfaState {
-                finalizers: state.finalizers.iter().collect(),
+                finalizers: tokenizer
+                    .matched_terminals_iter(state_idx as u32)
+                    .map(|terminal| terminal as usize)
+                    .collect(),
                 // PM token equivalence only cares which terminals can be
                 // reached while consuming the token bytes. Terminal-DWA
                 // future-group metadata is deliberately not part of this PM
@@ -1600,7 +1600,7 @@ fn sparse_root_terminal_limit() -> usize {
 }
 
 fn root_terminal_union_count(tokenizer: &Tokenizer, states: &[u32]) -> usize {
-    let mut seen = vec![false; tokenizer.num_terminals as usize];
+    let mut seen = vec![false; tokenizer.num_terminals() as usize];
     let mut count = 0usize;
     for &state in states {
         for terminal in tokenizer
