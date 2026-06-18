@@ -237,6 +237,9 @@ pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
     if bytes.is_empty() {
         return 5;
     }
+    if is_structural_boundary_lexical_token(bytes) {
+        return 7;
+    }
     // Strip optional leading ASCII space (GPT-2 BPE decodes Ġ → 0x20 before we see it)
     let content = if bytes[0] == b' ' {
         &bytes[1..]
@@ -283,6 +286,49 @@ pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
     }
     1 // Mixed
 }
+
+fn is_json_literal_collision(content: &[u8]) -> bool {
+    if content.is_empty() || !content.iter().all(|byte| byte.is_ascii_alphanumeric()) {
+        return false;
+    }
+
+    [b"true".as_slice(), b"false".as_slice(), b"null".as_slice()]
+        .iter()
+        .any(|literal| literal.starts_with(content) || content.starts_with(literal))
+}
+
+fn is_structural_boundary_lexical_token(bytes: &[u8]) -> bool {
+    if !structural_boundary_lexical_partition_enabled() {
+        return false;
+    }
+
+    let content = bytes.strip_prefix(b" ").unwrap_or(bytes);
+    if is_json_literal_collision(content) {
+        return true;
+    }
+    if bytes == b" -" {
+        return true;
+    }
+    if bytes.starts_with(b"[") && is_json_literal_collision(&bytes[1..]) {
+        return true;
+    }
+    bytes
+        .strip_prefix(b"\"")
+        .is_some_and(|suffix| suffix.first().is_some_and(u8::is_ascii_alphabetic))
+}
+
+fn structural_boundary_lexical_partition_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_STRUCTURAL_BOUNDARY_LEXICAL_PARTITION")
+            .map(|value| {
+                let trimmed = value.trim();
+                trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+            })
+            .unwrap_or(false)
+    })
+}
+
 
 /// Sub-classify a non-alphanumeric token into P0 (structural), P5 (short auxiliary),
 /// or P6 (long auxiliary).
@@ -445,7 +491,7 @@ fn exact_l2p_boundary_filter_enabled() -> bool {
                 let trimmed = value.trim();
                 trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
@@ -728,7 +774,7 @@ fn compute_token_l2p_map(
 }
 
 pub(crate) fn partition_vocab_char_type_tokens(vocab: &Vocab) -> Vec<Vec<u32>> {
-    let mut partitions: Vec<Vec<u32>> = (0..7).map(|_| Vec::new()).collect();
+    let mut partitions: Vec<Vec<u32>> = (0..8).map(|_| Vec::new()).collect();
     for (&token_id, bytes) in vocab.entries.iter() {
         let idx = classify_vocab_char_type(bytes) as usize;
         partitions[idx].push(token_id);
