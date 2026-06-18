@@ -161,12 +161,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     fn fast_step(&mut self, state: u32, byte: u8) -> Option<u32> {
         let state_idx = state as usize;
         if self.flat_transitions[state_idx].is_none() {
-            let dfa_state = &self.tokenizer.dfa.states()[state_idx];
-            let mut flat = Box::new([u32::MAX; 256]);
-            for (b, &target) in dfa_state.transitions.iter() {
-                flat[b as usize] = target;
-            }
-            self.flat_transitions[state_idx] = Some(flat);
+            self.flat_transitions[state_idx] = Some(self.tokenizer.transition_row(state));
         }
         let next = self.flat_transitions[state_idx].as_ref().unwrap()[byte as usize];
         if next == u32::MAX { None } else { Some(next) }
@@ -460,16 +455,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         node: &VocabPrefixTreeNode,
         tokenizer_state: TokenizerState,
     ) -> bool {
-        let self_loop_bytes = self.self_loop_bytes.entry(tokenizer_state).or_insert_with(|| {
-            let state = &self.tokenizer.dfa.states()[tokenizer_state as usize];
-            let mut bytes = U8Set::empty();
-            for (byte, &target) in state.transitions.iter() {
-                if target == tokenizer_state {
-                    bytes.insert(byte);
-                }
-            }
-            bytes
-        });
+        let self_loop_bytes = self
+            .self_loop_bytes
+            .entry(tokenizer_state)
+            .or_insert_with(|| self.tokenizer.self_loop_bytes(tokenizer_state));
         U8Set::from_words(*node.subtree_bytes()).is_subset(self_loop_bytes)
     }
 
@@ -663,12 +652,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let num_states = self.tokenizer.num_states() as usize;
         for state_idx in 0..num_states {
             if self.flat_transitions[state_idx].is_none() {
-                let dfa_state = &self.tokenizer.dfa.states()[state_idx];
-                let mut flat = Box::new([u32::MAX; 256]);
-                for (b, &target) in dfa_state.transitions.iter() {
-                    flat[b as usize] = target;
-                }
-                self.flat_transitions[state_idx] = Some(flat);
+                self.flat_transitions[state_idx] =
+                    Some(self.tokenizer.transition_row(state_idx as u32));
             }
         }
 
@@ -717,9 +702,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 if alive {
                     total_alive += 1;
                     // Terminal matches at the exact token endpoint.
-                    let finalizers = self.tokenizer.dfa.finalizers(scan_state);
-                    for t in finalizers.iter() {
-                        let terminal = t as TerminalID;
+                    for terminal in self.tokenizer.matched_terminals_iter(scan_state) {
                         self.profile.match_transition_additions += source_nodes.len() as u64;
                         self.add_leaf_token_from_sources(
                             source_nodes,

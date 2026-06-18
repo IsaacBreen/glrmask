@@ -187,7 +187,7 @@ impl DFA {
         &self.states[state as usize].possible_future_group_ids
     }
 
-    pub fn states(&self) -> &[DFAState] {
+    pub(super) fn states(&self) -> &[DFAState] {
         &self.states
     }
 

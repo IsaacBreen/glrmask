@@ -133,29 +133,27 @@ impl SharedClassifyBytesets {
 
         let nt = num_terminals as usize;
         let initial = tokenizer.start_state();
-        let dfa_states = tokenizer.dfa.states();
 
         // Single parallel pass: compute reachable_bytes and last_bytes together.
         // reachable_bytes[t] = all bytes b where some transition (_, b, target) exists
         //   and target has terminal t in finalizers or possible_future_group_ids.
         // last_bytes[t] = all bytes b where some transition (_, b, target) exists
         //   and target has terminal t in finalizers.
-        let (reachable_bytes, last_bytes) = dfa_states
-            .par_iter()
+        let (reachable_bytes, last_bytes) = (0..tokenizer.num_states())
+            .into_par_iter()
             .fold(
                 || (vec![U8Set::empty(); nt], vec![U8Set::empty(); nt]),
                 |(mut reachable, mut last), state| {
-                    for (byte, target) in state.transitions.iter() {
-                        let target = *target;
-                        let finalizers = tokenizer.dfa.finalizers(target);
-                        let futures = tokenizer.dfa.possible_future_group_ids(target);
-                        for t in finalizers.iter() {
+                    for (byte, target) in tokenizer.transitions_from(state) {
+                        for terminal in tokenizer.matched_terminals_iter(target) {
+                            let t = terminal as usize;
                             if t < nt {
                                 reachable[t].insert(byte);
                                 last[t].insert(byte);
                             }
                         }
-                        for t in futures.iter() {
+                        for terminal in tokenizer.possible_future_terminals_iter(target) {
+                            let t = terminal as usize;
                             if t < nt {
                                 reachable[t].insert(byte);
                             }
@@ -177,11 +175,12 @@ impl SharedClassifyBytesets {
 
         // first_bytes: only from initial state (single state, no parallelism needed).
         let mut first_bytes = vec![U8Set::empty(); nt];
-        for (byte, target) in dfa_states[initial as usize].transitions.iter() {
-            let target = *target;
-            let finalizers = tokenizer.dfa.finalizers(target);
-            let futures = tokenizer.dfa.possible_future_group_ids(target);
-            for t in finalizers.iter().chain(futures.iter()) {
+        for (byte, target) in tokenizer.transitions_from(initial) {
+            for terminal in tokenizer
+                .matched_terminals_iter(target)
+                .chain(tokenizer.possible_future_terminals_iter(target))
+            {
+                let t = terminal as usize;
                 if t < nt {
                     first_bytes[t].insert(byte);
                 }

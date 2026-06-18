@@ -81,11 +81,9 @@ fn build_filtered_possible_future_labels(
 }
 
 fn build_has_any_transition_labels(tokenizer: &Tokenizer) -> Vec<bool> {
-    tokenizer
-        .dfa
-        .states()
-        .par_iter()
-        .map(|state| !state.transitions.is_empty())
+    (0..tokenizer.num_states() as usize)
+        .into_par_iter()
+        .map(|state| tokenizer.transitions_from(state as u32).next().is_some())
         .collect()
 }
 

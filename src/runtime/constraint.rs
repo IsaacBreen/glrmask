@@ -560,14 +560,7 @@ impl Constraint {
     }
 
     fn compute_tokenizer_fast_transitions(&self) -> FastTokenizerTransitions {
-        let build = |state| {
-                let dfa_state = &self.tokenizer.dfa.states()[state as usize];
-                let mut flat = Box::new([u32::MAX; 256]);
-                for (byte, &target) in dfa_state.transitions.iter() {
-                    flat[byte as usize] = target;
-                }
-                flat
-            };
+        let build = |state| self.tokenizer.transition_row(state);
         if rayon::current_num_threads() == 1 {
             (0..self.tokenizer.num_states()).map(build).collect()
         } else {

@@ -402,11 +402,11 @@ pub(crate) fn build_tokenizer_from_exprs(
         );
     }
 
-    Tokenizer {
-        dfa: regex.dfa,
-        num_terminals: exprs.len() as u32,
-        exprs: Some(std::sync::Arc::from(exprs.to_vec())),
-    }
+    Tokenizer::from_parts(
+        regex.dfa,
+        exprs.len() as u32,
+        Some(std::sync::Arc::from(exprs.to_vec())),
+    )
 }
 
 fn terminal_expr(terminal: &Terminal) -> Expr {
@@ -512,12 +512,7 @@ fn compile_prepared_with_profile_and_table_construction(
         );
         profile.tokenizer_build_ms = tokenizer_build_ms;
         profile.tokenizer_final_states = tokenizer.num_states() as usize;
-        profile.tokenizer_final_transitions = tokenizer
-            .dfa
-            .states()
-            .iter()
-            .map(|state| state.transitions.len())
-            .sum();
+        profile.tokenizer_final_transitions = tokenizer.transition_count();
         profile.analyze_grammar_ms = analyze_grammar_ms;
         profile.glr_table_ms = glr_table_ms;
         profile.terminal_coloring_ms = terminal_coloring_ms;

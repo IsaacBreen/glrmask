@@ -1113,9 +1113,9 @@ fn collect_active_terminal_signature(
     active_terminals: &[bool],
 ) -> Vec<u32> {
     let mut signature = Vec::<u32>::new();
-    for tid in tokenizer.dfa.finalizers(state).iter() {
-        if active_terminals.get(tid).copied().unwrap_or(false) {
-            signature.push(tid as u32);
+    for tid in tokenizer.matched_terminals_iter(state) {
+        if active_terminals.get(tid as usize).copied().unwrap_or(false) {
+            signature.push(tid);
         }
     }
     for tid in tokenizer.tokens_accessible_from_state(state).iter() {
@@ -2007,9 +2007,9 @@ fn build_l1_terminal_dwa(
 pub(crate) fn build_flat_transition_table(tokenizer: &Tokenizer) -> Vec<u32> {
     let dead = u32::MAX;
     let mut flat_trans = vec![dead; tokenizer.num_states() as usize * 256];
-    for (state_idx, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
+    for state_idx in 0..tokenizer.num_states() as usize {
         let base = state_idx * 256;
-        for (byte, &target) in dfa_state.transitions.iter() {
+        for (byte, target) in tokenizer.transitions_from(state_idx as u32) {
             flat_trans[base + byte as usize] = target;
         }
     }

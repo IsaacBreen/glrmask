@@ -10,12 +10,13 @@ use crate::automata::dfa::DFA;
 use crate::automata::regex::Expr;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::ds::bitset::BitSet;
+use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tokenizer {
-    pub(crate) dfa: DFA,
-    pub num_terminals: u32,
+    pub(super) dfa: DFA,
+    pub(super) num_terminals: u32,
     /// Per-terminal regex expressions used to (re)build this tokenizer.
     /// Skipped during (de)serialization because they are only needed during
     /// compile-time simplification for active-terminal rebuilds.
@@ -63,8 +64,61 @@ struct TerminalFilteredDfa {
 }
 
 impl Tokenizer {
+    pub(crate) fn from_parts(
+        dfa: DFA,
+        num_terminals: u32,
+        exprs: Option<Arc<[Expr]>>,
+    ) -> Self {
+        Self {
+            dfa,
+            num_terminals,
+            exprs,
+        }
+    }
+
     pub fn start_state(&self) -> u32 {
         0
+    }
+
+    pub fn num_terminals(&self) -> u32 {
+        self.num_terminals
+    }
+
+    pub(crate) fn transitions_from(&self, state: u32) -> impl Iterator<Item = (u8, u32)> + '_ {
+        self.dfa
+            .states()
+            .get(state as usize)
+            .into_iter()
+            .flat_map(|state| state.transitions.iter().map(|(byte, &target)| (byte, target)))
+    }
+
+    pub(crate) fn fill_transition_row(&self, state: u32, row: &mut [u32; 256]) {
+        row.fill(u32::MAX);
+        for (byte, target) in self.transitions_from(state) {
+            row[byte as usize] = target;
+        }
+    }
+
+    pub(crate) fn transition_row(&self, state: u32) -> Box<[u32; 256]> {
+        let mut row = Box::new([u32::MAX; 256]);
+        self.fill_transition_row(state, &mut row);
+        row
+    }
+
+    pub(crate) fn self_loop_bytes(&self, state: u32) -> U8Set {
+        let mut bytes = U8Set::empty();
+        for (byte, target) in self.transitions_from(state) {
+            if target == state {
+                bytes.insert(byte);
+            }
+        }
+        bytes
+    }
+
+    pub(crate) fn transition_count(&self) -> usize {
+        (0..self.num_states())
+            .map(|state| self.transitions_from(state).count())
+            .sum()
     }
 
     /// Detect nullable terminals (those that match the empty string) by
