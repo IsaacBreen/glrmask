@@ -1674,14 +1674,14 @@ fn try_all_compatible_height_0_coloring(
 
 struct MergedStateBuilder {
     final_weights_pending: Vec<Weight>,
-    transitions: rustc_hash::FxHashMap<Label, (u32, Weight)>,
+    transitions_pending: rustc_hash::FxHashMap<Label, (u32, Vec<Weight>)>,
 }
 
 impl Default for MergedStateBuilder {
     fn default() -> Self {
         Self {
             final_weights_pending: Vec::new(),
-            transitions: rustc_hash::FxHashMap::default(),
+            transitions_pending: rustc_hash::FxHashMap::default(),
         }
     }
 }
@@ -1693,14 +1693,14 @@ impl MergedStateBuilder {
 
     fn add_transition(&mut self, label: Label, target: u32, weight: Weight) {
         use std::collections::hash_map::Entry;
-        match self.transitions.entry(label) {
+        match self.transitions_pending.entry(label) {
             Entry::Occupied(mut entry) => {
-                let (existing_target, existing_weight) = entry.get_mut();
+                let (existing_target, pending_weights) = entry.get_mut();
                 debug_assert_eq!(*existing_target, target);
-                *existing_weight = existing_weight.union(&weight);
+                pending_weights.push(weight);
             }
             Entry::Vacant(entry) => {
-                entry.insert((target, weight));
+                entry.insert((target, vec![weight]));
             }
         }
     }
@@ -1713,6 +1713,17 @@ impl MergedStateBuilder {
         let built = batch_build_weight(pending);
         if !built.is_empty() {
             self.final_weights_pending.push(built);
+        }
+
+        for (_, pending_weights) in self.transitions_pending.values_mut() {
+            if pending_weights.len() <= 1 {
+                continue;
+            }
+            let pending = std::mem::take(pending_weights);
+            let built = batch_build_weight(pending);
+            if !built.is_empty() {
+                pending_weights.push(built);
+            }
         }
     }
 }
@@ -1776,11 +1787,12 @@ fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedSta
         .into_iter()
         .map(|b| {
             let mut state = DWAState::default();
-            let final_weight = b.final_weights_pending.into_iter().next().unwrap_or_else(Weight::empty);
+            let final_weight = batch_build_weight(b.final_weights_pending);
             if !final_weight.is_empty() {
                 state.final_weight = Some(final_weight);
             }
-            for (lbl, (target, weight)) in b.transitions {
+            for (lbl, (target, pending_weights)) in b.transitions_pending {
+                let weight = batch_build_weight(pending_weights);
                 if !weight.is_empty() {
                     state.transitions.insert(lbl, (target, weight));
                 }

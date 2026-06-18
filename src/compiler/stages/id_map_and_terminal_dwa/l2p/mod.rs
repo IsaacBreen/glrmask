@@ -647,7 +647,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                     let trimmed = value.trim();
                     trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
                 })
-                .unwrap_or(true);
+                .unwrap_or(false);
             let dwa = if skip_minimize { det } else { minimize(&det) };
             let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
             let dwa_stats_before_compact = dwa.stats();
