@@ -7,12 +7,9 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
-use crate::automata::unweighted::dfa::DFA;
 use crate::automata::weighted::nwa::{NWA, NWAState as NWAStateType};
 use crate::grammar::flat::TerminalID;
-use super::equivalence_analysis::disallowed_follows::{
-    build_disallowed_follow_dfa, normalize_disallowed_follows,
-};
+use super::equivalence_analysis::disallowed_follows::normalize_disallowed_follows;
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
 
@@ -586,18 +583,14 @@ pub(crate) fn collapse_always_allowed(
 
 // ─── Disallowed-follow subtraction ───────────────────────────────────────────
 
-/// Per-build cache for the grammar-global disallowed-follow DFA.
+/// Per-build cache for the grammar-global disallowed-follow table.
 ///
 /// Every L2P partition receives the same `disallowed_follows` table and the same
-/// terminal count, but the old path normalized that table and rebuilt the same
-/// DFA independently inside every partition. The normalized table can dominate
-/// small partitions and p0 postprocess time on the target workloads. This cache
-/// is constructed once per global terminal-DWA build and is filled lazily by the
-/// first partition that reaches the disallowed-follow phase; other partitions
-/// share the exact same DFA.
+/// terminal count. Normalize it once per global terminal-DWA build and let each
+/// partition share the same table.
 #[derive(Default)]
 pub(crate) struct SharedDisallowedFollowDfaCache {
-    dfa: OnceLock<Option<Arc<DFA>>>,
+    normalized: OnceLock<Option<Arc<Vec<BitSet>>>>,
 }
 
 impl SharedDisallowedFollowDfaCache {
@@ -609,14 +602,14 @@ impl SharedDisallowedFollowDfaCache {
         &self,
         num_terminals: usize,
         disallowed_follows: &BTreeMap<u32, BitSet>,
-    ) -> Option<Arc<DFA>> {
-        self.dfa
+    ) -> Option<Arc<Vec<BitSet>>> {
+        self.normalized
             .get_or_init(|| {
                 let normalized = normalize_disallowed_follows(num_terminals, disallowed_follows);
                 if normalized.iter().all(|bits| bits.is_zero()) {
                     None
                 } else {
-                    Some(Arc::new(build_disallowed_follow_dfa(&normalized)))
+                    Some(Arc::new(normalized))
                 }
             })
             .clone()
@@ -632,10 +625,10 @@ pub(crate) fn apply_disallowed_follow_constraints(
     shared_cache: Option<&SharedDisallowedFollowDfaCache>,
 ) {
     if let Some(cache) = shared_cache {
-        let Some(disallowed_dfa) = cache.get_or_build(num_terminals, disallowed_follows) else {
+        let Some(normalized) = cache.get_or_build(num_terminals, disallowed_follows) else {
             return;
         };
-        *nwa = subtract_disallowed_dfa(nwa, disallowed_dfa.as_ref());
+        *nwa = subtract_disallowed_follows_direct(nwa, normalized.as_ref());
         return;
     }
 
@@ -644,14 +637,11 @@ pub(crate) fn apply_disallowed_follow_constraints(
         return;
     }
 
-    let disallowed_dfa = build_disallowed_follow_dfa(&normalized);
-    *nwa = subtract_disallowed_dfa(nwa, &disallowed_dfa);
+    *nwa = subtract_disallowed_follows_direct(nwa, &normalized);
 }
 
-fn subtract_disallowed_dfa(nwa: &NWA, right: &DFA) -> NWA {
+fn subtract_disallowed_follows_direct(nwa: &NWA, disallowed_follows: &[BitSet]) -> NWA {
     type ProdState = (u32, Option<u32>);
-
-    let right_start = (!right.states.is_empty()).then_some(right.start_state);
 
     let mut result = NWA::new(0, 0);
     let mut state_ids: HashMap<ProdState, u32> = HashMap::new();
@@ -673,41 +663,42 @@ fn subtract_disallowed_dfa(nwa: &NWA, right: &DFA) -> NWA {
     };
 
     for &nwa_start in nwa.start_states() {
-        let ps = (nwa_start, right_start);
+        let ps = (nwa_start, None);
         let id = get_or_create(&mut result, &mut state_ids, &mut worklist, ps);
         result.start_states_mut().push(id);
     }
 
-    while let Some((nwa_sid, dfa_sid)) = worklist.pop_front() {
-        let result_sid = state_ids[&(nwa_sid, dfa_sid)];
+    while let Some((nwa_sid, previous_terminal)) = worklist.pop_front() {
+        let result_sid = state_ids[&(nwa_sid, previous_terminal)];
         let nwa_state = &nwa.states()[nwa_sid as usize];
-        let dfa_accepting = dfa_sid
-            .map(|s| right.states[s as usize].is_accepting)
-            .unwrap_or(false);
 
-        if !dfa_accepting {
-            if let Some(fw) = &nwa_state.final_weight {
-                result.set_final_weight(result_sid, fw.clone());
-            }
+        if let Some(fw) = &nwa_state.final_weight {
+            result.set_final_weight(result_sid, fw.clone());
         }
 
         for (nwa_dst, weight) in &nwa_state.epsilons {
-            let ps = (*nwa_dst, dfa_sid);
+            let ps = (*nwa_dst, previous_terminal);
             let dst_id = get_or_create(&mut result, &mut state_ids, &mut worklist, ps);
             result.add_epsilon(result_sid, dst_id, weight.clone());
         }
 
         for (&label, targets) in &nwa_state.transitions {
-            let next_dfa = if label >= 0 {
-                dfa_sid.and_then(|s| {
-                    right.states[s as usize].transitions.get(&label).copied()
-                })
+            let next_previous_terminal = if label < 0 {
+                previous_terminal
+            } else if (label as usize) < disallowed_follows.len() {
+                let terminal = label as usize;
+                if previous_terminal.is_some_and(|previous| {
+                    disallowed_follows[previous as usize].contains(terminal)
+                }) {
+                    continue;
+                }
+                Some(terminal as u32)
             } else {
-                dfa_sid
+                None
             };
 
             for (nwa_dst, weight) in targets {
-                let ps = (*nwa_dst, next_dfa);
+                let ps = (*nwa_dst, next_previous_terminal);
                 let dst_id = get_or_create(&mut result, &mut state_ids, &mut worklist, ps);
                 result.add_transition(result_sid, label, dst_id, weight.clone());
             }
