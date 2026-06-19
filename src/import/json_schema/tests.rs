@@ -7499,3 +7499,88 @@ fn llguidance_compat_untyped_pattern_items_allow_non_string_items() {
     });
     assert!(schema_mask_allows_token_after_prefix(&schema, br#"{"checksums":"#, 300, b" [["));
 }
+
+#[test]
+fn closed_anyof_without_fastpath_keeps_declared_property_order() {
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "arguments": {
+                        "type": "object",
+                        "properties": {"x": {"type": "string"}},
+                        "required": ["x"],
+                        "additionalProperties": false
+                    },
+                    "name": {"type": "string", "enum": ["a"]}
+                },
+                "required": ["arguments", "name"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "arguments": {
+                        "type": "object",
+                        "properties": {"y": {"type": "boolean"}},
+                        "required": ["y"],
+                        "additionalProperties": false
+                    },
+                    "name": {"type": "string", "enum": ["b"]}
+                },
+                "required": ["arguments", "name"],
+                "additionalProperties": false
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert_eq!(
+        count_rules_with_prefix(&grammar, "json_closed_discriminator_anyof_object_body"),
+        0
+    );
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"arguments": {"x": "ok"}, "name": "a"}"#
+    ));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#"{"name": "a", "arguments": {"x": "ok"}}"#
+    ));
+    lower(&grammar).unwrap();
+}
+
+
+#[test]
+fn open_anyof_discriminator_fastpath_does_not_reorder_declared_properties() {
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "payload": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["a"]}
+                },
+                "required": ["payload", "kind"]
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "payload": {"type": "boolean"},
+                    "kind": {"type": "string", "enum": ["b"]}
+                },
+                "required": ["payload", "kind"]
+            }
+        ]
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert_eq!(
+        count_rules_with_prefix(&grammar, "json_discriminator_anyof_object_body"),
+        0
+    );
+    assert!(schema_accepts_bytes(&schema, br#"{"payload": "x", "kind": "a"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"kind": "a", "payload": "x"}"#));
+    lower(&grammar).unwrap();
+}

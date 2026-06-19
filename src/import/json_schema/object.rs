@@ -1904,10 +1904,10 @@ impl<'a> Lowerer<'a> {
         let Some(discriminator_index) = discriminator_index else {
             return Ok(None);
         };
-        let value_index = 1usize.saturating_sub(discriminator_index);
-        if discriminator_index >= 2 || value_index >= 2 {
+        if discriminator_index != 0 {
             return Ok(None);
         }
+        let value_index = 1;
 
         let fixed_keys = variants[0]
             .fixed_keys
