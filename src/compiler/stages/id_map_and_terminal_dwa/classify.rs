@@ -483,15 +483,40 @@ fn token_has_active_l2p_boundary(bytes: &[u8], allowed_boundary_pairs: &[U8Set; 
         .any(|pair| allowed_boundary_pairs[pair[0] as usize].contains(pair[1]))
 }
 
-fn exact_l2p_boundary_filter_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
+#[derive(Clone, Copy, Debug)]
+enum ExactL2pBoundaryFilterMode {
+    Auto,
+    Force(bool),
+}
+
+fn parse_exact_l2p_boundary_filter_mode(value: &str) -> ExactL2pBoundaryFilterMode {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" => ExactL2pBoundaryFilterMode::Auto,
+        "1" | "true" | "yes" | "on" => ExactL2pBoundaryFilterMode::Force(true),
+        "0" | "false" | "no" | "off" => ExactL2pBoundaryFilterMode::Force(false),
+        other => panic!(
+            "invalid GLRMASK_EXACT_L2P_BOUNDARY_FILTER value `{other}`; expected auto, 1/true/on, or 0/false/off"
+        ),
+    }
+}
+
+fn exact_l2p_boundary_filter_mode() -> ExactL2pBoundaryFilterMode {
+    static MODE: std::sync::OnceLock<ExactL2pBoundaryFilterMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
         std::env::var("GLRMASK_EXACT_L2P_BOUNDARY_FILTER")
-            .map(|value| {
-                let trimmed = value.trim();
-                trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
-            })
-            .unwrap_or(true)
+            .ok()
+            .map(|value| parse_exact_l2p_boundary_filter_mode(&value))
+            .unwrap_or(ExactL2pBoundaryFilterMode::Auto)
+    })
+}
+
+fn exact_l2p_boundary_filter_work_limit() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("GLRMASK_EXACT_L2P_BOUNDARY_FILTER_WORK_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(20_000_000)
     })
 }
 
@@ -667,7 +692,32 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
     let mut single_entries = Vec::<(u32, Vec<u8>)>::new();
     let mut adjacent_tokens = 0usize;
     let mut irrelevant_tokens = 0usize;
-    let use_exact_boundary_filter = exact_l2p_boundary_filter_enabled();
+    let adjacent_candidate_count = vocab
+        .entries
+        .values()
+        .filter(|bytes| token_has_active_l2p_boundary(bytes, &allowed_boundary_pairs))
+        .count();
+    let estimated_exact_work = active_start_states
+        .len()
+        .saturating_mul(adjacent_candidate_count);
+    let use_exact_boundary_filter = match exact_l2p_boundary_filter_mode() {
+        ExactL2pBoundaryFilterMode::Force(enabled) => enabled,
+        ExactL2pBoundaryFilterMode::Auto => {
+            estimated_exact_work <= exact_l2p_boundary_filter_work_limit()
+        }
+    };
+
+    if std::env::var_os("GLRMASK_PROFILE_EXACT_L2P_BOUNDARY_FILTER").is_some() {
+        eprintln!(
+            "[glrmask/profile][exact_l2p_boundary_filter] vocab_tokens={} active_terminals={} active_start_states={} adjacent_candidates={} estimated_work={} enabled={}",
+            vocab.entries.len(),
+            active.len(),
+            active_start_states.len(),
+            adjacent_candidate_count,
+            estimated_exact_work,
+            use_exact_boundary_filter,
+        );
+    }
 
     for (&token_id, bytes) in vocab.entries.iter() {
         if token_has_active_l2p_boundary(bytes, &allowed_boundary_pairs) {
@@ -990,4 +1040,22 @@ pub(crate) fn partition_vocab_by_l2p_cost(
         objective,
     )
     .0
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_exact_l2p_boundary_filter_mode, ExactL2pBoundaryFilterMode};
+
+    #[test]
+    fn parse_exact_l2p_boundary_filter_mode_accepts_auto_and_forced_values() {
+        assert!(matches!(parse_exact_l2p_boundary_filter_mode(""), ExactL2pBoundaryFilterMode::Auto));
+        assert!(matches!(parse_exact_l2p_boundary_filter_mode("auto"), ExactL2pBoundaryFilterMode::Auto));
+        assert!(matches!(parse_exact_l2p_boundary_filter_mode("1"), ExactL2pBoundaryFilterMode::Force(true)));
+        assert!(matches!(parse_exact_l2p_boundary_filter_mode("true"), ExactL2pBoundaryFilterMode::Force(true)));
+        assert!(matches!(parse_exact_l2p_boundary_filter_mode("on"), ExactL2pBoundaryFilterMode::Force(true)));
+        assert!(matches!(parse_exact_l2p_boundary_filter_mode("0"), ExactL2pBoundaryFilterMode::Force(false)));
+        assert!(matches!(parse_exact_l2p_boundary_filter_mode("false"), ExactL2pBoundaryFilterMode::Force(false)));
+        assert!(matches!(parse_exact_l2p_boundary_filter_mode("off"), ExactL2pBoundaryFilterMode::Force(false)));
+    }
 }
