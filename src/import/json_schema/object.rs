@@ -1458,6 +1458,84 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn try_lower_discriminator_value_closed_any_of_object(
+        &mut self,
+        variants: &[AnyOfFixedObjectVariant],
+        include_untyped_non_object_alts: bool,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        if include_untyped_non_object_alts || variants.len() < 2 {
+            return Ok(None);
+        }
+        if variants
+            .iter()
+            .any(|variant| variant.items.len() != 2 || !variant.items.iter().all(|item| item.required))
+        {
+            return Ok(None);
+        }
+
+        let first_keys = variants[0]
+            .items
+            .iter()
+            .map(|item| item.key.as_str())
+            .collect::<Vec<_>>();
+        if variants.iter().skip(1).any(|variant| {
+            variant
+                .items
+                .iter()
+                .map(|item| item.key.as_str())
+                .collect::<Vec<_>>()
+                != first_keys
+        }) {
+            return Ok(None);
+        }
+
+        let mut discriminator_index = None;
+        for index in 0..first_keys.len() {
+            let mut seen = BTreeSet::new();
+            let mut all_singleton = true;
+            for variant in variants {
+                let Some(value) = singleton_string_enum_value(&variant.items[index].schema) else {
+                    all_singleton = false;
+                    break;
+                };
+                if !seen.insert(value) {
+                    all_singleton = false;
+                    break;
+                }
+            }
+            if all_singleton && discriminator_index.replace(index).is_some() {
+                return Ok(None);
+            }
+        }
+        let Some(discriminator_index) = discriminator_index else {
+            return Ok(None);
+        };
+        let value_index = 1usize.saturating_sub(discriminator_index);
+        if discriminator_index >= 2 || value_index >= 2 {
+            return Ok(None);
+        }
+
+        let mut alternatives = Vec::with_capacity(variants.len());
+        for variant in variants {
+            let discriminator = &variant.items[discriminator_index];
+            let payload = &variant.items[value_index];
+            let Some(discriminator_value) = singleton_string_enum_value(&discriminator.schema) else {
+                return Ok(None);
+            };
+            alternatives.push(seq(vec![
+                self.lower_literal_key_colon(&discriminator.key),
+                self.lower_string_literal(&discriminator_value),
+                self.item_separator_expr(),
+                self.lower_literal_key_colon(&payload.key),
+                payload.value_expr.clone(),
+            ]));
+        }
+
+        let rule_name = self.fresh_rule_name("json_closed_discriminator_anyof_object_body");
+        self.add_nonterminal_rule(&rule_name, choice(alternatives));
+        Ok(Some(seq(vec![lit("{"), r(&rule_name), lit("}")])))
+    }
+
     fn lower_closed_any_of_object_variants_expr_nfa(
         &mut self,
         variants: &[AnyOfFixedObjectVariant],
@@ -1465,6 +1543,14 @@ impl<'a> Lowerer<'a> {
     ) -> ImportResult<Option<GrammarExpr>> {
         if variants.is_empty() {
             return Ok(None);
+        }
+        if !discriminator_anyof_fastpath_disabled() {
+            if let Some(expr) = self.try_lower_discriminator_value_closed_any_of_object(
+                variants,
+                include_untyped_non_object_alts,
+            )? {
+                return Ok(Some(expr));
+            }
         }
         if let Some(expr) = self.try_lower_common_property_closed_any_of_object_variants_expr_nfa(
             variants,
