@@ -1,5 +1,4 @@
 use crate::automata::lexer::Lexer;
-use std::sync::Arc;
 use std::time::Instant;
 
 use crate::Vocab;
@@ -110,7 +109,6 @@ pub(crate) fn run_state_equivalence_pipeline(
     active_groups: Option<&[bool]>,
     scope: StateEquivalenceScope,
     config: &StateEquivalencePipelineConfig,
-    flat_trans: Option<&Arc<[u32]>>,
 ) -> (ManyToOneIdMap, StateEquivalencePipelineProfile) {
     let mut current_state_map = initial_state_map
         .cloned()
@@ -139,7 +137,6 @@ pub(crate) fn run_state_equivalence_pipeline(
                     Some(&current_state_map),
                     active_groups,
                     mode,
-                    flat_trans,
                 );
                 record_max_length_profile(
                     &mut profile,

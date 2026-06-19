@@ -320,7 +320,7 @@ use crate::ds::weight::{shared_rangeset, Weight};
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
-use super::l2p::equivalence_analysis::compat::{compute_byte_classes, FlatDfa, FlatDfaState, TokenizerView};
+use super::l2p::equivalence_analysis::compat::{compute_byte_classes, TokenizerView};
 use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhaseProfile};
 
 fn compact_l1_terminal_dwa_enabled() -> bool {
@@ -332,84 +332,6 @@ fn compact_l1_terminal_dwa_enabled() -> bool {
                 !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
             })
             .unwrap_or(true)
-    })
-}
-
-
-fn map_projected_target(initial_state_map: &ManyToOneIdMap, target: u32) -> u32 {
-    if target == u32::MAX {
-        return u32::MAX;
-    }
-    initial_state_map
-        .original_to_internal
-        .get(target as usize)
-        .copied()
-        .unwrap_or(u32::MAX)
-}
-
-fn active_terminal_list(
-    values: impl Iterator<Item = TerminalID>,
-    active_terminals: &[bool],
-) -> Vec<usize> {
-    values
-        .filter_map(|terminal| {
-            let terminal = terminal as usize;
-            active_terminals
-                .get(terminal)
-                .copied()
-                .unwrap_or(false)
-                .then_some(terminal)
-        })
-        .collect()
-}
-
-fn projected_tokenizer_view_for_l1(
-    tokenizer: &Tokenizer,
-    initial_state_map: &ManyToOneIdMap,
-    active_terminals: &[bool],
-    bytes_to_fill: &[u8],
-    flat_trans: &[u32],
-) -> Option<TokenizerView> {
-    let class_count = initial_state_map.num_internal_ids() as usize;
-    if class_count == 0 || class_count >= tokenizer.num_states() as usize {
-        return None;
-    }
-    if initial_state_map.representative_original_ids.len() != class_count {
-        return None;
-    }
-
-    let mut states = Vec::with_capacity(class_count);
-    let mut transitions = vec![u32::MAX; class_count * 256];
-    for class_id in 0..class_count {
-        let repr = *initial_state_map.representative_original_ids.get(class_id)?;
-        if repr == u32::MAX || repr as usize >= tokenizer.num_states() as usize {
-            return None;
-        }
-        let base = class_id * 256;
-        for &byte in bytes_to_fill {
-            transitions[base + byte as usize] = map_projected_target(
-                initial_state_map,
-                flat_trans[repr as usize * 256 + byte as usize],
-            );
-        }
-        states.push(FlatDfaState {
-            finalizers: active_terminal_list(tokenizer.matched_terminals_iter(repr), active_terminals),
-            possible_future_group_ids: active_terminal_list(
-                tokenizer.possible_future_terminals_iter(repr),
-                active_terminals,
-            ),
-        });
-    }
-    let start_state = map_projected_target(initial_state_map, tokenizer.start_state()) as usize;
-    if start_state >= class_count {
-        return None;
-    }
-    Some(TokenizerView {
-        flat_dfa: FlatDfa {
-            states,
-            start_state,
-            transitions: Arc::from(transitions),
-        },
     })
 }
 
@@ -714,6 +636,9 @@ fn build_l1_id_map<'a>(
     let equiv_mapping = if max_length_skipped {
         states.clone()
     } else {
+        let tokenizer_view =
+            TokenizerView::new_filtered_from_flat_trans(flat_trans, tokenizer, active_terminals);
+        view_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
         let token_bytes: Vec<&[u8]> = token_id_bytes
             .iter()
             .map(|(_, bytes)| bytes.as_ref())
@@ -724,49 +649,15 @@ fn build_l1_id_map<'a>(
                 relevant_bytes[byte as usize] = true;
             }
         }
-        let bytes_to_fill: Vec<u8> = relevant_bytes
-            .iter()
-            .enumerate()
-            .filter_map(|(byte, &relevant)| relevant.then_some(byte as u8))
-            .collect();
-        if let Some(init_map) = initial_state_map
-            && let Some(projected_view) = projected_tokenizer_view_for_l1(
-                tokenizer,
-                init_map,
-                active_terminals,
-                &bytes_to_fill,
-                flat_trans,
-            )
-        {
-            view_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
-            let projected_states: Vec<usize> = (0..projected_view.dfa().states.len()).collect();
-            let byte_to_class = compute_byte_classes(projected_view.dfa());
-            let projected_mapping = super::l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted(
-                &projected_view,
-                &token_bytes,
-                &projected_states,
-                Some(&byte_to_class),
-                Some(active_terminals),
-                Some(&relevant_bytes),
-            );
-            projected_mapping
-                .into_iter()
-                .map(|rep_class| init_map.representative_original_ids[rep_class] as usize)
-                .collect()
-        } else {
-            let tokenizer_view =
-                TokenizerView::new_filtered_from_flat_trans(flat_trans, tokenizer, active_terminals);
-            view_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
-            let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
-            super::l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted(
-                &tokenizer_view,
-                &token_bytes,
-                &states,
-                Some(&byte_to_class),
-                Some(active_terminals),
-                Some(&relevant_bytes),
-            )
-        }
+        let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
+        super::l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted(
+            &tokenizer_view,
+            &token_bytes,
+            &states,
+            Some(&byte_to_class),
+            Some(active_terminals),
+            Some(&relevant_bytes),
+        )
     };
 
     // Sort token IDs first by first byte, then by length, then lexicographically.

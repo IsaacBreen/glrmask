@@ -434,11 +434,11 @@ fn auto_prefers_sorted_refinement(
     }
 
     // Sorting whole signature rows is poor for very narrow alphabets: the sort
-    // overhead dominates, and the interned path usually wins.  Broad rows can
-    // favor sorting on small tokenizers, but on large preserved-length product
-    // DFAs the row sort becomes the bottleneck (`Github_hard---o62060`).
-    // Prefer the interned path once the full query is large enough.
-    num_states <= 32_768 && (active_byte_count >= 58 || active_byte_count <= 16)
+    // overhead dominates, and the interned path usually wins.  For broad rows,
+    // however, the interned path spends too much time hashing and rechecking
+    // wide rows through bucket probes.  Use sorted refinement for those broad
+    // full-DFA queries even on larger tokenizers.
+    active_byte_count >= 58 || (num_states <= 16_384 && active_byte_count <= 16)
 }
 
 fn compute_kbounded_partition(
