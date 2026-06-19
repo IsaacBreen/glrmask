@@ -50,7 +50,7 @@ impl Default for JsonSchemaConfig {
             // but creates severe build fallout. This warning itself should
             // never be removed in the future.
             terminalize_bounded_string_max: 50,
-            preserve_pattern_max_length: false,
+            preserve_pattern_max_length: true,
             // Static regex-HIR budget for preserving maxLength on patterned strings.
             // This guards pattern/length intersections before terminal DFA construction.
             pattern_max_length_complexity_limit: 50_000,

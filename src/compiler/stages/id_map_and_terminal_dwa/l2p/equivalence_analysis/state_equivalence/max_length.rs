@@ -1,12 +1,13 @@
 use crate::automata::lexer::Lexer;
 use rayon::prelude::*;
+use std::sync::Arc;
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
 use super::build_state_map_from_subset_representatives;
-use super::super::compat::TokenizerView;
+use super::super::compat::{FlatDfa, FlatDfaState, TokenizerView};
 
 const MISSING_BLOCK: u32 = u32::MAX;
 
@@ -419,6 +420,112 @@ fn stable_refinement_blocks(
     blocks
 }
 
+
+fn map_target_class(initial_state_map: &ManyToOneIdMap, target: u32) -> u32 {
+    if target == u32::MAX {
+        return u32::MAX;
+    }
+    initial_state_map
+        .original_to_internal
+        .get(target as usize)
+        .copied()
+        .unwrap_or(u32::MAX)
+}
+
+fn transition_from_flat_or_tokenizer(
+    tokenizer: &Tokenizer,
+    flat_trans: Option<&Arc<[u32]>>,
+    state: u32,
+    byte: u8,
+) -> u32 {
+    flat_trans
+        .and_then(|trans| trans.get(state as usize * 256 + byte as usize).copied())
+        .unwrap_or_else(|| tokenizer.get_transition(state, byte))
+}
+
+fn build_quotient_view_from_stable_map(
+    tokenizer: &Tokenizer,
+    initial_state_map: &ManyToOneIdMap,
+    bytes_to_fill: &[u8],
+    flat_trans: Option<&Arc<[u32]>>,
+) -> Option<TokenizerView> {
+    let class_count = initial_state_map.num_internal_ids() as usize;
+    if class_count == 0 || class_count >= tokenizer.num_states() as usize {
+        return None;
+    }
+    if initial_state_map.representative_original_ids.len() != class_count {
+        return None;
+    }
+
+    let mut states = Vec::with_capacity(class_count);
+    let mut transitions = vec![u32::MAX; class_count * 256];
+
+    for class_id in 0..class_count {
+        let repr = *initial_state_map.representative_original_ids.get(class_id)?;
+        if repr == u32::MAX || repr as usize >= tokenizer.num_states() as usize {
+            return None;
+        }
+
+
+        let base = class_id * 256;
+        for &byte in bytes_to_fill {
+            transitions[base + byte as usize] =
+                map_target_class(
+                    initial_state_map,
+                    transition_from_flat_or_tokenizer(tokenizer, flat_trans, repr, byte),
+                );
+        }
+        states.push(FlatDfaState {
+            finalizers: filtered_terminals(tokenizer.matched_terminals_iter(repr), None),
+            possible_future_group_ids: filtered_terminals(tokenizer.possible_future_terminals_iter(repr), None),
+        });
+    }
+
+    let start_state = map_target_class(initial_state_map, tokenizer.start_state()) as usize;
+    if start_state >= class_count {
+        return None;
+    }
+
+    Some(TokenizerView {
+        flat_dfa: FlatDfa {
+            states,
+            start_state,
+            transitions: Arc::from(transitions),
+        },
+    })
+}
+
+fn compute_kbounded_state_map_on_initial_quotient(
+    tokenizer: &Tokenizer,
+    statistic: &MaxLengthStatistic,
+    initial_state_map: &ManyToOneIdMap,
+    active_groups: Option<&[bool]>,
+    byte_to_class: &[u8; 256],
+    active_bytes: &[u8],
+    flat_trans: Option<&Arc<[u32]>>,
+) -> Option<ManyToOneIdMap> {
+    let quotient_view =
+        build_quotient_view_from_stable_map(tokenizer, initial_state_map, active_bytes, flat_trans)?;
+    let class_count = quotient_view.flat_dfa.states.len();
+    let quotient_states: Vec<usize> = (0..class_count).collect();
+    let quotient_representatives = super::super::state::max_length::find_state_equivalence_classes_kbounded(
+        &quotient_view,
+        &quotient_states,
+        statistic.max_token_len,
+        active_groups,
+        Some(&statistic.relevant_bytes),
+        Some(byte_to_class),
+        "pipeline_kbounded_quotient",
+    );
+    let quotient_map = build_state_map_from_subset_representatives(
+        &quotient_states,
+        &quotient_representatives,
+        class_count,
+        None,
+    );
+    Some(initial_state_map.compose(&quotient_map))
+}
+
 pub(crate) fn compute_statistic(vocab: &Vocab) -> MaxLengthStatistic {
     let mut relevant_bytes = [false; 256];
     let mut max_token_len = 0usize;
@@ -440,6 +547,7 @@ pub(crate) fn compute_state_map(
     initial_state_map: Option<&ManyToOneIdMap>,
     active_groups: Option<&[bool]>,
     mode: MaxLengthMode,
+    flat_trans: Option<&Arc<[u32]>>,
 ) -> ManyToOneIdMap {
     let num_states = tokenizer.num_states() as usize;
     let states: Vec<usize> = match initial_state_map {
@@ -466,9 +574,27 @@ pub(crate) fn compute_state_map(
             build_subset_mapping(&states, &full_mapping)
         }
         MaxLengthMode::KBoundedByteRestricted => {
-            let tokenizer_view = match active_groups {
-                Some(active_groups) => TokenizerView::new_filtered(tokenizer, active_groups),
-                None => TokenizerView::new(tokenizer),
+            if let Some(initial_state_map) = initial_state_map
+                && let Some(quotient_map) = compute_kbounded_state_map_on_initial_quotient(
+                    tokenizer,
+                    statistic,
+                    initial_state_map,
+                    active_groups,
+                    &byte_to_class,
+                    &active_bytes,
+                    flat_trans,
+                )
+            {
+                return quotient_map;
+            }
+
+            let tokenizer_view = match (active_groups, flat_trans) {
+                (Some(active_groups), Some(flat_trans)) => {
+                    TokenizerView::new_filtered_from_flat_trans(flat_trans, tokenizer, active_groups)
+                }
+                (Some(active_groups), None) => TokenizerView::new_filtered(tokenizer, active_groups),
+                (None, Some(flat_trans)) => TokenizerView::new_from_flat_trans(flat_trans, tokenizer),
+                (None, None) => TokenizerView::new(tokenizer),
             };
             super::super::state::max_length::find_state_equivalence_classes_kbounded(
                 &tokenizer_view,
