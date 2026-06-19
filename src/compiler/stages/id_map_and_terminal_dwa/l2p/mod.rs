@@ -504,12 +504,14 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // fast-sound, identity, lex-dedup, or similar shortcut id-map paths.
     let fast_sound_id_map_used = false;
     // Keep equivalence analysis in the same terminal universe as the tokenizer
-    // consumed by the L2P NWA builder.  When simplification is enabled, inactive
+    // consumed by the L2P NWA builder. When simplification is enabled, inactive
     // terminal bits have already been removed from `tokenizer_for_build`, so no
-    // extra active-group filter is needed.  When simplification is disabled, the
-    // builder still consults full-tokenizer future-terminal sets in several
-    // paths, so filtering equivalence by `active_terminals` would be unsound: it
-    // could merge states that the later NWA construction still distinguishes.
+    // extra active-group filter is needed. When simplification is disabled, the
+    // tokenizer still contains full finalizer/future sets; filter the equivalence
+    // analysis to the active L2P terminal universe so inactive terminals do not
+    // prevent valid merges. The NWA builder only emits active L2P weights for
+    // this partition, so distinguishing inactive terminal futures here is wasted
+    // work and causes large regressions such as `Github_hard---o62060`.
     let (simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
@@ -517,7 +519,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             vocab,
             disallowed_follows,
             ignore_terminal,
-            None,
+            if use_simplified_tok { None } else { Some(active_terminals) },
             shared_vocab_dfa_cache,
             if use_simplified_tok { None } else { flat_trans },
             equivalence_initial_state_map,

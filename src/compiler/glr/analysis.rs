@@ -2144,9 +2144,7 @@ pub(crate) fn merge_identical_nonterminals(
     };
 
     // Refine until stable, using depth-ordered in-place (Gauss-Seidel) updates.
-    let mut iters = 0u32;
     loop {
-        iters += 1;
         let prev_class_of = class_of.clone();
         // In-place update: process NTs in depth order so that deeper NTs
         // (which depend on shallower ones) see already-updated classes.

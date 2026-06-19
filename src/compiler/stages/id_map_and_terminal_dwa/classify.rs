@@ -491,7 +491,11 @@ fn exact_l2p_boundary_filter_enabled() -> bool {
                 let trimmed = value.trim();
                 trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
             })
-            .unwrap_or(true)
+            // The exact filter can spend seconds walking many tokenizer states for
+            // large vocab partitions before normal L1/L2P timing starts. Keep the
+            // cheap adjacent-byte boundary split as the default and make this
+            // refinement opt-in.
+            .unwrap_or(false)
     })
 }
 
