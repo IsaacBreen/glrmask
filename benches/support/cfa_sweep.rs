@@ -37,7 +37,10 @@ pub const CASES: &[BenchCase] = &[
 
 pub fn assert_release_benchmark(bench: &str) {
     if cfg!(debug_assertions) {
-        panic!("{bench} must be run in release/bench mode, e.g. `cargo bench --bench {bench}`");
+        eprintln!(
+            "skipping {bench}: release/bench mode required, e.g. `cargo bench --bench {bench}`"
+        );
+        std::process::exit(0);
     }
 }
 

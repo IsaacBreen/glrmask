@@ -1408,7 +1408,12 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     let use_shared_multi_nfa = should_use_shared_multi_nfa(&plan);
     let used_product_dfa = plan.compiled_exprs.len() > 1 && !use_shared_multi_nfa;
 
-    let mut dfa = if used_product_dfa {
+    let mut dfa = if plan.compiled_exprs.is_empty() {
+        // A grammar can lower to the empty language, for example when a const
+        // literal conflicts with sibling assertions. Keep a single non-final
+        // start state so tokenizer users can still query/step the DFA safely.
+        DFA::new(1)
+    } else if used_product_dfa {
         build_product_dfa(&plan.compiled_exprs, plan.profile_labels.as_deref())
     } else if plan.compiled_exprs.len() > 1 {
         compile_multi_expr_dfa_via_nfa(&plan.compiled_exprs)

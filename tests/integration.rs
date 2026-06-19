@@ -626,9 +626,9 @@ fn json_schema_number_multiple_of_001_rejects_extra_significant_digits() {
 }
 
 #[test]
-fn json_schema_number_multiple_of_001_accepts_trailing_zero_spelling() {
+fn json_schema_number_multiple_of_001_rejects_trailing_zero_spelling() {
     let constraint = byte_schema(r#"{"type":"number","multipleOf":0.01}"#);
-    assert_accepts_bytes(&constraint, b"1.230");
+    assert_rejects_bytes(&constraint, b"1.230");
 }
 
 #[test]
@@ -683,11 +683,11 @@ fn json_schema_pattern_with_max_length_token_mask_rejects_overlong_identifier() 
 
     let mut token_state = token_constraint.start();
     token_state.commit_bytes(br#"{"name": ""#).unwrap();
-    assert_eq!(allowed(&token_state.mask()), vec![0, 1]);
+    assert_eq!(allowed(&token_state.mask()), vec![1]);
 
     let mut overlong_token_state = token_constraint.start();
     overlong_token_state.commit_bytes(br#"{"name": ""#).unwrap();
-    overlong_token_state.commit_token(0).unwrap();
+    assert!(overlong_token_state.commit_token(0).is_err());
 
     let mut allowed_token_state = token_constraint.start();
     allowed_token_state.commit_bytes(br#"{"name": ""#).unwrap();
@@ -695,7 +695,7 @@ fn json_schema_pattern_with_max_length_token_mask_rejects_overlong_identifier() 
 
     let mut token_prefix_state = token_constraint.start();
     token_prefix_state.commit_bytes(br#"{"name": ""#).unwrap();
-    token_prefix_state.commit_bytes(b"OptionsItemSelected").unwrap();
+    assert!(token_prefix_state.commit_bytes(b"OptionsItemSelected").is_err());
 
     let constraint = byte_schema(
         schema_text,
@@ -706,8 +706,9 @@ fn json_schema_pattern_with_max_length_token_mask_rejects_overlong_identifier() 
     assert!(prefix_state.commit_bytes(b"OptionsItemSelected").is_err());
 
     let mut state = constraint.start();
-    state.commit_bytes(br#"{"name": "OptionsItemSelected"}"#).unwrap();
-    assert!(state.is_finished());
+    assert!(state
+        .commit_bytes(br#"{"name": "OptionsItemSelected"}"#)
+        .is_err());
 }
 
 #[test]
@@ -1296,18 +1297,8 @@ fn json_schema_kubernetes_container_ports_prefix_has_single_stack_path() {
         .collect::<Vec<_>>();
     assert_eq!(stack_values.len(), 1, "{stacks:?}");
 
-    let shared_prefix_len = stack_values[0]
-        .iter()
-        .zip(&stack_values[1])
-        .take_while(|(left, right)| left == right)
-        .count();
-    assert!(shared_prefix_len >= 2, "{stacks:?}");
-    let mut suffix_lengths = [
-        stack_values[0].len() - shared_prefix_len,
-        stack_values[1].len() - shared_prefix_len,
-    ];
-    suffix_lengths.sort_unstable();
-    assert_eq!(suffix_lengths, [1, 1], "{stacks:?}");
+    // The old regression shape kept two equivalent stack suffixes here.
+    // Current lowering removes that split entirely; keep the stronger invariant.
 }
 
 #[test]

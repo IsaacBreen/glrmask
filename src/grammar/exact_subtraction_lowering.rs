@@ -872,7 +872,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_subtraction_errors_on_missing_exact_alternative() {
+    fn exact_subtraction_ignores_missing_exact_alternative() {
         let mut grammar = NamedGrammar {
             rules: vec![
                 nonterminal("A", GrammarExpr::Choice(vec![literal("a"), literal("b")])),
@@ -885,8 +885,10 @@ mod tests {
             ignore: None,
         };
 
-        let err = lower_exact_subtractions(&mut grammar).unwrap_err();
-        assert!(format!("{err}").contains("no exact alternative"), "{err}");
+        let stats = lower_exact_subtractions(&mut grammar).unwrap();
+        assert_eq!(stats.rewritten_sites, 1);
+        assert!(!contains_exclude(&find_rule(&grammar, "start").expr));
+        lower(&grammar).unwrap();
     }
 
     #[test]
@@ -948,8 +950,10 @@ mod tests {
             ignore: None,
         };
 
-        let err = lower_exact_subtractions(&mut grammar).unwrap_err();
-        assert!(format!("{err}").contains("no exact alternative"), "{err}");
+        let stats = lower_exact_subtractions(&mut grammar).unwrap();
+        assert_eq!(stats.rewritten_sites, 1);
+        assert!(!contains_exclude(&find_rule(&grammar, "start").expr));
+        lower(&grammar).unwrap();
     }
 
     #[test]

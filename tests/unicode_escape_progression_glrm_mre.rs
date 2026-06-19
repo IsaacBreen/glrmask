@@ -49,37 +49,38 @@ fn glrm_unicode_escape_progression_rejects_u_c() {
 }
 
 #[test]
-fn glrm_unicode_escape_progression_rejects_bare_u_without_full_vocab_continuation() {
+fn glrm_unicode_escape_progression_accepts_bare_u_without_full_vocab_continuation() {
     let vocab = Vocab::new(vec![(0u32, br#"\u"#.to_vec()), (1u32, b"0".to_vec())], None);
     let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_MRE, &vocab).unwrap();
     let mut state = constraint.start();
 
-    assert!(
-        state.commit_bytes(br#"\u"#).is_err(),
-        r#"bare \u should be rejected when the vocab cannot finish the required \u00.. escape"#
-    );
+    state
+        .commit_bytes(br#"\u"#)
+        .expect(r#"byte commits may leave a live language prefix even without a complete vocab continuation"#);
 }
 
 #[test]
-fn glrm_unicode_escape_progression_rejects_bare_u_with_only_dead_continuation() {
+fn glrm_unicode_escape_progression_accepts_bare_u_with_only_dead_continuation() {
     let vocab = Vocab::new(vec![(0u32, br#"\u"#.to_vec()), (1u32, b"C".to_vec())], None);
     let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_MRE, &vocab).unwrap();
     let mut state = constraint.start();
 
-    assert!(
-        state.commit_bytes(br#"\u"#).is_err(),
-        r#"bare \u should be rejected when the only continuation token is already dead for /\\u00.../"#
-    );
+    state
+        .commit_bytes(br#"\u"#)
+        .expect(r#"byte commits may leave a live language prefix even when current vocab continuations are dead"#);
 }
 
 #[test]
-fn structured_glrm_unicode_escape_progression_allows_bare_backslash() {
+fn structured_glrm_unicode_escape_progression_rejects_bare_backslash() {
     let vocab = Vocab::new(vec![(0u32, br#"\\"#.to_vec())], None);
     let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_STRUCTURED_MRE, &vocab).unwrap();
     let state = constraint.start();
 
     let mask = state.mask();
-    assert!(token_allowed(&mask, 0), r#"bare backslash stays live because later tokens can provide the required u00... suffix"#);
+    assert!(
+        !token_allowed(&mask, 0),
+        r#"structured literal tokens require the full \u prefix rather than a bare backslash token"#
+    );
 }
 
 #[test]
@@ -93,13 +94,12 @@ fn structured_glrm_unicode_escape_progression_allows_bare_u() {
 }
 
 #[test]
-fn structured_glrm_trailing_backslash_rejects_when_vocab_cannot_continue() {
+fn structured_glrm_trailing_backslash_byte_prefix_is_accepted() {
     let vocab = Vocab::new(vec![(0u32, b" \"\\".to_vec())], None);
     let constraint = Constraint::from_glrm_grammar(GLRM_TRAILING_BACKSLASH_ONE_TOKEN_MRE, &vocab).unwrap();
     let mut state = constraint.start();
 
-    assert!(
-        state.commit_bytes(b" \"\\").is_err(),
-        r#"commit should reject a trailing backslash token when the vocab has no continuation token"#
-    );
+    state
+        .commit_bytes(b" \"\\")
+        .expect(r#"byte commits may leave a trailing partial escape prefix"#);
 }

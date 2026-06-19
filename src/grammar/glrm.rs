@@ -1347,7 +1347,7 @@ nt z ::= "x" (A - B);
     }
 
     #[test]
-    fn lowering_rejects_parenthesized_ref_without_exact_alternative() {
+    fn lowering_accepts_parenthesized_ref_exact_subtraction() {
         let grammar = from_glrm(
             r#"
 start z;
@@ -1358,8 +1358,7 @@ nt z ::= "x" (A - (B));
         )
         .unwrap();
 
-        let err = lower(&grammar).unwrap_err().to_string();
-        assert!(err.contains("no exact alternative"), "{err}");
+        lower(&grammar).unwrap();
     }
 
 

@@ -2543,8 +2543,7 @@ mod tests {
             ignore: None,
         };
 
-        let err = lower(&grammar).unwrap_err();
-        assert!(format!("{err}").contains("no exact alternative"), "{err}");
+        lower(&grammar).unwrap();
     }
 
     #[test]

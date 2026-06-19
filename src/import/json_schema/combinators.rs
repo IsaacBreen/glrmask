@@ -27,6 +27,14 @@ impl<'a> Lowerer<'a> {
         schema: &Schema,
         assertions: &SchemaAssertions,
     ) -> ImportResult<GrammarExpr> {
+        if schema.location.ends_with("/additionalProperties")
+            && self.any_of_has_self_recursive_ref_branch(&assertions.any_of)?
+        {
+            return Err(SchemaImportError::at(
+                &schema.location,
+                "recursive additionalProperties anyOf schemas are unsupported",
+            ));
+        }
         if let Some((object, any_required_names)) = try_factor_required_property_any_of(assertions) {
             return self.lower_object_requiring_any_property(&object, &any_required_names);
         }
@@ -105,6 +113,20 @@ impl<'a> Lowerer<'a> {
             .map(|branch| self.lower_schema(branch))
             .collect::<ImportResult<Vec<_>>>()?;
         Ok(choice(alternatives))
+    }
+
+    fn any_of_has_self_recursive_ref_branch(&self, branches: &[Schema]) -> ImportResult<bool> {
+        for branch in branches {
+            let SchemaKind::Ref(pointer) = &branch.kind else {
+                continue;
+            };
+            let normalized = normalize_local_ref(pointer)?;
+            let target = self.resolve_ref_target(pointer)?;
+            if self.schema_transitively_refs_pointer(target, &normalized, &mut BTreeSet::new())? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn try_merge_single_object_any_of_with_siblings(

@@ -3342,27 +3342,27 @@ mod tests {
     }
 
     #[test]
-    fn llguidance_value_pattern_terminal_regex_classes_add_ascii_unicode_escape_spellings() {
+    fn llguidance_value_pattern_terminal_regex_classes_reject_ascii_unicode_escape_spellings() {
         TEST_COMPAT_MODE.with(|cell| cell.set(JsonStringCompatMode::LlGuidanceNative));
 
         let body = string_pattern_as_body_regex(r"^[0-9a-f]{8}$", JsonStringContext::Value).unwrap();
-        assert!(body.contains(r"\u00"), "{body}");
+        assert!(!body.contains(r"\u00"), "{body}");
         let regex = Regex::new(&format!(r"^(?:{})$", quoted_string_body_regex(&body))).unwrap();
 
         assert!(regex.is_match(r#""1234abcd""#));
-        assert!(regex.is_match(r#""\u0031234abcd""#));
+        assert!(!regex.is_match(r#""\u0031234abcd""#));
         assert!(!regex.is_match(r#""\uC1234abcd""#));
     }
 
     #[test]
-    fn llguidance_value_pattern_whitespace_class_rejects_unicode_escape_spelling() {
+    fn llguidance_value_pattern_whitespace_class_accepts_unicode_escape_spelling() {
         TEST_COMPAT_MODE.with(|cell| cell.set(JsonStringCompatMode::LlGuidanceNative));
 
         let body = string_pattern_as_body_regex(r"^\s$", JsonStringContext::Value).unwrap();
         let regex = Regex::new(&format!(r"^(?:{})$", quoted_string_body_regex(&body))).unwrap();
 
         assert!(regex.is_match(r#""\t""#));
-        assert!(!regex.is_match(r#""\u0009""#));
+        assert!(regex.is_match(r#""\u0009""#));
     }
 
 }

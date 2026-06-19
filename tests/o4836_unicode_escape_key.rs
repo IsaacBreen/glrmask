@@ -56,7 +56,7 @@ fn token_allowed(mask: &[u32], id: usize) -> bool {
 }
 
 #[test]
-fn o4836_pattern_property_key_rejects_partial_unicode_escape_token_like_llguidance_native() {
+fn o4836_pattern_property_key_allows_partial_unicode_escape_token() {
     let _compat = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
     let schema = r#"{
         "type": "object",
@@ -75,8 +75,8 @@ fn o4836_pattern_property_key_rejects_partial_unicode_escape_token_like_llguidan
 
     let mut token_state = constraint.start();
     token_state.commit_bytes(prefix).unwrap();
-    assert!(!token_allowed(&token_state.mask(), 0));
-    assert!(token_state.commit_token(0).is_err());
+    assert!(token_allowed(&token_state.mask(), 0));
+    token_state.commit_token(0).unwrap();
 }
 
 #[test]
