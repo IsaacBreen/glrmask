@@ -12,6 +12,11 @@ use super::super::compat::{FlatDfa, TokenizerView};
 
 const MISSING_BLOCK: u32 = u32::MAX;
 
+fn max_length_profile_enabled() -> bool {
+    std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+}
+
 struct ActiveTransitionTable {
     width: usize,
     targets_flat: Vec<u32>,
@@ -424,7 +429,16 @@ fn auto_prefers_sorted_refinement(
     num_states: usize,
     active_byte_count: usize,
 ) -> bool {
-    is_full_state_query && num_states <= 16_384 && active_byte_count <= 16
+    if !is_full_state_query {
+        return false;
+    }
+
+    // Sorting whole signature rows is poor for very narrow alphabets: the sort
+    // overhead dominates, and the interned path usually wins.  For broad rows,
+    // however, the interned path spends too much time hashing and rechecking
+    // wide rows through bucket probes.  Use sorted refinement for those broad
+    // full-DFA queries even on larger tokenizers.
+    active_byte_count >= 58 || (num_states <= 16_384 && active_byte_count <= 16)
 }
 
 fn compute_kbounded_partition(
@@ -530,14 +544,44 @@ pub(crate) fn find_state_equivalence_classes_kbounded(
         return Vec::new();
     }
 
+    let profile_enabled = max_length_profile_enabled();
+    let total_started_at = profile_enabled.then(std::time::Instant::now);
     let dfa = tokenizer.dfa();
+    let active_bytes_started_at = profile_enabled.then(std::time::Instant::now);
     let active_bytes = active_byte_representatives(relevant_bytes, byte_to_class);
+    let active_bytes_ms = active_bytes_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let full_state_query = is_full_state_query(states, dfa.states.len());
+    let compute_started_at = profile_enabled.then(std::time::Instant::now);
     let (blocks, block_count, iterations_run) =
         compute_kbounded_partition(dfa, k, active_groups, &active_bytes, full_state_query);
-    let _ = (block_count, iterations_run, mode);
+    let compute_ms = compute_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
-    build_subset_mapping(states, &blocks)
+    let mapping_started_at = profile_enabled.then(std::time::Instant::now);
+    let mapping = build_subset_mapping(states, &blocks);
+    let mapping_ms = mapping_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][max_length_equiv] mode={} query_states={} dfa_states={} k={} active_bytes={} full_state_query={} iterations={} reps={} active_bytes_ms={:.3} compute_ms={:.3} mapping_ms={:.3} total_ms={:.3}",
+            mode,
+            states.len(),
+            dfa.states.len(),
+            k,
+            active_bytes.len(),
+            full_state_query,
+            iterations_run,
+            block_count,
+            active_bytes_ms,
+            compute_ms,
+            mapping_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    mapping
 }
 
 pub fn find_state_equivalence_classes_byte_restricted<S: AsRef<[u8]>>(

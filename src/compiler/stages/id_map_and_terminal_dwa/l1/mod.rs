@@ -945,6 +945,8 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
             &token_buckets.token_indices_by_first_byte[byte_idx],
             &token_buckets.suffix_lcps_by_first_byte[byte_idx],
             &token_buckets.suffix_subtree_bytes[byte_idx],
+            &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
+            token_buckets.has_empty_suffix_by_bucket[byte_idx],
             &state_to_terminal_signature,
             flat_trans,
         )
@@ -1075,6 +1077,8 @@ fn l1_bucket_suffix_signature_profiles_batched(
     token_ids: &[usize],
     suffix_lcps: &[usize],
     suffix_subtree: &[u64; 4],
+    suffix_first_bytes: &[u64; 4],
+    has_empty_suffix: bool,
     state_to_terminal_signature: &[u32],
     flat_trans: &[u32],
 ) -> Vec<((u8, u32), Vec<(u32, u32, u32)>)> {
@@ -1100,6 +1104,51 @@ fn l1_bucket_suffix_signature_profiles_batched(
             results.push(((first_byte, target), profile));
         } else {
             walk_targets.push(target);
+        }
+    }
+
+    if walk_targets.is_empty() {
+        return results;
+    }
+
+    let mut dedup_others: Option<Vec<Vec<u32>>> = None;
+    if !has_empty_suffix {
+        let mut first_suffix_bytes = Vec::<u8>::new();
+        for word in 0..4u8 {
+            let mut bits = suffix_first_bytes[word as usize];
+            while bits != 0 {
+                let offset = bits.trailing_zeros() as u8;
+                first_suffix_bytes.push(word * 64 + offset);
+                bits &= bits - 1;
+            }
+        }
+
+        if !first_suffix_bytes.is_empty() {
+            let mut fp_groups = FxHashMap::<Vec<u32>, Vec<u32>>::default();
+            for &target in &walk_targets {
+                let fp: Vec<u32> = first_suffix_bytes
+                    .iter()
+                    .map(|&byte| flat_trans[target as usize * 256 + byte as usize])
+                    .collect();
+                fp_groups.entry(fp).or_default().push(target);
+            }
+
+            let mut deduped_targets = Vec::<u32>::new();
+            let mut others = Vec::<Vec<u32>>::new();
+            for (fp, group) in fp_groups {
+                if fp.iter().all(|&state| state == dead) {
+                    for target in group {
+                        results.push(((first_byte, target), Vec::new()));
+                    }
+                    continue;
+                }
+                deduped_targets.push(group[0]);
+                others.push(group[1..].to_vec());
+            }
+            if deduped_targets.len() < walk_targets.len() {
+                walk_targets = deduped_targets;
+                dedup_others = Some(others);
+            }
         }
     }
 
@@ -1144,7 +1193,12 @@ fn l1_bucket_suffix_signature_profiles_batched(
         }
     }
 
-    for (target, profile) in walk_targets.into_iter().zip(profiles) {
+    for (target_idx, (target, profile)) in walk_targets.into_iter().zip(profiles).enumerate() {
+        if let Some(ref others) = dedup_others {
+            for &other_target in &others[target_idx] {
+                results.push(((first_byte, other_target), profile.clone()));
+            }
+        }
         results.push(((first_byte, target), profile));
     }
     results
