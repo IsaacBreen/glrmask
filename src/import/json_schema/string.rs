@@ -157,6 +157,7 @@ impl<'a> Lowerer<'a> {
                 schema.max_length,
                 self.config.preserve_pattern_max_length,
                 self.config.pattern_max_length_complexity_limit,
+                self.config.pattern_max_length_preserve_cap,
             )
         {
             constraints.push(quoted_string_body_regex(&length_bound_body));
@@ -1904,6 +1905,7 @@ fn cheap_pattern_length_bound_body_regex(
     max: Option<usize>,
     preserve_pattern_max_length: bool,
     pattern_max_length_complexity_limit: usize,
+    pattern_max_length_preserve_cap: usize,
 ) -> Option<String> {
     if min == 0 && max.is_none() {
         return None;
@@ -1921,6 +1923,7 @@ fn cheap_pattern_length_bound_body_regex(
         // broader guard.
         let preserve_upper_bound = max <= 64
             || (preserve_pattern_max_length
+                && max <= pattern_max_length_preserve_cap
                 && pattern_max_length_complexity_score(&pattern, max)
                     <= pattern_max_length_complexity_limit);
         if preserve_upper_bound {
@@ -1928,10 +1931,10 @@ fn cheap_pattern_length_bound_body_regex(
         }
     }
 
-    // For large bounded patterns, keep the cheap lower bound but still drop the
-    // potentially explosive upper bound unless the explicit opt-in above is set.
-    // This rejects impossible too-short complete string tokens without rebuilding
-    // the old maxLength product by default.
+    // For large bounded patterns, keep the cheap lower bound but drop the
+    // potentially explosive upper bound once either the absolute cap or the
+    // complexity guard rejects preservation. This rejects impossible too-short
+    // complete string tokens without rebuilding the old maxLength product.
     if min > 0 {
         return Some(bounded_json_string_body_regex(string_char_regex, min, None));
     }

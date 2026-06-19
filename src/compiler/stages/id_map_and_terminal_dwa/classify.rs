@@ -483,19 +483,33 @@ fn token_has_active_l2p_boundary(bytes: &[u8], allowed_boundary_pairs: &[U8Set; 
         .any(|pair| allowed_boundary_pairs[pair[0] as usize].contains(pair[1]))
 }
 
-fn exact_l2p_boundary_filter_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
+#[derive(Clone, Copy, Debug)]
+enum ExactL2pBoundaryFilterMode {
+    Auto,
+    Force(bool),
+}
+
+fn exact_l2p_boundary_filter_mode() -> ExactL2pBoundaryFilterMode {
+    static MODE: std::sync::OnceLock<ExactL2pBoundaryFilterMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
         std::env::var("GLRMASK_EXACT_L2P_BOUNDARY_FILTER")
             .map(|value| {
                 let trimmed = value.trim();
-                trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+                ExactL2pBoundaryFilterMode::Force(
+                    trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true"),
+                )
             })
-            // The exact filter can spend seconds walking many tokenizer states for
-            // large vocab partitions before normal L1/L2P timing starts. Keep the
-            // cheap adjacent-byte boundary split as the default and make this
-            // refinement opt-in.
-            .unwrap_or(false)
+            .unwrap_or(ExactL2pBoundaryFilterMode::Auto)
+    })
+}
+
+fn exact_l2p_boundary_filter_work_limit() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("GLRMASK_EXACT_L2P_BOUNDARY_FILTER_WORK_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(20_000_000)
     })
 }
 
@@ -671,7 +685,32 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
     let mut single_entries = Vec::<(u32, Vec<u8>)>::new();
     let mut adjacent_tokens = 0usize;
     let mut irrelevant_tokens = 0usize;
-    let use_exact_boundary_filter = exact_l2p_boundary_filter_enabled();
+    let adjacent_candidate_count = vocab
+        .entries
+        .values()
+        .filter(|bytes| token_has_active_l2p_boundary(bytes, &allowed_boundary_pairs))
+        .count();
+    let estimated_exact_work = active_start_states
+        .len()
+        .saturating_mul(adjacent_candidate_count);
+    let use_exact_boundary_filter = match exact_l2p_boundary_filter_mode() {
+        ExactL2pBoundaryFilterMode::Force(enabled) => enabled,
+        ExactL2pBoundaryFilterMode::Auto => {
+            estimated_exact_work <= exact_l2p_boundary_filter_work_limit()
+        }
+    };
+
+    if std::env::var_os("GLRMASK_PROFILE_EXACT_L2P_BOUNDARY_FILTER").is_some() {
+        eprintln!(
+            "[glrmask/profile][exact_l2p_boundary_filter] vocab_tokens={} active_terminals={} active_start_states={} adjacent_candidates={} estimated_work={} enabled={}",
+            vocab.entries.len(),
+            active.len(),
+            active_start_states.len(),
+            adjacent_candidate_count,
+            estimated_exact_work,
+            use_exact_boundary_filter,
+        );
+    }
 
     for (&token_id, bytes) in vocab.entries.iter() {
         if token_has_active_l2p_boundary(bytes, &allowed_boundary_pairs) {

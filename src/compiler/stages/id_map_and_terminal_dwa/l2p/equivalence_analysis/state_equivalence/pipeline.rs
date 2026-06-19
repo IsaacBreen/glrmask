@@ -128,7 +128,7 @@ pub(crate) fn run_state_equivalence_pipeline(
         match *kind {
             StateEquivalencePassKind::MaxLength => {
                 let mode = match scope {
-                    StateEquivalenceScope::Global => MaxLengthMode::KBoundedByteRestricted,
+                    StateEquivalenceScope::Global => MaxLengthMode::StableByteRestricted,
                     StateEquivalenceScope::L2p => MaxLengthMode::KBoundedByteRestricted,
                 };
                 let statistic = max_length::compute_statistic(vocab);
