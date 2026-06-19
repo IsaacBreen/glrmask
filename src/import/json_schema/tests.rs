@@ -7383,7 +7383,7 @@ fn llguidance_compat_closed_optional_object_keeps_declared_property_order() {
 }
 
 #[test]
-fn json_schema_closed_optional_object_allows_out_of_order_properties_without_compat() {
+fn json_schema_lowering_closed_optional_object_keeps_declared_property_order() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "0");
     let schema = json!({
@@ -7395,10 +7395,9 @@ fn json_schema_closed_optional_object_allows_out_of_order_properties_without_com
             "users": {"type": "array", "items": {"type": "string"}}
         }
     });
-    assert!(schema_accepts_bytes(
-        &schema,
-        br#"{"organisations": [], "auth_bypass_ids": []}"#,
-    ));
+    let prefix = br#"{"organisations": [], ""#;
+    assert!(!schema_mask_allows_token_after_prefix(&schema, prefix, 300, b"a"));
+    assert!(schema_mask_allows_token_after_prefix(&schema, prefix, 301, b"u"));
 }
 
 #[test]

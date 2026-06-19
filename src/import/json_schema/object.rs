@@ -2510,24 +2510,6 @@ impl<'a> Lowerer<'a> {
         items: &[ObjectItem],
         tail_pair: Option<GrammarExpr>,
     ) -> ImportResult<GrammarExpr> {
-        if tail_pair.is_none() && !self.llguidance_compat_enabled() {
-            let required_prefix_len = items.iter().take_while(|item| item.required).count();
-            let required_count = items.iter().filter(|item| item.required).count();
-            if required_count == 0 && items.len() <= 4 {
-                let dependencies = BTreeMap::new();
-                return self.lower_fixed_object_body_exprnfa_with_property_dependencies(items, &dependencies);
-            }
-            if required_prefix_len > 0
-                && required_prefix_len == required_count
-                && items.len().saturating_sub(required_prefix_len) <= 6
-            {
-                return self.lower_required_prefix_unordered_optional_closed_object_body(
-                    items,
-                    required_prefix_len,
-                );
-            }
-        }
-
         let mut builder = ExprNfaBuilder::new();
         let mut states = vec![[0u32; 2]; items.len() + 1];
         states[0][0] = builder.start_state();
@@ -2662,76 +2644,6 @@ impl<'a> Lowerer<'a> {
         self.add_nonterminal_rule(&rule_name, body);
 
         Ok(seq(vec![lit("{"), r(&rule_name), lit("}")]))
-    }
-
-    fn lower_required_prefix_unordered_optional_closed_object_body(
-        &mut self,
-        items: &[ObjectItem],
-        required_prefix_len: usize,
-    ) -> ImportResult<GrammarExpr> {
-        let mut prefix = Vec::new();
-        for (index, item) in items[..required_prefix_len].iter().enumerate() {
-            if index > 0 {
-                prefix.push(self.item_separator_expr());
-            }
-            prefix.push(item.pair.clone());
-        }
-
-        let optional_items = &items[required_prefix_len..];
-        if optional_items.is_empty() {
-            return Ok(seq(vec![lit("{"), seq(prefix), lit("}")]));
-        }
-        if optional_items.len() > 63 {
-            return Err(SchemaImportError::new(
-                "unordered optional fixed-object suffix supports at most 63 properties".to_string(),
-            ));
-        }
-
-        let mut builder = ExprNfaBuilder::new();
-        let mut state_ids = BTreeMap::<u64, u32>::new();
-        let mut queue = VecDeque::<u64>::new();
-        state_ids.insert(0, builder.start_state());
-        queue.push_back(0);
-
-        let item_symbols = optional_items
-            .iter()
-            .map(|item| Self::split_object_pair_symbols(&item.pair))
-            .collect::<ImportResult<Vec<_>>>()?;
-
-        while let Some(seen_mask) = queue.pop_front() {
-            let state_id = state_ids[&seen_mask];
-            builder.set_accepting(state_id);
-            for (index, symbols) in item_symbols.iter().enumerate() {
-                let bit = 1u64 << index;
-                if seen_mask & bit != 0 {
-                    continue;
-                }
-                let next_seen = seen_mask | bit;
-                let next_state_id = if let Some(&existing) = state_ids.get(&next_seen) {
-                    existing
-                } else {
-                    let id = builder.add_state();
-                    state_ids.insert(next_seen, id);
-                    queue.push_back(next_seen);
-                    id
-                };
-                let mut transition_symbols = Vec::with_capacity(symbols.len() + 1);
-                transition_symbols.push(self.item_separator_expr());
-                transition_symbols.extend(symbols.iter().cloned());
-                Self::add_expr_nfa_symbol_path(
-                    &mut builder,
-                    state_id,
-                    transition_symbols,
-                    next_state_id,
-                );
-            }
-        }
-
-        let suffix_rule = self.fresh_rule_name("json_closed_object_optional_suffix");
-        let suffix = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
-        self.add_nonterminal_rule(&suffix_rule, suffix);
-
-        Ok(seq(vec![lit("{"), seq(prefix), r(&suffix_rule), lit("}")]))
     }
 
     fn split_literal_key_symbol(symbol: GrammarExpr) -> Vec<GrammarExpr> {
