@@ -510,7 +510,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             vocab,
             disallowed_follows,
             ignore_terminal,
-            if use_simplified_tok { None } else { Some(active_terminals) },
+            None,
             shared_vocab_dfa_cache,
             if use_simplified_tok { None } else { flat_trans },
             equivalence_initial_state_map,
