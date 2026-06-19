@@ -1612,7 +1612,7 @@ fn expr_nfa_pattern_property_symbols_hoist_raw_regexes_for_glrm_roundtrip() {
 }
 
 #[test]
-fn required_prefix_open_object_uses_pair_loop_body() {
+fn required_prefix_open_object_keeps_ordered_prefix_chain() {
     let mut properties = serde_json::Map::new();
     properties.insert("a".to_string(), json!({"type": "string"}));
     properties.insert("b".to_string(), json!({"type": "string"}));
@@ -1632,7 +1632,7 @@ fn required_prefix_open_object_uses_pair_loop_body() {
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
     assert!(
-        glrm.contains("json_required_prefix_open_object_pair_loop_body"),
+        !glrm.contains("json_required_prefix_open_object_pair_loop_body"),
         "{glrm}"
     );
     lower(&grammar).unwrap();
@@ -7398,6 +7398,27 @@ fn json_schema_lowering_closed_optional_object_keeps_declared_property_order() {
     let prefix = br#"{"organisations": [], ""#;
     assert!(!schema_mask_allows_token_after_prefix(&schema, prefix, 300, b"a"));
     assert!(schema_mask_allows_token_after_prefix(&schema, prefix, 301, b"u"));
+}
+
+#[test]
+fn property_dependencies_preserve_declared_property_order() {
+    let schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "a": {"type": "string"},
+            "b": {"type": "string"},
+            "c": {"type": "string"}
+        },
+        "dependentRequired": {
+            "c": ["a"]
+        }
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#"{}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"a": "x", "c": "z"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"c": "z"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"c": "z", "a": "x"}"#));
 }
 
 #[test]

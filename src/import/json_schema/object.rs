@@ -108,13 +108,6 @@ struct AnyOfObjectState {
     shadow_owner: ShadowOwnerState,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct AnyOfObjectUnorderedState {
-    variant_idx: u16,
-    seen_mask: u64,
-    has_content: bool,
-}
-
 fn is_obviously_object_valued_property(schema: &Schema) -> bool {
     let SchemaKind::Assertions(assertions) = &schema.kind else {
         return false;
@@ -348,35 +341,6 @@ impl<'a> Lowerer<'a> {
             }
         }
         Ok(false)
-    }
-
-    pub(crate) fn try_lower_unordered_open_object_any_of_variants(
-        &mut self,
-        branches: &[Schema],
-    ) -> ImportResult<Option<GrammarExpr>> {
-        if self.llguidance_compat_enabled() {
-            return Ok(None);
-        }
-        if branches.len() < 2 {
-            return Ok(None);
-        }
-
-        let mut variants = Vec::with_capacity(branches.len());
-        let mut include_untyped_non_object_alts = false;
-        for branch in branches {
-            let Some((variant, branch_requires_untyped_non_object_alts)) =
-                self.collect_open_any_of_object_variant(branch)?
-            else {
-                return Ok(None);
-            };
-            include_untyped_non_object_alts |= branch_requires_untyped_non_object_alts;
-            variants.push(variant);
-        }
-
-        self.lower_unordered_open_any_of_object_variants_expr_nfa(
-            &variants,
-            include_untyped_non_object_alts,
-        )
     }
 
     pub(crate) fn try_lower_ref_string_path_object_any_of(
@@ -737,21 +701,6 @@ impl<'a> Lowerer<'a> {
                 );
             }
 
-            let use_required_prefix_open_object_pair_loop = !self.llguidance_compat_enabled()
-                && required_prefix_len > 0
-                && required_prefix_len == required_count
-                && items.len().saturating_sub(required_prefix_len) + tail_pairs.len() >= 8
-                && any_required_names.is_none()
-                && exclusive_group.is_none();
-
-            if use_required_prefix_open_object_pair_loop {
-                return self.lower_required_prefix_open_object_pair_loop(
-                    &items,
-                    required_prefix_len,
-                    &tail_pairs,
-                );
-            }
-
             let use_large_closed_pattern_object_key_trie = normalized.properties.len()
                 >= LARGE_OBJECT_LITERAL_KEY_TRIE_MIN_ITEMS
                 && normalized.required.is_empty()
@@ -1109,48 +1058,45 @@ impl<'a> Lowerer<'a> {
         };
 
         let mut builder = ExprNfaBuilder::new();
-        let mut state_ids = BTreeMap::<(u64, bool), u32>::new();
-        let mut queue = VecDeque::<(u64, bool)>::new();
-        state_ids.insert((0, false), builder.start_state());
-        queue.push_back((0, false));
-
-        while let Some((seen_mask, has_content)) = queue.pop_front() {
-            if state_ids.len() > ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES {
-                return Err(SchemaImportError::new(
-                    "property dependencies object body state limit exceeded".to_string(),
-                ));
+        let mut states = Vec::with_capacity(items.len() + 1);
+        for index in 0..=items.len() {
+            let prefix_masks = 1usize << index;
+            let mut mask_states = Vec::with_capacity(prefix_masks);
+            for _ in 0..prefix_masks {
+                mask_states.push([builder.add_state(), builder.add_state()]);
             }
+            states.push(mask_states);
+        }
+        states[0][0][0] = builder.start_state();
 
-            let state_id = state_ids[&(seen_mask, has_content)];
-            if accepts(seen_mask) {
-                builder.set_accepting(state_id);
+        for (index, item) in items.iter().enumerate() {
+            let item_bit = 1usize << index;
+            for seen_mask in 0..(1usize << index) {
+                for has_content in 0..=1 {
+                    let state_id = states[index][seen_mask][has_content];
+                    if !item.required {
+                        builder.add_epsilon(state_id, states[index + 1][seen_mask][has_content]);
+                    }
+                    let next_mask = seen_mask | item_bit;
+                    let mut transition_symbols = Vec::new();
+                    if has_content == 1 {
+                        transition_symbols.push(self.item_separator_expr());
+                    }
+                    transition_symbols.extend(item_symbols[index].iter().cloned());
+                    Self::add_expr_nfa_symbol_path(
+                        &mut builder,
+                        state_id,
+                        transition_symbols,
+                        states[index + 1][next_mask][1],
+                    );
+                }
             }
+        }
 
-            for (index, symbols) in item_symbols.iter().enumerate() {
-                let item_bit = 1u64 << index;
-                if seen_mask & item_bit != 0 {
-                    continue;
-                }
-                let next_state = (seen_mask | item_bit, true);
-                let next_state_id = if let Some(&existing) = state_ids.get(&next_state) {
-                    existing
-                } else {
-                    let id = builder.add_state();
-                    state_ids.insert(next_state, id);
-                    queue.push_back(next_state);
-                    id
-                };
-                let mut transition_symbols = Vec::new();
-                if has_content {
-                    transition_symbols.push(self.item_separator_expr());
-                }
-                transition_symbols.extend(symbols.iter().cloned());
-                Self::add_expr_nfa_symbol_path(
-                    &mut builder,
-                    state_id,
-                    transition_symbols,
-                    next_state_id,
-                );
+        for seen_mask in 0..(1usize << items.len()) {
+            if accepts(seen_mask as u64) {
+                builder.set_accepting(states[items.len()][seen_mask][0]);
+                builder.set_accepting(states[items.len()][seen_mask][1]);
             }
         }
 
@@ -2357,154 +2303,6 @@ impl<'a> Lowerer<'a> {
         Ok(Some(object_expr))
     }
 
-    fn lower_unordered_open_any_of_object_variants_expr_nfa(
-        &mut self,
-        variants: &[AnyOfObjectVariant],
-        include_untyped_non_object_alts: bool,
-    ) -> ImportResult<Option<GrammarExpr>> {
-        if variants.is_empty()
-            || variants
-                .iter()
-                .any(|variant| {
-                    variant.items.len() > 63
-                        || !variant.pattern_pairs.is_empty()
-                        || !variant.pattern_keys.is_empty()
-                })
-        {
-            return Ok(None);
-        }
-
-        let item_symbols = variants
-            .iter()
-            .map(|variant| {
-                variant
-                    .items
-                    .iter()
-                    .map(|item| {
-                        Ok((
-                            item.key.clone(),
-                            item.required,
-                            [
-                                self.lower_literal_key_colon(&item.key),
-                                item.value_identity
-                                    .as_deref()
-                                    .and_then(singleton_string_identity_literal_expr)
-                                    .unwrap_or_else(|| item.value_expr.clone()),
-                            ],
-                        ))
-                    })
-                    .collect::<ImportResult<Vec<_>>>()
-            })
-            .collect::<ImportResult<Vec<_>>>()?;
-        let required_masks = item_symbols
-            .iter()
-            .map(|items| {
-                items
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(idx, (_, required, _))| required.then_some(1u64 << idx))
-                    .fold(0u64, |mask, bit| mask | bit)
-            })
-            .collect::<Vec<_>>();
-
-        let mut builder = ExprNfaBuilder::new();
-        let accept = builder.add_state();
-        builder.set_accepting(accept);
-        let mut state_ids = BTreeMap::<AnyOfObjectUnorderedState, u32>::new();
-        let mut queue = VecDeque::<AnyOfObjectUnorderedState>::new();
-        for (variant_idx, _) in variants.iter().enumerate() {
-            let state = AnyOfObjectUnorderedState {
-                variant_idx: variant_idx as u16,
-                seen_mask: 0,
-                has_content: false,
-            };
-            let state_id = builder.add_state();
-            builder.add_epsilon(builder.start_state(), state_id);
-            state_ids.insert(state, state_id);
-            queue.push_back(state);
-        }
-
-        while let Some(state) = queue.pop_front() {
-            if state_ids.len() > ANYOF_FIXED_OBJECT_EXPR_NFA_MAX_STATES {
-                return Ok(None);
-            }
-
-            let state_id = state_ids[&state];
-            let variant_idx = state.variant_idx as usize;
-            let variant = &variants[variant_idx];
-            if (state.seen_mask & required_masks[variant_idx]) == required_masks[variant_idx] {
-                builder.add_epsilon(state_id, accept);
-            }
-
-            for (item_idx, (_, _, symbols)) in item_symbols[variant_idx].iter().enumerate() {
-                let item_bit = 1u64 << item_idx;
-                if state.seen_mask & item_bit != 0 {
-                    continue;
-                }
-                let next_state = AnyOfObjectUnorderedState {
-                    variant_idx: state.variant_idx,
-                    seen_mask: state.seen_mask | item_bit,
-                    has_content: true,
-                };
-                let next_state_id =
-                    unordered_open_any_of_state_id(&mut builder, &mut state_ids, &mut queue, next_state);
-                let mut transition_symbols = Vec::new();
-                if state.has_content {
-                    transition_symbols.push(self.item_separator_expr());
-                }
-                transition_symbols.extend(symbols.iter().cloned());
-                Self::add_expr_nfa_symbol_path(
-                    &mut builder,
-                    state_id,
-                    transition_symbols,
-                    next_state_id,
-                );
-            }
-
-            if let Some(additional_value_expr) = &variant.additional_value_expr {
-                let next_state = AnyOfObjectUnorderedState {
-                    variant_idx: state.variant_idx,
-                    seen_mask: state.seen_mask,
-                    has_content: true,
-                };
-                let next_state_id =
-                    unordered_open_any_of_state_id(&mut builder, &mut state_ids, &mut queue, next_state);
-                let mut transition_symbols = Vec::new();
-                if state.has_content {
-                    transition_symbols.push(self.item_separator_expr());
-                }
-                transition_symbols.push(
-                    self.lower_additional_key_colon(&variant.fixed_keys, &variant.pattern_keys)?,
-                );
-                transition_symbols.push(additional_value_expr.clone());
-                Self::add_expr_nfa_symbol_path(
-                    &mut builder,
-                    state_id,
-                    transition_symbols,
-                    next_state_id,
-                );
-            }
-        }
-
-        let rule_name = self.fresh_rule_name("json_anyof_object_body");
-        let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
-        self.add_nonterminal_rule(&rule_name, body);
-
-        let object_expr = seq(vec![lit("{"), r(&rule_name), lit("}")]);
-        if include_untyped_non_object_alts {
-            return Ok(Some(choice(vec![
-                object_expr,
-                r(JSON_ARRAY_RULE),
-                r(JSON_STRING_RULE),
-                r(JSON_NUMBER_RULE),
-                r(JSON_BOOL_RULE),
-                r(JSON_NULL_RULE),
-            ])));
-        }
-
-        Ok(Some(object_expr))
-    }
-
     fn lower_fixed_object_body_exprnfa_without_group(
         &mut self,
         items: &[ObjectItem],
@@ -3013,182 +2811,6 @@ impl<'a> Lowerer<'a> {
         }
 
         seq(vec![lit("{"), choice(body_alternatives), lit("}")])
-    }
-
-    fn lower_large_closed_object_fixed_pair_loop(
-        &mut self,
-        items: &[ObjectItem],
-    ) -> ImportResult<GrammarExpr> {
-        let mut grouped_keys: Vec<(GrammarExpr, Vec<GrammarExpr>)> = Vec::new();
-        for item in items {
-            let [key_symbol, value_symbol] = Self::split_object_pair_symbols(&item.pair)?;
-            if let Some((_, key_symbols)) = grouped_keys
-                .iter_mut()
-                .find(|(group_value_symbol, _)| *group_value_symbol == value_symbol)
-            {
-                key_symbols.push(key_symbol);
-            } else {
-                grouped_keys.push((value_symbol, vec![key_symbol]));
-            }
-        }
-
-        let mut grouped_pairs = Vec::with_capacity(grouped_keys.len());
-        for (value_symbol, key_symbols) in grouped_keys {
-            let mut key_builder = ExprNfaBuilder::new();
-            let key_start = key_builder.start_state();
-            let key_end = key_builder.add_state();
-            key_builder.set_accepting(key_end);
-            for key_symbol in key_symbols {
-                Self::add_expr_nfa_symbol_path(
-                    &mut key_builder,
-                    key_start,
-                    Self::split_literal_key_symbol(key_symbol),
-                    key_end,
-                );
-            }
-
-            let key_rule_name = self.fresh_rule_name("json_closed_object_key_group");
-            self.add_nonterminal_rule(
-                &key_rule_name,
-                GrammarExpr::ExprNFA(Box::new(
-                    key_builder.build().into_determinized_and_minimized(),
-                )),
-            );
-            grouped_pairs.push((r(&key_rule_name), value_symbol));
-        }
-
-        let mut builder = ExprNfaBuilder::new();
-        let start_state = builder.start_state();
-        let seen_state = builder.add_state();
-        builder.set_accepting(start_state);
-        builder.set_accepting(seen_state);
-
-        for (key_group_ref, value_symbol) in grouped_pairs {
-            let pair_path = vec![key_group_ref.clone(), value_symbol.clone()];
-            Self::add_expr_nfa_symbol_path(
-                &mut builder,
-                start_state,
-                pair_path.clone(),
-                seen_state,
-            );
-            let mut loop_symbols = vec![self.item_separator_expr()];
-            loop_symbols.extend(pair_path);
-            Self::add_expr_nfa_symbol_path(&mut builder, seen_state, loop_symbols, seen_state);
-        }
-
-        let body_rule_name = self.fresh_rule_name("json_closed_object_fixed_pair_loop_body");
-        self.add_nonterminal_rule(
-            &body_rule_name,
-            GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized())),
-        );
-
-        Ok(seq(vec![
-            lit("{"),
-            r(&body_rule_name),
-            lit("}"),
-        ]))
-    }
-
-    fn lower_required_prefix_open_object_pair_loop(
-        &mut self,
-        items: &[ObjectItem],
-        required_prefix_len: usize,
-        tail_pairs: &[GrammarExpr],
-    ) -> ImportResult<GrammarExpr> {
-        let mut builder = ExprNfaBuilder::new();
-        let start_state = builder.start_state();
-        let mut required_state = start_state;
-
-        for (index, item) in items.iter().take(required_prefix_len).enumerate() {
-            let [key_symbol, value_symbol] = Self::split_object_pair_symbols(&item.pair)?;
-            let next_state = builder.add_state();
-            let path = if index == 0 {
-                Self::object_pair_path_symbols(key_symbol, value_symbol)
-            } else {
-                let mut symbols = vec![self.item_separator_expr()];
-                symbols.extend(Self::object_pair_path_symbols(key_symbol, value_symbol));
-                symbols
-            };
-            Self::add_expr_nfa_symbol_path(&mut builder, required_state, path, next_state);
-            required_state = next_state;
-        }
-
-        builder.set_accepting(required_state);
-
-        let mut pair_paths = Vec::new();
-        let mut grouped_keys: Vec<(GrammarExpr, Vec<GrammarExpr>)> = Vec::new();
-        for item in &items[required_prefix_len..] {
-            let [key_symbol, value_symbol] = Self::split_object_pair_symbols(&item.pair)?;
-            if let Some((_, key_symbols)) = grouped_keys
-                .iter_mut()
-                .find(|(group_value_symbol, _)| *group_value_symbol == value_symbol)
-            {
-                key_symbols.push(key_symbol);
-            } else {
-                grouped_keys.push((value_symbol, vec![key_symbol]));
-            }
-        }
-
-        for (value_symbol, key_symbols) in grouped_keys {
-            let mut key_builder = ExprNfaBuilder::new();
-            let key_start = key_builder.start_state();
-            let key_end = key_builder.add_state();
-            key_builder.set_accepting(key_end);
-            for key_symbol in key_symbols {
-                Self::add_expr_nfa_symbol_path(
-                    &mut key_builder,
-                    key_start,
-                    Self::split_literal_key_symbol(key_symbol),
-                    key_end,
-                );
-            }
-
-            let key_rule_name = self.fresh_rule_name("json_closed_object_key_group");
-            self.add_nonterminal_rule(
-                &key_rule_name,
-                GrammarExpr::ExprNFA(Box::new(
-                    key_builder.build().into_determinized_and_minimized(),
-                )),
-            );
-            pair_paths.push(vec![r(&key_rule_name), value_symbol]);
-        }
-
-        for tail_pair in tail_pairs {
-            for [key_symbol, value_symbol] in Self::split_object_pair_symbol_paths(tail_pair)? {
-                pair_paths.push(Self::object_pair_path_symbols(key_symbol, value_symbol));
-            }
-        }
-
-        let loop_state = builder.add_state();
-        builder.set_accepting(loop_state);
-
-        for pair_path in pair_paths {
-            let mut first_loop_symbols = vec![self.item_separator_expr()];
-            first_loop_symbols.extend(pair_path.clone());
-            Self::add_expr_nfa_symbol_path(
-                &mut builder,
-                required_state,
-                first_loop_symbols,
-                loop_state,
-            );
-            let mut loop_symbols = vec![self.item_separator_expr()];
-            loop_symbols.extend(pair_path);
-            Self::add_expr_nfa_symbol_path(
-                &mut builder,
-                loop_state,
-                loop_symbols,
-                loop_state,
-            );
-        }
-
-        let body_rule_name =
-            self.fresh_rule_name("json_required_prefix_open_object_pair_loop_body");
-        self.add_nonterminal_rule(
-            &body_rule_name,
-            GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized())),
-        );
-
-        Ok(seq(vec![lit("{"), r(&body_rule_name), lit("}")]))
     }
 
     fn lower_property_item(
@@ -3918,22 +3540,6 @@ fn merged_closed_any_of_state_id(
     } else {
         let id = builder.add_state();
         state_ids.insert(state.clone(), id);
-        queue.push_back(state);
-        id
-    }
-}
-
-fn unordered_open_any_of_state_id(
-    builder: &mut ExprNfaBuilder,
-    state_ids: &mut BTreeMap<AnyOfObjectUnorderedState, u32>,
-    queue: &mut VecDeque<AnyOfObjectUnorderedState>,
-    state: AnyOfObjectUnorderedState,
-) -> u32 {
-    if let Some(&existing) = state_ids.get(&state) {
-        existing
-    } else {
-        let id = builder.add_state();
-        state_ids.insert(state, id);
         queue.push_back(state);
         id
     }

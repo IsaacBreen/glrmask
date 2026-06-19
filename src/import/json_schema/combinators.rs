@@ -80,13 +80,6 @@ impl<'a> Lowerer<'a> {
         )? {
             return Ok(expr);
         }
-        if !discriminator_anyof_fastpath_disabled()
-            && object_choice_branches_have_singleton_discriminator(&factoring_branches)
-        {
-            if let Some(expr) = self.try_lower_unordered_open_object_any_of_variants(&factoring_branches)? {
-                return Ok(expr);
-            }
-        }
         if let Some(expr) = self.try_lower_open_object_any_of_variants(&factoring_branches)? {
             return Ok(expr);
         }
@@ -693,11 +686,6 @@ impl<'a> Lowerer<'a> {
                 }
                 ChoiceKind::OneOf => {
                     if object_choice_branches_have_singleton_discriminator(&distributed) {
-                        if let Some(expr) =
-                            self.try_lower_unordered_open_object_any_of_variants(&distributed)?
-                        {
-                            return Ok(expr);
-                        }
                         if let Some(expr) = self.try_lower_open_object_any_of_variants(&distributed)? {
                             return Ok(expr);
                         }
