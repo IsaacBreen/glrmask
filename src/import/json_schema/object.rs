@@ -2510,7 +2510,7 @@ impl<'a> Lowerer<'a> {
         items: &[ObjectItem],
         tail_pair: Option<GrammarExpr>,
     ) -> ImportResult<GrammarExpr> {
-        if tail_pair.is_none() {
+        if tail_pair.is_none() && !self.llguidance_compat_enabled() {
             let required_prefix_len = items.iter().take_while(|item| item.required).count();
             let required_count = items.iter().filter(|item| item.required).count();
             if required_count == 0 && items.len() <= 4 {

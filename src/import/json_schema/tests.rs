@@ -7365,6 +7365,43 @@ fn allof_propagates_object_type_into_nested_oneof_sibling_branch() {
 }
 
 #[test]
+fn llguidance_compat_closed_optional_object_keeps_declared_property_order() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "auth_bypass_ids": {"type": "array", "items": {"type": "string"}},
+            "organisations": {"type": "array", "items": {"type": "string"}},
+            "users": {"type": "array", "items": {"type": "string"}}
+        }
+    });
+    let prefix = br#"{"organisations": [], ""#;
+    assert!(!schema_mask_allows_token_after_prefix(&schema, prefix, 300, b"a"));
+    assert!(schema_mask_allows_token_after_prefix(&schema, prefix, 301, b"u"));
+}
+
+#[test]
+fn json_schema_closed_optional_object_allows_out_of_order_properties_without_compat() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "0");
+    let schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "auth_bypass_ids": {"type": "array", "items": {"type": "string"}},
+            "organisations": {"type": "array", "items": {"type": "string"}},
+            "users": {"type": "array", "items": {"type": "string"}}
+        }
+    });
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"organisations": [], "auth_bypass_ids": []}"#,
+    ));
+}
+
+#[test]
 fn llguidance_compat_oneof_sibling_optional_key_mask_regression() {
     let _lock = ENV_LOCK.lock().unwrap();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
