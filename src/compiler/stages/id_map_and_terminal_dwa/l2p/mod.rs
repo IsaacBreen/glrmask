@@ -373,7 +373,8 @@ fn project_initial_state_map_for_simplified_tokenizer(
 /// 4. Create NWA, seed root nodes
 /// 5. Trie-walk NWA build
 /// 6. Postprocess: always_allowed → collapse → disallowed → prune → canonicalize
-/// 7. Determinize → minimize
+/// 7. Determinize → minimize, unless an enclosing local merge will perform the
+///    exact determinize/minimize pass immediately afterwards.
 ///
 /// `disallowed_follows` is threaded explicitly for id_map building.
 ///
@@ -393,6 +394,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     shared_disallowed_follow_dfa_cache: Option<&SharedDisallowedFollowDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
+    defer_minimization_to_local_merge: bool,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
@@ -661,7 +663,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let minimize_started_at = Instant::now();
-            let skip_minimize = std::env::var("GLRMASK_SKIP_L2P_MINIMIZE")
+            let skip_minimize = defer_minimization_to_local_merge
+                || std::env::var("GLRMASK_SKIP_L2P_MINIMIZE")
                 .map(|value| {
                     let trimmed = value.trim();
                     trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
