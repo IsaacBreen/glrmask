@@ -138,6 +138,22 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         l1_mask.clone()
     };
 
+    // An L2P branch that is about to be combined with another local branch is
+    // determinized and minimized again by `merge_local_id_maps_and_terminal_dwas`.
+    // Defer its own minimization in that case: both paths denote the same
+    // weighted language, while avoiding an otherwise redundant exact pass.
+    let expected_l1_branches = usize::from(has_l1);
+    let expected_l2p_branches = match l2p_vocab_split.as_ref() {
+        None => usize::from(has_l2p),
+        Some(split) if combine_no_boundary_l2p_single_with_l1 => 0,
+        Some(split) => {
+            usize::from(!split.boundary_vocab.is_empty())
+                + usize::from(!split.single_vocab.is_empty())
+        }
+    };
+    let defer_l2p_minimization_to_local_merge =
+        expected_l1_branches + expected_l2p_branches > 1;
+
     // Build L1 and L2+ terminal DWAs in parallel. L2+ terminals get an
     // additional token split: only tokens that can actually cross an active
     // L2+ terminal boundary go through the expensive L2P NWA builder; the
@@ -185,6 +201,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                         // equivalence analysis verifies flat-table compatibility before using it.
                         Some(flat_trans),
                         initial_state_map,
+                        defer_l2p_minimization_to_local_merge,
                     );
                     return (
                         result.into_iter().map(|result| (result, started_at.elapsed().as_secs_f64() * 1000.0)).collect(),
@@ -230,6 +247,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                 // equivalence analysis verifies flat-table compatibility before using it.
                                 Some(flat_trans),
                                 initial_state_map,
+                                defer_l2p_minimization_to_local_merge,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         }
