@@ -131,6 +131,13 @@ fn l1_max_length_min_states() -> usize {
     })
 }
 
+// The bounded L1 prepass refines the full tokenizer DFA once per token byte.
+// On very large tokenizers this becomes more expensive than the exact L1
+// quotient it is meant to accelerate.  The exact pass still runs over the
+// original states and determines the emitted ID map, so this only avoids a
+// redundant sound pre-reduction; it does not weaken the final equivalence.
+const L1_MAX_LENGTH_BYPASS_LARGE_DFA_STATES: usize = 65_536;
+
 #[inline]
 fn should_skip_max_length_for_partition(
     partition_label: &str,
@@ -140,6 +147,7 @@ fn should_skip_max_length_for_partition(
     skip_max_length_for_partition(partition_label)
         || skip_l1_max_length_for_partition(partition_label)
         || initial_state_count < l1_max_length_min_states()
+        || initial_state_count >= L1_MAX_LENGTH_BYPASS_LARGE_DFA_STATES
         || (projected_by_global && initial_state_count <= 8192)
 }
 
@@ -2495,4 +2503,25 @@ struct L1TerminalBuildProfile {
     tsid_profile_merge_after: usize,
     vocab_tree_traversal_ms: f64,
     direct_terminal_dwa_ms: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        L1_MAX_LENGTH_BYPASS_LARGE_DFA_STATES, should_skip_max_length_for_partition,
+    };
+
+    #[test]
+    fn large_l1_state_sets_bypass_bounded_prepass() {
+        assert!(should_skip_max_length_for_partition(
+            "p0",
+            L1_MAX_LENGTH_BYPASS_LARGE_DFA_STATES,
+            false,
+        ));
+        assert!(!should_skip_max_length_for_partition(
+            "p0",
+            L1_MAX_LENGTH_BYPASS_LARGE_DFA_STATES - 1,
+            false,
+        ));
+    }
 }
