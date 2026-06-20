@@ -2534,7 +2534,7 @@ fn small_bounded_string_pattern_preserves_short_length_bounds() {
 }
 
 #[test]
-fn large_simple_bounded_string_pattern_preserves_length_under_complexity_limit() {
+fn large_simple_bounded_string_pattern_drops_length_above_default_cap() {
     let schema = json!({
         "type": "string",
         "maxLength": 512,
@@ -2548,18 +2548,11 @@ fn large_simple_bounded_string_pattern_preserves_length_under_complexity_limit()
         .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
         .expect("expected terminalized constrained string rule");
 
-    let GrammarExpr::Intersect { expr, intersect } = &rule.expr else {
-        panic!("expected pattern terminal intersected with length envelope: {:?}", rule.expr);
+    let GrammarExpr::RawRegex(pattern_regex) = &rule.expr else {
+        panic!("expected unbounded pattern terminal after dropping large maxLength: {:?}", rule.expr);
     };
-    let GrammarExpr::RawRegex(pattern_regex) = expr.as_ref() else {
-        panic!("expected raw regex pattern envelope: {:?}", expr);
-    };
-    let GrammarExpr::RawRegex(length_regex) = intersect.as_ref() else {
-        panic!("expected raw regex length envelope: {:?}", intersect);
-    };
-
     assert!(pattern_regex.contains("(?:/"), "{pattern_regex}");
-    assert!(length_regex.contains("{0,512}"), "{length_regex}");
+    assert!(!pattern_regex.contains("{0,512}"), "{pattern_regex}");
 
     let glrm = to_glrm(&grammar);
     assert!(!glrm.contains("json_string_char_exact_open_50"), "{glrm}");
@@ -2935,10 +2928,42 @@ fn large_pattern_max_length_is_dropped_when_disabled() {
     lower(&grammar).unwrap();
 }
 
+
+#[test]
+fn pattern_max_length_above_default_cap_drops_upper_bound() {
+    let schema = json!({
+        "type": "string",
+        "pattern": "^[a]+$",
+        "minLength": 2,
+        "maxLength": 120
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let rule = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
+        .expect("expected terminalized constrained string rule");
+
+    let GrammarExpr::Intersect { intersect, .. } = &rule.expr else {
+        panic!("expected pattern terminal intersected with cheap lower-bound envelope: {:?}", rule.expr);
+    };
+    let GrammarExpr::RawRegex(regex) = intersect.as_ref() else {
+        panic!("expected raw regex length envelope: {:?}", intersect);
+    };
+    assert!(regex.contains("{2,}"), "{regex}");
+    assert!(!regex.contains("{2,120}"), "{regex}");
+    lower(&grammar).unwrap();
+}
+
 #[test]
 fn large_pattern_max_length_env_intersects_json_string_length_envelope() {
     let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH", "1");
+    let _cap_guard = EnvVarGuard::set(
+        "GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_PRESERVE_CAP",
+        "80",
+    );
 
     let schema = json!({
         "type": "string",
@@ -3021,6 +3046,10 @@ fn pathological_pattern_max_length_high_complexity_limit_preserves_upper_bound()
     let _limit_guard = EnvVarGuard::set(
         "GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_COMPLEXITY_LIMIT",
         "1000000000",
+    );
+    let _cap_guard = EnvVarGuard::set(
+        "GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_PRESERVE_CAP",
+        "1000",
     );
 
     let schema = json!({
