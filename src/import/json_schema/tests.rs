@@ -1,9 +1,15 @@
 use serde_json::json;
-use std::{env, ffi::OsString, process::Command, sync::Mutex};
+use std::{
+    cell::Cell,
+    env,
+    ffi::OsString,
+    process::Command,
+    sync::{Mutex, MutexGuard},
+};
 
 use super::ast::StringSchema;
 use super::lower_exact_subtractions_enabled;
-use super::schema_to_named_grammar;
+use super::schema_to_named_grammar as schema_to_named_grammar_unlocked;
 use super::string::{property_name_matches_pattern, string_value_satisfies_schema, GLRMASK_LLGUIDANCE_COMPAT_ENV};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguityKind};
@@ -12,6 +18,65 @@ use crate::grammar::glrm::to_glrm;
 use crate::Vocab;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    static ENV_LOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Process environment is shared across test threads. Some schema tests change
+/// importer configuration through environment variables, while common helpers
+/// compile schemas under the default configuration. This reentrant lock lets
+/// helpers serialize with the mutating tests without deadlocking when a test
+/// already holds the lock.
+struct EnvLockGuard {
+    outer_guard: Option<MutexGuard<'static, ()>>,
+}
+
+fn lock_test_env() -> EnvLockGuard {
+    let reentered = ENV_LOCK_DEPTH.with(|depth| {
+        let current = depth.get();
+        if current == 0 {
+            false
+        } else {
+            depth.set(current + 1);
+            true
+        }
+    });
+    if reentered {
+        return EnvLockGuard { outer_guard: None };
+    }
+
+    let outer_guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    ENV_LOCK_DEPTH.with(|depth| {
+        debug_assert_eq!(depth.get(), 0);
+        depth.set(1);
+    });
+    EnvLockGuard {
+        outer_guard: Some(outer_guard),
+    }
+}
+
+impl Drop for EnvLockGuard {
+    fn drop(&mut self) {
+        let releases_outer_guard = ENV_LOCK_DEPTH.with(|depth| {
+            let current = depth.get();
+            assert!(current > 0, "environment lock depth underflow");
+            depth.set(current - 1);
+            current == 1
+        });
+        debug_assert_eq!(releases_outer_guard, self.outer_guard.is_some());
+    }
+}
+
+/// Test-local wrapper for all schema imports. The importer reads configuration
+/// from the process environment, so every import must serialize with tests that
+/// temporarily change those variables.
+fn schema_to_named_grammar(
+    schema: &serde_json::Value,
+) -> Result<NamedGrammar, crate::GlrMaskError> {
+    let _env_lock = lock_test_env();
+    schema_to_named_grammar_unlocked(schema)
+}
 
 struct EnvVarGuard {
     key: &'static str,
@@ -193,7 +258,7 @@ fn start_expr(grammar: &NamedGrammar) -> &GrammarExpr {
 
 #[test]
 fn exact_subtraction_lowering_env_var_defaults_false_and_accepts_truthy_values() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
 
     let _unset = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS");
     assert!(!lower_exact_subtractions_enabled());
@@ -211,7 +276,7 @@ fn exact_subtraction_lowering_env_var_defaults_false_and_accepts_truthy_values()
 
 #[test]
 fn schema_size_preflight_allows_below_budget_schema() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _allow_large = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_ALLOW_LARGE");
     let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", "64");
 
@@ -229,7 +294,7 @@ fn schema_size_preflight_allows_below_budget_schema() {
 
 #[test]
 fn schema_size_preflight_rejects_over_budget_schema() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _allow_large = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_ALLOW_LARGE");
     let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", "20");
 
@@ -252,7 +317,7 @@ fn schema_size_preflight_rejects_over_budget_schema() {
 
 #[test]
 fn schema_size_preflight_raised_max_nodes_allows_schema() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _allow_large = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_ALLOW_LARGE");
 
     let mut properties = serde_json::Map::new();
@@ -278,7 +343,7 @@ fn schema_size_preflight_raised_max_nodes_allows_schema() {
 
 #[test]
 fn schema_size_preflight_falsey_allow_large_does_not_bypass_budget() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _allow_large = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_ALLOW_LARGE", "0");
     let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", "1");
 
@@ -298,7 +363,7 @@ fn schema_size_preflight_falsey_allow_large_does_not_bypass_budget() {
 
 #[test]
 fn schema_size_preflight_allow_large_override_bypasses_budget() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _allow_large = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_ALLOW_LARGE", "1");
     let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", "1");
 
@@ -314,7 +379,7 @@ fn schema_size_preflight_allow_large_override_bypasses_budget() {
 
 #[test]
 fn schema_size_preflight_invalid_max_nodes_reports_env_var() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _allow_large = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_ALLOW_LARGE");
 
     for value in ["not-a-number", "0"] {
@@ -334,7 +399,7 @@ fn schema_size_preflight_invalid_max_nodes_reports_env_var() {
 
 #[test]
 fn overlapping_pattern_properties_preflight_rejects_non_disjoint_regexes() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _compat = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
 
     let schema = json!({
@@ -355,7 +420,7 @@ fn overlapping_pattern_properties_preflight_rejects_non_disjoint_regexes() {
 
 #[test]
 fn overlapping_pattern_properties_preflight_allows_non_disjoint_regexes_without_compat() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _compat = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
 
     let schema = json!({
@@ -482,6 +547,7 @@ fn schema_mask_allows_token_after_prefix(
     token_id: u32,
     token_bytes: &[u8],
 ) -> bool {
+    let _env_lock = lock_test_env();
     let mut entries = (0u32..=255)
         .map(|byte| (byte, vec![byte as u8]))
         .collect::<Vec<_>>();
@@ -510,6 +576,7 @@ fn mask_contains(mask: &[u32], token_id: u32) -> bool {
 }
 
 fn schema_accepts_bytes(schema: &serde_json::Value, input: &[u8]) -> bool {
+    let _env_lock = lock_test_env();
     let grammar = schema_to_named_grammar(schema).expect("schema should import");
     let lowered = lower(&grammar).expect("schema grammar should lower");
     let constraint = crate::compiler::compile_owned(lowered, &byte_vocab());
@@ -519,7 +586,7 @@ fn schema_accepts_bytes(schema: &serde_json::Value, input: &[u8]) -> bool {
 
 #[test]
 fn enum_literals_are_filtered_by_sibling_type_assertion() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({"type": "string", "enum": ["ok", 1]});
 
@@ -579,7 +646,7 @@ fn typed_const_rejects_literal_that_conflicts_with_sibling_assertions() {
 
 #[test]
 fn llguidance_compat_treats_untyped_format_as_typed_string() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let schema = json!({"format": "uri"});
 
     {
@@ -597,7 +664,7 @@ fn llguidance_compat_treats_untyped_format_as_typed_string() {
 
 #[test]
 fn llguidance_compat_keeps_untyped_property_format_permissive() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let schema = json!({
         "type": "object",
         "required": ["uri"],
@@ -628,7 +695,7 @@ fn llguidance_compat_keeps_untyped_property_format_permissive() {
 
 #[test]
 fn llguidance_compat_keeps_untyped_property_pattern_untyped() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let schema = json!({
         "type": "object",
         "required": ["cur"],
@@ -660,6 +727,7 @@ fn llguidance_compat_keeps_untyped_property_pattern_untyped() {
 }
 
 fn parser_path_count_after_bytes(schema: &serde_json::Value, input: &[u8], limit: usize) -> usize {
+    let _env_lock = lock_test_env();
     let grammar = schema_to_named_grammar(schema).expect("schema should import");
     let lowered = lower(&grammar).expect("schema grammar should lower");
     let constraint = crate::compiler::compile_owned(lowered, &byte_vocab());
@@ -672,7 +740,7 @@ fn parser_path_count_after_bytes(schema: &serde_json::Value, input: &[u8], limit
 
 #[test]
 fn json_string_accepts_escaped_solidus() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
     let schema = json!({"type": "string"});
     assert!(schema_accepts_bytes(&schema, br#""\/""#));
@@ -680,7 +748,7 @@ fn json_string_accepts_escaped_solidus() {
 
 #[test]
 fn patterned_string_accepts_escaped_solidus_for_decoded_slash() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
     let schema = json!({"type": "string", "pattern": "^/$"});
     assert!(schema_accepts_bytes(&schema, br#""\/""#));
@@ -689,7 +757,7 @@ fn patterned_string_accepts_escaped_solidus_for_decoded_slash() {
 
 #[test]
 fn patterned_string_class_accepts_escaped_solidus_for_decoded_slash() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
     let schema = json!({"type": "string", "pattern": "^[ab/]$"});
     assert!(schema_accepts_bytes(&schema, br#""\/""#));
@@ -698,7 +766,7 @@ fn patterned_string_class_accepts_escaped_solidus_for_decoded_slash() {
 
 #[test]
 fn llguidance_compat_rejects_escaped_solidus() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({"type": "string"});
     assert!(!schema_accepts_bytes(&schema, br#""\/""#));
@@ -707,7 +775,7 @@ fn llguidance_compat_rejects_escaped_solidus() {
 
 #[test]
 fn llguidance_compat_rejects_patterned_escaped_solidus() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({"type": "string", "pattern": "^/$"});
     assert!(!schema_accepts_bytes(&schema, br#""\/""#));
@@ -716,7 +784,7 @@ fn llguidance_compat_rejects_patterned_escaped_solidus() {
 
 #[test]
 fn llguidance_compat_rejects_unicode_escaped_pattern_literal() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({"type": "string", "pattern": "^file:.+\\.geodatabase?$"});
 
@@ -741,7 +809,7 @@ fn llguidance_compat_rejects_unicode_escaped_pattern_literal() {
 
 #[test]
 fn llguidance_compat_rejects_unicode_escaped_pattern_class_chars() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let uuid = json!({"type": "string", "pattern": "^[0-9a-f]{8}$"});
     let date = json!({"type": "string", "pattern": "^(0[1-9]|1[0-2])-20[0-9]{2}$"});
@@ -774,7 +842,7 @@ fn simple_decimal_multiple_of_matches_llguidance_scale() {
 
 #[test]
 fn llguidance_compat_pattern_literal_mask_rejects_json_u_prefix() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({"type": "string", "pattern": "^file:.+\\.geodatabase?$"});
 
@@ -795,7 +863,7 @@ fn llguidance_compat_pattern_literal_mask_rejects_json_u_prefix() {
 
 #[test]
 fn json_importer_compacts_terminal_pattern_literals() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({"type": "string", "pattern": "^file:.+\\.geodatabase?$"});
     let grammar = schema_to_named_grammar(&schema).expect("schema lowers");
@@ -809,7 +877,7 @@ fn json_importer_compacts_terminal_pattern_literals() {
 
 #[test]
 fn map_only_typed_additional_properties_repeat_with_separators() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -855,7 +923,7 @@ fn map_only_typed_additional_properties_repeat_with_separators() {
 
 #[test]
 fn llguidance_allof_child_required_prefix_rejects_optional_anyof_key_first() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "definitions": {
@@ -904,7 +972,7 @@ fn llguidance_allof_child_required_prefix_rejects_optional_anyof_key_first() {
 
 #[test]
 fn llguidance_additional_key_inside_pattern_property_anyof_accepts_escaped_solidus() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -961,7 +1029,7 @@ fn llguidance_additional_key_inside_pattern_property_anyof_accepts_escaped_solid
 
 #[test]
 fn llguidance_additional_property_accepts_escaped_solidus_key() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -973,7 +1041,7 @@ fn llguidance_additional_property_accepts_escaped_solidus_key() {
 
 #[test]
 fn llguidance_pattern_property_rejects_escaped_solidus_key() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -988,7 +1056,7 @@ fn llguidance_pattern_property_rejects_escaped_solidus_key() {
 
 #[test]
 fn llguidance_pattern_property_dotstar_accepts_escaped_solidus_key_prefix_and_partial_unicode() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -1013,7 +1081,7 @@ fn llguidance_pattern_property_dotstar_accepts_escaped_solidus_key_prefix_and_pa
 
 #[test]
 fn llguidance_generic_json_object_rejects_partial_unicode_key_escape() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -1033,7 +1101,7 @@ fn llguidance_generic_json_object_rejects_partial_unicode_key_escape() {
 
 #[test]
 fn llguidance_fixed_object_additional_property_accepts_escaped_solidus_key() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -1055,7 +1123,7 @@ fn llguidance_fixed_object_additional_property_accepts_escaped_solidus_key() {
 
 #[test]
 fn llguidance_map_only_allow_any_uses_strict_key_mask() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -1072,7 +1140,7 @@ fn llguidance_map_only_allow_any_uses_strict_key_mask() {
 
 #[test]
 fn llguidance_pattern_property_key_class_accepts_unicode_escape_prefix() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -1099,7 +1167,7 @@ fn llguidance_pattern_property_key_class_accepts_unicode_escape_prefix() {
 
 #[test]
 fn llguidance_pattern_property_digit_key_rejects_bare_backslash_prefix() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -1119,7 +1187,7 @@ fn llguidance_pattern_property_digit_key_rejects_bare_backslash_prefix() {
 
 #[test]
 fn llguidance_literal_property_rejects_escaped_solidus_key() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -1135,7 +1203,7 @@ fn llguidance_literal_property_rejects_escaped_solidus_key() {
 
 #[test]
 fn escaped_solidus_instance_rejected_when_no_decoded_key_matches_solidus() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -1151,7 +1219,7 @@ fn escaped_solidus_instance_rejected_when_no_decoded_key_matches_solidus() {
 
 #[test]
 fn llguidance_literal_property_mask_rejects_escaped_solidus() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -1173,7 +1241,7 @@ fn llguidance_literal_property_mask_rejects_escaped_solidus() {
 
 #[test]
 fn llguidance_additional_property_mask_accepts_escaped_solidus() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -1197,7 +1265,7 @@ fn llguidance_additional_property_mask_accepts_escaped_solidus() {
 
 #[test]
 fn llguidance_compat_patterned_string_non_whitespace_unicode_escape_progression() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({"type": "string", "pattern": r"^(?:\S+\s+){0,9}\S+$"});
 
@@ -1246,7 +1314,7 @@ fn llguidance_compat_patterned_string_non_whitespace_unicode_escape_progression(
 
 #[test]
 fn mre_llguidance_compat_non_whitespace_subtraction_mask_gap() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({"type": "string", "pattern": r"^(?:\S+\s+){0,9}\S+$"});
 
@@ -1402,6 +1470,42 @@ fn recursive_array_additional_properties_schema_does_not_reproduce_all_pop1_stac
         oracle.is_none(),
         "recursive-array additionalProperties schema should not keep the all-pop1 StackShifts ambiguity"
     );
+}
+
+#[test]
+fn recursive_additional_properties_anyof_lowers_and_preserves_recursive_value_choices() {
+    let schema = json!({
+        "definitions": {
+            "Node": {
+                "type": "object",
+                "properties": {
+                    "children": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "anyOf": [
+                                {"$ref": "#/definitions/Node"},
+                                {"type": "string"}
+                            ]
+                        }
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        "$ref": "#/definitions/Node"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).expect("recursive additionalProperties anyOf lowers");
+    lower(&grammar).expect("recursive additionalProperties anyOf grammar lowers");
+
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"children": {"nested": {"children": {"leaf": "ok"}}}}"#,
+    ));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#"{"children": {"nested": 1}}"#,
+    ));
 }
 
 fn contains_intersect(expr: &GrammarExpr) -> bool {
@@ -2610,7 +2714,7 @@ fn json_string_char_terminal_requires_valid_utf8_sequences() {
 
 #[test]
 fn medium_bounded_string_uses_split_chunk_rules_by_default() {
-    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _env_lock = lock_test_env();
     let _terminalize_guard = EnvVarGuard::unset(
         "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
     );
@@ -2908,7 +3012,7 @@ fn oversized_pattern_properties_overlap_check_broadens() {
 
 #[test]
 fn large_pattern_max_length_is_dropped_when_disabled() {
-    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _env_lock = lock_test_env();
     let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH", "0");
 
     let schema = json!({
@@ -2958,7 +3062,7 @@ fn pattern_max_length_above_default_cap_drops_upper_bound() {
 
 #[test]
 fn large_pattern_max_length_env_intersects_json_string_length_envelope() {
-    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _env_lock = lock_test_env();
     let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH", "1");
     let _cap_guard = EnvVarGuard::set(
         "GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_PRESERVE_CAP",
@@ -3007,7 +3111,7 @@ fn large_pattern_max_length_env_intersects_json_string_length_envelope() {
 
 #[test]
 fn pathological_pattern_max_length_guard_drops_upper_bound() {
-    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _env_lock = lock_test_env();
     let _preserve_guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH", "1");
     let _limit_guard = EnvVarGuard::set(
         "GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_COMPLEXITY_LIMIT",
@@ -3041,7 +3145,7 @@ fn pathological_pattern_max_length_guard_drops_upper_bound() {
 
 #[test]
 fn pathological_pattern_max_length_high_complexity_limit_preserves_upper_bound() {
-    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _env_lock = lock_test_env();
     let _preserve_guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH", "1");
     let _limit_guard = EnvVarGuard::set(
         "GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_COMPLEXITY_LIMIT",
@@ -3079,7 +3183,7 @@ fn pathological_pattern_max_length_high_complexity_limit_preserves_upper_bound()
 
 #[test]
 fn medium_bounded_string_terminalizes_with_env_override() {
-    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _env_lock = lock_test_env();
     let _terminalize_guard = EnvVarGuard::set(
         "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
         "1024",
@@ -3134,7 +3238,7 @@ fn ascii_string_pattern_class_unicode_escape_branch_is_compact() {
 
 #[test]
 fn moderately_bounded_string_terminalizes_by_default() {
-    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _env_lock = lock_test_env();
     let _terminalize_guard = EnvVarGuard::unset(
         "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
     );
@@ -3154,7 +3258,7 @@ fn moderately_bounded_string_terminalizes_by_default() {
 
 #[test]
 fn moderately_large_prefix_only_string_terminalizes_without_chunk_helper_rules() {
-    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _env_lock = lock_test_env();
     let _terminalize_guard = EnvVarGuard::unset(
         "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
     );
@@ -3180,7 +3284,7 @@ fn moderately_large_prefix_only_string_terminalizes_without_chunk_helper_rules()
 
 #[test]
 fn split_bounded_string_chunks_do_not_overlap_at_boundary() {
-    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _env_lock = lock_test_env();
     let _terminalize_guard = EnvVarGuard::unset(
         "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
     );
@@ -4585,7 +4689,7 @@ fn property_names_pattern_applies_to_additional_properties_keys() {
 
 #[test]
 fn llguidance_compat_property_names_with_pattern_properties_broadens() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -4602,7 +4706,7 @@ fn llguidance_compat_property_names_with_pattern_properties_broadens() {
 
 #[test]
 fn oneof_mixed_local_ref_and_const_primitive_disjoint_family_lowers() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "$defs": {
@@ -4985,7 +5089,7 @@ fn lower_bounded_integer_multiple_of_twelve_lowers_to_range() {
 
 #[test]
 fn recursive_root_array_ref_allows_split_object_opener() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "definitions": {"Node": {"$ref": "#"}},
@@ -5002,7 +5106,7 @@ fn recursive_root_array_ref_allows_split_object_opener() {
 
 #[test]
 fn llguidance_bounded_integer_multiple_rejects_signed_start() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -6762,7 +6866,7 @@ fn sibling_pattern_addback_subtracts_local_pattern_language_for_o10297_shape() {
 
 #[test]
 fn oneof_sibling_object_preserves_root_property_order() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -6801,7 +6905,7 @@ fn oneof_sibling_object_preserves_root_property_order() {
 
 #[test]
 fn llguidance_compat_drops_only_plain_subsumed_open_object_anyof_branch() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "anyOf": [
@@ -6832,7 +6936,7 @@ fn llguidance_compat_drops_only_plain_subsumed_open_object_anyof_branch() {
 
 #[test]
 fn llguidance_compat_keeps_subsumed_open_object_branch_with_pattern_properties() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "anyOf": [
@@ -7108,7 +7212,7 @@ fn shadow_owner_skips_residual_with_unsafe_additional_constraints() {
 
 #[test]
 fn shadow_owner_allows_unsupported_optional_owner_fields() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _allow_large = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_ALLOW_LARGE", "1");
 
     let schema = json!({
@@ -7403,7 +7507,7 @@ fn allof_propagates_object_type_into_nested_oneof_sibling_branch() {
 
 #[test]
 fn llguidance_compat_closed_optional_object_keeps_declared_property_order() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -7421,7 +7525,7 @@ fn llguidance_compat_closed_optional_object_keeps_declared_property_order() {
 
 #[test]
 fn json_schema_lowering_closed_optional_object_keeps_declared_property_order() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "0");
     let schema = json!({
         "type": "object",
@@ -7460,7 +7564,7 @@ fn property_dependencies_preserve_declared_property_order() {
 
 #[test]
 fn llguidance_compat_oneof_sibling_optional_key_mask_regression() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
@@ -7515,7 +7619,7 @@ fn untyped_string_keywords_on_array_items_allow_non_string_items() {
 
 #[test]
 fn llguidance_compat_untyped_pattern_items_allow_non_string_items() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lock = lock_test_env();
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
