@@ -13,26 +13,25 @@ fn state_result<T>(result: Result<T, String>) -> PyResult<T> {
 #[pyclass(name = "Constraint")]
 #[derive(Clone)]
 pub struct PyRuntimeConstraint {
-    artifact: glrmask_runtime::RuntimeArtifact,
-    mask_len: usize,
+    inner: glrmask_runtime::RuntimeConstraint,
 }
 
 #[pymethods]
 impl PyRuntimeConstraint {
     #[staticmethod]
     fn load(data: &[u8]) -> PyResult<Self> {
-        let artifact = runtime_result(glrmask_runtime::RuntimeArtifact::from_bytes(data.to_vec()))?;
-        let session = runtime_result(glrmask_runtime::Session::from_artifact(artifact.clone()))?;
-        Ok(Self { artifact, mask_len: session.mask_len() })
-    }
-
-    fn start(&self) -> PyResult<PyRuntimeConstraintState> {
-        Ok(PyRuntimeConstraintState {
-            inner: runtime_result(glrmask_runtime::Session::from_artifact(self.artifact.clone()))?,
+        Ok(Self {
+            inner: runtime_result(glrmask_runtime::RuntimeConstraint::from_bytes(data.to_vec()))?,
         })
     }
 
-    fn mask_len(&self) -> usize { self.mask_len }
+    fn start(&self) -> PyRuntimeConstraintState {
+        PyRuntimeConstraintState {
+            inner: self.inner.start(),
+        }
+    }
+
+    fn mask_len(&self) -> usize { self.inner.mask_len() }
 }
 
 #[pyclass(name = "ConstraintState")]
