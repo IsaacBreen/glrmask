@@ -1,7 +1,7 @@
 #![deny(warnings)]
 
+use std::alloc::{alloc, dealloc, Layout};
 use std::cell::RefCell;
-use std::mem;
 
 use glrmask_runtime::{RuntimeArtifact, Session};
 
@@ -41,21 +41,23 @@ fn with_session_mut<T>(handle: u32, f: impl FnOnce(&mut WasmSession) -> T) -> Op
 /// this buffer, calls `glrmask_session_new`, and then releases it with `glrmask_dealloc`.
 #[unsafe(no_mangle)]
 pub extern "C" fn glrmask_alloc(length: u32) -> u32 {
-    let mut bytes = Vec::<u8>::with_capacity(length as usize);
-    let pointer = bytes.as_mut_ptr() as usize;
-    mem::forget(bytes);
-    pointer as u32
+    if length == 0 {
+        return 0;
+    }
+    let layout = Layout::from_size_align(length as usize, 1).expect("byte alignment is valid");
+    unsafe { alloc(layout) as usize as u32 }
 }
 
 /// Free storage returned by `glrmask_alloc`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn glrmask_dealloc(pointer: u32, capacity: u32) {
-    if pointer == 0 || capacity == 0 {
+pub unsafe extern "C" fn glrmask_dealloc(pointer: u32, length: u32) {
+    if pointer == 0 || length == 0 {
         return;
     }
-    // SAFETY: JS must pass exactly a pointer and capacity previously returned by
-    // `glrmask_alloc`. The buffer has zero initialized length on the Rust side.
-    unsafe { drop(Vec::<u8>::from_raw_parts(pointer as usize as *mut u8, 0, capacity as usize)); }
+    let layout = Layout::from_size_align(length as usize, 1).expect("byte alignment is valid");
+    // SAFETY: JS must pass exactly a pointer and byte length returned by
+    // `glrmask_alloc`; the layout is therefore identical to the allocation.
+    unsafe { dealloc(pointer as usize as *mut u8, layout) };
 }
 
 /// Construct a session from a versioned, fully compiled constraint artifact.

@@ -21,7 +21,7 @@ The module exports linear memory plus these functions:
 
 ```text
 glrmask_alloc(length) -> pointer
-glrmask_dealloc(pointer, capacity)
+glrmask_dealloc(pointer, length)
 glrmask_session_new(artifact_pointer, artifact_length) -> handle | 0
 glrmask_session_free(handle)
 glrmask_mask(handle) -> pointer
@@ -33,6 +33,7 @@ glrmask_last_error_ptr() -> pointer
 glrmask_last_error_len() -> bytes
 ```
 
+`glrmask_dealloc` must receive the same byte length passed to `glrmask_alloc`.
 `glrmask_mask` returns a pointer into WASM memory. Copy the `Uint32Array` before
 calling another runtime operation. The bit layout is original vocabulary ID space:
 token `id` is admitted when:

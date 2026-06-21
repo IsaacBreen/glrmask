@@ -12,13 +12,16 @@ parent `glrmask` crate.
 
 ## Artifact boundary
 
-`RuntimeArtifact` is a versioned envelope:
+`RuntimeArtifact` uses a versioned envelope. The current outer format version is
+**2**, whose payload is the named **RuntimePayloadV1** execution contract:
 
 ```text
-GLRMASK\0 | u16 format version | u64 payload length | compiled runtime payload
+GLRMASK\0 | u16 outer format version | u64 payload length | RuntimePayloadV1
 ```
 
-The current payload is the serialized exact runtime state required by the executor.
+RuntimePayloadV1 holds only persistent execution inputs: parser DWA, GLR table,
+lexer/tokenizer, terminal matches, vocabulary maps, token bytes, and EOS metadata.
+All dense masks, lookup tables, and other acceleration caches are rebuilt after load.
 The envelope makes version rejection explicit and lets a later artifact representation
 change without changing the browser session API.
 
