@@ -3,6 +3,8 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
+use std::sync::Arc;
+
 #[path = "../../src/automata/mod.rs"]
 pub(crate) mod automata;
 #[path = "../../src/ds/mod.rs"]
@@ -69,20 +71,53 @@ impl RuntimeArtifact {
     }
 }
 
+/// A loaded, immutable execution artifact. Cloning this is cheap and lets a
+/// provider create fresh sessions without parsing the artifact or rebuilding
+/// runtime caches again.
+#[derive(Clone)]
+pub struct RuntimeConstraint {
+    constraint: Arc<Constraint>,
+}
+
+impl RuntimeConstraint {
+    pub fn from_artifact(artifact: RuntimeArtifact) -> Result<Self> {
+        Ok(Self {
+            constraint: Arc::new(artifact.into_constraint()?),
+        })
+    }
+
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        Self::from_artifact(RuntimeArtifact::from_bytes(bytes)?)
+    }
+
+    /// Start an independent decode session sharing the already-loaded runtime
+    /// constraint. This does not deserialize or rebuild caches.
+    pub fn start(&self) -> Session {
+        Session::from_constraint(self.constraint.clone())
+    }
+
+    pub fn mask_len(&self) -> usize {
+        self.constraint.mask_len()
+    }
+}
+
 pub struct Session {
     // This field must remain before `constraint`: Rust drops fields in declaration
-    // order, so the borrow-carrying state is dropped while its stable Box owner is
-    // still alive. Moving Session moves only the Box pointer, never the allocation.
+    // order, so the borrow-carrying state is dropped while its stable Arc owner is
+    // still alive. Moving Session moves only the Arc pointer, never the allocation.
     state: ConstraintState<'static>,
-    constraint: Box<Constraint>,
+    constraint: Arc<Constraint>,
 }
 
 impl Session {
     pub fn from_artifact(artifact: RuntimeArtifact) -> Result<Self> {
-        let constraint = Box::new(artifact.into_constraint()?);
+        Ok(RuntimeConstraint::from_artifact(artifact)?.start())
+    }
+
+    fn from_constraint(constraint: Arc<Constraint>) -> Self {
         let constraint_ref = Self::stable_constraint_ref(&constraint);
         let state = constraint_ref.start();
-        Ok(Self { state, constraint })
+        Self { state, constraint }
     }
 
     pub fn mask_words(&self) -> Vec<u32> { self.state.mask() }
@@ -120,9 +155,9 @@ impl Session {
         self.state = constraint_ref.start();
     }
 
-    fn stable_constraint_ref(constraint: &Box<Constraint>) -> &'static Constraint {
+    fn stable_constraint_ref(constraint: &Arc<Constraint>) -> &'static Constraint {
         unsafe {
-            // The allocation is pinned by the Box for the full Session lifetime.
+            // The allocation is pinned by the Arc for the full Session lifetime.
             // The only `'static` reference stays inside Session and `state` drops
             // before `constraint`; it cannot escape through this API.
             &*(constraint.as_ref() as *const Constraint)
