@@ -3,7 +3,7 @@ use crate::import::ast::{GrammarExpr, Quantifier};
 
 use super::ast::{ArraySchema, SchemaKind};
 use super::error::ImportResult;
-use super::lower::{choice, lit, never, seq, Lowerer};
+use super::lower::{choice, lit, never, seq, Lowerer, JSON_SEPARATOR_WS_REGEX};
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_array(&mut self, schema: &ArraySchema) -> ImportResult<GrammarExpr> {
@@ -12,22 +12,25 @@ impl<'a> Lowerer<'a> {
         }
 
         // A patterned or recognized-format string item is most useful as one
-        // lexical unit with its enclosing array punctuation.  Keeping the item
-        // as a standalone terminal lets its DFA meet unrelated string values
-        // during terminal construction.  This path is deliberately restricted
-        // to explicit string-only items: an untyped `pattern` or `format`
-        // schema still permits non-string JSON values.
+        // lexical unit with its enclosing array punctuation. This path is
+        // deliberately restricted to explicit string-only items: an untyped
+        // `pattern` or `format` schema still permits non-string JSON values.
         if schema.prefix_items.is_empty()
-            && let Some(item) = self.lower_isolated_array_string_item_expr(
-                &schema.items,
-                schema.max_items,
-            )?
+            && let Some((item, repeat_complexity)) =
+                self.lower_isolated_array_string_item_expr(&schema.items)?
         {
-            return Ok(self.isolated_homogeneous_array_terminal(
-                item,
-                schema.min_items,
+            return Ok(if self.should_terminalize_whole_isolated_array(
+                repeat_complexity,
                 schema.max_items,
-            ));
+            ) {
+                self.isolated_homogeneous_array_terminal(item, schema.min_items, schema.max_items)
+            } else {
+                self.contextualized_homogeneous_array_terminals(
+                    item,
+                    schema.min_items,
+                    schema.max_items,
+                )
+            });
         }
 
         if schema.prefix_items.is_empty()
@@ -75,6 +78,79 @@ impl<'a> Lowerer<'a> {
             Some(0) => seq(vec![lit("["), lit("]")]),
             Some(max) => self.bounded_homogeneous_array_terminal(item, min, max),
             None => self.unbounded_homogeneous_array_terminal(item, min),
+        }
+    }
+
+    fn should_terminalize_whole_isolated_array(
+        &self,
+        repeat_complexity: Option<usize>,
+        max_items: Option<usize>,
+    ) -> bool {
+        let Some(item_complexity) = repeat_complexity else {
+            return true;
+        };
+        let repetitions = max_items.unwrap_or(1).max(1);
+        item_complexity.saturating_mul(repetitions)
+            <= self.config.pattern_max_length_complexity_limit
+    }
+
+    /// Keep a costly constrained item contextual without constructing one
+    /// whole-array terminal that repeats its DFA at every bounded position.
+    /// The first terminal consumes `[` plus the first item; the second consumes
+    /// the comma/whitespace separator plus each later item. The item count is
+    /// then enforced by grammar-level repetition of the second terminal.
+    fn contextualized_homogeneous_array_terminals(
+        &mut self,
+        item: GrammarExpr,
+        min: usize,
+        max: Option<usize>,
+    ) -> GrammarExpr {
+        if max == Some(0) {
+            return lit("[]");
+        }
+
+        let first_name = self.fresh_rule_name("contextual_array_first_item");
+        self.add_terminal_rule(&first_name, seq(vec![lit("["), item.clone()]));
+
+        let next_name = self.fresh_rule_name("contextual_array_next_item");
+        self.add_terminal_rule(
+            &next_name,
+            seq(vec![
+                GrammarExpr::RawRegex(format!(r#",{JSON_SEPARATOR_WS_REGEX}"#)),
+                item,
+            ]),
+        );
+
+        let first = super::lower::r(&first_name);
+        let next = super::lower::r(&next_name);
+        let nonempty = match max {
+            Some(max) => seq(vec![
+                first,
+                GrammarExpr::Quantified(
+                    Box::new(next),
+                    Quantifier::Range(min.saturating_sub(1), Some(max - 1)),
+                ),
+                lit("]"),
+            ]),
+            None => {
+                let required = min.saturating_sub(1);
+                let mut parts = vec![first];
+                if required > 0 {
+                    parts.push(GrammarExpr::Quantified(
+                        Box::new(next.clone()),
+                        Quantifier::Range(required, Some(required)),
+                    ));
+                }
+                parts.push(GrammarExpr::Quantified(Box::new(next), Quantifier::ZeroPlus));
+                parts.push(lit("]"));
+                seq(parts)
+            }
+        };
+
+        if min == 0 {
+            choice(vec![lit("[]"), nonempty])
+        } else {
+            nonempty
         }
     }
 

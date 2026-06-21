@@ -117,8 +117,7 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn lower_isolated_array_string_item_expr(
         &mut self,
         schema: &super::ast::Schema,
-        max_items: Option<usize>,
-    ) -> ImportResult<Option<GrammarExpr>> {
+    ) -> ImportResult<Option<(GrammarExpr, Option<usize>)>> {
         let super::ast::SchemaKind::Assertions(assertions) = &schema.kind else {
             return Ok(None);
         };
@@ -148,30 +147,19 @@ impl<'a> Lowerer<'a> {
             return Ok(None);
         }
 
-        // Whole-array terminalization repeats the item expression up to the
-        // array bound.  A nested variable-width pattern with a maxLength can
-        // therefore turn one acceptable lexer product into many copies of the
-        // same expensive product.  Apply the existing item-level product
-        // budget, scaled by the finite array repetition bound.  Fixed-width or
-        // unbounded-length patterns remain eligible; only a bounded costly
-        // item repeated through a finite array falls back to the normal array
-        // grammar with its one item terminal.
-        if let (Some(pattern), Some(max_length)) = (&string.pattern, string.max_length) {
-            let repetitions = max_items.unwrap_or(1);
-            if pattern_max_length_complexity_score(pattern, max_length)
-                .saturating_mul(repetitions)
-                > self.config.pattern_max_length_complexity_limit
-            {
-                return Ok(None);
-            }
-        }
-
         // Keep the item whole.  The generic constrained-string lowering may
         // split an unanchored pattern into parser-visible pieces, which is
         // useful for a standalone value but defeats array-level isolation.
-        Ok(Some(
+        let repeat_complexity = match (&string.pattern, string.max_length) {
+            (Some(pattern), Some(max_length)) => {
+                Some(pattern_max_length_complexity_score(pattern, max_length))
+            }
+            _ => None,
+        };
+        Ok(Some((
             self.lower_constrained_string_terminal_expr_with_pattern_split(string, false)?,
-        ))
+            repeat_complexity,
+        )))
     }
 
     fn lower_constrained_string_terminal_expr(
@@ -936,16 +924,6 @@ impl<'a> Lowerer<'a> {
             return Ok(seq(vec![
                 self.lower_literal_key_colon_with_prefix(prefix, key),
                 self.lower_string_expr(schema)?,
-            ]));
-        }
-
-        if let (Some(pattern), Some(max_length)) = (&schema.pattern, schema.max_length)
-            && pattern_max_length_complexity_score(pattern, max_length)
-                > self.config.pattern_max_length_complexity_limit
-        {
-            return Ok(seq(vec![
-                self.lower_literal_key_colon_with_prefix(prefix, key),
-                self.lower_string_property_value_expr(schema)?,
             ]));
         }
 

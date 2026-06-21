@@ -1998,7 +1998,7 @@ fn patterned_property_key_terminal_preserves_cheap_length_bounds() {
 }
 
 #[test]
-fn costly_bounded_pattern_property_keeps_the_value_outside_the_key_terminal() {
+fn costly_bounded_pattern_property_still_fuses_with_the_key_terminal() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -2013,10 +2013,21 @@ fn costly_bounded_pattern_property_keeps_the_value_outside_the_key_terminal() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(!grammar.rules.iter().any(|rule| {
+    assert!(grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("json_property_string_value")
     }), "{:?}", grammar.rules);
+    assert!(!grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_string_constrained")
+    }), "{:?}", grammar.rules);
     lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"summary": "one two three"}"#,
+    ));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#"{"summary": " one two"}"#,
+    ));
 }
 
 #[test]
@@ -2526,7 +2537,7 @@ fn large_bounded_pattern_string_arrays_use_isolated_terminal_rule() {
 }
 
 #[test]
-fn costly_bounded_pattern_string_arrays_keep_the_item_terminal() {
+fn costly_bounded_pattern_string_arrays_use_contextual_item_terminals() {
     let schema = json!({
         "type": "array",
         "minItems": 1,
@@ -2543,9 +2554,23 @@ fn costly_bounded_pattern_string_arrays_keep_the_item_terminal() {
         rule.is_terminal && rule.name.starts_with("bounded_scalar_array")
     }), "{:?}", grammar.rules);
     assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("contextual_array_first_item")
+    }), "{:?}", grammar.rules);
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("contextual_array_next_item")
+    }), "{:?}", grammar.rules);
+    assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("json_string_constrained")
     }), "{:?}", grammar.rules);
     lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"["one two", "three four"]"#,
+    ));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#"["one two", "three four", "five six", "seven eight", "nine ten", "a b", "c d", "e f", "g h", "i j", "k l"]"#,
+    ));
 }
 
 #[test]
