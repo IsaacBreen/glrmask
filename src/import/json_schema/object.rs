@@ -3073,6 +3073,27 @@ impl<'a> Lowerer<'a> {
             return Ok(None);
         };
 
+        let string_only = assertions.types.as_ref().is_some_and(|types| {
+            !types.is_empty()
+                && types
+                    .iter()
+                    .all(|schema_type| *schema_type == SchemaType::String)
+        });
+        let string_branch_needs_isolation = string.pattern.is_some()
+            || super::string::recognized_string_format_body_regex_for_lowering(
+                string.format.as_deref(),
+            )
+            .is_some();
+        // Keep ordinary typed string unions on the established generic path.
+        // The specialized branch below exists to isolate a patterned or
+        // recognized-format string branch while preserving its non-string
+        // alternatives. Applying it to every `string | null` property changes
+        // the object shape of large nullable-record schemas without adding any
+        // lexical isolation benefit.
+        if assertions.types.is_some() && !string_only && !string_branch_needs_isolation {
+            return Ok(None);
+        }
+
         let string_pair = self.lower_literal_key_colon_with_prefix_and_string_schema(
             b"",
             key_name,

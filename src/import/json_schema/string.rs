@@ -117,6 +117,7 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn lower_isolated_array_string_item_expr(
         &mut self,
         schema: &super::ast::Schema,
+        max_items: Option<usize>,
     ) -> ImportResult<Option<GrammarExpr>> {
         let super::ast::SchemaKind::Assertions(assertions) = &schema.kind else {
             return Ok(None);
@@ -145,6 +146,24 @@ impl<'a> Lowerer<'a> {
             && recognized_string_format_body_regex_for_lowering(string.format.as_deref()).is_none()
         {
             return Ok(None);
+        }
+
+        // Whole-array terminalization repeats the item expression up to the
+        // array bound.  A nested variable-width pattern with a maxLength can
+        // therefore turn one acceptable lexer product into many copies of the
+        // same expensive product.  Apply the existing item-level product
+        // budget, scaled by the finite array repetition bound.  Fixed-width or
+        // unbounded-length patterns remain eligible; only a bounded costly
+        // item repeated through a finite array falls back to the normal array
+        // grammar with its one item terminal.
+        if let (Some(pattern), Some(max_length)) = (&string.pattern, string.max_length) {
+            let repetitions = max_items.unwrap_or(1);
+            if pattern_max_length_complexity_score(pattern, max_length)
+                .saturating_mul(repetitions)
+                > self.config.pattern_max_length_complexity_limit
+            {
+                return Ok(None);
+            }
         }
 
         // Keep the item whole.  The generic constrained-string lowering may
@@ -914,12 +933,19 @@ impl<'a> Lowerer<'a> {
         if schema.pattern.is_none()
             && recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_none()
         {
-            if schema.min_length == 0 && schema.max_length.is_none() {
-                return Ok(self.lower_literal_key_colon_with_prefix_and_json_string(prefix, key));
-            }
             return Ok(seq(vec![
                 self.lower_literal_key_colon_with_prefix(prefix, key),
                 self.lower_string_expr(schema)?,
+            ]));
+        }
+
+        if let (Some(pattern), Some(max_length)) = (&schema.pattern, schema.max_length)
+            && pattern_max_length_complexity_score(pattern, max_length)
+                > self.config.pattern_max_length_complexity_limit
+        {
+            return Ok(seq(vec![
+                self.lower_literal_key_colon_with_prefix(prefix, key),
+                self.lower_string_property_value_expr(schema)?,
             ]));
         }
 
@@ -2161,7 +2187,9 @@ const DATE_FORMAT_LOWERING_BODY_REGEX: &str =
     r#"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"#;
 const DATE_TIME_FORMAT_LOWERING_BODY_REGEX: &str = r#"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:(?:[0-5][0-9]|60)(?:\.[0-9]+)?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"#;
 
-fn recognized_string_format_body_regex_for_lowering(format: Option<&str>) -> Option<&'static str> {
+pub(super) fn recognized_string_format_body_regex_for_lowering(
+    format: Option<&str>,
+) -> Option<&'static str> {
     match format {
         Some("date-time") => Some(DATE_TIME_FORMAT_LOWERING_BODY_REGEX),
         Some("date") => Some(DATE_FORMAT_LOWERING_BODY_REGEX),

@@ -1924,7 +1924,7 @@ fn object_property_nullable_string_value_fuses_string_branch_into_key_terminal()
     let schema = json!({
         "type": "object",
         "properties": {
-            "name": {"type": ["string", "null"]}
+            "name": {"type": ["string", "null"], "pattern": "^[a]+$"}
         },
         "required": ["name"],
         "additionalProperties": false
@@ -1932,7 +1932,9 @@ fn object_property_nullable_string_value_fuses_string_branch_into_key_terminal()
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("/\"name\": \""), "{glrm}");
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_property_string_value")
+    }), "{:?}", grammar.rules);
     assert!(glrm.contains("/\"name\": null/"), "{glrm}");
     assert!(!glrm.contains(r#""\"name\"" JSON_KEY_SEPARATOR"#), "{glrm}");
     lower(&grammar).unwrap();
@@ -1993,6 +1995,28 @@ fn patterned_property_key_terminal_preserves_cheap_length_bounds() {
     assert!(!schema_accepts_bytes(&schema, br#"{"code": "a"}"#));
     assert!(!schema_accepts_bytes(&schema, br#"{"code": "aaaaa"}"#));
     assert!(!schema_accepts_bytes(&schema, br#"{"code": "bbb"}"#));
+}
+
+#[test]
+fn costly_bounded_pattern_property_keeps_the_value_outside_the_key_terminal() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "summary": {
+                "type": "string",
+                "pattern": "^(?:\\S+\\s+){0,9}\\S+$",
+                "maxLength": 100
+            }
+        },
+        "required": ["summary"],
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_property_string_value")
+    }), "{:?}", grammar.rules);
+    lower(&grammar).unwrap();
 }
 
 #[test]
@@ -2498,6 +2522,29 @@ fn large_bounded_pattern_string_arrays_use_isolated_terminal_rule() {
     assert!(grammar.rules.iter().any(|rule| {
         rule.name.contains("bounded_scalar_array_") && rule.is_terminal
     }), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn costly_bounded_pattern_string_arrays_keep_the_item_terminal() {
+    let schema = json!({
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 10,
+        "items": {
+            "type": "string",
+            "pattern": "^(?:\\S+\\s+){0,9}\\S+$",
+            "maxLength": 100
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("bounded_scalar_array")
+    }), "{:?}", grammar.rules);
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_string_constrained")
+    }), "{:?}", grammar.rules);
     lower(&grammar).unwrap();
 }
 

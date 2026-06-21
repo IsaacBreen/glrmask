@@ -18,7 +18,10 @@ impl<'a> Lowerer<'a> {
         // to explicit string-only items: an untyped `pattern` or `format`
         // schema still permits non-string JSON values.
         if schema.prefix_items.is_empty()
-            && let Some(item) = self.lower_isolated_array_string_item_expr(&schema.items)?
+            && let Some(item) = self.lower_isolated_array_string_item_expr(
+                &schema.items,
+                schema.max_items,
+            )?
         {
             return Ok(self.isolated_homogeneous_array_terminal(
                 item,
