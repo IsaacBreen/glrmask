@@ -11,6 +11,22 @@ impl<'a> Lowerer<'a> {
             return Ok(never());
         }
 
+        // A patterned or recognized-format string item is most useful as one
+        // lexical unit with its enclosing array punctuation.  Keeping the item
+        // as a standalone terminal lets its DFA meet unrelated string values
+        // during terminal construction.  This path is deliberately restricted
+        // to explicit string-only items: an untyped `pattern` or `format`
+        // schema still permits non-string JSON values.
+        if schema.prefix_items.is_empty()
+            && let Some(item) = self.lower_isolated_array_string_item_expr(&schema.items)?
+        {
+            return Ok(self.isolated_homogeneous_array_terminal(
+                item,
+                schema.min_items,
+                schema.max_items,
+            ));
+        }
+
         if schema.prefix_items.is_empty()
             && let Some(max) = schema.max_items
             && max >= 2
@@ -30,7 +46,7 @@ impl<'a> Lowerer<'a> {
             && schema.max_items.is_none()
             && let Some(item) = self.lower_inline_bounded_array_string_item_expr(&schema.items)?
         {
-            return Ok(self.unbounded_homogeneous_array_terminal(item));
+            return Ok(self.unbounded_homogeneous_array_terminal(item, 0));
         }
 
         let body = if schema.prefix_items.is_empty() {
@@ -44,6 +60,19 @@ impl<'a> Lowerer<'a> {
 
     fn should_terminalize_bounded_scalar_array(&self, max_items: usize) -> bool {
         max_items <= self.config.repeat_chunk_size.max(2)
+    }
+
+    fn isolated_homogeneous_array_terminal(
+        &mut self,
+        item: GrammarExpr,
+        min: usize,
+        max: Option<usize>,
+    ) -> GrammarExpr {
+        match max {
+            Some(0) => seq(vec![lit("["), lit("]")]),
+            Some(max) => self.bounded_homogeneous_array_terminal(item, min, max),
+            None => self.unbounded_homogeneous_array_terminal(item, min),
+        }
     }
 
     fn array_body(&self, item: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr {
@@ -136,12 +165,32 @@ impl<'a> Lowerer<'a> {
         super::lower::r(&rule_name)
     }
 
-    fn unbounded_homogeneous_array_terminal(&mut self, item: GrammarExpr) -> GrammarExpr {
+    fn unbounded_homogeneous_array_terminal(
+        &mut self,
+        item: GrammarExpr,
+        min: usize,
+    ) -> GrammarExpr {
         let separator_item = seq(vec![self.item_separator_expr(), item.clone()]);
-        let body = GrammarExpr::Quantified(Box::new(seq(vec![
-            item,
-            GrammarExpr::Quantified(Box::new(GrammarExpr::Quantified(Box::new(separator_item), Quantifier::OnePlus)), Quantifier::Optional),
-        ])), Quantifier::Optional);
+        // Keep the unbounded tail in the already-established `(+)?` form.
+        // An open `{n,}` range over a composite constrained item is not lowered
+        // reliably by the terminal grammar path.  Spell the finite required
+        // prefix directly, then append zero or more additional items as an
+        // optional nonempty tail.
+        let mut required_nonempty = vec![item];
+        required_nonempty.extend((1..min).map(|_| separator_item.clone()));
+        required_nonempty.push(GrammarExpr::Quantified(
+            Box::new(GrammarExpr::Quantified(
+                Box::new(separator_item),
+                Quantifier::OnePlus,
+            )),
+            Quantifier::Optional,
+        ));
+        let nonempty = seq(required_nonempty);
+        let body = if min == 0 {
+            GrammarExpr::Quantified(Box::new(nonempty), Quantifier::Optional)
+        } else {
+            nonempty
+        };
 
         let rule_name = self.fresh_rule_name("unbounded_scalar_array");
         self.add_terminal_rule(&rule_name, seq(vec![lit("["), body, lit("]")]));

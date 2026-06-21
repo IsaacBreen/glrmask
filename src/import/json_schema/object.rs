@@ -3042,9 +3042,6 @@ impl<'a> Lowerer<'a> {
         };
         if assertions.const_value.is_some()
             || assertions.enum_values.is_some()
-            || assertions.object.is_some()
-            || assertions.array.is_some()
-            || assertions.number.is_some()
             || !assertions.any_of.is_empty()
             || !assertions.one_of.is_empty()
             || !assertions.all_of.is_empty()
@@ -3052,18 +3049,29 @@ impl<'a> Lowerer<'a> {
         {
             return Ok(None);
         }
-        let Some(string) = assertions.string.as_ref() else {
-            return Ok(None);
-        };
-
-        let string_only = assertions.types.as_ref().is_some_and(|types| {
-            types.iter().all(|schema_type| *schema_type == SchemaType::String)
-        });
         let untyped = assertions.types.is_none();
-        let allow_non_string_fallbacks = untyped;
-        if !string_only && !untyped {
+        let explicitly_allows_string = assertions.types.as_ref().is_some_and(|types| {
+            types.iter().any(|schema_type| *schema_type == SchemaType::String)
+        });
+        if !explicitly_allows_string && !untyped {
             return Ok(None);
         }
+        if untyped
+            && (assertions.object.is_some()
+                || assertions.array.is_some()
+                || assertions.number.is_some())
+        {
+            return Ok(None);
+        }
+        let default_string;
+        let string = if let Some(string) = assertions.string.as_ref() {
+            string
+        } else if explicitly_allows_string {
+            default_string = super::ast::StringSchema::default();
+            &default_string
+        } else {
+            return Ok(None);
+        };
 
         let string_pair = self.lower_literal_key_colon_with_prefix_and_string_schema(
             b"",
@@ -3076,7 +3084,41 @@ impl<'a> Lowerer<'a> {
             string,
         )?;
 
-        let (pair, separator_pair) = if allow_non_string_fallbacks {
+        let (pair, separator_pair) = if let Some(types) = &assertions.types {
+            let mut pair_alternatives = vec![string_pair];
+            let mut separator_pair_alternatives = vec![separator_string_pair];
+            for schema_type in types.iter().copied() {
+                if schema_type == SchemaType::String {
+                    continue;
+                }
+                if schema_type == SchemaType::Null {
+                    pair_alternatives.push(
+                        self.lower_literal_key_colon_with_prefix_and_literal_value(
+                            b"",
+                            key_name,
+                            b"null",
+                        ),
+                    );
+                    separator_pair_alternatives.push(
+                        self.lower_literal_key_colon_with_prefix_and_literal_value(
+                            b", ",
+                            key_name,
+                            b"null",
+                        ),
+                    );
+                } else {
+                    pair_alternatives.push(seq(vec![
+                        self.lower_literal_key_colon(key_name),
+                        self.lower_for_type(schema_type, assertions)?,
+                    ]));
+                    separator_pair_alternatives.push(seq(vec![
+                        self.lower_literal_key_colon_with_prefix(b", ", key_name),
+                        self.lower_for_type(schema_type, assertions)?,
+                    ]));
+                }
+            }
+            (choice(pair_alternatives), choice(separator_pair_alternatives))
+        } else {
             let non_string_value = choice(vec![
                 r(JSON_OBJECT_RULE),
                 r(JSON_ARRAY_RULE),
@@ -3097,8 +3139,6 @@ impl<'a> Lowerer<'a> {
                     ]),
                 ]),
             )
-        } else {
-            (string_pair, separator_string_pair)
         };
 
         Ok(Some(ObjectItem {

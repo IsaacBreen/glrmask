@@ -60,15 +60,21 @@ impl<'a> Lowerer<'a> {
             || assertions.const_value.is_some()
             || assertions.object.is_some()
             || assertions.array.is_some()
-            || assertions.types.as_ref().is_some_and(|types| {
-                !types
-                    .iter()
-                    .all(|schema_type| *schema_type == super::ast::SchemaType::String)
-            })
             || !assertions.any_of.is_empty()
             || !assertions.one_of.is_empty()
             || !assertions.all_of.is_empty()
         {
+            return Ok(None);
+        }
+        // String keywords are annotations for non-string values unless the
+        // schema explicitly restricts the item family to strings.  Do not
+        // terminalize an untyped item and accidentally erase those values.
+        if !assertions.types.as_ref().is_some_and(|types| {
+            !types.is_empty()
+                && types
+                    .iter()
+                    .all(|schema_type| *schema_type == super::ast::SchemaType::String)
+        }) {
             return Ok(None);
         }
         let Some(string) = &assertions.string else {
@@ -102,9 +108,64 @@ impl<'a> Lowerer<'a> {
 
         Ok(Some(self.lower_string_expr(string)?))
     }
+
+    /// Return a constrained, explicit-string array item as a direct expression
+    /// for an enclosing array terminal.  This is intentionally stricter than
+    /// the ordinary string-item fast path: JSON Schema keywords such as
+    /// `pattern` and `format` do not constrain non-string values when `type`
+    /// is absent, so untyped items must keep their normal JSON-value branches.
+    pub(crate) fn lower_isolated_array_string_item_expr(
+        &mut self,
+        schema: &super::ast::Schema,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        let super::ast::SchemaKind::Assertions(assertions) = &schema.kind else {
+            return Ok(None);
+        };
+        if assertions.enum_values.is_some()
+            || assertions.const_value.is_some()
+            || assertions.object.is_some()
+            || assertions.array.is_some()
+            || assertions.number.is_some()
+            || !assertions.any_of.is_empty()
+            || !assertions.one_of.is_empty()
+            || !assertions.all_of.is_empty()
+            || assertions.not.is_some()
+        {
+            return Ok(None);
+        }
+        if !assertions.types.as_ref().is_some_and(|types| {
+            !types.is_empty() && types.iter().all(|schema_type| *schema_type == super::ast::SchemaType::String)
+        }) {
+            return Ok(None);
+        }
+        let Some(string) = &assertions.string else {
+            return Ok(None);
+        };
+        if string.pattern.is_none()
+            && recognized_string_format_body_regex_for_lowering(string.format.as_deref()).is_none()
+        {
+            return Ok(None);
+        }
+
+        // Keep the item whole.  The generic constrained-string lowering may
+        // split an unanchored pattern into parser-visible pieces, which is
+        // useful for a standalone value but defeats array-level isolation.
+        Ok(Some(
+            self.lower_constrained_string_terminal_expr_with_pattern_split(string, false)?,
+        ))
+    }
+
     fn lower_constrained_string_terminal_expr(
         &mut self,
         schema: &StringSchema,
+    ) -> ImportResult<GrammarExpr> {
+        self.lower_constrained_string_terminal_expr_with_pattern_split(schema, true)
+    }
+
+    fn lower_constrained_string_terminal_expr_with_pattern_split(
+        &mut self,
+        schema: &StringSchema,
+        split_pattern: bool,
     ) -> ImportResult<GrammarExpr> {
         if schema.pattern.is_none()
             && let Some(format_body_regex) =
@@ -126,14 +187,19 @@ impl<'a> Lowerer<'a> {
         }
 
         let mut expr = if let Some(pattern) = &schema.pattern {
-            // NOTE: Pattern strength intentionally does NOT preserve sibling
-            // minLength/maxLength inside terminalized string lowering.
-            // Preserving those bounds with terminalized patterns causes severe
-            // build-time blowups and timeouts. This is a deliberate importer
-            // policy and this comment must NEVER EVER be removed under any
-            // circumstances.
-            if let Some(pattern_expr) = self.lower_string_pattern_expr(pattern)? {
-                pattern_expr
+            // Preserve the inexpensive length envelope alongside the pattern.
+            // `cheap_pattern_length_bound_body_regex` keeps lower bounds and
+            // admits an upper bound only when the static pattern×length product
+            // stays inside its configured cost budget.
+            if split_pattern {
+                if let Some(pattern_expr) = self.lower_string_pattern_expr(pattern)? {
+                    pattern_expr
+                } else {
+                    GrammarExpr::RawRegex(quoted_string_body_regex(&string_pattern_as_body_regex(
+                        pattern,
+                        JsonStringContext::Value,
+                    )?))
+                }
             } else {
                 GrammarExpr::RawRegex(quoted_string_body_regex(&string_pattern_as_body_regex(
                     pattern,
@@ -848,28 +914,12 @@ impl<'a> Lowerer<'a> {
         if schema.pattern.is_none()
             && recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_none()
         {
-            return Ok(seq(vec![
-                self.lower_literal_key_colon_with_prefix(prefix, key),
-                self.lower_string_expr(schema)?,
-            ]));
-        }
-
-        if self.llguidance_compat_enabled() && schema.pattern.is_some() {
-            let value = self.lower_string_property_value_expr(schema)?;
-            if llguidance_property_value_expr_is_safe_to_fuse(&value) {
-                let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
-                let mut literal_prefix = Vec::new();
-                literal_prefix.extend_from_slice(prefix);
-                literal_prefix.extend_from_slice(encoded.as_bytes());
-                literal_prefix.extend_from_slice(b": ");
-                let expr = prepend_literal_prefix_to_expr(literal_prefix, value);
-                let name = self.fresh_rule_name("json_property_string_value");
-                self.add_terminal_rule(&name, expr);
-                return Ok(r(&name));
+            if schema.min_length == 0 && schema.max_length.is_none() {
+                return Ok(self.lower_literal_key_colon_with_prefix_and_json_string(prefix, key));
             }
             return Ok(seq(vec![
                 self.lower_literal_key_colon_with_prefix(prefix, key),
-                value,
+                self.lower_string_expr(schema)?,
             ]));
         }
 
@@ -2940,7 +2990,7 @@ fn prepend_literal_prefix_to_expr(prefix: Vec<u8>, expr: GrammarExpr) -> Grammar
             lit_bytes(merged)
         }
         GrammarExpr::RawRegex(regex) => GrammarExpr::RawRegex(format!(
-            "{}{}",
+            "(?:{})(?:{})",
             regex::escape(&String::from_utf8_lossy(&prefix)),
             regex
         )),
@@ -2961,20 +3011,6 @@ fn prepend_literal_prefix_to_expr(prefix: Vec<u8>, expr: GrammarExpr) -> Grammar
             intersect: Box::new(prepend_literal_prefix_to_expr(prefix, *intersect)),
         },
         other => seq(vec![lit_bytes(prefix), other]),
-    }
-}
-
-fn llguidance_property_value_expr_is_safe_to_fuse(expr: &GrammarExpr) -> bool {
-    match expr {
-        GrammarExpr::Literal(_) | GrammarExpr::CharClass { .. } | GrammarExpr::Epsilon => true,
-        GrammarExpr::RawRegex(regex) => !regex.contains(char::from(92)),
-        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
-            parts.iter().all(llguidance_property_value_expr_is_safe_to_fuse)
-        }
-        GrammarExpr::Quantified(inner, _) | GrammarExpr::Grouped(inner) => {
-            llguidance_property_value_expr_is_safe_to_fuse(inner)
-        }
-        _ => false,
     }
 }
 

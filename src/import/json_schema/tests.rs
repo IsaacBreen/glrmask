@@ -1939,6 +1939,115 @@ fn object_property_nullable_string_value_fuses_string_branch_into_key_terminal()
 }
 
 #[test]
+fn nullable_uuid_property_fuses_the_string_branch_with_its_key() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "id": {"type": ["string", "null"], "format": "uuid"}
+        },
+        "required": ["id"],
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_property_string_value")
+    }), "{:?}", grammar.rules);
+    assert!(!grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_string_constrained")
+    }), "{:?}", grammar.rules);
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"id": "12345678-1234-1234-1234-1234567890ab"}"#,
+    ));
+    assert!(schema_accepts_bytes(&schema, br#"{"id": null}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"id": "not-a-uuid"}"#));
+}
+
+#[test]
+fn patterned_property_key_terminal_preserves_cheap_length_bounds() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "code": {
+                "type": "string",
+                "pattern": "^[a]+$",
+                "minLength": 2,
+                "maxLength": 4
+            }
+        },
+        "required": ["code"],
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_property_string_value")
+    }), "{:?}", grammar.rules);
+    assert!(!grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_string_constrained")
+    }), "{:?}", grammar.rules);
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#"{"code": "aaa"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"code": "a"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"code": "aaaaa"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"code": "bbb"}"#));
+}
+
+#[test]
+fn mixed_string_integer_pattern_property_fuses_only_the_string_branch() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": ["string", "integer"],
+                "pattern": "^[A-Z]{2}$",
+                "minimum": 10
+            }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_property_string_value")
+    }), "{:?}", grammar.rules);
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#"{"id": "AB"}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"id": 10}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"id": "A"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"id": 9}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"id": true}"#));
+}
+
+#[test]
+fn llguidance_compat_escaped_pattern_property_fuses_with_key() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "pattern": "^file:.+\\.geodatabase?$"}
+        },
+        "required": ["path"],
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_property_string_value")
+    }), "{:?}", grammar.rules);
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"path": "file:./esricampus.geodatabase"}"#,
+    ));
+    assert!(!schema_accepts_bytes(&schema, br#"{"path": "file:./x.txt"}"#));
+}
+
+#[test]
 fn object_property_null_value_fuses_into_key_terminal() {
     let schema = json!({
         "type": "object",
@@ -2373,7 +2482,7 @@ fn bounded_pattern_string_arrays_use_terminal_rule() {
 }
 
 #[test]
-fn large_bounded_pattern_string_arrays_do_not_use_terminal_rule() {
+fn large_bounded_pattern_string_arrays_use_isolated_terminal_rule() {
     let schema = json!({
         "type": "array",
         "items": {
@@ -2385,11 +2494,82 @@ fn large_bounded_pattern_string_arrays_do_not_use_terminal_rule() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(!glrm.contains("bounded_scalar_array_"), "{glrm}");
-    assert!(!grammar.rules.iter().any(|rule| {
+    assert!(glrm.contains("bounded_scalar_array_"), "{glrm}");
+    assert!(grammar.rules.iter().any(|rule| {
         rule.name.contains("bounded_scalar_array_") && rule.is_terminal
     }), "{glrm}");
     lower(&grammar).unwrap();
+}
+
+#[test]
+fn constrained_unbounded_string_arrays_terminalize_and_respect_min_items() {
+    let item_schema = json!({
+        "type": "string",
+        "minLength": 2,
+        "pattern": "^[a]+$"
+    });
+    assert!(schema_accepts_bytes(&item_schema, br#""aa""#));
+    assert!(schema_accepts_bytes(&item_schema, br#""aaa""#));
+
+    let schema = json!({
+        "type": "array",
+        "minItems": 2,
+        "items": {
+            "type": "string",
+            "minLength": 2,
+            "pattern": "^[a]+$"
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("unbounded_scalar_array")
+    }), "{:?}", grammar.rules);
+    assert!(!grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_string_constrained")
+    }), "{:?}", grammar.rules);
+    lower(&grammar).unwrap();
+    assert!(!schema_accepts_bytes(&schema, br#"["aa"]"#));
+    assert!(schema_accepts_bytes(&schema, br#"["aa", "aaa"]"#));
+    assert!(!schema_accepts_bytes(&schema, br#"["aa", "B"]"#));
+}
+
+#[test]
+fn constrained_format_string_arrays_terminalize_the_enclosing_array() {
+    let schema = json!({
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 3,
+        "items": {"type": "string", "format": "uuid"}
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("bounded_scalar_array")
+    }), "{:?}", grammar.rules);
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"["12345678-1234-1234-1234-1234567890ab"]"#,
+    ));
+    assert!(!schema_accepts_bytes(&schema, br#"["not-a-uuid"]"#));
+}
+
+#[test]
+fn untyped_pattern_arrays_keep_non_string_items_outside_array_terminal() {
+    let schema = json!({
+        "type": "array",
+        "items": {"pattern": "^[a]+$"}
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("unbounded_scalar_array")
+    }), "{:?}", grammar.rules);
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#"[true, []]"#));
+    assert!(schema_accepts_bytes(&schema, br#"["aaa"]"#));
+    assert!(!schema_accepts_bytes(&schema, br#"["A"]"#));
 }
 
 #[test]

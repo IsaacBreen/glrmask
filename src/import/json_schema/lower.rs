@@ -397,7 +397,7 @@ impl<'a> Lowerer<'a> {
         Ok(inferred)
     }
 
-    fn lower_for_type(
+    pub(super) fn lower_for_type(
         &mut self,
         schema_type: SchemaType,
         assertions: &SchemaAssertions,
