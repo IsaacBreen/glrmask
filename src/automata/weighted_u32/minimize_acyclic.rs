@@ -1087,6 +1087,61 @@ fn sorted_weights_compatible_on_domain_intersection(
     true
 }
 
+/// Exact transition-weight compatibility on a domain that has already been
+/// intersected.  The caller uses this after computing one member-pair overlap,
+/// avoiding a fresh three-way domain scan for every transition label.
+fn sorted_weights_compatible_on_domain(
+    class_weights: &[(Label, Weight)],
+    member_weights: &[(Label, Weight)],
+    domain: &Weight,
+) -> bool {
+    let mut class_idx = 0;
+    let mut member_idx = 0;
+
+    while class_idx < class_weights.len() && member_idx < member_weights.len() {
+        let (class_label, class_weight) = &class_weights[class_idx];
+        let (member_label, member_weight) = &member_weights[member_idx];
+        if class_label == member_label {
+            if class_weight != member_weight {
+                let class_disjoint = class_weight.is_disjoint(domain);
+                let member_disjoint = member_weight.is_disjoint(domain);
+                if class_disjoint != member_disjoint {
+                    return false;
+                }
+                if !class_disjoint && !weights_equal_on_domain(class_weight, member_weight, domain)
+                {
+                    return false;
+                }
+            }
+            class_idx += 1;
+            member_idx += 1;
+        } else if class_label < member_label {
+            if !class_weight.is_disjoint(domain) {
+                return false;
+            }
+            class_idx += 1;
+        } else {
+            if !member_weight.is_disjoint(domain) {
+                return false;
+            }
+            member_idx += 1;
+        }
+    }
+
+    for (_, class_weight) in &class_weights[class_idx..] {
+        if !class_weight.is_disjoint(domain) {
+            return false;
+        }
+    }
+    for (_, member_weight) in &member_weights[member_idx..] {
+        if !member_weight.is_disjoint(domain) {
+            return false;
+        }
+    }
+
+    true
+}
+
 fn targets_compatible_with_group_map(
     class_targets: &[(Label, u32)],
     group_targets_by_label: &FxHashMap<Label, u32>,
@@ -1117,6 +1172,21 @@ fn final_weights_compatible_on_domain_intersection(
         (None, Some(member_fw)) => {
             weight_is_disjoint_from_domain_intersection(member_fw, class_domain, member_domain)
         }
+        (None, None) => true,
+    }
+}
+
+/// Exact final-weight compatibility on a domain that has already been
+/// intersected.
+fn final_weights_compatible_on_domain(
+    class_final_weight: Option<&Weight>,
+    member_final_weight: Option<&Weight>,
+    domain: &Weight,
+) -> bool {
+    match (class_final_weight, member_final_weight) {
+        (Some(class_fw), Some(member_fw)) => weights_equal_on_domain(class_fw, member_fw, domain),
+        (Some(class_fw), None) => class_fw.is_disjoint(domain),
+        (None, Some(member_fw)) => member_fw.is_disjoint(domain),
         (None, None) => true,
     }
 }
@@ -1459,7 +1529,8 @@ fn build_and_color_hybrid(
                 for &member_class in scan_members {
                     overlapping_member_scans += 1;
                     let member_needed = &class_needed_union[member_class];
-                    if cn.is_disjoint(member_needed) {
+                    let overlap = cn.intersection(member_needed);
+                    if overlap.is_empty() {
                         continue;
                     }
                     saw_overlap = true;
@@ -1467,11 +1538,10 @@ fn build_and_color_hybrid(
 
                     final_weight_checks += 1;
                     let final_weight_check_started_at = Instant::now();
-                    let final_weight_ok = final_weights_compatible_on_domain_intersection(
+                    let final_weight_ok = final_weights_compatible_on_domain(
                         class_profile.final_weight.as_ref(),
                         class_profiles[member_class].final_weight.as_ref(),
-                        cn,
-                        member_needed,
+                        &overlap,
                     );
                     final_weight_check_ms +=
                         final_weight_check_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1483,11 +1553,10 @@ fn build_and_color_hybrid(
 
                     transition_weight_checks += 1;
                     let transition_weight_check_started_at = Instant::now();
-                    let transition_weights_ok = sorted_weights_compatible_on_domain_intersection(
+                    let transition_weights_ok = sorted_weights_compatible_on_domain(
                         &class_profile.weights,
                         &class_profiles[member_class].weights,
-                        cn,
-                        member_needed,
+                        &overlap,
                     );
                     transition_weight_check_ms +=
                         transition_weight_check_started_at.elapsed().as_secs_f64() * 1000.0;
