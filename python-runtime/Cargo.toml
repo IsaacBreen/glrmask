@@ -1,15 +1,14 @@
 [package]
-name = "_glrmask"
+name = "_glrmask_runtime"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+publish = false
 
 [lib]
-name = "_glrmask"
+name = "_glrmask_runtime"
 crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.24.2", features = ["extension-module"] }
 numpy = "0.24.0"
-glrmask = { path = ".." }
 glrmask-runtime = { path = "../glrmask-runtime" }
-self_cell = "1"
