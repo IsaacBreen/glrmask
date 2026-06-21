@@ -2613,6 +2613,71 @@ fn costly_bounded_pattern_string_arrays_use_contextual_item_terminals() {
 }
 
 #[test]
+fn contextual_pattern_array_allows_empty_when_min_items_is_zero() {
+    let schema = json!({
+        "type": "array",
+        "minItems": 0,
+        "maxItems": 2,
+        "items": {
+            "type": "string",
+            "pattern": "^(?:\\S+\\s+){0,9}\\S+$",
+            "maxLength": 100
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("contextual_array_first_item")
+    }), "{:?}", grammar.rules);
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("contextual_array_next_item")
+    }), "{:?}", grammar.rules);
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#"[]"#));
+    assert!(schema_accepts_bytes(&schema, br#"["one two"]"#));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"["one two", "three four"]"#,
+    ));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#"["one two", "three four", "five six"]"#,
+    ));
+}
+
+#[test]
+fn contextual_pattern_array_enforces_unbounded_min_items() {
+    let schema = json!({
+        "type": "array",
+        "minItems": 2,
+        "items": {
+            "type": "string",
+            "pattern": "^(?:\\S+\\s+){0,9}\\S+$",
+            "maxLength": 100
+        }
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("contextual_array_first_item")
+    }), "{:?}", grammar.rules);
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("contextual_array_next_item")
+    }), "{:?}", grammar.rules);
+    lower(&grammar).unwrap();
+    assert!(!schema_accepts_bytes(&schema, br#"[]"#));
+    assert!(!schema_accepts_bytes(&schema, br#"["one two"]"#));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"["one two", "three four"]"#,
+    ));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"["one two", "three four", "five six"]"#,
+    ));
+}
+
+#[test]
 fn constrained_unbounded_string_arrays_terminalize_and_respect_min_items() {
     let item_schema = json!({
         "type": "string",
