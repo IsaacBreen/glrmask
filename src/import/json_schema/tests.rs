@@ -2031,6 +2031,45 @@ fn costly_bounded_pattern_property_still_fuses_with_the_key_terminal() {
 }
 
 #[test]
+fn patterned_property_reuses_its_key_terminal_after_an_object_separator() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "tag": {"type": "string"},
+            "summary": {
+                "type": "string",
+                "pattern": "^(?:\\S+\\s+){0,9}\\S+$",
+                "maxLength": 100
+            }
+        },
+        "required": ["tag", "summary"],
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let summary_terminals = grammar
+        .rules
+        .iter()
+        .filter(|rule| {
+            rule.is_terminal
+                && rule.name.starts_with("json_property_string_value")
+                && to_glrm(&NamedGrammar {
+                    rules: vec![(*rule).clone()],
+                    start: rule.name.clone(),
+                    ignore: None,
+                })
+                .contains("summary")
+        })
+        .count();
+    assert_eq!(summary_terminals, 1, "{:?}", grammar.rules);
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"tag": "x", "summary": "one two"}"#,
+    ));
+}
+
+#[test]
 fn mixed_string_integer_pattern_property_fuses_only_the_string_branch() {
     let schema = json!({
         "type": "object",

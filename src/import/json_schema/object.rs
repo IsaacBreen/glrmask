@@ -3099,11 +3099,20 @@ impl<'a> Lowerer<'a> {
             key_name,
             string,
         )?;
-        let separator_string_pair = self.lower_literal_key_colon_with_prefix_and_string_schema(
-            b", ",
-            key_name,
-            string,
-        )?;
+        // The key is the useful lexical context: it keeps this value DFA
+        // disjoint from unrelated string values.  Do not also compile a
+        // second copy of a costly key/value terminal merely to absorb the
+        // preceding comma.  Keep the comma as grammar-visible JSON separator
+        // and reuse the same fused key/value terminal in either position.
+        let separator_string_pair = if string_branch_needs_isolation {
+            seq(vec![self.item_separator_expr(), string_pair.clone()])
+        } else {
+            self.lower_literal_key_colon_with_prefix_and_string_schema(
+                b", ",
+                key_name,
+                string,
+            )?
+        };
 
         let (pair, separator_pair) = if let Some(types) = &assertions.types {
             let mut pair_alternatives = vec![string_pair];
