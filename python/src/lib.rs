@@ -445,6 +445,17 @@ impl PyConstraint {
         self.inner.save()
     }
 
+    /// Serialize the versioned execution-only artifact consumed by
+    /// `_glrmask_runtime`. Compilation remains in this main binding; the
+    /// runtime binding only loads and executes this artifact.
+    fn save_runtime_artifact(&self) -> Vec<u8> {
+        glrmask_runtime::RuntimeArtifact::from_runtime_payload_v1(
+            self.inner.save_runtime_payload_v1(),
+        )
+            .as_bytes()
+            .to_vec()
+    }
+
     #[staticmethod]
     fn load(data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
         Self::from_constraint_result(glrmask::Constraint::load(data), vocab)

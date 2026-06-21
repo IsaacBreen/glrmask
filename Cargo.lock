@@ -7,9 +7,19 @@ name = "_glrmask"
 version = "0.1.0"
 dependencies = [
  "glrmask",
+ "glrmask-runtime",
  "numpy",
  "pyo3",
  "self_cell",
+]
+
+[[package]]
+name = "_glrmask_runtime"
+version = "0.1.0"
+dependencies = [
+ "glrmask-runtime",
+ "numpy",
+ "pyo3",
 ]
 
 [[package]]

@@ -87,11 +87,33 @@ impl Session {
 
     pub fn mask_words(&self) -> Vec<u32> { self.state.mask() }
 
+    /// Fill a caller-owned packed original-vocabulary mask without allocating.
+    /// This is the hot CFA/runtime path and matches the main executor's mask API.
+    pub fn fill_mask(&self, words: &mut [u32]) {
+        self.state.fill_mask(words);
+    }
+
+    /// As `fill_mask`, with timing measured entirely inside the runtime crate.
+    pub fn fill_mask_timed_ns(&self, words: &mut [u32]) -> u64 {
+        self.state.fill_mask_timed_ns(words)
+    }
+
+    pub fn mask_len(&self) -> usize {
+        self.constraint.mask_len()
+    }
+
     pub fn commit_token(&mut self, token_id: u32) -> std::result::Result<(), String> {
         self.state.commit_token(token_id)
     }
 
+    /// Commit a sampled BPE token with timing measured inside the runtime crate.
+    pub fn commit_token_timed_ns(&mut self, token_id: u32) -> std::result::Result<u64, String> {
+        self.state.commit_token_timed_ns(token_id)
+    }
+
     pub fn eos_allowed(&self) -> bool { self.state.is_complete() }
+
+    pub fn is_finished(&self) -> bool { self.state.is_finished() }
 
     pub fn reset(&mut self) {
         let constraint_ref = Self::stable_constraint_ref(&self.constraint);
