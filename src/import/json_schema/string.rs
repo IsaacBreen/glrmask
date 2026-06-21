@@ -157,7 +157,6 @@ impl<'a> Lowerer<'a> {
                 schema.max_length,
                 self.config.preserve_pattern_max_length,
                 self.config.pattern_max_length_complexity_limit,
-                self.config.pattern_max_length_preserve_cap,
             )
         {
             constraints.push(quoted_string_body_regex(&length_bound_body));
@@ -1905,7 +1904,6 @@ fn cheap_pattern_length_bound_body_regex(
     max: Option<usize>,
     preserve_pattern_max_length: bool,
     pattern_max_length_complexity_limit: usize,
-    pattern_max_length_preserve_cap: usize,
 ) -> Option<String> {
     if min == 0 && max.is_none() {
         return None;
@@ -1917,24 +1915,22 @@ fn cheap_pattern_length_bound_body_regex(
     }
 
     if let Some(max) = max {
-        // Preserve short finite bounds: these are the common JSON-Schema idioms
-        // like `[0-9]{10}` plus `minLength=maxLength=10`, and they do not
-        // trigger the severe pattern/length product blowups that motivated the
-        // broader guard.
-        let preserve_upper_bound = max <= 64
-            || (preserve_pattern_max_length
-                && max <= pattern_max_length_preserve_cap
-                && pattern_max_length_complexity_score(&pattern, max)
-                    <= pattern_max_length_complexity_limit);
-        if preserve_upper_bound {
+        // Preserve an upper bound only when the pattern/length product stays
+        // below the static cost budget. This is intentionally not a hard
+        // maxLength cutoff: a large simple language can remain exact, while a
+        // shorter nested variable-repeat language is rejected before it expands
+        // the terminal lexer state space.
+        if preserve_pattern_max_length
+            && pattern_max_length_complexity_score(&pattern, max)
+                <= pattern_max_length_complexity_limit
+        {
             return Some(bounded_json_string_body_regex(string_char_regex, min, Some(max)));
         }
     }
 
-    // For large bounded patterns, keep the cheap lower bound but drop the
-    // potentially explosive upper bound once either the absolute cap or the
-    // complexity guard rejects preservation. This is a deliberate over-accepting
-    // importer policy for pathological pattern/length intersections.
+    // Keep the cheap lower bound when the product-cost estimate rejects the
+    // upper envelope. This is a deliberate over-accepting importer policy for
+    // pathological pattern/length intersections.
     if min > 0 {
         return Some(bounded_json_string_body_regex(string_char_regex, min, None));
     }

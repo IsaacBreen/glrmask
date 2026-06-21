@@ -62,9 +62,9 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 | `GLRMASK_MERGE_ANYOF` | strict `1` bool | off |
 | `GLRMASK_STRING_REPEAT_CHUNK` | integer (`usize`) | `256` |
 | `GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH` | truthy bool | `on` |
-| `GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_COMPLEXITY_LIMIT` | integer (`usize`) | `50000` |
+| `GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_COMPLEXITY_LIMIT` | integer (`usize`) | `8000` |
 
-`GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_COMPLEXITY_LIMIT` is a static regex-HIR budget used only when preserving `maxLength` on patterned strings. If the score is above the budget, the importer drops the upper length envelope before terminal DFA construction; cheap `minLength` lower bounds are still kept, and `maxLength <= 64` is always preserved.
+`GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_COMPLEXITY_LIMIT` is a static regex-HIR budget used only when preserving `maxLength` on patterned strings. If the score is above the budget, the importer drops the upper length envelope before terminal DFA construction; cheap `minLength` lower bounds are still kept. There is no separate hard `maxLength` cap: a sufficiently simple large bound can remain exact.
 
 `GLRMASK_STRING_VALUE_EXCLUSIONS_COMPAT=abdcffb6b` restores the old capped
 schema-wide string-value exclusion profile from `abdcffb6b`: global shared
