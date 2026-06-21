@@ -23,15 +23,6 @@ fn unwrap_shared(expr: &Expr) -> &Expr {
     }
 }
 
-fn expr_to_seq_parts(expr: Expr) -> Vec<Expr> {
-    match expr {
-        Expr::Seq(parts) => parts,
-        Expr::Shared(inner) => expr_to_seq_parts((*inner).clone()),
-        Expr::Epsilon => Vec::new(),
-        other => vec![other],
-    }
-}
-
 fn seq_from_parts(mut parts: Vec<Expr>) -> Expr {
     match parts.len() {
         0 => Expr::Epsilon,
@@ -40,28 +31,58 @@ fn seq_from_parts(mut parts: Vec<Expr>) -> Expr {
     }
 }
 
-fn factor_choice_common_prefix(options: Vec<Expr>) -> Option<Expr> {
+fn choice_first_part(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::Shared(inner) => choice_first_part(inner),
+        Expr::Seq(parts) => parts.first(),
+        Expr::Epsilon => None,
+        other => Some(other),
+    }
+}
+
+fn choice_without_first_part(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Shared(inner) => choice_without_first_part(inner),
+        Expr::Seq(parts) => seq_from_parts(parts[1..].to_vec()),
+        Expr::Epsilon => Expr::Epsilon,
+        _ => Expr::Epsilon,
+    }
+}
+
+fn choice_last_part(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::Shared(inner) => choice_last_part(inner),
+        Expr::Seq(parts) => parts.last(),
+        Expr::Epsilon => None,
+        other => Some(other),
+    }
+}
+
+fn choice_without_last_part(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Shared(inner) => choice_without_last_part(inner),
+        Expr::Seq(parts) => seq_from_parts(parts[..parts.len() - 1].to_vec()),
+        Expr::Epsilon => Expr::Epsilon,
+        _ => Expr::Epsilon,
+    }
+}
+
+fn factor_choice_common_prefix(options: &[Expr]) -> Option<Expr> {
     if options.len() < 2 {
         return None;
     }
 
-    let seqs: Vec<Vec<Expr>> = options.into_iter().map(expr_to_seq_parts).collect();
-    if seqs.iter().any(|parts| parts.is_empty()) {
+    let prefix = choice_first_part(options.first()?)?.clone();
+    if !options
+        .iter()
+        .all(|option| choice_first_part(option) == Some(&prefix))
+    {
         return None;
     }
 
-    let first = &seqs[0][0];
-    if !seqs.iter().all(|parts| parts[0] == *first) {
-        return None;
-    }
-
-    let prefix = first.clone();
-    let remainders = seqs
-        .into_iter()
-        .map(|mut parts| {
-            parts.remove(0);
-            seq_from_parts(parts)
-        })
+    let remainders = options
+        .iter()
+        .map(choice_without_first_part)
         .collect::<Vec<_>>();
 
     Some(seq_from_parts(vec![
@@ -70,27 +91,22 @@ fn factor_choice_common_prefix(options: Vec<Expr>) -> Option<Expr> {
     ]))
 }
 
-fn factor_choice_common_suffix(options: Vec<Expr>) -> Option<Expr> {
+fn factor_choice_common_suffix(options: &[Expr]) -> Option<Expr> {
     if options.len() < 2 {
         return None;
     }
 
-    let mut seqs: Vec<Vec<Expr>> = options.into_iter().map(expr_to_seq_parts).collect();
-    if seqs.iter().any(|parts| parts.is_empty()) {
+    let suffix = choice_last_part(options.first()?)?.clone();
+    if !options
+        .iter()
+        .all(|option| choice_last_part(option) == Some(&suffix))
+    {
         return None;
     }
 
-    let suffix = seqs[0].last()?.clone();
-    if !seqs.iter().all(|parts| parts.last() == Some(&suffix)) {
-        return None;
-    }
-
-    let prefixes = seqs
-        .iter_mut()
-        .map(|parts| {
-            parts.pop();
-            seq_from_parts(std::mem::take(parts))
-        })
+    let prefixes = options
+        .iter()
+        .map(choice_without_last_part)
         .collect::<Vec<_>>();
 
     Some(seq_from_parts(vec![
@@ -99,34 +115,33 @@ fn factor_choice_common_suffix(options: Vec<Expr>) -> Option<Expr> {
     ]))
 }
 
-fn factor_choice_literals(options: Vec<Expr>) -> Option<Expr> {
+fn factor_choice_literals(options: &[Expr]) -> Option<Expr> {
     if options.len() < 2 {
         return None;
     }
 
-    let mut byte_options = Vec::<Vec<u8>>::with_capacity(options.len());
-    for option in &options {
+    let first_byte = match unwrap_shared(options.first()?) {
+        Expr::U8Seq(bytes) if !bytes.is_empty() => bytes[0],
+        _ => return None,
+    };
+    for option in options {
         match unwrap_shared(option) {
-            Expr::U8Seq(bytes) if !bytes.is_empty() => {
-                byte_options.push(bytes.clone());
-            }
+            Expr::U8Seq(bytes) if !bytes.is_empty() && bytes[0] == first_byte => {}
             _ => return None,
         }
     }
 
-    let first_byte = byte_options[0][0];
-    if !byte_options.iter().all(|bytes| bytes[0] == first_byte) {
-        return None;
-    }
-
-    let remainders = byte_options
-        .into_iter()
-        .map(|bytes| {
+    let remainders = options
+        .iter()
+        .map(|option| match unwrap_shared(option) {
+            Expr::U8Seq(bytes) => {
             if bytes.len() == 1 {
                 Expr::Epsilon
             } else {
                 Expr::U8Seq(bytes[1..].to_vec())
             }
+            }
+            _ => unreachable!("literal choice was validated above"),
         })
         .collect::<Vec<_>>();
 
@@ -156,19 +171,17 @@ pub(crate) fn factor_regex_expr(expr: Expr) -> Expr {
                 return factored_options.pop().unwrap();
             }
 
-            // Repeatedly peel common structure. Prefix first handles
-            // A B1 C | A B2 C; suffix then handles B1 C | B2 C.
-            loop {
-                if let Some(factored) = factor_choice_literals(factored_options.clone()) {
-                    return factored;
-                }
-                if let Some(factored) = factor_choice_common_prefix(factored_options.clone()) {
-                    return factored;
-                }
-                if let Some(factored) = factor_choice_common_suffix(factored_options.clone()) {
-                    return factored;
-                }
-                break;
+            // Prefix first handles A B1 C | A B2 C; suffix then handles
+            // B1 C | B2 C. Each helper probes through references and only
+            // clones a choice when it actually finds a factor.
+            if let Some(factored) = factor_choice_literals(&factored_options) {
+                return factored;
+            }
+            if let Some(factored) = factor_choice_common_prefix(&factored_options) {
+                return factored;
+            }
+            if let Some(factored) = factor_choice_common_suffix(&factored_options) {
+                return factored;
             }
 
             Expr::Choice(factored_options)
@@ -238,25 +251,57 @@ fn split_top_level_group_ops(expr: &Expr) -> (Expr, Vec<Expr>, Vec<Expr>) {
     }
 }
 
-fn materialize_nested_group_ops(expr: Expr) -> Expr {
+#[derive(Default)]
+struct NestedGroupOpCache {
+    compiled: FxHashMap<Expr, Arc<DFA>>,
+    cache_hits: usize,
+    cache_misses: usize,
+    compiled_ms: f64,
+    max_compile_ms: f64,
+}
+
+fn materialize_nested_group_ops(expr: Expr, cache: &mut NestedGroupOpCache) -> Expr {
     match expr {
-        Expr::Exclude { .. } | Expr::Intersect { .. } => Expr::Dfa(Arc::new(compile_with_plan(
-            build_exclusion_compile_plan(std::slice::from_ref(&expr)),
-        ))),
-        Expr::Seq(parts) => Expr::Seq(parts.into_iter().map(materialize_nested_group_ops).collect()),
+        expr @ (Expr::Exclude { .. } | Expr::Intersect { .. }) => {
+            if let Some(compiled) = cache.compiled.get(&expr) {
+                cache.cache_hits += 1;
+                return Expr::Dfa(compiled.clone());
+            }
+
+            cache.cache_misses += 1;
+            let started_at = Instant::now();
+            let compiled = Arc::new(compile_with_plan(
+                build_exclusion_compile_plan_with_labels_and_cache(
+                    std::slice::from_ref(&expr),
+                    None,
+                    cache,
+                ),
+            ));
+            let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+            cache.compiled_ms += elapsed_ms;
+            cache.max_compile_ms = cache.max_compile_ms.max(elapsed_ms);
+            cache.compiled.insert(expr, compiled.clone());
+            Expr::Dfa(compiled)
+        }
+        Expr::Seq(parts) => Expr::Seq(
+            parts
+                .into_iter()
+                .map(|part| materialize_nested_group_ops(part, cache))
+                .collect(),
+        ),
         Expr::Choice(options) => Expr::Choice(
             options
                 .into_iter()
-                .map(materialize_nested_group_ops)
+                .map(|option| materialize_nested_group_ops(option, cache))
                 .collect(),
         ),
         Expr::Repeat { expr, min, max } => Expr::Repeat {
-            expr: Box::new(materialize_nested_group_ops(*expr)),
+            expr: Box::new(materialize_nested_group_ops(*expr, cache)),
             min,
             max,
         },
         Expr::Shared(inner) => {
-            let rewritten = materialize_nested_group_ops((*inner).clone());
+            let rewritten = materialize_nested_group_ops((*inner).clone(), cache);
             if rewritten == *inner {
                 Expr::Shared(inner)
             } else {
@@ -362,6 +407,32 @@ fn build_exclusion_compile_plan_with_labels(
     exprs: &[Expr],
     visible_labels: Option<&[String]>,
 ) -> ExclusionCompilePlan {
+    let mut nested_group_op_cache = NestedGroupOpCache::default();
+    let plan = build_exclusion_compile_plan_with_labels_and_cache(
+        exprs,
+        visible_labels,
+        &mut nested_group_op_cache,
+    );
+    if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some()
+        && nested_group_op_cache.cache_misses > 0
+    {
+        eprintln!(
+            "[glrmask/profile][tokenizer] nested_group_ops cache_entries={} cache_hits={} cache_misses={} compiled_ms={:.3} max_compile_ms={:.3}",
+            nested_group_op_cache.compiled.len(),
+            nested_group_op_cache.cache_hits,
+            nested_group_op_cache.cache_misses,
+            nested_group_op_cache.compiled_ms,
+            nested_group_op_cache.max_compile_ms,
+        );
+    }
+    plan
+}
+
+fn build_exclusion_compile_plan_with_labels_and_cache(
+    exprs: &[Expr],
+    visible_labels: Option<&[String]>,
+    nested_group_op_cache: &mut NestedGroupOpCache,
+) -> ExclusionCompilePlan {
     let visible_groups = exprs.len();
     let mut compiled_exprs = Vec::with_capacity(visible_groups);
     let mut deferred_exclusions = Vec::<Vec<Expr>>::with_capacity(visible_groups);
@@ -378,14 +449,14 @@ fn build_exclusion_compile_plan_with_labels(
 
     for (index, expr) in exprs.iter().enumerate() {
         let (base, excluded, intersections) = split_top_level_group_ops(expr);
-        let base = materialize_nested_group_ops(base);
+        let base = materialize_nested_group_ops(base, nested_group_op_cache);
         let excluded = excluded
             .into_iter()
-            .map(materialize_nested_group_ops)
+            .map(|expr| materialize_nested_group_ops(expr, nested_group_op_cache))
             .collect::<Vec<_>>();
         let intersections = intersections
             .into_iter()
-            .map(materialize_nested_group_ops)
+            .map(|expr| materialize_nested_group_ops(expr, nested_group_op_cache))
             .collect::<Vec<_>>();
         assert!(
             !expr_contains_group_op(&base),
@@ -1400,14 +1471,21 @@ fn should_use_shared_multi_nfa(plan: &ExclusionCompilePlan) -> bool {
 
 fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
+    let profile_timing = profile_detail
+        || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let profile_started_at = Instant::now();
+    let group_set_started_at = Instant::now();
     let group_sets: Vec<U8Set> = plan
         .compiled_exprs
         .iter()
         .map(|expr| expr_u8set(expr))
         .collect();
+    let group_set_ms = profile_timing
+        .then(|| group_set_started_at.elapsed().as_secs_f64() * 1000.0);
     let use_shared_multi_nfa = should_use_shared_multi_nfa(&plan);
     let used_product_dfa = plan.compiled_exprs.len() > 1 && !use_shared_multi_nfa;
 
+    let dfa_build_started_at = Instant::now();
     let mut dfa = if plan.compiled_exprs.is_empty() {
         // A grammar can lower to the empty language, for example when a const
         // literal conflicts with sibling assertions. Keep a single non-final
@@ -1420,12 +1498,18 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     } else {
         compile_single_expr_dfa(&plan.compiled_exprs[0])
     };
+    let dfa_build_ms = profile_timing
+        .then(|| dfa_build_started_at.elapsed().as_secs_f64() * 1000.0);
 
+    let metadata_started_at = Instant::now();
     dfa.ensure_group_capacity(group_sets.len());
     for (group_id, set) in group_sets.into_iter().enumerate() {
         dfa.set_group_u8set(group_id as u32, set);
     }
+    let metadata_ms = profile_timing
+        .then(|| metadata_started_at.elapsed().as_secs_f64() * 1000.0);
 
+    let group_ops_started_at = Instant::now();
     let mut group_ops_changed = false;
     if !plan.exclusions.is_empty() {
         group_ops_changed |= dfa.apply_group_exclusions(&plan.exclusions);
@@ -1436,21 +1520,29 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     if group_ops_changed {
         dfa.recompute_possible_futures();
     }
+    let group_ops_ms = profile_timing
+        .then(|| group_ops_started_at.elapsed().as_secs_f64() * 1000.0);
 
+    let project_started_at = Instant::now();
     let dfa = if plan.visible_groups < plan.compiled_exprs.len() {
         dfa.project_groups(plan.visible_groups)
     } else {
         dfa
     };
+    let project_ms = profile_timing
+        .then(|| project_started_at.elapsed().as_secs_f64() * 1000.0);
 
     let pre_minimize_states = dfa.num_states();
     let pre_minimize_transitions = dfa_transition_count(&dfa);
     let force_tokenizer_minimize = std::env::var_os("GLRMASK_FORCE_TOKENIZER_MINIMIZE").is_some();
+    let minimize_started_at = Instant::now();
     let final_dfa = if used_product_dfa && !force_tokenizer_minimize {
         dfa
     } else {
         dfa.minimize()
     };
+    let minimize_ms = profile_timing
+        .then(|| minimize_started_at.elapsed().as_secs_f64() * 1000.0);
     let forced_minimized_states = if profile_detail {
         if used_product_dfa && !force_tokenizer_minimize {
             Some(final_dfa.minimize().num_states())
@@ -1472,6 +1564,22 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
             final_dfa.num_states(),
             dfa_transition_count(&final_dfa),
             forced_minimized_states.unwrap_or(final_dfa.num_states())
+        );
+    }
+    if profile_timing {
+        eprintln!(
+            "[glrmask/profile][tokenizer] compile_plan groups={} visible_groups={} product_dfa={} shared_multi_nfa={} group_set_ms={:.3} dfa_build_ms={:.3} metadata_ms={:.3} group_ops_ms={:.3} project_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+            plan.compiled_exprs.len(),
+            plan.visible_groups,
+            used_product_dfa,
+            use_shared_multi_nfa,
+            group_set_ms.unwrap_or_default(),
+            dfa_build_ms.unwrap_or_default(),
+            metadata_ms.unwrap_or_default(),
+            group_ops_ms.unwrap_or_default(),
+            project_ms.unwrap_or_default(),
+            minimize_ms.unwrap_or_default(),
+            profile_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
     final_dfa
@@ -1683,7 +1791,10 @@ fn compile_product_component(expr: &Expr) -> ProductComponent {
 
 fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentProfileLabel]>) -> DFA {
     let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
+    let profile_timing = profile_detail
+        || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let profile_started_at = Instant::now();
+    let component_compile_started_at = Instant::now();
     let components: Vec<ProductComponent> = if profile_detail {
         let mut components = Vec::with_capacity(exprs.len());
         for (index, expr) in exprs.iter().enumerate() {
@@ -1716,6 +1827,8 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
     } else {
         exprs.par_iter().map(compile_product_component).collect()
     };
+    let component_compile_ms = profile_timing
+        .then(|| component_compile_started_at.elapsed().as_secs_f64() * 1000.0);
     if profile_detail {
         eprintln!(
             "[glrmask/profile][tokenizer] product_components groups={} compile_components_ms={:.3}",
@@ -1757,9 +1870,15 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
         .iter()
         .map(ProductComponent::dead_state)
         .collect();
+    let equivalence_classes_started_at = Instant::now();
     let (class_map, class_members) = compute_product_equivalence_classes(&components);
+    let equivalence_classes_ms = profile_timing
+        .then(|| equivalence_classes_started_at.elapsed().as_secs_f64() * 1000.0);
     let num_classes = class_members.len();
+    let class_transition_started_at = Instant::now();
     let component_class_transitions = build_product_class_transitions(&components, &class_map);
+    let class_transition_ms = profile_timing
+        .then(|| class_transition_started_at.elapsed().as_secs_f64() * 1000.0);
     let mut dfa = DFA::new(1);
     dfa.ensure_group_capacity(num_groups);
 
@@ -1787,6 +1906,7 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
     }
     worklist.push_back((0, start_tuple));
 
+    let product_state_expand_started_at = Instant::now();
     while let Some((current_state, state_tuple)) = worklist.pop_front() {
         for &(group_id, component_state) in &state_tuple {
             let group_index = group_id as usize;
@@ -1870,6 +1990,8 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
         used_classes.clear();
         pending_class_transitions[current_state as usize] = class_transitions;
     }
+    let product_state_expand_ms = profile_timing
+        .then(|| product_state_expand_started_at.elapsed().as_secs_f64() * 1000.0);
 
     if profile_detail {
         if let Some(recorder) = growth_recorder.as_ref() {
@@ -1905,6 +2027,7 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
         );
     }
 
+    let byte_expand_started_at = Instant::now();
     let expanded_transitions: Vec<crate::ds::char_transitions::CharTransitions<u32>> = pending_class_transitions
         .into_par_iter()
         .map(|class_transitions| {
@@ -1912,21 +2035,60 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
                 .iter()
                 .map(|(class_id, _)| class_members[*class_id as usize].len())
                 .sum();
-            let mut transitions = Vec::with_capacity(byte_capacity);
-            for (class_id, target) in class_transitions {
-                for &byte in &class_members[class_id as usize] {
-                    transitions.push((byte, target));
+            const DENSE_BYTE_EXPANSION_THRESHOLD: usize = 96;
+
+            let transitions = if byte_capacity >= DENSE_BYTE_EXPANSION_THRESHOLD {
+                // Byte-equivalence classes are disjoint but need not be
+                // contiguous, so expanding classes in class-ID order does
+                // not generally produce byte-sorted output.  For dense rows,
+                // scatter targets into the fixed byte alphabet and scan it
+                // once. This avoids a large per-state comparison sort.
+                let mut target_by_byte = [u32::MAX; 256];
+                for (class_id, target) in class_transitions {
+                    for &byte in &class_members[class_id as usize] {
+                        target_by_byte[byte as usize] = target;
+                    }
                 }
-            }
-            if transitions.len() > 1 {
-                transitions.sort_unstable_by_key(|entry| entry.0);
-            }
+                target_by_byte
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(byte, target)| {
+                        (target != u32::MAX).then_some((byte as u8, target))
+                    })
+                    .collect()
+            } else {
+                let mut transitions = Vec::with_capacity(byte_capacity);
+                for (class_id, target) in class_transitions {
+                    for &byte in &class_members[class_id as usize] {
+                        transitions.push((byte, target));
+                    }
+                }
+                if transitions.len() > 1 {
+                    transitions.sort_unstable_by_key(|entry| entry.0);
+                }
+                transitions
+            };
             crate::ds::char_transitions::CharTransitions::from_sorted_entries(transitions)
         })
         .collect();
+    let byte_expand_ms = profile_timing
+        .then(|| byte_expand_started_at.elapsed().as_secs_f64() * 1000.0);
 
     for (state, transitions) in dfa.states_mut().iter_mut().zip(expanded_transitions) {
         state.transitions = transitions;
+    }
+
+    if profile_timing {
+        eprintln!(
+            "[glrmask/profile][tokenizer] product_phases groups={} classes={} component_compile_ms={:.3} equivalence_classes_ms={:.3} class_transition_ms={:.3} product_state_expand_ms={:.3} byte_expand_ms={:.3}",
+            components.len(),
+            num_classes,
+            component_compile_ms.unwrap_or_default(),
+            equivalence_classes_ms.unwrap_or_default(),
+            class_transition_ms.unwrap_or_default(),
+            product_state_expand_ms.unwrap_or_default(),
+            byte_expand_ms.unwrap_or_default(),
+        );
     }
 
     dfa
@@ -2091,6 +2253,24 @@ mod tests {
         exec.matches
             .iter()
             .any(|matched| matched.id == 0 && matched.width == input.len())
+    }
+
+    #[test]
+    fn nested_group_op_materialization_reuses_structurally_equal_dfas() {
+        let nested = Expr::Exclude {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"abc"))),
+            exclude: Box::new(Expr::U8Seq(vec![b'b'])),
+        };
+        let mut cache = super::NestedGroupOpCache::default();
+        let first = super::materialize_nested_group_ops(nested.clone(), &mut cache);
+        let second = super::materialize_nested_group_ops(nested, &mut cache);
+
+        assert_eq!(cache.cache_misses, 1);
+        assert_eq!(cache.cache_hits, 1);
+        match (first, second) {
+            (Expr::Dfa(first), Expr::Dfa(second)) => assert!(Arc::ptr_eq(&first, &second)),
+            _ => panic!("nested group operation was not materialized to a DFA"),
+        }
     }
 
     #[test]

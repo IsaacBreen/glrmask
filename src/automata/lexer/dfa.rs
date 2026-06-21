@@ -227,14 +227,26 @@ impl DFA {
 
     /// Rewrite every transition that targets `old_target` so it targets
     /// `new_target` instead.
-    pub(super) fn redirect_transitions(&mut self, old_target: u32, new_target: u32) {
+    /// Redirect every incoming edge to `old_target`, returning whether any
+    /// edge changed. The caller may use this to speculatively clone a state
+    /// and discard the clone when no incoming edge exists.
+    pub(super) fn redirect_transitions(&mut self, old_target: u32, new_target: u32) -> bool {
+        let mut changed = false;
         for state in &mut self.states {
             for (_, target) in state.transitions.iter_mut() {
                 if *target == old_target {
                     *target = new_target;
+                    changed = true;
                 }
             }
         }
+        changed
+    }
+
+    /// Remove the final state when it is the expected freshly-created ID.
+    pub(super) fn discard_last_state(&mut self, expected: u32) {
+        debug_assert_eq!(self.states.len(), expected as usize + 1);
+        self.states.pop();
     }
 
     pub(super) fn apply_group_exclusions(

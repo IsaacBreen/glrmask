@@ -341,12 +341,21 @@ pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<
 }
 
 pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
+    let profile_timing = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let factor_started_at = Instant::now();
     let exprs: Vec<Expr> = grammar
         .terminals
         .iter()
         .map(terminal_expr)
         .map(factor_regex_expr)
         .collect();
+    if profile_timing {
+        eprintln!(
+            "[glrmask/profile][tokenizer] factor_terminals terminals={} elapsed_ms={:.3}",
+            exprs.len(),
+            elapsed_ms(factor_started_at),
+        );
+    }
     let terminal_labels: Vec<String> = grammar
         .terminals
         .iter()
@@ -469,7 +478,17 @@ fn compile_prepared_with_profile_and_table_construction(
             || {
                 let tok_started = Instant::now();
                 let mut tokenizer = build_tokenizer(&prepared_grammar);
+                let tokenizer_construct_ms = elapsed_ms(tok_started);
+                let isolate_started = Instant::now();
                 tokenizer.isolate_start_state_and_drain_nullable_terminals();
+                if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+                    eprintln!(
+                        "[glrmask/profile][tokenizer] construction_vs_isolation construct_ms={:.3} isolate_ms={:.3} total_ms={:.3}",
+                        tokenizer_construct_ms,
+                        elapsed_ms(isolate_started),
+                        elapsed_ms(tok_started),
+                    );
+                }
                 (tokenizer, elapsed_ms(tok_started))
             },
             || {

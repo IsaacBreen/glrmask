@@ -217,11 +217,10 @@ impl Tokenizer {
     /// position 0.
     fn isolate_start_state(&mut self) {
         let start = self.start_state();
-        if !self.has_incoming_start_transitions(start) {
-            return;
-        }
         let clone_id = self.dfa.clone_state(start);
-        self.dfa.redirect_transitions(start, clone_id);
+        if !self.dfa.redirect_transitions(start, clone_id) {
+            self.dfa.discard_last_state(clone_id);
+        }
     }
 
     fn step(&self, state: u32, byte: u8) -> Option<u32> {
@@ -387,13 +386,6 @@ impl Tokenizer {
         } else {
             (matched, Some(state))
         }
-    }
-
-    fn has_incoming_start_transitions(&self, start: u32) -> bool {
-        self.dfa
-            .states()
-            .iter()
-            .any(|state| state.transitions.values().any(|&target| target == start))
     }
 
     fn record_all_matches(&self, matches: &mut Vec<TokenizerMatch>, state: u32, width: usize) {
