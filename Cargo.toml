@@ -52,5 +52,11 @@ name = "bounded_string_array_close"
 harness = false
 
 [workspace]
-members = [".", "glrmask-runtime", "glrmask-wasm", "glrmask-browser-artifact"]
+members = [
+    ".",
+    "python",
+    "glrmask-runtime",
+    "glrmask-wasm",
+    "glrmask-browser-artifact",
+]
 resolver = "2"
