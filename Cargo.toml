@@ -50,3 +50,7 @@ harness = false
 [[bench]]
 name = "bounded_string_array_close"
 harness = false
+
+[workspace]
+members = [".", "glrmask-runtime", "glrmask-wasm", "glrmask-browser-artifact"]
+resolver = "2"

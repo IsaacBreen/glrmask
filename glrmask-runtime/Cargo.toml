@@ -1,0 +1,28 @@
+[package]
+name = "glrmask-runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Runtime-only executor for precompiled glrmask constraints"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+rustc-hash = "1"
+ahash = "0.8"
+smallvec = "1"
+im = "15"
+range-set-blaze = "0.3.0"
+hashbrown = "0.15"
+once_cell = "1"
+serde = { version = "1", features = ["derive", "rc"] }
+bincode = "1"
+regex = "1"
+regex-syntax = "0.8"
+derivre = { version = "=0.3.8", default-features = false, features = ["compress"] }
+rayon = "1"
+dashmap = "6"
+thiserror = "1"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[dev-dependencies]
+pretty_assertions = "1"

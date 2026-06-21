@@ -332,9 +332,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi",
  "wasip2",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -360,6 +362,45 @@ dependencies = [
  "serde_json",
  "smallvec",
  "thiserror",
+]
+
+[[package]]
+name = "glrmask-browser-artifact"
+version = "0.1.0"
+dependencies = [
+ "glrmask",
+ "glrmask-runtime",
+ "serde_json",
+]
+
+[[package]]
+name = "glrmask-runtime"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "bincode",
+ "dashmap",
+ "derivre",
+ "getrandom 0.3.4",
+ "hashbrown 0.15.5",
+ "im",
+ "once_cell",
+ "pretty_assertions",
+ "range-set-blaze",
+ "rayon",
+ "regex",
+ "regex-syntax",
+ "rustc-hash",
+ "serde",
+ "smallvec",
+ "thiserror",
+]
+
+[[package]]
+name = "glrmask-wasm"
+version = "0.1.0"
+dependencies = [
+ "glrmask-runtime",
 ]
 
 [[package]]
