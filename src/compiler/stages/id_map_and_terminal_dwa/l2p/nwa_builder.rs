@@ -97,6 +97,12 @@ pub(crate) struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     use_terminal_coloring: bool,
     terminal_path_lengths: Option<Vec<TerminalPathLength>>,
     active_terminals: Option<Vec<bool>>,
+    /// Maps each real terminal to the NWA label emitted for it. L2P terminal
+    /// quotienting uses representative labels while still scanning all members.
+    terminal_label_map: Option<Vec<TerminalID>>,
+    class_label_offset: Option<TerminalID>,
+    first_terminal_label_offset: Option<TerminalID>,
+    root_states: Vec<bool>,
     self_loop_bytes: FxHashMap<TokenizerState, U8Set>,
     leaf_token_ids_buffer: Vec<Vec<LeafTokenIds>>,
     future_leaf_buffer: FxHashMap<(u32, TokenizerState, ColorId), BufferedLeafTransition>,
@@ -127,8 +133,18 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         use_terminal_coloring: bool,
         terminal_path_lengths: Option<Vec<TerminalPathLength>>,
         active_terminals: Option<Vec<bool>>,
+        terminal_label_map: Option<Vec<TerminalID>>,
+        class_label_offset: Option<TerminalID>,
+        first_terminal_label_offset: Option<TerminalID>,
+        root_state_ids: &[u32],
         num_tokenizer_states: usize,
     ) -> Self {
+        let mut root_states = vec![false; nwa.states().len()];
+        for &root in root_state_ids {
+            if let Some(slot) = root_states.get_mut(root as usize) {
+                *slot = true;
+            }
+        }
         Self {
             tokenizer,
             terminal_coloring,
@@ -144,6 +160,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             use_terminal_coloring,
             terminal_path_lengths,
             active_terminals,
+            terminal_label_map,
+            class_label_offset,
+            first_terminal_label_offset,
+            root_states,
             self_loop_bytes: FxHashMap::default(),
             leaf_token_ids_buffer: Vec::new(),
             future_leaf_buffer: FxHashMap::default(),
@@ -193,6 +213,28 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             .as_ref()
             .map(|active| active.get(terminal as usize).copied().unwrap_or(false))
             .unwrap_or(true)
+    }
+
+    #[inline]
+    fn emitted_label(&self, source: u32, terminal: TerminalID) -> TerminalID {
+        let class = self
+            .terminal_label_map
+            .as_ref()
+            .and_then(|labels| labels.get(terminal as usize).copied())
+            .unwrap_or(terminal);
+        let is_root = self
+            .root_states
+            .get(source as usize)
+            .copied()
+            .unwrap_or(false);
+        let offset = if is_root {
+            self.first_terminal_label_offset
+        } else {
+            self.class_label_offset
+        };
+        offset
+            .and_then(|offset| offset.checked_add(class))
+            .unwrap_or(class)
     }
 
     fn possible_future_terminals_for_state(&mut self, tokenizer_state: TokenizerState) -> Vec<TerminalID> {
@@ -461,7 +503,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
 
         for &source in sources {
-            self.buffer_leaf_token_id(source, label, internal_token_id);
+            self.buffer_leaf_token_id(source, self.emitted_label(source, label), internal_token_id);
         }
     }
 
@@ -506,7 +548,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         target: u32,
         weight: &Weight,
     ) {
-        if self.ignore_terminal == Some(label) {
+        let is_ignore_terminal = self.ignore_terminal == Some(label);
+        if is_ignore_terminal {
             for &source in sources {
                 self.epsilon_buffer
                     .entry((source, target))
@@ -515,8 +558,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             }
         } else {
             for &source in sources {
+                let emitted_label = self.emitted_label(source, label);
                 self.transition_buffer
-                    .entry((source, label as i32, target))
+                    .entry((source, emitted_label as i32, target))
                     .and_modify(|existing| *existing = existing.union(weight))
                     .or_insert_with(|| weight.clone());
             }
@@ -571,8 +615,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             }
             let terminals = &terminal_cache[&(tokenizer_state, color)];
             for &terminal_id in terminals {
+                let label = self.emitted_label(source, terminal_id);
                 let entry = leaf_transition_buckets[source as usize]
-                    .entry(terminal_id as i32)
+                    .entry(label as i32)
                     .or_default();
                 if !buffered.token_ids.is_empty() {
                     entry.token_ids.extend_from_slice(&buffered.token_ids);
@@ -994,6 +1039,10 @@ pub(crate) fn build_nwa_via_trie_walk<'a>(
     roots: &NodesByTokenizerState,
     possible_matches: &mut PossibleMatchesComputer<'a>,
     active_terminals: Option<&[bool]>,
+    terminal_label_map: Option<&[TerminalID]>,
+    class_label_offset: Option<TerminalID>,
+    first_terminal_label_offset: Option<TerminalID>,
+    root_state_ids: &[u32],
 ) -> TerminalDwaBuildProfile {
     let num_tokenizer_states = tokenizer.num_states() as usize;
     let mut builder = TerminalNwaBuilder::new(
@@ -1007,6 +1056,10 @@ pub(crate) fn build_nwa_via_trie_walk<'a>(
         use_terminal_coloring,
         None,
         active_terminals.map(|a| a.to_vec()),
+        terminal_label_map.map(|labels| labels.to_vec()),
+        class_label_offset,
+        first_terminal_label_offset,
+        root_state_ids,
         num_tokenizer_states,
     );
     let trie_start = std::time::Instant::now();

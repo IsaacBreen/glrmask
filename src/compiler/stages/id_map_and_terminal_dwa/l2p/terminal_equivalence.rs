@@ -5,21 +5,22 @@
 //! partition's byte alphabet. A member terminal state is then mapped to a
 //! representative terminal state in the same residual block.
 //!
-//! The terminal NWA still needs a source state for every runtime TSID. Its raw
-//! build therefore uses only representative labels, but preserves the full
-//! state map. Expansion copies representative root transitions through the
-//! member-to-representative residual-state map. Merely remapping edge weights
-//! cannot create a member transition at a root where the representative was not
-//! live.
+//! Every real terminal scanner remains active during raw NWA construction.
+//! Only its emitted label is replaced by the terminal-class label. This retains
+//! member-specific root topology through determinization; a later DWA pass
+//! restores concrete labels and applies the exact grammar-follow relation.
 
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 
-use rustc_hash::FxHashMap;
+use range_set_blaze::RangeSetBlaze;
+use rustc_hash::{FxHashMap, FxHasher};
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
-use crate::automata::weighted::nwa::NWA;
+use crate::automata::weighted::dwa::DWA;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 
@@ -34,12 +35,7 @@ pub(crate) struct TerminalEquivalence {
     /// Sorted `(original lexer state, restricted residual block)` pairs.
     /// A missing state belongs to the shared dead block.
     state_blocks_by_terminal: Vec<Vec<(u32, u32)>>,
-    /// For an active non-representative member, indexed by source TSID. Each
-    /// entry contains every representative TSID corresponding to an original
-    /// lexer state inside that source TSID. This relation is intentionally
-    /// one-to-many: a merged runtime TSID may contain several member residuals
-    /// that map to different, but equivalent, representative residuals.
-    member_source_to_rep_tsids: Vec<Option<Vec<Vec<u32>>>>,
+    member_live_tsids: Vec<Option<BitSet>>,
     original_active_terminals: Vec<bool>,
     active_terminal_count: usize,
     class_count: usize,
@@ -74,7 +70,7 @@ impl TerminalEquivalence {
             members_by_representative,
             active_representatives: active_terminals.to_vec(),
             state_blocks_by_terminal: vec![Vec::new(); num_terminals],
-            member_source_to_rep_tsids: vec![None; num_terminals],
+            member_live_tsids: vec![None; num_terminals],
             original_active_terminals: active_terminals.to_vec(),
             active_terminal_count,
             class_count: active_terminal_count,
@@ -261,7 +257,7 @@ impl TerminalEquivalence {
             members_by_representative,
             active_representatives,
             state_blocks_by_terminal,
-            member_source_to_rep_tsids: vec![None; num_terminals],
+            member_live_tsids: vec![None; num_terminals],
             original_active_terminals: active_terminals.to_vec(),
             active_terminal_count: active_ids.len(),
             class_count,
@@ -272,17 +268,34 @@ impl TerminalEquivalence {
         }
     }
 
-    /// Retain only members that can map every runtime source TSID to one
-    /// representative TSID. The initial residual must also map to the
-    /// representative's initial residual because post-match scans restart there.
+    /// Refine classes against the runtime TSID map. First-terminal expansion
+    /// later needs the exact set of TSIDs where every member is live. Terminal
+    /// sequences after a completed match restart at the lexer initial state, so
+    /// members whose initial residual differs from their representative cannot
+    /// share a continuation class label.
     pub(crate) fn refine_for_tsid_map(
         &mut self,
         tokenizer_states: &ManyToOneIdMap,
         initial_state: u32,
     ) {
-        self.member_source_to_rep_tsids.fill(None);
         let num_terminals = self.representative_for_terminal.len();
         let num_tsids = tokenizer_states.num_internal_ids() as usize;
+        self.member_live_tsids = vec![None; num_terminals];
+        for terminal in 0..num_terminals {
+            if !self.original_active_terminals[terminal] {
+                continue;
+            }
+            let mut live_tsids = BitSet::new(num_tsids);
+            for (tsid, originals) in tokenizer_states.internal_to_originals.iter().enumerate() {
+                if originals
+                    .iter()
+                    .any(|&state| self.block_for(terminal as TerminalID, state) != DEAD_BLOCK)
+                {
+                    live_tsids.set(tsid);
+                }
+            }
+            self.member_live_tsids[terminal] = Some(live_tsids);
+        }
 
         for representative_index in 0..num_terminals {
             let representative = representative_index as TerminalID;
@@ -290,47 +303,64 @@ impl TerminalEquivalence {
             if members.len() <= 1 || members[0] != representative {
                 continue;
             }
-
             let representative_initial_block = self.block_for(representative, initial_state);
             let mut retained = vec![representative];
             for member in members.into_iter().skip(1) {
-                if self.block_for(member, initial_state) != representative_initial_block {
+                if self.block_for(member, initial_state) == representative_initial_block {
+                    retained.push(member);
+                } else {
                     self.make_singleton(member);
-                    continue;
                 }
-
-                let mut source_map = vec![Vec::new(); num_tsids];
-                for (source_tsid, originals) in tokenizer_states.internal_to_originals.iter().enumerate() {
-                    for &original in originals {
-                        let block = self.block_for(member, original);
-                        if let Some(representative_tsid) = self
-                            .state_for_block(representative, block)
-                            .and_then(|state| {
-                                tokenizer_states
-                                    .original_to_internal
-                                    .get(state as usize)
-                                    .copied()
-                            })
-                            .filter(|&tsid| tsid != u32::MAX)
-                        {
-                            source_map[source_tsid].push(representative_tsid);
-                        }
-                    }
-                }
-                for representative_tsids in &mut source_map {
-                    representative_tsids.sort_unstable();
-                    representative_tsids.dedup();
-                }
-                self.member_source_to_rep_tsids[member as usize] = Some(source_map);
-                retained.push(member);
             }
             self.members_by_representative[representative_index] = retained;
         }
         self.recompute_class_metadata();
     }
 
-    pub(crate) fn representative_active_terminals(&self) -> &[bool] {
-        &self.active_representatives
+    /// Maps each real terminal to the class label emitted during raw NWA
+    /// construction. The representative itself is a real terminal ID, so no
+    /// downstream label format changes are needed.
+    pub(crate) fn terminal_label_map(&self) -> &[TerminalID] {
+        &self.representative_for_terminal
+    }
+
+    /// Conservative class-level disallowed follows. A class edge C→D is
+    /// removed before determinization only when every member pair c∈C,d∈D is
+    /// grammatically disallowed. The exact member relation is applied after
+    /// class expansion.
+    pub(crate) fn class_disallowed_follows(
+        &self,
+        disallowed_follows: &BTreeMap<u32, BitSet>,
+        num_terminals: usize,
+    ) -> BTreeMap<u32, BitSet> {
+        let mut result = BTreeMap::new();
+        for representative in 0..self.members_by_representative.len() {
+            if !self.active_representatives[representative] {
+                continue;
+            }
+            let members = &self.members_by_representative[representative];
+            let mut disallowed = BitSet::new(num_terminals);
+            for next_representative in 0..self.members_by_representative.len() {
+                if !self.active_representatives[next_representative] {
+                    continue;
+                }
+                let next_members = &self.members_by_representative[next_representative];
+                let universally_disallowed = members.iter().all(|&previous| {
+                    next_members.iter().all(|&next| {
+                        disallowed_follows
+                            .get(&previous)
+                            .is_some_and(|bits| bits.contains(next as usize))
+                    })
+                });
+                if universally_disallowed {
+                    disallowed.set(next_representative);
+                }
+            }
+            if !disallowed.is_zero() {
+                result.insert(representative as u32, disallowed);
+            }
+        }
+        result
     }
 
     pub(crate) fn is_identity(&self) -> bool {
@@ -350,14 +380,14 @@ impl TerminalEquivalence {
         }
     }
 
-    /// Restore member labels on the raw NWA. A member source TSID maps to one
-    /// or more representative source TSIDs with the same partition-restricted
-    /// residual. Copying those roots is essential: a representative-only NWA
-    /// has no edge at member-only roots to repair by changing weights alone.
-    pub(crate) fn expand_nwa(
+    /// Expand class labels on a deterministic DWA. `class` labels are
+    /// continuation terminals; `first_label_offset + class` labels are first
+    /// terminals and are restricted to each member's live source-TSID domain.
+    pub(crate) fn expand_class_dwa(
         &self,
-        nwa: &mut NWA,
-        roots_by_tsid: &[u32],
+        dwa: &mut DWA,
+        class_label_offset: u32,
+        first_label_offset: u32,
     ) -> TerminalEquivalenceProfile {
         let mut profile = TerminalEquivalenceProfile {
             active_terminals: self.active_terminal_count,
@@ -372,83 +402,81 @@ impl TerminalEquivalence {
             return profile;
         }
 
-        let raw_transitions = nwa
-            .states()
+        let all_tokens: RangeSetBlaze<u32> = std::iter::once(0..=u32::MAX).collect();
+        let member_domain_weights = self
+            .member_live_tsids
             .iter()
-            .map(|state| state.transitions.clone())
+            .map(|live_tsids| {
+                live_tsids.as_ref().map(|live_tsids| {
+                    Weight::from_per_tsid_token_sets(
+                        live_tsids
+                            .iter_ones()
+                            .map(|tsid| (tsid as u32, all_tokens.clone())),
+                    )
+                })
+            })
             .collect::<Vec<_>>();
-        let mut is_root = vec![false; raw_transitions.len()];
-        for &root in roots_by_tsid {
-            if let Some(slot) = is_root.get_mut(root as usize) {
-                *slot = true;
-            }
-        }
 
-        // The first terminal of a token scans from a member-specific lexer
-        // residual, so its source root must be mapped explicitly.
-        for (representative_index, members) in self.members_by_representative.iter().enumerate() {
-            if members.len() <= 1 {
-                continue;
-            }
-            let representative = representative_index as TerminalID;
-            for &member in members.iter().skip(1) {
-                let source_map = self.member_source_to_rep_tsids[member as usize]
-                    .as_ref()
-                    .expect("retained terminal-equivalence member lacks source map");
-                for (member_tsid, representative_tsids) in source_map.iter().enumerate() {
-                    if representative_tsids.is_empty() {
-                        continue;
-                    }
-                    let Some(&member_root) = roots_by_tsid.get(member_tsid) else {
-                        continue;
-                    };
-                    for &representative_tsid in representative_tsids {
-                        let Some(&representative_root) = roots_by_tsid.get(representative_tsid as usize) else {
-                            continue;
-                        };
-                        let Some(targets) = raw_transitions[representative_root as usize]
-                            .get(&(representative as i32))
-                        else {
-                            continue;
-                        };
-                        merge_labeled_targets(
-                            &mut nwa.states_mut()[member_root as usize].transitions,
-                            member as i32,
-                            targets,
-                        );
-                        profile.expanded_transition_copies += targets.len();
-                        profile.root_source_maps += 1;
-                    }
-                }
-            }
-        }
-
-        // Every later terminal scan starts at the common tokenizer initial
-        // state. Refinement required member and representative to share that
-        // restricted residual, so the continuation topology is shared.
-        for (state_id, transitions) in raw_transitions.iter().enumerate() {
-            if is_root.get(state_id).copied().unwrap_or(false) {
-                continue;
-            }
+        for state in dwa.states_mut() {
+            let original = state.transitions.clone();
             for (representative_index, members) in self.members_by_representative.iter().enumerate() {
-                if members.len() <= 1 {
+                if !self.active_representatives[representative_index] {
                     continue;
                 }
-                let representative = representative_index as TerminalID;
-                let Some(targets) = transitions.get(&(representative as i32)) else {
-                    continue;
-                };
-                for &member in members.iter().skip(1) {
-                    merge_labeled_targets(
-                        &mut nwa.states_mut()[state_id].transitions,
-                        member as i32,
-                        targets,
-                    );
-                    profile.expanded_transition_copies += targets.len();
+                let representative = representative_index as u32;
+                let continuation = representative
+                    .checked_add(class_label_offset)
+                    .and_then(|label| original.get(&(label as i32)));
+                let first = representative
+                    .checked_add(first_label_offset)
+                    .and_then(|label| original.get(&(label as i32)));
+                for &member in members {
+                    if let Some(&(target, ref weight)) = continuation {
+                        insert_dwa_transition(
+                            &mut state.transitions,
+                            member as i32,
+                            target,
+                            weight.clone(),
+                        );
+                        profile.expanded_transition_copies += 1;
+                    }
+                    if let Some(&(target, ref weight)) = first {
+                        let domain = member_domain_weights[member as usize]
+                            .as_ref()
+                            .expect("active terminal class member lacks live TSID domain");
+                        let restricted = weight.intersection(domain);
+                        if !restricted.is_empty() {
+                            insert_dwa_transition(
+                                &mut state.transitions,
+                                member as i32,
+                                target,
+                                restricted,
+                            );
+                            profile.expanded_transition_copies += 1;
+                        }
+                    }
                 }
             }
+            state.transitions.retain(|&label, _| {
+                if label < 0 {
+                    return true;
+                }
+                let raw = label as u32;
+                let encoded_class = if raw >= first_label_offset {
+                    Some(raw - first_label_offset)
+                } else if raw >= class_label_offset {
+                    Some(raw - class_label_offset)
+                } else {
+                    None
+                };
+                !encoded_class.is_some_and(|class| {
+                    self.active_representatives
+                        .get(class as usize)
+                        .copied()
+                        .unwrap_or(false)
+                })
+            });
         }
-
         profile
     }
 
@@ -460,21 +488,11 @@ impl TerminalEquivalence {
             .unwrap_or(DEAD_BLOCK)
     }
 
-    fn state_for_block(&self, terminal: TerminalID, block: u32) -> Option<u32> {
-        if block == DEAD_BLOCK {
-            return None;
-        }
-        self.state_blocks_by_terminal[terminal as usize]
-            .iter()
-            .find_map(|&(state, candidate)| (candidate == block).then_some(state))
-    }
-
     fn make_singleton(&mut self, terminal: TerminalID) {
         let index = terminal as usize;
         self.representative_for_terminal[index] = terminal;
         self.members_by_representative[index] = vec![terminal];
         self.active_representatives[index] = true;
-        self.member_source_to_rep_tsids[index] = None;
     }
 
     fn recompute_class_metadata(&mut self) {
@@ -520,54 +538,101 @@ fn refine_blocks(
     width: usize,
     previous_blocks: &[u32],
 ) -> Vec<u32> {
-    let row_width = width + 1;
-    let mut signatures = vec![DEAD_BLOCK; outputs.len() * row_width];
-    for pair in 0..outputs.len() {
-        let row = &mut signatures[pair * row_width..(pair + 1) * row_width];
-        row[0] = outputs[pair] as u32;
-        for slot in 0..width {
-            let target = transitions[pair * width + slot];
-            row[slot + 1] = if target == NO_PAIR {
-                DEAD_BLOCK
-            } else {
-                previous_blocks[target as usize]
-            };
-        }
-    }
-
-    let mut order = (0..outputs.len()).collect::<Vec<_>>();
-    order.sort_unstable_by(|&left, &right| {
-        signatures[left * row_width..(left + 1) * row_width]
-            .cmp(&signatures[right * row_width..(right + 1) * row_width])
-    });
+    // The old implementation materialized every `(output, successor-blocks…)`
+    // row then lexicographically sorted wide rows. On large partitions that is
+    // dominated by comparisons, not by the actual DFA refinement. Bucket by a
+    // stable hash and verify collisions against the source rows instead.
+    let mut buckets = FxHashMap::<u64, Vec<(usize, u32)>>::default();
     let mut blocks = vec![DEAD_BLOCK; outputs.len()];
     let mut next_block = DEAD_BLOCK;
-    let mut previous = None;
-    for pair in order {
-        let starts_new = previous.map_or(true, |previous| {
-            signatures[pair * row_width..(pair + 1) * row_width]
-                != signatures[previous * row_width..(previous + 1) * row_width]
-        });
-        if starts_new {
+
+    for pair in 0..outputs.len() {
+        let hash = residual_signature_hash(pair, outputs, transitions, width, previous_blocks);
+        let candidates = buckets.entry(hash).or_default();
+        if let Some(&(_, block)) = candidates.iter().find(|&&(candidate, _)| {
+            same_residual_signature(
+                pair,
+                candidate,
+                outputs,
+                transitions,
+                width,
+                previous_blocks,
+            )
+        }) {
+            blocks[pair] = block;
+        } else {
             next_block += 1;
+            candidates.push((pair, next_block));
+            blocks[pair] = next_block;
         }
-        blocks[pair] = next_block;
-        previous = Some(pair);
     }
     blocks
 }
 
-fn merge_labeled_targets(
-    transitions: &mut BTreeMap<i32, Vec<(u32, Weight)>>,
+#[inline]
+fn residual_successor_block(
+    pair: usize,
+    slot: usize,
+    transitions: &[u32],
+    width: usize,
+    previous_blocks: &[u32],
+) -> u32 {
+    let target = transitions[pair * width + slot];
+    if target == NO_PAIR {
+        DEAD_BLOCK
+    } else {
+        previous_blocks[target as usize]
+    }
+}
+
+fn residual_signature_hash(
+    pair: usize,
+    outputs: &[u8],
+    transitions: &[u32],
+    width: usize,
+    previous_blocks: &[u32],
+) -> u64 {
+    let mut hasher = FxHasher::default();
+    outputs[pair].hash(&mut hasher);
+    for slot in 0..width {
+        residual_successor_block(pair, slot, transitions, width, previous_blocks).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn same_residual_signature(
+    left: usize,
+    right: usize,
+    outputs: &[u8],
+    transitions: &[u32],
+    width: usize,
+    previous_blocks: &[u32],
+) -> bool {
+    outputs[left] == outputs[right]
+        && (0..width).all(|slot| {
+            residual_successor_block(left, slot, transitions, width, previous_blocks)
+                == residual_successor_block(right, slot, transitions, width, previous_blocks)
+        })
+}
+
+fn insert_dwa_transition(
+    transitions: &mut BTreeMap<i32, (u32, Weight)>,
     label: i32,
-    targets: &[(u32, Weight)],
+    target: u32,
+    weight: Weight,
 ) {
-    let entry = transitions.entry(label).or_default();
-    for (target, weight) in targets {
-        if let Some((_, existing)) = entry.iter_mut().find(|(existing_target, _)| *existing_target == *target) {
-            *existing = existing.union(weight);
-        } else {
-            entry.push((*target, weight.clone()));
+    match transitions.entry(label) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert((target, weight));
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            let (existing_target, existing_weight) = entry.get_mut();
+            assert_eq!(
+                *existing_target,
+                target,
+                "class expansion requires distinct first/continuation DWA sources"
+            );
+            *existing_weight = existing_weight.union(&weight);
         }
     }
 }
@@ -642,6 +707,62 @@ mod tests {
         let equivalence = TerminalEquivalence::build(&tokenizer, &[true, true], Some(1), &all_bytes());
 
         assert!(equivalence.is_identity());
-        assert_eq!(equivalence.representative_active_terminals(), &[true, true]);
+    }
+}
+
+#[cfg(test)]
+mod class_follow_tests {
+    use super::*;
+
+    #[test]
+    fn class_pre_follow_keeps_any_member_pair_that_is_legal() {
+        // Class 0 = {0, 1}; class 2 = {2, 3}; class 4 = {4}. The pair 0→2
+        // is legal, although 1→2 and both transitions to 3 are forbidden.
+        // By contrast every pair into class 4 is forbidden. The class pre-pass
+        // must retain class 0→2 but reject class 0→4.
+        let equivalence = TerminalEquivalence {
+            representative_for_terminal: vec![0, 0, 2, 2, 4],
+            members_by_representative: vec![
+                vec![0, 1],
+                Vec::new(),
+                vec![2, 3],
+                Vec::new(),
+                vec![4],
+            ],
+            active_representatives: vec![true, false, true, false, true],
+            state_blocks_by_terminal: vec![Vec::new(); 5],
+            member_live_tsids: vec![None; 5],
+            original_active_terminals: vec![true; 5],
+            active_terminal_count: 5,
+            class_count: 3,
+            quotient_hits: 2,
+            residual_pair_count: 0,
+            residual_block_count: 0,
+            active_byte_count: 0,
+        };
+        let mut disallowed = BTreeMap::new();
+        let mut zero = BitSet::new(5);
+        zero.set(3);
+        zero.set(4);
+        disallowed.insert(0, zero);
+        let mut one = BitSet::new(5);
+        one.set(2);
+        one.set(3);
+        one.set(4);
+        disallowed.insert(1, one);
+
+        let class_disallowed = equivalence.class_disallowed_follows(&disallowed, 5);
+        assert!(
+            !class_disallowed
+                .get(&0)
+                .is_some_and(|bits| bits.contains(2)),
+            "the legal member pair 0→2 must keep class 0→2"
+        );
+        assert!(
+            class_disallowed
+                .get(&0)
+                .is_some_and(|bits| bits.contains(4)),
+            "every member pair into class 4 is forbidden"
+        );
     }
 }

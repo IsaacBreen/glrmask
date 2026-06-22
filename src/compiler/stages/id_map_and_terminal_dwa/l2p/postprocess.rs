@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
+use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::nwa::{NWA, NWAState as NWAStateType};
 use crate::grammar::flat::TerminalID;
 use super::equivalence_analysis::disallowed_follows::normalize_disallowed_follows;
@@ -706,4 +707,169 @@ fn subtract_disallowed_follows_direct(nwa: &NWA, disallowed_follows: &[BitSet]) 
     }
 
     result
+}
+
+
+/// Apply a class-level follow filter to an NWA whose labels use two encodings:
+/// `class` for continuation terminals and `first_label_offset + class` for the
+/// first terminal in a token. The underlying follow state stores the class ID.
+pub(crate) fn apply_disallowed_follow_constraints_with_class_labels(
+    nwa: &mut NWA,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: usize,
+    class_label_offset: u32,
+    first_label_offset: u32,
+) {
+    let normalized = normalize_disallowed_follows(num_terminals, disallowed_follows);
+    if normalized.iter().all(|bits| bits.is_zero()) {
+        return;
+    }
+
+    type ProductState = (u32, Option<u32>);
+    let mut result = NWA::new(0, 0);
+    let mut state_ids: HashMap<ProductState, u32> = HashMap::new();
+    let mut worklist: VecDeque<ProductState> = VecDeque::new();
+    let get_or_create = |result: &mut NWA,
+                         state_ids: &mut HashMap<ProductState, u32>,
+                         worklist: &mut VecDeque<ProductState>,
+                         state: ProductState|
+     -> u32 {
+        if let Some(&id) = state_ids.get(&state) {
+            id
+        } else {
+            let id = result.add_state();
+            state_ids.insert(state, id);
+            worklist.push_back(state);
+            id
+        }
+    };
+
+    for &start in nwa.start_states() {
+        let id = get_or_create(&mut result, &mut state_ids, &mut worklist, (start, None));
+        result.start_states_mut().push(id);
+    }
+
+    while let Some((source, previous_class)) = worklist.pop_front() {
+        let result_source = state_ids[&(source, previous_class)];
+        let original = &nwa.states()[source as usize];
+        if let Some(final_weight) = &original.final_weight {
+            result.set_final_weight(result_source, final_weight.clone());
+        }
+        for (target, weight) in &original.epsilons {
+            let result_target = get_or_create(
+                &mut result,
+                &mut state_ids,
+                &mut worklist,
+                (*target, previous_class),
+            );
+            result.add_epsilon(result_source, result_target, weight.clone());
+        }
+        for (&label, targets) in &original.transitions {
+            let next_class = if label < 0 {
+                previous_class
+            } else {
+                let raw = label as u32;
+                let class = if raw >= first_label_offset {
+                    raw - first_label_offset
+                } else if raw >= class_label_offset {
+                    raw - class_label_offset
+                } else {
+                    raw
+                };
+                if (class as usize) >= normalized.len() {
+                    None
+                } else {
+                    if previous_class.is_some_and(|previous| {
+                        normalized[previous as usize].contains(class as usize)
+                    }) {
+                        continue;
+                    }
+                    Some(class)
+                }
+            };
+            for (target, weight) in targets {
+                let result_target = get_or_create(
+                    &mut result,
+                    &mut state_ids,
+                    &mut worklist,
+                    (*target, next_class),
+                );
+                result.add_transition(result_source, label, result_target, weight.clone());
+            }
+        }
+    }
+    *nwa = result;
+}
+
+/// Apply the exact original terminal-follow relation after class labels have
+/// been expanded on a deterministic terminal DWA. The product is still a DWA;
+/// minimize it afterward.
+pub(crate) fn apply_disallowed_follow_constraints_dwa(
+    dwa: &mut DWA,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: usize,
+) {
+    let normalized = normalize_disallowed_follows(num_terminals, disallowed_follows);
+    if normalized.iter().all(|bits| bits.is_zero()) {
+        return;
+    }
+
+    type ProductState = (u32, Option<u32>);
+    let original = dwa.clone();
+    let mut result = DWA::new(0, 0);
+    let mut state_ids: HashMap<ProductState, u32> = HashMap::new();
+    let mut worklist: VecDeque<ProductState> = VecDeque::new();
+    let get_or_create = |result: &mut DWA,
+                         state_ids: &mut HashMap<ProductState, u32>,
+                         worklist: &mut VecDeque<ProductState>,
+                         state: ProductState|
+     -> u32 {
+        if let Some(&id) = state_ids.get(&state) {
+            id
+        } else {
+            let id = result.add_state();
+            state_ids.insert(state, id);
+            worklist.push_back(state);
+            id
+        }
+    };
+
+    let result_start = get_or_create(
+        &mut result,
+        &mut state_ids,
+        &mut worklist,
+        (original.start_state(), None),
+    );
+    result.set_start_state(result_start);
+
+    while let Some((source, previous_terminal)) = worklist.pop_front() {
+        let result_source = state_ids[&(source, previous_terminal)];
+        let original_state = &original.states()[source as usize];
+        if let Some(final_weight) = &original_state.final_weight {
+            result.set_final_weight(result_source, final_weight.clone());
+        }
+        for (&label, &(target, ref weight)) in &original_state.transitions {
+            let next_previous_terminal = if label < 0 {
+                previous_terminal
+            } else if (label as usize) < normalized.len() {
+                let terminal = label as u32;
+                if previous_terminal.is_some_and(|previous| {
+                    normalized[previous as usize].contains(terminal as usize)
+                }) {
+                    continue;
+                }
+                Some(terminal)
+            } else {
+                None
+            };
+            let result_target = get_or_create(
+                &mut result,
+                &mut state_ids,
+                &mut worklist,
+                (target, next_previous_terminal),
+            );
+            result.add_transition(result_source, label, result_target, weight.clone());
+        }
+    }
+    *dwa = result;
 }

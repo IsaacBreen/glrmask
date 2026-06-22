@@ -38,7 +38,8 @@ use super::grammar_helpers::compute_always_allowed_follows;
 use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhaseProfile};
 use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
 use postprocess::{
-    apply_disallowed_follow_constraints, canonicalize_acyclic_nwa,
+    apply_disallowed_follow_constraints, apply_disallowed_follow_constraints_dwa,
+    apply_disallowed_follow_constraints_with_class_labels, canonicalize_acyclic_nwa,
     collapse_always_allowed, prune_non_coreachable_states, SharedDisallowedFollowDfaCache,
 };
 use terminal_equivalence::TerminalEquivalence;
@@ -568,7 +569,17 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     );
     let terminal_equivalence_refine_ms =
         terminal_equivalence_refine_started_at.elapsed().as_secs_f64() * 1000.0;
-    let representative_active_terminals = terminal_equivalence.representative_active_terminals();
+    let class_quotient_active = !terminal_equivalence.is_identity();
+    let class_label_offset = grammar.num_terminals;
+    let first_class_label_offset = class_label_offset
+        .checked_add(grammar.num_terminals)
+        .expect("synthetic L2P class label range overflow");
+    let class_disallowed_follows = class_quotient_active.then(|| {
+        terminal_equivalence.class_disallowed_follows(
+            disallowed_follows,
+            grammar.num_terminals as usize,
+        )
+    });
     if compile_profile_enabled() {
         let profile = terminal_equivalence.profile();
         eprintln!(
@@ -684,40 +695,47 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 &full_tree.root,
                 &roots,
                 &mut pm_computer,
-                Some(representative_active_terminals),
+                Some(active_terminals),
+                class_quotient_active.then_some(terminal_equivalence.terminal_label_map()),
+                class_quotient_active.then_some(class_label_offset),
+                class_quotient_active.then_some(first_class_label_offset),
+                &roots_by_tsid,
             );
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
-            let terminal_expansion_started_at = Instant::now();
-            let terminal_expansion_profile = terminal_equivalence.expand_nwa(&mut nwa, &roots_by_tsid);
-            let terminal_expansion_ms = terminal_expansion_started_at.elapsed().as_secs_f64() * 1000.0;
-            if compile_profile_enabled() {
-                eprintln!(
-                    "[glrmask/profile][l2p_terminal_equivalence_expand] partition={} expanded_transition_copies={} root_source_maps={} ms={:.3}",
-                    partition_label,
-                    terminal_expansion_profile.expanded_transition_copies,
-                    terminal_expansion_profile.root_source_maps,
-                    terminal_expansion_ms,
-                );
-            }
-
             let always_allowed_started_at = Instant::now();
-            let always_allowed = compute_always_allowed_follows(grammar);
+            let always_allowed = (!class_quotient_active)
+                .then(|| compute_always_allowed_follows(grammar))
+                .unwrap_or_default();
             let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_build = nwa.states().len();
 
             let collapse_started_at = Instant::now();
-            collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
+            if !class_quotient_active {
+                collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
+            }
             let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_collapse = nwa.states().len();
 
             let disallowed_started_at = Instant::now();
-            apply_disallowed_follow_constraints(
-                &mut nwa,
-                disallowed_follows,
-                grammar.num_terminals as usize,
-                shared_disallowed_follow_dfa_cache,
-            );
+            if class_quotient_active {
+                apply_disallowed_follow_constraints_with_class_labels(
+                    &mut nwa,
+                    class_disallowed_follows
+                        .as_ref()
+                        .expect("class follow relation missing"),
+                    grammar.num_terminals as usize,
+                    class_label_offset,
+                    first_class_label_offset,
+                );
+            } else {
+                apply_disallowed_follow_constraints(
+                    &mut nwa,
+                    disallowed_follows,
+                    grammar.num_terminals as usize,
+                    shared_disallowed_follow_dfa_cache,
+                );
+            }
             let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_disallowed = nwa.states().len();
 
@@ -732,8 +750,36 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let nwa_states_after_canonicalize = nwa.states().len();
 
             let determinize_started_at = Instant::now();
-            let det = determinize(&nwa).expect("L2+ terminal NWA determinization failed");
+            let mut det = determinize(&nwa).expect("L2+ terminal NWA determinization failed");
             let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
+
+            let terminal_expansion_started_at = Instant::now();
+            let terminal_expansion_profile = if class_quotient_active {
+                terminal_equivalence.expand_class_dwa(
+                    &mut det,
+                    class_label_offset,
+                    first_class_label_offset,
+                )
+            } else {
+                terminal_equivalence.profile()
+            };
+            let terminal_expansion_ms = terminal_expansion_started_at.elapsed().as_secs_f64() * 1000.0;
+            if compile_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_terminal_equivalence_expand] partition={} deferred={} expanded_transition_copies={} ms={:.3}",
+                    partition_label,
+                    class_quotient_active,
+                    terminal_expansion_profile.expanded_transition_copies,
+                    terminal_expansion_ms,
+                );
+            }
+            if class_quotient_active {
+                apply_disallowed_follow_constraints_dwa(
+                    &mut det,
+                    disallowed_follows,
+                    grammar.num_terminals as usize,
+                );
+            }
 
             let minimize_started_at = Instant::now();
             let skip_minimize = std::env::var("GLRMASK_SKIP_L2P_MINIMIZE")
@@ -753,7 +799,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 possible_matches_ms,
                 seed_ms,
                 trie_build_ms,
-                always_allowed_ms + terminal_expansion_ms,
+              always_allowed_ms,
                 collapse_ms,
                 disallowed_ms,
                 prune_ms,
@@ -841,7 +887,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             nwa_states_after_disallowed,
             nwa_states_after_prune,
             nwa_states_after_canonicalize,
-            always_allowed_ms,
+                always_allowed_ms,
             collapse_ms,
             disallowed_ms,
             prune_ms,
