@@ -1959,7 +1959,8 @@ fn large_optional_open_object_uses_fused_prefix_chain_rules() {
     let glrm = to_glrm(&grammar);
     assert!(count_rules_with_prefix(&grammar, "json_open_object_prefix") > 0);
     assert_eq!(count_rules_with_prefix(&grammar, "json_closed_object_body"), 0);
-    assert!(glrm.contains(r#"/, "k1": "#), "{glrm}");
+    assert!(glrm.contains(r#"JSON_QUOTE "k1" JSON_KEY_SUFFIX"#), "{glrm}");
+    assert!(glrm.contains("JSON_ITEM_SEPARATOR"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -2571,10 +2572,25 @@ fn shared_additional_excluded_key_skips_closed_object_keys() {
         .expect("shared excluded-key rule exists");
 
     assert!(
-        contains_raw_regex_substring(&excluded_rule.expr, "\"open_only\"")
-            || contains_literal_bytes(&excluded_rule.expr, b"\"open_only\"")
+        contains_ref_named(&excluded_rule.expr, "JSON_QUOTE"),
+        "{:?}",
+        excluded_rule.expr
     );
-    assert!(!format!("{:?}", excluded_rule.expr).is_empty());
+    assert!(
+        contains_literal_bytes(&excluded_rule.expr, b"open_only"),
+        "{:?}",
+        excluded_rule.expr
+    );
+    assert!(
+        contains_ref_named(&excluded_rule.expr, "JSON_KEY_SUFFIX"),
+        "{:?}",
+        excluded_rule.expr
+    );
+    assert!(
+        !contains_literal_bytes(&excluded_rule.expr, b"closed_only"),
+        "{:?}",
+        excluded_rule.expr
+    );
 
     lower(&grammar).unwrap();
 }
@@ -2877,9 +2893,9 @@ fn prefix_items_lower_with_no_tail() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let expr = start_expr(&grammar);
-    assert!(contains_literal_bytes(expr, b"\""), "{expr:?}");
-    assert!(contains_literal_bytes(expr, b"a\""), "{expr:?}");
-    assert!(contains_literal_bytes(expr, b"b\""), "{expr:?}");
+    assert!(contains_ref_named(expr, "JSON_QUOTE"), "{expr:?}");
+    assert!(contains_literal_bytes(expr, b"a"), "{expr:?}");
+    assert!(contains_literal_bytes(expr, b"b"), "{expr:?}");
     assert!(!contains_literal_bytes(expr, b"\"a\""), "{expr:?}");
     assert!(!contains_literal_bytes(expr, b"\"b\""), "{expr:?}");
     lower(&grammar).unwrap();
@@ -2899,8 +2915,8 @@ fn legacy_tuple_items_use_additional_items_tail() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let expr = start_expr(&grammar);
-    assert!(contains_literal_bytes(expr, b"\""), "{expr:?}");
-    assert!(contains_literal_bytes(expr, b"head\""), "{expr:?}");
+    assert!(contains_ref_named(expr, "JSON_QUOTE"), "{expr:?}");
+    assert!(contains_literal_bytes(expr, b"head"), "{expr:?}");
     assert!(!contains_literal_bytes(expr, b"\"head\""), "{expr:?}");
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("JSON_INTEGER") || glrm.contains("JSON_NUMBER"), "{glrm}");
@@ -4007,7 +4023,7 @@ fn string_pattern_is_intersected_with_format() {
 }
 
 #[test]
-fn object_nonterminals_reference_terminalized_key_and_string_patterns() {
+fn object_nonterminals_keep_split_literal_keys_and_constrained_values() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -4026,11 +4042,11 @@ fn object_nonterminals_reference_terminalized_key_and_string_patterns() {
         assert!(!rule.name.is_empty());
     }
     assert!(
-        grammar.rules.iter().any(|rule| {
-            rule.is_terminal
-                && (rule.name.starts_with("json_string_constrained")
-                    || rule.name.starts_with("json_property_string_value"))
-        })
+        !grammar.rules.iter().any(|rule| {
+            rule.is_terminal && rule.name.starts_with("json_property_string_value")
+        }),
+        "{:?}",
+        grammar.rules
     );
     assert!(
         grammar
@@ -4040,12 +4056,8 @@ fn object_nonterminals_reference_terminalized_key_and_string_patterns() {
     );
 
     let glrm = to_glrm(&grammar);
-    assert!(
-        glrm.contains("\"last_modification\"")
-            || glrm.contains("\\\"last_modification\\\""),
-        "{glrm}"
-    );
-    assert!(glrm.contains("last_modification") && glrm.contains("JSON_KEY_SEPARATOR"), "{glrm}");
+    assert_glrm_has_split_literal_key(&glrm, "last_modification");
+    assert!(glrm.contains("[Tt]") && glrm.contains("[+-]"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -5314,18 +5326,13 @@ fn object_const_uses_json_separator_rules() {
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let expr = start_expr(&grammar);
 
+    assert!(contains_ref_named(expr, "JSON_QUOTE"), "{expr:?}");
+    assert!(contains_literal_bytes(expr, b"$data"), "{expr:?}");
+    assert!(contains_ref_named(expr, "JSON_KEY_SUFFIX"), "{expr:?}");
     assert!(
-        contains_raw_regex_substring(expr, r#""\$data""#)
-            || contains_raw_regex_substring(expr, r#""$data""#)
-            || contains_literal_bytes(expr, b"\"$data\""),
+        contains_ref_named(expr, "JSON_ITEM_SEPARATOR") || contains_raw_regex_substring(expr, r#", "#),
         "{expr:?}"
     );
-    assert!(
-        contains_ref_named(expr, "JSON_KEY_SEPARATOR")
-            || contains_raw_regex_substring(expr, r#"": "#),
-        "{expr:?}"
-    );
-    assert!(contains_ref_named(expr, "JSON_ITEM_SEPARATOR") || contains_raw_regex_substring(expr, r#", "#), "{expr:?}");
     lower(&grammar).unwrap();
 }
 
@@ -6548,7 +6555,7 @@ fn allof_merges_plain_object_branches() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains(r#"/"a": "#), "{glrm}");
+    assert_glrm_has_split_literal_key(&glrm, "a");
     assert!(glrm.contains("JSON_BOOL"), "{glrm}");
     lower(&grammar).unwrap();
 }
