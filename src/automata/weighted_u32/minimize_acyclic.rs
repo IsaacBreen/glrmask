@@ -1087,61 +1087,6 @@ fn sorted_weights_compatible_on_domain_intersection(
     true
 }
 
-/// Exact transition-weight compatibility on a domain that has already been
-/// intersected.  The caller uses this after computing one member-pair overlap,
-/// avoiding a fresh three-way domain scan for every transition label.
-fn sorted_weights_compatible_on_domain(
-    class_weights: &[(Label, Weight)],
-    member_weights: &[(Label, Weight)],
-    domain: &Weight,
-) -> bool {
-    let mut class_idx = 0;
-    let mut member_idx = 0;
-
-    while class_idx < class_weights.len() && member_idx < member_weights.len() {
-        let (class_label, class_weight) = &class_weights[class_idx];
-        let (member_label, member_weight) = &member_weights[member_idx];
-        if class_label == member_label {
-            if class_weight != member_weight {
-                let class_disjoint = class_weight.is_disjoint(domain);
-                let member_disjoint = member_weight.is_disjoint(domain);
-                if class_disjoint != member_disjoint {
-                    return false;
-                }
-                if !class_disjoint && !weights_equal_on_domain(class_weight, member_weight, domain)
-                {
-                    return false;
-                }
-            }
-            class_idx += 1;
-            member_idx += 1;
-        } else if class_label < member_label {
-            if !class_weight.is_disjoint(domain) {
-                return false;
-            }
-            class_idx += 1;
-        } else {
-            if !member_weight.is_disjoint(domain) {
-                return false;
-            }
-            member_idx += 1;
-        }
-    }
-
-    for (_, class_weight) in &class_weights[class_idx..] {
-        if !class_weight.is_disjoint(domain) {
-            return false;
-        }
-    }
-    for (_, member_weight) in &member_weights[member_idx..] {
-        if !member_weight.is_disjoint(domain) {
-            return false;
-        }
-    }
-
-    true
-}
-
 fn targets_compatible_with_group_map(
     class_targets: &[(Label, u32)],
     group_targets_by_label: &FxHashMap<Label, u32>,
@@ -1172,21 +1117,6 @@ fn final_weights_compatible_on_domain_intersection(
         (None, Some(member_fw)) => {
             weight_is_disjoint_from_domain_intersection(member_fw, class_domain, member_domain)
         }
-        (None, None) => true,
-    }
-}
-
-/// Exact final-weight compatibility on a domain that has already been
-/// intersected.
-fn final_weights_compatible_on_domain(
-    class_final_weight: Option<&Weight>,
-    member_final_weight: Option<&Weight>,
-    domain: &Weight,
-) -> bool {
-    match (class_final_weight, member_final_weight) {
-        (Some(class_fw), Some(member_fw)) => weights_equal_on_domain(class_fw, member_fw, domain),
-        (Some(class_fw), None) => class_fw.is_disjoint(domain),
-        (None, Some(member_fw)) => member_fw.is_disjoint(domain),
         (None, None) => true,
     }
 }
@@ -1365,6 +1295,10 @@ fn build_and_color_hybrid(
         }
         class_needed_union[class] = class_needed_union[class].union(&needed[state_id]);
     }
+    let class_tsid_coverage: Vec<Option<RangeSetBlaze<u32>>> = class_needed_union
+        .iter()
+        .map(Weight::tsid_coverage)
+        .collect();
     let class_union_ms = class_union_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let class_profiles_started_at = Instant::now();
@@ -1409,21 +1343,13 @@ fn build_and_color_hybrid(
         / num_classes as f64;
 
     // Step 3: Greedy merge of classes, handling both disjoint and overlapping
-    // needed sets. Each group keeps an exact union summary of its members.
-    //
-    // After `push_weights`, every final/transition weight of member i is a
-    // subset of `needed[i]`. Members admitted to a group agree on every
-    // pairwise overlap. Therefore their union weights are the unique behavior
-    // on `union(needed[i])`: outside a member's domain it contributes nothing,
-    // and on shared domains all members agree. A candidate is compatible with
-    // every member iff it agrees with this summary on the one overlap with the
-    // group domain. This is exact, and avoids rescanning every member of a
-    // large compatible group for each candidate.
+    // needed sets. Instead of building an O(K²) incompatibility graph, we check
+    // each class against only the small number of existing groups (~14 for kb_684).
     struct OverlapMergeGroup {
         targets_by_label: FxHashMap<Label, u32>,
-        needed_union: Weight,
-        merged_final_weight: Option<Weight>,
-        merged_weights: Vec<(Label, Weight)>,
+        needed_tsid_coverage: Option<RangeSetBlaze<u32>>,
+        indexed_members_by_tsid: FxHashMap<u32, Vec<usize>>,
+        unindexed_member_classes: Vec<usize>,
         member_classes: Vec<usize>,
     }
 
@@ -1442,7 +1368,16 @@ fn build_and_color_hybrid(
     let mut transition_weight_checks = 0usize;
     let mut transition_weight_rejects = 0usize;
     let mut transition_weight_check_ms = 0.0;
+    let mut overlapping_member_scans = 0usize;
+    let mut overlapping_member_hits = 0usize;
+    let mut overlapping_member_scan_ms = 0.0;
+    let mut indexed_member_scans = 0usize;
+    let mut indexed_member_scan_fallbacks = 0usize;
+    let mut tsid_coverage_rejects = 0usize;
     let mut group_update_ms = 0.0;
+    let mut overlap_candidate_marks = vec![0u32; num_classes];
+    let mut overlap_candidate_mark = 0u32;
+    let mut overlap_candidate_members = Vec::<usize>::new();
 
     for class in 0..num_classes {
         let cn = &class_needed_union[class];
@@ -1464,37 +1399,114 @@ fn build_and_color_hybrid(
 
             disjoint_checks += 1;
             let disjoint_check_started_at = Instant::now();
-            let overlap = cn.intersection(&g.needed_union);
-            disjoint_check_ms += disjoint_check_started_at.elapsed().as_secs_f64() * 1000.0;
-            if overlap.is_empty() {
-                disjoint_true += 1;
-            } else {
-                final_weight_checks += 1;
-                let final_weight_check_started_at = Instant::now();
-                let final_weight_ok = final_weights_compatible_on_domain(
-                    class_profile.final_weight.as_ref(),
-                    g.merged_final_weight.as_ref(),
-                    &overlap,
-                );
-                final_weight_check_ms +=
-                    final_weight_check_started_at.elapsed().as_secs_f64() * 1000.0;
-                if !final_weight_ok {
-                    final_weight_rejects += 1;
-                    continue;
-                }
+            let mut saw_overlap = false;
+            let mut compatible_with_overlapping_members = true;
+            let mut tsid_disjoint = false;
 
-                transition_weight_checks += 1;
-                let transition_weight_check_started_at = Instant::now();
-                let transition_weights_ok = sorted_weights_compatible_on_domain(
-                    &class_profile.weights,
-                    &g.merged_weights,
-                    &overlap,
-                );
-                transition_weight_check_ms +=
-                    transition_weight_check_started_at.elapsed().as_secs_f64() * 1000.0;
-                if !transition_weights_ok {
-                    transition_weight_rejects += 1;
-                    continue;
+            overlap_candidate_members.clear();
+            overlap_candidate_mark = overlap_candidate_mark.wrapping_add(1);
+            if overlap_candidate_mark == 0 {
+                overlap_candidate_marks.fill(0);
+                overlap_candidate_mark = 1;
+            }
+            let mut used_index = true;
+            for &member_class in &g.unindexed_member_classes {
+                overlap_candidate_marks[member_class] = overlap_candidate_mark;
+                overlap_candidate_members.push(member_class);
+            }
+            if !enumerate_tsid_coverage_limited(
+                &class_tsid_coverage[class],
+                TSID_MEMBER_INDEX_ENUMERATION_LIMIT,
+                |tsid| {
+                    if let Some(members) = g.indexed_members_by_tsid.get(&tsid) {
+                        for &member_class in members {
+                            if overlap_candidate_marks[member_class] != overlap_candidate_mark {
+                                overlap_candidate_marks[member_class] = overlap_candidate_mark;
+                                overlap_candidate_members.push(member_class);
+                            }
+                        }
+                    }
+                },
+            ) {
+                used_index = false;
+                indexed_member_scan_fallbacks += 1;
+            }
+
+            if used_index {
+                indexed_member_scans += 1;
+                if overlap_candidate_members.is_empty() {
+                    tsid_disjoint = true;
+                    tsid_coverage_rejects += 1;
+                    disjoint_true += 1;
+                }
+            } else {
+                tsid_disjoint =
+                    tsid_coverage_disjoint(&class_tsid_coverage[class], &g.needed_tsid_coverage);
+                if tsid_disjoint {
+                    tsid_coverage_rejects += 1;
+                    disjoint_true += 1;
+                }
+            }
+
+            if !tsid_disjoint {
+                let member_scan_started_at = Instant::now();
+                let scan_members: &[usize] = if used_index {
+                    &overlap_candidate_members
+                } else {
+                    &g.member_classes
+                };
+
+                for &member_class in scan_members {
+                    overlapping_member_scans += 1;
+                    let member_needed = &class_needed_union[member_class];
+                    if cn.is_disjoint(member_needed) {
+                        continue;
+                    }
+                    saw_overlap = true;
+                    overlapping_member_hits += 1;
+
+                    final_weight_checks += 1;
+                    let final_weight_check_started_at = Instant::now();
+                    let final_weight_ok = final_weights_compatible_on_domain_intersection(
+                        class_profile.final_weight.as_ref(),
+                        class_profiles[member_class].final_weight.as_ref(),
+                        cn,
+                        member_needed,
+                    );
+                    final_weight_check_ms +=
+                        final_weight_check_started_at.elapsed().as_secs_f64() * 1000.0;
+                    if !final_weight_ok {
+                        final_weight_rejects += 1;
+                        compatible_with_overlapping_members = false;
+                        break;
+                    }
+
+                    transition_weight_checks += 1;
+                    let transition_weight_check_started_at = Instant::now();
+                    let transition_weights_ok = sorted_weights_compatible_on_domain_intersection(
+                        &class_profile.weights,
+                        &class_profiles[member_class].weights,
+                        cn,
+                        member_needed,
+                    );
+                    transition_weight_check_ms +=
+                        transition_weight_check_started_at.elapsed().as_secs_f64() * 1000.0;
+                    if !transition_weights_ok {
+                        transition_weight_rejects += 1;
+                        compatible_with_overlapping_members = false;
+                        break;
+                    }
+                }
+                overlapping_member_scan_ms +=
+                    member_scan_started_at.elapsed().as_secs_f64() * 1000.0;
+            }
+            disjoint_check_ms += disjoint_check_started_at.elapsed().as_secs_f64() * 1000.0;
+            if !compatible_with_overlapping_members {
+                continue;
+            }
+            if !saw_overlap {
+                if !tsid_disjoint {
+                    disjoint_true += 1;
                 }
             }
 
@@ -1507,14 +1519,18 @@ fn build_and_color_hybrid(
                     g.targets_by_label.insert(*label, *target);
                 }
             }
-            g.needed_union = g.needed_union.union(cn);
-            if let Some(final_weight) = &class_profile.final_weight {
-                g.merged_final_weight = Some(match g.merged_final_weight.take() {
-                    Some(existing) => existing.union(final_weight),
-                    None => final_weight.clone(),
-                });
+            merge_tsid_coverage(&mut g.needed_tsid_coverage, &class_tsid_coverage[class]);
+            if enumerate_tsid_coverage_limited(
+                &class_tsid_coverage[class],
+                TSID_MEMBER_INDEX_ENUMERATION_LIMIT,
+                |tsid| {
+                    g.indexed_members_by_tsid.entry(tsid).or_default().push(class);
+                },
+            ) {
+                // indexed above
+            } else {
+                g.unindexed_member_classes.push(class);
             }
-            merge_sorted_weights(&mut g.merged_weights, &class_profile.weights);
             g.member_classes.push(class);
             group_update_ms += group_update_started_at.elapsed().as_secs_f64() * 1000.0;
             placed = true;
@@ -1530,9 +1546,35 @@ fn build_and_color_hybrid(
 
             groups.push(OverlapMergeGroup {
                 targets_by_label,
-                needed_union: cn.clone(),
-                merged_final_weight: class_profile.final_weight.clone(),
-                merged_weights: class_profile.weights.clone(),
+                needed_tsid_coverage: class_tsid_coverage[class].clone(),
+                indexed_members_by_tsid: {
+                    let mut by_tsid = FxHashMap::default();
+                    let mut unindexed = false;
+                    if !enumerate_tsid_coverage_limited(
+                        &class_tsid_coverage[class],
+                        TSID_MEMBER_INDEX_ENUMERATION_LIMIT,
+                        |tsid| {
+                            by_tsid.entry(tsid).or_insert_with(Vec::new).push(class);
+                        },
+                    ) {
+                        unindexed = true;
+                    }
+                    if unindexed {
+                        by_tsid.clear();
+                    }
+                    by_tsid
+                },
+                unindexed_member_classes: {
+                    if enumerate_tsid_coverage_limited(
+                        &class_tsid_coverage[class],
+                        TSID_MEMBER_INDEX_ENUMERATION_LIMIT,
+                        |_| {},
+                    ) {
+                        Vec::new()
+                    } else {
+                        vec![class]
+                    }
+                },
                 member_classes: vec![class],
             });
         }
@@ -1580,7 +1622,7 @@ fn build_and_color_hybrid(
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
         eprintln!(
-            "[glrmask/profile][weighted_dwa_minimize_hybrid_detail] candidates={} classes={} groups={} group_attempts={} target_checks={} target_rejects={} target_check_ms={:.3} disjoint_checks={} disjoint_true={} disjoint_check_ms={:.3} summary_final_weight_checks={} summary_final_weight_rejects={} summary_final_weight_check_ms={:.3} summary_transition_weight_checks={} summary_transition_weight_rejects={} summary_transition_weight_check_ms={:.3} group_update_ms={:.3} classes_with_final_weight={} min_targets={} max_targets={} avg_targets={:.3} min_weights={} max_weights={} avg_weights={:.3} min_group_size={} max_group_size={}",
+            "[glrmask/profile][weighted_dwa_minimize_hybrid_detail] candidates={} classes={} groups={} group_attempts={} target_checks={} target_rejects={} target_check_ms={:.3} disjoint_checks={} disjoint_true={} tsid_coverage_rejects={} disjoint_check_ms={:.3} final_weight_checks={} final_weight_rejects={} final_weight_check_ms={:.3} transition_weight_checks={} transition_weight_rejects={} transition_weight_check_ms={:.3} overlapping_member_scans={} overlapping_member_hits={} overlapping_member_scan_ms={:.3} indexed_member_scans={} indexed_member_scan_fallbacks={} group_update_ms={:.3} classes_with_final_weight={} min_targets={} max_targets={} avg_targets={:.3} min_weights={} max_weights={} avg_weights={:.3} min_group_size={} max_group_size={}",
             candidates.len(),
             num_classes,
             groups.len(),
@@ -1590,6 +1632,7 @@ fn build_and_color_hybrid(
             target_check_ms,
             disjoint_checks,
             disjoint_true,
+            tsid_coverage_rejects,
             disjoint_check_ms,
             final_weight_checks,
             final_weight_rejects,
@@ -1597,6 +1640,11 @@ fn build_and_color_hybrid(
             transition_weight_checks,
             transition_weight_rejects,
             transition_weight_check_ms,
+            overlapping_member_scans,
+            overlapping_member_hits,
+            overlapping_member_scan_ms,
+            indexed_member_scans,
+            indexed_member_scan_fallbacks,
             group_update_ms,
             classes_with_final_weight,
             min_targets,
@@ -2081,8 +2129,7 @@ pub fn minimize_acyclic_owned(mut pushed: DWA) -> DWA {
 #[cfg(test)]
 mod tests {
     use super::{
-        final_weights_compatible_on_domain, push_weights, sorted_weights_compatible_on_domain,
-        sorted_weights_compatible_on_domain_intersection,
+        push_weights, sorted_weights_compatible_on_domain_intersection,
         weight_is_disjoint_from_domain_intersection, weights_equal_on_domain,
         weights_equal_on_domain_intersection,
     };
@@ -2117,19 +2164,6 @@ mod tests {
             weights_equal_on_domain_intersection(a, b, left, right),
             weights_equal_on_domain(a, b, &overlap),
         );
-    }
-
-    fn profiles_compatible(
-        left_final: Option<&Weight>,
-        left_weights: &[(i32, Weight)],
-        left_domain: &Weight,
-        right_final: Option<&Weight>,
-        right_weights: &[(i32, Weight)],
-        right_domain: &Weight,
-    ) -> bool {
-        let overlap = left_domain.intersection(right_domain);
-        final_weights_compatible_on_domain(left_final, right_final, &overlap)
-            && sorted_weights_compatible_on_domain(left_weights, right_weights, &overlap)
     }
 
     #[test]
@@ -2228,77 +2262,6 @@ mod tests {
             &group_weights,
             &overlap,
             &overlap,
-        ));
-    }
-
-    #[test]
-    fn union_summary_matches_pairwise_member_compatibility() {
-        // The member profiles agree where their domains overlap. Their union
-        // is therefore a single exact summary over the union domain.
-        let first_domain = weight(&[(1, &[(1, 4)])]);
-        let second_domain = weight(&[(1, &[(3, 6)]), (2, &[(1, 2)])]);
-        let group_domain = first_domain.union(&second_domain);
-
-        let first_final = first_domain.clone();
-        let second_final = second_domain.clone();
-        let group_final = first_final.union(&second_final);
-        let first_weights = vec![(7, first_domain.clone())];
-        let second_weights = vec![(7, second_domain.clone())];
-        let group_weights = vec![(7, first_weights[0].1.union(&second_weights[0].1))];
-
-        let candidate_final = group_final.clone();
-        let candidate_weights = group_weights.clone();
-        assert!(profiles_compatible(
-            Some(&candidate_final),
-            &candidate_weights,
-            &group_domain,
-            Some(&first_final),
-            &first_weights,
-            &first_domain,
-        ));
-        assert!(profiles_compatible(
-            Some(&candidate_final),
-            &candidate_weights,
-            &group_domain,
-            Some(&second_final),
-            &second_weights,
-            &second_domain,
-        ));
-        assert!(profiles_compatible(
-            Some(&candidate_final),
-            &candidate_weights,
-            &group_domain,
-            Some(&group_final),
-            &group_weights,
-            &group_domain,
-        ));
-
-        // Removing behavior used only by the second member must be rejected
-        // both pairwise and by the summary.
-        let incomplete_weights = vec![(7, first_domain.clone())];
-        assert!(profiles_compatible(
-            Some(&candidate_final),
-            &incomplete_weights,
-            &group_domain,
-            Some(&first_final),
-            &first_weights,
-            &first_domain,
-        ));
-        assert!(!profiles_compatible(
-            Some(&candidate_final),
-            &incomplete_weights,
-            &group_domain,
-            Some(&second_final),
-            &second_weights,
-            &second_domain,
-        ));
-        assert!(!profiles_compatible(
-            Some(&candidate_final),
-            &incomplete_weights,
-            &group_domain,
-            Some(&group_final),
-            &group_weights,
-            &group_domain,
         ));
     }
 
