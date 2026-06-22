@@ -73,6 +73,7 @@ pub(crate) trait Lexer {
 
     fn step(&self, state: u32, byte: u8) -> Option<u32>;
     fn get_transition(&self, state: u32, byte: u8) -> u32;
+    fn matched_terminal_bitset(&self, state: u32) -> &BitSet;
     fn matched_terminals_iter(&self, state: u32) -> impl Iterator<Item = TerminalID> + '_;
     fn possible_future_terminals_iter(&self, state: u32) -> impl Iterator<Item = TerminalID> + '_;
     fn possible_future_terminals(&self, state: u32) -> &BitSet;
@@ -250,6 +251,10 @@ impl Tokenizer {
             .finalizers(state)
             .iter()
             .map(|terminal| terminal as TerminalID)
+    }
+
+    fn matched_terminal_bitset(&self, state: u32) -> &BitSet {
+        self.dfa.finalizers(state)
     }
 
     fn possible_future_terminals_iter(
@@ -619,6 +624,7 @@ impl Lexer for Tokenizer {
     fn transition_count(&self) -> usize { self.transition_count() }
     fn step(&self, state: u32, byte: u8) -> Option<u32> { self.step(state, byte) }
     fn get_transition(&self, state: u32, byte: u8) -> u32 { self.get_transition(state, byte) }
+    fn matched_terminal_bitset(&self, state: u32) -> &BitSet { self.matched_terminal_bitset(state) }
     fn matched_terminals_iter(&self, state: u32) -> impl Iterator<Item = TerminalID> + '_ { self.matched_terminals_iter(state) }
     fn possible_future_terminals_iter(&self, state: u32) -> impl Iterator<Item = TerminalID> + '_ { self.possible_future_terminals_iter(state) }
     fn possible_future_terminals(&self, state: u32) -> &BitSet { self.possible_future_terminals(state) }

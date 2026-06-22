@@ -31,6 +31,12 @@ pub(crate) struct MaxLengthStatistic {
     relevant_bytes: [bool; 256],
 }
 
+impl MaxLengthStatistic {
+    pub(crate) fn relevant_byte_count(&self) -> usize {
+        self.relevant_bytes.iter().filter(|&&active| active).count()
+    }
+}
+
 #[inline(always)]
 fn mix_u64(mut x: u64) -> u64 {
     x ^= x >> 30;

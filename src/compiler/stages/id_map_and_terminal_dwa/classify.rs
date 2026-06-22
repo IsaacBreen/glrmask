@@ -134,67 +134,103 @@ impl L2pPartitionBucket {
 
 impl SharedClassifyBytesets {
     /// Scan the DFA to compute per-terminal byte sets.
-    ///
-    /// Merges the reachable_bytes and last_bytes scans into a single parallel
-    /// pass over all DFA transitions, eliminating the intermediate
-    /// per-state incoming_bytes array.
     pub fn build(tokenizer: &Tokenizer, num_terminals: u32) -> Self {
-        use rayon::prelude::*;
-
         let nt = num_terminals as usize;
         let initial = tokenizer.start_state();
 
-        // Single parallel pass: compute reachable_bytes and last_bytes together.
-        // reachable_bytes[t] = all bytes b where some transition (_, b, target) exists
-        //   and target has terminal t in finalizers or possible_future_group_ids.
-        // last_bytes[t] = all bytes b where some transition (_, b, target) exists
-        //   and target has terminal t in finalizers.
-        let (reachable_bytes, last_bytes) = (0..tokenizer.num_states())
-            .into_par_iter()
-            .fold(
-                || (vec![U8Set::empty(); nt], vec![U8Set::empty(); nt]),
-                |(mut reachable, mut last), state| {
-                    for (byte, target) in tokenizer.transitions_from(state) {
-                        for terminal in tokenizer.matched_terminals_iter(target) {
-                            let t = terminal as usize;
-                            if t < nt {
-                                reachable[t].insert(byte);
-                                last[t].insert(byte);
-                            }
-                        }
-                        for terminal in tokenizer.possible_future_terminals_iter(target) {
-                            let t = terminal as usize;
-                            if t < nt {
-                                reachable[t].insert(byte);
-                            }
-                        }
+        // The old implementation expanded target terminal bitsets once per
+        // transition. On a large tokenizer this is catastrophic: many
+        // transitions reach states whose possible-future bitsets contain most
+        // terminals. The result only depends on the transition byte, so first
+        // union terminal bitsets into 256 byte buckets, then transpose those
+        // buckets once into the terminal -> byte sets required by callers.
+        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+        let started_at = std::time::Instant::now();
+        let words_per_terminal_set = nt.div_ceil(64);
+        let mut reachable_by_byte = vec![0u64; 256 * words_per_terminal_set];
+        let mut last_by_byte = vec![0u64; 256 * words_per_terminal_set];
+        let mut transition_count = 0usize;
+
+        for state in 0..tokenizer.num_states() {
+            for (byte, target) in tokenizer.transitions_from(state) {
+                transition_count += 1;
+                let bucket_offset = byte as usize * words_per_terminal_set;
+                let matched_words = tokenizer.matched_terminal_bitset(target).words();
+                let future_words = tokenizer.possible_future_terminals(target).words();
+
+                for (word_index, &matched_word) in matched_words
+                    .iter()
+                    .take(words_per_terminal_set)
+                    .enumerate()
+                {
+                    reachable_by_byte[bucket_offset + word_index] |= matched_word;
+                    last_by_byte[bucket_offset + word_index] |= matched_word;
+                }
+                for (word_index, &future_word) in future_words
+                    .iter()
+                    .take(words_per_terminal_set)
+                    .enumerate()
+                {
+                    reachable_by_byte[bucket_offset + word_index] |= future_word;
+                }
+            }
+        }
+        let scan_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+
+        let mut reachable_bytes = vec![U8Set::empty(); nt];
+        let mut last_bytes = vec![U8Set::empty(); nt];
+        for byte in 0u8..=u8::MAX {
+            let bucket_offset = byte as usize * words_per_terminal_set;
+            for word_index in 0..words_per_terminal_set {
+                let base_terminal = word_index * 64;
+                let mut reachable_word = reachable_by_byte[bucket_offset + word_index];
+                while reachable_word != 0 {
+                    let terminal = base_terminal + reachable_word.trailing_zeros() as usize;
+                    if terminal < nt {
+                        reachable_bytes[terminal].insert(byte);
                     }
-                    (reachable, last)
-                },
-            )
-            .reduce(
-                || (vec![U8Set::empty(); nt], vec![U8Set::empty(); nt]),
-                |(mut ra, mut la), (rb, lb)| {
-                    for i in 0..nt {
-                        ra[i] = ra[i].union(&rb[i]);
-                        la[i] = la[i].union(&lb[i]);
+                    reachable_word &= reachable_word - 1;
+                }
+
+                let mut last_word = last_by_byte[bucket_offset + word_index];
+                while last_word != 0 {
+                    let terminal = base_terminal + last_word.trailing_zeros() as usize;
+                    if terminal < nt {
+                        last_bytes[terminal].insert(byte);
                     }
-                    (ra, la)
-                },
-            );
+                    last_word &= last_word - 1;
+                }
+            }
+        }
 
         // first_bytes: only from initial state (single state, no parallelism needed).
         let mut first_bytes = vec![U8Set::empty(); nt];
         for (byte, target) in tokenizer.transitions_from(initial) {
-            for terminal in tokenizer
-                .matched_terminals_iter(target)
-                .chain(tokenizer.possible_future_terminals_iter(target))
-            {
+            for terminal in tokenizer.matched_terminal_bitset(target).iter() {
+                if terminal < nt {
+                    first_bytes[terminal].insert(byte);
+                }
+            }
+            for terminal in tokenizer.possible_future_terminals(target).iter() {
                 let t = terminal as usize;
                 if t < nt {
                     first_bytes[t].insert(byte);
                 }
             }
+        }
+
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][classify_bytesets] terminals={} states={} transitions={} words_per_terminal_set={} scan_ms={:.3} transpose_and_first_ms={:.3} total_ms={:.3}",
+                nt,
+                tokenizer.num_states(),
+                transition_count,
+                words_per_terminal_set,
+                scan_ms,
+                started_at.elapsed().as_secs_f64() * 1000.0 - scan_ms,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
         }
 
         SharedClassifyBytesets {
@@ -1045,7 +1081,60 @@ pub(crate) fn partition_vocab_by_l2p_cost(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_exact_l2p_boundary_filter_mode, ExactL2pBoundaryFilterMode};
+    use std::sync::Arc;
+
+    use super::{
+        parse_exact_l2p_boundary_filter_mode, ExactL2pBoundaryFilterMode,
+        SharedClassifyBytesets,
+    };
+    use crate::automata::lexer::ast::Expr;
+    use crate::automata::lexer::compile::build_regex;
+    use crate::automata::lexer::tokenizer::Tokenizer;
+    use crate::automata::lexer::Lexer;
+    use crate::ds::u8set::U8Set;
+
+    fn reference_bytesets(tokenizer: &Tokenizer, num_terminals: u32) -> SharedClassifyBytesets {
+        let nt = num_terminals as usize;
+        let initial = tokenizer.start_state();
+        let mut reachable_bytes = vec![U8Set::empty(); nt];
+        let mut last_bytes = vec![U8Set::empty(); nt];
+
+        for state in 0..tokenizer.num_states() {
+            for (byte, target) in tokenizer.transitions_from(state) {
+                for terminal in tokenizer.matched_terminal_bitset(target).iter() {
+                    if terminal < nt {
+                        reachable_bytes[terminal].insert(byte);
+                        last_bytes[terminal].insert(byte);
+                    }
+                }
+                for terminal in tokenizer.possible_future_terminals(target).iter() {
+                    if terminal < nt {
+                        reachable_bytes[terminal].insert(byte);
+                    }
+                }
+            }
+        }
+
+        let mut first_bytes = vec![U8Set::empty(); nt];
+        for (byte, target) in tokenizer.transitions_from(initial) {
+            for terminal in tokenizer.matched_terminal_bitset(target).iter() {
+                if terminal < nt {
+                    first_bytes[terminal].insert(byte);
+                }
+            }
+            for terminal in tokenizer.possible_future_terminals(target).iter() {
+                if terminal < nt {
+                    first_bytes[terminal].insert(byte);
+                }
+            }
+        }
+
+        SharedClassifyBytesets {
+            reachable_bytes,
+            first_bytes,
+            last_bytes,
+        }
+    }
 
     #[test]
     fn parse_exact_l2p_boundary_filter_mode_accepts_auto_and_forced_values() {
@@ -1057,5 +1146,28 @@ mod tests {
         assert!(matches!(parse_exact_l2p_boundary_filter_mode("0"), ExactL2pBoundaryFilterMode::Force(false)));
         assert!(matches!(parse_exact_l2p_boundary_filter_mode("false"), ExactL2pBoundaryFilterMode::Force(false)));
         assert!(matches!(parse_exact_l2p_boundary_filter_mode("off"), ExactL2pBoundaryFilterMode::Force(false)));
+    }
+
+    #[test]
+    fn byte_bucket_bytesets_match_reference_transition_scan() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::Choice(vec![Expr::U8Seq(b"ac".to_vec()), Expr::U8Seq(b"b".to_vec())]),
+            Expr::Seq(vec![
+                Expr::U8Class(U8Set::from_bytes(b"xy")),
+                Expr::Shared(Arc::new(Expr::U8Seq(b"z".to_vec()))),
+            ]),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+
+        let actual = SharedClassifyBytesets::build(&tokenizer, tokenizer.num_terminals());
+        let expected = reference_bytesets(&tokenizer, tokenizer.num_terminals());
+        assert_eq!(actual.reachable_bytes, expected.reachable_bytes);
+        assert_eq!(actual.first_bytes, expected.first_bytes);
+        assert_eq!(actual.last_bytes, expected.last_bytes);
     }
 }

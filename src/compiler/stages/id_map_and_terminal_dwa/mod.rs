@@ -160,10 +160,53 @@ fn global_max_length_env_override() -> Option<bool> {
     })
 }
 
-fn use_global_max_length(tokenizer: &Tokenizer) -> bool {
+const DEFAULT_GLOBAL_MAX_LENGTH_STABLE_SIGNATURE_CELL_LIMIT: usize = 2_000_000;
+
+fn global_max_length_stable_signature_cell_limit() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("GLRMASK_GLOBAL_MAX_LENGTH_STABLE_SIGNATURE_CELL_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_GLOBAL_MAX_LENGTH_STABLE_SIGNATURE_CELL_LIMIT)
+    })
+}
+
+fn global_max_length_stable_signature_cells(
+    tokenizer: &Tokenizer,
+    statistic: &l2p::equivalence_analysis::state_equivalence::max_length::MaxLengthStatistic,
+) -> usize {
+    (tokenizer.num_states() as usize)
+        .saturating_mul(1 + statistic.relevant_byte_count())
+}
+
+fn should_auto_use_global_max_length(
+    num_states: usize,
+    relevant_byte_count: usize,
+    stable_signature_cell_limit: usize,
+) -> bool {
+    num_states > 50_000
+        && num_states.saturating_mul(1 + relevant_byte_count) <= stable_signature_cell_limit
+}
+
+fn use_global_max_length(
+    tokenizer: &Tokenizer,
+    statistic: &l2p::equivalence_analysis::state_equivalence::max_length::MaxLengthStatistic,
+) -> bool {
     match global_max_length_env_override() {
         Some(enabled) => enabled,
-        None => tokenizer.num_states() > 50_000,
+        None => {
+            // Stable refinement is exact, but its cost is unbounded in the
+            // number of refinement rounds. It is only a compile-time
+            // acceleration: returning the identity map preserves all states
+            // and therefore exactness. Do not launch the global stable pass
+            // when even one signature matrix exceeds the structural budget.
+            should_auto_use_global_max_length(
+                tokenizer.num_states() as usize,
+                statistic.relevant_byte_count(),
+                global_max_length_stable_signature_cell_limit(),
+            )
+        }
     }
 }
 
@@ -185,8 +228,12 @@ pub(crate) fn build_global_max_length_state_map(
         .map(|bytes| bytes.len())
         .max()
         .unwrap_or(0);
+    let global_statistic =
+        l2p::equivalence_analysis::state_equivalence::max_length::compute_statistic(vocab);
+    let stable_signature_cells = global_max_length_stable_signature_cells(tokenizer, &global_statistic);
+    let stable_signature_cell_limit = global_max_length_stable_signature_cell_limit();
 
-    let config = resolve_global_pipeline_config(use_global_max_length(tokenizer));
+    let config = resolve_global_pipeline_config(use_global_max_length(tokenizer, &global_statistic));
     let (state_map, profile) = run_state_equivalence_pipeline(
         tokenizer,
         vocab,
@@ -199,18 +246,22 @@ pub(crate) fn build_global_max_length_state_map(
     if compile_profile_enabled() {
         if profile.max_length_skipped {
             eprintln!(
-                "[glrmask/profile][global_max_length] mode=identity skipped=true states={} reps={} tokens_included=0 max_token_len=0 ms={:.3}",
+                "[glrmask/profile][global_max_length] mode=identity skipped=true states={} reps={} tokens_included=0 max_token_len=0 stable_signature_cells={} stable_signature_cell_limit={} ms={:.3}",
                 num_states,
                 state_map.representative_original_ids.len(),
+                stable_signature_cells,
+                stable_signature_cell_limit,
                 started_at.elapsed().as_secs_f64() * 1000.0,
             );
         } else {
             eprintln!(
-                "[glrmask/profile][global_max_length] mode=stable skipped=false states={} reps={} tokens_included={} max_token_len={} ms={:.3}",
+                "[glrmask/profile][global_max_length] mode=stable skipped=false states={} reps={} tokens_included={} max_token_len={} stable_signature_cells={} stable_signature_cell_limit={} ms={:.3}",
                 num_states,
                 state_map.representative_original_ids.len(),
                 token_bytes.len(),
                 max_token_len,
+                stable_signature_cells,
+                stable_signature_cell_limit,
                 profile.max_length_state_equiv_ms,
             );
         }
@@ -608,4 +659,35 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     profile.add_assign(inner_profile);
 
     (mapped_dwa, profile, global_max_length_state_map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        should_auto_use_global_max_length,
+        DEFAULT_GLOBAL_MAX_LENGTH_STABLE_SIGNATURE_CELL_LIMIT,
+    };
+
+    #[test]
+    fn global_max_length_auto_gate_bounds_stable_signature_matrix() {
+        assert!(should_auto_use_global_max_length(
+            50_001,
+            1,
+            DEFAULT_GLOBAL_MAX_LENGTH_STABLE_SIGNATURE_CELL_LIMIT,
+        ));
+        assert!(!should_auto_use_global_max_length(
+            50_000,
+            1,
+            DEFAULT_GLOBAL_MAX_LENGTH_STABLE_SIGNATURE_CELL_LIMIT,
+        ));
+
+        // o9802 has 71,429 states and a near-full byte alphabet. The stable
+        // global refinement is optional, and its first signature matrix alone
+        // exceeds the bounded auto budget by almost an order of magnitude.
+        assert!(!should_auto_use_global_max_length(
+            71_429,
+            89,
+            DEFAULT_GLOBAL_MAX_LENGTH_STABLE_SIGNATURE_CELL_LIMIT,
+        ));
+    }
 }
