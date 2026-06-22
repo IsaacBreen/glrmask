@@ -3,7 +3,7 @@
 use std::alloc::{alloc, dealloc, Layout};
 use std::cell::RefCell;
 
-use glrmask_runtime::{RuntimeArtifact, Session};
+use glrmask_runtime::{RuntimeConstraint, Session};
 
 struct WasmSession {
     inner: Session,
@@ -11,6 +11,7 @@ struct WasmSession {
 }
 
 thread_local! {
+    static CONSTRAINTS: RefCell<Vec<Option<RuntimeConstraint>>> = const { RefCell::new(Vec::new()) };
     static SESSIONS: RefCell<Vec<Option<WasmSession>>> = const { RefCell::new(Vec::new()) };
     static LAST_ERROR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
@@ -37,6 +38,44 @@ fn with_session_mut<T>(handle: u32, f: impl FnOnce(&mut WasmSession) -> T) -> Op
     })
 }
 
+fn with_constraint<T>(handle: u32, f: impl FnOnce(&RuntimeConstraint) -> T) -> Option<T> {
+    let index = handle_index(handle)?;
+    CONSTRAINTS.with(|constraints| {
+        let constraints = constraints.borrow();
+        constraints.get(index)?.as_ref().map(f)
+    })
+}
+
+fn insert_constraint(constraint: RuntimeConstraint) -> u32 {
+    CONSTRAINTS.with(|constraints| {
+        let mut constraints = constraints.borrow_mut();
+        if let Some((index, slot)) = constraints.iter_mut().enumerate().find(|(_, slot)| slot.is_none()) {
+            *slot = Some(constraint);
+            (index + 1) as u32
+        } else {
+            constraints.push(Some(constraint));
+            constraints.len() as u32
+        }
+    })
+}
+
+fn insert_session(inner: Session) -> u32 {
+    let session = WasmSession {
+        mask: vec![0; inner.mask_len()],
+        inner,
+    };
+    SESSIONS.with(|sessions| {
+        let mut sessions = sessions.borrow_mut();
+        if let Some((index, slot)) = sessions.iter_mut().enumerate().find(|(_, slot)| slot.is_none()) {
+            *slot = Some(session);
+            (index + 1) as u32
+        } else {
+            sessions.push(Some(session));
+            sessions.len() as u32
+        }
+    })
+}
+
 /// Allocate caller-owned linear-memory storage. JavaScript writes an artifact into
 /// this buffer, calls `glrmask_session_new`, and then releases it with `glrmask_dealloc`.
 #[unsafe(no_mangle)]
@@ -60,10 +99,10 @@ pub unsafe extern "C" fn glrmask_dealloc(pointer: u32, length: u32) {
     unsafe { dealloc(pointer as usize as *mut u8, layout) };
 }
 
-/// Construct a session from a versioned, fully compiled constraint artifact.
+/// Load a versioned, fully compiled constraint artifact for reuse across sessions.
 /// Returns zero on error; retrieve UTF-8 diagnostics via `glrmask_last_error_*`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn glrmask_session_new(artifact_pointer: u32, artifact_length: u32) -> u32 {
+pub unsafe extern "C" fn glrmask_constraint_load(artifact_pointer: u32, artifact_length: u32) -> u32 {
     clear_error();
     if artifact_pointer == 0 || artifact_length == 0 {
         set_error("empty compiled glrmask artifact");
@@ -73,30 +112,52 @@ pub unsafe extern "C" fn glrmask_session_new(artifact_pointer: u32, artifact_len
     let bytes = unsafe {
         std::slice::from_raw_parts(artifact_pointer as usize as *const u8, artifact_length as usize)
     };
-    let result = RuntimeArtifact::from_bytes(bytes.to_vec())
-        .and_then(Session::from_artifact)
-        .map(|inner| {
-            let mask = vec![0; inner.mask_len()];
-            WasmSession { inner, mask }
-        });
-    let session = match result {
-        Ok(session) => session,
+    let constraint = match RuntimeConstraint::from_bytes(bytes.to_vec()) {
+        Ok(constraint) => constraint,
         Err(error) => {
             set_error(error);
             return 0;
         }
     };
 
-    SESSIONS.with(|sessions| {
-        let mut sessions = sessions.borrow_mut();
-        if let Some((index, slot)) = sessions.iter_mut().enumerate().find(|(_, slot)| slot.is_none()) {
-            *slot = Some(session);
-            (index + 1) as u32
-        } else {
-            sessions.push(Some(session));
-            sessions.len() as u32
-        }
-    })
+    insert_constraint(constraint)
+}
+
+/// Release a loaded constraint and its shared runtime caches.
+#[unsafe(no_mangle)]
+pub extern "C" fn glrmask_constraint_free(handle: u32) {
+    if let Some(index) = handle_index(handle) {
+        CONSTRAINTS.with(|constraints| {
+            if let Some(slot) = constraints.borrow_mut().get_mut(index) {
+                *slot = None;
+            }
+        });
+    }
+}
+
+/// Start one independent decoder session sharing an already-loaded constraint.
+#[unsafe(no_mangle)]
+pub extern "C" fn glrmask_session_new_from_constraint(constraint_handle: u32) -> u32 {
+    clear_error();
+    let Some(inner) = with_constraint(constraint_handle, RuntimeConstraint::start) else {
+        set_error("invalid glrmask constraint handle");
+        return 0;
+    };
+    insert_session(inner)
+}
+
+/// Construct a one-off session from a versioned, fully compiled constraint artifact.
+/// For more than one session per artifact, prefer `glrmask_constraint_load` plus
+/// `glrmask_session_new_from_constraint`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn glrmask_session_new(artifact_pointer: u32, artifact_length: u32) -> u32 {
+    let constraint_handle = unsafe { glrmask_constraint_load(artifact_pointer, artifact_length) };
+    if constraint_handle == 0 {
+        return 0;
+    }
+    let session_handle = glrmask_session_new_from_constraint(constraint_handle);
+    glrmask_constraint_free(constraint_handle);
+    session_handle
 }
 
 /// Drop a browser session and all its parser/lexer state.

@@ -22,6 +22,9 @@ The module exports linear memory plus these functions:
 ```text
 glrmask_alloc(length) -> pointer
 glrmask_dealloc(pointer, length)
+glrmask_constraint_load(artifact_pointer, artifact_length) -> handle | 0
+glrmask_constraint_free(handle)
+glrmask_session_new_from_constraint(constraint_handle) -> handle | 0
 glrmask_session_new(artifact_pointer, artifact_length) -> handle | 0
 glrmask_session_free(handle)
 glrmask_mask(handle) -> pointer
@@ -34,6 +37,12 @@ glrmask_last_error_len() -> bytes
 ```
 
 `glrmask_dealloc` must receive the same byte length passed to `glrmask_alloc`.
+For several streams using the same grammar, load the artifact once with
+`glrmask_constraint_load`, create one session per stream with
+`glrmask_session_new_from_constraint`, then release the public constraint handle.
+Existing sessions retain their shared executor. `glrmask_session_new` remains the
+one-shot convenience form for a single stream.
+
 `glrmask_mask` returns a pointer into WASM memory. Its packed `u32` buffer is
 allocated once when the session is created and reused for subsequent mask calls.
 Copy the `Uint32Array` before calling another runtime operation. The bit layout
