@@ -40,6 +40,16 @@ const LARGE_ALMOST_OPTIMAL_2OPT_WINDOW: usize = 64;
 const DEFAULT_LAYOUT_SKETCH_WORDS: usize = 4;
 const MIN_UNIQUE_WEIGHTS_FOR_COMPACTION_POOL: usize = 1024;
 
+type TokenRemapCache = HashMap<usize, RangeSetBlaze<u32>>;
+
+#[derive(Debug, Default)]
+struct PrecomputedTokenCompaction {
+    token_remaps: TokenRemapCache,
+    // Original weight storage pointer -> token-remapped Weight. This is final
+    // whenever the plan preserves the TSID dimension.
+    weight_remaps: HashMap<usize, Weight>,
+}
+
 #[derive(Clone, Debug)]
 pub struct CompactReport {
     pub tsid_perm: Vec<u32>,
@@ -53,6 +63,10 @@ pub struct CompactPlan {
     ordered_num_tsids: usize,
     token_perm: Vec<u32>,
     ordered_num_tokens: usize,
+    // Token-set remaps already computed while constructing the plan's
+    // token-compacted weights. Pointer keys are intentionally advisory:
+    // applying the plan to a related artifact falls back for cache misses.
+    precomputed_token_compaction: Arc<PrecomputedTokenCompaction>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -82,6 +96,7 @@ struct DimensionCompaction {
     ordered_num_tsids: usize,
     token_perm: Vec<u32>,
     ordered_num_tokens: usize,
+    precomputed_token_compaction: Arc<PrecomputedTokenCompaction>,
 }
 
 impl DimensionCompaction {
@@ -115,6 +130,7 @@ impl CompactPlan {
             ordered_num_tsids: compaction.ordered_num_tsids,
             token_perm: compaction.token_perm,
             ordered_num_tokens: compaction.ordered_num_tokens,
+            precomputed_token_compaction: compaction.precomputed_token_compaction,
         }
     }
 
@@ -289,6 +305,7 @@ pub(super) fn compact_weights_with_id_map(
         id_map,
         allow_expensive_layout,
         use_default_layout,
+        false,
     );
     apply_compaction_plan_to_weight_refs(weights, id_map, collect_profile_stats, &plan)
 }
@@ -298,6 +315,7 @@ pub(super) fn plan_compaction_for_weight_refs(
     id_map: &InternalIdMap,
     allow_expensive_layout: bool,
     use_default_layout: bool,
+    keep_unmerged_tsid_identity: bool,
 ) -> CompactPlan {
     let profile_compaction = env_flag("GLRMASK_PROFILE_COMPILE");
     let total_started_at = profile_compaction.then(Instant::now);
@@ -317,6 +335,7 @@ pub(super) fn plan_compaction_for_weight_refs(
             num_tokens,
             allow_expensive_layout,
             use_default_layout,
+            keep_unmerged_tsid_identity,
         )
     };
     let compaction = if use_thread_pool {
@@ -376,6 +395,7 @@ pub(super) fn apply_compaction_plan_to_weight_refs(
                 &unique_weights,
                 &plan.tsid_perm,
                 &plan.token_perm,
+                plan.precomputed_token_compaction.as_ref(),
             );
         };
         if use_thread_pool {
@@ -456,6 +476,7 @@ fn build_dimension_compaction(
     num_tokens: usize,
     allow_expensive_layout: bool,
     use_default_layout: bool,
+    keep_unmerged_tsid_identity: bool,
 ) -> DimensionCompaction {
     if allow_expensive_layout
         && (globally_exact_compaction_enabled() || almost_optimal_compaction_enabled())
@@ -472,6 +493,7 @@ fn build_dimension_compaction(
         num_tokens,
         use_default_layout,
         use_exact_profile_layout,
+        keep_unmerged_tsid_identity,
     )
 }
 
@@ -481,6 +503,7 @@ fn build_default_dimension_compaction(
     num_tokens: usize,
     use_default_layout: bool,
     adaptive_layout: bool,
+    keep_unmerged_tsid_identity: bool,
 ) -> DimensionCompaction {
     let profile_compaction = env_flag("GLRMASK_PROFILE_COMPILE");
     let total_started_at = profile_compaction.then(Instant::now);
@@ -503,8 +526,12 @@ fn build_default_dimension_compaction(
     let token_order_ms = token_order_started_at.map_or(0.0, elapsed_ms);
 
     let apply_token_started_at = profile_compaction.then(Instant::now);
-    let token_compacted_weights =
-        apply_permutations_to_weight_set(unique_weights, &identity_perm(num_tsids), &token_perm);
+    let (token_compacted_weights, precomputed_token_compaction) =
+        apply_permutations_to_weight_set_with_cache(
+            unique_weights,
+            &identity_perm(num_tsids),
+            &token_perm,
+        );
     let apply_token_ms = apply_token_started_at.map_or(0.0, elapsed_ms);
     let token_compacted_refs = weight_refs(&token_compacted_weights);
     let tsid_merge_started_at = profile_compaction.then(Instant::now);
@@ -512,7 +539,9 @@ fn build_default_dimension_compaction(
         build_exact_tsid_merge_permutation(&token_compacted_refs, num_tsids);
     let tsid_merge_ms = tsid_merge_started_at.map_or(0.0, elapsed_ms);
     let tsid_order_started_at = profile_compaction.then(Instant::now);
-    let tsid_perm = if merged_num_tsids == num_tsids || !use_default_layout {
+    let tsid_perm = if merged_num_tsids == num_tsids && keep_unmerged_tsid_identity {
+        identity_perm(num_tsids)
+    } else if merged_num_tsids == num_tsids || !use_default_layout {
         tsid_merge_perm
     } else {
         if adaptive_layout {
@@ -555,6 +584,7 @@ fn build_default_dimension_compaction(
         ordered_num_tsids: merged_num_tsids,
         token_perm,
         ordered_num_tokens: merged_num_tokens,
+        precomputed_token_compaction: Arc::new(precomputed_token_compaction),
     }
 }
 
@@ -573,11 +603,12 @@ fn build_global_objective_dimension_compaction(
         merged_num_tokens,
     );
 
-    let token_compacted_weights = apply_permutations_to_weight_set(
-        unique_weights,
-        &identity_perm(num_tsids),
-        &token_perm,
-    );
+    let (token_compacted_weights, precomputed_token_compaction) =
+        apply_permutations_to_weight_set_with_cache(
+            unique_weights,
+            &identity_perm(num_tsids),
+            &token_perm,
+        );
     let token_compacted_refs = weight_refs(&token_compacted_weights);
     let (tsid_merge_perm, merged_num_tsids) =
         build_exact_tsid_merge_permutation(&token_compacted_refs, num_tsids);
@@ -593,6 +624,7 @@ fn build_global_objective_dimension_compaction(
         ordered_num_tsids: merged_num_tsids,
         token_perm,
         ordered_num_tokens: merged_num_tokens,
+        precomputed_token_compaction: Arc::new(precomputed_token_compaction),
     }
 }
 
@@ -852,13 +884,36 @@ fn apply_permutations_to_weight_set(
     tsid_perm: &[u32],
     token_perm: &[u32],
 ) -> Vec<Weight> {
+    apply_permutations_to_weight_set_with_cache(weights, tsid_perm, token_perm).0
+}
+
+fn apply_permutations_to_weight_set_with_cache(
+    weights: &[Weight],
+    tsid_perm: &[u32],
+    token_perm: &[u32],
+) -> (Vec<Weight>, PrecomputedTokenCompaction) {
     let perm_context = PermutationContext::new(tsid_perm, token_perm);
-    let token_cache = build_global_permuted_token_cache(weights, &perm_context);
-    dedup_weights_by_storage_ptr(
-        weights
-            .iter()
-            .map(|weight| permute_weight_with_cache(weight, &perm_context, &token_cache))
-            .collect(),
+    let token_remaps = build_global_permuted_token_cache(weights, &perm_context);
+    let empty_cache = TokenRemapCache::new();
+    let weight_entries: Vec<(usize, Weight)> = weights
+        .iter()
+        .map(|weight| {
+            (
+                Arc::as_ptr(&weight.0) as usize,
+                permute_weight_with_caches(weight, &perm_context, &empty_cache, &token_remaps),
+            )
+        })
+        .collect();
+    let weight_remaps: HashMap<usize, Weight> = weight_entries.iter().cloned().collect();
+    let compacted = dedup_weights_by_storage_ptr(
+        weight_entries.into_iter().map(|(_, weight)| weight).collect(),
+    );
+    (
+        compacted,
+        PrecomputedTokenCompaction {
+            token_remaps,
+            weight_remaps,
+        },
     )
 }
 
@@ -867,32 +922,90 @@ fn apply_permutations_to_weight_refs(
     unique_weights: &[Weight],
     tsid_perm: &[u32],
     token_perm: &[u32],
+    precomputed_token_compaction: &PrecomputedTokenCompaction,
 ) {
+    let profile_compaction = env_flag("GLRMASK_PROFILE_COMPILE");
+    let total_started_at = profile_compaction.then(Instant::now);
     let perm_context = PermutationContext::new(tsid_perm, token_perm);
-    let token_cache = build_global_permuted_token_cache(unique_weights, &perm_context);
+    let direct_weight_remaps = perm_context
+        .tsid_perm_is_identity
+        .then_some(&precomputed_token_compaction.weight_remaps);
+    let has_missing_weight_remaps = unique_weights.iter().any(|weight| {
+        direct_weight_remaps.is_none_or(|remaps| {
+            !remaps.contains_key(&(Arc::as_ptr(&weight.0) as usize))
+        })
+    });
+
+    let cache_started_at = profile_compaction.then(Instant::now);
+    let fallback_token_cache = if has_missing_weight_remaps {
+        build_missing_global_permuted_token_cache(
+            unique_weights,
+            &perm_context,
+            &precomputed_token_compaction.token_remaps,
+        )
+    } else {
+        TokenRemapCache::new()
+    };
+    let fallback_cache_ms = cache_started_at.map_or(0.0, elapsed_ms);
+
+    let transform_started_at = profile_compaction.then(Instant::now);
     let permute_entry = |weight: &Weight| {
-            let new_weight = permute_weight_with_cache(weight, &perm_context, &token_cache);
-            (Arc::as_ptr(&weight.0) as usize, new_weight)
-        };
+        let ptr = Arc::as_ptr(&weight.0) as usize;
+        let new_weight = direct_weight_remaps
+            .and_then(|remaps| remaps.get(&ptr))
+            .cloned()
+            .unwrap_or_else(|| {
+                permute_weight_with_caches(
+                    weight,
+                    &perm_context,
+                    &precomputed_token_compaction.token_remaps,
+                    &fallback_token_cache,
+                )
+            });
+        (ptr, new_weight)
+    };
     let weight_entries: Vec<(usize, Weight)> = if rayon::current_num_threads() == 1 {
         unique_weights.iter().map(permute_entry).collect()
     } else {
         unique_weights.par_iter().map(permute_entry).collect()
     };
+    let transform_ms = transform_started_at.map_or(0.0, elapsed_ms);
+    let map_started_at = profile_compaction.then(Instant::now);
     let weight_map: HashMap<usize, Weight> = weight_entries.into_iter().collect();
+    let map_ms = map_started_at.map_or(0.0, elapsed_ms);
 
+    let writeback_started_at = profile_compaction.then(Instant::now);
     for weight in weights.iter_mut() {
         let ptr = Arc::as_ptr(&weight.0) as usize;
         if let Some(new_weight) = weight_map.get(&ptr) {
             **weight = new_weight.clone();
         }
     }
+    let writeback_ms = writeback_started_at.map_or(0.0, elapsed_ms);
+
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][mapped_compaction_apply_detail] weights={} unique_weights={} planned_token_sets={} planned_weight_remaps={} direct_weight_remaps={} fallback_token_sets={} fallback_cache_ms={:.3} transform_ms={:.3} map_ms={:.3} writeback_ms={:.3} total_ms={:.3}",
+            weights.len(),
+            unique_weights.len(),
+            precomputed_token_compaction.token_remaps.len(),
+            precomputed_token_compaction.weight_remaps.len(),
+            direct_weight_remaps.is_some(),
+            fallback_token_cache.len(),
+            fallback_cache_ms,
+            transform_ms,
+            map_ms,
+            writeback_ms,
+            elapsed_ms(total_started_at),
+        );
+    }
 }
 
-fn permute_weight_with_cache(
+fn permute_weight_with_caches(
     weight: &Weight,
     perm_context: &PermutationContext,
-    permuted_token_cache: &HashMap<usize, RangeSetBlaze<u32>>,
+    precomputed_token_remaps: &TokenRemapCache,
+    fallback_token_cache: &TokenRemapCache,
 ) -> Weight {
     if weight.is_empty() {
         return Weight::empty();
@@ -908,10 +1021,13 @@ fn permute_weight_with_cache(
         let mut map = RangeMapBlaze::new();
         for (tsid_range, token_set) in weight.0.range_values() {
             let token_set_ptr = Arc::as_ptr(token_set) as usize;
-            let mapped_tokens = permuted_token_cache
-                .get(&token_set_ptr)
-                .cloned()
-                .unwrap_or_else(|| permute_rangeset_with_runs(token_set, &perm_context.token_runs));
+            let mapped_tokens = lookup_permuted_token_set(
+                token_set,
+                token_set_ptr,
+                perm_context,
+                precomputed_token_remaps,
+                fallback_token_cache,
+            );
             map.extend_simple(std::iter::once((
                 *tsid_range.start()..=*tsid_range.end(),
                 shared_rangeset(mapped_tokens),
@@ -927,10 +1043,13 @@ fn permute_weight_with_cache(
         let mapped_tokens = if perm_context.token_perm_is_identity {
             (**token_set).clone()
         } else {
-            permuted_token_cache
-                .get(&token_set_ptr)
-                .cloned()
-                .unwrap_or_else(|| permute_rangeset_with_runs(token_set, &perm_context.token_runs))
+            lookup_permuted_token_set(
+                token_set,
+                token_set_ptr,
+                perm_context,
+                precomputed_token_remaps,
+                fallback_token_cache,
+            )
         };
 
         for run in overlapping_perm_runs(
@@ -950,12 +1069,34 @@ fn permute_weight_with_cache(
     finalize_weight_map(build_weight_map_from_tsid_tokens(tokens_by_new_tsid))
 }
 
+fn lookup_permuted_token_set(
+    token_set: &RangeSetBlaze<u32>,
+    token_set_ptr: usize,
+    perm_context: &PermutationContext,
+    precomputed_token_remaps: &TokenRemapCache,
+    fallback_token_cache: &TokenRemapCache,
+) -> RangeSetBlaze<u32> {
+    precomputed_token_remaps
+        .get(&token_set_ptr)
+        .or_else(|| fallback_token_cache.get(&token_set_ptr))
+        .cloned()
+        .unwrap_or_else(|| permute_rangeset_with_runs(token_set, &perm_context.token_runs))
+}
+
 fn build_global_permuted_token_cache(
     weights: &[Weight],
     perm_context: &PermutationContext,
-) -> HashMap<usize, RangeSetBlaze<u32>> {
+) -> TokenRemapCache {
+    build_missing_global_permuted_token_cache(weights, perm_context, &TokenRemapCache::new())
+}
+
+fn build_missing_global_permuted_token_cache(
+    weights: &[Weight],
+    perm_context: &PermutationContext,
+    precomputed_token_remaps: &TokenRemapCache,
+) -> TokenRemapCache {
     if perm_context.token_perm_is_identity {
-        return HashMap::new();
+        return TokenRemapCache::new();
     }
 
     let mut seen = HashSet::new();
@@ -966,6 +1107,9 @@ fn build_global_permuted_token_cache(
         }
         for (_tsid_range, token_set) in weight.0.range_values() {
             let ptr = Arc::as_ptr(token_set) as usize;
+            if precomputed_token_remaps.contains_key(&ptr) {
+                continue;
+            }
             if seen.insert(ptr) {
                 token_sets.push((ptr, Arc::clone(token_set)));
             }

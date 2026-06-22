@@ -203,8 +203,21 @@ impl<T: WeightRefs> MappedArtifact<T> {
         self.apply_compaction_plan_with_stats(&plan)
     }
 
+    /// Fast exact compaction for local L1 artifacts. When token compaction
+    /// does not merge any TSIDs, preserve their existing order so the already
+    /// planned token-remapped weights can be reused directly.
+    pub(crate) fn compact_dimensions_fast_l1_with_stats(&mut self) -> CompactReport {
+        let plan = self.plan_dimensions_compaction_with_options(false, true, true);
+        self.apply_compaction_plan_with_stats(&plan)
+    }
+
     pub(crate) fn compact_dimensions_fast(&mut self) -> CompactReport {
         let plan = self.plan_dimensions_compaction(false, true);
+        self.apply_compaction_plan(&plan)
+    }
+
+    pub(crate) fn compact_dimensions_fast_l1(&mut self) -> CompactReport {
+        let plan = self.plan_dimensions_compaction_with_options(false, true, true);
         self.apply_compaction_plan(&plan)
     }
 
@@ -218,12 +231,26 @@ impl<T: WeightRefs> MappedArtifact<T> {
         allow_expensive_layout: bool,
         use_default_layout: bool,
     ) -> CompactPlan {
+        self.plan_dimensions_compaction_with_options(
+            allow_expensive_layout,
+            use_default_layout,
+            false,
+        )
+    }
+
+    fn plan_dimensions_compaction_with_options(
+        &self,
+        allow_expensive_layout: bool,
+        use_default_layout: bool,
+        keep_unmerged_tsid_identity: bool,
+    ) -> CompactPlan {
         let weights = self.artifact.weight_refs();
         compaction::plan_compaction_for_weight_refs(
             &weights,
             &self.id_map,
             allow_expensive_layout,
             use_default_layout,
+            keep_unmerged_tsid_identity,
         )
     }
 
