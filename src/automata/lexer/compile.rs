@@ -1737,10 +1737,11 @@ fn compile_product_component_dfa(expr: &Expr) -> DFA {
     compile_with_plan(build_exclusion_compile_plan(std::slice::from_ref(expr)))
 }
 
+#[derive(Clone)]
 enum ProductComponent {
-    Materialized(DFA),
+    Materialized(Arc<DFA>),
     VirtualBoundedRepeat {
-        base_dfa: DFA,
+        base_dfa: Arc<DFA>,
         min: u32,
         max: u32,
     },
@@ -1777,16 +1778,46 @@ fn compile_product_component(expr: &Expr) -> ProductComponent {
         } => {
             if let Some(base_dfa) = compile_direct_bounded_repeat_base_dfa(repeat_expr, *max) {
                 return ProductComponent::VirtualBoundedRepeat {
-                    base_dfa,
+                    base_dfa: Arc::new(base_dfa),
                     min: *min as u32,
                     max: *max as u32,
                 };
             }
 
-            ProductComponent::Materialized(compile_product_component_dfa(expr))
+            ProductComponent::Materialized(Arc::new(compile_product_component_dfa(expr)))
         }
-        _ => ProductComponent::Materialized(compile_product_component_dfa(expr)),
+        _ => ProductComponent::Materialized(Arc::new(compile_product_component_dfa(expr))),
     }
+}
+
+fn compile_product_components(exprs: &[Expr]) -> (Vec<ProductComponent>, usize) {
+    let mut unique_exprs = Vec::<&Expr>::new();
+    let mut component_indices = Vec::with_capacity(exprs.len());
+    let mut index_by_expr = FxHashMap::<&Expr, usize>::default();
+
+    for expr in exprs {
+        let expr = unwrap_shared(expr);
+        let index = if let Some(&index) = index_by_expr.get(expr) {
+            index
+        } else {
+            let index = unique_exprs.len();
+            unique_exprs.push(expr);
+            index_by_expr.insert(expr, index);
+            index
+        };
+        component_indices.push(index);
+    }
+
+    let unique_components: Vec<ProductComponent> = unique_exprs
+        .par_iter()
+        .map(|expr| compile_product_component(expr))
+        .collect();
+    let cache_hits = exprs.len() - unique_components.len();
+    let components = component_indices
+        .into_iter()
+        .map(|index| unique_components[index].clone())
+        .collect();
+    (components, cache_hits)
 }
 
 fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentProfileLabel]>) -> DFA {
@@ -1795,7 +1826,7 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let profile_started_at = Instant::now();
     let component_compile_started_at = Instant::now();
-    let components: Vec<ProductComponent> = if profile_detail {
+    let (components, component_cache_hits): (Vec<ProductComponent>, usize) = if profile_detail {
         let mut components = Vec::with_capacity(exprs.len());
         for (index, expr) in exprs.iter().enumerate() {
             let component_started_at = Instant::now();
@@ -1823,12 +1854,20 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
             );
             components.push(component);
         }
-        components
+        (components, 0)
     } else {
-        exprs.par_iter().map(compile_product_component).collect()
+        compile_product_components(exprs)
     };
     let component_compile_ms = profile_timing
         .then(|| component_compile_started_at.elapsed().as_secs_f64() * 1000.0);
+    if profile_timing && !profile_detail {
+        eprintln!(
+            "[glrmask/profile][tokenizer] product_component_cache groups={} unique_components={} cache_hits={}",
+            exprs.len(),
+            exprs.len() - component_cache_hits,
+            component_cache_hits,
+        );
+    }
     if profile_detail {
         eprintln!(
             "[glrmask/profile][tokenizer] product_components groups={} compile_components_ms={:.3}",
@@ -2270,6 +2309,29 @@ mod tests {
         match (first, second) {
             (Expr::Dfa(first), Expr::Dfa(second)) => assert!(Arc::ptr_eq(&first, &second)),
             _ => panic!("nested group operation was not materialized to a DFA"),
+        }
+    }
+
+    #[test]
+    fn duplicate_product_components_share_the_same_dfa() {
+        let expr = Expr::Seq(vec![
+            Expr::U8Seq(vec![b'"']),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"abc"))),
+                min: 0,
+                max: None,
+            },
+        ]);
+        let shared_expr = Expr::Shared(Arc::new(expr.clone()));
+        let (components, cache_hits) = super::compile_product_components(&[expr, shared_expr]);
+
+        assert_eq!(cache_hits, 1);
+        match (&components[0], &components[1]) {
+            (
+                super::ProductComponent::Materialized(first),
+                super::ProductComponent::Materialized(second),
+            ) => assert!(Arc::ptr_eq(first, second)),
+            _ => panic!("expected materialized product components"),
         }
     }
 
