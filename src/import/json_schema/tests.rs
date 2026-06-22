@@ -2,8 +2,10 @@ use serde_json::json;
 use std::{env, ffi::OsString, process::Command, sync::Mutex};
 
 use super::ast::StringSchema;
-use super::lower_exact_subtractions_enabled;
-use super::schema_to_named_grammar;
+use super::{
+    GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS_ENV, lower_exact_subtractions_enabled,
+    schema_to_named_grammar, split_literal_terminals_enabled,
+};
 use super::string::{property_name_matches_pattern, string_value_satisfies_schema, GLRMASK_LLGUIDANCE_COMPAT_ENV};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguityKind};
@@ -199,6 +201,88 @@ fn assert_glrm_has_split_literal_key(glrm: &str, key: &str) {
         !glrm.contains(&format!("\\\"{key}\\\": ")),
         "literal key {key:?} was fused back into one terminal:\n{glrm}"
     );
+}
+
+const SPLIT_LITERAL_TERMINALS_TEST_CHILD_ENV: &str =
+    "GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS_TEST_CHILD";
+const SPLIT_LITERAL_TERMINALS_TEST_EXPECTED_ENV: &str =
+    "GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS_TEST_EXPECTED";
+
+#[test]
+fn literal_terminal_splitting_env_toggle() {
+    if env::var_os(SPLIT_LITERAL_TERMINALS_TEST_CHILD_ENV).is_none() {
+        for (setting, expected) in [
+            (None, true),
+            (Some(""), false),
+            (Some("0"), false),
+            (Some("false"), false),
+            (Some("no"), false),
+            (Some("off"), false),
+            (Some("1"), true),
+        ] {
+            let mut command = Command::new(env::current_exe().unwrap());
+            command
+                .arg("--exact")
+                .arg("import::json_schema::tests::literal_terminal_splitting_env_toggle")
+                .arg("--nocapture")
+                .env(SPLIT_LITERAL_TERMINALS_TEST_CHILD_ENV, "1")
+                .env(
+                    SPLIT_LITERAL_TERMINALS_TEST_EXPECTED_ENV,
+                    if expected { "1" } else { "0" },
+                );
+            match setting {
+                Some(value) => {
+                    command.env(GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS_ENV, value);
+                }
+                None => {
+                    command.env_remove(GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS_ENV);
+                }
+            }
+            let status = command.status().expect("literal-terminal toggle child should launch");
+            assert!(status.success(), "setting {setting:?} failed with {status}");
+        }
+        return;
+    }
+
+    let expected = env::var(SPLIT_LITERAL_TERMINALS_TEST_EXPECTED_ENV)
+        .expect("child expected-mode marker")
+        == "1";
+    assert_eq!(split_literal_terminals_enabled(), expected);
+
+    let object_schema = json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "pattern": "^[a]+$"}
+        },
+        "required": ["name"],
+        "additionalProperties": false
+    });
+    let object_grammar = schema_to_named_grammar(&object_schema).unwrap();
+    let object_glrm = to_glrm(&object_grammar);
+
+    let string_const = schema_to_named_grammar(&json!({"const": "ready"})).unwrap();
+    let string_const_expr = start_expr(&string_const);
+
+    if expected {
+        assert_glrm_has_split_literal_key(&object_glrm, "name");
+        assert!(!object_grammar.rules.iter().any(|rule| {
+            rule.is_terminal && rule.name.starts_with("json_property_string_value")
+        }), "{:?}", object_grammar.rules);
+        assert!(contains_ref_named(string_const_expr, "JSON_QUOTE"), "{string_const_expr:?}");
+        assert!(contains_literal_bytes(string_const_expr, b"ready"), "{string_const_expr:?}");
+        assert!(!contains_literal_bytes(string_const_expr, b"ready\""), "{string_const_expr:?}");
+    } else {
+        assert!(!object_glrm.contains("JSON_QUOTE"), "{object_glrm}");
+        assert!(!object_glrm.contains("JSON_KEY_SUFFIX"), "{object_glrm}");
+        assert!(object_grammar.rules.iter().any(|rule| {
+            rule.is_terminal && rule.name.starts_with("json_property_string_value")
+        }), "{:?}", object_grammar.rules);
+        assert!(!contains_ref_named(string_const_expr, "JSON_QUOTE"), "{string_const_expr:?}");
+        assert!(contains_literal_bytes(string_const_expr, b"ready\""), "{string_const_expr:?}");
+    }
+
+    lower(&object_grammar).unwrap();
+    lower(&string_const).unwrap();
 }
 
 #[test]

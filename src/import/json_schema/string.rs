@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use regex::Regex;
+use regex::{Regex, escape as regex_escape};
 use regex_syntax::hir::{Class, Hir, HirKind, Literal, Look, Repetition};
 use regex_syntax::Parser;
 
@@ -8,6 +8,7 @@ use crate::import::ast::{GrammarExpr, Quantifier};
 
 use super::ast::StringSchema;
 use super::error::{ImportResult, SchemaImportError};
+use super::split_literal_terminals_enabled;
 use super::lower::{
     choice, json_additional_key_string_rule, json_key_string_rule, lit, lit_bytes, never, r, seq, Lowerer,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
@@ -17,6 +18,12 @@ use super::lower::{
     JSON_STRING_CHAR_RULE,
     JSON_STRING_PATTERN_DOT_CHAR_RULE, JSON_STRING_RULE, MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS,
 };
+
+fn encoded_json_key_regex(encoded: &str) -> String {
+    // Keep literal property spelling exactly as serde_json emits it.
+    // This matches llguidance's builder.string(json_dumps(name)) behavior.
+    regex_escape(encoded)
+}
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_string(&mut self, schema: &StringSchema) -> ImportResult<GrammarExpr> {
@@ -914,7 +921,23 @@ impl<'a> Lowerer<'a> {
         key: &str,
         schema: &StringSchema,
     ) -> ImportResult<GrammarExpr> {
-        // Keep the fixed object-key syntax grammar-visible.  In particular, do
+        if !split_literal_terminals_enabled()
+            && (schema.pattern.is_some()
+                || recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_some())
+        {
+            let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+            let mut literal_prefix = Vec::new();
+            literal_prefix.extend_from_slice(prefix);
+            literal_prefix.extend_from_slice(encoded.as_bytes());
+            literal_prefix.extend_from_slice(b": ");
+            let value = self.lower_string_property_value_expr(schema)?;
+            let expr = prepend_literal_prefix_to_expr(literal_prefix, value);
+            let name = self.fresh_rule_name("json_property_string_value");
+            self.add_terminal_rule(&name, expr);
+            return Ok(r(&name));
+        }
+
+        // Keep the fixed object-key syntax grammar-visible. In particular, do
         // not absorb `"key": ` into the constrained value terminal: that makes
         // every key a separate p0 L2P terminal even though the quote and colon
         // boundaries are shared across the whole schema.
@@ -938,6 +961,13 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn lower_string_literal(&mut self, text: &str) -> GrammarExpr {
         let encoded = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
+        if !split_literal_terminals_enabled() {
+            let body_and_close = encoded
+                .strip_prefix('"')
+                .expect("serde_json string encoding starts with a quote");
+            return seq(vec![lit("\""), lit_bytes(body_and_close.as_bytes().to_vec())]);
+        }
+
         let bytes = encoded.as_bytes();
         debug_assert!(bytes.len() >= 2 && bytes.first() == Some(&b'"') && bytes.last() == Some(&b'"'));
 
@@ -977,7 +1007,33 @@ impl<'a> Lowerer<'a> {
         prefix: &[u8],
         key: &str,
     ) -> GrammarExpr {
-        seq(self.literal_key_colon_parts(prefix, key))
+        if split_literal_terminals_enabled() {
+            return seq(self.literal_key_colon_parts(prefix, key));
+        }
+
+        let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+        if matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative) {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(prefix);
+            bytes.extend_from_slice(encoded.as_bytes());
+            bytes.extend_from_slice(b": ");
+            return lit_bytes(bytes);
+        }
+        let encoded_regex = encoded_json_key_regex(&encoded);
+        if prefix == b", " {
+            GrammarExpr::RawRegex(format!(
+                r#",{JSON_SEPARATOR_WS_REGEX}{}:{JSON_SEPARATOR_WS_REGEX}"#,
+                encoded_regex
+            ))
+        } else if prefix.is_empty() {
+            GrammarExpr::RawRegex(format!(r#"{}:{JSON_SEPARATOR_WS_REGEX}"#, encoded_regex))
+        } else {
+            GrammarExpr::RawRegex(format!(
+                r#"{}{}:{JSON_SEPARATOR_WS_REGEX}"#,
+                regex_escape(&String::from_utf8_lossy(prefix)),
+                encoded_regex
+            ))
+        }
     }
 
     pub(crate) fn lower_literal_key_colon_with_prefix(
@@ -996,10 +1052,31 @@ impl<'a> Lowerer<'a> {
         key: &str,
         suffix: u8,
     ) -> GrammarExpr {
-        seq(vec![
-            self.lower_literal_key_colon_with_prefix(prefix, key),
-            lit_bytes(vec![suffix]),
-        ])
+        if split_literal_terminals_enabled() {
+            return seq(vec![
+                self.lower_literal_key_colon_with_prefix(prefix, key),
+                lit_bytes(vec![suffix]),
+            ]);
+        }
+
+        let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+        let encoded_regex = encoded_json_key_regex(&encoded);
+        let suffix_byte = suffix;
+        let suffix = regex_escape(&String::from_utf8_lossy(&[suffix_byte]));
+        if prefix == b", " {
+            GrammarExpr::RawRegex(format!(
+                r#",{JSON_SEPARATOR_WS_REGEX}{}:{JSON_SEPARATOR_WS_REGEX}{}"#,
+                encoded_regex,
+                suffix
+            ))
+        } else if prefix.is_empty() {
+            GrammarExpr::RawRegex(format!(r#"{}:{JSON_SEPARATOR_WS_REGEX}{}"#, encoded_regex, suffix))
+        } else {
+            seq(vec![
+                lit_bytes(prefix.to_vec()),
+                self.lower_literal_key_colon_with_prefix_and_suffix(b"", key, suffix_byte),
+            ])
+        }
     }
 
     pub(crate) fn lower_literal_key_colon_with_prefix_and_json_string(
@@ -1007,10 +1084,34 @@ impl<'a> Lowerer<'a> {
         prefix: &[u8],
         key: &str,
     ) -> GrammarExpr {
-        seq(vec![
-            self.lower_literal_key_colon_with_prefix(prefix, key),
-            r(JSON_STRING_RULE),
-        ])
+        if split_literal_terminals_enabled() {
+            return seq(vec![
+                self.lower_literal_key_colon_with_prefix(prefix, key),
+                r(JSON_STRING_RULE),
+            ]);
+        }
+
+        let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+        let encoded_regex = encoded_json_key_regex(&encoded);
+        let string_body = self.json_string_char_regex();
+        if prefix == b", " {
+            GrammarExpr::RawRegex(format!(
+                r#",{JSON_SEPARATOR_WS_REGEX}{}:{JSON_SEPARATOR_WS_REGEX}"(?:{})*""#,
+                encoded_regex,
+                string_body
+            ))
+        } else if prefix.is_empty() {
+            GrammarExpr::RawRegex(format!(
+                r#"{}:{JSON_SEPARATOR_WS_REGEX}"(?:{})*""#,
+                encoded_regex,
+                string_body
+            ))
+        } else {
+            seq(vec![
+                lit_bytes(prefix.to_vec()),
+                self.lower_literal_key_colon_with_prefix_and_json_string(b"", key),
+            ])
+        }
     }
 
     pub(crate) fn lower_literal_key_colon_with_prefix_and_literal_value(
@@ -1019,10 +1120,30 @@ impl<'a> Lowerer<'a> {
         key: &str,
         value: &[u8],
     ) -> GrammarExpr {
-        seq(vec![
-            self.lower_literal_key_colon_with_prefix(prefix, key),
-            lit_bytes(value.to_vec()),
-        ])
+        if split_literal_terminals_enabled() {
+            return seq(vec![
+                self.lower_literal_key_colon_with_prefix(prefix, key),
+                lit_bytes(value.to_vec()),
+            ]);
+        }
+
+        let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
+        let encoded_regex = encoded_json_key_regex(&encoded);
+        let value_regex = regex_escape(&String::from_utf8_lossy(value));
+        if prefix == b", " {
+            GrammarExpr::RawRegex(format!(
+                r#",{JSON_SEPARATOR_WS_REGEX}{}:{JSON_SEPARATOR_WS_REGEX}{}"#,
+                encoded_regex,
+                value_regex
+            ))
+        } else if prefix.is_empty() {
+            GrammarExpr::RawRegex(format!(r#"{}:{JSON_SEPARATOR_WS_REGEX}{}"#, encoded_regex, value_regex))
+        } else {
+            seq(vec![
+                lit_bytes(prefix.to_vec()),
+                self.lower_literal_key_colon_with_prefix_and_literal_value(b"", key, value),
+            ])
+        }
     }
 
     fn lower_pattern_key_colon_expr(&mut self, pattern: &str) -> ImportResult<GrammarExpr> {
@@ -2911,6 +3032,41 @@ fn escape_regex_class_char(ch: char) -> String {
         ']' => r"\]".to_string(),
         '^' => r"\^".to_string(),
         _ => regex::escape(&ch.to_string()),
+    }
+}
+
+fn prepend_literal_prefix_to_expr(prefix: Vec<u8>, expr: GrammarExpr) -> GrammarExpr {
+    if prefix.is_empty() {
+        return expr;
+    }
+    match expr {
+        GrammarExpr::Literal(mut bytes) => {
+            let mut merged = prefix;
+            merged.append(&mut bytes);
+            lit_bytes(merged)
+        }
+        GrammarExpr::RawRegex(regex) => GrammarExpr::RawRegex(format!(
+            "(?:{})(?:{})",
+            regex::escape(&String::from_utf8_lossy(&prefix)),
+            regex
+        )),
+        GrammarExpr::Sequence(mut parts) => {
+            if let Some(GrammarExpr::Literal(bytes)) = parts.first_mut() {
+                let mut merged = prefix;
+                merged.append(bytes);
+                *bytes = merged;
+                return seq(parts);
+            }
+            let mut prefixed = Vec::with_capacity(parts.len() + 1);
+            prefixed.push(lit_bytes(prefix));
+            prefixed.extend(parts);
+            seq(prefixed)
+        }
+        GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+            expr: Box::new(prepend_literal_prefix_to_expr(prefix.clone(), *expr)),
+            intersect: Box::new(prepend_literal_prefix_to_expr(prefix, *intersect)),
+        },
+        other => seq(vec![lit_bytes(prefix), other]),
     }
 }
 
