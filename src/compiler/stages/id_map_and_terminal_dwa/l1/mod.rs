@@ -27,6 +27,9 @@ struct L1ExactProfileReuse {
 
 impl L1ExactProfileReuse {
     fn materialize_walk_cache(&self) -> FxHashMap<(u8, u32), Vec<(u32, Vec<(u32, u32)>)>> {
+        let profiling = compile_profile_enabled();
+        let total_started_at = profiling.then(Instant::now);
+        let profile_build_started_at = profiling.then(Instant::now);
         let mut walk_results_by_profile: Vec<Vec<(u32, Vec<(u32, u32)>)>> =
             Vec::with_capacity(self.profiles_by_id.len());
         for runs in &self.profiles_by_id {
@@ -42,12 +45,29 @@ impl L1ExactProfileReuse {
             }
             walk_results_by_profile.push(by_signature.into_iter().collect());
         }
+        let profile_build_ms = profile_build_started_at.map_or(0.0, |started| {
+            started.elapsed().as_secs_f64() * 1000.0
+        });
 
+        let target_clone_started_at = profiling.then(Instant::now);
         let mut cache = FxHashMap::default();
         for (&target, &profile_id) in &self.target_to_profile_id {
             if profile_id != 0 {
                 cache.insert(target, walk_results_by_profile[profile_id as usize].clone());
             }
+        }
+        let target_clone_ms = target_clone_started_at.map_or(0.0, |started| {
+            started.elapsed().as_secs_f64() * 1000.0
+        });
+        if let Some(total_started_at) = total_started_at {
+            eprintln!(
+                "[glrmask/profile][l1_exact_profile_materialize] profiles={} targets={} profile_build_ms={:.3} target_clone_ms={:.3} total_ms={:.3}",
+                self.profiles_by_id.len(),
+                self.target_to_profile_id.len(),
+                profile_build_ms,
+                target_clone_ms,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
         }
         cache
     }
@@ -381,6 +401,18 @@ fn l1_exact_profile_reuse_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("GLRMASK_L1_EXACT_PROFILE_REUSE")
+            .map(|value| {
+                let trimmed = value.trim();
+                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(true)
+    })
+}
+
+fn l1_sequential_group_assembly_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_L1_SEQUENTIAL_GROUP_ASSEMBLY")
             .map(|value| {
                 let trimmed = value.trim();
                 trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
@@ -1840,6 +1872,7 @@ fn build_l1_terminal_dwa(
     // Build indexed walk_cache: (byte, target) → Vec of (signature_id, &ranges, entry_hash, entry_range_count).
     // entry_hash is precomputed from the ranges so Phase 2 can combine hashes
     // in O(entries) instead of O(ranges).
+    let indexed_cache_started_at = compile_profile_enabled().then(Instant::now);
     let indexed_walk_cache: FxHashMap<(u8, u32), Vec<(usize, &[(u32, u32)], u64, usize)>> =
         walk_cache
             .iter()
@@ -1863,6 +1896,13 @@ fn build_l1_terminal_dwa(
                 (key, indexed)
             })
             .collect();
+    if let Some(indexed_cache_started_at) = indexed_cache_started_at {
+        eprintln!(
+            "[glrmask/profile][l1_indexed_walk_cache] targets={} total_ms={:.3}",
+            indexed_walk_cache.len(),
+            indexed_cache_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
 
     // Phase 2: For each start_state, collect walk_cache references per
 
@@ -1963,6 +2003,8 @@ fn build_l1_terminal_dwa(
                 .map(build_start_state_results)
                 .collect()
         };
+
+    let start_state_collect_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // Sort-based intern: sort entries by hash, find hash-group boundaries,
     // then verify and build Arcs in parallel. LazyRanges are compared by
@@ -2076,6 +2118,7 @@ fn build_l1_terminal_dwa(
     let num_tsids = id_map.num_tsids() as usize;
 
     // Build per-TSID: full ranges union + contributing signature count.
+    let full_ranges_started_at = Instant::now();
     let mut tsid_full_ranges: Vec<Vec<(u32, u32)>> = (0..num_tsids).map(|_| Vec::new()).collect();
     let mut tsid_total_rep_counts = vec![0usize; num_tsids];
     for entries in &deferred_arced {
@@ -2089,7 +2132,10 @@ fn build_l1_terminal_dwa(
     let tsid_full_arc_cache: Vec<std::sync::OnceLock<Option<Arc<RangeSetBlaze<u32>>>>> =
         (0..num_tsids).map(|_| std::sync::OnceLock::new()).collect();
 
+    let full_ranges_ms = full_ranges_started_at.elapsed().as_secs_f64() * 1000.0;
+
     // Group terminals by active_states to deduplicate identical computation
+    let terminal_group_started_at = Instant::now();
     let mut active_tids: Vec<usize> = (0..terminal_to_signatures.len())
         .filter(|&i| !terminal_to_signatures[i].is_empty())
         .collect();
@@ -2106,7 +2152,9 @@ fn build_l1_terminal_dwa(
         unique_groups.push(vec![tid]);
     }
 
+    let terminal_group_ms = terminal_group_started_at.elapsed().as_secs_f64() * 1000.0;
     let num_groups = unique_groups.len();
+    let contribution_seed_started_at = Instant::now();
     let (signature_group_masks, words_per_mask) = build_end_rep_group_masks(
         &unique_groups,
         &terminal_to_signatures,
@@ -2125,19 +2173,33 @@ fn build_l1_terminal_dwa(
         }
     }
 
-    let per_tsid_group_entries: Vec<Vec<(usize, u32, Arc<RangeSetBlaze<u32>>)>> =
-        tsid_group_contributions
-            .par_iter()
-            .enumerate()
-            .map(|(tsid, contributions)| {
+    let contribution_seed_ms = contribution_seed_started_at.elapsed().as_secs_f64() * 1000.0;
+    let per_tsid_group_entries_started_at = Instant::now();
+    let single_thread_direct_group_assembly =
+        rayon::current_num_threads() == 1 && l1_sequential_group_assembly_enabled();
+    let group_weight_entries: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
+        if single_thread_direct_group_assembly {
+            // In the single-threaded case, avoid allocating `num_groups` fresh
+            // counters and range buffers for every TSID. Reuse sparse scratch
+            // and emit directly into each group, which is already ordered by
+            // ascending TSID because this loop is sequential.
+            let mut group_weight_entries: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
+                (0..num_groups).map(|_| Vec::new()).collect();
+            let mut group_counts = vec![0usize; num_groups];
+            let mut group_ranges: Vec<Vec<(u32, u32)>> =
+                (0..num_groups).map(|_| Vec::new()).collect();
+            let mut touched_groups = Vec::<usize>::new();
+
+            for (tsid, contributions) in tsid_group_contributions.iter().enumerate() {
                 if contributions.is_empty() {
-                    return Vec::new();
+                    continue;
                 }
 
-                let mut group_counts = vec![0usize; num_groups];
-                let mut group_ranges: Vec<Vec<(u32, u32)>> =
-                    (0..num_groups).map(|_| Vec::new()).collect();
-                let mut touched_groups: Vec<usize> = Vec::new();
+                for &group_idx in &touched_groups {
+                    group_counts[group_idx] = 0;
+                    group_ranges[group_idx].clear();
+                }
+                touched_groups.clear();
 
                 for &(sig_id, ref arc) in contributions {
                     let mask_offset = sig_id * words_per_mask;
@@ -2153,18 +2215,14 @@ fn build_l1_terminal_dwa(
                                 touched_groups.push(group_idx);
                             }
                             group_counts[group_idx] += 1;
-                            for r in arc.ranges() {
-                                group_ranges[group_idx].push((*r.start(), *r.end()));
-                            }
+                            group_ranges[group_idx].extend(
+                                arc.ranges().map(|range| (*range.start(), *range.end())),
+                            );
                         }
                     }
                 }
 
-                touched_groups.sort_unstable();
-
-                let mut out: Vec<(usize, u32, Arc<RangeSetBlaze<u32>>)> = Vec::new();
-                out.reserve(touched_groups.len());
-                for group_idx in touched_groups {
+                for &group_idx in &touched_groups {
                     let shared = if group_counts[group_idx] == tsid_total_rep_counts[tsid] {
                         tsid_full_arc_cache[tsid]
                             .get_or_init(|| {
@@ -2177,23 +2235,90 @@ fn build_l1_terminal_dwa(
                         shared_rangeset_from_unsorted_pairs(group_ranges[group_idx].as_slice())
                     };
                     if let Some(tokens) = shared {
-                        out.push((group_idx, tsid as u32, tokens));
+                        group_weight_entries[group_idx].push((tsid as u32, tokens));
                     }
                 }
-                out
-            })
-            .collect();
+            }
 
-    let mut group_weight_entries: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
-        (0..unique_groups.len()).map(|_| Vec::new()).collect();
-    for entries in per_tsid_group_entries {
-        for (group_idx, tsid, tokens) in entries {
-            group_weight_entries[group_idx].push((tsid, tokens));
-        }
-    }
-    for entries in &mut group_weight_entries {
-        entries.sort_unstable_by_key(|&(tsid, _)| tsid);
-    }
+            group_weight_entries
+        } else {
+            let per_tsid_group_entries: Vec<Vec<(usize, u32, Arc<RangeSetBlaze<u32>>)>> =
+                tsid_group_contributions
+                    .par_iter()
+                    .enumerate()
+                    .map(|(tsid, contributions)| {
+                        if contributions.is_empty() {
+                            return Vec::new();
+                        }
+
+                        let mut group_counts = vec![0usize; num_groups];
+                        let mut group_ranges: Vec<Vec<(u32, u32)>> =
+                            (0..num_groups).map(|_| Vec::new()).collect();
+                        let mut touched_groups: Vec<usize> = Vec::new();
+
+                        for &(sig_id, ref arc) in contributions {
+                            let mask_offset = sig_id * words_per_mask;
+                            let mask_slice =
+                                &signature_group_masks[mask_offset..mask_offset + words_per_mask];
+                            for (word_idx, &word) in mask_slice.iter().enumerate() {
+                                let mut remaining = word;
+                                while remaining != 0 {
+                                    let bit_idx = remaining.trailing_zeros() as usize;
+                                    remaining &= remaining - 1;
+                                    let group_idx = word_idx * 64 + bit_idx;
+                                    if group_counts[group_idx] == 0 {
+                                        touched_groups.push(group_idx);
+                                    }
+                                    group_counts[group_idx] += 1;
+                                    for range in arc.ranges() {
+                                        group_ranges[group_idx]
+                                            .push((*range.start(), *range.end()));
+                                    }
+                                }
+                            }
+                        }
+
+                        touched_groups.sort_unstable();
+
+                        let mut out: Vec<(usize, u32, Arc<RangeSetBlaze<u32>>)> = Vec::new();
+                        out.reserve(touched_groups.len());
+                        for group_idx in touched_groups {
+                            let shared = if group_counts[group_idx] == tsid_total_rep_counts[tsid] {
+                                tsid_full_arc_cache[tsid]
+                                    .get_or_init(|| {
+                                        shared_rangeset_from_unsorted_pairs(
+                                            tsid_full_ranges[tsid].as_slice(),
+                                        )
+                                    })
+                                    .clone()
+                            } else {
+                                shared_rangeset_from_unsorted_pairs(
+                                    group_ranges[group_idx].as_slice(),
+                                )
+                            };
+                            if let Some(tokens) = shared {
+                                out.push((group_idx, tsid as u32, tokens));
+                            }
+                        }
+                        out
+                    })
+                    .collect();
+
+            let mut group_weight_entries: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
+                (0..unique_groups.len()).map(|_| Vec::new()).collect();
+            for entries in per_tsid_group_entries {
+                for (group_idx, tsid, tokens) in entries {
+                    group_weight_entries[group_idx].push((tsid, tokens));
+                }
+            }
+            for entries in &mut group_weight_entries {
+                entries.sort_unstable_by_key(|&(tsid, _)| tsid);
+            }
+            group_weight_entries
+        };
+    let per_tsid_group_entries_ms =
+        per_tsid_group_entries_started_at.elapsed().as_secs_f64() * 1000.0;
+    let group_weight_entries_ms = 0.0;
 
     let group_results: Vec<Option<(Vec<usize>, Weight)>> = unique_groups
         .iter()
@@ -2214,6 +2339,7 @@ fn build_l1_terminal_dwa(
         .collect();
 
     // Sequential DWA construction from grouped results
+    let dwa_build_started_at = Instant::now();
     let mut dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
     let end_state = dwa.add_state();
     dwa.set_final_weight(end_state, Weight::all());
@@ -2232,8 +2358,23 @@ fn build_l1_terminal_dwa(
     }
 
     let dwa_stats = dwa.stats();
+    let dwa_build_ms = dwa_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][l1_terminal_assembly] start_collect_ms={:.3} token_intern_ms={:.3} full_ranges_ms={:.3} terminal_group_ms={:.3} contribution_seed_ms={:.3} per_tsid_group_entries_ms={:.3} group_weight_entries_ms={:.3} dwa_build_ms={:.3} total_direct_ms={:.3}",
+            start_state_collect_ms,
+            token_set_intern_ms,
+            full_ranges_ms,
+            terminal_group_ms,
+            contribution_seed_ms,
+            per_tsid_group_entries_ms,
+            group_weight_entries_ms,
+            dwa_build_ms,
+            merge_ms,
+        );
+    }
     let direct_terminal_dwa_ms = merge_ms;
     let distribute_ms = distribute_started_at.elapsed().as_secs_f64() * 1000.0;
     let vocab_tree_traversal_ms = traversal_ms;
