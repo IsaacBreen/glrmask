@@ -25,19 +25,24 @@ All dense masks, lookup tables, and other acceleration caches are rebuilt after 
 The envelope makes version rejection explicit and lets a later artifact representation
 change without changing the browser session API.
 
-## Session API
+## Loaded constraint and session API
 
 ```rust
 let artifact = RuntimeArtifact::from_bytes(bytes)?;
-let mut session = Session::from_artifact(artifact)?;
+let runtime = RuntimeConstraint::from_artifact(artifact)?;
 
-let words: Vec<u32> = session.mask_words();
+// Cheap: each session shares the already-loaded immutable executor.
+let mut session = runtime.start();
+
+let mut words = vec![0; runtime.mask_len()];
+session.fill_mask(&mut words);
 session.commit_token(token_id)?;
 let eos_ok = session.eos_allowed();
 session.reset();
 ```
 
-`mask_words` is packed in original vocabulary ID space: bit `id % 32` in word
+`fill_mask` is allocation-free. `mask_words` remains available as a convenience
+method when an owned vector is appropriate. Both use original vocabulary ID space: bit `id % 32` in word
 `id / 32` is set exactly when token `id` is admissible at the current state.
 
 The artifact is intentionally tokenizer/vocabulary-specific. A TinyStories artifact

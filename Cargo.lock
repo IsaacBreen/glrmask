@@ -7,9 +7,19 @@ name = "_glrmask"
 version = "0.1.0"
 dependencies = [
  "glrmask",
+ "glrmask-runtime",
  "numpy",
  "pyo3",
  "self_cell",
+]
+
+[[package]]
+name = "_glrmask_runtime"
+version = "0.1.0"
+dependencies = [
+ "glrmask-runtime",
+ "numpy",
+ "pyo3",
 ]
 
 [[package]]
@@ -392,6 +402,7 @@ dependencies = [
  "dashmap",
  "derivre",
  "getrandom 0.3.4",
+ "glrmask",
  "hashbrown 0.15.5",
  "im",
  "once_cell",
