@@ -1316,9 +1316,15 @@ fn enumerate_tsid_coverage_limited(
 /// class has a small TSID footprint.  Broad classes cannot use that index and
 /// can force repeated scans of a large group, so after several such probes we
 /// promote the group to the exact pointwise summary used by the summary path.
-/// Both representations encode the same compatibility condition.
+/// Dense indexed probes can be just as expensive.  Promote compact profiles
+/// after enough actual overlap checks, rather than using wall-clock time: the
+/// latter is host-load dependent and can misclassify very wide profiles whose
+/// eager summary would be more expensive than their indexed checks.  Both
+/// representations encode the same compatibility condition.
 const SUMMARY_PROMOTION_MIN_MEMBERS: usize = 64;
 const SUMMARY_PROMOTION_BROAD_PROBES: usize = 4;
+const SUMMARY_WORK_PROMOTION_MAX_PROFILE_WEIGHTS: usize = 128;
+const SUMMARY_PROMOTION_MEMBERWISE_OVERLAP_CHECKS: usize = 4_096;
 
 struct ExactGroupSummary {
     needed_union: Weight,
@@ -1333,7 +1339,17 @@ struct OverlapMergeGroup {
     unindexed_member_classes: Vec<usize>,
     member_classes: Vec<usize>,
     broad_probe_count: usize,
+    max_profile_weights: usize,
+    memberwise_overlap_checks: usize,
     summary: Option<ExactGroupSummary>,
+}
+
+fn should_promote_group_summary(group: &OverlapMergeGroup) -> bool {
+    group.member_classes.len() >= SUMMARY_PROMOTION_MIN_MEMBERS
+        && (group.broad_probe_count >= SUMMARY_PROMOTION_BROAD_PROBES
+            || (group.max_profile_weights <= SUMMARY_WORK_PROMOTION_MAX_PROFILE_WEIGHTS
+                && group.memberwise_overlap_checks
+                    >= SUMMARY_PROMOTION_MEMBERWISE_OVERLAP_CHECKS))
 }
 
 fn build_exact_group_summary(
@@ -1544,8 +1560,10 @@ fn build_and_color_hybrid(
     let mut memberwise_indexed_probes = 0usize;
     let mut memberwise_broad_probes = 0usize;
     let mut memberwise_member_scans = 0usize;
+    let mut memberwise_overlap_checks = 0usize;
     let mut summary_checks = 0usize;
     let mut summary_promotions = 0usize;
+    let mut summary_work_promotions = 0usize;
     let mut overlap_candidate_marks = vec![0u32; num_classes];
     let mut overlap_candidate_mark = 0u32;
     let mut overlap_candidate_members = Vec::<usize>::new();
@@ -1678,6 +1696,8 @@ fn build_and_color_hybrid(
                         continue;
                     }
                     saw_overlap = true;
+                    g.memberwise_overlap_checks += 1;
+                    memberwise_overlap_checks += 1;
 
                     final_weight_checks += 1;
                     let final_weight_check_started_at = Instant::now();
@@ -1716,6 +1736,16 @@ fn build_and_color_hybrid(
                 }
                 memberwise_compatible
             };
+            if g.summary.is_none() && should_promote_group_summary(g) {
+                let promoted_by_work = g.broad_probe_count < SUMMARY_PROMOTION_BROAD_PROBES;
+                g.summary = Some(build_exact_group_summary(
+                    &g.member_classes,
+                    &class_needed_union,
+                    &class_profiles,
+                ));
+                summary_promotions += 1;
+                summary_work_promotions += usize::from(promoted_by_work);
+            }
             disjoint_check_ms += disjoint_check_started_at.elapsed().as_secs_f64() * 1000.0;
             if !compatible {
                 continue;
@@ -1742,17 +1772,19 @@ fn build_and_color_hybrid(
                 g.unindexed_member_classes.push(class);
             }
             g.member_classes.push(class);
+            g.max_profile_weights = g.max_profile_weights.max(class_profile.weights.len());
             if let Some(summary) = g.summary.as_mut() {
                 update_exact_group_summary(summary, cn, class_profile);
-            } else if g.member_classes.len() >= SUMMARY_PROMOTION_MIN_MEMBERS
-                && g.broad_probe_count >= SUMMARY_PROMOTION_BROAD_PROBES
-            {
+            } else if should_promote_group_summary(g) {
                 g.summary = Some(build_exact_group_summary(
                     &g.member_classes,
                     &class_needed_union,
                     &class_profiles,
                 ));
                 summary_promotions += 1;
+                summary_work_promotions += usize::from(
+                    g.broad_probe_count < SUMMARY_PROMOTION_BROAD_PROBES,
+                );
             }
             group_update_ms += group_update_started_at.elapsed().as_secs_f64() * 1000.0;
             placed = true;
@@ -1794,6 +1826,8 @@ fn build_and_color_hybrid(
                 },
                 member_classes: vec![class],
                 broad_probe_count: 0,
+                max_profile_weights: class_profile.weights.len(),
+                memberwise_overlap_checks: 0,
                 summary: None,
             });
         }
@@ -1841,7 +1875,7 @@ fn build_and_color_hybrid(
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
         eprintln!(
-            "[glrmask/profile][weighted_dwa_minimize_hybrid_detail] candidates={} classes={} groups={} group_attempts={} target_checks={} target_rejects={} target_check_ms={:.3} disjoint_checks={} disjoint_true={} disjoint_check_ms={:.3} final_weight_checks={} final_weight_rejects={} final_weight_check_ms={:.3} transition_weight_checks={} transition_weight_rejects={} transition_weight_check_ms={:.3} group_update_ms={:.3} memberwise_indexed_probes={} memberwise_broad_probes={} memberwise_member_scans={} summary_checks={} summary_promotions={} classes_with_final_weight={} min_targets={} max_targets={} avg_targets={:.3} min_weights={} max_weights={} avg_weights={:.3} min_group_size={} max_group_size={}",
+            "[glrmask/profile][weighted_dwa_minimize_hybrid_detail] candidates={} classes={} groups={} group_attempts={} target_checks={} target_rejects={} target_check_ms={:.3} disjoint_checks={} disjoint_true={} disjoint_check_ms={:.3} final_weight_checks={} final_weight_rejects={} final_weight_check_ms={:.3} transition_weight_checks={} transition_weight_rejects={} transition_weight_check_ms={:.3} group_update_ms={:.3} memberwise_indexed_probes={} memberwise_broad_probes={} memberwise_member_scans={} memberwise_overlap_checks={} summary_checks={} summary_promotions={} summary_work_promotions={} classes_with_final_weight={} min_targets={} max_targets={} avg_targets={:.3} min_weights={} max_weights={} avg_weights={:.3} min_group_size={} max_group_size={}",
             candidates.len(),
             num_classes,
             groups.len(),
@@ -1862,8 +1896,10 @@ fn build_and_color_hybrid(
             memberwise_indexed_probes,
             memberwise_broad_probes,
             memberwise_member_scans,
+            memberwise_overlap_checks,
             summary_checks,
             summary_promotions,
+            summary_work_promotions,
             classes_with_final_weight,
             min_targets,
             max_targets,
@@ -2347,10 +2383,12 @@ pub fn minimize_acyclic_owned(mut pushed: DWA) -> DWA {
 #[cfg(test)]
 mod tests {
     use super::{
-        minimize_acyclic, push_weights, sorted_weights_compatible_on_domain,
+        build_exact_group_summary, final_weights_compatible_on_domain,
+        memberwise_group_compatible, minimize_acyclic, push_weights,
+        sorted_weights_compatible_on_domain,
         sorted_weights_compatible_on_domain_intersection,
         weight_is_disjoint_from_domain_intersection, weights_equal_on_domain,
-        weights_equal_on_domain_intersection,
+        weights_equal_on_domain_intersection, ClassProfile,
     };
     use crate::automata::weighted_u32::dwa::{DWA, DWAState};
     use crate::ds::weight::Weight;
@@ -2540,6 +2578,74 @@ mod tests {
             ),
             sorted_weights_compatible_on_domain(&class_weights, &group_weights, &overlap),
         );
+    }
+
+    #[test]
+    fn exact_group_summary_matches_memberwise_compatibility() {
+        let needed = vec![
+            weight(&[(0, &[(0, 9)])]),
+            weight(&[(1, &[(0, 9)])]),
+            weight(&[(1, &[(0, 9)])]),
+        ];
+        let members = vec![
+            ClassProfile {
+                targets: Vec::new(),
+                weights: vec![(7, weight(&[(0, &[(2, 4)])]))],
+                final_weight: None,
+            },
+            ClassProfile {
+                targets: Vec::new(),
+                weights: vec![(7, weight(&[(1, &[(3, 5)])]))],
+                final_weight: None,
+            },
+        ];
+        let summary = build_exact_group_summary(&[0, 1], &needed, &members);
+
+        let compatible = ClassProfile {
+            targets: Vec::new(),
+            weights: vec![(7, weight(&[(1, &[(3, 5)])]))],
+            final_weight: None,
+        };
+        let incompatible = ClassProfile {
+            targets: Vec::new(),
+            weights: vec![(7, weight(&[(1, &[(6, 8)])]))],
+            final_weight: None,
+        };
+
+        for candidate in [&compatible, &incompatible] {
+            let overlap = needed[2].intersection(&summary.needed_union);
+            let via_summary = final_weights_compatible_on_domain(
+                candidate.final_weight.as_ref(),
+                summary.merged_final_weight.as_ref(),
+                &overlap,
+            ) && sorted_weights_compatible_on_domain(
+                &candidate.weights,
+                &summary.transition_weights,
+                &overlap,
+            );
+            let via_members = memberwise_group_compatible(
+                &needed[2],
+                candidate,
+                &[0, 1],
+                &needed,
+                &members,
+            );
+            assert_eq!(via_summary, via_members);
+        }
+        assert!(memberwise_group_compatible(
+            &needed[2],
+            &compatible,
+            &[0, 1],
+            &needed,
+            &members,
+        ));
+        assert!(!memberwise_group_compatible(
+            &needed[2],
+            &incompatible,
+            &[0, 1],
+            &needed,
+            &members,
+        ));
     }
 
     #[test]
