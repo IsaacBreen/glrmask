@@ -6,6 +6,9 @@ description = "Runtime-only executor for precompiled glrmask constraints"
 license = "MIT OR Apache-2.0"
 publish = false
 
+[lib]
+test = false
+
 [dependencies]
 rustc-hash = "1"
 ahash = "0.8"
@@ -26,3 +29,4 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 pretty_assertions = "1"
+glrmask = { path = ".." }
