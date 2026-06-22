@@ -75,7 +75,10 @@ pub unsafe extern "C" fn glrmask_session_new(artifact_pointer: u32, artifact_len
     };
     let result = RuntimeArtifact::from_bytes(bytes.to_vec())
         .and_then(Session::from_artifact)
-        .map(|inner| WasmSession { inner, mask: Vec::new() });
+        .map(|inner| {
+            let mask = vec![0; inner.mask_len()];
+            WasmSession { inner, mask }
+        });
     let session = match result {
         Ok(session) => session,
         Err(error) => {
@@ -109,12 +112,13 @@ pub extern "C" fn glrmask_session_free(handle: u32) {
 }
 
 /// Recompute the exact original-vocabulary mask and return its linear-memory pointer.
-/// Call `glrmask_mask_len` immediately after this function, then copy the u32 words.
+/// The session owns and reuses this allocation across token steps. Call
+/// `glrmask_mask_len` immediately after this function, then copy the u32 words.
 #[unsafe(no_mangle)]
 pub extern "C" fn glrmask_mask(handle: u32) -> u32 {
     clear_error();
     let Some(pointer) = with_session_mut(handle, |session| {
-        session.mask = session.inner.mask_words();
+        session.inner.fill_mask(&mut session.mask);
         session.mask.as_ptr() as usize as u32
     }) else {
         set_error("invalid glrmask session handle");
