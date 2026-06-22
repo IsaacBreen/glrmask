@@ -334,26 +334,56 @@ impl TerminalEquivalence {
         num_terminals: usize,
     ) -> BTreeMap<u32, BitSet> {
         let mut result = BTreeMap::new();
+        let mut seen_epoch = vec![0u32; num_terminals];
+        let mut member_counts = vec![0usize; num_terminals];
+        let mut touched_classes = Vec::new();
+        let mut epoch = 0u32;
+
         for representative in 0..self.members_by_representative.len() {
             if !self.active_representatives[representative] {
                 continue;
             }
-            let members = &self.members_by_representative[representative];
-            let mut disallowed = BitSet::new(num_terminals);
-            for next_representative in 0..self.members_by_representative.len() {
-                if !self.active_representatives[next_representative] {
+            let mut common_disallowed = None::<BitSet>;
+            for &member in &self.members_by_representative[representative] {
+                let Some(member_disallowed) = disallowed_follows.get(&member) else {
+                    common_disallowed = Some(BitSet::new(num_terminals));
+                    break;
+                };
+                match &mut common_disallowed {
+                    None => common_disallowed = Some(member_disallowed.clone()),
+                    Some(common) => common.intersect_with(member_disallowed),
+                }
+            }
+            let Some(common_disallowed) = common_disallowed else {
+                continue;
+            };
+            if common_disallowed.is_zero() {
+                continue;
+            }
+
+            epoch = epoch.wrapping_add(1);
+            if epoch == 0 {
+                seen_epoch.fill(0);
+                epoch = 1;
+            }
+            touched_classes.clear();
+            for terminal in common_disallowed.iter_ones() {
+                let destination = self.representative_for_terminal[terminal] as usize;
+                if !self.active_representatives[destination] {
                     continue;
                 }
-                let next_members = &self.members_by_representative[next_representative];
-                let universally_disallowed = members.iter().all(|&previous| {
-                    next_members.iter().all(|&next| {
-                        disallowed_follows
-                            .get(&previous)
-                            .is_some_and(|bits| bits.contains(next as usize))
-                    })
-                });
-                if universally_disallowed {
-                    disallowed.set(next_representative);
+                if seen_epoch[destination] != epoch {
+                    seen_epoch[destination] = epoch;
+                    member_counts[destination] = 0;
+                    touched_classes.push(destination);
+                }
+                member_counts[destination] += 1;
+            }
+
+            let mut disallowed = BitSet::new(num_terminals);
+            for destination in touched_classes.iter().copied() {
+                if member_counts[destination] == self.members_by_representative[destination].len() {
+                    disallowed.set(destination);
                 }
             }
             if !disallowed.is_zero() {
@@ -714,6 +744,66 @@ mod tests {
 mod class_follow_tests {
     use super::*;
 
+    fn naive_class_disallowed_follows(
+        equivalence: &TerminalEquivalence,
+        disallowed_follows: &BTreeMap<u32, BitSet>,
+        num_terminals: usize,
+    ) -> BTreeMap<u32, BitSet> {
+        let mut result = BTreeMap::new();
+        for representative in 0..equivalence.members_by_representative.len() {
+            if !equivalence.active_representatives[representative] {
+                continue;
+            }
+            let members = &equivalence.members_by_representative[representative];
+            let mut disallowed = BitSet::new(num_terminals);
+            for destination in 0..equivalence.members_by_representative.len() {
+                if !equivalence.active_representatives[destination] {
+                    continue;
+                }
+                if members.iter().all(|&previous| {
+                    equivalence.members_by_representative[destination]
+                        .iter()
+                        .all(|&next| {
+                            disallowed_follows
+                                .get(&previous)
+                                .is_some_and(|bits| bits.contains(next as usize))
+                        })
+                }) {
+                    disallowed.set(destination);
+                }
+            }
+            if !disallowed.is_zero() {
+                result.insert(representative as u32, disallowed);
+            }
+        }
+        result
+    }
+
+    fn four_class_equivalence() -> TerminalEquivalence {
+        TerminalEquivalence {
+            representative_for_terminal: vec![0, 0, 2, 2, 4, 5, 5],
+            members_by_representative: vec![
+                vec![0, 1],
+                Vec::new(),
+                vec![2, 3],
+                Vec::new(),
+                vec![4],
+                vec![5, 6],
+                Vec::new(),
+            ],
+            active_representatives: vec![true, false, true, false, true, true, false],
+            state_blocks_by_terminal: vec![Vec::new(); 7],
+            member_live_tsids: vec![None; 7],
+            original_active_terminals: vec![true; 7],
+            active_terminal_count: 7,
+            class_count: 4,
+            quotient_hits: 3,
+            residual_pair_count: 0,
+            residual_block_count: 0,
+            active_byte_count: 0,
+        }
+    }
+
     #[test]
     fn class_pre_follow_keeps_any_member_pair_that_is_legal() {
         // Class 0 = {0, 1}; class 2 = {2, 3}; class 4 = {4}. The pair 0→2
@@ -764,5 +854,32 @@ mod class_follow_tests {
                 .is_some_and(|bits| bits.contains(4)),
             "every member pair into class 4 is forbidden"
         );
+    }
+
+    #[test]
+    fn sparse_class_follow_matches_quadratic_definition() {
+        let equivalence = four_class_equivalence();
+        let mut state = 0x5EED_1234_89AB_CDEFu64;
+        for _ in 0..128 {
+            let mut disallowed = BTreeMap::new();
+            for previous in 0..7u32 {
+                let mut bits = BitSet::new(7);
+                for next in 0..7 {
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    if state >> 63 != 0 {
+                        bits.set(next);
+                    }
+                }
+                if !bits.is_zero() {
+                    disallowed.insert(previous, bits);
+                }
+            }
+            assert_eq!(
+                equivalence.class_disallowed_follows(&disallowed, 7),
+                naive_class_disallowed_follows(&equivalence, &disallowed, 7),
+            );
+        }
     }
 }
