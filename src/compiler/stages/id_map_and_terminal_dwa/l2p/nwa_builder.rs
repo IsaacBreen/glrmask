@@ -187,17 +187,28 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         self.leaf_token_ids_for(source, label).push(internal_token_id);
     }
 
-    fn possible_future_terminals_for_state(&mut self, tokenizer_state: TokenizerState) -> Vec<TerminalID> {
-        self.possible_future_terminals
-            .entry(tokenizer_state)
-            .or_insert_with(|| {
-                self.tokenizer
-                    .possible_future_terminals_iter(tokenizer_state)
-                    .collect()
-            })
-            .clone()
+    #[inline]
+    fn terminal_is_active(&self, terminal: TerminalID) -> bool {
+        self.active_terminals
+            .as_ref()
+            .map(|active| active.get(terminal as usize).copied().unwrap_or(false))
+            .unwrap_or(true)
     }
 
+    fn possible_future_terminals_for_state(&mut self, tokenizer_state: TokenizerState) -> Vec<TerminalID> {
+        if let Some(cached) = self.possible_future_terminals.get(&tokenizer_state) {
+            return cached.clone();
+        }
+
+        let terminals = self
+            .tokenizer
+            .possible_future_terminals_iter(tokenizer_state)
+            .filter(|&terminal| self.terminal_is_active(terminal))
+            .collect::<Vec<_>>();
+        self.possible_future_terminals
+            .insert(tokenizer_state, terminals.clone());
+        terminals
+    }
     fn populate_future_terminal_color_cache(&mut self, tokenizer_state: TokenizerState) {
         if self.future_terminal_color_groups.contains_key(&tokenizer_state) {
             return;
@@ -208,6 +219,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let mut ignore_present = false;
 
         for terminal_id in self.tokenizer.possible_future_terminals_iter(tokenizer_state) {
+            if !self.terminal_is_active(terminal_id) {
+                continue;
+            }
             if Some(terminal_id) == self.ignore_terminal {
                 ignore_present = true;
                 continue;

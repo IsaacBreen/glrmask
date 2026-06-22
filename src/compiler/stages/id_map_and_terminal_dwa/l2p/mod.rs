@@ -12,6 +12,7 @@ use crate::automata::lexer::Lexer;
 pub(crate) mod equivalence_analysis;
 pub(crate) mod nwa_builder;
 pub(crate) mod postprocess;
+pub(crate) mod terminal_equivalence;
 
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
@@ -40,6 +41,7 @@ use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
     prune_non_coreachable_states, SharedDisallowedFollowDfaCache,
 };
+use terminal_equivalence::TerminalEquivalence;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct SimplifyCacheKey {
@@ -160,6 +162,22 @@ fn l2p_tokenizer_simplify_disabled() -> bool {
             .map(|value| {
                 let trimmed = value.trim();
                 trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(true)
+    })
+}
+
+fn l2p_terminal_equivalence_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_L2P_TERMINAL_EQUIVALENCE")
+            .map(|value| {
+                let trimmed = value.trim();
+                !trimmed.is_empty()
+                    && !matches!(
+                        trimmed.to_ascii_lowercase().as_str(),
+                        "0" | "false" | "no" | "off"
+                    )
             })
             .unwrap_or(true)
     })
@@ -402,6 +420,28 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let num_original_states = tokenizer.num_states() as usize;
     let num_active_terminals = active_terminals.iter().filter(|&&active| active).count();
 
+    let terminal_equivalence_started_at = Instant::now();
+    let terminal_equivalence_enabled = l2p_terminal_equivalence_enabled();
+    let terminal_equivalence = if terminal_equivalence_enabled {
+        TerminalEquivalence::build(tokenizer, active_terminals, ignore_terminal)
+    } else {
+        TerminalEquivalence::identity(active_terminals)
+    };
+    let representative_active_terminals = terminal_equivalence.representative_active_terminals();
+    let terminal_equivalence_ms = terminal_equivalence_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compile_profile_enabled() {
+        let profile = terminal_equivalence.profile();
+        eprintln!(
+            "[glrmask/profile][l2p_terminal_equivalence] partition={} enabled={} active_terminals={} classes={} quotient_hits={} classify_ms={:.3}",
+            partition_label,
+            terminal_equivalence_enabled,
+            profile.active_terminals,
+            profile.classes,
+            profile.quotient_hits,
+            terminal_equivalence_ms,
+        );
+    }
+
     let mut relevant_bytes = [false; 256];
     for bytes in vocab.entries.values() {
         for &byte in bytes {
@@ -418,15 +458,19 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // `fill_unmapped_with_new_class` after composition, so we always
     // use the simplified tokenizer.
     let simplify_started_at = Instant::now();
-    let can_skip_simplify = l2p_tokenizer_simplify_disabled() || num_active_terminals == active_terminals.len();
+    let can_skip_simplify = l2p_tokenizer_simplify_disabled()
+        || representative_active_terminals.iter().all(|&active| active);
     let (simplified_tok_storage, simplify_state_map, simplify_cache_hit) = if can_skip_simplify {
         (None, None, false)
     } else if let Some(cache) = shared_simplify_cache {
         let (tok, map, cache_hit) =
-            cache.simplify_for_terminals(tokenizer, active_terminals, &relevant_bytes);
+            cache.simplify_for_terminals(tokenizer, representative_active_terminals, &relevant_bytes);
         (Some(tok), Some(map), cache_hit)
     } else {
-        let (tok, map) = tokenizer.simplify_for_terminals(active_terminals, Some(&relevant_bytes));
+        let (tok, map) = tokenizer.simplify_for_terminals(
+            representative_active_terminals,
+            Some(&relevant_bytes),
+        );
         (Some(tok), Some(map), false)
     };
     let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -503,13 +547,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // state/vocab equivalence pass must not be bypassed. Do not reintroduce
     // fast-sound, identity, lex-dedup, or similar shortcut id-map paths.
     let fast_sound_id_map_used = false;
-    // Keep equivalence analysis in the same terminal universe as the tokenizer
-    // consumed by the L2P NWA builder.  When simplification is enabled, inactive
-    // terminal bits have already been removed from `tokenizer_for_build`, so no
-    // extra active-group filter is needed.  When simplification is disabled, the
-    // builder still consults full-tokenizer future-terminal sets in several
-    // paths, so filtering equivalence by `active_terminals` would be unsound: it
-    // could merge states that the later NWA construction still distinguishes.
+    // The representative mask is used by both equivalence analysis and the NWA
+    // builder.  A hidden terminal has exactly the same final/future columns as
+    // its representative at every tokenizer state, so this smaller terminal
+    // universe is exact even when tokenizer simplification is disabled.
     let (simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
@@ -517,7 +558,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             vocab,
             disallowed_follows,
             ignore_terminal,
-            None,
+            Some(representative_active_terminals),
             shared_vocab_dfa_cache,
             if use_simplified_tok { None } else { flat_trans },
             equivalence_initial_state_map,
@@ -622,9 +663,21 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 &full_tree.root,
                 &roots,
                 &mut pm_computer,
-                None,
+                Some(representative_active_terminals),
             );
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
+
+            let terminal_expansion_started_at = Instant::now();
+            let terminal_expansion_profile = terminal_equivalence.expand_nwa(&mut nwa);
+            let terminal_expansion_ms = terminal_expansion_started_at.elapsed().as_secs_f64() * 1000.0;
+            if compile_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_terminal_equivalence_expand] partition={} expanded_transition_copies={} ms={:.3}",
+                    partition_label,
+                    terminal_expansion_profile.expanded_transition_copies,
+                    terminal_expansion_ms,
+                );
+            }
 
             let always_allowed_started_at = Instant::now();
             let always_allowed = compute_always_allowed_follows(grammar);
@@ -678,7 +731,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 possible_matches_ms,
                 seed_ms,
                 trie_build_ms,
-                always_allowed_ms,
+                always_allowed_ms + terminal_expansion_ms,
                 collapse_ms,
                 disallowed_ms,
                 prune_ms,
