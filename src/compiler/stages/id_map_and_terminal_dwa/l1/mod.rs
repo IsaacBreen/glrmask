@@ -12,6 +12,47 @@ use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+/// Exact first-byte target profiles computed for L1 state equivalence.
+///
+/// The L1 terminal-DWA builder needs the same whole-token walks. Reusing these
+/// profiles avoids rebuilding the walk cache after exact equivalence has already
+/// established it. Signature IDs in these profiles reserve zero for the empty
+/// signature; the direct DWA builder numbers non-empty signatures from zero, so
+/// `materialize_walk_cache` shifts them by one.
+#[derive(Debug)]
+struct L1ExactProfileReuse {
+    target_to_profile_id: FxHashMap<(u8, u32), u32>,
+    profiles_by_id: Vec<Arc<[(u32, u32, u32)]>>,
+}
+
+impl L1ExactProfileReuse {
+    fn materialize_walk_cache(&self) -> FxHashMap<(u8, u32), Vec<(u32, Vec<(u32, u32)>)>> {
+        let mut walk_results_by_profile: Vec<Vec<(u32, Vec<(u32, u32)>)>> =
+            Vec::with_capacity(self.profiles_by_id.len());
+        for runs in &self.profiles_by_id {
+            let mut by_signature = FxHashMap::<u32, Vec<(u32, u32)>>::default();
+            for &(signature_id, start, end) in runs.iter() {
+                if signature_id == 0 {
+                    continue;
+                }
+                by_signature
+                    .entry(signature_id - 1)
+                    .or_default()
+                    .push((start, end));
+            }
+            walk_results_by_profile.push(by_signature.into_iter().collect());
+        }
+
+        let mut cache = FxHashMap::default();
+        for (&target, &profile_id) in &self.target_to_profile_id {
+            if profile_id != 0 {
+                cache.insert(target, walk_results_by_profile[profile_id as usize].clone());
+            }
+        }
+        cache
+    }
+}
+
 /// Ranges key with pre-computed hash for O(1) HashMap lookups.
 /// The hash is computed in the parallel traversal phase so the sequential
 /// interning loop avoids re-hashing large range vectors.
@@ -46,7 +87,6 @@ fn l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrder> {
         left_bytes
             .first()
             .cmp(&right_bytes.first())
-            .then(left_bytes.len().cmp(&right_bytes.len()))
             .then(left_bytes.cmp(right_bytes))
     });
 
@@ -131,6 +171,19 @@ fn l1_max_length_min_states() -> usize {
     })
 }
 
+/// Above this many unprojected states, the bounded prepass can cost more than
+/// the exact token-signature pass it is meant to shrink. Skipping it remains
+/// exact because L1 then classifies every candidate state directly.
+fn l1_max_length_large_state_skip_threshold() -> usize {
+    static THRESHOLD: OnceLock<usize> = OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        std::env::var("GLRMASK_L1_MAX_LENGTH_LARGE_STATE_SKIP_THRESHOLD")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(16_384)
+    })
+}
+
 #[inline]
 fn should_skip_max_length_for_partition(
     partition_label: &str,
@@ -140,6 +193,7 @@ fn should_skip_max_length_for_partition(
     skip_max_length_for_partition(partition_label)
         || skip_l1_max_length_for_partition(partition_label)
         || initial_state_count < l1_max_length_min_states()
+        || initial_state_count >= l1_max_length_large_state_skip_threshold()
         || (projected_by_global && initial_state_count <= 8192)
 }
 
@@ -323,6 +377,18 @@ use crate::Vocab;
 use super::l2p::equivalence_analysis::compat::{compute_byte_classes, TokenizerView};
 use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhaseProfile};
 
+fn l1_exact_profile_reuse_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_L1_EXACT_PROFILE_REUSE")
+            .map(|value| {
+                let trimmed = value.trim();
+                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(true)
+    })
+}
+
 fn compact_l1_terminal_dwa_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -379,7 +445,7 @@ pub(crate) fn count_l1_equivalence_classes(
 
     let order = l1_identity_vocab_order(vocab);
     let flat_trans = build_flat_transition_table(tokenizer);
-    let exact_mapping = find_l1_exact_state_equivalence_by_token_signatures(
+    let (exact_mapping, _) = find_l1_exact_state_equivalence_by_token_signatures(
         tokenizer,
         order.as_ref(),
         &max_length_representatives,
@@ -419,7 +485,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
 
     let total_started_at = Instant::now();
     let id_map_started_at = Instant::now();
-    let (mut id_map, vocab_order, _state_to_rep, id_map_profile) = build_l1_id_map(
+    let (mut id_map, vocab_order, _state_to_rep, id_map_profile, exact_profile_reuse) = build_l1_id_map(
         partition_label,
         tokenizer,
         vocab,
@@ -438,6 +504,9 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         num_terminals,
         active_terminals,
         flat_trans.as_ref(),
+        exact_profile_reuse
+            .as_ref()
+            .filter(|_| l1_exact_profile_reuse_enabled()),
     )?;
     let dwa_stats_before_compact = dwa.stats();
     let terminal_build_ms = dwa_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -450,9 +519,9 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     let (compact_report, compact_ms) = if compact_l1_terminal_dwa_enabled() {
         let compact_started_at = Instant::now();
         let compact_report = if profiling {
-            mapped_dwa.compact_dimensions_fast_with_stats()
+            mapped_dwa.compact_dimensions_fast_l1_with_stats()
         } else {
-            mapped_dwa.compact_dimensions_fast()
+            mapped_dwa.compact_dimensions_fast_l1()
         };
         let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
         (Some(compact_report), compact_ms)
@@ -559,6 +628,7 @@ fn build_l1_id_map<'a>(
     Arc<L1IdentityVocabOrder>,
     Vec<u32>,
     L1IdMapProfile,
+    Option<L1ExactProfileReuse>,
 ) {
     let num_dfa_states = tokenizer.num_states() as usize;
     let states: Vec<usize> = match initial_state_map {
@@ -614,6 +684,7 @@ fn build_l1_id_map<'a>(
                 exact_reps,
                 token_identity_map_ms,
             },
+            None,
         );
     }
 
@@ -660,10 +731,9 @@ fn build_l1_id_map<'a>(
         )
     };
 
-    // Sort token IDs first by first byte, then by length, then lexicographically.
-    // Keeping first-byte buckets contiguous preserves cheap whole-bucket unions,
-    // while length-major order can reduce fragmentation for length-sensitive
-    // token sets before the later compact pass.
+    // Token IDs are first-byte bucketed and lexicographic within each bucket.
+    // This preserves cheap whole-bucket unions and maximizes LCP reuse in the
+    // exact suffix-profile walks used by both equivalence and terminal-DWA build.
     let token_sort_ms = 0.0;
 
     let max_length_ms = if max_length_skipped {
@@ -675,7 +745,7 @@ fn build_l1_id_map<'a>(
     let mut max_length_representatives = equiv_mapping.clone();
     max_length_representatives.sort_unstable();
     max_length_representatives.dedup();
-    let exact_mapping = find_l1_exact_state_equivalence_by_token_signatures(
+    let (exact_mapping, exact_profile_reuse) = find_l1_exact_state_equivalence_by_token_signatures(
         tokenizer,
         order.as_ref(),
         &max_length_representatives,
@@ -771,6 +841,7 @@ fn build_l1_id_map<'a>(
             exact_reps,
             token_identity_map_ms,
         },
+        exact_profile_reuse,
     )
 }
 
@@ -875,9 +946,9 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     states: &[usize],
     active_terminals: &[bool],
     flat_trans: &[u32],
-) -> Vec<usize> {
+) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
     if states.len() <= 1 {
-        return states.to_vec();
+        return (states.to_vec(), None);
     }
     let profile_enabled = compile_profile_enabled();
     let total_started_at = profile_enabled.then(Instant::now);
@@ -964,16 +1035,23 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     });
 
     let profile_intern_started_at = profile_enabled.then(Instant::now);
-    let mut profile_to_id = FxHashMap::<Vec<(u32, u32, u32)>, u32>::default();
-    profile_to_id.insert(Vec::new(), 0);
+    let empty_profile: Arc<[(u32, u32, u32)]> = Arc::from([]);
+    let mut profile_to_id = FxHashMap::<Arc<[(u32, u32, u32)]>, u32>::default();
+    profile_to_id.insert(Arc::clone(&empty_profile), 0);
+    let mut profiles_by_id = vec![empty_profile];
     let mut next_profile_id = 1u32;
     let mut target_to_profile_id = FxHashMap::<(u8, u32), u32>::default();
     for (target_key, profile) in target_profiles {
-        let profile_id = *profile_to_id.entry(profile).or_insert_with(|| {
-            let id = next_profile_id;
+        let profile: Arc<[(u32, u32, u32)]> = Arc::from(profile);
+        let profile_id = if let Some(&profile_id) = profile_to_id.get(&profile) {
+            profile_id
+        } else {
+            let profile_id = next_profile_id;
             next_profile_id += 1;
-            id
-        });
+            profile_to_id.insert(Arc::clone(&profile), profile_id);
+            profiles_by_id.push(profile);
+            profile_id
+        };
         target_to_profile_id.insert(target_key, profile_id);
     }
     let profile_ids_len = next_profile_id as usize;
@@ -1048,7 +1126,13 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         );
     }
 
-    mapping
+    (
+        mapping,
+        Some(L1ExactProfileReuse {
+            target_to_profile_id,
+            profiles_by_id,
+        }),
+    )
 }
 
 fn l1_target_self_loop_covers_suffix_subtree(
@@ -1389,6 +1473,7 @@ fn build_l1_terminal_dwa(
     num_terminals: u32,
     active_terminals: &[bool],
     flat_trans: &[u32],
+    exact_profile_reuse: Option<&L1ExactProfileReuse>,
 ) -> Option<(DWA, L1TerminalBuildProfile)> {
     let total_started_at = std::time::Instant::now();
     let internal_vocab_ms = 0.0;
@@ -1455,6 +1540,10 @@ fn build_l1_terminal_dwa(
     // the raw merged ranges. Self-loop optimization: if the target state
     // has self-loops on all suffix bytes, all tokens end at the target
     // state and the walk can be skipped entirely.
+    let walk_cache: FxHashMap<(u8, u32), Vec<(u32, Vec<(u32, u32)>)>> =
+        if let Some(exact_profile_reuse) = exact_profile_reuse {
+            exact_profile_reuse.materialize_walk_cache()
+        } else {
     // Phase 1: Identify unique concrete (first_byte, target_state) pairs.
     // State equivalence is valid for whole-token walks from a start state,
     // but it is not necessarily closed over suffixes after the first byte.
@@ -1494,7 +1583,7 @@ fn build_l1_terminal_dwa(
     // are walked simultaneously in one pass over the token list.
     // This breaks the serial dependency chain across targets, enabling
     // memory-level parallelism (independent L2 accesses can overlap).
-    let walk_cache: FxHashMap<(u8, u32), Vec<(u32, Vec<(u32, u32)>)>> = {
+    {
         // Group unique walk keys by first_byte.
         let mut walks_by_byte: FxHashMap<u8, Vec<u32>> = FxHashMap::default();
         for &(byte, target) in &unique_walk_keys {
@@ -1745,7 +1834,8 @@ fn build_l1_terminal_dwa(
             }
         }
         cache
-    };
+    }
+        };
 
     // Build indexed walk_cache: (byte, target) → Vec of (signature_id, &ranges, entry_hash, entry_range_count).
     // entry_hash is precomputed from the ranges so Phase 2 can combine hashes
