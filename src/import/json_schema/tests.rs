@@ -191,6 +191,16 @@ fn start_expr(grammar: &NamedGrammar) -> &GrammarExpr {
     resolve_nonterminal_ref_expr(grammar, rule_expr(grammar, &grammar.start))
 }
 
+fn assert_glrm_has_split_literal_key(glrm: &str, key: &str) {
+    assert!(glrm.contains("-- JSON_QUOTE -->"), "{glrm}");
+    assert!(glrm.contains(&format!("-- \"{key}\" -->")), "{glrm}");
+    assert!(glrm.contains("-- JSON_KEY_SUFFIX -->"), "{glrm}");
+    assert!(
+        !glrm.contains(&format!("\\\"{key}\\\": ")),
+        "literal key {key:?} was fused back into one terminal:\n{glrm}"
+    );
+}
+
 #[test]
 fn exact_subtraction_lowering_env_var_defaults_false_and_accepts_truthy_values() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -718,7 +728,7 @@ fn llguidance_compat_rejects_patterned_escaped_solidus() {
 fn llguidance_compat_rejects_unicode_escaped_pattern_literal() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
-    let schema = json!({"type": "string", "pattern": "^file:.+\\.geodatabase?$"});
+    let schema = json!({"type": "string", "pattern": r"^file:.+\.geodatabase?$"});
 
     assert!(schema_accepts_bytes(&schema, br#""file:./esricampus.geodatabase""#));
     assert!(!schema_accepts_bytes(
@@ -776,7 +786,7 @@ fn simple_decimal_multiple_of_matches_llguidance_scale() {
 fn llguidance_compat_pattern_literal_mask_rejects_json_u_prefix() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
-    let schema = json!({"type": "string", "pattern": "^file:.+\\.geodatabase?$"});
+    let schema = json!({"type": "string", "pattern": r"^file:.+\.geodatabase?$"});
 
     assert!(schema_mask_allows_token_after_prefix(&schema, br#"""#, 400, b"f"));
     assert!(!schema_mask_allows_token_after_prefix(
@@ -797,7 +807,7 @@ fn llguidance_compat_pattern_literal_mask_rejects_json_u_prefix() {
 fn json_importer_compacts_terminal_pattern_literals() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
-    let schema = json!({"type": "string", "pattern": "^file:.+\\.geodatabase?$"});
+    let schema = json!({"type": "string", "pattern": r"^file:.+\.geodatabase?$"});
     let grammar = schema_to_named_grammar(&schema).expect("schema lowers");
     let glrm = to_glrm(&grammar);
 
@@ -1870,7 +1880,7 @@ fn large_optional_open_object_uses_fused_prefix_chain_rules() {
 }
 
 #[test]
-fn object_property_array_opener_fuses_into_key_terminal() {
+fn object_property_array_opener_keeps_literal_key_boundaries() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -1892,13 +1902,13 @@ fn object_property_array_opener_fuses_into_key_terminal() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("/\"items\": \\[/"), "{glrm}");
-    assert!(!glrm.contains(r#""\"items\"" JSON_KEY_SEPARATOR"#), "{glrm}");
+    assert_glrm_has_split_literal_key(&glrm, "items");
+    assert!(glrm.contains("-- \"[\" -->"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
 #[test]
-fn object_property_string_value_fuses_into_key_terminal() {
+fn object_property_string_value_keeps_literal_key_boundaries() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -1910,17 +1920,13 @@ fn object_property_string_value_fuses_into_key_terminal() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(
-        glrm.contains("/\"name\": \"")
-            || (glrm.contains(r#"/"name": "#) && glrm.contains("JSON_STRING")),
-        "{glrm}"
-    );
-    assert!(!glrm.contains(r#""\"name\"" JSON_KEY_SEPARATOR"#), "{glrm}");
+    assert_glrm_has_split_literal_key(&glrm, "name");
+    assert!(glrm.contains("-- JSON_STRING -->"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
 #[test]
-fn object_property_nullable_string_value_fuses_string_branch_into_key_terminal() {
+fn object_property_nullable_string_value_keeps_literal_key_boundaries() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -1932,16 +1938,16 @@ fn object_property_nullable_string_value_fuses_string_branch_into_key_terminal()
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(grammar.rules.iter().any(|rule| {
+    assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("json_property_string_value")
     }), "{:?}", grammar.rules);
-    assert!(glrm.contains("/\"name\": null/"), "{glrm}");
-    assert!(!glrm.contains(r#""\"name\"" JSON_KEY_SEPARATOR"#), "{glrm}");
+    assert_glrm_has_split_literal_key(&glrm, "name");
+    assert!(glrm.contains("-- \"null\" -->"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
 #[test]
-fn nullable_uuid_property_fuses_the_string_branch_with_its_key() {
+fn nullable_uuid_property_keeps_literal_key_boundaries() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -1952,12 +1958,11 @@ fn nullable_uuid_property_fuses_the_string_branch_with_its_key() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(grammar.rules.iter().any(|rule| {
+    let glrm = to_glrm(&grammar);
+    assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("json_property_string_value")
     }), "{:?}", grammar.rules);
-    assert!(!grammar.rules.iter().any(|rule| {
-        rule.is_terminal && rule.name.starts_with("json_string_constrained")
-    }), "{:?}", grammar.rules);
+    assert_glrm_has_split_literal_key(&glrm, "id");
     lower(&grammar).unwrap();
     assert!(schema_accepts_bytes(
         &schema,
@@ -1968,7 +1973,7 @@ fn nullable_uuid_property_fuses_the_string_branch_with_its_key() {
 }
 
 #[test]
-fn patterned_property_key_terminal_preserves_cheap_length_bounds() {
+fn patterned_property_keeps_literal_key_boundaries_and_length_bounds() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -1984,12 +1989,11 @@ fn patterned_property_key_terminal_preserves_cheap_length_bounds() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(grammar.rules.iter().any(|rule| {
+    let glrm = to_glrm(&grammar);
+    assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("json_property_string_value")
     }), "{:?}", grammar.rules);
-    assert!(!grammar.rules.iter().any(|rule| {
-        rule.is_terminal && rule.name.starts_with("json_string_constrained")
-    }), "{:?}", grammar.rules);
+    assert_glrm_has_split_literal_key(&glrm, "code");
     lower(&grammar).unwrap();
     assert!(schema_accepts_bytes(&schema, br#"{"code": "aaa"}"#));
     assert!(!schema_accepts_bytes(&schema, br#"{"code": "a"}"#));
@@ -1998,13 +2002,13 @@ fn patterned_property_key_terminal_preserves_cheap_length_bounds() {
 }
 
 #[test]
-fn costly_bounded_pattern_property_still_fuses_with_the_key_terminal() {
+fn costly_bounded_pattern_property_keeps_literal_key_boundaries() {
     let schema = json!({
         "type": "object",
         "properties": {
             "summary": {
                 "type": "string",
-                "pattern": "^(?:\\S+\\s+){0,9}\\S+$",
+                "pattern": r"^(?:\S+\s+){0,9}\S+$",
                 "maxLength": 100
             }
         },
@@ -2013,12 +2017,11 @@ fn costly_bounded_pattern_property_still_fuses_with_the_key_terminal() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(grammar.rules.iter().any(|rule| {
+    let glrm = to_glrm(&grammar);
+    assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("json_property_string_value")
     }), "{:?}", grammar.rules);
-    assert!(!grammar.rules.iter().any(|rule| {
-        rule.is_terminal && rule.name.starts_with("json_string_constrained")
-    }), "{:?}", grammar.rules);
+    assert_glrm_has_split_literal_key(&glrm, "summary");
     lower(&grammar).unwrap();
     assert!(schema_accepts_bytes(
         &schema,
@@ -2031,14 +2034,14 @@ fn costly_bounded_pattern_property_still_fuses_with_the_key_terminal() {
 }
 
 #[test]
-fn patterned_property_reuses_its_key_terminal_after_an_object_separator() {
+fn patterned_property_reuses_split_key_components_after_an_object_separator() {
     let schema = json!({
         "type": "object",
         "properties": {
             "tag": {"type": "string"},
             "summary": {
                 "type": "string",
-                "pattern": "^(?:\\S+\\s+){0,9}\\S+$",
+                "pattern": r"^(?:\S+\s+){0,9}\S+$",
                 "maxLength": 100
             }
         },
@@ -2047,21 +2050,11 @@ fn patterned_property_reuses_its_key_terminal_after_an_object_separator() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let summary_terminals = grammar
-        .rules
-        .iter()
-        .filter(|rule| {
-            rule.is_terminal
-                && rule.name.starts_with("json_property_string_value")
-                && to_glrm(&NamedGrammar {
-                    rules: vec![(*rule).clone()],
-                    start: rule.name.clone(),
-                    ignore: None,
-                })
-                .contains("summary")
-        })
-        .count();
-    assert_eq!(summary_terminals, 1, "{:?}", grammar.rules);
+    let glrm = to_glrm(&grammar);
+    assert!(!grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_property_string_value")
+    }), "{:?}", grammar.rules);
+    assert_glrm_has_split_literal_key(&glrm, "summary");
     lower(&grammar).unwrap();
     assert!(schema_accepts_bytes(
         &schema,
@@ -2070,7 +2063,7 @@ fn patterned_property_reuses_its_key_terminal_after_an_object_separator() {
 }
 
 #[test]
-fn mixed_string_integer_pattern_property_fuses_only_the_string_branch() {
+fn mixed_string_integer_pattern_property_keeps_literal_key_boundaries() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -2085,9 +2078,11 @@ fn mixed_string_integer_pattern_property_fuses_only_the_string_branch() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(grammar.rules.iter().any(|rule| {
+    let glrm = to_glrm(&grammar);
+    assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("json_property_string_value")
     }), "{:?}", grammar.rules);
+    assert_glrm_has_split_literal_key(&glrm, "id");
     lower(&grammar).unwrap();
     assert!(schema_accepts_bytes(&schema, br#"{"id": "AB"}"#));
     assert!(schema_accepts_bytes(&schema, br#"{"id": 10}"#));
@@ -2097,22 +2092,24 @@ fn mixed_string_integer_pattern_property_fuses_only_the_string_branch() {
 }
 
 #[test]
-fn llguidance_compat_escaped_pattern_property_fuses_with_key() {
+fn llguidance_compat_escaped_pattern_property_keeps_literal_key_boundaries() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
         "type": "object",
         "properties": {
-            "path": {"type": "string", "pattern": "^file:.+\\.geodatabase?$"}
+            "path": {"type": "string", "pattern": r"^file:.+\.geodatabase?$"}
         },
         "required": ["path"],
         "additionalProperties": false
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(grammar.rules.iter().any(|rule| {
+    let glrm = to_glrm(&grammar);
+    assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("json_property_string_value")
     }), "{:?}", grammar.rules);
+    assert_glrm_has_split_literal_key(&glrm, "path");
     lower(&grammar).unwrap();
     assert!(schema_accepts_bytes(
         &schema,
@@ -2122,7 +2119,7 @@ fn llguidance_compat_escaped_pattern_property_fuses_with_key() {
 }
 
 #[test]
-fn object_property_null_value_fuses_into_key_terminal() {
+fn object_property_null_value_keeps_literal_key_boundaries() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -2134,8 +2131,8 @@ fn object_property_null_value_fuses_into_key_terminal() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("/\"name\": null/"), "{glrm}");
-    assert!(!glrm.contains(r#""\"name\"" JSON_KEY_SEPARATOR"#), "{glrm}");
+    assert_glrm_has_split_literal_key(&glrm, "name");
+    assert!(glrm.contains("-- \"null\" -->"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -2583,7 +2580,7 @@ fn costly_bounded_pattern_string_arrays_use_contextual_item_terminals() {
         "maxItems": 10,
         "items": {
             "type": "string",
-            "pattern": "^(?:\\S+\\s+){0,9}\\S+$",
+            "pattern": r"^(?:\S+\s+){0,9}\S+$",
             "maxLength": 100
         }
     });
@@ -2620,7 +2617,7 @@ fn contextual_pattern_array_allows_empty_when_min_items_is_zero() {
         "maxItems": 2,
         "items": {
             "type": "string",
-            "pattern": "^(?:\\S+\\s+){0,9}\\S+$",
+            "pattern": r"^(?:\S+\s+){0,9}\S+$",
             "maxLength": 100
         }
     });
@@ -2652,7 +2649,7 @@ fn contextual_pattern_array_enforces_unbounded_min_items() {
         "minItems": 2,
         "items": {
             "type": "string",
-            "pattern": "^(?:\\S+\\s+){0,9}\\S+$",
+            "pattern": r"^(?:\S+\s+){0,9}\S+$",
             "maxLength": 100
         }
     });
@@ -5205,18 +5202,19 @@ fn enum_and_const_lower_to_exact_json_literals() {
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("\"null\""), "{glrm}");
     assert!(glrm.contains("\"true\""), "{glrm}");
-    assert!(glrm.contains("\"\\\"\" \"ready\\\"\""), "{glrm}");
+    assert!(glrm.contains("JSON_QUOTE \"ready\" JSON_QUOTE"), "{glrm}");
     assert!(glrm.contains("\"7\""), "{glrm}");
 }
 
 #[test]
-fn string_const_splits_open_quote_from_literal_body() {
+fn string_const_keeps_both_quotes_separate_from_literal_body() {
     let schema = json!({"const": "ready"});
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let expr = start_expr(&grammar);
 
-    assert!(contains_literal_bytes(expr, b"\""), "{expr:?}");
-    assert!(contains_literal_bytes(expr, b"ready\""), "{expr:?}");
+    assert!(contains_ref_named(expr, "JSON_QUOTE"), "{expr:?}");
+    assert!(contains_literal_bytes(expr, b"ready"), "{expr:?}");
+    assert!(!contains_literal_bytes(expr, b"ready\""), "{expr:?}");
     assert!(!contains_literal_bytes(expr, b"\"ready\""), "{expr:?}");
     lower(&grammar).unwrap();
 }
