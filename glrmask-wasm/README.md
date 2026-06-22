@@ -34,8 +34,10 @@ glrmask_last_error_len() -> bytes
 ```
 
 `glrmask_dealloc` must receive the same byte length passed to `glrmask_alloc`.
-`glrmask_mask` returns a pointer into WASM memory. Copy the `Uint32Array` before
-calling another runtime operation. The bit layout is original vocabulary ID space:
+`glrmask_mask` returns a pointer into WASM memory. Its packed `u32` buffer is
+allocated once when the session is created and reused for subsequent mask calls.
+Copy the `Uint32Array` before calling another runtime operation. The bit layout
+is original vocabulary ID space:
 token `id` is admitted when:
 
 ```js
