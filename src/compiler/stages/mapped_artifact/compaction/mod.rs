@@ -655,7 +655,27 @@ fn build_exact_token_merge_permutation(weights: &[&Weight], num_tokens: usize) -
     if profile_words == 1 {
         return build_exact_token_merge_permutation_one_word(&token_sets, num_tokens);
     }
+    if exact_token_merge_sweep_enabled() {
+        build_exact_token_merge_permutation_multiword_sweep(&token_sets, num_tokens, profile_words)
+    } else {
+        build_exact_token_merge_permutation_multiword_dense(&token_sets, num_tokens, profile_words)
+    }
+}
 
+fn exact_token_merge_sweep_enabled() -> bool {
+    std::env::var("GLRMASK_EXACT_TOKEN_MERGE_SWEEP")
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(true)
+}
+
+fn build_exact_token_merge_permutation_multiword_dense(
+    token_sets: &[Arc<RangeSetBlaze<u32>>],
+    num_tokens: usize,
+    profile_words: usize,
+) -> (Vec<u32>, usize) {
     let mut profiles = vec![0u64; num_tokens * profile_words];
     for (context, token_set) in token_sets.iter().enumerate() {
         let word = context / 64;
@@ -692,6 +712,100 @@ fn build_exact_token_merge_permutation(weights: &[&Weight], num_tokens: usize) -
         groups.push((profile.to_vec(), group));
         perm[token] = group;
         next_group += 1;
+    }
+
+    (perm, next_group as usize)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TokenProfileWordEvent {
+    pos: usize,
+    word: usize,
+    bit: u64,
+    add: bool,
+}
+
+fn build_exact_token_merge_permutation_multiword_sweep(
+    token_sets: &[Arc<RangeSetBlaze<u32>>],
+    num_tokens: usize,
+    profile_words: usize,
+) -> (Vec<u32>, usize) {
+    let mut events = Vec::<TokenProfileWordEvent>::new();
+    for (context, token_set) in token_sets.iter().enumerate() {
+        let word = context / 64;
+        let bit = 1u64 << (context % 64);
+        for token_range in token_set.ranges() {
+            let start = (*token_range.start() as usize).min(num_tokens);
+            let end = (*token_range.end() as usize).min(num_tokens.saturating_sub(1));
+            if start > end {
+                continue;
+            }
+            events.push(TokenProfileWordEvent {
+                pos: start,
+                word,
+                bit,
+                add: true,
+            });
+            let remove_pos = end + 1;
+            if remove_pos < num_tokens {
+                events.push(TokenProfileWordEvent {
+                    pos: remove_pos,
+                    word,
+                    bit,
+                    add: false,
+                });
+            }
+        }
+    }
+
+    if events.is_empty() {
+        return (vec![0; num_tokens], 1);
+    }
+
+    // At a boundary, remove old membership before adding new membership. This
+    // also makes the behavior match the one-word sweep implementation.
+    events.sort_unstable_by_key(|event| (event.pos, event.add, event.word, event.bit));
+
+    let mut active_profile = vec![0u64; profile_words];
+    let mut profile_to_group = HashMap::<Vec<u64>, u32>::new();
+    let mut perm = vec![0u32; num_tokens];
+    let mut next_group = 0u32;
+    let mut cursor = 0usize;
+    let mut idx = 0usize;
+
+    while idx < events.len() {
+        let pos = events[idx].pos;
+        if cursor < pos {
+            let group = *profile_to_group
+                .entry(active_profile.clone())
+                .or_insert_with(|| {
+                    let group = next_group;
+                    next_group += 1;
+                    group
+                });
+            perm[cursor..pos].fill(group);
+            cursor = pos;
+        }
+
+        while idx < events.len() && events[idx].pos == pos && !events[idx].add {
+            active_profile[events[idx].word] &= !events[idx].bit;
+            idx += 1;
+        }
+        while idx < events.len() && events[idx].pos == pos && events[idx].add {
+            active_profile[events[idx].word] |= events[idx].bit;
+            idx += 1;
+        }
+    }
+
+    if cursor < num_tokens {
+        let group = *profile_to_group
+            .entry(active_profile)
+            .or_insert_with(|| {
+                let group = next_group;
+                next_group += 1;
+                group
+            });
+        perm[cursor..num_tokens].fill(group);
     }
 
     (perm, next_group as usize)
@@ -1433,4 +1547,42 @@ fn rangeset_key(set: &RangeSetBlaze<u32>) -> Vec<(u32, u32)> {
     set.ranges()
         .map(|range| (*range.start(), *range.end()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn token_set(ranges: &[(u32, u32)]) -> Arc<RangeSetBlaze<u32>> {
+        Arc::new(ranges.iter().map(|&(start, end)| start..=end).collect())
+    }
+
+    #[test]
+    fn multiword_token_profile_sweep_matches_dense_permutation() {
+        const NUM_TOKENS: usize = 257;
+        let token_sets: Vec<Arc<RangeSetBlaze<u32>>> = (0..137u32)
+            .map(|context| {
+                let first = (context.wrapping_mul(29) % NUM_TOKENS as u32) as u32;
+                let second = (context.wrapping_mul(47).wrapping_add(11) % NUM_TOKENS as u32) as u32;
+                token_set(&[
+                    (first, (first + context % 19).min(NUM_TOKENS as u32 - 1)),
+                    (second, (second + context % 7).min(NUM_TOKENS as u32 - 1)),
+                ])
+            })
+            .collect();
+        let profile_words = token_sets.len().div_ceil(64);
+
+        let dense = build_exact_token_merge_permutation_multiword_dense(
+            &token_sets,
+            NUM_TOKENS,
+            profile_words,
+        );
+        let sweep = build_exact_token_merge_permutation_multiword_sweep(
+            &token_sets,
+            NUM_TOKENS,
+            profile_words,
+        );
+
+        assert_eq!(sweep, dense);
+    }
 }
