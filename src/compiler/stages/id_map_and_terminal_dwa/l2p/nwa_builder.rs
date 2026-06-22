@@ -963,8 +963,9 @@ pub(crate) fn seed_root_nodes(
     nwa: &mut NWA,
     start_state: u32,
     id_map: &InternalIdMap,
-) -> NodesByTokenizerState {
+) -> (NodesByTokenizerState, Vec<u32>) {
     let mut roots_by_tokenizer_state = NodesByTokenizerState::new();
+    let mut roots_by_tsid = Vec::with_capacity(id_map.tokenizer_states.num_internal_ids() as usize);
 
     for (internal_tsid, representative_state) in id_map
         .tokenizer_states
@@ -975,9 +976,10 @@ pub(crate) fn seed_root_nodes(
         let start_weight = all_token_weight(internal_tsid as u32, id_map.max_internal_token_id());
         nwa.add_epsilon(start_state, root, start_weight);
         roots_by_tokenizer_state.merge(representative_state, &[root]);
+        roots_by_tsid.push(root);
     }
 
-    roots_by_tokenizer_state
+    (roots_by_tokenizer_state, roots_by_tsid)
 }
 
 pub(crate) fn build_nwa_via_trie_walk<'a>(
