@@ -212,7 +212,7 @@ const SPLIT_LITERAL_TERMINALS_TEST_EXPECTED_ENV: &str =
 fn literal_terminal_splitting_env_toggle() {
     if env::var_os(SPLIT_LITERAL_TERMINALS_TEST_CHILD_ENV).is_none() {
         for (setting, expected) in [
-            (None, true),
+            (None, false),
             (Some(""), false),
             (Some("0"), false),
             (Some("false"), false),
