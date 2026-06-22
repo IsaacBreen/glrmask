@@ -160,7 +160,9 @@ impl<'a> Lowerer<'a> {
             JSON_STRING_CHAR_RULE,
             GrammarExpr::RawRegex(value_string_char.to_string()),
         );
-        self.add_terminal_rule(JSON_QUOTE_RULE, lit("\""));
+        if super::split_literal_terminals_enabled() {
+            self.add_terminal_rule(JSON_QUOTE_RULE, lit("\""));
+        }
         self.add_terminal_rule(
             JSON_STRING_RULE,
             quoted_repeated_char_rule_expr(JSON_STRING_CHAR_RULE),
@@ -195,7 +197,9 @@ impl<'a> Lowerer<'a> {
             JSON_KEY_SEPARATOR_RULE,
             GrammarExpr::RawRegex(self.separator_regex(":")),
         );
-        self.add_terminal_rule(JSON_KEY_SUFFIX_RULE, lit("\": "));
+        if super::split_literal_terminals_enabled() {
+            self.add_terminal_rule(JSON_KEY_SUFFIX_RULE, lit("\": "));
+        }
         self.add_terminal_rule(
             JSON_INTEGER_RULE,
             GrammarExpr::RawRegex(r#"-?(0|[1-9][0-9]*)"#.to_string()),

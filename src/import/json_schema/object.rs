@@ -12,6 +12,7 @@ use super::combinators::{
     try_merge_all_of_objects,
 };
 use super::error::{ImportResult, SchemaImportError};
+use super::split_literal_terminals_enabled;
 use super::lower::{
     choice, lit, lit_bytes, never, normalize_local_ref, r, seq, Lowerer, JSON_ARRAY_RULE,
     json_key_string_rule,
@@ -2505,6 +2506,10 @@ impl<'a> Lowerer<'a> {
     }
 
     fn expand_structured_literal_key_paths(symbols: Vec<GrammarExpr>) -> Vec<Vec<GrammarExpr>> {
+        if !split_literal_terminals_enabled() {
+            return vec![symbols];
+        }
+
         let mut paths = vec![Vec::new()];
         for symbol in symbols {
             let symbol_paths = Self::structured_literal_key_symbol_paths(symbol.clone())

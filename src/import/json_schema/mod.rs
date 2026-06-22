@@ -178,6 +178,27 @@ pub(crate) fn lower_exact_subtractions_enabled() -> bool {
     }
 }
 
+/// Split fixed JSON literal terminals at shared structural boundaries. Default ON.
+///
+/// Set `GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS=0` (or false/no/off/empty)
+/// to restore the previous fused key and string-literal terminals.
+pub(crate) const GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS_ENV: &str =
+    "GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS";
+
+pub(crate) fn split_literal_terminals_enabled() -> bool {
+    match env::var(GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS_ENV) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            !trimmed.is_empty()
+                && !matches!(
+                    trimmed.to_ascii_lowercase().as_str(),
+                    "0" | "false" | "no" | "off"
+                )
+        }
+        Err(_) => true,
+    }
+}
+
 /// Fold additional-property excluded-key add-backs into the shared terminal
 /// instead of emitting one parser alternative per excluded key. Default ON.
 /// Disable with GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK=0 (or false/no/off/empty).
