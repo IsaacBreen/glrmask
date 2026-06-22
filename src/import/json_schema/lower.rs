@@ -19,6 +19,7 @@ pub(crate) const JSON_VALUE_RULE: &str = "json_value";
 pub(crate) const JSON_OBJECT_RULE: &str = "json_object";
 pub(crate) const JSON_ARRAY_RULE: &str = "json_array";
 pub(crate) const JSON_STRING_RULE: &str = "JSON_STRING";
+pub(crate) const JSON_QUOTE_RULE: &str = "JSON_QUOTE";
 pub(crate) const JSON_KEY_STRING_RULE: &str = "JSON_KEY_STRING";
 pub(crate) const JSON_ADDITIONAL_KEY_STRING_RULE: &str = "JSON_ADDITIONAL_KEY_STRING";
 pub(crate) const JSON_STRING_CHAR_RULE: &str = "JSON_STRING_CHAR";
@@ -27,6 +28,7 @@ pub(crate) const JSON_KEY_STRING_CHAR_RULE: &str = "JSON_KEY_STRING_CHAR";
 pub(crate) const JSON_ADDITIONAL_KEY_STRING_CHAR_RULE: &str = "JSON_ADDITIONAL_KEY_STRING_CHAR";
 pub(crate) const JSON_ITEM_SEPARATOR_RULE: &str = "JSON_ITEM_SEPARATOR";
 pub(crate) const JSON_KEY_SEPARATOR_RULE: &str = "JSON_KEY_SEPARATOR";
+pub(crate) const JSON_KEY_SUFFIX_RULE: &str = "JSON_KEY_SUFFIX";
 pub(crate) const JSON_INTEGER_RULE: &str = "JSON_INTEGER";
 pub(crate) const JSON_NUMBER_RULE: &str = "JSON_NUMBER";
 pub(crate) const JSON_BOOL_RULE: &str = "JSON_BOOL";
@@ -158,6 +160,7 @@ impl<'a> Lowerer<'a> {
             JSON_STRING_CHAR_RULE,
             GrammarExpr::RawRegex(value_string_char.to_string()),
         );
+        self.add_terminal_rule(JSON_QUOTE_RULE, lit("\""));
         self.add_terminal_rule(
             JSON_STRING_RULE,
             quoted_repeated_char_rule_expr(JSON_STRING_CHAR_RULE),
@@ -192,6 +195,7 @@ impl<'a> Lowerer<'a> {
             JSON_KEY_SEPARATOR_RULE,
             GrammarExpr::RawRegex(self.separator_regex(":")),
         );
+        self.add_terminal_rule(JSON_KEY_SUFFIX_RULE, lit("\": "));
         self.add_terminal_rule(
             JSON_INTEGER_RULE,
             GrammarExpr::RawRegex(r#"-?(0|[1-9][0-9]*)"#.to_string()),

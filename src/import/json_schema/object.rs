@@ -18,7 +18,7 @@ use super::lower::{
     JSON_BOOL_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
     JSON_ADDITIONAL_KEY_COLON_SHARED_RULE, JSON_NULL_RULE,
-    JSON_KEY_SEPARATOR_RULE,
+    JSON_KEY_SEPARATOR_RULE, JSON_KEY_SUFFIX_RULE, JSON_QUOTE_RULE,
     JSON_NUMBER_RULE, JSON_OBJECT_RULE, JSON_STRING_RULE, JSON_VALUE_RULE,
 };
 use super::string::property_name_matches_pattern;
@@ -1369,14 +1369,16 @@ impl<'a> Lowerer<'a> {
             return;
         }
 
-        let mut current = from;
-        let last = symbols.len() - 1;
-        for (index, symbol) in symbols.into_iter().enumerate() {
-            let next = if index == last { to } else { builder.add_state() };
-            for transition_symbol in Self::split_additional_key_colon_transition(symbol) {
-                builder.add_transition(current, transition_symbol, next);
+        for symbols in Self::expand_structured_literal_key_paths(symbols) {
+            let mut current = from;
+            let last = symbols.len() - 1;
+            for (index, symbol) in symbols.into_iter().enumerate() {
+                let next = if index == last { to } else { builder.add_state() };
+                for transition_symbol in Self::split_additional_key_colon_transition(symbol) {
+                    builder.add_transition(current, transition_symbol, next);
+                }
+                current = next;
             }
-            current = next;
         }
     }
 
@@ -2444,7 +2446,100 @@ impl<'a> Lowerer<'a> {
         Ok(seq(vec![lit("{"), r(&rule_name), lit("}")]))
     }
 
+    fn is_structured_literal_key_symbol(symbol: &GrammarExpr) -> bool {
+        fn contains_ref(expr: &GrammarExpr, wanted: &str) -> bool {
+            match expr {
+                GrammarExpr::Ref(name) => name == wanted,
+                GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+                    parts.iter().any(|part| contains_ref(part, wanted))
+                }
+                GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+                    contains_ref(inner, wanted)
+                }
+                _ => false,
+            }
+        }
+
+        contains_ref(symbol, JSON_QUOTE_RULE) && contains_ref(symbol, JSON_KEY_SUFFIX_RULE)
+    }
+
+    /// Expand a grammar symbol that contains a literal object-key path into
+    /// grammar-visible terminal paths.  A `Choice` must be expanded path-wise:
+    /// treating a choice of `"key": value` sequences as one ExprNFA symbol
+    /// would silently reintroduce a unique terminal for every property.
+    fn structured_literal_key_symbol_paths(symbol: GrammarExpr) -> Option<Vec<Vec<GrammarExpr>>> {
+        if !Self::is_structured_literal_key_symbol(&symbol) {
+            return None;
+        }
+
+        match symbol {
+            GrammarExpr::Sequence(parts) => {
+                let mut paths = vec![Vec::new()];
+                for part in parts {
+                    let part_paths = Self::structured_literal_key_symbol_paths(part.clone())
+                        .unwrap_or_else(|| vec![vec![part]]);
+                    let mut combined = Vec::with_capacity(paths.len() * part_paths.len());
+                    for path in paths {
+                        for part_path in &part_paths {
+                            let mut full_path = path.clone();
+                            full_path.extend(part_path.iter().cloned());
+                            combined.push(full_path);
+                        }
+                    }
+                    paths = combined;
+                }
+                Some(paths)
+            }
+            GrammarExpr::Choice(alternatives) => {
+                let mut paths = Vec::new();
+                for alternative in alternatives {
+                    paths.extend(
+                        Self::structured_literal_key_symbol_paths(alternative.clone())
+                            .unwrap_or_else(|| vec![vec![alternative]]),
+                    );
+                }
+                Some(paths)
+            }
+            other => Some(vec![vec![other]]),
+        }
+    }
+
+    fn expand_structured_literal_key_paths(symbols: Vec<GrammarExpr>) -> Vec<Vec<GrammarExpr>> {
+        let mut paths = vec![Vec::new()];
+        for symbol in symbols {
+            let symbol_paths = Self::structured_literal_key_symbol_paths(symbol.clone())
+                .unwrap_or_else(|| vec![vec![symbol]]);
+            let mut combined = Vec::with_capacity(paths.len() * symbol_paths.len());
+            for path in paths {
+                for symbol_path in &symbol_paths {
+                    let mut full_path = path.clone();
+                    full_path.extend(symbol_path.iter().cloned());
+                    combined.push(full_path);
+                }
+            }
+            paths = combined;
+        }
+        paths
+    }
+
+    fn flatten_structured_literal_key_parts(symbol: GrammarExpr, out: &mut Vec<GrammarExpr>) {
+        match symbol {
+            GrammarExpr::Sequence(parts) => {
+                for part in parts {
+                    Self::flatten_structured_literal_key_parts(part, out);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+
     fn split_literal_key_symbol(symbol: GrammarExpr) -> Vec<GrammarExpr> {
+        if Self::is_structured_literal_key_symbol(&symbol) {
+            let mut symbols = Vec::new();
+            Self::flatten_structured_literal_key_parts(symbol, &mut symbols);
+            return symbols;
+        }
+
         match symbol {
             GrammarExpr::Literal(bytes) if bytes.len() > 1 => {
                 let split_len = LARGE_OBJECT_KEY_TRIE_PREFIX_SPLIT_BYTES.min(bytes.len());
