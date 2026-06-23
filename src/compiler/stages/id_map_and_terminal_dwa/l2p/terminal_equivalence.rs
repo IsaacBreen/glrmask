@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
+use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHasher};
@@ -55,6 +56,15 @@ pub(crate) struct TerminalEquivalenceProfile {
     pub(crate) active_bytes: usize,
     pub(crate) expanded_transition_copies: usize,
     pub(crate) root_source_maps: usize,
+    pub(crate) coarse_tsids: usize,
+    pub(crate) expanded_tsids: usize,
+    pub(crate) tsid_weight_remap_ms: f64,
+}
+
+#[derive(Clone, Debug)]
+struct ConcreteTsidRefinement {
+    refined_map: ManyToOneIdMap,
+    coarse_to_refined: Vec<Vec<u32>>,
 }
 
 impl TerminalEquivalence {
@@ -332,13 +342,14 @@ impl TerminalEquivalence {
         &self.active_representatives
     }
 
-    /// Restore member distinctions in a class-level TSID map.  The result is
-    /// a refinement of `coarse`: it can split a class-level TSID but cannot
-    /// merge states from different class-level TSIDs.
-    pub(crate) fn split_tsid_map_for_member_expansion(
+    /// Split a class-level TSID only where concrete terminal residuals differ.
+    /// This is intentionally deferred until terminal-class expansion: the raw
+    /// NWA and its determinization operate entirely over the smaller coarse
+    /// class partition.
+    fn refine_tsids_for_concrete_expansion(
         &self,
         coarse: &ManyToOneIdMap,
-    ) -> ManyToOneIdMap {
+    ) -> ConcreteTsidRefinement {
         let state_count = coarse.original_to_internal.len();
         let mut signatures = vec![Vec::<(TerminalID, u32)>::new(); state_count];
         for terminal in 0..self.representative_for_terminal.len() {
@@ -349,7 +360,7 @@ impl TerminalEquivalence {
                 let state = state as usize;
                 assert!(
                     state < state_count,
-                    "terminal residual state exceeds class-level TSID domain",
+                    "terminal residual state exceeds TSID domain",
                 );
                 signatures[state].push((terminal as TerminalID, block));
             }
@@ -357,8 +368,10 @@ impl TerminalEquivalence {
 
         let mut original_to_internal = vec![u32::MAX; state_count];
         let mut representatives = Vec::new();
+        let mut coarse_to_refined = vec![Vec::new(); coarse.num_internal_ids() as usize];
         let mut next_internal = 0u32;
-        for originals in &coarse.internal_to_originals {
+
+        for (coarse_tsid, originals) in coarse.internal_to_originals.iter().enumerate() {
             let mut splits = BTreeMap::<Vec<(TerminalID, u32)>, u32>::new();
             for &state in originals {
                 let state = state as usize;
@@ -368,6 +381,7 @@ impl TerminalEquivalence {
                         let internal = next_internal;
                         next_internal += 1;
                         representatives.push(state as u32);
+                        coarse_to_refined[coarse_tsid].push(internal);
                         entry.insert(internal);
                         internal
                     }
@@ -376,12 +390,12 @@ impl TerminalEquivalence {
             }
         }
 
-        let refined = ManyToOneIdMap::from_original_to_internal_with_representatives(
+        let refined_map = ManyToOneIdMap::from_original_to_internal_with_representatives(
             original_to_internal,
             next_internal,
             representatives,
         );
-        debug_assert!(refined.internal_to_originals.iter().all(|states| {
+        debug_assert!(refined_map.internal_to_originals.iter().all(|states| {
             let mut coarse_tsid = None;
             states.iter().all(|&state| {
                 let current = coarse.original_to_internal[state as usize];
@@ -394,7 +408,58 @@ impl TerminalEquivalence {
                 }
             })
         }));
-        refined
+        ConcreteTsidRefinement {
+            refined_map,
+            coarse_to_refined,
+        }
+    }
+
+    fn lift_weight_to_concrete_tsids(
+        weight: &Weight,
+        coarse_to_refined: &[Vec<u32>],
+    ) -> Weight {
+        if weight.is_empty() || weight.is_full() {
+            return weight.clone();
+        }
+
+        let mut entries = Vec::new();
+        for (start, end, tokens) in weight
+            .compact_entries()
+            .expect("non-full weight must expose compact entries")
+        {
+            let start = start as usize;
+            let end = end as usize;
+            assert!(
+                end < coarse_to_refined.len(),
+                "weight TSID lies outside coarse terminal-class partition",
+            );
+            for refined_ids in &coarse_to_refined[start..=end] {
+                entries.extend(refined_ids.iter().map(|&tsid| (tsid, tokens.clone())));
+            }
+        }
+        Weight::from_per_tsid_shared(entries)
+    }
+
+    fn lift_dwa_weights_to_concrete_tsids(
+        dwa: &mut DWA,
+        coarse_to_refined: &[Vec<u32>],
+    ) {
+        let mut cache = FxHashMap::<usize, Weight>::default();
+        let mut lift = |weight: &Weight| {
+            cache
+                .entry(weight.ptr_key())
+                .or_insert_with(|| Self::lift_weight_to_concrete_tsids(weight, coarse_to_refined))
+                .clone()
+        };
+
+        for state in dwa.states_mut() {
+            if let Some(final_weight) = &mut state.final_weight {
+                *final_weight = lift(final_weight);
+            }
+            for (_, weight) in state.transitions.values_mut() {
+                *weight = lift(weight);
+            }
+        }
     }
 
     /// Maps each real terminal to the class label emitted during raw NWA
@@ -487,6 +552,7 @@ impl TerminalEquivalence {
             active_bytes: self.active_byte_count,
             expanded_transition_copies: 0,
             root_source_maps: 0,
+            ..TerminalEquivalenceProfile::default()
         }
     }
 
@@ -494,11 +560,14 @@ impl TerminalEquivalence {
     /// continuation terminals; `first_label_offset + class` labels are first
     /// terminals and are restricted to each member's live source-TSID domain.
     pub(crate) fn expand_class_dwa(
-        &self,
+        &mut self,
         dwa: &mut DWA,
         class_label_offset: u32,
         first_label_offset: u32,
-    ) -> TerminalEquivalenceProfile {
+        coarse_tsid_map: &ManyToOneIdMap,
+        initial_state: u32,
+        refine_class_state_map: bool,
+    ) -> (TerminalEquivalenceProfile, ManyToOneIdMap) {
         let mut profile = TerminalEquivalenceProfile {
             active_terminals: self.active_terminal_count,
             classes: self.class_count,
@@ -509,8 +578,22 @@ impl TerminalEquivalence {
             ..TerminalEquivalenceProfile::default()
         };
         if self.is_identity() {
-            return profile;
+            return (profile, coarse_tsid_map.clone());
         }
+
+        profile.coarse_tsids = coarse_tsid_map.num_internal_ids() as usize;
+        let expanded_tsid_map = if refine_class_state_map {
+            let refinement = self.refine_tsids_for_concrete_expansion(coarse_tsid_map);
+            profile.expanded_tsids = refinement.refined_map.num_internal_ids() as usize;
+            let remap_started_at = Instant::now();
+            Self::lift_dwa_weights_to_concrete_tsids(dwa, &refinement.coarse_to_refined);
+            profile.tsid_weight_remap_ms = remap_started_at.elapsed().as_secs_f64() * 1000.0;
+            refinement.refined_map
+        } else {
+            profile.expanded_tsids = profile.coarse_tsids;
+            coarse_tsid_map.clone()
+        };
+        self.refine_for_tsid_map(&expanded_tsid_map, initial_state);
 
         let all_tokens: RangeSetBlaze<u32> = std::iter::once(0..=u32::MAX).collect();
         let member_domain_weights = self
@@ -587,7 +670,7 @@ impl TerminalEquivalence {
                 })
             });
         }
-        profile
+        (profile, expanded_tsid_map)
     }
 
     fn block_for(&self, terminal: TerminalID, state: u32) -> u32 {
@@ -820,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn member_expansion_splits_a_class_only_tsid() {
+    fn deferred_concrete_tsid_refinement_lifts_coarse_weights() {
         let expressions = vec![Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"b".to_vec())];
         let tokenizer = build_regex(&expressions).into_tokenizer(
             expressions.len() as u32,
@@ -834,22 +917,33 @@ mod tests {
         let start = tokenizer.initial_state_id() as usize;
         let a_state = tokenizer.get_transition(tokenizer.initial_state_id(), b'a') as usize;
         let b_state = tokenizer.get_transition(tokenizer.initial_state_id(), b'b') as usize;
-        let mut coarse = vec![1u32; tokenizer.num_states() as usize];
-        coarse[start] = 0;
+        let mut coarse_ids = vec![1u32; tokenizer.num_states() as usize];
+        coarse_ids[start] = 0;
         let coarse = ManyToOneIdMap::from_original_to_internal_with_representatives(
-            coarse,
+            coarse_ids,
             2,
             vec![start as u32, a_state as u32],
         );
 
-        let split = equivalence.split_tsid_map_for_member_expansion(&coarse);
-        assert!(split.num_internal_ids() > coarse.num_internal_ids());
+        let refinement = equivalence.refine_tsids_for_concrete_expansion(&coarse);
+        assert!(refinement.refined_map.num_internal_ids() > coarse.num_internal_ids());
         assert_ne!(
-            split.original_to_internal[a_state],
-            split.original_to_internal[b_state],
-            "states accepting different concrete members cannot retain a class-only TSID merge",
+            refinement.refined_map.original_to_internal[a_state],
+            refinement.refined_map.original_to_internal[b_state],
         );
+
+        let token_set: RangeSetBlaze<u32> = std::iter::once(7..=7).collect();
+        let coarse_weight = Weight::from_token_set_for_tsid(1, token_set);
+        let lifted = TerminalEquivalence::lift_weight_to_concrete_tsids(
+            &coarse_weight,
+            &refinement.coarse_to_refined,
+        );
+        for &refined_tsid in &refinement.coarse_to_refined[1] {
+            assert!(lifted.tokens_for_tsid(refined_tsid).contains(7));
+        }
+        assert!(lifted.tokens_for_tsid(refinement.coarse_to_refined[0][0]).is_empty());
     }
+
 }
 
 #[cfg(test)]

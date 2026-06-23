@@ -1,9 +1,11 @@
 //! Runtime-facing tokenizer API built on top of the lexer DFA.
 
 use std::collections::BTreeSet;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHasher};
+use smallvec::SmallVec;
 use serde::{Deserialize, Serialize};
 
 use super::dfa::DFA;
@@ -613,6 +615,111 @@ impl Tokenizer {
         )
     }
 
+    /// Exact DFA quotient under the language observable through `active_groups`.
+    ///
+    /// This deliberately differs from `simplify_for_terminals`: it does not
+    /// prune bytes or dead continuations and it never uses the near-minimal
+    /// shortcut. It is exactly the quotient obtained by clearing inactive
+    /// finalizer bits and minimizing the full byte DFA while retaining a map
+    /// for every original lexer state.
+    pub(crate) fn minimize_for_active_finalizers(
+        &self,
+        active_groups: Option<&[bool]>,
+    ) -> ManyToOneIdMap {
+        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+        let started_at = profile_enabled.then(std::time::Instant::now);
+        let num_states = self.num_states() as usize;
+        if num_states == 0 {
+            return ManyToOneIdMap::from_original_to_internal_allowing_unmapped(Vec::new(), 0);
+        }
+
+        let active_mask = active_groups.map(|active_groups| {
+            let mut active = BitSet::new(self.dfa.num_groups());
+            for (group, &is_active) in active_groups.iter().enumerate() {
+                if is_active && group < self.dfa.num_groups() {
+                    active.set(group);
+                }
+            }
+            active
+        });
+
+        let mut finalizer_to_block = FxHashMap::<BitSet, u32>::default();
+        let mut blocks = vec![0u32; num_states];
+        let mut block_count = 0u32;
+        for (state_id, state) in self.dfa.states().iter().enumerate() {
+            let mut finalizers = state.finalizers.clone();
+            if let Some(active_mask) = &active_mask {
+                finalizers.intersect_with(active_mask);
+            }
+            let block = *finalizer_to_block.entry(finalizers).or_insert_with(|| {
+                let block = block_count;
+                block_count += 1;
+                block
+            });
+            blocks[state_id] = block;
+        }
+
+        let mut iterations = 0usize;
+        loop {
+            let mut next_blocks = vec![0u32; num_states];
+            let mut buckets = FxHashMap::<u64, SmallVec<[(usize, u32); 1]>>::default();
+            let mut next_block_count = 0u32;
+
+            for state_id in 0..num_states {
+                let transitions = &self.dfa.states()[state_id].transitions;
+                let mut hasher = FxHasher::default();
+                blocks[state_id].hash(&mut hasher);
+                transitions.len().hash(&mut hasher);
+                for (byte, &target) in transitions.iter() {
+                    byte.hash(&mut hasher);
+                    blocks[target as usize].hash(&mut hasher);
+                }
+                let candidates = buckets.entry(hasher.finish()).or_default();
+                let block = candidates
+                    .iter()
+                    .find_map(|&(representative, block)| {
+                        active_finalizer_refinement_rows_equal(
+                            &self.dfa,
+                            state_id,
+                            representative,
+                            &blocks,
+                        )
+                        .then_some(block)
+                    })
+                    .unwrap_or_else(|| {
+                        let block = next_block_count;
+                        next_block_count += 1;
+                        candidates.push((state_id, block));
+                        block
+                    });
+                next_blocks[state_id] = block;
+            }
+
+            iterations += 1;
+            if next_block_count == block_count {
+                blocks = next_blocks;
+                break;
+            }
+            blocks = next_blocks;
+            block_count = next_block_count;
+        }
+
+        if let Some(started_at) = started_at {
+            eprintln!(
+                "[glrmask/profile][active_finalizer_dfa_minimize] states={} active_groups={} initial_blocks={} final_blocks={} iterations={} total_ms={:.3}",
+                num_states,
+                active_groups.map_or(self.dfa.num_groups(), |groups| groups.iter().filter(|&&active| active).count()),
+                finalizer_to_block.len(),
+                block_count,
+                iterations,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+
+        ManyToOneIdMap::from_original_to_internal_allowing_unmapped(blocks, block_count)
+    }
+
     /// Relabel terminal finalizer/future observations without changing the
     /// state graph. Every concrete member remains live, but is observed as its
     /// terminal-class representative by the class-level state analysis.
@@ -666,78 +773,29 @@ impl Tokenizer {
         dfa
     }
 
-    /// Materialize a tokenizer over the classes in `state_map`.  The caller
-    /// must ensure that all members of each class agree on the token bytes it
-    /// will later query.  State zero in the result is the class containing the
-    /// original lexer start state.
-    pub(crate) fn quotient_for_state_map(
-        &self,
-        state_map: &ManyToOneIdMap,
-    ) -> (Tokenizer, ManyToOneIdMap) {
-        assert_eq!(
-            state_map.original_to_internal.len(),
-            self.num_states() as usize,
-            "state quotient must cover every tokenizer state",
-        );
-        let old_start = state_map.original_to_internal[self.start_state() as usize];
-        assert_ne!(old_start, u32::MAX, "tokenizer start state must be mapped");
+}
 
-        let old_count = state_map.num_internal_ids() as usize;
-        let mut old_to_new = vec![u32::MAX; old_count];
-        old_to_new[old_start as usize] = 0;
-        let mut next = 1u32;
-        for old in 0..old_count {
-            if old_to_new[old] == u32::MAX {
-                old_to_new[old] = next;
-                next += 1;
-            }
-        }
 
-        let mut dfa = DFA::new(old_count);
-        let num_groups = self.num_terminals as usize;
-        dfa.ensure_group_capacity(num_groups);
-        for group in 0..num_groups {
-            dfa.set_group_u8set(group as u32, *self.dfa.group_id_to_u8set(group as u32));
-        }
-
-        let mut new_representatives = vec![u32::MAX; old_count];
-        for old in 0..old_count {
-            let new = old_to_new[old] as usize;
-            let representative = state_map.representative_original_ids[old];
-            assert_ne!(representative, u32::MAX, "state quotient class lacks a representative");
-            new_representatives[new] = representative;
-
-            for (byte, target) in self.transitions_from(representative) {
-                let target_class = state_map.original_to_internal[target as usize];
-                assert_ne!(target_class, u32::MAX, "state quotient transition leaves mapped domain");
-                dfa.add_transition(new as u32, byte, old_to_new[target_class as usize]);
-            }
-            dfa.overwrite_state_metadata(
-                new as u32,
-                self.matched_terminal_bitset(representative).clone(),
-                self.possible_future_terminals(representative).clone(),
-            );
-        }
-
-        let remapped_original_to_internal = state_map
-            .original_to_internal
-            .iter()
-            .map(|&old| if old == u32::MAX { u32::MAX } else { old_to_new[old as usize] })
-            .collect();
-        let remapped_map = ManyToOneIdMap::from_original_to_internal_with_representatives(
-            remapped_original_to_internal,
-            next,
-            new_representatives,
-        );
-        (
-            Tokenizer {
-                dfa,
-                num_terminals: self.num_terminals,
-                exprs: self.exprs.clone(),
-            },
-            remapped_map,
-        )
+fn active_finalizer_refinement_rows_equal(
+    dfa: &DFA,
+    left: usize,
+    right: usize,
+    blocks: &[u32],
+) -> bool {
+    if blocks[left] != blocks[right] {
+        return false;
     }
+    let left_transitions = &dfa.states()[left].transitions;
+    let right_transitions = &dfa.states()[right].transitions;
+    if left_transitions.len() != right_transitions.len() {
+        return false;
+    }
+    left_transitions
+        .iter()
+        .zip(right_transitions.iter())
+        .all(|((left_byte, &left_target), (right_byte, &right_target))| {
+            left_byte == right_byte && blocks[left_target as usize] == blocks[right_target as usize]
+        })
 }
 
 impl Lexer for Tokenizer {
@@ -773,4 +831,48 @@ impl Lexer for Tokenizer {
 pub struct TokenizerResult {
     pub end_state: u32,
     pub matches: Vec<(usize, BTreeSet<TerminalID>)>,
+}
+
+#[cfg(test)]
+mod active_finalizer_minimization_tests {
+    use super::*;
+    use crate::automata::lexer::compile::build_regex;
+
+    #[test]
+    fn active_finalizer_refinement_matches_full_dfa_minimization() {
+        let expressions = vec![
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"ac".to_vec()),
+            Expr::U8Seq(b"ba".to_vec()),
+            Expr::U8Seq(b"bb".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let active = [true, false, true, false];
+        let actual = tokenizer.minimize_for_active_finalizers(Some(&active));
+
+        let mut expected_dfa = tokenizer.dfa.clone();
+        let mut active_mask = BitSet::new(expected_dfa.num_groups());
+        for (group, &is_active) in active.iter().enumerate() {
+            if is_active {
+                active_mask.set(group);
+            }
+        }
+        for state in expected_dfa.states_mut() {
+            state.finalizers.intersect_with(&active_mask);
+        }
+        let expected = expected_dfa.minimize_state_mapping_preserve_all_states();
+
+        for left in 0..expected.len() {
+            for right in 0..expected.len() {
+                assert_eq!(
+                    actual.original_to_internal[left] == actual.original_to_internal[right],
+                    expected[left] == expected[right],
+                    "partition mismatch for states {left} and {right}",
+                );
+            }
+        }
+    }
 }

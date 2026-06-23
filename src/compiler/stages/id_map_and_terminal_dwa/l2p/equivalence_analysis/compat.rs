@@ -4,6 +4,7 @@ use crate::automata::lexer::Lexer;
 use std::sync::Arc;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
 fn build_transition_table(
     transitions: impl Iterator<Item = (u8, u32)>,
@@ -181,6 +182,63 @@ impl FlatDfa {
         }
     }
 
+    /// Materialize the transition quotient induced by `state_map`. Every row
+    /// is read from that TSID's chosen original representative and every target
+    /// is immediately mapped back to its destination TSID. This is the view
+    /// required by later state-equivalence passes: they must traverse the
+    /// current quotient rather than silently re-enter the raw lexer graph.
+    pub fn from_tokenizer_tsid_quotient(
+        tokenizer: &Tokenizer,
+        state_map: &ManyToOneIdMap,
+        active_groups: Option<&[bool]>,
+    ) -> Self {
+        let num_states = state_map.num_internal_ids() as usize;
+        let mut transitions = vec![u32::MAX; num_states * 256];
+        let states = (0..num_states)
+            .map(|tsid| {
+                let representative = state_map.representative_original_ids[tsid];
+                assert_ne!(representative, u32::MAX, "TSID quotient has no representative");
+                let base = tsid * 256;
+                for byte in 0..=u8::MAX {
+                    let target = tokenizer.get_transition(representative, byte);
+                    if target != u32::MAX {
+                        let mapped = state_map.original_to_internal[target as usize];
+                        assert_ne!(mapped, u32::MAX, "TSID quotient transition leaves mapped domain");
+                        transitions[base + byte as usize] = mapped;
+                    }
+                }
+
+                let finalizers = match active_groups {
+                    Some(active_groups) => collect_filtered_group_ids(
+                        tokenizer.matched_terminals_iter(representative),
+                        active_groups,
+                    ),
+                    None => collect_group_ids(tokenizer.matched_terminals_iter(representative)),
+                };
+                let possible_future_group_ids = match active_groups {
+                    Some(active_groups) => collect_filtered_group_ids(
+                        tokenizer.possible_future_terminals_iter(representative),
+                        active_groups,
+                    ),
+                    None => collect_group_ids(
+                        tokenizer.possible_future_terminals_iter(representative),
+                    ),
+                };
+                FlatDfaState {
+                    finalizers,
+                    possible_future_group_ids,
+                }
+            })
+            .collect();
+        let start_state = state_map.original_to_internal[tokenizer.start_state() as usize] as usize;
+        assert_ne!(start_state, u32::MAX as usize, "tokenizer start state is unmapped");
+        FlatDfa {
+            states,
+            start_state,
+            transitions: Arc::from(transitions),
+        }
+    }
+
     /// Build a FlatDfa using a pre-built flat transition table, sharing the
     /// transition data via Arc. Copies all finalizers/futures without filtering.
     pub fn from_flat_trans(
@@ -251,6 +309,18 @@ impl TokenizerView {
     pub fn new_filtered(tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
         TokenizerView {
             flat_dfa: FlatDfa::from_tokenizer_filtered(tokenizer, active_groups),
+        }
+    }
+
+    /// A quotient view over an existing TSID map. Subsequent equivalence
+    /// refinement sees destination TSIDs, not raw destination states.
+    pub fn new_tsid_quotient(
+        tokenizer: &Tokenizer,
+        state_map: &ManyToOneIdMap,
+        active_groups: Option<&[bool]>,
+    ) -> Self {
+        TokenizerView {
+            flat_dfa: FlatDfa::from_tokenizer_tsid_quotient(tokenizer, state_map, active_groups),
         }
     }
 

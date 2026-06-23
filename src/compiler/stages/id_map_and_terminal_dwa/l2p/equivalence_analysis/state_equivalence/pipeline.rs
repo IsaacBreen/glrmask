@@ -5,20 +5,22 @@ use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
-use super::identity_state_map;
+use super::{build_state_map_from_subset_representatives, identity_state_map};
 use super::max_length::{self, MaxLengthMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StateEquivalencePassKind {
+    ActiveDfaMinimize,
     MaxLength,
 }
 
 impl StateEquivalencePassKind {
     fn parse(value: &str) -> Result<Self, String> {
         match value.trim() {
+            "active_dfa_minimize" => Ok(Self::ActiveDfaMinimize),
             "max_length" => Ok(Self::MaxLength),
             other => Err(format!(
-                "unknown state-equivalence pass `{other}`; expected one of: max_length"
+                "unknown state-equivalence pass `{other}`; expected one of: active_dfa_minimize, max_length"
             )),
         }
     }
@@ -47,6 +49,8 @@ pub(crate) struct StateEquivalencePassProfile {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct StateEquivalencePipelineProfile {
     pub pass_profiles: Vec<StateEquivalencePassProfile>,
+    pub active_dfa_minimize_ms: f64,
+    pub active_dfa_minimize_reps: usize,
     pub max_length_skipped: bool,
     pub max_length_state_equiv_ms: f64,
     pub max_length_reps: usize,
@@ -95,7 +99,10 @@ pub(crate) fn resolve_l2p_pipeline_config(
     default_include_max_length: bool,
 ) -> StateEquivalencePipelineConfig {
     let default_passes = if default_include_max_length {
-        &[StateEquivalencePassKind::MaxLength][..]
+        &[
+            StateEquivalencePassKind::ActiveDfaMinimize,
+            StateEquivalencePassKind::MaxLength,
+        ][..]
     } else {
         &[][..]
     };
@@ -124,6 +131,24 @@ pub(crate) fn run_state_equivalence_pipeline(
 
     for kind in &config.passes {
         match *kind {
+            StateEquivalencePassKind::ActiveDfaMinimize => {
+                let started_at = Instant::now();
+                current_state_map = minimize_active_dfa_from_current_map(
+                    tokenizer,
+                    &current_state_map,
+                    active_groups,
+                );
+                let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+                profile.active_dfa_minimize_ms = elapsed_ms;
+                profile.active_dfa_minimize_reps = current_state_map.num_internal_ids() as usize;
+                profile.pass_profiles.push(StateEquivalencePassProfile {
+                    kind: *kind,
+                    name: "active_dfa_minimize",
+                    elapsed_ms,
+                    representative_count: current_state_map.num_internal_ids() as usize,
+                    skipped: false,
+                });
+            }
             StateEquivalencePassKind::MaxLength => {
                 let mode = match scope {
                     StateEquivalenceScope::Global => MaxLengthMode::StableByteRestricted,
@@ -150,6 +175,34 @@ pub(crate) fn run_state_equivalence_pipeline(
     }
 
     (current_state_map, profile)
+}
+
+fn minimize_active_dfa_from_current_map(
+    tokenizer: &Tokenizer,
+    current_state_map: &ManyToOneIdMap,
+    active_groups: Option<&[bool]>,
+) -> ManyToOneIdMap {
+    let raw_minimized = tokenizer.minimize_for_active_finalizers(active_groups);
+    let mut states = Vec::with_capacity(current_state_map.num_internal_ids() as usize);
+    let mut representatives = Vec::with_capacity(current_state_map.num_internal_ids() as usize);
+
+    for state in current_state_map.iter_representative_ids() {
+        if state == u32::MAX {
+            continue;
+        }
+        let raw_internal = raw_minimized.original_to_internal[state as usize];
+        assert_ne!(raw_internal, u32::MAX, "full DFA minimizer dropped a preserved state");
+        let raw_representative = raw_minimized.representative_original_ids[raw_internal as usize];
+        states.push(state as usize);
+        representatives.push(raw_representative as usize);
+    }
+
+    build_state_map_from_subset_representatives(
+        &states,
+        &representatives,
+        tokenizer.num_states() as usize,
+        Some(current_state_map),
+    )
 }
 
 fn record_max_length_profile(

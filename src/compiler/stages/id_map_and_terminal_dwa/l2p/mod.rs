@@ -191,6 +191,20 @@ fn l2p_terminal_class_id_map_worthwhile(active_terminals: usize, quotient_hits: 
     quotient_hits.saturating_mul(8) >= active_terminals
 }
 
+fn identity_vocab_id_map(vocab: &Vocab) -> ManyToOneIdMap {
+    let mut original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
+    let mut representative_original_ids = Vec::with_capacity(vocab.entries.len());
+    for (&token_id, _) in vocab.entries.iter() {
+        let internal = representative_original_ids.len() as u32;
+        original_to_internal[token_id as usize] = internal;
+        representative_original_ids.push(token_id);
+    }
+    ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+        original_to_internal,
+        representative_original_ids,
+    )
+}
+
 #[derive(Clone, Copy)]
 struct L2PTokenLengthStats {
     max_len: usize,
@@ -527,11 +541,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         );
     }
 
-    // ---- Step 1: class-level then concrete-member equivalence analysis ----
-    // The class route first relabels every active member to its representative
-    // and minimizes that lexer. It never drops member paths. Restoring the
-    // concrete members then splits any class-only TSIDs before the final exact
-    // member-level analysis.
+    // ---- Step 1: class-level equivalence analysis ----
+    // The class route relabels every active member to its representative and
+    // keeps the resulting class-level max-length TSIDs as the final state map.
+    // Concrete terminal labels are restored only on the deterministic DWA.
     let terminal_equivalence_started_at = Instant::now();
     let terminal_equivalence_enabled = l2p_terminal_equivalence_enabled();
     let mut terminal_equivalence = if terminal_equivalence_enabled {
@@ -567,7 +580,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     let id_map_started_at = Instant::now();
     let fast_sound_id_map_used = false;
-    let (simplified_id_map, equiv_profile) = if use_class_id_map {
+    let (mut simplified_id_map, equiv_profile) = if use_class_id_map {
         let class_relabel_started_at = Instant::now();
         let class_tokenizer = tokenizer_for_build.relabel_for_terminal_labels(
             terminal_equivalence.terminal_label_map(),
@@ -590,63 +603,61 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         let class_analysis_ms = class_analysis_started_at.elapsed().as_secs_f64() * 1000.0;
         let coarse_tsid_map = class_tsid_map.fill_unmapped_with_new_class();
 
-        let member_split_started_at = Instant::now();
-        let member_seed_map =
-            terminal_equivalence.split_tsid_map_for_member_expansion(&coarse_tsid_map);
-        let member_split_ms = member_split_started_at.elapsed().as_secs_f64() * 1000.0;
-
-        let member_quotient_started_at = Instant::now();
-        let (member_tokenizer, member_state_map) =
-            tokenizer_for_build.quotient_for_state_map(&member_seed_map);
-        let member_quotient_ms =
-            member_quotient_started_at.elapsed().as_secs_f64() * 1000.0;
-
-        let member_analysis_started_at = Instant::now();
-        let (member_quotient_id_map, member_profile) =
-            equivalence_analysis::combined::analyze_equivalences_with_group_filter_skip_max_length(
-                partition_label,
-                &member_tokenizer,
-                vocab,
-                disallowed_follows,
-                ignore_terminal,
-                Some(active_terminals),
-                None,
-                None,
-                None,
-            );
-        let member_analysis_ms = member_analysis_started_at.elapsed().as_secs_f64() * 1000.0;
-        let member_id_map = InternalIdMap {
-            tokenizer_states: member_state_map
-                .compose(&member_quotient_id_map.tokenizer_states)
-                .fill_unmapped_with_new_class(),
-            vocab_tokens: member_quotient_id_map.vocab_tokens,
+        // The terminal-class route exists to make the state quotient cheap.
+        // Keep token IDs singleton here rather than paying another full
+        // vocabulary-equivalence pass over the unreduced lexer graph.
+        let class_vocab_analysis_ms = 0.0;
+        let token_stats = l2p_token_length_stats(vocab);
+        let class_vocab_profile = equivalence_analysis::combined::CombinedEquivalenceProfile {
+            initial_states_considered: class_tokenizer.num_states() as usize,
+            max_length_skipped: class_profile.max_length_skipped,
+            max_token_len: token_stats.max_len,
+            token_len_gt_4: token_stats.gt_4,
+            token_len_gt_8: token_stats.gt_8,
+            token_len_gt_16: token_stats.gt_16,
+            token_len_gt_32: token_stats.gt_32,
+            token_len_gt_64: token_stats.gt_64,
+            prepare_inputs_ms: 0.0,
+            byte_class_setup_ms: 0.0,
+            token_dedup_ms: 0.0,
+            max_length_state_equiv_ms: class_profile.max_length_state_equiv_ms,
+            vocab_equiv_ms: 0.0,
+            exact_state_equiv_ms: 0.0,
+            id_map_finalize_ms: 0.0,
+            max_length_reps: class_profile.max_length_reps,
+            exact_reps: coarse_tsid_map.num_internal_ids() as usize,
+            exact_rep_confirmation_used: false,
+        };
+        let class_id_map = InternalIdMap {
+            tokenizer_states: coarse_tsid_map,
+            vocab_tokens: identity_vocab_id_map(vocab),
         };
 
         if compile_profile_enabled() {
             eprintln!(
-                "[glrmask/profile][l2p_terminal_class_id_map] partition={} class_tokenizer_states={} class_tsids={} member_seed_tsids={} member_tokenizer_states={} final_tsids={} class_relabel_ms={:.3} class_analysis_ms={:.3} member_split_ms={:.3} member_quotient_ms={:.3} member_analysis_ms={:.3}",
+                "[glrmask/profile][l2p_terminal_class_id_map] partition={} class_tokenizer_states={} class_tsids={} final_tsids={} class_relabel_ms={:.3} class_pipeline_ms={:.3} active_dfa_minimize_ms={:.3} active_dfa_minimize_reps={} max_length_ms={:.3} max_length_reps={} class_vocab_analysis_ms={:.3}",
                 partition_label,
                 class_tokenizer.num_states(),
-                coarse_tsid_map.num_internal_ids(),
-                member_seed_map.num_internal_ids(),
-                member_tokenizer.num_states(),
-                member_id_map.num_tsids(),
+                class_id_map.num_tsids(),
+                class_id_map.num_tsids(),
                 class_relabel_ms,
                 class_analysis_ms,
-                member_split_ms,
-                member_quotient_ms,
-                member_analysis_ms,
+                class_profile.active_dfa_minimize_ms,
+                class_profile.active_dfa_minimize_reps,
+                class_profile.max_length_state_equiv_ms,
+                class_profile.max_length_reps,
+                class_vocab_analysis_ms,
             );
             eprintln!(
-                "[glrmask/profile][l2p_terminal_class_id_map_detail] partition={} class_initial_states={} class_max_length_reps={} member_initial_states={} member_exact_reps={}",
+                "[glrmask/profile][l2p_terminal_class_id_map_detail] partition={} class_initial_states={} class_max_length_reps={} class_vocab_states={} class_vocab_exact_reps={}",
                 partition_label,
                 class_tokenizer.num_states(),
                 class_profile.max_length_reps,
-                member_profile.initial_states_considered,
-                member_profile.exact_reps,
+                class_vocab_profile.initial_states_considered,
+                class_vocab_profile.exact_reps,
             );
         }
-        (member_id_map, member_profile)
+        (class_id_map, class_vocab_profile)
     } else {
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
@@ -662,26 +673,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     };
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let terminal_equivalence_refine_started_at = Instant::now();
-    terminal_equivalence.refine_for_tsid_map(
-        &simplified_id_map.tokenizer_states,
-        tokenizer_for_build.initial_state_id(),
-    );
-    let terminal_equivalence_refine_ms =
-        terminal_equivalence_refine_started_at.elapsed().as_secs_f64() * 1000.0;
-    let composed_tokenizer_states = if use_simplified_tok {
-        simplify_state_map
-            .as_ref()
-            .expect("simplify_state_map missing for simplified tokenizer")
-            .compose(&simplified_id_map.tokenizer_states)
-            .fill_unmapped_with_new_class()
-    } else {
-        simplified_id_map.tokenizer_states.clone()
-    };
     if compile_profile_enabled() {
         let profile = terminal_equivalence.profile();
         eprintln!(
-            "[glrmask/profile][l2p_terminal_equivalence] partition={} enabled={} class_id_map={} active_terminals={} classes={} quotient_hits={} residual_pairs={} residual_blocks={} active_bytes={} classify_ms={:.3} tsid_refine_ms={:.3}",
+            "[glrmask/profile][l2p_terminal_equivalence] partition={} enabled={} class_id_map={} active_terminals={} classes={} quotient_hits={} residual_pairs={} residual_blocks={} active_bytes={} classify_ms={:.3}",
             partition_label,
             terminal_equivalence_enabled,
             use_class_id_map,
@@ -692,7 +687,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             profile.residual_blocks,
             profile.active_bytes,
             terminal_equivalence_ms,
-            terminal_equivalence_refine_ms,
         );
     }
 
@@ -853,22 +847,29 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let terminal_expansion_started_at = Instant::now();
-            let terminal_expansion_profile = if class_quotient_active {
+            let (terminal_expansion_profile, expanded_tsid_map) = if class_quotient_active {
                 terminal_equivalence.expand_class_dwa(
                     &mut det,
                     class_label_offset,
                     first_class_label_offset,
+                    &simplified_id_map.tokenizer_states,
+                    tokenizer_for_build.initial_state_id(),
+                    use_class_id_map,
                 )
             } else {
-                terminal_equivalence.profile()
+                (terminal_equivalence.profile(), simplified_id_map.tokenizer_states.clone())
             };
+            simplified_id_map.tokenizer_states = expanded_tsid_map;
             let terminal_expansion_ms = terminal_expansion_started_at.elapsed().as_secs_f64() * 1000.0;
             if compile_profile_enabled() {
                 eprintln!(
-                    "[glrmask/profile][l2p_terminal_equivalence_expand] partition={} deferred={} expanded_transition_copies={} ms={:.3}",
+                    "[glrmask/profile][l2p_terminal_equivalence_expand] partition={} deferred={} coarse_tsids={} expanded_tsids={} expanded_transition_copies={} weight_remap_ms={:.3} ms={:.3}",
                     partition_label,
                     class_quotient_active,
+                    terminal_expansion_profile.coarse_tsids,
+                    terminal_expansion_profile.expanded_tsids,
                     terminal_expansion_profile.expanded_transition_copies,
+                    terminal_expansion_profile.tsid_weight_remap_ms,
                     terminal_expansion_ms,
                 );
             }
@@ -920,6 +921,15 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     if early_none {
         return None;
     }
+    let composed_tokenizer_states = if use_simplified_tok {
+        simplify_state_map
+            .as_ref()
+            .expect("simplify_state_map missing for simplified tokenizer")
+            .compose(&simplified_id_map.tokenizer_states)
+            .fill_unmapped_with_new_class()
+    } else {
+        simplified_id_map.tokenizer_states.clone()
+    };
     let composed_id_map = InternalIdMap {
         tokenizer_states: composed_tokenizer_states,
         vocab_tokens: simplified_id_map.vocab_tokens.clone(),

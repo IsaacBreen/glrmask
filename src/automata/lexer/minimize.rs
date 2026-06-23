@@ -527,6 +527,13 @@ impl DFA {
         self.minimize_impl(false)
     }
 
+    /// Compute the exact minimized-state partition without rebuilding the
+    /// minimized DFA. This is the right primitive for compiler equivalence
+    /// passes that need only original-state → quotient-state IDs.
+    pub(super) fn minimize_state_mapping_preserve_all_states(&self) -> Vec<u32> {
+        self.minimize_mapping_impl(false)
+    }
+
     fn minimize_impl(&self, drop_unreachable: bool) -> (DFA, Vec<u32>) {
         let orig_n = self.states().len();
         if orig_n == 0 {
@@ -580,6 +587,51 @@ impl DFA {
         let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
         let composed = compose_mappings(&old_to_working, &block_map);
         (result, composed)
+    }
+
+    fn minimize_mapping_impl(&self, drop_unreachable: bool) -> Vec<u32> {
+        let orig_n = self.states().len();
+        if orig_n == 0 {
+            return Vec::new();
+        }
+
+        let mut working = self.clone();
+        let old_to_working = if drop_unreachable {
+            working.remove_unreachable_states_with_mapping()
+        } else {
+            (0..orig_n as u32).collect()
+        };
+        clear_possible_futures_for_minimization(&mut working);
+        let n = working.states().len();
+        if n <= 1 {
+            return old_to_working;
+        }
+
+        let (partition, blocks) = partition_by_finalizers(&working);
+        let mut minimality_check_blocks = blocks.clone();
+
+        match topology_prerefine_partition(&working, &partition) {
+            TopologyPrerefine::AlreadyMinimal(blocks) => {
+                return compose_mappings(
+                    &old_to_working,
+                    &state_mapping_from_blocks(blocks, n),
+                );
+            }
+            TopologyPrerefine::Refined { blocks: refined_blocks, .. } => {
+                minimality_check_blocks = refined_blocks;
+            }
+            TopologyPrerefine::Skip => {}
+        }
+
+        if minimality_check_blocks.iter().all(|block| block.len() <= 1) {
+            return compose_mappings(
+                &old_to_working,
+                &state_mapping_from_blocks(minimality_check_blocks, n),
+            );
+        }
+
+        let blocks = hopcroft_refine_partition(&working, partition, blocks);
+        compose_mappings(&old_to_working, &state_mapping_from_blocks(blocks, n))
     }
 
     /// Remove unreachable states, returning old→new mapping.
@@ -762,22 +814,14 @@ impl DFA {
     /// Like `rebuild_from_blocks` but also returns old→new state mapping.
     fn rebuild_from_blocks_with_mapping(&self, mut partition_blocks: Vec<Vec<u32>>) -> (DFA, Vec<u32>) {
         let n = self.states().len();
-        let mut state_mapping = vec![0u32; n];
+        let state_mapping = state_mapping_from_blocks(partition_blocks.clone(), n);
 
         partition_blocks.retain(|block| !block.is_empty());
-
-        // Ensure the block containing start state (0) is first.
         if let Some(start_part_idx) = partition_blocks
             .iter()
             .position(|block| block.iter().any(|&state| state == 0))
         {
             partition_blocks.swap(0, start_part_idx);
-        }
-
-        for (new_idx, block) in partition_blocks.iter().enumerate() {
-            for &old_idx in block {
-                state_mapping[old_idx as usize] = new_idx as u32;
-            }
         }
 
         let num_groups = self.num_groups();
@@ -806,6 +850,24 @@ impl DFA {
         result.recompute_possible_futures();
         (result, state_mapping)
     }
+}
+
+fn state_mapping_from_blocks(mut partition_blocks: Vec<Vec<u32>>, num_states: usize) -> Vec<u32> {
+    partition_blocks.retain(|block| !block.is_empty());
+    if let Some(start_part_idx) = partition_blocks
+        .iter()
+        .position(|block| block.iter().any(|&state| state == 0))
+    {
+        partition_blocks.swap(0, start_part_idx);
+    }
+
+    let mut state_mapping = vec![0u32; num_states];
+    for (new_idx, block) in partition_blocks.iter().enumerate() {
+        for &old_idx in block {
+            state_mapping[old_idx as usize] = new_idx as u32;
+        }
+    }
+    state_mapping
 }
 
 /// Compose two state mappings: first[i] → second[first[i]].

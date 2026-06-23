@@ -344,6 +344,38 @@ fn build_subset_mapping(states: &[usize], full_mapping: &[usize]) -> Vec<usize> 
         .collect()
 }
 
+fn compute_kbounded_state_map_on_tsid_quotient(
+    tokenizer: &Tokenizer,
+    statistic: &MaxLengthStatistic,
+    initial_state_map: &ManyToOneIdMap,
+    active_groups: Option<&[bool]>,
+) -> ManyToOneIdMap {
+    let tokenizer_view = TokenizerView::new_tsid_quotient(
+        tokenizer,
+        initial_state_map,
+        active_groups,
+    );
+    let quotient_states = tokenizer_view.dfa().states.len();
+    let states = (0..quotient_states).collect::<Vec<_>>();
+    let byte_to_class = super::super::compat::compute_byte_classes(tokenizer_view.dfa());
+    let representative_states = super::super::state::max_length::find_state_equivalence_classes_kbounded(
+        &tokenizer_view,
+        &states,
+        statistic.max_token_len,
+        active_groups,
+        Some(&statistic.relevant_bytes),
+        Some(&byte_to_class),
+        "pipeline_kbounded_tsid_quotient",
+    );
+    let quotient_map = build_state_map_from_subset_representatives(
+        &states,
+        &representative_states,
+        quotient_states,
+        None,
+    );
+    initial_state_map.compose(&quotient_map)
+}
+
 fn compute_kbounded_partition(
     tokenizer: &Tokenizer,
     k: usize,
@@ -447,6 +479,17 @@ pub(crate) fn compute_state_map(
     active_groups: Option<&[bool]>,
     mode: MaxLengthMode,
 ) -> ManyToOneIdMap {
+    if matches!(mode, MaxLengthMode::KBoundedByteRestricted) {
+        if let Some(initial_state_map) = initial_state_map {
+            return compute_kbounded_state_map_on_tsid_quotient(
+                tokenizer,
+                statistic,
+                initial_state_map,
+                active_groups,
+            );
+        }
+    }
+
     let num_states = tokenizer.num_states() as usize;
     let states: Vec<usize> = match initial_state_map {
         Some(map) => map
