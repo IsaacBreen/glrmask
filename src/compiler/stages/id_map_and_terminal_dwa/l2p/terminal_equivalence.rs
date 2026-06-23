@@ -278,6 +278,7 @@ impl TerminalEquivalence {
         tokenizer_states: &ManyToOneIdMap,
         initial_state: u32,
     ) {
+        self.split_incompatible_initial_members(initial_state);
         let num_terminals = self.representative_for_terminal.len();
         let num_tsids = tokenizer_states.num_internal_ids() as usize;
         self.member_live_tsids = vec![None; num_terminals];
@@ -297,6 +298,13 @@ impl TerminalEquivalence {
             self.member_live_tsids[terminal] = Some(live_tsids);
         }
 
+    }
+
+    /// Split class members whose initial residual differs from their chosen
+    /// representative. A later terminal restarts scanning from this state, so
+    /// such members cannot share the continuation class label.
+    pub(crate) fn split_incompatible_initial_members(&mut self, initial_state: u32) {
+        let num_terminals = self.representative_for_terminal.len();
         for representative_index in 0..num_terminals {
             let representative = representative_index as TerminalID;
             let members = self.members_by_representative[representative_index].clone();
@@ -315,6 +323,78 @@ impl TerminalEquivalence {
             self.members_by_representative[representative_index] = retained;
         }
         self.recompute_class_metadata();
+    }
+
+    /// Active representatives for the class-labelled lexer analysis. Every
+    /// concrete member is relabelled to one of these IDs; no member path is
+    /// discarded.
+    pub(crate) fn active_representatives(&self) -> &[bool] {
+        &self.active_representatives
+    }
+
+    /// Restore member distinctions in a class-level TSID map.  The result is
+    /// a refinement of `coarse`: it can split a class-level TSID but cannot
+    /// merge states from different class-level TSIDs.
+    pub(crate) fn split_tsid_map_for_member_expansion(
+        &self,
+        coarse: &ManyToOneIdMap,
+    ) -> ManyToOneIdMap {
+        let state_count = coarse.original_to_internal.len();
+        let mut signatures = vec![Vec::<(TerminalID, u32)>::new(); state_count];
+        for terminal in 0..self.representative_for_terminal.len() {
+            if !self.original_active_terminals[terminal] {
+                continue;
+            }
+            for &(state, block) in &self.state_blocks_by_terminal[terminal] {
+                let state = state as usize;
+                assert!(
+                    state < state_count,
+                    "terminal residual state exceeds class-level TSID domain",
+                );
+                signatures[state].push((terminal as TerminalID, block));
+            }
+        }
+
+        let mut original_to_internal = vec![u32::MAX; state_count];
+        let mut representatives = Vec::new();
+        let mut next_internal = 0u32;
+        for originals in &coarse.internal_to_originals {
+            let mut splits = BTreeMap::<Vec<(TerminalID, u32)>, u32>::new();
+            for &state in originals {
+                let state = state as usize;
+                let internal = match splits.entry(signatures[state].clone()) {
+                    std::collections::btree_map::Entry::Occupied(entry) => *entry.get(),
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        let internal = next_internal;
+                        next_internal += 1;
+                        representatives.push(state as u32);
+                        entry.insert(internal);
+                        internal
+                    }
+                };
+                original_to_internal[state] = internal;
+            }
+        }
+
+        let refined = ManyToOneIdMap::from_original_to_internal_with_representatives(
+            original_to_internal,
+            next_internal,
+            representatives,
+        );
+        debug_assert!(refined.internal_to_originals.iter().all(|states| {
+            let mut coarse_tsid = None;
+            states.iter().all(|&state| {
+                let current = coarse.original_to_internal[state as usize];
+                match coarse_tsid {
+                    Some(previous) => previous == current,
+                    None => {
+                        coarse_tsid = Some(current);
+                        true
+                    }
+                }
+            })
+        }));
+        refined
     }
 
     /// Maps each real terminal to the class label emitted during raw NWA
@@ -737,6 +817,38 @@ mod tests {
         let equivalence = TerminalEquivalence::build(&tokenizer, &[true, true], Some(1), &all_bytes());
 
         assert!(equivalence.is_identity());
+    }
+
+    #[test]
+    fn member_expansion_splits_a_class_only_tsid() {
+        let expressions = vec![Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"b".to_vec())];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let mut equivalence =
+            TerminalEquivalence::build(&tokenizer, &[true, true], None, &[false; 256]);
+        equivalence.split_incompatible_initial_members(tokenizer.initial_state_id());
+        assert_eq!(equivalence.profile().quotient_hits, 1);
+
+        let start = tokenizer.initial_state_id() as usize;
+        let a_state = tokenizer.get_transition(tokenizer.initial_state_id(), b'a') as usize;
+        let b_state = tokenizer.get_transition(tokenizer.initial_state_id(), b'b') as usize;
+        let mut coarse = vec![1u32; tokenizer.num_states() as usize];
+        coarse[start] = 0;
+        let coarse = ManyToOneIdMap::from_original_to_internal_with_representatives(
+            coarse,
+            2,
+            vec![start as u32, a_state as u32],
+        );
+
+        let split = equivalence.split_tsid_map_for_member_expansion(&coarse);
+        assert!(split.num_internal_ids() > coarse.num_internal_ids());
+        assert_ne!(
+            split.original_to_internal[a_state],
+            split.original_to_internal[b_state],
+            "states accepting different concrete members cannot retain a class-only TSID merge",
+        );
     }
 }
 

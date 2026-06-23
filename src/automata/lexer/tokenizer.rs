@@ -612,6 +612,132 @@ impl Tokenizer {
             ),
         )
     }
+
+    /// Relabel terminal finalizer/future observations without changing the
+    /// state graph. Every concrete member remains live, but is observed as its
+    /// terminal-class representative by the class-level state analysis.
+    pub(crate) fn relabel_for_terminal_labels(
+        &self,
+        terminal_labels: &[TerminalID],
+        active_labels: &[bool],
+    ) -> Tokenizer {
+        Tokenizer {
+            dfa: self.relabel_dfa_for_terminal_labels(terminal_labels, active_labels),
+            num_terminals: self.num_terminals,
+            exprs: self.exprs.clone(),
+        }
+    }
+
+    fn relabel_dfa_for_terminal_labels(
+        &self,
+        terminal_labels: &[TerminalID],
+        active_labels: &[bool],
+    ) -> DFA {
+        assert_eq!(
+            terminal_labels.len(),
+            self.num_terminals as usize,
+            "terminal label map must cover every tokenizer terminal",
+        );
+
+        let mut dfa = self.dfa.clone();
+        let num_labels = self.num_terminals as usize;
+        dfa.ensure_group_capacity(num_labels);
+
+        for state in 0..self.num_states() {
+            let mut finalizers = BitSet::new(num_labels);
+            for terminal in self.matched_terminals_iter(state) {
+                let label = terminal_labels[terminal as usize] as usize;
+                if active_labels.get(label).copied().unwrap_or(false) {
+                    finalizers.set(label);
+                }
+            }
+
+            let mut futures = BitSet::new(num_labels);
+            for terminal in self.possible_future_terminals_iter(state) {
+                let label = terminal_labels[terminal as usize] as usize;
+                if active_labels.get(label).copied().unwrap_or(false) {
+                    futures.set(label);
+                }
+            }
+
+            dfa.overwrite_state_metadata(state, finalizers, futures);
+        }
+
+        dfa
+    }
+
+    /// Materialize a tokenizer over the classes in `state_map`.  The caller
+    /// must ensure that all members of each class agree on the token bytes it
+    /// will later query.  State zero in the result is the class containing the
+    /// original lexer start state.
+    pub(crate) fn quotient_for_state_map(
+        &self,
+        state_map: &ManyToOneIdMap,
+    ) -> (Tokenizer, ManyToOneIdMap) {
+        assert_eq!(
+            state_map.original_to_internal.len(),
+            self.num_states() as usize,
+            "state quotient must cover every tokenizer state",
+        );
+        let old_start = state_map.original_to_internal[self.start_state() as usize];
+        assert_ne!(old_start, u32::MAX, "tokenizer start state must be mapped");
+
+        let old_count = state_map.num_internal_ids() as usize;
+        let mut old_to_new = vec![u32::MAX; old_count];
+        old_to_new[old_start as usize] = 0;
+        let mut next = 1u32;
+        for old in 0..old_count {
+            if old_to_new[old] == u32::MAX {
+                old_to_new[old] = next;
+                next += 1;
+            }
+        }
+
+        let mut dfa = DFA::new(old_count);
+        let num_groups = self.num_terminals as usize;
+        dfa.ensure_group_capacity(num_groups);
+        for group in 0..num_groups {
+            dfa.set_group_u8set(group as u32, *self.dfa.group_id_to_u8set(group as u32));
+        }
+
+        let mut new_representatives = vec![u32::MAX; old_count];
+        for old in 0..old_count {
+            let new = old_to_new[old] as usize;
+            let representative = state_map.representative_original_ids[old];
+            assert_ne!(representative, u32::MAX, "state quotient class lacks a representative");
+            new_representatives[new] = representative;
+
+            for (byte, target) in self.transitions_from(representative) {
+                let target_class = state_map.original_to_internal[target as usize];
+                assert_ne!(target_class, u32::MAX, "state quotient transition leaves mapped domain");
+                dfa.add_transition(new as u32, byte, old_to_new[target_class as usize]);
+            }
+            dfa.overwrite_state_metadata(
+                new as u32,
+                self.matched_terminal_bitset(representative).clone(),
+                self.possible_future_terminals(representative).clone(),
+            );
+        }
+
+        let remapped_original_to_internal = state_map
+            .original_to_internal
+            .iter()
+            .map(|&old| if old == u32::MAX { u32::MAX } else { old_to_new[old as usize] })
+            .collect();
+        let remapped_map = ManyToOneIdMap::from_original_to_internal_with_representatives(
+            remapped_original_to_internal,
+            next,
+            new_representatives,
+        );
+        (
+            Tokenizer {
+                dfa,
+                num_terminals: self.num_terminals,
+                exprs: self.exprs.clone(),
+            },
+            remapped_map,
+        )
+    }
 }
 
 impl Lexer for Tokenizer {

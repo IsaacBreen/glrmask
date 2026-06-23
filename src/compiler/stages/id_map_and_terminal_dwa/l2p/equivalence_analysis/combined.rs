@@ -321,7 +321,46 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
-    analyze_equivalences_impl(partition_label, tokenizer, vocab, disallowed_follows, ignore_terminal, active_groups, shared_vocab_dfa_cache, flat_trans, initial_state_map)
+    analyze_equivalences_impl(
+        partition_label,
+        tokenizer,
+        vocab,
+        disallowed_follows,
+        ignore_terminal,
+        active_groups,
+        shared_vocab_dfa_cache,
+        flat_trans,
+        initial_state_map,
+        false,
+    )
+}
+
+/// As above, but omit the max-length prepass.  Callers may use this after
+/// supplying an exact lexical state refinement that has already reduced the
+/// candidate TSIDs.
+pub(crate) fn analyze_equivalences_with_group_filter_skip_max_length(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<u32>,
+    active_groups: Option<&[bool]>,
+    shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
+    flat_trans: Option<&std::sync::Arc<[u32]>>,
+    initial_state_map: Option<&ManyToOneIdMap>,
+) -> (InternalIdMap, CombinedEquivalenceProfile) {
+    analyze_equivalences_impl(
+        partition_label,
+        tokenizer,
+        vocab,
+        disallowed_follows,
+        ignore_terminal,
+        active_groups,
+        shared_vocab_dfa_cache,
+        flat_trans,
+        initial_state_map,
+        true,
+    )
 }
 
 /// Combined equivalence analysis over a flattened tokenizer DFA.
@@ -338,6 +377,7 @@ fn analyze_equivalences_impl(
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
+    force_skip_max_length: bool,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
     let token_path_disallowed_follows =
         ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal);
@@ -390,11 +430,12 @@ fn analyze_equivalences_impl(
         }
     }
     let projected_by_global = prepared.initial_states.len() < tokenizer.num_states() as usize;
-    let max_length_skipped = should_skip_max_length_for_partition(
-        partition_label,
-        prepared.initial_states.len(),
-        projected_by_global,
-    );
+    let max_length_skipped = force_skip_max_length
+        || should_skip_max_length_for_partition(
+            partition_label,
+            prepared.initial_states.len(),
+            projected_by_global,
+        );
     let pipeline_config = resolve_l2p_pipeline_config(!max_length_skipped);
     let (pre_state_map, pipeline_profile) = run_state_equivalence_pipeline(
         tokenizer,
