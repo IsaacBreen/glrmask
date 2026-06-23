@@ -5,7 +5,7 @@ pub(crate) mod pipeline;
 
 pub(crate) use pipeline::{
     resolve_global_pipeline_config, resolve_l2p_pipeline_config, run_state_equivalence_pipeline,
-    StateEquivalenceScope,
+    StateEquivalencePassKind, StateEquivalencePipelineConfig, StateEquivalenceScope,
 };
 
 pub(crate) fn identity_state_map(num_states: usize) -> ManyToOneIdMap {

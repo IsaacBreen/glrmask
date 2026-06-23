@@ -581,6 +581,21 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let id_map_started_at = Instant::now();
     let fast_sound_id_map_used = false;
     let (mut simplified_id_map, equiv_profile) = if use_class_id_map {
+        let concrete_seed_pipeline =
+            equivalence_analysis::state_equivalence::StateEquivalencePipelineConfig {
+                passes: vec![
+                    equivalence_analysis::state_equivalence::StateEquivalencePassKind::ActiveDfaMinimize,
+                ],
+            };
+        let (concrete_active_map, concrete_seed_profile) =
+            equivalence_analysis::state_equivalence::run_state_equivalence_pipeline(
+                tokenizer_for_build,
+                vocab,
+                None,
+                Some(active_terminals),
+                equivalence_analysis::state_equivalence::StateEquivalenceScope::L2p,
+                &concrete_seed_pipeline,
+            );
         let class_relabel_started_at = Instant::now();
         let class_tokenizer = tokenizer_for_build.relabel_for_terminal_labels(
             terminal_equivalence.terminal_label_map(),
@@ -590,12 +605,16 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
         let class_analysis_started_at = Instant::now();
         let class_pipeline =
-            equivalence_analysis::state_equivalence::resolve_l2p_pipeline_config(true);
+            equivalence_analysis::state_equivalence::StateEquivalencePipelineConfig {
+                passes: vec![
+                    equivalence_analysis::state_equivalence::StateEquivalencePassKind::MaxLength,
+                ],
+            };
         let (class_tsid_map, class_profile) =
             equivalence_analysis::state_equivalence::run_state_equivalence_pipeline(
                 &class_tokenizer,
                 vocab,
-                None,
+                Some(&concrete_active_map),
                 Some(terminal_equivalence.active_representatives()),
                 equivalence_analysis::state_equivalence::StateEquivalenceScope::L2p,
                 &class_pipeline,
@@ -635,16 +654,16 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
         if compile_profile_enabled() {
             eprintln!(
-                "[glrmask/profile][l2p_terminal_class_id_map] partition={} class_tokenizer_states={} class_tsids={} final_tsids={} class_relabel_ms={:.3} class_pipeline_ms={:.3} active_dfa_minimize_ms={:.3} active_dfa_minimize_reps={} max_length_ms={:.3} max_length_reps={} class_vocab_analysis_ms={:.3}",
+                "[glrmask/profile][l2p_terminal_class_id_map] partition={} class_tokenizer_states={} concrete_active_tsids={} class_tsids={} final_tsids={} class_relabel_ms={:.3} concrete_active_dfa_minimize_ms={:.3} class_max_length_ms={:.3} class_pipeline_ms={:.3} max_length_reps={} class_vocab_analysis_ms={:.3}",
                 partition_label,
                 class_tokenizer.num_states(),
+                concrete_active_map.num_internal_ids(),
                 class_id_map.num_tsids(),
                 class_id_map.num_tsids(),
                 class_relabel_ms,
-                class_analysis_ms,
-                class_profile.active_dfa_minimize_ms,
-                class_profile.active_dfa_minimize_reps,
+                concrete_seed_profile.active_dfa_minimize_ms,
                 class_profile.max_length_state_equiv_ms,
+                class_analysis_ms,
                 class_profile.max_length_reps,
                 class_vocab_analysis_ms,
             );
