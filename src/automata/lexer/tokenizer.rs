@@ -615,17 +615,26 @@ impl Tokenizer {
         )
     }
 
-    /// Exact DFA quotient under the language observable through `active_groups`.
+    /// Exact active-language DFA quotient.
     ///
-    /// This deliberately differs from `simplify_for_terminals`: it does not
-    /// prune bytes or dead continuations and it never uses the near-minimal
-    /// shortcut. It is exactly the quotient obtained by clearing inactive
-    /// finalizer bits and minimizing the full byte DFA while retaining a map
-    /// for every original lexer state.
+    /// Inactive finalizers and transitions into states that cannot complete an
+    /// active terminal are removed before minimization. The resulting quotient
+    /// is equivalent to rebuilding the lexer from only the active terminals.
+    /// Original states outside that language are intentionally left unmapped.
     pub(crate) fn minimize_for_active_finalizers(
         &self,
         active_groups: Option<&[bool]>,
     ) -> ManyToOneIdMap {
+        if let Some(active_groups) = active_groups {
+            let TerminalFilteredDfa { dfa, .. } =
+                self.filter_dfa_for_terminals(active_groups, None);
+            let (minimized, state_mapping) = dfa.minimize_with_state_mapping();
+            return ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                state_mapping,
+                minimized.num_states() as u32,
+            );
+        }
+
         let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let started_at = profile_enabled.then(std::time::Instant::now);
@@ -718,6 +727,36 @@ impl Tokenizer {
         }
 
         ManyToOneIdMap::from_original_to_internal_allowing_unmapped(blocks, block_count)
+    }
+
+    /// Rebuild the lexer from only the active terminal expressions, then
+    /// minimize that rebuilt lexer. This is a validation oracle for
+    /// `minimize_for_active_finalizers(Some(active_groups))`: both describe
+    /// the same labelled active-terminal language.
+    pub(crate) fn rebuilt_active_terminal_minimized_state_count(
+        &self,
+        active_groups: &[bool],
+    ) -> Option<usize> {
+        let expressions = self.exprs.as_ref()?;
+        assert_eq!(
+            expressions.len(),
+            self.num_terminals as usize,
+            "terminal-expression inventory must match tokenizer groups",
+        );
+        let active_expressions: Vec<Expr> = expressions
+            .iter()
+            .zip(active_groups.iter().copied())
+            .filter_map(|(expression, active)| active.then(|| expression.clone()))
+            .collect();
+        let rebuilt = super::compile::build_regex(&active_expressions).into_tokenizer(
+            active_expressions.len() as u32,
+            Some(Arc::from(active_expressions.into_boxed_slice())),
+        );
+        Some(
+            rebuilt
+                .minimize_for_active_finalizers(None)
+                .num_internal_ids() as usize,
+        )
     }
 
     /// Relabel terminal finalizer/future observations without changing the
@@ -839,7 +878,7 @@ mod active_finalizer_minimization_tests {
     use crate::automata::lexer::compile::build_regex;
 
     #[test]
-    fn active_finalizer_refinement_matches_full_dfa_minimization() {
+    fn active_finalizer_refinement_matches_rebuilt_active_lexer() {
         let expressions = vec![
             Expr::U8Seq(b"ab".to_vec()),
             Expr::U8Seq(b"ac".to_vec()),
@@ -852,27 +891,10 @@ mod active_finalizer_minimization_tests {
         );
         let active = [true, false, true, false];
         let actual = tokenizer.minimize_for_active_finalizers(Some(&active));
+        let rebuilt_count = tokenizer
+            .rebuilt_active_terminal_minimized_state_count(&active)
+            .expect("test tokenizer keeps terminal expressions");
 
-        let mut expected_dfa = tokenizer.dfa.clone();
-        let mut active_mask = BitSet::new(expected_dfa.num_groups());
-        for (group, &is_active) in active.iter().enumerate() {
-            if is_active {
-                active_mask.set(group);
-            }
-        }
-        for state in expected_dfa.states_mut() {
-            state.finalizers.intersect_with(&active_mask);
-        }
-        let expected = expected_dfa.minimize_state_mapping_preserve_all_states();
-
-        for left in 0..expected.len() {
-            for right in 0..expected.len() {
-                assert_eq!(
-                    actual.original_to_internal[left] == actual.original_to_internal[right],
-                    expected[left] == expected[right],
-                    "partition mismatch for states {left} and {right}",
-                );
-            }
-        }
+        assert_eq!(actual.num_internal_ids() as usize, rebuilt_count);
     }
 }

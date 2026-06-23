@@ -203,8 +203,14 @@ impl FlatDfa {
                     let target = tokenizer.get_transition(representative, byte);
                     if target != u32::MAX {
                         let mapped = state_map.original_to_internal[target as usize];
-                        assert_ne!(mapped, u32::MAX, "TSID quotient transition leaves mapped domain");
-                        transitions[base + byte as usize] = mapped;
+                        // The active-language quotient deliberately omits
+                        // original states that cannot complete an active
+                        // terminal. Treat a transition into that omitted
+                        // region as dead, exactly as the rebuilt active DFA
+                        // does.
+                        if mapped != u32::MAX {
+                            transitions[base + byte as usize] = mapped;
+                        }
                     }
                 }
 

@@ -183,6 +183,25 @@ fn minimize_active_dfa_from_current_map(
     active_groups: Option<&[bool]>,
 ) -> ManyToOneIdMap {
     let raw_minimized = tokenizer.minimize_for_active_finalizers(active_groups);
+    if std::env::var_os("GLRMASK_ASSERT_ACTIVE_DFA_REBUILD_EQUIVALENCE").is_some() {
+        if let Some(active_groups) = active_groups {
+            if let Some(rebuilt_count) =
+                tokenizer.rebuilt_active_terminal_minimized_state_count(active_groups)
+            {
+                assert_eq!(
+                    raw_minimized.num_internal_ids() as usize,
+                    rebuilt_count,
+                    "active-language DFA quotient must match rebuilding and minimizing only active terminals",
+                );
+                if crate::compiler::stages::id_map_and_terminal_dwa::compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][active_dfa_rebuild_validation] minimized_states={}",
+                        rebuilt_count,
+                    );
+                }
+            }
+        }
+    }
     let mut states = Vec::with_capacity(current_state_map.num_internal_ids() as usize);
     let mut representatives = Vec::with_capacity(current_state_map.num_internal_ids() as usize);
 
@@ -191,7 +210,11 @@ fn minimize_active_dfa_from_current_map(
             continue;
         }
         let raw_internal = raw_minimized.original_to_internal[state as usize];
-        assert_ne!(raw_internal, u32::MAX, "full DFA minimizer dropped a preserved state");
+        if raw_internal == u32::MAX {
+            // This original state can no longer complete any active terminal.
+            // It has no corresponding state in the rebuilt active lexer.
+            continue;
+        }
         let raw_representative = raw_minimized.representative_original_ids[raw_internal as usize];
         states.push(state as usize);
         representatives.push(raw_representative as usize);

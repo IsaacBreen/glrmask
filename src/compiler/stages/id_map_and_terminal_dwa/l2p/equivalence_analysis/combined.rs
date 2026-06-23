@@ -445,6 +445,12 @@ fn analyze_equivalences_impl(
         StateEquivalenceScope::L2p,
         &pipeline_config,
     );
+    let active_initial_states: Vec<usize> = prepared
+        .initial_states
+        .iter()
+        .copied()
+        .filter(|&state| pre_state_map.original_to_internal[state] != u32::MAX)
+        .collect();
     let pre_reduced_states: Vec<usize> = pre_state_map
         .representative_original_ids
         .iter()
@@ -495,7 +501,7 @@ fn analyze_equivalences_impl(
         .copied()
         .zip(reduced_state_reps_for_pre_reduced.iter().copied())
         .collect();
-    let representative_states = prepared.initial_states
+    let representative_states = active_initial_states
         .iter()
         .map(|&state| {
             let pre_internal = pre_state_map.original_to_internal[state];
@@ -510,8 +516,10 @@ fn analyze_equivalences_impl(
         &dedup.original_to_repr,
         dedup.representative_token_bytes.len(),
     );
-    let state_classes =
-        state_equivalence_analysis::mapping_to_equivalence_classes(&prepared.initial_states, &representative_states);
+    let state_classes = state_equivalence_analysis::mapping_to_equivalence_classes(
+        &active_initial_states,
+        &representative_states,
+    );
     let exact_reps = state_classes.len();
     let result = CombinedEquivalenceResult {
         vocab_classes,
@@ -524,7 +532,7 @@ fn analyze_equivalences_impl(
     (
         internal_id_map,
         CombinedEquivalenceProfile {
-            initial_states_considered: prepared.initial_states.len(),
+            initial_states_considered: active_initial_states.len(),
             max_length_skipped: pipeline_profile.max_length_skipped,
             max_token_len,
             token_len_gt_4: token_len_stats.gt_4,

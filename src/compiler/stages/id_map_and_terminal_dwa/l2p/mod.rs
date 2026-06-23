@@ -678,7 +678,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         }
         (class_id_map, class_vocab_profile)
     } else {
-        equivalence_analysis::combined::analyze_equivalences_with_group_filter(
+        let (mut id_map, profile) = equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
             tokenizer_for_build,
             vocab,
@@ -688,7 +688,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             shared_vocab_dfa_cache,
             if use_simplified_tok { None } else { flat_trans },
             equivalence_initial_state_map,
-        )
+        );
+        // The active-language pre-pass can omit original states that cannot
+        // complete a terminal in this partition. Keep one explicit dead TSID
+        // at the total-map boundary; it has no active terminal behaviour.
+        id_map.tokenizer_states = id_map.tokenizer_states.fill_unmapped_with_new_class();
+        (id_map, profile)
     };
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
