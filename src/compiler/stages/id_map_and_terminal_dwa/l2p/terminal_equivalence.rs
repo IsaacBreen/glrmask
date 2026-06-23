@@ -291,17 +291,30 @@ impl TerminalEquivalence {
         self.split_incompatible_initial_members(initial_state);
         let num_terminals = self.representative_for_terminal.len();
         let num_tsids = tokenizer_states.num_internal_ids() as usize;
+        let check_uniform_domains = cfg!(debug_assertions)
+            || std::env::var_os("GLRMASK_ASSERT_TERMINAL_CLASS_TSID_DOMAINS").is_some();
         self.member_live_tsids = vec![None; num_terminals];
         for terminal in 0..num_terminals {
             if !self.original_active_terminals[terminal] {
                 continue;
             }
+            let representative = self.representative_for_terminal[terminal] as usize;
+            let requires_uniform_domain = self.members_by_representative[representative].len() > 1;
             let mut live_tsids = BitSet::new(num_tsids);
             for (tsid, originals) in tokenizer_states.internal_to_originals.iter().enumerate() {
-                if originals
+                let any_live = originals
                     .iter()
-                    .any(|&state| self.block_for(terminal as TerminalID, state) != DEAD_BLOCK)
-                {
+                    .any(|&state| self.block_for(terminal as TerminalID, state) != DEAD_BLOCK);
+                if check_uniform_domains && requires_uniform_domain {
+                    let any_dead = originals
+                        .iter()
+                        .any(|&state| self.block_for(terminal as TerminalID, state) == DEAD_BLOCK);
+                    assert!(
+                        !any_live || !any_dead,
+                        "late TSID refinement left class-member liveness mixed within one TSID",
+                    );
+                }
+                if any_live {
                     live_tsids.set(tsid);
                 }
             }
@@ -342,27 +355,38 @@ impl TerminalEquivalence {
         &self.active_representatives
     }
 
-    /// Split a class-level TSID only where concrete terminal residuals differ.
-    /// This is intentionally deferred until terminal-class expansion: the raw
-    /// NWA and its determinization operate entirely over the smaller coarse
-    /// class partition.
+    /// Split a coarse TSID only where a member of a non-singleton terminal
+    /// class changes from live to dead. This is the exact information needed
+    /// to restrict a late-expanded first-terminal edge to its source domain.
+    ///
+    /// Residual-block identity is deliberately not part of this signature.
+    /// The class-labelled DWA has already accounted for byte behaviour; late
+    /// expansion only restores which concrete member labels are available in
+    /// each source row. This is intentionally deferred until terminal-class
+    /// expansion, so raw-NWA construction and determinization use the smaller
+    /// coarse partition.
     fn refine_tsids_for_concrete_expansion(
         &self,
         coarse: &ManyToOneIdMap,
     ) -> ConcreteTsidRefinement {
         let state_count = coarse.original_to_internal.len();
-        let mut signatures = vec![Vec::<(TerminalID, u32)>::new(); state_count];
-        for terminal in 0..self.representative_for_terminal.len() {
-            if !self.original_active_terminals[terminal] {
+        let mut signatures = vec![Vec::<TerminalID>::new(); state_count];
+        for (representative, members) in self.members_by_representative.iter().enumerate() {
+            if members.len() <= 1
+                || !self.original_active_terminals[representative]
+                || self.representative_for_terminal[representative] != representative as TerminalID
+            {
                 continue;
             }
-            for &(state, block) in &self.state_blocks_by_terminal[terminal] {
-                let state = state as usize;
-                assert!(
-                    state < state_count,
-                    "terminal residual state exceeds TSID domain",
-                );
-                signatures[state].push((terminal as TerminalID, block));
+            for &terminal in members {
+                for &(state, _) in &self.state_blocks_by_terminal[terminal as usize] {
+                    let state = state as usize;
+                    assert!(
+                        state < state_count,
+                        "terminal residual state exceeds TSID domain",
+                    );
+                    signatures[state].push(terminal);
+                }
             }
         }
 
@@ -372,7 +396,7 @@ impl TerminalEquivalence {
         let mut next_internal = 0u32;
 
         for (coarse_tsid, originals) in coarse.internal_to_originals.iter().enumerate() {
-            let mut splits = BTreeMap::<Vec<(TerminalID, u32)>, u32>::new();
+            let mut splits = BTreeMap::<Vec<TerminalID>, u32>::new();
             for &state in originals {
                 let state = state as usize;
                 let internal = match splits.entry(signatures[state].clone()) {
@@ -566,7 +590,6 @@ impl TerminalEquivalence {
         first_label_offset: u32,
         coarse_tsid_map: &ManyToOneIdMap,
         initial_state: u32,
-        refine_class_state_map: bool,
     ) -> (TerminalEquivalenceProfile, ManyToOneIdMap) {
         let mut profile = TerminalEquivalenceProfile {
             active_terminals: self.active_terminal_count,
@@ -582,17 +605,12 @@ impl TerminalEquivalence {
         }
 
         profile.coarse_tsids = coarse_tsid_map.num_internal_ids() as usize;
-        let expanded_tsid_map = if refine_class_state_map {
-            let refinement = self.refine_tsids_for_concrete_expansion(coarse_tsid_map);
-            profile.expanded_tsids = refinement.refined_map.num_internal_ids() as usize;
-            let remap_started_at = Instant::now();
-            Self::lift_dwa_weights_to_concrete_tsids(dwa, &refinement.coarse_to_refined);
-            profile.tsid_weight_remap_ms = remap_started_at.elapsed().as_secs_f64() * 1000.0;
-            refinement.refined_map
-        } else {
-            profile.expanded_tsids = profile.coarse_tsids;
-            coarse_tsid_map.clone()
-        };
+        let refinement = self.refine_tsids_for_concrete_expansion(coarse_tsid_map);
+        profile.expanded_tsids = refinement.refined_map.num_internal_ids() as usize;
+        let remap_started_at = Instant::now();
+        Self::lift_dwa_weights_to_concrete_tsids(dwa, &refinement.coarse_to_refined);
+        profile.tsid_weight_remap_ms = remap_started_at.elapsed().as_secs_f64() * 1000.0;
+        let expanded_tsid_map = refinement.refined_map;
         self.refine_for_tsid_map(&expanded_tsid_map, initial_state);
 
         let all_tokens: RangeSetBlaze<u32> = std::iter::once(0..=u32::MAX).collect();
@@ -634,10 +652,14 @@ impl TerminalEquivalence {
                         profile.expanded_transition_copies += 1;
                     }
                     if let Some(&(target, ref weight)) = first {
-                        let domain = member_domain_weights[member as usize]
-                            .as_ref()
-                            .expect("active terminal class member lacks live TSID domain");
-                        let restricted = weight.intersection(domain);
+                        let restricted = if members.len() == 1 {
+                            weight.clone()
+                        } else {
+                            let domain = member_domain_weights[member as usize]
+                                .as_ref()
+                                .expect("active terminal class member lacks live TSID domain");
+                            weight.intersection(domain)
+                        };
                         if !restricted.is_empty() {
                             insert_dwa_transition(
                                 &mut state.transitions,

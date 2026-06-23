@@ -878,7 +878,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                     first_class_label_offset,
                     &simplified_id_map.tokenizer_states,
                     tokenizer_for_build.initial_state_id(),
-                    use_class_id_map,
                 )
             } else {
                 (terminal_equivalence.profile(), simplified_id_map.tokenizer_states.clone())
