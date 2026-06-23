@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 
 use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::compiler::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
-use crate::ds::weight::Weight;
+use crate::ds::weight::{ScopedWeightOpCache, Weight};
 
 type QueryKey = (u32, i32);
 type CancellationTask = (u32, u32, i32);
@@ -187,7 +187,7 @@ impl GuardedFinalWeight {
             });
         }
 
-        let weight = self.weight.intersection(edge_weight);
+        let weight = self.weight.intersection_uncached(edge_weight);
         (!weight.is_empty()).then_some(Self {
             weight,
             subset_of: Some(edge_weight.clone()),
@@ -198,6 +198,7 @@ impl GuardedFinalWeight {
 fn merge_guarded_final_weight(
     entry: &mut Option<GuardedFinalWeight>,
     add: GuardedFinalWeight,
+    weight_ops: &mut ScopedWeightOpCache,
 ) -> bool {
     if add.weight.is_empty() {
         return false;
@@ -205,7 +206,7 @@ fn merge_guarded_final_weight(
 
     match entry {
         Some(existing) => {
-            let updated = existing.weight.union(&add.weight);
+            let updated = weight_ops.union(&existing.weight, &add.weight);
             if updated != existing.weight {
                 let subset_of = if existing
                     .subset_of
@@ -233,6 +234,7 @@ fn merge_guarded_final_weight(
 
 fn union_guarded_pending(
     pending: SmallVec<[GuardedFinalWeight; 4]>,
+    weight_ops: &mut ScopedWeightOpCache,
 ) -> Option<GuardedFinalWeight> {
     match pending.len() {
         0 => None,
@@ -246,7 +248,7 @@ fn union_guarded_pending(
                         .is_some_and(|guard| Arc::ptr_eq(&first_guard.0, &guard.0))
                 })
             });
-            let weight = Weight::union_all(pending.iter().map(|entry| &entry.weight));
+            let weight = weight_ops.union_all(pending.iter().map(|entry| &entry.weight));
             (!weight.is_empty()).then_some(GuardedFinalWeight {
                 weight,
                 subset_of: shared_guard,
@@ -681,6 +683,7 @@ fn propagate_final_weights_to_predecessors(
     preds: &[Vec<PredEdge<'_>>],
     reachable_final_weights: &mut [Option<GuardedFinalWeight>],
     state_id: usize,
+    weight_ops: &mut ScopedWeightOpCache,
     mut on_change: impl FnMut(usize),
 ) {
     let Some(reachable_final) = reachable_final_weights[state_id].clone() else {
@@ -691,7 +694,7 @@ fn propagate_final_weights_to_predecessors(
         let Some(propagated) = reachable_final.intersection_with_edge(edge.weight) else {
             continue;
         };
-        if merge_guarded_final_weight(&mut reachable_final_weights[edge.from], propagated) {
+        if merge_guarded_final_weight(&mut reachable_final_weights[edge.from], propagated, weight_ops) {
             on_change(edge.from);
         }
     }
@@ -701,6 +704,7 @@ fn apply_finality_fixpoint_worklist(
     nwa: &NWA,
     preds: &[Vec<PredEdge<'_>>],
     reachable_final_weights: &mut [Option<GuardedFinalWeight>],
+    weight_ops: &mut ScopedWeightOpCache,
 ) {
     let n = nwa.states().len();
     let mut worklist = VecDeque::<usize>::new();
@@ -719,6 +723,7 @@ fn apply_finality_fixpoint_worklist(
             preds,
             reachable_final_weights,
             state_id,
+            weight_ops,
             |pred_state| {
                 if queued[pred_state] {
                     return;
@@ -735,6 +740,7 @@ fn apply_finality_fixpoint_acyclic(
     preds: &[Vec<PredEdge<'_>>],
     reachable_final_weights: &mut [Option<GuardedFinalWeight>],
     reverse_topo_order: &[usize],
+    weight_ops: &mut ScopedWeightOpCache,
 ) {
     let mut pending_by_state: Vec<SmallVec<[GuardedFinalWeight; 4]>> = (0..preds.len())
         .map(|_| SmallVec::new())
@@ -747,7 +753,9 @@ fn apply_finality_fixpoint_acyclic(
     }
 
     for &state_id in reverse_topo_order {
-        let Some(reachable_final) = union_guarded_pending(std::mem::take(&mut pending_by_state[state_id])) else {
+        let Some(reachable_final) =
+            union_guarded_pending(std::mem::take(&mut pending_by_state[state_id]), weight_ops)
+        else {
             continue;
         };
 
@@ -770,15 +778,17 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
     let (preds, outdegree) = build_finality_preds_and_outdegree(nwa);
     let reverse_topo_order = build_finality_reverse_topo_order(&preds, outdegree);
     let mut reachable_final_weights = collect_initial_final_weights(nwa);
+    let mut weight_ops = ScopedWeightOpCache::default();
 
     if let Some(reverse_topo_order) = reverse_topo_order.as_deref() {
         apply_finality_fixpoint_acyclic(
             &preds,
             &mut reachable_final_weights,
             reverse_topo_order,
+            &mut weight_ops,
         );
     } else {
-        apply_finality_fixpoint_worklist(nwa, &preds, &mut reachable_final_weights);
+        apply_finality_fixpoint_worklist(nwa, &preds, &mut reachable_final_weights, &mut weight_ops);
     }
 
     write_final_weights(nwa, reachable_final_weights);

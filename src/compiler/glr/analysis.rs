@@ -275,9 +275,10 @@ impl AnalyzedGrammar {
 pub(crate) fn eliminate_right_recursion(
     rules: &mut Vec<Rule>,
     fresh_nt: &mut impl FnMut() -> NonterminalID,
-) {
+) -> bool {
     // Resolve indirect right recursion by inlining right ends.
     const MAX_INDIRECT_ROUNDS: usize = 200;
+    let mut completed = false;
     for _ in 0..MAX_INDIRECT_ROUNDS {
         let num_nt = max_nt_id(rules) + 1;
         let nullable = compute_nullable(rules, num_nt);
@@ -288,7 +289,10 @@ pub(crate) fn eliminate_right_recursion(
                 let to = cycle[1 % cycle.len()];
                 inline_right_end(rules, from, to, &nullable);
             }
-            None => break,
+            None => {
+                completed = true;
+                break;
+            }
         }
     }
 
@@ -306,6 +310,7 @@ pub(crate) fn eliminate_right_recursion(
     if !rr_nts.is_empty() {
         resolve_direct_rr_batched(rules, &rr_nts);
     }
+    completed
 }
 
 fn max_nt_id(rules: &[Rule]) -> u32 {
@@ -1403,8 +1408,9 @@ fn eliminate_hidden_left_recursion(
     rules: &mut Vec<Rule>,
     nullable: &BTreeSet<NonterminalID>,
     normalize_iteration: usize,
-) {
+) -> bool {
     let profile_enabled = compile_profile_enabled();
+    let mut changed = false;
 
     loop {
         let rules_len = rules.len();
@@ -1437,7 +1443,7 @@ fn eliminate_hidden_left_recursion(
                     ),
                 );
             }
-            return;
+            return changed;
         }
         let rhs_by_lhs_started_at = profile_enabled.then(Instant::now);
         let rhs_by_lhs = build_rhs_by_lhs(rules);
@@ -1524,12 +1530,14 @@ fn eliminate_hidden_left_recursion(
 
         if !replaced_cycle_rules.is_empty() {
             rules.retain(|rule| !replaced_cycle_rules.contains(rule));
+            changed = true;
         }
 
         if additions.is_empty() {
-            return;
+            return changed;
         }
         rules.extend(additions);
+        changed = true;
     }
 }
 
@@ -2255,6 +2263,8 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
     };
 
     let mut iteration = 0;
+    let mut previous_right_recursion_completed = false;
+    let mut previous_hidden_left_recursion_changed = false;
     loop {
         let iteration_rules_before = rules.len();
         let iteration_started_at = profiling.then(Instant::now);
@@ -2275,6 +2285,7 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
         let inline_rules_before = rules.len();
         let inline_started_at = profiling.then(Instant::now);
         replace_rules_with_resync(rules, &next_nt, inline_null_productions);
+        let inline_unchanged = *rules == snap;
         if let Some(started_at) = inline_started_at {
             emit_normalize_profile(
                 "inline_null_productions",
@@ -2282,14 +2293,25 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
                 elapsed_ms(started_at),
                 inline_rules_before,
                 rules.len(),
-                " phase=fixed_point",
+                &format!(" phase=fixed_point changed={}", !inline_unchanged),
             );
+        }
+
+        let no_nullable_nonterminals =
+            compute_nullable(rules, max_nt_id(rules) + 1).is_empty();
+        if iteration > 0
+            && inline_unchanged
+            && no_nullable_nonterminals
+            && previous_right_recursion_completed
+            && !previous_hidden_left_recursion_changed
+        {
+            break;
         }
 
         let rr_rules_before = rules.len();
         let rr_started_at = profiling.then(Instant::now);
-        with_resynced_next_nonterminal(rules, &next_nt, |rules| {
-            eliminate_right_recursion(rules, &mut fresh_nt);
+        let right_recursion_completed = with_resynced_next_nonterminal(rules, &next_nt, |rules| {
+            eliminate_right_recursion(rules, &mut fresh_nt)
         });
         if let Some(started_at) = rr_started_at {
             emit_normalize_profile(
@@ -2305,10 +2327,17 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
         let hlr_rules_before = rules.len();
         let hlr_started_at = profiling.then(Instant::now);
         let mut nullable_count = 0usize;
-        with_resynced_next_nonterminal(rules, &next_nt, |rules| {
+        let hidden_left_recursion_changed = with_resynced_next_nonterminal(rules, &next_nt, |rules| {
             let nullable = compute_nullable(rules, max_nt_id(rules) + 1);
             nullable_count = nullable.len();
-            eliminate_hidden_left_recursion(rules, &nullable, iteration + 1);
+            // Hidden left recursion requires a nullable prefix. Once epsilon
+            // inlining has removed every nullable nonterminal, the graph pass
+            // cannot add or replace a rule.
+            if nullable.is_empty() {
+                false
+            } else {
+                eliminate_hidden_left_recursion(rules, &nullable, iteration + 1)
+            }
         });
 
         if let Some(started_at) = hlr_started_at {
@@ -2361,6 +2390,8 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
             );
         }
 
+        previous_right_recursion_completed = right_recursion_completed;
+        previous_hidden_left_recursion_changed = hidden_left_recursion_changed;
         iteration += 1;
 
         if converged {
@@ -2369,8 +2400,10 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
     }
 
     let post_inline_rules_before = rules.len();
+    let post_inline_snapshot = rules.clone();
     let post_inline_started_at = profiling.then(Instant::now);
     replace_rules_with_resync(rules, &next_nt, inline_null_productions);
+    let post_inline_changed = *rules != post_inline_snapshot;
     if let Some(started_at) = post_inline_started_at {
         emit_normalize_profile(
             "inline_null_productions",
@@ -2378,7 +2411,7 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
             elapsed_ms(started_at),
             post_inline_rules_before,
             rules.len(),
-            " phase=post_loop",
+            &format!(" phase=post_loop changed={post_inline_changed}"),
         );
     }
 
@@ -2398,7 +2431,9 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
 
     let final_dedup_rules_before = rules.len();
     let final_dedup_started_at = profiling.then(Instant::now);
-    dedup_rules(rules);
+    if post_inline_changed {
+        dedup_rules(rules);
+    }
     if let Some(started_at) = final_dedup_started_at {
         emit_normalize_profile(
             "dedup_rules",
@@ -2406,7 +2441,11 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
             elapsed_ms(started_at),
             final_dedup_rules_before,
             rules.len(),
-            " phase=final",
+            if post_inline_changed {
+                " phase=final"
+            } else {
+                " phase=final skipped=post_inline_unchanged"
+            },
         );
     }
 }
@@ -2420,13 +2459,14 @@ fn replace_rules_with_resync(
     resync_next_nonterminal(rules, next_nt);
 }
 
-fn with_resynced_next_nonterminal(
+fn with_resynced_next_nonterminal<R>(
     rules: &mut Vec<Rule>,
     next_nt: &std::cell::Cell<u32>,
-    update: impl FnOnce(&mut Vec<Rule>),
-) {
-    update(rules);
+    update: impl FnOnce(&mut Vec<Rule>) -> R,
+) -> R {
+    let result = update(rules);
     resync_next_nonterminal(rules, next_nt);
+    result
 }
 
 fn resync_next_nonterminal(rules: &[Rule], next_nt: &std::cell::Cell<u32>) {

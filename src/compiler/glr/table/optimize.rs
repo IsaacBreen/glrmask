@@ -418,7 +418,26 @@ impl GLRTable {
     pub(super) fn collapse_sr_unit_reductions_with_compatible_gotos(
         &mut self,
     ) -> UnitReductionInliningReport {
-        let original = self.clone();
+        // Keep the original only as an abort rollback. Moving it out of
+        // `self` avoids cloning the complete table twice on the usual
+        // successful path; `work` is the sole mutable copy.
+        let original = std::mem::replace(
+            self,
+            Self {
+                action: Vec::new(),
+                goto: Vec::new(),
+                num_states: 0,
+                num_terminals: 0,
+                num_rules: 0,
+                rules: Vec::new(),
+                nonterminal_display_names: Vec::new(),
+                construction: GlrTableConstruction::default(),
+                admission_policy: AdmissionPolicy::default(),
+                advance: Vec::new(),
+                forwarded_shifts: FxHashSet::default(),
+                guarded_shift_index: Vec::new(),
+            },
+        );
         let mut work = original.clone();
         let mut budget = UnitInlineBudget::from_env();
         work.collapse_sr_unit_reductions_with_compatible_gotos_inner(&mut budget);

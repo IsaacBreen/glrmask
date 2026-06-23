@@ -522,11 +522,12 @@ impl Constraint {
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
         let derived_piece_started_at = profile.then(std::time::Instant::now);
-        self.weight_token_buf_masks = self.compute_weight_token_buf_masks();
+        let (weight_token_buf_masks, weight_token_sparse_buf_masks) =
+            self.compute_weight_token_buf_mask_caches();
+        self.weight_token_buf_masks = weight_token_buf_masks;
         let weight_buf_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let derived_piece_started_at = profile.then(std::time::Instant::now);
-        self.weight_token_sparse_buf_masks = self.compute_weight_token_sparse_buf_masks();
-        let weight_sparse_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        self.weight_token_sparse_buf_masks = weight_token_sparse_buf_masks;
+        let weight_sparse_ms = 0.0;
         self.dwa_fast_transitions = fast_transitions;
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
         let derived_ms = derived_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -805,25 +806,46 @@ impl Constraint {
         true
     }
 
-    fn compute_weight_token_buf_masks(&self) -> DenseWeightBufMaskCache {
+    /// Build dense and sparse per-weight buffer-mask caches in one expansion.
+    ///
+    /// The sparse cache is a subset representation of the dense cache. Building
+    /// both independently duplicated the internal-token-to-buffer expansion for
+    /// every sparse candidate.
+    fn compute_weight_token_buf_mask_caches(
+        &self,
+    ) -> (DenseWeightBufMaskCache, SparseWeightBufMaskCache) {
         let buf_words = self.mask_len();
         if buf_words == 0 {
-            return FxHashMap::default();
+            return (FxHashMap::default(), FxHashMap::default());
         }
 
+        let can_store_sparse = buf_words <= u16::MAX as usize;
+        let sparse_cost_limit = (buf_words / 2) as u64;
         let final_dense_masks = self.final_weight_token_dense_masks();
-        let build = |(&key, dense): (&usize, &DenseWords)| {
+        let mut dense_masks = FxHashMap::default();
+        let mut sparse_masks = FxHashMap::default();
+
+        for (&key, dense) in final_dense_masks {
             let estimated_cost = self.estimate_internal_dense_to_buf_cost(dense);
             if estimated_cost == 0 {
-                return None;
+                continue;
             }
 
+            let try_sparse = can_store_sparse && estimated_cost < sparse_cost_limit;
             let mut buf = vec![0u32; buf_words];
             self.or_internal_dense_to_buf(dense, &mut buf, true);
-            Some((key, buf.into_boxed_slice()))
-        };
 
-        final_dense_masks.into_iter().filter_map(build).collect()
+            if try_sparse {
+                let sparse = Self::dense_buf_to_sparse_entries(&buf);
+                if sparse.len() < buf_words / 2 {
+                    sparse_masks.insert(key, sparse);
+                }
+            }
+
+            dense_masks.insert(key, buf.into_boxed_slice());
+        }
+
+        (dense_masks, sparse_masks)
     }
 
     fn dense_buf_to_sparse_entries(buf: &[u32]) -> Box<[(u16, u32)]> {
@@ -838,32 +860,6 @@ impl Constraint {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice()
-    }
-
-    fn compute_weight_token_sparse_buf_masks(&self) -> SparseWeightBufMaskCache {
-        let buf_words = self.mask_len();
-        if buf_words == 0 || buf_words > u16::MAX as usize {
-            return FxHashMap::default();
-        }
-
-        let final_dense_masks = self.final_weight_token_dense_masks();
-        let build = |(&key, dense): (&usize, &DenseWords)| {
-            let estimated_cost = self.estimate_internal_dense_to_buf_cost(dense);
-            if estimated_cost == 0 || estimated_cost >= (buf_words / 2) as u64 {
-                return None;
-            }
-
-            let mut buf = vec![0u32; buf_words];
-            self.or_internal_dense_to_buf(dense, &mut buf, true);
-            let sparse = Self::dense_buf_to_sparse_entries(&buf);
-            if sparse.len() < buf_words / 2 {
-                Some((key, sparse))
-            } else {
-                None
-            }
-        };
-
-        final_dense_masks.into_iter().filter_map(build).collect()
     }
 
     /// Build dense buf masks for internal tokens with many sparse entries.
