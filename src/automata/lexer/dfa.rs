@@ -67,6 +67,10 @@ fn intersection_missing_group_indices(
     to_clear
 }
 
+fn default_start_states() -> Vec<u32> {
+    vec![0]
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(super) struct DFAState {
     pub(super) transitions: CharTransitions<u32>,
@@ -74,10 +78,24 @@ pub(super) struct DFAState {
     possible_future_group_ids: BitSet,
 }
 
-#[derive(Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DFA {
     states: Vec<DFAState>,
     group_id_to_u8set: Vec<U8Set>,
+    /// Selectable entry states. The first entry is the default start state.
+    ///
+    /// These are not NFA-style union starts: callers select one concrete
+    /// lexer state when beginning a scan. Keeping the full set here ensures
+    /// pruning, minimization, and determinization preserve every supported
+    /// entry point.
+    #[serde(default = "default_start_states")]
+    start_states: Vec<u32>,
+}
+
+impl Default for DFA {
+    fn default() -> Self {
+        Self::new(0)
+    }
 }
 
 impl std::fmt::Debug for DFA {
@@ -91,6 +109,62 @@ impl DFA {
         Self {
             states: vec![DFAState::default(); num_states],
             group_id_to_u8set: Vec::new(),
+            start_states: default_start_states(),
+        }
+    }
+
+    /// The default entry state used by legacy single-start callers.
+    pub(super) fn start_state(&self) -> u32 {
+        self.start_states.first().copied().unwrap_or(0)
+    }
+
+    /// All selectable lexer entry states, with the default first.
+    pub(super) fn start_states(&self) -> &[u32] {
+        &self.start_states
+    }
+
+    /// Replace the selectable lexer entry states. The first state becomes the
+    /// default. Duplicate entries are removed while preserving order.
+    pub(super) fn set_start_states(&mut self, states: Vec<u32>) {
+        assert!(!states.is_empty(), "lexer DFA must have a default start state");
+        let mut deduplicated = Vec::with_capacity(states.len());
+        for state in states {
+            assert!(
+                (state as usize) < self.states.len(),
+                "lexer DFA start state {state} is out of bounds for {} states",
+                self.states.len(),
+            );
+            if !deduplicated.contains(&state) {
+                deduplicated.push(state);
+            }
+        }
+        self.start_states = deduplicated;
+    }
+
+    /// Make an existing or new entry state the default while retaining every
+    /// other selectable entry state as auxiliary.
+    pub(super) fn set_default_start_state(&mut self, state: u32) {
+        assert!(
+            (state as usize) < self.states.len(),
+            "lexer DFA start state {state} is out of bounds for {} states",
+            self.states.len(),
+        );
+        let mut starts = Vec::with_capacity(self.start_states.len() + 1);
+        starts.push(state);
+        starts.extend(self.start_states.iter().copied().filter(|&entry| entry != state));
+        self.set_start_states(starts);
+    }
+
+    /// Add an auxiliary selectable lexer entry state. It is appended after the
+    /// default entry state unless it is already present.
+    pub(super) fn add_start_state(&mut self, state: u32) {
+        assert!(
+            (state as usize) < self.states.len(),
+            "lexer DFA start state {state} is out of bounds for {} states",
+            self.states.len(),
+        );
+        if !self.start_states.contains(&state) {
+            self.start_states.push(state);
         }
     }
 
@@ -306,6 +380,8 @@ impl DFA {
         for group_id in 0..num_groups {
             projected.set_group_u8set(group_id as u32, self.group_id_to_u8set[group_id]);
         }
+
+        projected.set_start_states(self.start_states.clone());
 
         projected
     }

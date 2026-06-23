@@ -279,6 +279,13 @@ fn determinize_epsilon_free_deterministic(nfa: &NFA, group_count: usize, reachab
         dfa.set_transitions_from_sorted_entries(new_state as u32, transitions);
     }
 
+    let mut start_states = Vec::with_capacity(1 + nfa.additional_start_states.len());
+    start_states.push(remap[nfa.start_state as usize]);
+    for &start in &nfa.additional_start_states {
+        start_states.push(remap[start as usize]);
+    }
+    dfa.set_start_states(start_states);
+
     dfa
 }
 
@@ -557,6 +564,26 @@ impl NFA {
         subset_map.insert(start_key.clone(), 0);
         worklist.push((0, start_key));
 
+        // Each NFA start is a selectable entry point, not one constituent of a
+        // union start subset. Materialize its own epsilon closure and retain
+        // the resulting DFA state as an auxiliary entry.
+        for &nfa_start in &self.additional_start_states {
+            let closure = build_start_closure(&compact_nfa, nfa_start as usize, &out_degree);
+            let key = CompressedStateSet::from_sparse(&closure);
+            let dfa_start = if let Some(&existing) = subset_map.get(&key) {
+                existing
+            } else {
+                let new_state = dfa.add_state();
+                let (finalizers, future) =
+                    compute_subset_metadata(self, &key, group_count, &reachable_groups);
+                dfa.overwrite_state_metadata(new_state, finalizers, future);
+                subset_map.insert(key.clone(), new_state);
+                worklist.push((new_state, key));
+                new_state
+            };
+            dfa.add_start_state(dfa_start);
+        }
+
         let mut transition_targets: Vec<SparseStateSet> = (0..num_classes)
             .map(|_| SparseStateSet::new(num_nfa_states))
             .collect();
@@ -635,3 +662,53 @@ impl NFA {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn determinization_preserves_independent_epsilon_entry_states() {
+        let mut nfa = NFA::new(5);
+        nfa.add_transition(0, b'a', 2);
+        nfa.add_finalizer(2, 0);
+        nfa.add_epsilon(1, 3);
+        nfa.add_transition(3, b'b', 4);
+        nfa.add_finalizer(4, 1);
+        nfa.set_start_states(vec![0, 1]);
+
+        let dfa = nfa.to_dfa();
+        assert_eq!(dfa.start_state(), 0);
+        assert_eq!(dfa.start_states().len(), 2);
+
+        let default_start = dfa.start_state();
+        let auxiliary_start = dfa.start_states()[1];
+        let default_end = dfa.get_transition(default_start, b'a');
+        let auxiliary_end = dfa.get_transition(auxiliary_start, b'b');
+
+        assert_ne!(default_end, u32::MAX);
+        assert_ne!(auxiliary_end, u32::MAX);
+        assert!(dfa.finalizers(default_end).contains(0));
+        assert!(dfa.finalizers(auxiliary_end).contains(1));
+        assert_eq!(dfa.get_transition(default_start, b'b'), u32::MAX);
+        assert_eq!(dfa.get_transition(auxiliary_start, b'a'), u32::MAX);
+    }
+
+    #[test]
+    fn epsilon_free_determinization_preserves_all_entry_states() {
+        let mut nfa = NFA::new(4);
+        nfa.add_transition(1, b'a', 3);
+        nfa.add_transition(2, b'b', 3);
+        nfa.add_finalizer(3, 0);
+        nfa.set_start_states(vec![1, 2]);
+
+        let dfa = nfa.to_dfa();
+        assert_eq!(dfa.start_state(), 0);
+        assert_eq!(dfa.start_states().len(), 2);
+        assert_ne!(dfa.get_transition(dfa.start_state(), b'a'), u32::MAX);
+        assert_eq!(dfa.get_transition(dfa.start_state(), b'b'), u32::MAX);
+
+        let auxiliary_start = dfa.start_states()[1];
+        assert_ne!(dfa.get_transition(auxiliary_start, b'b'), u32::MAX);
+        assert_eq!(dfa.get_transition(auxiliary_start, b'a'), u32::MAX);
+    }
+}

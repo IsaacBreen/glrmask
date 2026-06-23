@@ -154,8 +154,30 @@ impl Tokenizer {
         }
     }
 
-    fn start_state(&self) -> u32 {
-        0
+    /// The default lexer entry state.
+    pub fn start_state(&self) -> u32 {
+        self.dfa.start_state()
+    }
+
+    /// All selectable lexer entry states, with [`Self::start_state`] first.
+    pub fn start_states(&self) -> &[u32] {
+        self.dfa.start_states()
+    }
+
+    /// Replace all selectable lexer entry states. The first state is the
+    /// default used by `run()` and legacy callers.
+    pub fn set_start_states(&mut self, states: Vec<u32>) {
+        self.dfa.set_start_states(states);
+    }
+
+    /// Select the default lexer entry state while retaining all other entries.
+    pub fn set_default_start_state(&mut self, state: u32) {
+        self.dfa.set_default_start_state(state);
+    }
+
+    /// Add an auxiliary selectable lexer entry state.
+    pub fn add_start_state(&mut self, state: u32) {
+        self.dfa.add_start_state(state);
     }
 
     fn num_terminals(&self) -> u32 {
@@ -199,30 +221,37 @@ impl Tokenizer {
             .sum()
     }
 
-    /// Detect nullable terminals (those that match the empty string) by
-    /// inspecting start-state finalizers, remove them from the DFA, and return
-    /// the set.  After this call the tokenizer no longer reports those
-    /// terminals as matched at state 0.
+    /// Detect terminals nullable from any selectable entry state, remove those
+    /// entry-state finalizers from the DFA, and return their union. After this
+    /// call the tokenizer reports no zero-byte terminal match from any entry.
     pub fn isolate_start_state_and_drain_nullable_terminals(&mut self) -> BTreeSet<TerminalID> {
         self.isolate_start_state();
-        self.dfa
-            .clear_finalizers_for_state(self.start_state())
-            .iter()
-            .map(|terminal| terminal as TerminalID)
-            .collect()
+        let mut nullable = BTreeSet::new();
+        for start in self.start_states().to_vec() {
+            nullable.extend(
+                self.dfa
+                    .clear_finalizers_for_state(start)
+                    .iter()
+                    .map(|terminal| terminal as TerminalID),
+            );
+        }
+        nullable
     }
 
-    /// Ensure that no byte transition in the DFA targets the start state.
+    /// Ensure that no byte transition in the DFA targets a selectable entry
+    /// state.
     ///
     /// If any transition does, a copy of the start state is created and all
-    /// such transitions are redirected to the copy.  This keeps the DFA
-    /// equivalent while guaranteeing the start state is only reachable at
-    /// position 0.
+    /// such transitions are redirected to the copy. This keeps the DFA
+    /// equivalent while guaranteeing every designated entry state is only
+    /// reached at position 0 when that entry was explicitly selected.
     fn isolate_start_state(&mut self) {
-        let start = self.start_state();
-        let clone_id = self.dfa.clone_state(start);
-        if !self.dfa.redirect_transitions(start, clone_id) {
-            self.dfa.discard_last_state(clone_id);
+        let starts = self.dfa.start_states().to_vec();
+        for start in starts {
+            let clone_id = self.dfa.clone_state(start);
+            if !self.dfa.redirect_transitions(start, clone_id) {
+                self.dfa.discard_last_state(clone_id);
+            }
         }
     }
 
@@ -239,6 +268,15 @@ impl Tokenizer {
             .iter()
             .try_fold(self.start_state(), |state, &byte| self.step(state, byte))
             .unwrap_or(self.start_state())
+    }
+
+    /// Run from a selected lexer entry or continuation state. Unlike `run`,
+    /// failure remains observable rather than falling back to the default
+    /// start state.
+    pub fn run_from_state(&self, input: &[u8], start: u32) -> Option<u32> {
+        input
+            .iter()
+            .try_fold(start, |state, &byte| self.step(state, byte))
     }
 
     pub fn matched_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
@@ -876,6 +914,7 @@ pub struct TokenizerResult {
 mod active_finalizer_minimization_tests {
     use super::*;
     use crate::automata::lexer::compile::build_regex;
+    use crate::automata::lexer::dfa::DFA;
 
     #[test]
     fn active_finalizer_refinement_matches_rebuilt_active_lexer() {
@@ -896,5 +935,92 @@ mod active_finalizer_minimization_tests {
             .expect("test tokenizer keeps terminal expressions");
 
         assert_eq!(actual.num_internal_ids() as usize, rebuilt_count);
+    }
+
+    #[test]
+    fn tokenizer_exposes_and_isolates_all_selectable_entry_states() {
+        let mut dfa = DFA::new(3);
+        dfa.ensure_group_capacity(1);
+        dfa.add_transition(0, b'a', 2);
+        dfa.add_transition(1, b'b', 2);
+        dfa.add_transition(2, b'a', 0);
+        dfa.add_transition(2, b'b', 1);
+        dfa.set_start_states(vec![0, 1]);
+
+        let mut tokenizer = Tokenizer::from_parts(dfa, 1, None);
+        assert_eq!(tokenizer.start_states(), &[0, 1]);
+        assert_eq!(tokenizer.run(b"a"), 2);
+        assert_eq!(tokenizer.run_from_state(b"b", 1), Some(2));
+        assert_eq!(tokenizer.run_from_state(b"b", 0), None);
+
+        tokenizer.set_default_start_state(1);
+        assert_eq!(tokenizer.start_states(), &[1, 0]);
+        assert_eq!(tokenizer.run(b"b"), 2);
+        tokenizer.set_default_start_state(0);
+
+        tokenizer.isolate_start_state();
+        let entry_states = tokenizer.start_states().to_vec();
+        for source in 0..tokenizer.num_states() {
+            for (_, target) in tokenizer.transitions_from(source) {
+                assert!(
+                    !entry_states.contains(&target),
+                    "entry state {target} remained reachable from state {source}",
+                );
+            }
+        }
+        assert_eq!(tokenizer.run(b"a"), 2);
+        assert_eq!(tokenizer.run_from_state(b"b", 1), Some(2));
+    }
+
+    #[test]
+    fn tokenizer_serialization_preserves_selectable_entry_states() {
+        let mut dfa = DFA::new(3);
+        dfa.ensure_group_capacity(1);
+        dfa.add_transition(0, b'a', 2);
+        dfa.add_transition(1, b'b', 2);
+        dfa.set_start_states(vec![0, 1]);
+        let tokenizer = Tokenizer::from_parts(dfa, 1, None);
+
+        let bytes = bincode::serialize(&tokenizer).expect("tokenizer serializes");
+        let restored: Tokenizer = bincode::deserialize(&bytes).expect("tokenizer deserializes");
+        assert_eq!(restored.start_states(), &[0, 1]);
+        assert_eq!(restored.run_from_state(b"b", 1), Some(2));
+    }
+
+    #[test]
+    fn nullable_drain_clears_every_selectable_entry_state() {
+        let mut dfa = DFA::new(2);
+        dfa.ensure_group_capacity(1);
+        let mut finalizers = BitSet::new(1);
+        finalizers.set(0);
+        dfa.overwrite_state_metadata(0, finalizers.clone(), BitSet::new(1));
+        dfa.overwrite_state_metadata(1, finalizers, BitSet::new(1));
+        dfa.set_start_states(vec![0, 1]);
+        let mut tokenizer = Tokenizer::from_parts(dfa, 1, None);
+
+        assert_eq!(
+            tokenizer.isolate_start_state_and_drain_nullable_terminals(),
+            BTreeSet::from([0]),
+        );
+        for &start in tokenizer.start_states() {
+            assert!(tokenizer.matched_terminal_bitset(start).is_empty());
+        }
+    }
+
+    #[test]
+    fn missing_start_state_metadata_defaults_to_legacy_state_zero() {
+        let mut dfa = DFA::new(2);
+        dfa.ensure_group_capacity(1);
+        dfa.set_start_states(vec![1, 0]);
+        let tokenizer = Tokenizer::from_parts(dfa, 1, None);
+
+        let mut value = serde_json::to_value(tokenizer).expect("tokenizer converts to JSON");
+        value
+            .get_mut("dfa")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("tokenizer JSON includes DFA object")
+            .remove("start_states");
+        let restored: Tokenizer = serde_json::from_value(value).expect("legacy JSON deserializes");
+        assert_eq!(restored.start_states(), &[0]);
     }
 }

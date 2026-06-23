@@ -35,6 +35,9 @@ pub(super) struct CompactNFA {
 pub struct NFA {
     pub(super) states: Vec<NFAState>,
     pub(super) start_state: u32,
+    /// Additional selectable entry states. These are not union starts: the
+    /// lexer determinizer creates one DFA entry for each state.
+    pub(super) additional_start_states: Vec<u32>,
 }
 
 fn build_states(count: usize) -> Vec<NFAState> {
@@ -51,11 +54,70 @@ impl NFA {
         Self {
             states: build_states(count),
             start_state: 0,
+            additional_start_states: Vec::new(),
         }
     }
 
     pub fn num_states(&self) -> usize {
         self.states.len()
+    }
+
+    /// The default entry state.
+    pub fn start_state(&self) -> u32 {
+        self.start_state
+    }
+
+    /// Additional selectable entry states, excluding the default.
+    pub fn additional_start_states(&self) -> &[u32] {
+        &self.additional_start_states
+    }
+
+    /// All selectable entry states with the default first.
+    pub fn start_states(&self) -> impl Iterator<Item = u32> + '_ {
+        std::iter::once(self.start_state).chain(self.additional_start_states.iter().copied())
+    }
+
+    /// Replace all selectable entry states. The first state is the default.
+    pub fn set_start_states(&mut self, states: Vec<u32>) {
+        assert!(!states.is_empty(), "lexer NFA must have a default start state");
+        let mut deduplicated = Vec::with_capacity(states.len());
+        for state in states {
+            assert!(
+                (state as usize) < self.states.len(),
+                "lexer NFA start state {state} is out of bounds for {} states",
+                self.states.len(),
+            );
+            if !deduplicated.contains(&state) {
+                deduplicated.push(state);
+            }
+        }
+        self.start_state = deduplicated[0];
+        self.additional_start_states = deduplicated[1..].to_vec();
+    }
+
+    /// Select the default entry state while retaining all other entries.
+    pub fn set_default_start_state(&mut self, state: u32) {
+        assert!(
+            (state as usize) < self.states.len(),
+            "lexer NFA start state {state} is out of bounds for {} states",
+            self.states.len(),
+        );
+        let mut starts = Vec::with_capacity(self.additional_start_states.len() + 2);
+        starts.push(state);
+        starts.extend(self.start_states().filter(|&entry| entry != state));
+        self.set_start_states(starts);
+    }
+
+    /// Add an auxiliary selectable entry state.
+    pub fn add_start_state(&mut self, state: u32) {
+        assert!(
+            (state as usize) < self.states.len(),
+            "lexer NFA start state {state} is out of bounds for {} states",
+            self.states.len(),
+        );
+        if state != self.start_state && !self.additional_start_states.contains(&state) {
+            self.additional_start_states.push(state);
+        }
     }
 
     pub fn add_state(&mut self) -> u32 {
@@ -170,6 +232,14 @@ impl NFA {
 
         self.states = new_states;
         self.start_state = scc_map[self.start_state as usize] as u32;
+        let mut remapped_starts = vec![self.start_state];
+        for state in std::mem::take(&mut self.additional_start_states) {
+            let remapped = scc_map[state as usize] as u32;
+            if !remapped_starts.contains(&remapped) {
+                remapped_starts.push(remapped);
+            }
+        }
+        self.additional_start_states = remapped_starts[1..].to_vec();
     }
 
     pub(super) fn build_compact_nfa(&self) -> CompactNFA {
@@ -268,5 +338,33 @@ impl NFA {
             }
         }
         (class_map, class_members)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn epsilon_scc_condensation_remaps_all_selectable_entry_states() {
+        let mut nfa = NFA::new(4);
+        nfa.add_transition(0, b'a', 3);
+        nfa.add_finalizer(3, 0);
+        nfa.add_epsilon(1, 2);
+        nfa.add_epsilon(2, 1);
+        nfa.add_transition(2, b'b', 3);
+        nfa.set_start_states(vec![1, 0]);
+
+        nfa.condense_epsilon_sccs();
+        assert_eq!(nfa.start_states().count(), 2);
+        assert!(nfa.start_states().all(|state| (state as usize) < nfa.num_states()));
+
+        let dfa = nfa.to_dfa();
+        let default_end = dfa.get_transition(dfa.start_state(), b'b');
+        let auxiliary_end = dfa.get_transition(dfa.start_states()[1], b'a');
+        assert_ne!(default_end, u32::MAX);
+        assert_ne!(auxiliary_end, u32::MAX);
+        assert!(dfa.finalizers(default_end).contains(0));
+        assert!(dfa.finalizers(auxiliary_end).contains(0));
     }
 }

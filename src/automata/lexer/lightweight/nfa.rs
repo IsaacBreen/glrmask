@@ -25,6 +25,8 @@ pub struct State {
 pub struct Nfa {
     pub states: Vec<State>,
     pub start_state: u32,
+    /// Additional selectable entry states. The default remains `start_state`.
+    pub additional_start_states: Vec<u32>,
     deterministic: bool,
     minimal: bool,
 }
@@ -34,6 +36,7 @@ impl Nfa {
         Self {
             states: vec![State::default(); num_states.max(1)],
             start_state: 0,
+            additional_start_states: Vec::new(),
             deterministic: false,
             minimal: false,
         }
@@ -48,6 +51,7 @@ impl Nfa {
         Self {
             states,
             start_state,
+            additional_start_states: Vec::new(),
             deterministic,
             minimal,
         }
@@ -55,6 +59,47 @@ impl Nfa {
 
     pub fn num_states(&self) -> usize {
         self.states.len()
+    }
+
+    pub fn start_states(&self) -> impl Iterator<Item = u32> + '_ {
+        std::iter::once(self.start_state).chain(self.additional_start_states.iter().copied())
+    }
+
+    pub fn set_start_states(&mut self, states: Vec<u32>) {
+        assert!(!states.is_empty(), "lightweight lexer NFA needs a default start state");
+        let mut deduplicated = Vec::with_capacity(states.len());
+        for state in states {
+            assert!(
+                (state as usize) < self.states.len(),
+                "lightweight lexer NFA start state {state} is out of bounds",
+            );
+            if !deduplicated.contains(&state) {
+                deduplicated.push(state);
+            }
+        }
+        self.start_state = deduplicated[0];
+        self.additional_start_states = deduplicated[1..].to_vec();
+    }
+
+    pub fn set_default_start_state(&mut self, state: u32) {
+        assert!(
+            (state as usize) < self.states.len(),
+            "lightweight lexer NFA start state {state} is out of bounds",
+        );
+        let mut starts = Vec::with_capacity(self.additional_start_states.len() + 2);
+        starts.push(state);
+        starts.extend(self.start_states().filter(|&entry| entry != state));
+        self.set_start_states(starts);
+    }
+
+    pub fn add_start_state(&mut self, state: u32) {
+        assert!(
+            (state as usize) < self.states.len(),
+            "lightweight lexer NFA start state {state} is out of bounds",
+        );
+        if state != self.start_state && !self.additional_start_states.contains(&state) {
+            self.additional_start_states.push(state);
+        }
     }
 
     pub fn is_deterministic(&self) -> bool {
@@ -184,7 +229,9 @@ impl Nfa {
             }
         }
 
-        Self::with_flags(states, lhs.start_state, false, false)
+        let mut result = Self::with_flags(states, lhs.start_state, false, false);
+        result.set_start_states(lhs.start_states().collect());
+        result
     }
 
     pub fn union(&self, rhs: &Self) -> Self {
@@ -218,7 +265,14 @@ impl Nfa {
         states[0].epsilon_transitions.push(lhs_start);
         states[0].epsilon_transitions.push(rhs_start);
 
-        Self::with_flags(states, 0, false, false)
+        let mut result = Self::with_flags(states, 0, false, false);
+        for start in lhs.start_states() {
+            result.add_start_state(start + lhs_offset);
+        }
+        for start in rhs.start_states() {
+            result.add_start_state(start + rhs_offset);
+        }
+        result
     }
 
     pub fn subtract(&self, rhs: &Self) -> Self {
@@ -228,10 +282,16 @@ impl Nfa {
         let lhs_tables = lhs.transition_tables();
         let rhs_tables = rhs.transition_tables();
 
-        let start = ProductState {
-            left: lhs.start_state,
-            right: Some(rhs.start_state),
-        };
+        let start_products: Vec<ProductState> = lhs
+            .start_states()
+            .flat_map(|left| {
+                rhs.start_states().map(move |right| ProductState {
+                    left,
+                    right: Some(right),
+                })
+            })
+            .collect();
+        let start = start_products[0];
         let mut state_ids = HashMap::<ProductState, u32>::new();
         let mut worklist = VecDeque::<ProductState>::new();
         let mut out = Nfa::new(1);
@@ -240,6 +300,10 @@ impl Nfa {
 
         state_ids.insert(start, 0);
         worklist.push_back(start);
+        for product in start_products.into_iter().skip(1) {
+            let state = Self::product_state_id(product, &mut state_ids, &mut worklist, &mut out);
+            out.add_start_state(state);
+        }
 
         while let Some(product) = worklist.pop_front() {
             let out_state = state_ids[&product];
@@ -278,7 +342,7 @@ impl Nfa {
 
     fn to_lexer_nfa(&self) -> LexerNfa {
         let mut nfa = LexerNfa::new(self.states.len());
-        nfa.start_state = self.start_state;
+        nfa.set_start_states(self.start_states().collect());
 
         for (state_id, state) in self.states.iter().enumerate() {
             for (set, target) in &state.transitions {
@@ -316,6 +380,7 @@ impl Nfa {
 
         let start_u8set = dfa.get_u8set(self.start_state);
         dfa.set_group_u8set(0, start_u8set);
+        dfa.set_start_states(self.start_states().collect());
         dfa
     }
 
@@ -334,9 +399,11 @@ impl Nfa {
             });
         }
 
+        let starts = dfa.start_states();
         Self {
             states,
-            start_state: 0,
+            start_state: starts[0],
+            additional_start_states: starts[1..].to_vec(),
             deterministic: true,
             minimal,
         }
@@ -440,5 +507,34 @@ impl Nfa {
                 .insert(byte);
         }
         target_bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn determinize_and_minimize_preserve_selectable_entry_states() {
+        let mut nfa = Nfa::new(4);
+        nfa.add_transition(0, b'a', 2);
+        nfa.add_transition(1, b'b', 3);
+        nfa.set_end(2, true);
+        nfa.set_end(3, true);
+        nfa.set_start_states(vec![0, 1]);
+
+        let deterministic = nfa.determinize();
+        assert!(deterministic.is_deterministic());
+        assert_eq!(deterministic.start_states().collect::<Vec<_>>().len(), 2);
+        assert!(deterministic.step(deterministic.start_state, b'a').is_some());
+        let auxiliary = deterministic.additional_start_states[0];
+        assert!(deterministic.step(auxiliary, b'b').is_some());
+
+        let minimized = deterministic.minimize();
+        assert!(minimized.is_minimal());
+        assert_eq!(minimized.start_states().collect::<Vec<_>>().len(), 2);
+        assert!(minimized.step(minimized.start_state, b'a').is_some());
+        let auxiliary = minimized.additional_start_states[0];
+        assert!(minimized.step(auxiliary, b'b').is_some());
     }
 }

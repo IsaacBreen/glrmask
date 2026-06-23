@@ -505,7 +505,8 @@ impl DFA {
     }
 
     /// Minimize this DFA using Hopcroft's algorithm.
-    /// Returns a new, minimized DFA.  State 0 remains the start state.
+    /// Every selectable entry state is retained and remapped; the default
+    /// entry's quotient block remains state 0 for compatibility.
     pub(super) fn minimize(&self) -> DFA {
         self.minimize_impl(true).0
     }
@@ -614,7 +615,7 @@ impl DFA {
             TopologyPrerefine::AlreadyMinimal(blocks) => {
                 return compose_mappings(
                     &old_to_working,
-                    &state_mapping_from_blocks(blocks, n),
+                    &state_mapping_from_blocks(blocks, n, working.start_state()),
                 );
             }
             TopologyPrerefine::Refined { blocks: refined_blocks, .. } => {
@@ -626,12 +627,19 @@ impl DFA {
         if minimality_check_blocks.iter().all(|block| block.len() <= 1) {
             return compose_mappings(
                 &old_to_working,
-                &state_mapping_from_blocks(minimality_check_blocks, n),
+                    &state_mapping_from_blocks(
+                        minimality_check_blocks,
+                        n,
+                        working.start_state(),
+                    ),
             );
         }
 
         let blocks = hopcroft_refine_partition(&working, partition, blocks);
-        compose_mappings(&old_to_working, &state_mapping_from_blocks(blocks, n))
+        compose_mappings(
+            &old_to_working,
+            &state_mapping_from_blocks(blocks, n, working.start_state()),
+        )
     }
 
     /// Remove unreachable states, returning old→new mapping.
@@ -640,14 +648,15 @@ impl DFA {
         self.remove_unreachable_states_with_roots_with_mapping(&[])
     }
 
-    /// Remove states unreachable from state 0 or any provided extra roots,
+    /// Remove states unreachable from any selectable entry state or any
+    /// provided extra roots,
     /// returning old→new mapping. Unreachable states map to `u32::MAX`.
     fn remove_unreachable_states_with_roots_with_mapping(&mut self, extra_roots: &[u32]) -> Vec<u32> {
         let n = self.states().len();
         let mut reachable = vec![false; n];
-        let mut queue = vec![0usize];
-        reachable[0] = true;
-        for &root in extra_roots {
+        let old_start_states = self.start_states().to_vec();
+        let mut queue = Vec::with_capacity(old_start_states.len() + extra_roots.len());
+        for &root in old_start_states.iter().chain(extra_roots.iter()) {
             let root = root as usize;
             if root < n && !reachable[root] {
                 reachable[root] = true;
@@ -698,6 +707,12 @@ impl DFA {
         }
 
         *self.states_mut() = new_states;
+        let remapped_start_states = old_start_states
+            .into_iter()
+            .map(|state| state_mapping[state as usize])
+            .filter(|&state| state != u32::MAX)
+            .collect();
+        self.set_start_states(remapped_start_states);
         state_mapping
     }
 
@@ -805,8 +820,8 @@ impl DFA {
     }
 
     /// Rebuild DFA from partition blocks.
-    /// Ensures state 0 in the new DFA corresponds to the block
-    /// containing old state 0.
+    /// Ensures state 0 in the new DFA corresponds to the block containing the
+    /// old default entry state.
     fn rebuild_from_blocks(&self, partition_blocks: Vec<Vec<u32>>) -> DFA {
         self.rebuild_from_blocks_with_mapping(partition_blocks).0
     }
@@ -814,12 +829,13 @@ impl DFA {
     /// Like `rebuild_from_blocks` but also returns old→new state mapping.
     fn rebuild_from_blocks_with_mapping(&self, mut partition_blocks: Vec<Vec<u32>>) -> (DFA, Vec<u32>) {
         let n = self.states().len();
-        let state_mapping = state_mapping_from_blocks(partition_blocks.clone(), n);
+        let state_mapping = state_mapping_from_blocks(partition_blocks.clone(), n, self.start_state());
+        let old_start_states = self.start_states().to_vec();
 
         partition_blocks.retain(|block| !block.is_empty());
         if let Some(start_part_idx) = partition_blocks
             .iter()
-            .position(|block| block.iter().any(|&state| state == 0))
+            .position(|block| block.iter().any(|&state| state == self.start_state()))
         {
             partition_blocks.swap(0, start_part_idx);
         }
@@ -848,15 +864,24 @@ impl DFA {
         }
 
         result.recompute_possible_futures();
+        let remapped_start_states = old_start_states
+            .into_iter()
+            .map(|state| state_mapping[state as usize])
+            .collect();
+        result.set_start_states(remapped_start_states);
         (result, state_mapping)
     }
 }
 
-fn state_mapping_from_blocks(mut partition_blocks: Vec<Vec<u32>>, num_states: usize) -> Vec<u32> {
+fn state_mapping_from_blocks(
+    mut partition_blocks: Vec<Vec<u32>>,
+    num_states: usize,
+    default_start_state: u32,
+) -> Vec<u32> {
     partition_blocks.retain(|block| !block.is_empty());
     if let Some(start_part_idx) = partition_blocks
         .iter()
-        .position(|block| block.iter().any(|&state| state == 0))
+        .position(|block| block.iter().any(|&state| state == default_start_state))
     {
         partition_blocks.swap(0, start_part_idx);
     }
@@ -883,4 +908,48 @@ fn compose_mappings(first: &[u32], second: &[u32]) -> Vec<u32> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minimization_retains_and_remaps_all_selectable_entry_states() {
+        let mut dfa = DFA::new(5);
+        dfa.ensure_group_capacity(1);
+        dfa.add_transition(3, b'a', 4);
+        dfa.add_transition(1, b'b', 2);
+
+        let mut finalizers = BitSet::new(1);
+        finalizers.set(0);
+        dfa.overwrite_state_metadata(4, finalizers.clone(), BitSet::new(1));
+        dfa.overwrite_state_metadata(2, finalizers, BitSet::new(1));
+        dfa.set_start_states(vec![3, 1]);
+
+        let (minimized, mapping) = dfa.minimize_with_state_mapping();
+        assert_eq!(mapping[0], u32::MAX, "unreachable non-entry state must drop");
+        assert_eq!(mapping[3], minimized.start_state());
+        assert_eq!(minimized.start_state(), 0);
+        assert_eq!(minimized.start_states().len(), 2);
+        assert_eq!(mapping[1], minimized.start_states()[1]);
+
+        let default_end = minimized.get_transition(minimized.start_state(), b'a');
+        let auxiliary_end = minimized.get_transition(minimized.start_states()[1], b'b');
+        assert_ne!(default_end, u32::MAX);
+        assert_ne!(auxiliary_end, u32::MAX);
+        assert!(minimized.finalizers(default_end).contains(0));
+        assert!(minimized.finalizers(auxiliary_end).contains(0));
+    }
+
+    #[test]
+    fn group_projection_preserves_selectable_entry_states() {
+        let mut dfa = DFA::new(3);
+        dfa.ensure_group_capacity(2);
+        dfa.set_start_states(vec![2, 0]);
+
+        let projected = dfa.project_groups(1);
+        assert_eq!(projected.start_states(), &[2, 0]);
+        assert_eq!(projected.start_state(), 2);
+    }
 }
