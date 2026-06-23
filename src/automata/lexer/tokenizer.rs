@@ -1007,20 +1007,4 @@ mod active_finalizer_minimization_tests {
         }
     }
 
-    #[test]
-    fn missing_start_state_metadata_defaults_to_legacy_state_zero() {
-        let mut dfa = DFA::new(2);
-        dfa.ensure_group_capacity(1);
-        dfa.set_start_states(vec![1, 0]);
-        let tokenizer = Tokenizer::from_parts(dfa, 1, None);
-
-        let mut value = serde_json::to_value(tokenizer).expect("tokenizer converts to JSON");
-        value
-            .get_mut("dfa")
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("tokenizer JSON includes DFA object")
-            .remove("start_states");
-        let restored: Tokenizer = serde_json::from_value(value).expect("legacy JSON deserializes");
-        assert_eq!(restored.start_states(), &[0]);
-    }
 }

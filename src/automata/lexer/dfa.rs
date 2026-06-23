@@ -67,6 +67,8 @@ fn intersection_missing_group_indices(
     to_clear
 }
 
+const START_METADATA_SENTINEL: u32 = u32::MAX;
+
 fn default_start_states() -> Vec<u32> {
     vec![0]
 }
@@ -78,7 +80,7 @@ pub(super) struct DFAState {
     possible_future_group_ids: BitSet,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct DFA {
     states: Vec<DFAState>,
     group_id_to_u8set: Vec<U8Set>,
@@ -88,8 +90,111 @@ pub struct DFA {
     /// lexer state when beginning a scan. Keeping the full set here ensures
     /// pruning, minimization, and determinization preserve every supported
     /// entry point.
-    #[serde(default = "default_start_states")]
     start_states: Vec<u32>,
+}
+
+/// Deliberate two-field wire format compatible with lexer DFAs serialized
+/// before selectable entry states existed. Multi-entry metadata is stored as
+/// trailing invalid DFA states, so the enclosing bincode layout stays intact.
+#[derive(Serialize, Deserialize)]
+struct DfaWire {
+    states: Vec<DFAState>,
+    group_id_to_u8set: Vec<U8Set>,
+}
+
+fn encode_start_metadata(starts: &[u32]) -> Vec<DFAState> {
+    starts
+        .chunks(255)
+        .map(|chunk| {
+            let mut entries: Vec<(u8, u32)> = chunk
+                .iter()
+                .enumerate()
+                .map(|(index, &state)| (index as u8, state))
+                .collect();
+            entries.push((u8::MAX, START_METADATA_SENTINEL));
+            DFAState {
+                transitions: CharTransitions::from_sorted_entries(entries),
+                finalizers: BitSet::new(0),
+                possible_future_group_ids: BitSet::new(0),
+            }
+        })
+        .collect()
+}
+
+fn decode_start_metadata(states: &mut Vec<DFAState>) -> Result<Vec<u32>, String> {
+    let mut reversed_chunks = Vec::<Vec<u32>>::new();
+    while let Some(last) = states.last() {
+        let is_metadata = last.finalizers.len() == 0
+            && last.possible_future_group_ids.len() == 0
+            && last.transitions.get(u8::MAX) == Some(&START_METADATA_SENTINEL);
+        if !is_metadata {
+            break;
+        }
+
+        let mut chunk = Vec::with_capacity(last.transitions.len().saturating_sub(1));
+        for (byte, &target) in last.transitions.iter() {
+            if byte == u8::MAX {
+                continue;
+            }
+            if target == START_METADATA_SENTINEL {
+                return Err("invalid lexer DFA start-state metadata".to_owned());
+            }
+            chunk.push(target);
+        }
+        reversed_chunks.push(chunk);
+        states.pop();
+    }
+
+    if reversed_chunks.is_empty() {
+        return Ok(default_start_states());
+    }
+
+    reversed_chunks.reverse();
+    let starts: Vec<u32> = reversed_chunks.into_iter().flatten().collect();
+    if starts.is_empty() {
+        return Err("lexer DFA start-state metadata is empty".to_owned());
+    }
+    if starts.iter().any(|&state| state as usize >= states.len()) {
+        return Err("lexer DFA start-state metadata is out of bounds".to_owned());
+    }
+    let mut seen = BTreeSet::new();
+    if starts.iter().any(|&state| !seen.insert(state)) {
+        return Err("lexer DFA start-state metadata contains duplicate entries".to_owned());
+    }
+    Ok(starts)
+}
+
+impl Serialize for DFA {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut states = self.states.clone();
+        if self.start_states != default_start_states() {
+            states.extend(encode_start_metadata(&self.start_states));
+        }
+        DfaWire {
+            states,
+            group_id_to_u8set: self.group_id_to_u8set.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for DFA {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut wire = DfaWire::deserialize(deserializer)?;
+        let start_states = decode_start_metadata(&mut wire.states)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            states: wire.states,
+            group_id_to_u8set: wire.group_id_to_u8set,
+            start_states,
+        })
+    }
 }
 
 impl Default for DFA {
@@ -396,5 +501,57 @@ impl DFA {
             state.possible_future_group_ids =
                 resized_bitset(&state.possible_future_group_ids, num_groups);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Serialize)]
+    struct LegacyDfa {
+        states: Vec<DFAState>,
+        group_id_to_u8set: Vec<U8Set>,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyContainer {
+        dfa: LegacyDfa,
+        trailing_value: u32,
+    }
+
+    #[derive(Deserialize)]
+    struct CurrentContainer {
+        dfa: DFA,
+        trailing_value: u32,
+    }
+
+    #[test]
+    fn bincode_legacy_dfa_defaults_to_single_start_state() {
+        let dfa = DFA::new(2);
+        let legacy = LegacyDfa {
+            states: dfa.states.clone(),
+            group_id_to_u8set: dfa.group_id_to_u8set.clone(),
+        };
+        let bytes = bincode::serialize(&legacy).expect("legacy DFA serializes");
+        let restored: DFA = bincode::deserialize(&bytes).expect("legacy DFA deserializes");
+        assert_eq!(restored.start_states(), &[0]);
+    }
+
+    #[test]
+    fn bincode_legacy_dfa_keeps_nested_stream_aligned() {
+        let dfa = DFA::new(2);
+        let legacy = LegacyContainer {
+            dfa: LegacyDfa {
+                states: dfa.states.clone(),
+                group_id_to_u8set: dfa.group_id_to_u8set.clone(),
+            },
+            trailing_value: 0xA5A5_1234,
+        };
+        let bytes = bincode::serialize(&legacy).expect("legacy container serializes");
+        let restored: CurrentContainer =
+            bincode::deserialize(&bytes).expect("legacy container deserializes");
+        assert_eq!(restored.dfa.start_states(), &[0]);
+        assert_eq!(restored.trailing_value, legacy.trailing_value);
     }
 }
