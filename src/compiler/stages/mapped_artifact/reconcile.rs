@@ -5,7 +5,7 @@ use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use rustc_hash::FxHashMap;
 
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
-use crate::ds::weight::{Weight, finalize_weight_map, shared_rangeset};
+use crate::ds::weight::{SharedTokenSet, Weight, finalize_weight_map, shared_rangeset};
 
 pub(super) fn reconcile_weight_id_maps(
     left_weights: &mut [&mut Weight],
@@ -358,21 +358,171 @@ fn sort_dedup_local_to_common(mut local_to_common: Vec<Vec<u32>>) -> Vec<Vec<u32
     local_to_common
 }
 
+#[derive(Debug)]
+struct InjectiveLocalMap {
+    destination_by_local: Vec<u32>,
+    destination_order_is_monotone: bool,
+}
+
+impl InjectiveLocalMap {
+    fn from_local_to_common(local_to_common: &[Vec<u32>], common_count: usize) -> Option<Self> {
+        let mut destination_by_local = vec![u32::MAX; local_to_common.len()];
+        let mut seen_destinations = vec![false; common_count];
+        let mut previous_destination = None;
+        let mut destination_order_is_monotone = true;
+
+        for (local, destinations) in local_to_common.iter().enumerate() {
+            let &destination = match destinations.as_slice() {
+                [] => continue,
+                [destination] => destination,
+                _ => return None,
+            };
+            let destination_index = destination as usize;
+            if destination_index >= common_count || std::mem::replace(&mut seen_destinations[destination_index], true) {
+                return None;
+            }
+            if let Some(previous) = previous_destination
+                && destination <= previous
+            {
+                destination_order_is_monotone = false;
+            }
+            previous_destination = Some(destination);
+            destination_by_local[local] = destination;
+        }
+
+        Some(Self {
+            destination_by_local,
+            destination_order_is_monotone,
+        })
+    }
+
+    #[inline]
+    fn destination(&self, local: u32) -> Option<u32> {
+        self.destination_by_local
+            .get(local as usize)
+            .copied()
+            .filter(|&destination| destination != u32::MAX)
+    }
+}
+
+fn remap_token_set_with_injective_map(
+    tokens: &SharedTokenSet,
+    token_map: &InjectiveLocalMap,
+    cache: &mut HashMap<usize, SharedTokenSet>,
+) -> SharedTokenSet {
+    let key = Arc::as_ptr(tokens) as usize;
+    if let Some(cached) = cache.get(&key) {
+        return Arc::clone(cached);
+    }
+
+    let mut mapped = RangeSetBlaze::new();
+    for local_token in tokens.iter() {
+        if let Some(common_token) = token_map.destination(local_token) {
+            mapped.insert(common_token);
+        }
+    }
+    // Keep the generic remapper's sharing boundary: it creates a fresh token
+    // set per source-weight remap and shares only within that weight. Global
+    // interning here changes serialized artifact layout even though masks are
+    // equivalent.
+    let mapped = Arc::new(mapped);
+    cache.insert(key, Arc::clone(&mapped));
+    mapped
+}
+
+fn remap_weight_with_injective_maps(
+    weight: &Weight,
+    tsid_map: &InjectiveLocalMap,
+    token_map: &InjectiveLocalMap,
+    token_cache: &mut HashMap<usize, SharedTokenSet>,
+) -> Weight {
+    // Preserve the generic path for the special universal representation. It
+    // is rare and has different "all mapped IDs" semantics.
+    if weight.is_empty() || weight.is_full() {
+        return weight.clone();
+    }
+
+    let mut entries = Vec::<(u32, SharedTokenSet)>::new();
+    for (local_range, tokens) in weight.0.range_values() {
+        let mapped_tokens = remap_token_set_with_injective_map(tokens, token_map, token_cache);
+        if mapped_tokens.is_empty() {
+            continue;
+        }
+        for local_tsid in *local_range.start()..=*local_range.end() {
+            if let Some(common_tsid) = tsid_map.destination(local_tsid) {
+                entries.push((common_tsid, Arc::clone(&mapped_tokens)));
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        return Weight::empty();
+    }
+    if !tsid_map.destination_order_is_monotone {
+        entries.sort_unstable_by_key(|(common_tsid, _)| *common_tsid);
+    }
+
+    // Match the general remapper's canonical construction order exactly. The
+    // fast path avoids the `common_tsid_count`-sized scratch vector, not the
+    // final RangeMap / interning boundary.
+    let mut map = RangeMapBlaze::<u32, SharedTokenSet>::new();
+    let mut run_start = entries[0].0;
+    let mut run_end = entries[0].0;
+    let mut run_tokens = Arc::clone(&entries[0].1);
+    for (common_tsid, tokens) in entries.into_iter().skip(1) {
+        if common_tsid == run_end + 1
+            && (Arc::ptr_eq(&run_tokens, &tokens) || run_tokens.as_ref() == tokens.as_ref())
+        {
+            run_end = common_tsid;
+            continue;
+        }
+        map.extend_simple(std::iter::once((run_start..=run_end, run_tokens)));
+        run_start = common_tsid;
+        run_end = common_tsid;
+        run_tokens = tokens;
+    }
+    map.extend_simple(std::iter::once((run_start..=run_end, run_tokens)));
+    finalize_weight_map(map)
+}
+
 fn remap_weights_with_maps(
     weights: &mut [&mut Weight],
     local_to_common_tsids: &[Vec<u32>],
     local_to_common_tokens: &[Vec<u32>],
     common_tsid_count: usize,
 ) {
+    let tsid_map = InjectiveLocalMap::from_local_to_common(local_to_common_tsids, common_tsid_count);
+    let token_map = InjectiveLocalMap::from_local_to_common(
+        local_to_common_tokens,
+        local_to_common_tokens
+            .iter()
+            .flatten()
+            .copied()
+            .max()
+            .map_or(0, |maximum| maximum as usize + 1),
+    );
     let mut cache = HashMap::<usize, Weight>::new();
+
     for weight in weights.iter_mut() {
-        let remapped = remap_weight_cached_general(
-            weight,
-            local_to_common_tsids,
-            local_to_common_tokens,
-            common_tsid_count,
-            &mut cache,
-        );
+        let ptr = Arc::as_ptr(&weight.0) as usize;
+        let remapped = if let Some(cached) = cache.get(&ptr) {
+            cached.clone()
+        } else {
+            let remapped = match (&tsid_map, &token_map) {
+                (Some(tsid_map), Some(token_map)) if !weight.is_full() => {
+                    let mut token_cache = HashMap::<usize, SharedTokenSet>::new();
+                    remap_weight_with_injective_maps(weight, tsid_map, token_map, &mut token_cache)
+                }
+                _ => remap_weight_general(
+                    weight,
+                    local_to_common_tsids,
+                    local_to_common_tokens,
+                    common_tsid_count,
+                ),
+            };
+            cache.insert(ptr, remapped.clone());
+            remapped
+        };
         **weight = remapped;
     }
 }
@@ -526,4 +676,48 @@ fn remap_weight_general(
     }
 
     finalize_weight_map(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entries_key(weight: &Weight) -> Vec<(u32, u32, Vec<(u32, u32)>)> {
+        weight
+            .0
+            .range_values()
+            .map(|(range, tokens)| {
+                (
+                    *range.start(),
+                    *range.end(),
+                    tokens
+                        .ranges()
+                        .map(|range| (*range.start(), *range.end()))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn injective_reconcile_remap_matches_general_for_reordered_ids() {
+        let weight = Weight::from_per_tsid_token_sets([
+            (0, RangeSetBlaze::from_iter([0..=1])),
+            (1, RangeSetBlaze::from_iter([3..=3])),
+            (2, RangeSetBlaze::from_iter([0..=1])),
+            (3, RangeSetBlaze::from_iter([3..=3])),
+        ]);
+        let tsid_map = vec![vec![2], vec![0], vec![3], vec![1]];
+        let token_map = vec![vec![3], vec![1], vec![0], vec![2]];
+
+        let general = remap_weight_general(&weight, &tsid_map, &token_map, 4);
+        let fast = remap_weight_with_injective_maps(
+            &weight,
+            &InjectiveLocalMap::from_local_to_common(&tsid_map, 4).expect("injective tsids"),
+            &InjectiveLocalMap::from_local_to_common(&token_map, 4).expect("injective tokens"),
+            &mut HashMap::new(),
+        );
+
+        assert_eq!(entries_key(&fast), entries_key(&general));
+    }
 }
