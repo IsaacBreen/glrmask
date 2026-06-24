@@ -440,46 +440,67 @@ pub(crate) fn inline_single_use_nonterminals(
 fn remove_cyclic_inline_candidates(
     inline_candidates: &mut BTreeMap<NonterminalID, (usize, Vec<Symbol>)>,
 ) {
-    fn reaches_start(
-        start: NonterminalID,
-        current: NonterminalID,
-        deps: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
-        seen: &mut BTreeSet<NonterminalID>,
-    ) -> bool {
-        if !seen.insert(current) {
-            return false;
-        }
-        deps.get(&current).is_some_and(|nexts| {
-            nexts
-                .iter()
-                .any(|&next| next == start || reaches_start(start, next, deps, seen))
-        })
+    if inline_candidates.is_empty() {
+        return;
     }
 
-    let inline_candidate_ids: BTreeSet<NonterminalID> =
-        inline_candidates.keys().copied().collect();
-    let deps: BTreeMap<NonterminalID, BTreeSet<NonterminalID>> = inline_candidates
-        .iter()
-        .map(|(&nt, (_, rhs))| {
-            let rhs_deps = rhs
-                .iter()
-                .filter_map(|symbol| match symbol {
-                    Symbol::Nonterminal(id) if inline_candidate_ids.contains(id) => Some(*id),
-                    _ => None,
-                })
-                .collect();
-            (nt, rhs_deps)
-        })
-        .collect();
+    // Preserve the old per-candidate reachability semantics, but avoid building
+    // ordered dependency maps and allocating a new visited set for each start.
+    // Candidate IDs are grammar nonterminal IDs, so one dense index plus visit
+    // stamps gives the same search with substantially less bookkeeping.
+    let candidate_ids: Vec<NonterminalID> = inline_candidates.keys().copied().collect();
+    let max_nonterminal = candidate_ids.last().copied().unwrap_or(0) as usize;
+    let mut candidate_index_by_nonterminal = vec![usize::MAX; max_nonterminal + 1];
+    for (candidate_index, &nonterminal) in candidate_ids.iter().enumerate() {
+        candidate_index_by_nonterminal[nonterminal as usize] = candidate_index;
+    }
 
-    let cyclic: Vec<NonterminalID> = inline_candidate_ids
-        .iter()
-        .copied()
-        .filter(|&nt| reaches_start(nt, nt, &deps, &mut BTreeSet::new()))
-        .collect();
+    let mut visited_at = vec![0usize; candidate_ids.len()];
+    let mut search_stamp = 0usize;
+    let mut stack = Vec::new();
+    let mut cyclic = vec![false; candidate_ids.len()];
 
-    for nt in cyclic {
-        inline_candidates.remove(&nt);
+    for (start_index, &start_nonterminal) in candidate_ids.iter().enumerate() {
+        search_stamp = search_stamp.checked_add(1).expect("cycle-search stamp overflow");
+        stack.clear();
+        stack.push(start_index);
+        visited_at[start_index] = search_stamp;
+
+        let mut reaches_start = false;
+        while let Some(current_index) = stack.pop() {
+            let current_nonterminal = candidate_ids[current_index];
+            let (_, rhs) = inline_candidates
+                .get(&current_nonterminal)
+                .expect("candidate id must be present");
+            for symbol in rhs {
+                let Symbol::Nonterminal(child) = symbol else {
+                    continue;
+                };
+                if *child == start_nonterminal {
+                    reaches_start = true;
+                    break;
+                }
+                let child_index = candidate_index_by_nonterminal
+                    .get(*child as usize)
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                if child_index != usize::MAX && visited_at[child_index] != search_stamp {
+                    visited_at[child_index] = search_stamp;
+                    stack.push(child_index);
+                }
+            }
+            if reaches_start {
+                break;
+            }
+        }
+
+        cyclic[start_index] = reaches_start;
+    }
+
+    for (candidate_index, nonterminal) in candidate_ids.into_iter().enumerate() {
+        if cyclic[candidate_index] {
+            inline_candidates.remove(&nonterminal);
+        }
     }
 }
 
@@ -858,6 +879,89 @@ mod tests {
 
     fn t(id: TerminalID) -> Symbol {
         Symbol::Terminal(id)
+    }
+
+    fn remove_cyclic_inline_candidates_reference(
+        inline_candidates: &mut BTreeMap<NonterminalID, (usize, Vec<Symbol>)>,
+    ) {
+        fn reaches_start(
+            start: NonterminalID,
+            current: NonterminalID,
+            deps: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
+            seen: &mut BTreeSet<NonterminalID>,
+        ) -> bool {
+            if !seen.insert(current) {
+                return false;
+            }
+            deps.get(&current).is_some_and(|nexts| {
+                nexts
+                    .iter()
+                    .any(|&next| next == start || reaches_start(start, next, deps, seen))
+            })
+        }
+
+        let inline_candidate_ids: BTreeSet<NonterminalID> =
+            inline_candidates.keys().copied().collect();
+        let deps: BTreeMap<NonterminalID, BTreeSet<NonterminalID>> = inline_candidates
+            .iter()
+            .map(|(&nt, (_, rhs))| {
+                let rhs_deps = rhs
+                    .iter()
+                    .filter_map(|symbol| match symbol {
+                        Symbol::Nonterminal(id) if inline_candidate_ids.contains(id) => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                (nt, rhs_deps)
+            })
+            .collect();
+
+        let cyclic: Vec<NonterminalID> = inline_candidate_ids
+            .iter()
+            .copied()
+            .filter(|&nt| reaches_start(nt, nt, &deps, &mut BTreeSet::new()))
+            .collect();
+        for nt in cyclic {
+            inline_candidates.remove(&nt);
+        }
+    }
+
+    #[test]
+    fn inline_cycle_pruning_matches_reference_on_varied_candidate_graphs() {
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        let mut seed = 0x1a11_c7c1_e55_u64;
+        for case_index in 0..512 {
+            let nonterminals = (next(&mut seed) % 9 + 1) as u32;
+            let mut candidates = BTreeMap::new();
+            for nonterminal in 0..nonterminals {
+                if next(&mut seed) % 4 == 0 {
+                    continue;
+                }
+                let rhs_len = (next(&mut seed) % 5) as usize;
+                let mut rhs = Vec::with_capacity(rhs_len);
+                for _ in 0..rhs_len {
+                    if next(&mut seed) & 1 == 0 {
+                        rhs.push(Symbol::Terminal((next(&mut seed) % 5) as u32));
+                    } else {
+                        rhs.push(Symbol::Nonterminal(
+                            (next(&mut seed) % u64::from(nonterminals + 2)) as u32,
+                        ));
+                    }
+                }
+                candidates.insert(nonterminal, (nonterminal as usize, rhs));
+            }
+
+            let mut expected = candidates.clone();
+            remove_cyclic_inline_candidates_reference(&mut expected);
+            remove_cyclic_inline_candidates(&mut candidates);
+            assert_eq!(candidates, expected, "case_index={case_index}");
+        }
     }
 
     #[test]
