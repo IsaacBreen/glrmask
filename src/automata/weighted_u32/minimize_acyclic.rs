@@ -998,6 +998,388 @@ fn build_class_profile(
     }
 }
 
+/// Sparse pointwise behavior used to compare one group against a candidate
+/// without rescanning all overlapping members.
+#[derive(Clone, Eq, PartialEq, Hash)]
+struct PointwiseBehavior {
+    final_active: bool,
+    transitions: Vec<(Label, u32)>,
+}
+
+#[derive(Default)]
+struct PointwiseBehaviorInterner {
+    ids: FxHashMap<PointwiseBehavior, u32>,
+}
+
+impl PointwiseBehaviorInterner {
+    fn intern(&mut self, final_active: bool, transitions: Vec<(Label, u32)>) -> u32 {
+        let behavior = PointwiseBehavior { final_active, transitions };
+        if let Some(&id) = self.ids.get(&behavior) {
+            return id;
+        }
+        let id = self.ids.len() as u32;
+        self.ids.insert(behavior, id);
+        id
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TokenBehaviorRange {
+    start: u32,
+    end: u32,
+    behavior: u32,
+}
+
+#[derive(Default)]
+struct PointwiseProfile {
+    /// Sorted by TSID. Each inner list is sorted and non-overlapping.
+    by_tsid: Vec<(u32, Vec<TokenBehaviorRange>)>,
+}
+
+#[derive(Default)]
+struct PointwiseMergeGroup {
+    targets_by_label: FxHashMap<Label, u32>,
+    /// Exact partial behavior function of all members already in this group.
+    behavior_by_tsid: FxHashMap<u32, Vec<TokenBehaviorRange>>,
+    member_classes: Vec<usize>,
+}
+
+fn range_set_contains(tokens: &RangeSetBlaze<u32>, value: u32) -> bool {
+    tokens.contains(value)
+}
+
+fn profile_target_for_label(profile: &ClassProfile, label: Label) -> Option<u32> {
+    profile
+        .targets
+        .binary_search_by_key(&label, |(candidate, _)| *candidate)
+        .ok()
+        .map(|index| profile.targets[index].1)
+}
+
+fn push_token_behavior_range(
+    ranges: &mut Vec<TokenBehaviorRange>,
+    start: u32,
+    end: u32,
+    behavior: u32,
+) {
+    if start > end {
+        return;
+    }
+    if let Some(previous) = ranges.last_mut() {
+        if previous.behavior == behavior
+            && previous.end != u32::MAX
+            && previous.end + 1 == start
+        {
+            previous.end = end;
+            return;
+        }
+    }
+    ranges.push(TokenBehaviorRange { start, end, behavior });
+}
+
+/// Materialize a complete observable behavior function over this class's
+/// pushed-needed domain. Every covered point must have a final action or one
+/// or more productive transitions.
+fn build_pointwise_profile(
+    domain: &Weight,
+    profile: &ClassProfile,
+    interner: &mut PointwiseBehaviorInterner,
+) -> Option<PointwiseProfile> {
+    if domain.is_full()
+        || profile.final_weight.as_ref().is_some_and(Weight::is_full)
+        || profile.weights.iter().any(|(_, weight)| weight.is_full())
+    {
+        return None;
+    }
+
+    let domain_entries = domain.compact_entries()?;
+    let mut by_tsid = Vec::new();
+    for (tsid_start, tsid_end, domain_tokens) in domain_entries {
+        for tsid in tsid_start..=tsid_end {
+            let final_tokens = profile
+                .final_weight
+                .as_ref()
+                .and_then(|weight| weight.0.get(tsid))
+                .map(|tokens| tokens.as_ref());
+            let mut active_transitions = Vec::<(Label, u32, &RangeSetBlaze<u32>)>::new();
+            for (label, weight) in &profile.weights {
+                let Some(tokens) = weight.0.get(tsid) else { continue; };
+                let target = profile_target_for_label(profile, *label)?;
+                active_transitions.push((*label, target, tokens.as_ref()));
+            }
+
+            let mut boundaries = Vec::<u64>::new();
+            for range in domain_tokens.ranges() {
+                boundaries.push(u64::from(*range.start()));
+                boundaries.push(u64::from(*range.end()) + 1);
+            }
+            if let Some(tokens) = final_tokens {
+                for range in tokens.ranges() {
+                    boundaries.push(u64::from(*range.start()));
+                    boundaries.push(u64::from(*range.end()) + 1);
+                }
+            }
+            for (_, _, tokens) in &active_transitions {
+                for range in tokens.ranges() {
+                    boundaries.push(u64::from(*range.start()));
+                    boundaries.push(u64::from(*range.end()) + 1);
+                }
+            }
+            boundaries.sort_unstable();
+            boundaries.dedup();
+
+            let mut token_ranges = Vec::new();
+            for pair in boundaries.windows(2) {
+                let start64 = pair[0];
+                let next = pair[1];
+                if start64 > u64::from(u32::MAX) || start64 >= next {
+                    continue;
+                }
+                let start = start64 as u32;
+                let end = (next - 1) as u32;
+                if !range_set_contains(domain_tokens.as_ref(), start) {
+                    continue;
+                }
+                let final_active = final_tokens.is_some_and(|tokens| range_set_contains(tokens, start));
+                let mut transitions = Vec::new();
+                for (label, target, tokens) in &active_transitions {
+                    if range_set_contains(tokens, start) {
+                        transitions.push((*label, *target));
+                    }
+                }
+                debug_assert!(final_active || !transitions.is_empty());
+                if !final_active && transitions.is_empty() {
+                    return None;
+                }
+                let behavior = interner.intern(final_active, transitions);
+                push_token_behavior_range(&mut token_ranges, start, end, behavior);
+            }
+            if token_ranges.is_empty() {
+                return None;
+            }
+            by_tsid.push((tsid, token_ranges));
+        }
+    }
+    Some(PointwiseProfile { by_tsid })
+}
+fn token_behavior_ranges_compatible(
+    left: &[TokenBehaviorRange],
+    right: &[TokenBehaviorRange],
+) -> bool {
+    let mut left_index = 0usize;
+    let mut right_index = 0usize;
+    while left_index < left.len() && right_index < right.len() {
+        let left_range = left[left_index];
+        let right_range = right[right_index];
+        if left_range.end < right_range.start {
+            left_index += 1;
+            continue;
+        }
+        if right_range.end < left_range.start {
+            right_index += 1;
+            continue;
+        }
+        if left_range.behavior != right_range.behavior {
+            return false;
+        }
+        if left_range.end <= right_range.end {
+            left_index += 1;
+        }
+        if right_range.end <= left_range.end {
+            right_index += 1;
+        }
+    }
+    true
+}
+
+/// Overlay two compatible sparse functions. Equal behavior is required where
+/// both inputs are defined; the output preserves their exact union.
+fn overlay_compatible_token_behavior_ranges(
+    existing: &[TokenBehaviorRange],
+    add: &[TokenBehaviorRange],
+) -> Vec<TokenBehaviorRange> {
+    let mut result = Vec::with_capacity(existing.len() + add.len());
+    let mut existing_index = 0usize;
+    let mut add_index = 0usize;
+    let mut current_existing = existing.get(existing_index).copied();
+    let mut current_add = add.get(add_index).copied();
+
+    loop {
+        match (current_existing, current_add) {
+            (None, None) => break,
+            (Some(range), None) => {
+                push_token_behavior_range(&mut result, range.start, range.end, range.behavior);
+                existing_index += 1;
+                current_existing = existing.get(existing_index).copied();
+            }
+            (None, Some(range)) => {
+                push_token_behavior_range(&mut result, range.start, range.end, range.behavior);
+                add_index += 1;
+                current_add = add.get(add_index).copied();
+            }
+            (Some(mut left), Some(mut right)) => {
+                if left.end < right.start {
+                    push_token_behavior_range(&mut result, left.start, left.end, left.behavior);
+                    existing_index += 1;
+                    current_existing = existing.get(existing_index).copied();
+                    continue;
+                }
+                if right.end < left.start {
+                    push_token_behavior_range(&mut result, right.start, right.end, right.behavior);
+                    add_index += 1;
+                    current_add = add.get(add_index).copied();
+                    continue;
+                }
+
+                debug_assert_eq!(left.behavior, right.behavior);
+                if left.start < right.start {
+                    push_token_behavior_range(&mut result, left.start, right.start - 1, left.behavior);
+                    left.start = right.start;
+                } else if right.start < left.start {
+                    push_token_behavior_range(&mut result, right.start, left.start - 1, right.behavior);
+                    right.start = left.start;
+                }
+
+                let end = left.end.min(right.end);
+                push_token_behavior_range(&mut result, left.start, end, left.behavior);
+                if left.end == end {
+                    existing_index += 1;
+                    current_existing = existing.get(existing_index).copied();
+                } else {
+                    left.start = end + 1;
+                    current_existing = Some(left);
+                }
+                if right.end == end {
+                    add_index += 1;
+                    current_add = add.get(add_index).copied();
+                } else {
+                    right.start = end + 1;
+                    current_add = Some(right);
+                }
+            }
+        }
+    }
+    result
+}
+
+fn pointwise_profile_compatible(group: &PointwiseMergeGroup, profile: &PointwiseProfile) -> bool {
+    profile.by_tsid.iter().all(|(tsid, ranges)| {
+        group
+            .behavior_by_tsid
+            .get(tsid)
+            .is_none_or(|existing| token_behavior_ranges_compatible(existing, ranges))
+    })
+}
+
+fn merge_pointwise_profile_into_group(group: &mut PointwiseMergeGroup, profile: &PointwiseProfile) {
+    for (tsid, ranges) in &profile.by_tsid {
+        match group.behavior_by_tsid.get_mut(tsid) {
+            Some(existing) => {
+                *existing = overlay_compatible_token_behavior_ranges(existing, ranges);
+            }
+            None => {
+                group.behavior_by_tsid.insert(*tsid, ranges.clone());
+            }
+        }
+    }
+}
+/// Exact greedy grouping using one sparse partial behavior function per group.
+/// The class order and target-map restriction are identical to the memberwise
+/// path; only the witness representation changes.
+fn try_build_and_color_pointwise(
+    candidates: &[usize],
+    class_coloring: &[usize],
+    class_needed_union: &[Weight],
+    class_profiles: &[ClassProfile],
+    profile_enabled: bool,
+) -> Option<Vec<usize>> {
+    let started_at = Instant::now();
+    let mut interner = PointwiseBehaviorInterner::default();
+    let profile_started_at = Instant::now();
+    let mut pointwise_profiles = Vec::with_capacity(class_profiles.len());
+    for (domain, profile) in class_needed_union.iter().zip(class_profiles) {
+        pointwise_profiles.push(build_pointwise_profile(domain, profile, &mut interner)?);
+    }
+    let profile_build_ms = profile_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let merge_started_at = Instant::now();
+    let mut groups = Vec::<PointwiseMergeGroup>::new();
+    let mut group_attempts = 0usize;
+    let mut target_rejects = 0usize;
+    let mut behavior_rejects = 0usize;
+    for class in 0..class_profiles.len() {
+        let class_profile = &class_profiles[class];
+        let pointwise_profile = &pointwise_profiles[class];
+        let mut placed = false;
+        for group in &mut groups {
+            group_attempts += 1;
+            if !targets_compatible_with_group_map(&class_profile.targets, &group.targets_by_label) {
+                target_rejects += 1;
+                continue;
+            }
+            if !pointwise_profile_compatible(group, pointwise_profile) {
+                behavior_rejects += 1;
+                continue;
+            }
+            for (label, target) in &class_profile.targets {
+                group.targets_by_label.entry(*label).or_insert(*target);
+            }
+            merge_pointwise_profile_into_group(group, pointwise_profile);
+            group.member_classes.push(class);
+            placed = true;
+            break;
+        }
+        if !placed {
+            let mut targets_by_label = FxHashMap::default();
+            targets_by_label.reserve(class_profile.targets.len());
+            for (label, target) in &class_profile.targets {
+                targets_by_label.insert(*label, *target);
+            }
+            let mut group = PointwiseMergeGroup {
+                targets_by_label,
+                behavior_by_tsid: FxHashMap::default(),
+                member_classes: vec![class],
+            };
+            merge_pointwise_profile_into_group(&mut group, pointwise_profile);
+            groups.push(group);
+        }
+    }
+    let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let mut class_to_group = vec![0usize; class_profiles.len()];
+    for (group_id, group) in groups.iter().enumerate() {
+        for &class in &group.member_classes {
+            class_to_group[class] = group_id;
+        }
+    }
+    let coloring = class_coloring
+        .iter()
+        .map(|class| class_to_group[*class])
+        .collect();
+
+    if profile_enabled {
+        let regions = groups
+            .iter()
+            .map(|group| group.behavior_by_tsid.values().map(Vec::len).sum::<usize>())
+            .sum::<usize>();
+        eprintln!(
+            "[glrmask/profile][weighted_dwa_minimize_pointwise] candidates={} classes={} groups={} behaviors={} regions={} profile_build_ms={:.3} merge_ms={:.3} total_ms={:.3} group_attempts={} target_rejects={} behavior_rejects={}",
+            candidates.len(),
+            class_profiles.len(),
+            groups.len(),
+            interner.ids.len(),
+            regions,
+            profile_build_ms,
+            merge_ms,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+            group_attempts,
+            target_rejects,
+            behavior_rejects,
+        );
+    }
+    Some(coloring)
+}
+
 fn sorted_targets_compatible(class_targets: &[(Label, u32)], group_targets: &[(Label, u32)]) -> bool {
     let mut class_idx = 0;
     let mut group_idx = 0;
@@ -1513,6 +1895,34 @@ fn build_and_color_hybrid(
         .map(|&rep| build_class_profile(rep, old_to_new, productive_transitions, dwa))
         .collect();
     let class_profiles_ms = class_profiles_started_at.elapsed().as_secs_f64() * 1000.0;
+    if profile_enabled {
+        let mut coverage_cells = 0usize;
+        let mut max_coverage_cells = 0usize;
+        let mut coverage_over_256 = 0usize;
+        for coverage in &class_tsid_coverage {
+            let count = coverage
+                .as_ref()
+                .map(|set| set.ranges().map(|range| (*range.end() as usize - *range.start() as usize) + 1).sum())
+                .unwrap_or(usize::MAX);
+            coverage_cells = coverage_cells.saturating_add(count);
+            max_coverage_cells = max_coverage_cells.max(count);
+            coverage_over_256 += usize::from(count > 256);
+        }
+        let total_profile_weight_ranges: usize = class_profiles
+            .iter()
+            .flat_map(|profile| profile.weights.iter())
+            .map(|(_, weight)| weight.outer_range_count())
+            .sum();
+        let total_profile_weight_cells: usize = class_profiles
+            .iter()
+            .flat_map(|profile| profile.weights.iter())
+            .map(|(_, weight)| weight.tsid_coverage().map(|set| set.ranges().map(|range| (*range.end() as usize - *range.start() as usize) + 1).sum()).unwrap_or(usize::MAX))
+            .fold(0usize, usize::saturating_add);
+        eprintln!(
+            "[glrmask/profile][weighted_dwa_minimize_hybrid_shape] candidates={} classes={} coverage_cells={} max_coverage_cells={} coverage_over_256={} total_profile_weight_ranges={} total_profile_weight_cells={}",
+            candidates.len(), num_classes, coverage_cells, max_coverage_cells, coverage_over_256, total_profile_weight_ranges, total_profile_weight_cells,
+        );
+    }
     let classes_with_final_weight = class_profiles
         .iter()
         .filter(|profile| profile.final_weight.is_some())
@@ -1547,6 +1957,20 @@ fn build_and_color_hybrid(
         .map(|profile| profile.weights.len() as f64)
         .sum::<f64>()
         / num_classes as f64;
+
+    // Each class is a partial behavior function over its pushed-needed
+    // TSID/token domain. When that representation is finite, compare against
+    // the exact union function of each group instead of revisiting all members.
+    // A full sentinel cannot be enumerated, so it retains the generic path.
+    if let Some(coloring) = try_build_and_color_pointwise(
+        candidates,
+        &class_coloring,
+        &class_needed_union,
+        &class_profiles,
+        profile_enabled,
+    ) {
+        return coloring;
+    }
 
     // Step 3: Greedy merge of classes, handling both disjoint and overlapping
     // needed sets. Instead of building an O(K²) incompatibility graph, we check
