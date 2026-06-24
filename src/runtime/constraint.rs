@@ -726,28 +726,22 @@ impl Constraint {
         }
     }
 
-    fn build_sparse_buf_mask_from_internal_dense(
+    fn build_sparse_buf_mask_from_internal_tokens(
         &self,
-        dense: &[u64],
+        internal_tokens: &RangeSetBlaze<u32>,
         scratch: &mut [u32],
         touched: &mut Vec<u16>,
     ) -> Box<[(u16, u32)]> {
         debug_assert!(touched.is_empty());
-        for (dense_word_index, &bits) in dense.iter().enumerate() {
-            let mut remaining = bits;
-            while remaining != 0 {
-                let bit = remaining.trailing_zeros() as usize;
-                let internal_token = dense_word_index * 64 + bit;
-                if let Some(token_masks) = self.internal_token_buf_masks.get(internal_token) {
-                    for &(word, mask) in token_masks {
-                        let slot = &mut scratch[word as usize];
-                        if *slot == 0 {
-                            touched.push(word);
-                        }
-                        *slot |= mask;
+        for internal_token in internal_tokens.iter() {
+            if let Some(token_masks) = self.internal_token_buf_masks.get(internal_token as usize) {
+                for &(word, mask) in token_masks {
+                    let slot = &mut scratch[word as usize];
+                    if *slot == 0 {
+                        touched.push(word);
                     }
+                    *slot |= mask;
                 }
-                remaining &= remaining - 1;
             }
         }
         touched.sort_unstable();
@@ -758,6 +752,17 @@ impl Constraint {
             .into_boxed_slice();
         Self::clear_sparse_buf_scratch(scratch, touched);
         sparse
+    }
+
+    fn token_set_cardinality_at_most(tokens: &RangeSetBlaze<u32>, limit: u64) -> bool {
+        let mut total = 0u64;
+        for range in tokens.ranges() {
+            total = total.saturating_add(u64::from(*range.end() - *range.start()) + 1);
+            if total > limit {
+                return false;
+            }
+        }
+        true
     }
 
     #[inline(always)]
@@ -886,16 +891,16 @@ impl Constraint {
         let mut sparse_scratch = vec![0u32; buf_words];
         let mut sparse_touched = Vec::<u16>::new();
 
-        for (&key, dense) in final_dense_masks {
-            let estimated_cost = self.estimate_internal_dense_to_buf_cost(dense);
-            if estimated_cost == 0 {
-                continue;
-            }
-
-            let try_sparse = can_store_sparse && estimated_cost < sparse_cost_limit;
-            if try_sparse && direct_sparse {
-                let sparse = self.build_sparse_buf_mask_from_internal_dense(
-                    dense,
+        for (&key, token_set, dense) in final_dense_masks {
+            // Most final-weight token sets are tiny. Build their sparse output
+            // cache directly from the source set instead of scanning the dense
+            // internal-token bitmap that the runtime keeps for containment.
+            if can_store_sparse
+                && direct_sparse
+                && Self::token_set_cardinality_at_most(token_set, sparse_cost_limit)
+            {
+                let sparse = self.build_sparse_buf_mask_from_internal_tokens(
+                    token_set,
                     &mut sparse_scratch,
                     &mut sparse_touched,
                 );
@@ -905,6 +910,12 @@ impl Constraint {
                 }
             }
 
+            let estimated_cost = self.estimate_internal_dense_to_buf_cost(dense);
+            if estimated_cost == 0 {
+                continue;
+            }
+
+            let try_sparse = can_store_sparse && estimated_cost < sparse_cost_limit;
             let mut buf = vec![0u32; buf_words];
             self.or_internal_dense_to_buf(dense, &mut buf, true);
 
@@ -1160,7 +1171,7 @@ impl Constraint {
         }
     }
 
-    fn final_weight_token_dense_masks(&self) -> Vec<(&usize, &DenseWords)> {
+    fn final_weight_token_dense_masks(&self) -> Vec<(&usize, &RangeSetBlaze<u32>, &DenseWords)> {
         let mut keys: FxHashMap<usize, ()> = FxHashMap::default();
         let mut dense_masks = Vec::new();
 
@@ -1176,7 +1187,7 @@ impl Constraint {
                 }
                 if let Some((stored_key, dense)) = self.weight_token_dense_masks.get_key_value(&key)
                 {
-                    dense_masks.push((stored_key, dense));
+                    dense_masks.push((stored_key, token_set, dense));
                 }
             }
         }
