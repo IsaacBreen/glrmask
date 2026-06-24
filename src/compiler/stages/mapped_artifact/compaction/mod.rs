@@ -171,6 +171,9 @@ struct PermutationContext {
     // A bijective TSID remap only reorders states. It never needs the
     // dense many-to-one accumulator used by merge compaction.
     tsid_perm_is_bijective: bool,
+    // Retain the direct non-identity bijection for the sparse rewrite path.
+    // This avoids re-discovering singleton runs for every source TSID.
+    tsid_direct_bijection: Option<Arc<[u32]>>,
     new_tsid_count: usize,
     token_runs: Vec<PermRun>,
     token_perm_is_identity: bool,
@@ -183,13 +186,17 @@ impl PermutationContext {
             .copied()
             .max()
             .map_or(0, |max| max as usize + 1);
+        let tsid_perm_is_identity = tsid_perm
+            .iter()
+            .enumerate()
+            .all(|(idx, &value)| value == idx as u32);
+        let tsid_perm_is_bijective = is_bijective_permutation(tsid_perm, new_tsid_count);
         Self {
             tsid_runs: permutation_runs(tsid_perm),
-            tsid_perm_is_identity: tsid_perm
-                .iter()
-                .enumerate()
-                .all(|(idx, &value)| value == idx as u32),
-            tsid_perm_is_bijective: is_bijective_permutation(tsid_perm, new_tsid_count),
+            tsid_perm_is_identity,
+            tsid_perm_is_bijective,
+            tsid_direct_bijection: (tsid_perm_is_bijective && !tsid_perm_is_identity)
+                .then(|| Arc::from(tsid_perm)),
             new_tsid_count,
             token_runs: permutation_runs(token_perm),
             token_perm_is_identity: token_perm
@@ -1328,7 +1335,10 @@ fn permute_weight_with_bijective_tsid_permutation(
     fallback_token_cache: &TokenRemapCache,
 ) -> Weight {
     debug_assert!(perm_context.tsid_perm_is_bijective);
-
+    let direct_bijection = perm_context
+        .tsid_direct_bijection
+        .as_deref()
+        .expect("non-identity bijective path must retain a direct map");
     let mut mapped_entries = Vec::<(u32, SharedTokenSet)>::with_capacity(weight.num_ranges());
     let mut mapped_token_sets = HashMap::<usize, SharedTokenSet>::new();
     for (tsid_range, token_set) in weight.0.range_values() {
@@ -1351,15 +1361,8 @@ fn permute_weight_with_bijective_tsid_permutation(
             mapped
         };
 
-        for run in overlapping_perm_runs(
-            &perm_context.tsid_runs,
-            *tsid_range.start(),
-            *tsid_range.end(),
-        ) {
-            // A run can contain multiple source TSIDs only for a many-to-one
-            // compaction, excluded by the bijection guard above.
-            debug_assert_eq!(run.start, run.end);
-            mapped_entries.push((run.mapped, Arc::clone(&mapped_tokens)));
+        for old_tsid in *tsid_range.start()..=*tsid_range.end() {
+            mapped_entries.push((direct_bijection[old_tsid as usize], Arc::clone(&mapped_tokens)));
         }
     }
 
