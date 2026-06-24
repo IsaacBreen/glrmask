@@ -159,20 +159,16 @@ impl SharedClassifyBytesets {
                 let matched_words = tokenizer.matched_terminal_bitset(target).words();
                 let future_words = tokenizer.possible_future_terminals(target).words();
 
-                for (word_index, &matched_word) in matched_words
-                    .iter()
-                    .take(words_per_terminal_set)
-                    .enumerate()
-                {
-                    reachable_by_byte[bucket_offset + word_index] |= matched_word;
+                debug_assert!(matched_words.len() >= words_per_terminal_set);
+                debug_assert!(future_words.len() >= words_per_terminal_set);
+                for word_index in 0..words_per_terminal_set {
+                    let matched_word = matched_words[word_index];
+                    let future_word = future_words[word_index];
+                    // Future terminals are strict and omit finalizers, so the
+                    // reachable set is exactly their union. Fuse the two
+                    // reachable-bucket writes into one pass.
+                    reachable_by_byte[bucket_offset + word_index] |= matched_word | future_word;
                     last_by_byte[bucket_offset + word_index] |= matched_word;
-                }
-                for (word_index, &future_word) in future_words
-                    .iter()
-                    .take(words_per_terminal_set)
-                    .enumerate()
-                {
-                    reachable_by_byte[bucket_offset + word_index] |= future_word;
                 }
             }
         }
