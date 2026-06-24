@@ -536,7 +536,7 @@ impl Constraint {
         let seed_ms = seed_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if let Some(total_started_at) = total_started_at {
             eprintln!(
-                "[glrmask/profile][runtime_finalize_derived] pair_ms={:.3} quad_ms={:.3} super_ms={:.3} mega_ms={:.3} giga_ms={:.3} all_tokens_ms={:.3} heavy_ms={:.3} flat_ms={:.3} costs_ms={:.3} weight_buf_ms={:.3} weight_sparse_ms={:.3} final_weight_sets={}",
+                "[glrmask/profile][runtime_finalize_derived] pair_ms={:.3} quad_ms={:.3} super_ms={:.3} mega_ms={:.3} giga_ms={:.3} all_tokens_ms={:.3} heavy_ms={:.3} flat_ms={:.3} costs_ms={:.3} weight_buf_ms={:.3} weight_sparse_ms={:.3} final_weight_sets={} final_weight_sparse_sets={}",
                 pair_ms,
                 quad_ms,
                 super_ms,
@@ -549,6 +549,7 @@ impl Constraint {
                 weight_buf_ms,
                 weight_sparse_ms,
                 self.weight_token_buf_masks.len(),
+                self.weight_token_sparse_buf_masks.len(),
             );
             eprintln!(
                 "[glrmask/profile][runtime_finalize] primary_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} total_ms={:.3}",
@@ -707,6 +708,58 @@ impl Constraint {
         prefix
     }
 
+    fn direct_sparse_weight_buf_cache_enabled() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("GLRMASK_DIRECT_SPARSE_WEIGHT_BUF_CACHE")
+                .map(|value| {
+                    let value = value.trim();
+                    !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+                })
+                .unwrap_or(true)
+        })
+    }
+
+    fn clear_sparse_buf_scratch(scratch: &mut [u32], touched: &mut Vec<u16>) {
+        for word in touched.drain(..) {
+            scratch[word as usize] = 0;
+        }
+    }
+
+    fn build_sparse_buf_mask_from_internal_dense(
+        &self,
+        dense: &[u64],
+        scratch: &mut [u32],
+        touched: &mut Vec<u16>,
+    ) -> Box<[(u16, u32)]> {
+        debug_assert!(touched.is_empty());
+        for (dense_word_index, &bits) in dense.iter().enumerate() {
+            let mut remaining = bits;
+            while remaining != 0 {
+                let bit = remaining.trailing_zeros() as usize;
+                let internal_token = dense_word_index * 64 + bit;
+                if let Some(token_masks) = self.internal_token_buf_masks.get(internal_token) {
+                    for &(word, mask) in token_masks {
+                        let slot = &mut scratch[word as usize];
+                        if *slot == 0 {
+                            touched.push(word);
+                        }
+                        *slot |= mask;
+                    }
+                }
+                remaining &= remaining - 1;
+            }
+        }
+        touched.sort_unstable();
+        let sparse = touched
+            .iter()
+            .map(|&word| (word, scratch[word as usize]))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self::clear_sparse_buf_scratch(scratch, touched);
+        sparse
+    }
+
     #[inline(always)]
     pub(crate) fn or_weight_token_set_to_buf_if_contained(
         &self,
@@ -715,9 +768,11 @@ impl Constraint {
         buf: &mut [u32],
     ) -> bool {
         let key = Arc::as_ptr(token_set) as usize;
-        let Some(mask) = self.weight_token_buf_masks.get(&key) else {
+        let sparse_mask = self.weight_token_sparse_buf_masks.get(&key);
+        let dense_mask = self.weight_token_buf_masks.get(&key);
+        if sparse_mask.is_none() && dense_mask.is_none() {
             return false;
-        };
+        }
         let Some(token_dense) = self.weight_token_dense_masks.get(&key) else {
             return false;
         };
@@ -729,10 +784,10 @@ impl Constraint {
             }
         }
 
-        if let Some(sparse_mask) = self.weight_token_sparse_buf_masks.get(&key) {
+        if let Some(sparse_mask) = sparse_mask {
             or_sparse_buf_entries(buf, sparse_mask);
         } else {
-            or_dense_buf(buf, mask);
+            or_dense_buf(buf, dense_mask.expect("cache presence checked"));
         }
         true
     }
@@ -789,7 +844,9 @@ impl Constraint {
         token_set: &Arc<RangeSetBlaze<u32>>,
     ) -> bool {
         let key = Arc::as_ptr(token_set) as usize;
-        if !self.weight_token_buf_masks.contains_key(&key) {
+        if !self.weight_token_buf_masks.contains_key(&key)
+            && !self.weight_token_sparse_buf_masks.contains_key(&key)
+        {
             return false;
         }
         let Some(token_dense) = self.weight_token_dense_masks.get(&key) else {
@@ -822,8 +879,12 @@ impl Constraint {
         let can_store_sparse = buf_words <= u16::MAX as usize;
         let sparse_cost_limit = (buf_words / 2) as u64;
         let final_dense_masks = self.final_weight_token_dense_masks();
+        let direct_sparse = Self::direct_sparse_weight_buf_cache_enabled()
+            && self.final_mask_mapping.internal_len() == 0;
         let mut dense_masks = FxHashMap::default();
         let mut sparse_masks = FxHashMap::default();
+        let mut sparse_scratch = vec![0u32; buf_words];
+        let mut sparse_touched = Vec::<u16>::new();
 
         for (&key, dense) in final_dense_masks {
             let estimated_cost = self.estimate_internal_dense_to_buf_cost(dense);
@@ -832,6 +893,18 @@ impl Constraint {
             }
 
             let try_sparse = can_store_sparse && estimated_cost < sparse_cost_limit;
+            if try_sparse && direct_sparse {
+                let sparse = self.build_sparse_buf_mask_from_internal_dense(
+                    dense,
+                    &mut sparse_scratch,
+                    &mut sparse_touched,
+                );
+                if sparse.len() < buf_words / 2 {
+                    sparse_masks.insert(key, sparse);
+                    continue;
+                }
+            }
+
             let mut buf = vec![0u32; buf_words];
             self.or_internal_dense_to_buf(dense, &mut buf, true);
 
@@ -839,6 +912,7 @@ impl Constraint {
                 let sparse = Self::dense_buf_to_sparse_entries(&buf);
                 if sparse.len() < buf_words / 2 {
                     sparse_masks.insert(key, sparse);
+                    continue;
                 }
             }
 
