@@ -14,15 +14,18 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Exact first-byte target profiles computed for L1 state equivalence.
 ///
-/// The L1 terminal-DWA builder needs the same whole-token walks. Reusing these
-/// profiles avoids rebuilding the walk cache after exact equivalence has already
-/// established it. Signature IDs in these profiles reserve zero for the empty
-/// signature; the direct DWA builder numbers non-empty signatures from zero, so
-/// `materialize_walk_cache` shifts them by one.
+/// The L1 terminal-DWA builder needs the same whole-token walks *and* the same
+/// active-terminal signature at each tokenizer state. Reusing both avoids a
+/// second full tokenizer-state scan after exact equivalence has already proved
+/// the signatures. Profile signature IDs reserve zero for the empty signature;
+/// the direct DWA builder numbers non-empty signatures from zero, so the cached
+/// direct-builder view stores that shifted numbering explicitly.
 #[derive(Debug)]
 struct L1ExactProfileReuse {
     target_to_profile_id: FxHashMap<(u8, u32), u32>,
     profiles_by_id: Vec<Arc<[(u32, u32, u32)]>>,
+    direct_terminal_signatures: Arc<[Vec<u32>]>,
+    direct_state_to_terminal_signature: Arc<[u32]>,
 }
 
 impl L1ExactProfileReuse {
@@ -995,8 +998,8 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     // its first-byte transitions.
     let sorted_entries = vocab_order.token_entries_sorted.as_ref();
     let terminal_signature_started_at = profile_enabled.then(Instant::now);
-    let state_to_terminal_signature =
-        build_l1_state_to_terminal_signature(tokenizer, active_terminals);
+    let (state_to_terminal_signature, terminal_signatures) =
+        build_l1_state_to_terminal_signatures(tokenizer, active_terminals);
     let terminal_signature_ms = terminal_signature_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
@@ -1163,6 +1166,21 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         Some(L1ExactProfileReuse {
             target_to_profile_id,
             profiles_by_id,
+            // Exact-equivalence signature ids reserve zero for empty. The
+            // direct DWA builder uses `u32::MAX` for empty and zero-based ids
+            // for non-empty signatures, matching `materialize_walk_cache`.
+            direct_terminal_signatures: terminal_signatures[1..].to_vec().into(),
+            direct_state_to_terminal_signature: state_to_terminal_signature
+                .into_iter()
+                .map(|signature_id| {
+                    if signature_id == 0 {
+                        u32::MAX
+                    } else {
+                        signature_id - 1
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into(),
         }),
     )
 }
@@ -1404,27 +1422,32 @@ fn collect_active_terminal_signature(
     signature
 }
 
-fn build_l1_state_to_terminal_signature(
+/// Intern the exact active-terminal signature of every tokenizer state.
+///
+/// Signature zero is the empty signature. Keeping the reverse table lets the
+/// L1 terminal-DWA builder reuse the same proof object rather than redoing this
+/// full state scan with a separately numbered signature map.
+fn build_l1_state_to_terminal_signatures(
     tokenizer: &Tokenizer,
     active_terminals: &[bool],
-) -> Vec<u32> {
+) -> (Vec<u32>, Vec<Vec<u32>>) {
     let mut signature_to_id = FxHashMap::<Vec<u32>, u32>::default();
     signature_to_id.insert(Vec::new(), 0);
-    let mut next_signature_id = 1u32;
+    let mut terminal_signatures = vec![Vec::new()];
     let mut state_to_terminal_signature = vec![0u32; tokenizer.num_states() as usize];
 
     for state in 0..tokenizer.num_states() as usize {
         let signature =
             collect_active_terminal_signature(tokenizer, state as u32, active_terminals);
-        let sig_id = *signature_to_id.entry(signature).or_insert_with(|| {
-            let id = next_signature_id;
-            next_signature_id += 1;
-            id
+        let next_signature_id = terminal_signatures.len() as u32;
+        let sig_id = *signature_to_id.entry(signature.clone()).or_insert_with(|| {
+            terminal_signatures.push(signature);
+            next_signature_id
         });
         state_to_terminal_signature[state] = sig_id;
     }
 
-    state_to_terminal_signature
+    (state_to_terminal_signature, terminal_signatures)
 }
 
 fn l1_token_signature_profile_for_state(
@@ -1532,24 +1555,38 @@ fn build_l1_terminal_dwa(
     }
     let state_seed_ms = state_seed_started_at.elapsed().as_secs_f64() * 1000.0;
     let dead = u32::MAX;
-    let num_dfa_states = tokenizer.num_states() as usize;
-
-    let mut signature_to_id = FxHashMap::<Vec<u32>, u32>::default();
-    let mut terminal_signatures = Vec::<Vec<u32>>::new();
-    let mut state_to_terminal_signature = vec![u32::MAX; num_dfa_states];
-    for state in 0..num_dfa_states {
-        let signature =
-            collect_active_terminal_signature(tokenizer, state as u32, active_terminals);
-        if signature.is_empty() {
-            continue;
-        }
-        let next_id = signature_to_id.len() as u32;
-        let sig_id = *signature_to_id.entry(signature.clone()).or_insert_with(|| {
-            terminal_signatures.push(signature);
-            next_id
-        });
-        state_to_terminal_signature[state] = sig_id;
-    }
+    // Exact equivalence has already built this state-signature index on the
+    // normal L1 path. Reuse it verbatim. The fallback keeps the direct builder
+    // self-contained for callers that intentionally bypass exact-profile reuse.
+    let fallback_signatures = exact_profile_reuse.is_none().then(|| {
+        let (state_to_exact_signature, signatures_with_empty) =
+            build_l1_state_to_terminal_signatures(tokenizer, active_terminals);
+        let terminal_signatures: Vec<Vec<u32>> =
+            signatures_with_empty.into_iter().skip(1).collect();
+        let state_to_terminal_signature: Vec<u32> = state_to_exact_signature
+            .into_iter()
+            .map(|signature_id| {
+                if signature_id == 0 {
+                    u32::MAX
+                } else {
+                    signature_id - 1
+                }
+            })
+            .collect();
+        (terminal_signatures, state_to_terminal_signature)
+    });
+    let (terminal_signatures, state_to_terminal_signature): (&[Vec<u32>], &[u32]) =
+        if let Some(reuse) = exact_profile_reuse {
+            (
+                reuse.direct_terminal_signatures.as_ref(),
+                reuse.direct_state_to_terminal_signature.as_ref(),
+            )
+        } else {
+            let (terminal_signatures, state_to_terminal_signature) = fallback_signatures
+                .as_ref()
+                .expect("missing fallback L1 terminal signatures");
+            (terminal_signatures.as_slice(), state_to_terminal_signature.as_slice())
+        };
 
     // Batch simulation: for each unique start state, simulate all tokens through
     // the DFA and accumulate terminal_signature(final concrete state) → (tsid → token_ids).
