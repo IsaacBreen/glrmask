@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::FxHashSet;
 
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::{GrammarDef, NonterminalID, Rule, Symbol, TerminalID};
@@ -1795,6 +1795,221 @@ fn flatten_rhs_symbols(
     flattened
 }
 
+/// Borrowed, dense indexing for rule deduplication.
+///
+/// This preserves the old distinction between a sole *physical* production
+/// (which cannot need deduplication) and a sole *distinct* RHS (which can be
+/// expanded while testing whether sibling productions deduplicate).  The index
+/// stores positions into `rules`, rather than cloning every RHS into an ordered
+/// map and set.
+struct DedupSingleProductionIndex {
+    first_rule_by_lhs: Vec<Option<usize>>,
+    has_multiple_distinct_rhs: Vec<bool>,
+    rule_count_by_lhs: Vec<usize>,
+    expandable_by_lhs: Vec<bool>,
+}
+
+impl DedupSingleProductionIndex {
+    fn build(rules: &[Rule]) -> Self {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum VisitState {
+            Unseen,
+            Visiting,
+            Expandable,
+            NotExpandable,
+        }
+
+        fn visit(
+            nonterminal: NonterminalID,
+            rules: &[Rule],
+            first_rule_by_lhs: &[Option<usize>],
+            has_multiple_distinct_rhs: &[bool],
+            states: &mut [VisitState],
+        ) -> bool {
+            let index = nonterminal as usize;
+            if index >= first_rule_by_lhs.len()
+                || has_multiple_distinct_rhs[index]
+                || first_rule_by_lhs[index].is_none()
+            {
+                // As in the old map-based implementation, a child with no
+                // unique production is an opaque symbol for this flattening
+                // analysis and does not block its parent's expansion.
+                return true;
+            }
+
+            match states[index] {
+                VisitState::Visiting | VisitState::NotExpandable => return false,
+                VisitState::Expandable => return true,
+                VisitState::Unseen => {}
+            }
+
+            states[index] = VisitState::Visiting;
+            let rule = &rules[first_rule_by_lhs[index].expect("checked above")];
+            let expandable = rule.rhs.iter().all(|symbol| match symbol {
+                Symbol::Terminal(_) => true,
+                Symbol::Nonterminal(child) => visit(
+                    *child,
+                    rules,
+                    first_rule_by_lhs,
+                    has_multiple_distinct_rhs,
+                    states,
+                ),
+            });
+            states[index] = if expandable {
+                VisitState::Expandable
+            } else {
+                VisitState::NotExpandable
+            };
+            expandable
+        }
+
+        let len = max_nt_id(rules) as usize + 1;
+        let mut first_rule_by_lhs: Vec<Option<usize>> = vec![None; len];
+        let mut has_multiple_distinct_rhs = vec![false; len];
+        let mut rule_count_by_lhs = vec![0usize; len];
+
+        for (rule_index, rule) in rules.iter().enumerate() {
+            let lhs = rule.lhs as usize;
+            rule_count_by_lhs[lhs] += 1;
+            match first_rule_by_lhs[lhs] {
+                Some(first_rule_index) => {
+                    if rules[first_rule_index].rhs != rule.rhs {
+                        has_multiple_distinct_rhs[lhs] = true;
+                    }
+                }
+                None => first_rule_by_lhs[lhs] = Some(rule_index),
+            }
+        }
+
+        let mut states = vec![VisitState::Unseen; len];
+        let mut expandable_by_lhs = vec![false; len];
+        for nonterminal in 0..len {
+            if first_rule_by_lhs[nonterminal].is_some()
+                && !has_multiple_distinct_rhs[nonterminal]
+            {
+                expandable_by_lhs[nonterminal] = visit(
+                    nonterminal as NonterminalID,
+                    rules,
+                    &first_rule_by_lhs,
+                    &has_multiple_distinct_rhs,
+                    &mut states,
+                );
+            }
+        }
+
+        Self {
+            first_rule_by_lhs,
+            has_multiple_distinct_rhs,
+            rule_count_by_lhs,
+            expandable_by_lhs,
+        }
+    }
+
+    #[inline]
+    fn rule_count(&self, nonterminal: NonterminalID) -> usize {
+        self.rule_count_by_lhs
+            .get(nonterminal as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    #[inline]
+    fn is_expandable(&self, nonterminal: NonterminalID) -> bool {
+        self.expandable_by_lhs
+            .get(nonterminal as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    #[inline]
+    fn unique_rhs<'a>(&self, rules: &'a [Rule], nonterminal: NonterminalID) -> Option<&'a [Symbol]> {
+        let index = nonterminal as usize;
+        (!self.has_multiple_distinct_rhs.get(index).copied().unwrap_or(true))
+            .then_some(())
+            .and_then(|_| self.first_rule_by_lhs.get(index).copied().flatten())
+            .map(|rule_index| rules[rule_index].rhs.as_slice())
+    }
+
+    fn len(&self) -> usize {
+        self.first_rule_by_lhs.len()
+    }
+}
+
+fn flatten_rhs_symbols_for_dedup(
+    rhs: &[Symbol],
+    rules: &[Rule],
+    index: &DedupSingleProductionIndex,
+    flatten_cache: &mut [Option<Option<Vec<Symbol>>>],
+) -> Vec<Symbol> {
+    const MAX_FLATTENED_RHS_LEN: usize = 4096;
+
+    fn flatten_symbol(
+        symbol: &Symbol,
+        out: &mut Vec<Symbol>,
+        rules: &[Rule],
+        index: &DedupSingleProductionIndex,
+        flatten_cache: &mut [Option<Option<Vec<Symbol>>>],
+    ) {
+        match symbol {
+            Symbol::Terminal(_) => out.push(symbol.clone()),
+            Symbol::Nonterminal(nonterminal) if index.is_expandable(*nonterminal) => {
+                let nonterminal_index = *nonterminal as usize;
+                if let Some(cached) = flatten_cache
+                    .get(nonterminal_index)
+                    .and_then(Option::as_ref)
+                {
+                    match cached {
+                        Some(flattened)
+                            if out.len() + flattened.len() <= MAX_FLATTENED_RHS_LEN =>
+                        {
+                            out.extend(flattened.iter().cloned());
+                        }
+                        _ => out.push(symbol.clone()),
+                    }
+                    return;
+                }
+
+                let Some(expanded_rhs) = index.unique_rhs(rules, *nonterminal) else {
+                    out.push(symbol.clone());
+                    return;
+                };
+                let mut flattened_nonterminal = Vec::new();
+                for expanded_symbol in expanded_rhs {
+                    flatten_symbol(
+                        expanded_symbol,
+                        &mut flattened_nonterminal,
+                        rules,
+                        index,
+                        flatten_cache,
+                    );
+                    if flattened_nonterminal.len() > MAX_FLATTENED_RHS_LEN {
+                        if let Some(slot) = flatten_cache.get_mut(nonterminal_index) {
+                            *slot = Some(None);
+                        }
+                        out.push(symbol.clone());
+                        return;
+                    }
+                }
+
+                if let Some(slot) = flatten_cache.get_mut(nonterminal_index) {
+                    *slot = Some(Some(flattened_nonterminal.clone()));
+                }
+                out.extend(flattened_nonterminal);
+            }
+            Symbol::Nonterminal(_) => out.push(symbol.clone()),
+        }
+    }
+
+    let mut flattened = Vec::new();
+    for symbol in rhs {
+        flatten_symbol(symbol, &mut flattened, rules, index, flatten_cache);
+        if flattened.len() > MAX_FLATTENED_RHS_LEN {
+            return rhs.to_vec();
+        }
+    }
+    flattened
+}
+
 /// Deduplicate rules, preserving order of first occurrence.
 enum RuleDedupKey<'a> {
     Borrowed(NonterminalID, &'a [Symbol]),
@@ -1832,38 +2047,28 @@ impl Hash for RuleDedupKey<'_> {
 }
 
 fn dedup_rules(rules: &mut Vec<Rule>) {
-    let mut rhs_by_lhs = BTreeMap::<NonterminalID, BTreeSet<Vec<Symbol>>>::new();
-    let mut rule_counts_by_lhs = FxHashMap::<NonterminalID, usize>::default();
-    for rule in rules.iter() {
-        rhs_by_lhs
-            .entry(rule.lhs)
-            .or_default()
-            .insert(rule.rhs.clone());
-        *rule_counts_by_lhs.entry(rule.lhs).or_default() += 1;
-    }
-    let (unique_rhs_by_lhs, expandable_single_productions) =
-        compute_expandable_single_productions(&rhs_by_lhs);
+    let index = DedupSingleProductionIndex::build(rules);
     let mut keep = Vec::with_capacity(rules.len());
     {
-        let mut seen = HashSet::with_capacity(rules.len());
-        let mut flatten_cache = HashMap::<NonterminalID, Option<Vec<Symbol>>>::new();
+        let mut seen = FxHashSet::with_capacity_and_hasher(rules.len(), Default::default());
+        let mut flatten_cache = vec![None; index.len()];
         for rule in rules.iter() {
-            // Rule equality includes the LHS. A sole production for an LHS
-            // cannot duplicate any other rule, even after flattening chains.
-            if rule_counts_by_lhs[&rule.lhs] == 1 {
+            // Rule equality includes the LHS. A sole physical production for an
+            // LHS cannot duplicate any other rule, even after flattening chains.
+            if index.rule_count(rule.lhs) == 1 {
                 keep.push(true);
                 continue;
             }
             let can_flatten = rule.rhs.iter().any(|symbol| {
-                matches!(symbol, Symbol::Nonterminal(nonterminal) if expandable_single_productions.contains(nonterminal))
+                matches!(symbol, Symbol::Nonterminal(nonterminal) if index.is_expandable(*nonterminal))
             });
             let key = if can_flatten {
                 RuleDedupKey::Owned(
                     rule.lhs,
-                    flatten_rhs_symbols(
+                    flatten_rhs_symbols_for_dedup(
                         &rule.rhs,
-                        &unique_rhs_by_lhs,
-                        &expandable_single_productions,
+                        rules,
+                        &index,
                         &mut flatten_cache,
                     ),
                 )
@@ -2801,6 +3006,202 @@ mod tests {
         sccs.sort_by_key(|component| component.iter().next().copied().unwrap_or(u32::MAX));
 
         assert_eq!(sccs, vec![BTreeSet::from([0, 1]), BTreeSet::from([2, 3, 4])]);
+    }
+
+    fn dedup_rules_reference(rules: &mut Vec<Rule>) {
+        let mut rhs_by_lhs = BTreeMap::<NonterminalID, BTreeSet<Vec<Symbol>>>::new();
+        let mut rule_counts_by_lhs = HashMap::<NonterminalID, usize>::new();
+        for rule in rules.iter() {
+            rhs_by_lhs
+                .entry(rule.lhs)
+                .or_default()
+                .insert(rule.rhs.clone());
+            *rule_counts_by_lhs.entry(rule.lhs).or_default() += 1;
+        }
+        let (unique_rhs_by_lhs, expandable_single_productions) =
+            compute_expandable_single_productions(&rhs_by_lhs);
+        let mut keep = Vec::with_capacity(rules.len());
+        {
+            let mut seen = HashSet::with_capacity(rules.len());
+            let mut flatten_cache = HashMap::<NonterminalID, Option<Vec<Symbol>>>::new();
+            for rule in rules.iter() {
+                if rule_counts_by_lhs[&rule.lhs] == 1 {
+                    keep.push(true);
+                    continue;
+                }
+                let can_flatten = rule.rhs.iter().any(|symbol| {
+                    matches!(symbol, Symbol::Nonterminal(nonterminal) if expandable_single_productions.contains(nonterminal))
+                });
+                let key = if can_flatten {
+                    RuleDedupKey::Owned(
+                        rule.lhs,
+                        flatten_rhs_symbols(
+                            &rule.rhs,
+                            &unique_rhs_by_lhs,
+                            &expandable_single_productions,
+                            &mut flatten_cache,
+                        ),
+                    )
+                } else {
+                    RuleDedupKey::Borrowed(rule.lhs, &rule.rhs)
+                };
+                keep.push(seen.insert(key));
+            }
+        }
+        let mut keep_iter = keep.into_iter();
+        rules.retain(|_| keep_iter.next().unwrap_or(false));
+    }
+
+    #[test]
+    fn dedup_rules_matches_reference_on_varied_small_grammars() {
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        let mut seed = 0x17a1_ded0_0c42_u64;
+        for case_index in 0..512 {
+            let nonterminals = (next(&mut seed) % 7 + 1) as u32;
+            let rules_len = (next(&mut seed) % 28 + 1) as usize;
+            let mut rules = Vec::with_capacity(rules_len);
+            for _ in 0..rules_len {
+                let lhs = (next(&mut seed) % u64::from(nonterminals)) as u32;
+                let rhs_len = (next(&mut seed) % 5) as usize;
+                let mut rhs = Vec::with_capacity(rhs_len);
+                for _ in 0..rhs_len {
+                    if next(&mut seed) & 1 == 0 {
+                        rhs.push(Symbol::Terminal((next(&mut seed) % 5) as u32));
+                    } else {
+                        rhs.push(Symbol::Nonterminal(
+                            (next(&mut seed) % u64::from(nonterminals)) as u32,
+                        ));
+                    }
+                }
+                rules.push(Rule { lhs, rhs });
+            }
+
+            let mut expected = rules.clone();
+            dedup_rules_reference(&mut expected);
+            let mut actual = rules;
+            dedup_rules(&mut actual);
+            assert_eq!(actual, expected, "case_index={case_index}");
+        }
+    }
+
+    #[test]
+    fn dedup_rules_collapses_duplicate_physical_single_productions() {
+        let mut rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(1)],
+            },
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(1)],
+            },
+            Rule {
+                lhs: 1,
+                rhs: vec![Symbol::Terminal(0)],
+            },
+        ];
+
+        dedup_rules(&mut rules);
+
+        assert_eq!(
+            rules,
+            vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn dedup_rules_detects_duplicates_after_single_production_flattening() {
+        let mut rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(1)],
+            },
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            },
+            Rule {
+                lhs: 1,
+                rhs: vec![Symbol::Terminal(0)],
+            },
+        ];
+
+        dedup_rules(&mut rules);
+
+        assert_eq!(
+            rules,
+            vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn dedup_rules_does_not_flatten_cyclic_single_productions() {
+        let mut rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(1)],
+            },
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(2)],
+            },
+            Rule {
+                lhs: 1,
+                rhs: vec![Symbol::Nonterminal(2)],
+            },
+            Rule {
+                lhs: 2,
+                rhs: vec![Symbol::Nonterminal(1)],
+            },
+        ];
+
+        dedup_rules(&mut rules);
+
+        assert_eq!(
+            rules,
+            vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(2)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Nonterminal(2)],
+                },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![Symbol::Nonterminal(1)],
+                },
+            ]
+        );
     }
 
     #[test]
