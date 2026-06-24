@@ -17,6 +17,10 @@ use crate::ds::weight::Weight;
 type Label = i32;
 
 const UNMAPPED: u32 = u32::MAX;
+// Reconstruction reduces large exact weight unions in a bounded tree. 64 is
+// the best measured fan-in for the global terminal-DWA merge: it avoids the
+// additional rounds of 16 while keeping intermediate event sweeps bounded.
+const RECONSTRUCTION_UNION_BATCH_SIZE: usize = 64;
 
 fn weighted_dwa_minimize_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
@@ -2796,12 +2800,12 @@ fn batch_build_weight(pending: Vec<Weight>) -> Weight {
     match pending.len() {
         0 => Weight::empty(),
         1 => pending.into_iter().next().unwrap(),
-        n if n <= 16 => Weight::union_all(pending.iter()),
+        n if n <= RECONSTRUCTION_UNION_BATCH_SIZE => Weight::union_all(pending.iter()),
         _ => {
             let mut current = pending;
-            while current.len() > 16 {
+            while current.len() > RECONSTRUCTION_UNION_BATCH_SIZE {
                 current = current
-                    .chunks(16)
+                    .chunks(RECONSTRUCTION_UNION_BATCH_SIZE)
                     .map(|chunk| Weight::union_all(chunk.iter()))
                     .collect();
             }
