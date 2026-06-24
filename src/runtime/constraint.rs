@@ -1165,7 +1165,14 @@ impl Constraint {
         weight: &'a Weight,
         unique_sets: &mut FxHashMap<usize, &'a RangeSetBlaze<u32>>,
     ) {
-        for token_set in weight.unique_token_sets() {
+        if weight.is_full() || weight.is_empty() {
+            return;
+        }
+        // `unique_sets` already deduplicates globally. Avoid allocating and
+        // linearly deduplicating a temporary vector for every individual
+        // weight before inserting the same pointers here.
+        for (_tsid_range, token_set) in weight.0.range_values() {
+            let token_set = token_set.as_ref();
             let key = token_set as *const RangeSetBlaze<u32> as usize;
             unique_sets.entry(key).or_insert(token_set);
         }
