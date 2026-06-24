@@ -1077,6 +1077,75 @@ struct WeightRangeEntry {
     tokens: SharedTokenSet,
 }
 
+#[derive(Clone)]
+pub(crate) struct WeightIntersectionIndex {
+    source: Weight,
+    entries: Vec<WeightRangeEntry>,
+}
+
+impl WeightIntersectionIndex {
+    fn new(source: &Weight) -> Self {
+        Self {
+            source: source.clone(),
+            entries: source
+                .0
+                .range_values()
+                .map(|(range, tokens)| WeightRangeEntry {
+                    start: *range.start(),
+                    end: *range.end(),
+                    tokens: Arc::clone(tokens),
+                })
+                .collect(),
+        }
+    }
+}
+
+fn intersect_weight_with_index(sparse: &Weight, index: &WeightIntersectionIndex) -> Weight {
+    let mut builder = CompactRangeBuilder::new();
+    let mut overlap_cache: SmallVec<[(
+        *const RangeSetBlaze<u32>,
+        *const RangeSetBlaze<u32>,
+        Option<SharedTokenSet>,
+    ); 8]> = SmallVec::new();
+
+    for (sparse_range, sparse_tokens) in sparse.0.range_values() {
+        let sparse_start = *sparse_range.start();
+        let sparse_end = *sparse_range.end();
+        let mut entry_index = index
+            .entries
+            .partition_point(|entry| entry.end < sparse_start);
+
+        while let Some(entry) = index.entries.get(entry_index) {
+            if entry.start > sparse_end {
+                break;
+            }
+
+            let start = sparse_start.max(entry.start);
+            let end = sparse_end.min(entry.end);
+            let sparse_ptr = Arc::as_ptr(sparse_tokens);
+            let dense_ptr = Arc::as_ptr(&entry.tokens);
+            let tokens = if let Some((_, _, cached)) = overlap_cache.iter().find(
+                |(cached_sparse, cached_dense, _)| {
+                    *cached_sparse == sparse_ptr && *cached_dense == dense_ptr
+                },
+            ) {
+                cached.clone()
+            } else {
+                let overlap = shared_token_intersection(sparse_tokens, &entry.tokens);
+                overlap_cache.push((sparse_ptr, dense_ptr, overlap.clone()));
+                overlap
+            };
+
+            if let Some(tokens) = tokens {
+                builder.push(start, end, tokens);
+            }
+            entry_index += 1;
+        }
+    }
+
+    builder.finish()
+}
+
 struct CompactRangeBuilder {
     map: WeightMap,
     pending_start: Option<u32>,
@@ -1728,6 +1797,34 @@ fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight)
 }
 
 impl Weight {
+    pub(crate) fn intersection_index(&self) -> WeightIntersectionIndex {
+        WeightIntersectionIndex::new(self)
+    }
+
+    pub(crate) fn intersection_with_index(&self, index: &WeightIntersectionIndex) -> Self {
+        let other = &index.source;
+        if self.is_empty() || other.is_empty() {
+            return Self::empty();
+        }
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return self.clone();
+        }
+        if self.is_full() {
+            return other.clone();
+        }
+        if other.is_full() {
+            return self.clone();
+        }
+
+        if let Some(existing) = with_public_weight_intersection_memo(|memo| memo.lookup(self, other)) {
+            return existing;
+        }
+
+        let result = intersect_weight_with_index(self, index);
+        with_public_weight_intersection_memo(|memo| memo.store(self, other, &result));
+        result
+    }
+
     pub(crate) fn ptr_key(&self) -> usize {
         Arc::as_ptr(&self.0) as usize
     }
@@ -2375,6 +2472,73 @@ mod tests {
             .fold(Weight::empty(), |acc, weight| acc.union(weight));
 
         assert_eq!(bulk, sequential);
+    }
+
+    #[test]
+    fn indexed_intersection_matches_generic_intersection() {
+        fn assert_matches(sparse: Weight, dense: Weight) {
+            let index = dense.intersection_index();
+            clear_weight_op_caches();
+            let indexed = sparse.intersection_with_index(&index);
+            clear_weight_op_caches();
+            let generic = sparse.intersection_uncached(&dense);
+            assert_eq!(indexed, generic);
+        }
+
+        let dense = Weight::from_per_tsid_token_sets((0..160u32).map(|tsid| {
+            let tokens = match tsid % 5 {
+                0 => RangeSetBlaze::from_iter([0..=7, 40..=47]),
+                1 => RangeSetBlaze::from_iter([4..=13]),
+                2 => RangeSetBlaze::from_iter([20..=29]),
+                3 => RangeSetBlaze::from_iter([8..=11, 30..=36]),
+                _ => RangeSetBlaze::from_iter([50..=65]),
+            };
+            (tsid * 3, tokens)
+        }));
+        let sparse = Weight::from_per_tsid_token_sets([
+            (2, RangeSetBlaze::from_iter([3..=10])),
+            (93, RangeSetBlaze::from_iter([0..=5, 44..=52])),
+            (231, RangeSetBlaze::from_iter([7..=35])),
+            (351, RangeSetBlaze::from_iter([30..=70])),
+        ]);
+        assert_matches(sparse, dense.clone());
+
+        let index = dense.intersection_index();
+        assert_eq!(Weight::all().intersection_with_index(&index), dense);
+        assert_eq!(Weight::empty().intersection_with_index(&index), Weight::empty());
+
+        for case in 0..64u32 {
+            let dense = Weight::from_per_tsid_token_sets((0..192u32).map(|tsid| {
+                let tokens = match (tsid / 3 + case) % 7 {
+                    0 => RangeSetBlaze::from_iter([0..=9, 42..=57]),
+                    1 => RangeSetBlaze::from_iter([5..=18]),
+                    2 => RangeSetBlaze::from_iter([20..=37]),
+                    3 => RangeSetBlaze::from_iter([11..=14, 30..=45]),
+                    4 => RangeSetBlaze::from_iter([48..=66]),
+                    5 => RangeSetBlaze::from_iter([3..=7, 70..=79]),
+                    _ => RangeSetBlaze::from_iter([25..=31, 60..=73]),
+                };
+                (tsid, tokens)
+            }));
+            let sparse = Weight::from_per_tsid_token_sets((0..192u32).filter_map(|tsid| {
+                if (tsid * 17 + case * 11) % 5 == 0 {
+                    return None;
+                }
+                let tokens = match (tsid / 2 + case * 3) % 9 {
+                    0 => RangeSetBlaze::from_iter([0..=6, 40..=53]),
+                    1 => RangeSetBlaze::from_iter([4..=15]),
+                    2 => RangeSetBlaze::from_iter([16..=29]),
+                    3 => RangeSetBlaze::from_iter([8..=12, 28..=38]),
+                    4 => RangeSetBlaze::from_iter([32..=51]),
+                    5 => RangeSetBlaze::from_iter([50..=69]),
+                    6 => RangeSetBlaze::from_iter([65..=82]),
+                    7 => RangeSetBlaze::from_iter([2..=4, 75..=91]),
+                    _ => RangeSetBlaze::from_iter([24..=27, 56..=64]),
+                };
+                Some((tsid, tokens))
+            }));
+            assert_matches(sparse, dense);
+        }
     }
 
     #[test]

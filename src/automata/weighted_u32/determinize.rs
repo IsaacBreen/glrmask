@@ -11,8 +11,11 @@ use smallvec::SmallVec;
 
 use super::dwa::DWA;
 use super::nwa::NWA;
-use crate::ds::weight::Weight;
+use crate::ds::weight::{Weight, WeightIntersectionIndex};
 use crate::GlrMaskError;
+
+const MAX_INDEXED_FINAL_PATH_RANGES: usize = 8;
+const MIN_INDEXED_FINAL_WEIGHT_RANGES: usize = 32;
 
 fn union_state_weight(weights: &mut FxHashMap<u32, Weight>, state_id: u32, add: Weight) {
     if add.is_empty() {
@@ -30,13 +33,37 @@ fn union_state_weight(weights: &mut FxHashMap<u32, Weight>, state_id: u32, add: 
     }
 }
 
-fn subset_final_weight(nwa: &NWA, subset_entries: &[(u32, Weight)]) -> Weight {
+fn final_weight_intersection(
+    path_weight: &Weight,
+    state_final: &Weight,
+    final_weight_indices: &FxHashMap<usize, WeightIntersectionIndex>,
+    max_indexed_path_ranges: usize,
+) -> Weight {
+    if path_weight.outer_range_count() <= max_indexed_path_ranges {
+        if let Some(index) = final_weight_indices.get(&state_final.ptr_key()) {
+            return path_weight.intersection_with_index(index);
+        }
+    }
+    path_weight.intersection(state_final)
+}
+
+fn subset_final_weight(
+    nwa: &NWA,
+    subset_entries: &[(u32, Weight)],
+    final_weight_indices: &FxHashMap<usize, WeightIntersectionIndex>,
+    max_indexed_path_ranges: usize,
+) -> Weight {
     subset_entries.iter().fold(Weight::empty(), |final_weight, (state_id, path_weight)| {
         let Some(state_final) = nwa.states()[*state_id as usize].final_weight.as_ref() else {
             return final_weight;
         };
 
-        final_weight.union(&path_weight.intersection(state_final))
+        final_weight.union(&final_weight_intersection(
+            path_weight,
+            state_final,
+            final_weight_indices,
+            MAX_INDEXED_FINAL_PATH_RANGES,
+        ))
     })
 }
 
@@ -66,6 +93,8 @@ impl FinalWeightProfile {
 fn subset_final_weight_profiled(
     nwa: &NWA,
     subset_entries: &[(u32, Weight)],
+    final_weight_indices: &FxHashMap<usize, WeightIntersectionIndex>,
+    max_indexed_path_ranges: usize,
 ) -> (Weight, FinalWeightProfile) {
     let mut profile = FinalWeightProfile {
         subsets: 1,
@@ -82,7 +111,12 @@ fn subset_final_weight_profiled(
         profile.max_final_entries = profile.max_final_entries.max(profile.final_entries);
 
         let intersection_started_at = Instant::now();
-        let contribution = path_weight.intersection(state_final);
+        let contribution = final_weight_intersection(
+            path_weight,
+            state_final,
+            final_weight_indices,
+            MAX_INDEXED_FINAL_PATH_RANGES,
+        );
         profile.intersection_ms += intersection_started_at.elapsed().as_secs_f64() * 1000.0;
         if contribution.is_empty() {
             continue;
@@ -312,13 +346,27 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
 
     // Compute final weights in parallel after the main loop.
     // The subset_map already stores all (entries, state_id) pairs.
+    // Sparse path weights recur against a few wide final weights. Index those
+    // wide maps once so each sparse range can seek directly to its overlaps.
+    let final_weight_indices: FxHashMap<usize, WeightIntersectionIndex> = nwa
+        .states()
+        .iter()
+        .filter_map(|state| state.final_weight.as_ref())
+        .filter(|weight| weight.outer_range_count() >= MIN_INDEXED_FINAL_WEIGHT_RANGES)
+        .map(|weight| (weight.ptr_key(), weight.intersection_index()))
+        .collect();
     let final_weights_started_at = profile.then(Instant::now);
     let mut final_weight_profile = FinalWeightProfile::default();
     let final_weights: Vec<(u32, Weight)> = if profile {
         let profiled: Vec<(u32, Weight, FinalWeightProfile)> = subset_map
             .par_iter()
             .map(|(entries, &state_id)| {
-                let (fw, stats) = subset_final_weight_profiled(nwa, entries);
+                let (fw, stats) = subset_final_weight_profiled(
+                    nwa,
+                    entries,
+                    &final_weight_indices,
+                    MAX_INDEXED_FINAL_PATH_RANGES,
+                );
                 (state_id, fw, stats)
             })
             .collect();
@@ -333,7 +381,12 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
         subset_map
             .par_iter()
             .filter_map(|(entries, &state_id)| {
-                let fw = subset_final_weight(nwa, entries);
+                let fw = subset_final_weight(
+                    nwa,
+                    entries,
+                    &final_weight_indices,
+                    MAX_INDEXED_FINAL_PATH_RANGES,
+                );
                 (!fw.is_empty()).then_some((state_id, fw))
             })
             .collect()
