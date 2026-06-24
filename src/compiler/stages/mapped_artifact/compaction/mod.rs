@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
-use crate::ds::weight::{Weight, finalize_weight_map, shared_rangeset};
+use crate::ds::weight::{SharedTokenSet, Weight, finalize_weight_map, shared_rangeset};
 
 mod almost_optimal_layout;
 mod default_layout;
@@ -40,7 +40,7 @@ const LARGE_ALMOST_OPTIMAL_2OPT_WINDOW: usize = 64;
 const DEFAULT_LAYOUT_SKETCH_WORDS: usize = 4;
 const MIN_UNIQUE_WEIGHTS_FOR_COMPACTION_POOL: usize = 1024;
 
-type TokenRemapCache = HashMap<usize, RangeSetBlaze<u32>>;
+type TokenRemapCache = HashMap<usize, SharedTokenSet>;
 
 #[derive(Debug, Default)]
 struct PrecomputedTokenCompaction {
@@ -1161,7 +1161,7 @@ fn permute_weight_with_caches(
             );
             map.extend_simple(std::iter::once((
                 *tsid_range.start()..=*tsid_range.end(),
-                shared_rangeset(mapped_tokens),
+                mapped_tokens,
             )));
         }
         return finalize_weight_map(map);
@@ -1202,13 +1202,13 @@ fn permute_weight_with_bijective_tsid_perm(
         let mapped_tokens = if perm_context.token_perm_is_identity {
             Arc::clone(token_set)
         } else {
-            shared_rangeset(lookup_permuted_token_set(
+            lookup_permuted_token_set(
                 token_set,
                 token_set_ptr,
                 perm_context,
                 precomputed_token_remaps,
                 fallback_token_cache,
-            ))
+            )
         };
         for run in overlapping_perm_runs(
             &perm_context.tsid_runs,
@@ -1267,6 +1267,8 @@ fn permute_weight_with_general_tsid_remap(
                 precomputed_token_remaps,
                 fallback_token_cache,
             )
+            .as_ref()
+            .clone()
         };
 
         for run in overlapping_perm_runs(
@@ -1292,12 +1294,12 @@ fn lookup_permuted_token_set(
     perm_context: &PermutationContext,
     precomputed_token_remaps: &TokenRemapCache,
     fallback_token_cache: &TokenRemapCache,
-) -> RangeSetBlaze<u32> {
+) -> SharedTokenSet {
     precomputed_token_remaps
         .get(&token_set_ptr)
         .or_else(|| fallback_token_cache.get(&token_set_ptr))
         .cloned()
-        .unwrap_or_else(|| permute_rangeset_with_runs(token_set, &perm_context.token_runs))
+        .unwrap_or_else(|| shared_rangeset(permute_rangeset_with_runs(token_set, &perm_context.token_runs)))
 }
 
 fn build_global_permuted_token_cache(
@@ -1333,17 +1335,52 @@ fn build_missing_global_permuted_token_cache(
         }
     }
 
+    let profile_compaction = env_flag("GLRMASK_PROFILE_COMPILE");
+    let source_range_count = profile_compaction.then(|| {
+        token_sets
+            .iter()
+            .map(|(_, token_set)| token_set.ranges().count())
+            .sum::<usize>()
+    });
+    let overlap_run_count = profile_compaction.then(|| {
+        token_sets
+            .iter()
+            .flat_map(|(_, token_set)| token_set.ranges())
+            .map(|range| {
+                overlapping_perm_runs(
+                    &perm_context.token_runs,
+                    *range.start(),
+                    *range.end(),
+                )
+                .len()
+            })
+            .sum::<usize>()
+    });
+    let remap_started_at = profile_compaction.then(Instant::now);
     let permute_token_set = |(ptr, token_set): &(usize, Arc<RangeSetBlaze<u32>>)| {
-            (
-                *ptr,
-                permute_rangeset_with_runs(token_set, &perm_context.token_runs),
-            )
-        };
-    if rayon::current_num_threads() == 1 {
+        (
+            *ptr,
+            shared_rangeset(permute_rangeset_with_runs(token_set, &perm_context.token_runs)),
+        )
+    };
+    let remaps: TokenRemapCache = if rayon::current_num_threads() == 1 {
         token_sets.iter().map(permute_token_set).collect()
     } else {
         token_sets.par_iter().map(permute_token_set).collect()
+    };
+    if let Some(remap_started_at) = remap_started_at {
+        let output_range_count: usize = remaps.values().map(|set| set.as_ref().ranges().count()).sum();
+        eprintln!(
+            "[glrmask/profile][mapped_compaction_token_remap] token_sets={} source_ranges={} perm_runs={} overlap_runs={} output_ranges={} remap_ms={:.3}",
+            token_sets.len(),
+            source_range_count.unwrap_or(0),
+            perm_context.token_runs.len(),
+            overlap_run_count.unwrap_or(0),
+            output_range_count,
+            elapsed_ms(remap_started_at),
+        );
     }
+    remaps
 }
 
 fn permutation_runs(perm: &[u32]) -> Vec<PermRun> {
@@ -1683,6 +1720,37 @@ mod tests {
             &TokenRemapCache::new(),
         );
         assert_eq!(direct, general);
+    }
+
+    #[test]
+    fn shared_token_remap_cache_matches_fallback_and_reuses_storage() {
+        let weight = Weight::from_per_tsid_token_sets([
+            (0, RangeSetBlaze::from_iter([0..=0])),
+            (1, RangeSetBlaze::from_iter([1..=1])),
+            (2, RangeSetBlaze::from_iter([2..=2])),
+        ]);
+        let context = PermutationContext::new(&[0, 1, 2], &[2, 0, 1]);
+        let cache = build_global_permuted_token_cache(&[weight.clone()], &context);
+        let cached = permute_weight_with_caches(
+            &weight,
+            &context,
+            &cache,
+            &TokenRemapCache::new(),
+        );
+        let fallback = permute_weight_with_caches(
+            &weight,
+            &context,
+            &TokenRemapCache::new(),
+            &TokenRemapCache::new(),
+        );
+
+        assert_eq!(cached, fallback);
+        for ((_, source_tokens), (_, cached_tokens)) in
+            weight.0.range_values().zip(cached.0.range_values())
+        {
+            let source_ptr = Arc::as_ptr(source_tokens) as usize;
+            assert!(Arc::ptr_eq(cached_tokens, cache.get(&source_ptr).unwrap()));
+        }
     }
 
     #[test]
