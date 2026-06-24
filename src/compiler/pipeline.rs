@@ -1,5 +1,5 @@
 use crate::automata::lexer::Lexer;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -323,15 +323,13 @@ pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<
     let mut disallowed_by_terminal = BTreeMap::new();
 
     for (terminal_id, allowed) in ever_allowed.iter().enumerate() {
-        let allowed_set: BTreeSet<u32> = allowed.iter().copied().collect();
-        let mut disallowed = BitSet::new(num_terminals);
-
-        for other in 0..num_terminals {
-            if !allowed_set.contains(&(other as u32)) {
-                disallowed.set(other);
+        let mut allowed_bits = BitSet::new(num_terminals);
+        for &follow in allowed {
+            if (follow as usize) < num_terminals {
+                allowed_bits.set(follow as usize);
             }
         }
-
+        let disallowed = allowed_bits.complement();
         if !disallowed.is_zero() {
             disallowed_by_terminal.insert(terminal_id as u32, disallowed);
         }
