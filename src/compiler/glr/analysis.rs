@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
+use rustc_hash::FxHashMap;
+
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::{GrammarDef, NonterminalID, Rule, Symbol, TerminalID};
 
@@ -1607,33 +1609,33 @@ fn nullable_prefix_len(rhs: &[Symbol], nullable: &BTreeSet<NonterminalID>) -> us
 
 /// Remove rules for nonterminals not reachable from the start symbol.
 fn remove_unreachable_rules(rules: &[Rule], start: NonterminalID) -> Vec<Rule> {
-    // Build index: lhs → rule indices for O(1) lookup per NT.
-    let mut rules_by_lhs = BTreeMap::<NonterminalID, Vec<usize>>::new();
-    for (i, rule) in rules.iter().enumerate() {
-        rules_by_lhs.entry(rule.lhs).or_default().push(i);
+    let num_nonterminals = max_nt_id(rules) as usize + 1;
+    let mut rules_by_lhs = vec![Vec::<usize>::new(); num_nonterminals];
+    for (index, rule) in rules.iter().enumerate() {
+        rules_by_lhs[rule.lhs as usize].push(index);
     }
 
-    let mut reachable = BTreeSet::new();
+    let mut reachable = vec![false; num_nonterminals];
     let mut worklist = vec![start];
-    while let Some(nt) = worklist.pop() {
-        if !reachable.insert(nt) {
+    while let Some(nonterminal) = worklist.pop() {
+        let nonterminal_index = nonterminal as usize;
+        if reachable[nonterminal_index] {
             continue;
         }
-        if let Some(indexes) = rules_by_lhs.get(&nt) {
-            for &idx in indexes {
-                for sym in &rules[idx].rhs {
-                    if let Symbol::Nonterminal(n) = sym {
-                        if !reachable.contains(n) {
-                            worklist.push(*n);
-                        }
-                    }
+        reachable[nonterminal_index] = true;
+        for &rule_index in &rules_by_lhs[nonterminal_index] {
+            for symbol in &rules[rule_index].rhs {
+                if let Symbol::Nonterminal(next_nonterminal) = symbol
+                    && !reachable[*next_nonterminal as usize]
+                {
+                    worklist.push(*next_nonterminal);
                 }
             }
         }
     }
     rules
         .iter()
-        .filter(|r| reachable.contains(&r.lhs))
+        .filter(|rule| reachable[rule.lhs as usize])
         .cloned()
         .collect()
 }
@@ -1830,7 +1832,15 @@ impl Hash for RuleDedupKey<'_> {
 }
 
 fn dedup_rules(rules: &mut Vec<Rule>) {
-    let rhs_by_lhs = build_rhs_by_lhs(rules);
+    let mut rhs_by_lhs = BTreeMap::<NonterminalID, BTreeSet<Vec<Symbol>>>::new();
+    let mut rule_counts_by_lhs = FxHashMap::<NonterminalID, usize>::default();
+    for rule in rules.iter() {
+        rhs_by_lhs
+            .entry(rule.lhs)
+            .or_default()
+            .insert(rule.rhs.clone());
+        *rule_counts_by_lhs.entry(rule.lhs).or_default() += 1;
+    }
     let (unique_rhs_by_lhs, expandable_single_productions) =
         compute_expandable_single_productions(&rhs_by_lhs);
     let mut keep = Vec::with_capacity(rules.len());
@@ -1838,8 +1848,14 @@ fn dedup_rules(rules: &mut Vec<Rule>) {
         let mut seen = HashSet::with_capacity(rules.len());
         let mut flatten_cache = HashMap::<NonterminalID, Option<Vec<Symbol>>>::new();
         for rule in rules.iter() {
+            // Rule equality includes the LHS. A sole production for an LHS
+            // cannot duplicate any other rule, even after flattening chains.
+            if rule_counts_by_lhs[&rule.lhs] == 1 {
+                keep.push(true);
+                continue;
+            }
             let can_flatten = rule.rhs.iter().any(|symbol| {
-                matches!(symbol, Symbol::Nonterminal(nt) if expandable_single_productions.contains(nt))
+                matches!(symbol, Symbol::Nonterminal(nonterminal) if expandable_single_productions.contains(nonterminal))
             });
             let key = if can_flatten {
                 RuleDedupKey::Owned(
@@ -1857,7 +1873,6 @@ fn dedup_rules(rules: &mut Vec<Rule>) {
             keep.push(seen.insert(key));
         }
     }
-
     let mut keep_iter = keep.into_iter();
     rules.retain(|_| keep_iter.next().unwrap_or(false));
 }
@@ -2263,8 +2278,7 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
     };
 
     let mut iteration = 0;
-    let mut previous_right_recursion_completed = false;
-    let mut previous_hidden_left_recursion_changed = false;
+    let mut nullable_eliminated_before_exit = false;
     loop {
         let iteration_rules_before = rules.len();
         let iteration_started_at = profiling.then(Instant::now);
@@ -2299,15 +2313,6 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
 
         let no_nullable_nonterminals =
             compute_nullable(rules, max_nt_id(rules) + 1).is_empty();
-        if iteration > 0
-            && inline_unchanged
-            && no_nullable_nonterminals
-            && previous_right_recursion_completed
-            && !previous_hidden_left_recursion_changed
-        {
-            break;
-        }
-
         let rr_rules_before = rules.len();
         let rr_started_at = profiling.then(Instant::now);
         let right_recursion_completed = with_resynced_next_nonterminal(rules, &next_nt, |rules| {
@@ -2390,8 +2395,15 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
             );
         }
 
-        previous_right_recursion_completed = right_recursion_completed;
-        previous_hidden_left_recursion_changed = hidden_left_recursion_changed;
+        if no_nullable_nonterminals
+            && right_recursion_completed
+            && !hidden_left_recursion_changed
+        {
+            // Subsequent passes cannot create nullability, indirect right
+            // recursion, or hidden left recursion: dedup only removes rules.
+            nullable_eliminated_before_exit = true;
+            break;
+        }
         iteration += 1;
 
         if converged {
@@ -2400,18 +2412,27 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
     }
 
     let post_inline_rules_before = rules.len();
-    let post_inline_snapshot = rules.clone();
+    let post_inline_snapshot = (!nullable_eliminated_before_exit).then(|| rules.clone());
     let post_inline_started_at = profiling.then(Instant::now);
-    replace_rules_with_resync(rules, &next_nt, inline_null_productions);
-    let post_inline_changed = *rules != post_inline_snapshot;
+    if !nullable_eliminated_before_exit {
+        replace_rules_with_resync(rules, &next_nt, inline_null_productions);
+    }
+    let post_inline_changed = post_inline_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| *rules != *snapshot);
     if let Some(started_at) = post_inline_started_at {
+        let post_inline_extra = if nullable_eliminated_before_exit {
+            " phase=post_loop skipped=nullable_eliminated".to_string()
+        } else {
+            format!(" phase=post_loop changed={post_inline_changed}")
+        };
         emit_normalize_profile(
             "inline_null_productions",
             None,
             elapsed_ms(started_at),
             post_inline_rules_before,
             rules.len(),
-            &format!(" phase=post_loop changed={post_inline_changed}"),
+            &post_inline_extra,
         );
     }
 
