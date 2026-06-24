@@ -6,7 +6,7 @@ use std::collections::{VecDeque, hash_map::Entry as HashMapEntry};
 use std::time::Instant;
 
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use super::dwa::DWA;
@@ -38,6 +38,63 @@ fn subset_final_weight(nwa: &NWA, subset_entries: &[(u32, Weight)]) -> Weight {
 
         final_weight.union(&path_weight.intersection(state_final))
     })
+}
+
+#[derive(Default)]
+struct FinalWeightProfile {
+    subsets: usize,
+    subset_entries: usize,
+    final_entries: usize,
+    nonempty_contributions: usize,
+    max_final_entries: usize,
+    intersection_ms: f64,
+    union_ms: f64,
+}
+
+impl FinalWeightProfile {
+    fn merge(&mut self, other: Self) {
+        self.subsets += other.subsets;
+        self.subset_entries += other.subset_entries;
+        self.final_entries += other.final_entries;
+        self.nonempty_contributions += other.nonempty_contributions;
+        self.max_final_entries = self.max_final_entries.max(other.max_final_entries);
+        self.intersection_ms += other.intersection_ms;
+        self.union_ms += other.union_ms;
+    }
+}
+
+fn subset_final_weight_profiled(
+    nwa: &NWA,
+    subset_entries: &[(u32, Weight)],
+) -> (Weight, FinalWeightProfile) {
+    let mut profile = FinalWeightProfile {
+        subsets: 1,
+        subset_entries: subset_entries.len(),
+        ..FinalWeightProfile::default()
+    };
+    let mut final_weight = Weight::empty();
+
+    for (state_id, path_weight) in subset_entries {
+        let Some(state_final) = nwa.states()[*state_id as usize].final_weight.as_ref() else {
+            continue;
+        };
+        profile.final_entries += 1;
+        profile.max_final_entries = profile.max_final_entries.max(profile.final_entries);
+
+        let intersection_started_at = Instant::now();
+        let contribution = path_weight.intersection(state_final);
+        profile.intersection_ms += intersection_started_at.elapsed().as_secs_f64() * 1000.0;
+        if contribution.is_empty() {
+            continue;
+        }
+        profile.nonempty_contributions += 1;
+
+        let union_started_at = Instant::now();
+        final_weight = final_weight.union(&contribution);
+        profile.union_ms += union_started_at.elapsed().as_secs_f64() * 1000.0;
+    }
+
+    (final_weight, profile)
 }
 
 fn seed_start_subset(nwa: &NWA) -> FxHashMap<u32, Weight> {
@@ -256,13 +313,31 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     // Compute final weights in parallel after the main loop.
     // The subset_map already stores all (entries, state_id) pairs.
     let final_weights_started_at = profile.then(Instant::now);
-    let final_weights: Vec<(u32, Weight)> = subset_map
-        .par_iter()
-        .filter_map(|(entries, &state_id)| {
-            let fw = subset_final_weight(nwa, entries);
-            (!fw.is_empty()).then_some((state_id, fw))
-        })
-        .collect();
+    let mut final_weight_profile = FinalWeightProfile::default();
+    let final_weights: Vec<(u32, Weight)> = if profile {
+        let profiled: Vec<(u32, Weight, FinalWeightProfile)> = subset_map
+            .par_iter()
+            .map(|(entries, &state_id)| {
+                let (fw, stats) = subset_final_weight_profiled(nwa, entries);
+                (state_id, fw, stats)
+            })
+            .collect();
+        profiled
+            .into_iter()
+            .filter_map(|(state_id, fw, stats)| {
+                final_weight_profile.merge(stats);
+                (!fw.is_empty()).then_some((state_id, fw))
+            })
+            .collect()
+    } else {
+        subset_map
+            .par_iter()
+            .filter_map(|(entries, &state_id)| {
+                let fw = subset_final_weight(nwa, entries);
+                (!fw.is_empty()).then_some((state_id, fw))
+            })
+            .collect()
+    };
     for (state_id, fw) in final_weights {
         dwa.set_final_weight(state_id, fw);
     }
@@ -276,8 +351,45 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             .map(|w| w.0.ranges_len())
             .max()
             .unwrap_or(0);
+        let mut final_pairs = FxHashSet::default();
+        let mut final_path_weights = FxHashSet::default();
+        let mut final_state_weights = FxHashSet::default();
+        let mut final_path_outer_ranges = 0usize;
+        let mut final_state_outer_ranges = 0usize;
+        let mut max_final_path_outer_ranges = 0usize;
+        let mut max_final_state_outer_ranges = 0usize;
+        for entries in subset_map.keys() {
+            for (state_id, path_weight) in entries {
+                let Some(state_final) = nwa.states()[*state_id as usize].final_weight.as_ref() else {
+                    continue;
+                };
+                let path_key = path_weight.ptr_key();
+                let state_key = state_final.ptr_key();
+                final_pairs.insert((path_key, state_key));
+                final_path_weights.insert(path_key);
+                final_state_weights.insert(state_key);
+                let path_ranges = path_weight.outer_range_count();
+                let state_ranges = state_final.outer_range_count();
+                final_path_outer_ranges += path_ranges;
+                final_state_outer_ranges += state_ranges;
+                max_final_path_outer_ranges = max_final_path_outer_ranges.max(path_ranges);
+                max_final_state_outer_ranges = max_final_state_outer_ranges.max(state_ranges);
+            }
+        }
         eprintln!(
-            "[glrmask/profile][determinize] nwa_states={} dwa_states={} subset_map_entries={} max_weight_dim={} subset_entries={} max_subset_entries={} raw_transition_visits={} labels={} target_contributions={} expand_ms={:.3} combine_ms={:.3} edge_union_ms={:.3} closure_ms={:.3} normalize_ms={:.3} canonicalize_ms={:.3} subset_lookup_ms={:.3} final_weights_ms={:.3}",
+            "[glrmask/profile][determinize_final_shape] pairs={} unique_pairs={} unique_path_weights={} unique_state_weights={} path_outer_ranges={} state_outer_ranges={} max_path_outer_ranges={} max_state_outer_ranges={}",
+            final_weight_profile.final_entries,
+            final_pairs.len(),
+            final_path_weights.len(),
+            final_state_weights.len(),
+            final_path_outer_ranges,
+            final_state_outer_ranges,
+            max_final_path_outer_ranges,
+            max_final_state_outer_ranges,
+        );
+
+        eprintln!(
+            "[glrmask/profile][determinize] nwa_states={} dwa_states={} subset_map_entries={} max_weight_dim={} subset_entries={} max_subset_entries={} raw_transition_visits={} labels={} target_contributions={} expand_ms={:.3} combine_ms={:.3} edge_union_ms={:.3} closure_ms={:.3} normalize_ms={:.3} canonicalize_ms={:.3} subset_lookup_ms={:.3} final_weights_ms={:.3} final_subsets={} final_subset_entries={} final_entries={} final_nonempty_contributions={} final_max_entries={} final_intersection_ms={:.3} final_union_ms={:.3}",
             nwa.states().len(),
             dwa.states().len(),
             subset_map.len(),
@@ -295,6 +407,13 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             profile_canonicalize_ms,
             profile_subset_lookup_ms,
             final_weights_ms,
+            final_weight_profile.subsets,
+            final_weight_profile.subset_entries,
+            final_weight_profile.final_entries,
+            final_weight_profile.nonempty_contributions,
+            final_weight_profile.max_final_entries,
+            final_weight_profile.intersection_ms,
+            final_weight_profile.union_ms,
         );
     }
 
