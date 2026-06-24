@@ -1383,11 +1383,7 @@ pub struct Regex {
 
 impl Regex {
     pub(crate) fn into_tokenizer(self, num_terminals: u32, exprs: Option<std::sync::Arc<[Expr]>>) -> Tokenizer {
-        Tokenizer {
-            dfa: self.dfa,
-            num_terminals,
-            exprs,
-        }
+        Tokenizer::from_parts(self.dfa, num_terminals, exprs)
     }
 
     pub fn num_states(&self) -> usize {
@@ -2244,11 +2240,7 @@ mod tests {
 
     fn terminal_matches(expr: Expr, input: &[u8]) -> bool {
         let regex = build_regex(std::slice::from_ref(&expr));
-        let tokenizer = Tokenizer {
-            dfa: regex.dfa,
-            num_terminals: 1,
-            exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
-        };
+        let tokenizer = Tokenizer::from_parts(regex.dfa, 1, Some(Arc::from(vec![expr].into_boxed_slice())));
         let exec = tokenizer.execute_from_state(input, tokenizer.initial_state());
         exec.matches
             .iter()
@@ -2386,11 +2378,7 @@ mod tests {
             max: Some(16),
         };
         let regex = build_regex(std::slice::from_ref(&expr));
-        let tokenizer = Tokenizer {
-            dfa: regex.dfa,
-            num_terminals: 1,
-            exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
-        };
+        let tokenizer = Tokenizer::from_parts(regex.dfa, 1, Some(Arc::from(vec![expr].into_boxed_slice())));
 
         for len in [1usize, 2, 15] {
             let input = vec![b' '; len];
@@ -2421,11 +2409,7 @@ mod tests {
         };
 
         let regex = build_regex(&[space.clone(), exact_repeat.clone()]);
-        let tokenizer = Tokenizer {
-            dfa: regex.dfa,
-            num_terminals: 2,
-            exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
-        };
+        let tokenizer = Tokenizer::from_parts(regex.dfa, 2, Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())));
 
         for len in [1usize, 2, 15] {
             let input = vec![b' '; len];
@@ -2456,11 +2440,7 @@ mod tests {
         };
 
         let regex = build_regex(&[space.clone(), exact_repeat.clone()]);
-        let tokenizer = Tokenizer {
-            dfa: regex.dfa,
-            num_terminals: 2,
-            exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
-        };
+        let tokenizer = Tokenizer::from_parts(regex.dfa, 2, Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())));
 
         for len in [1usize, 2, 31] {
             let input = vec![b' '; len];
@@ -2513,11 +2493,7 @@ mod tests {
             quote,
         ];
         let regex = build_regex(&exprs);
-        let tokenizer = Tokenizer {
-            dfa: regex.dfa,
-            num_terminals: exprs.len() as u32,
-            exprs: Some(Arc::from(exprs.into_boxed_slice())),
-        };
+        let tokenizer = Tokenizer::from_parts(regex.dfa, exprs.len() as u32, Some(Arc::from(exprs.into_boxed_slice())));
 
         for len in [1usize, 2, 15] {
             let input = vec![b' '; len];
@@ -2557,11 +2533,11 @@ mod tests {
             dfa.num_states(),
         );
 
-        let tokenizer = Tokenizer {
+        let tokenizer = Tokenizer::from_parts(
             dfa,
-            num_terminals: 1,
-            exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
-        };
+            1,
+            Some(Arc::from(vec![expr].into_boxed_slice())),
+        );
 
         for len in [0usize, 1, 31, 32] {
             let mut input = Vec::with_capacity(len + 2);
@@ -2611,11 +2587,11 @@ mod tests {
             dfa.num_states(),
         );
 
-        let tokenizer = Tokenizer {
+        let tokenizer = Tokenizer::from_parts(
             dfa,
-            num_terminals: 1,
-            exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
-        };
+            1,
+            Some(Arc::from(vec![expr].into_boxed_slice())),
+        );
 
         for input in [b"\"a".as_slice(), b"\"aa", b"\"a a", b"\"aa  aaa"] {
             let exec = tokenizer.execute_from_state(input, tokenizer.initial_state());
@@ -2754,11 +2730,7 @@ mod tests {
     fn prefixed_optional_word_list_semantics() {
         let expr = prefixed_optional_word_list_expr(2);
         let regex = build_regex(std::slice::from_ref(&expr));
-        let tokenizer = Tokenizer {
-            dfa: regex.dfa,
-            num_terminals: 1,
-            exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
-        };
+        let tokenizer = Tokenizer::from_parts(regex.dfa, 1, Some(Arc::from(vec![expr].into_boxed_slice())));
 
         for input in [b"\"".as_slice(), b"\"a", b"\"a a", b"\"a  a"] {
             let exec = tokenizer.execute_from_state(input, tokenizer.initial_state());

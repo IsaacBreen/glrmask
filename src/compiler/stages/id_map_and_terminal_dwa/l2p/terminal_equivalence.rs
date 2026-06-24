@@ -114,29 +114,10 @@ impl TerminalEquivalence {
         let active_bytes: Vec<u8> = (0..=255u8)
             .filter(|&byte| relevant_bytes[byte as usize])
             .collect();
-        let quotient_active = |terminal: TerminalID| {
-            active_terminals.get(terminal as usize).copied().unwrap_or(false)
-                && Some(terminal) != ignore_terminal
-        };
-
-        let mut final_states = vec![Vec::<u32>::new(); num_terminals];
-        let mut future_states = vec![Vec::<u32>::new(); num_terminals];
-        for state in 0..tokenizer.num_states() {
-            for terminal in tokenizer.matched_terminals_iter(state) {
-                if quotient_active(terminal) {
-                    final_states[terminal as usize].push(state);
-                }
-            }
-            for terminal in tokenizer.possible_future_terminals_iter(state) {
-                if quotient_active(terminal) {
-                    future_states[terminal as usize].push(state);
-                }
-            }
-        }
-
-        let mut pair_ids_by_terminal = (0..num_terminals)
-            .map(|_| FxHashMap::<u32, u32>::default())
-            .collect::<Vec<_>>();
+        // Each terminal's residual scanner is supplied directly by the
+        // tokenizer's stored isolated group DFA. The accompanying joint-state
+        // map restores the raw lexer-state domain needed during late expansion.
+        let mut pair_ids_by_terminal = vec![Vec::<u32>::new(); num_terminals];
         let mut pair_terminals = Vec::<TerminalID>::new();
         let mut pair_states = Vec::<u32>::new();
         let mut outputs = Vec::<u8>::new();
@@ -145,31 +126,20 @@ impl TerminalEquivalence {
             if Some(terminal) == ignore_terminal {
                 continue;
             }
-            let finals = &final_states[terminal as usize];
-            let futures = &future_states[terminal as usize];
-            let mut final_index = 0usize;
-            let mut future_index = 0usize;
-            while final_index < finals.len() || future_index < futures.len() {
-                let next_final = finals.get(final_index).copied();
-                let next_future = futures.get(future_index).copied();
-                let state = match (next_final, next_future) {
-                    (Some(left), Some(right)) => left.min(right),
-                    (Some(left), None) => left,
-                    (None, Some(right)) => right,
-                    (None, None) => unreachable!(),
-                };
-                let is_final = next_final == Some(state);
-                let is_future = next_future == Some(state);
-                if is_final {
-                    final_index += 1;
-                }
-                if is_future {
-                    future_index += 1;
+            let group = tokenizer.group_dfa(terminal);
+            let local_state_count = group.num_states();
+            let pair_ids = &mut pair_ids_by_terminal[terminal as usize];
+            pair_ids.resize(local_state_count, NO_PAIR);
+            for local_state in 0..local_state_count as u32 {
+                let is_final = group.is_match(local_state);
+                let is_future = group.can_continue(local_state);
+                if !is_final && !is_future {
+                    continue;
                 }
                 let pair = pair_terminals.len() as u32;
-                pair_ids_by_terminal[terminal as usize].insert(state, pair);
+                pair_ids[local_state as usize] = pair;
                 pair_terminals.push(terminal);
-                pair_states.push(state);
+                pair_states.push(local_state);
                 outputs.push((u8::from(is_final) << 1) | u8::from(is_future));
             }
         }
@@ -182,15 +152,13 @@ impl TerminalEquivalence {
         let mut transitions = vec![NO_PAIR; pair_terminals.len() * width];
         for pair_index in 0..pair_terminals.len() {
             let terminal = pair_terminals[pair_index] as usize;
-            let state = pair_states[pair_index];
+            let local_state = pair_states[pair_index];
+            let group = tokenizer.group_dfa(terminal as TerminalID);
             let row = &mut transitions[pair_index * width..(pair_index + 1) * width];
             for (slot, &byte) in active_bytes.iter().enumerate() {
-                let next = tokenizer.get_transition(state, byte);
+                let next = group.get_transition(local_state, byte);
                 if next != u32::MAX {
-                    row[slot] = pair_ids_by_terminal[terminal]
-                        .get(&next)
-                        .copied()
-                        .unwrap_or(NO_PAIR);
+                    row[slot] = pair_ids_by_terminal[terminal][next as usize];
                 }
             }
         }
@@ -205,10 +173,37 @@ impl TerminalEquivalence {
         }
         let residual_block_count = blocks.iter().copied().max().unwrap_or(DEAD_BLOCK) as usize;
 
-        let mut state_blocks_by_terminal = vec![Vec::<(u32, u32)>::new(); num_terminals];
+        let mut local_blocks_by_terminal = vec![Vec::<u32>::new(); num_terminals];
         for pair_index in 0..pair_terminals.len() {
-            state_blocks_by_terminal[pair_terminals[pair_index] as usize]
-                .push((pair_states[pair_index], blocks[pair_index]));
+            let terminal = pair_terminals[pair_index] as usize;
+            let local_state = pair_states[pair_index] as usize;
+            let local_blocks = &mut local_blocks_by_terminal[terminal];
+            if local_blocks.len() <= local_state {
+                local_blocks.resize(local_state + 1, DEAD_BLOCK);
+            }
+            local_blocks[local_state] = blocks[pair_index];
+        }
+
+        let mut state_blocks_by_terminal = vec![Vec::<(u32, u32)>::new(); num_terminals];
+        for &terminal in &active_ids {
+            if Some(terminal) == ignore_terminal {
+                continue;
+            }
+            let group = tokenizer.group_dfa(terminal);
+            let local_blocks = &local_blocks_by_terminal[terminal as usize];
+            for (joint_state, &local_state) in group.joint_state_to_group_state.iter().enumerate() {
+                if local_state == u32::MAX {
+                    continue;
+                }
+                let block = local_blocks
+                    .get(local_state as usize)
+                    .copied()
+                    .unwrap_or(DEAD_BLOCK);
+                if block != DEAD_BLOCK {
+                    state_blocks_by_terminal[terminal as usize]
+                        .push((joint_state as u32, block));
+                }
+            }
         }
 
         let mut representative_for_terminal =

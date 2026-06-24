@@ -1,8 +1,9 @@
 //! Runtime-facing tokenizer API built on top of the lexer DFA.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use rustc_hash::{FxHashMap, FxHasher};
 use smallvec::SmallVec;
@@ -24,6 +25,146 @@ pub struct Tokenizer {
     /// compile-time simplification for active-terminal rebuilds.
     #[serde(default, skip)]
     pub(super) exprs: Option<Arc<[Expr]>>,
+    #[serde(skip, default = "new_group_dfa_cache")]
+    group_dfas: Arc<OnceLock<Arc<[GroupDfa]>>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GroupDfa {
+    pub(crate) dfa: DFA,
+    pub(crate) joint_state_to_group_state: Arc<[u32]>,
+}
+
+impl GroupDfa {
+    pub(crate) fn num_states(&self) -> usize {
+        self.dfa.num_states()
+    }
+
+    pub(crate) fn is_match(&self, state: u32) -> bool {
+        self.dfa.finalizers(state).contains(0)
+    }
+
+    pub(crate) fn can_continue(&self, state: u32) -> bool {
+        self.dfa.possible_future_group_ids(state).contains(0)
+    }
+
+    pub(crate) fn get_transition(&self, state: u32, byte: u8) -> u32 {
+        self.dfa.get_transition(state, byte)
+    }
+}
+
+fn new_group_dfa_cache() -> Arc<OnceLock<Arc<[GroupDfa]>>> {
+    Arc::new(OnceLock::new())
+}
+
+fn build_group_dfas(joint_dfa: &DFA, num_terminals: u32) -> Arc<[GroupDfa]> {
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let started_at = profile_enabled.then(Instant::now);
+    let group_dfas = (0..num_terminals)
+        .map(|terminal| build_group_dfa(joint_dfa, terminal))
+        .collect::<Vec<_>>()
+        ;
+    if let Some(started_at) = started_at {
+        let states: usize = group_dfas.iter().map(|group| group.dfa.num_states()).sum();
+        let transitions: usize = group_dfas
+            .iter()
+            .flat_map(|group| group.dfa.states())
+            .map(|state| state.transitions.len())
+            .sum();
+        eprintln!(
+            "[glrmask/profile][tokenizer_group_dfas] groups={} joint_states={} isolated_states={} isolated_transitions={} total_ms={:.3}",
+            num_terminals,
+            joint_dfa.num_states(),
+            states,
+            transitions,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    group_dfas.into()
+}
+
+fn build_group_dfa(joint_dfa: &DFA, terminal: TerminalID) -> GroupDfa {
+    let joint_state_count = joint_dfa.num_states();
+    let terminal_index = terminal as usize;
+    let mut joint_state_to_group_state = vec![u32::MAX; joint_state_count];
+    let mut dfa = DFA::new(1);
+    dfa.ensure_group_capacity(1);
+    dfa.set_group_u8set(0, *joint_dfa.group_id_to_u8set(terminal));
+
+    let joint_starts = joint_dfa.start_states().to_vec();
+    let joint_start = joint_dfa.start_state();
+    joint_state_to_group_state[joint_start as usize] = 0;
+    let mut queue = VecDeque::from([joint_start]);
+    let mut group_starts = vec![0];
+    for joint_start in joint_starts.into_iter().skip(1) {
+        let local_start = if joint_state_to_group_state[joint_start as usize] == u32::MAX {
+            let local_start = dfa.add_state();
+            joint_state_to_group_state[joint_start as usize] = local_start;
+            queue.push_back(joint_start);
+            local_start
+        } else {
+            joint_state_to_group_state[joint_start as usize]
+        };
+        group_starts.push(local_start);
+    }
+
+    while let Some(joint_state) = queue.pop_front() {
+        let local_state = joint_state_to_group_state[joint_state as usize];
+        let joint = &joint_dfa.states()[joint_state as usize];
+        let is_match = joint.finalizers.contains(terminal_index);
+        let is_live = is_match
+            || joint_dfa
+                .possible_future_group_ids(joint_state)
+                .contains(terminal_index);
+
+        if !is_live && joint_state != joint_start {
+            continue;
+        }
+
+        let mut finalizers = BitSet::new(1);
+        if is_match {
+            finalizers.set(0);
+        }
+        dfa.overwrite_state_metadata(local_state, finalizers, BitSet::new(1));
+
+        let mut transitions = Vec::new();
+        for (byte, &joint_target) in joint.transitions.iter() {
+            let target = &joint_dfa.states()[joint_target as usize];
+            let target_live = target.finalizers.contains(terminal_index)
+                || joint_dfa
+                    .possible_future_group_ids(joint_target)
+                    .contains(terminal_index);
+            if !target_live {
+                continue;
+            }
+
+            let local_target = if joint_state_to_group_state[joint_target as usize] == u32::MAX {
+                let local_target = dfa.add_state();
+                joint_state_to_group_state[joint_target as usize] = local_target;
+                queue.push_back(joint_target);
+                local_target
+            } else {
+                joint_state_to_group_state[joint_target as usize]
+            };
+            transitions.push((byte, local_target));
+        }
+        dfa.set_transitions_from_sorted_entries(local_state, transitions);
+    }
+
+    dfa.set_start_states(group_starts);
+
+    let (minimized, local_state_map) = dfa.minimize_with_state_mapping();
+    for state in &mut joint_state_to_group_state {
+        if *state != u32::MAX {
+            *state = local_state_map[*state as usize];
+        }
+    }
+
+    GroupDfa {
+        dfa: minimized,
+        joint_state_to_group_state: Arc::from(joint_state_to_group_state),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,7 +292,34 @@ impl Tokenizer {
             dfa,
             num_terminals,
             exprs,
+            group_dfas: new_group_dfa_cache(),
         }
+    }
+
+    fn invalidate_group_dfas(&mut self) {
+        self.group_dfas = new_group_dfa_cache();
+    }
+
+    fn group_dfas(&self) -> &[GroupDfa] {
+        self.group_dfas
+            .get_or_init(|| build_group_dfas(&self.dfa, self.num_terminals))
+            .as_ref()
+    }
+
+    /// Materialize and retain every isolated group DFA. The terminal-
+    /// equivalence builder invokes this through `group_dfa`; other callers can
+    /// request it explicitly.
+    pub fn materialize_group_dfas(&self) {
+        let _ = self.group_dfas();
+    }
+
+    /// Number of isolated group DFAs retained by this tokenizer.
+    pub fn group_dfa_count(&self) -> usize {
+        self.group_dfas().len()
+    }
+
+    pub(crate) fn group_dfa(&self, terminal: TerminalID) -> &GroupDfa {
+        &self.group_dfas()[terminal as usize]
     }
 
     /// The default lexer entry state.
@@ -168,16 +336,55 @@ impl Tokenizer {
     /// default used by `run()` and legacy callers.
     pub fn set_start_states(&mut self, states: Vec<u32>) {
         self.dfa.set_start_states(states);
+        self.invalidate_group_dfas();
     }
 
     /// Select the default lexer entry state while retaining all other entries.
     pub fn set_default_start_state(&mut self, state: u32) {
         self.dfa.set_default_start_state(state);
+        self.invalidate_group_dfas();
     }
 
     /// Add an auxiliary selectable lexer entry state.
     pub fn add_start_state(&mut self, state: u32) {
         self.dfa.add_start_state(state);
+        self.invalidate_group_dfas();
+    }
+
+    /// Number of states in the isolated DFA for `terminal`.
+    pub fn group_dfa_num_states(&self, terminal: TerminalID) -> usize {
+        self.group_dfa(terminal).dfa.num_states()
+    }
+
+    /// Default state of the isolated DFA for `terminal`.
+    pub fn group_dfa_start_state(&self, terminal: TerminalID) -> u32 {
+        self.group_dfa(terminal).dfa.start_state()
+    }
+
+    /// All selectable entries of `terminal`'s isolated DFA, with its default
+    /// first. This mirrors generic multi-entry lexer semantics when present.
+    pub fn group_dfa_start_states(&self, terminal: TerminalID) -> Vec<u32> {
+        self.group_dfa(terminal).dfa.start_states().to_vec()
+    }
+
+    /// Step the isolated DFA for `terminal`. Its group-0 match predicate means
+    /// this original terminal and no other terminal.
+    pub fn group_dfa_step(&self, terminal: TerminalID, state: u32, byte: u8) -> Option<u32> {
+        self.group_dfa(terminal).dfa.step(state, byte)
+    }
+
+    /// Whether `state` in `terminal`'s isolated DFA accepts that terminal.
+    pub fn group_dfa_is_match(&self, terminal: TerminalID, state: u32) -> bool {
+        self.group_dfa(terminal).dfa.finalizers(state).contains(0)
+    }
+
+    /// Whether `state` in `terminal`'s isolated DFA has a non-empty future.
+    pub fn group_dfa_can_continue(&self, terminal: TerminalID, state: u32) -> bool {
+        !self
+            .group_dfa(terminal)
+            .dfa
+            .possible_future_group_ids(state)
+            .is_empty()
     }
 
     fn num_terminals(&self) -> u32 {
@@ -235,6 +442,7 @@ impl Tokenizer {
                     .map(|terminal| terminal as TerminalID),
             );
         }
+        self.invalidate_group_dfas();
         nullable
     }
 
@@ -253,6 +461,7 @@ impl Tokenizer {
                 self.dfa.discard_last_state(clone_id);
             }
         }
+        self.invalidate_group_dfas();
     }
 
     fn step(&self, state: u32, byte: u8) -> Option<u32> {
@@ -586,11 +795,7 @@ impl Tokenizer {
                 num_states as u32,
             );
             return (
-                Tokenizer {
-                    dfa,
-                    num_terminals: self.num_terminals,
-                    exprs: self.exprs.clone(),
-                },
+                Tokenizer::from_parts(dfa, self.num_terminals, self.exprs.clone()),
                 identity,
             );
         }
@@ -606,11 +811,7 @@ impl Tokenizer {
                     pre_minimize_states as u32,
                 );
                 return (
-                    Tokenizer {
-                        dfa,
-                        num_terminals: self.num_terminals,
-                        exprs: self.exprs.clone(),
-                    },
+                    Tokenizer::from_parts(dfa, self.num_terminals, self.exprs.clone()),
                     identity,
                 );
             }
@@ -628,11 +829,7 @@ impl Tokenizer {
                 num_states as u32,
             );
             return (
-                Tokenizer {
-                    dfa,
-                    num_terminals: self.num_terminals,
-                    exprs: self.exprs.clone(),
-                },
+                Tokenizer::from_parts(dfa, self.num_terminals, self.exprs.clone()),
                 identity,
             );
         }
@@ -641,11 +838,7 @@ impl Tokenizer {
         let post_minimize_states = minimized.num_states();
 
         (
-            Tokenizer {
-                dfa: minimized,
-                num_terminals: self.num_terminals,
-                exprs: self.exprs.clone(),
-            },
+            Tokenizer::from_parts(minimized, self.num_terminals, self.exprs.clone()),
             ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
                 state_mapping,
                 post_minimize_states as u32,
@@ -805,11 +998,11 @@ impl Tokenizer {
         terminal_labels: &[TerminalID],
         active_labels: &[bool],
     ) -> Tokenizer {
-        Tokenizer {
-            dfa: self.relabel_dfa_for_terminal_labels(terminal_labels, active_labels),
-            num_terminals: self.num_terminals,
-            exprs: self.exprs.clone(),
-        }
+        Tokenizer::from_parts(
+            self.relabel_dfa_for_terminal_labels(terminal_labels, active_labels),
+            self.num_terminals,
+            self.exprs.clone(),
+        )
     }
 
     fn relabel_dfa_for_terminal_labels(
@@ -916,6 +1109,12 @@ mod active_finalizer_minimization_tests {
     use crate::automata::lexer::compile::build_regex;
     use crate::automata::lexer::dfa::DFA;
 
+    #[derive(Serialize)]
+    struct LegacyTokenizerWire {
+        dfa: DFA,
+        num_terminals: u32,
+    }
+
     #[test]
     fn active_finalizer_refinement_matches_rebuilt_active_lexer() {
         let expressions = vec![
@@ -1005,6 +1204,178 @@ mod active_finalizer_minimization_tests {
         for &start in tokenizer.start_states() {
             assert!(tokenizer.matched_terminal_bitset(start).is_empty());
         }
+    }
+
+    #[test]
+    fn group_dfas_are_isolated_and_map_joint_residuals() {
+        let expressions = vec![
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"ac".to_vec()),
+            Expr::U8Seq(b"x".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+
+        let joint_start = tokenizer.start_state();
+        let joint_after_a = tokenizer
+            .run_from_state(b"a", joint_start)
+            .expect("joint lexer accepts shared prefix");
+        let joint_after_x = tokenizer
+            .run_from_state(b"x", joint_start)
+            .expect("joint lexer accepts x");
+
+        for terminal in 0..3u32 {
+            let group = tokenizer.group_dfa(terminal);
+            assert_eq!(group.dfa.num_groups(), 1);
+            for (state_id, state) in group.dfa.states().iter().enumerate() {
+                assert!(state.finalizers.count_ones() <= 1);
+                assert!(
+                    group
+                        .dfa
+                        .possible_future_group_ids(state_id as u32)
+                        .count_ones()
+                        <= 1
+                );
+            }
+            assert_ne!(
+                group.joint_state_to_group_state[joint_start as usize],
+                u32::MAX,
+            );
+        }
+
+        let ab_start = tokenizer.group_dfa_start_state(0);
+        let ab_after_a = tokenizer
+            .group_dfa_step(0, ab_start, b'a')
+            .expect("ab group accepts shared prefix");
+        let ab_end = tokenizer
+            .group_dfa_step(0, ab_after_a, b'b')
+            .expect("ab group accepts ab");
+        assert!(tokenizer.group_dfa_is_match(0, ab_end));
+        assert_eq!(tokenizer.group_dfa_step(0, ab_after_a, b'c'), None);
+
+        let ac_start = tokenizer.group_dfa_start_state(1);
+        let ac_after_a = tokenizer
+            .group_dfa_step(1, ac_start, b'a')
+            .expect("ac group accepts shared prefix");
+        let ac_end = tokenizer
+            .group_dfa_step(1, ac_after_a, b'c')
+            .expect("ac group accepts ac");
+        assert!(tokenizer.group_dfa_is_match(1, ac_end));
+        assert_eq!(tokenizer.group_dfa_step(1, ac_after_a, b'b'), None);
+
+        assert_ne!(
+            tokenizer.group_dfa(0).joint_state_to_group_state[joint_after_a as usize],
+            u32::MAX,
+        );
+        assert_ne!(
+            tokenizer.group_dfa(1).joint_state_to_group_state[joint_after_a as usize],
+            u32::MAX,
+        );
+        assert_eq!(
+            tokenizer.group_dfa(0).joint_state_to_group_state[joint_after_x as usize],
+            u32::MAX,
+        );
+        assert_ne!(
+            tokenizer.group_dfa(2).joint_state_to_group_state[joint_after_x as usize],
+            u32::MAX,
+        );
+    }
+
+    #[test]
+    fn group_dfas_rebuild_after_tokenizer_round_trip() {
+        let expressions = vec![Expr::U8Seq(b"ab".to_vec()), Expr::U8Seq(b"x".to_vec())];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        assert_eq!(tokenizer.group_dfa_num_states(0), 3);
+
+        let bytes = bincode::serialize(&tokenizer).expect("tokenizer serializes");
+        let restored: Tokenizer = bincode::deserialize(&bytes).expect("tokenizer deserializes");
+        let start = restored.group_dfa_start_state(1);
+        let end = restored
+            .group_dfa_step(1, start, b'x')
+            .expect("isolated group DFA rebuilds after deserialization");
+        assert!(restored.group_dfa_is_match(1, end));
+    }
+
+    #[test]
+    fn legacy_tokenizer_wire_rebuilds_group_dfas() {
+        let expressions = vec![Expr::U8Seq(b"ab".to_vec()), Expr::U8Seq(b"x".to_vec())];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let legacy = LegacyTokenizerWire {
+            dfa: tokenizer.dfa.clone(),
+            num_terminals: tokenizer.num_terminals,
+        };
+
+        let bytes = bincode::serialize(&legacy).expect("legacy tokenizer serializes");
+        let restored: Tokenizer = bincode::deserialize(&bytes).expect("legacy tokenizer deserializes");
+        assert_eq!(restored.group_dfa_count(), 2);
+        let end = restored
+            .group_dfa_step(0, restored.group_dfa_start_state(0), b'a')
+            .and_then(|state| restored.group_dfa_step(0, state, b'b'))
+            .expect("restored group DFA recognizes ab");
+        assert!(restored.group_dfa_is_match(0, end));
+    }
+
+    #[test]
+    fn group_dfa_cache_is_invalidated_when_default_entry_changes() {
+        let mut dfa = DFA::new(4);
+        dfa.ensure_group_capacity(1);
+        dfa.add_transition(0, b'a', 2);
+        dfa.add_transition(1, b'b', 3);
+        let mut finalizers = BitSet::new(1);
+        finalizers.set(0);
+        dfa.overwrite_state_metadata(2, finalizers.clone(), BitSet::new(1));
+        dfa.overwrite_state_metadata(3, finalizers, BitSet::new(1));
+        dfa.set_start_states(vec![0, 1]);
+        let mut tokenizer = Tokenizer::from_parts(dfa, 1, None);
+
+        let first_start = tokenizer.group_dfa_start_state(0);
+        assert!(tokenizer
+            .group_dfa_step(0, first_start, b'a')
+            .is_some());
+        assert_eq!(tokenizer.group_dfa_step(0, first_start, b'b'), None);
+
+        tokenizer.set_default_start_state(1);
+        let second_start = tokenizer.group_dfa_start_state(0);
+        assert_eq!(tokenizer.group_dfa_step(0, second_start, b'a'), None);
+        assert!(tokenizer
+            .group_dfa_step(0, second_start, b'b')
+            .is_some());
+    }
+
+    #[test]
+    fn group_dfas_preserve_generic_selectable_entries() {
+        let mut dfa = DFA::new(4);
+        dfa.ensure_group_capacity(1);
+        dfa.add_transition(0, b'a', 2);
+        dfa.add_transition(1, b'b', 3);
+        let mut finalizers = BitSet::new(1);
+        finalizers.set(0);
+        dfa.overwrite_state_metadata(2, finalizers.clone(), BitSet::new(1));
+        dfa.overwrite_state_metadata(3, finalizers, BitSet::new(1));
+        dfa.set_start_states(vec![0, 1]);
+        dfa.recompute_possible_futures();
+        let tokenizer = Tokenizer::from_parts(dfa, 1, None);
+
+        let group = tokenizer.group_dfa(0);
+        assert_eq!(group.dfa.start_states().len(), 2);
+        let default_end = group
+            .dfa
+            .step(group.dfa.start_state(), b'a')
+            .expect("default isolated entry accepts a");
+        let auxiliary_end = group
+            .dfa
+            .step(group.dfa.start_states()[1], b'b')
+            .expect("auxiliary isolated entry accepts b");
+        assert!(group.is_match(default_end));
+        assert!(group.is_match(auxiliary_end));
     }
 
 }
