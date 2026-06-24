@@ -774,6 +774,46 @@ struct TokenProfileWordEvent {
     add: bool,
 }
 
+fn sort_token_profile_word_events(
+    events: &mut Vec<TokenProfileWordEvent>,
+    num_tokens: usize,
+) {
+    // Counting by token position avoids comparison sorting for dense boundary
+    // sets. Event order within a position is intentionally irrelevant: the
+    // sweep processes all removals, then all additions, and bit operations
+    // commute within either phase.
+    let use_counting_sort = events.len() > num_tokens.saturating_mul(2);
+    if !use_counting_sort {
+        events.sort_unstable_by_key(|event| (event.pos, event.add, event.word, event.bit));
+        return;
+    }
+
+    let mut counts = vec![0usize; num_tokens];
+    for event in events.iter() {
+        counts[event.pos] += 1;
+    }
+    let mut offsets = vec![0usize; num_tokens + 1];
+    for position in 0..num_tokens {
+        offsets[position + 1] = offsets[position] + counts[position];
+    }
+    let mut next = offsets[..num_tokens].to_vec();
+    let mut ordered = vec![
+        TokenProfileWordEvent {
+            pos: 0,
+            word: 0,
+            bit: 0,
+            add: false,
+        };
+        events.len()
+    ];
+    for &event in events.iter() {
+        let slot = next[event.pos];
+        ordered[slot] = event;
+        next[event.pos] += 1;
+    }
+    *events = ordered;
+}
+
 fn build_exact_token_merge_permutation_multiword_sweep(
     token_sets: &[Arc<RangeSetBlaze<u32>>],
     num_tokens: usize,
@@ -813,7 +853,7 @@ fn build_exact_token_merge_permutation_multiword_sweep(
 
     // At a boundary, remove old membership before adding new membership. This
     // also makes the behavior match the one-word sweep implementation.
-    events.sort_unstable_by_key(|event| (event.pos, event.add, event.word, event.bit));
+    sort_token_profile_word_events(&mut events, num_tokens);
 
     let mut active_profile = vec![0u64; profile_words];
     let mut profile_to_group = HashMap::<Vec<u64>, u32>::new();
@@ -836,13 +876,19 @@ fn build_exact_token_merge_permutation_multiword_sweep(
             cursor = pos;
         }
 
-        while idx < events.len() && events[idx].pos == pos && !events[idx].add {
-            active_profile[events[idx].word] &= !events[idx].bit;
+        let bucket_start = idx;
+        while idx < events.len() && events[idx].pos == pos {
             idx += 1;
         }
-        while idx < events.len() && events[idx].pos == pos && events[idx].add {
-            active_profile[events[idx].word] |= events[idx].bit;
-            idx += 1;
+        for event in &events[bucket_start..idx] {
+            if !event.add {
+                active_profile[event.word] &= !event.bit;
+            }
+        }
+        for event in &events[bucket_start..idx] {
+            if event.add {
+                active_profile[event.word] |= event.bit;
+            }
         }
     }
 
