@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 
 use super::dwa::{DWA, DWAState};
 use crate::ds::weight::Weight;
@@ -1127,6 +1128,20 @@ struct TokenBehaviorRange {
     behavior: u32,
 }
 
+#[derive(Clone, Eq, PartialEq, Hash)]
+struct PointwiseRegionBuildKey {
+    domain_tokens: usize,
+    final_tokens: usize,
+    transitions: SmallVec<[(Label, u32, usize); 4]>,
+}
+
+#[derive(Default)]
+struct PointwiseRegionBuildCache {
+    entries: FxHashMap<PointwiseRegionBuildKey, Option<Arc<Vec<TokenBehaviorRange>>>>,
+    hits: usize,
+    misses: usize,
+}
+
 #[derive(Default)]
 struct PointwiseRegionInterner {
     regions: FxHashMap<Vec<TokenBehaviorRange>, Arc<Vec<TokenBehaviorRange>>>,
@@ -1212,7 +1227,27 @@ fn build_token_behavior_region(
     active_transitions: &[(Label, u32, &RangeSetBlaze<u32>)],
     behaviors: &mut PointwiseBehaviorInterner,
     regions: &mut PointwiseRegionInterner,
+    build_cache: &mut PointwiseRegionBuildCache,
 ) -> Option<Arc<Vec<TokenBehaviorRange>>> {
+    // Token sets are immutable and retained by the DWA/needed weights for this
+    // whole coloring pass, so their addresses form an exact local cache key.
+    let key = PointwiseRegionBuildKey {
+        domain_tokens: domain_tokens as *const RangeSetBlaze<u32> as usize,
+        final_tokens: final_tokens
+            .map(|tokens| tokens as *const RangeSetBlaze<u32> as usize)
+            .unwrap_or(0),
+        transitions: active_transitions
+            .iter()
+            .map(|(label, target, tokens)| {
+                (*label, *target, *tokens as *const RangeSetBlaze<u32> as usize)
+            })
+            .collect(),
+    };
+    if let Some(existing) = build_cache.entries.get(&key) {
+        build_cache.hits += 1;
+        return existing.clone();
+    }
+    build_cache.misses += 1;
     let mut boundaries = Vec::<u64>::new();
     for range in domain_tokens.ranges() {
         boundaries.push(u64::from(*range.start()));
@@ -1259,7 +1294,9 @@ fn build_token_behavior_region(
         let behavior = behaviors.intern(final_active, transitions);
         push_token_behavior_range(&mut token_ranges, start, end, behavior);
     }
-    (!token_ranges.is_empty()).then(|| regions.intern(token_ranges))
+    let result = (!token_ranges.is_empty()).then(|| regions.intern(token_ranges));
+    build_cache.entries.insert(key, result.clone());
+    result
 }
 
 /// Materialize a complete observable behavior function. A profile is constant
@@ -1270,6 +1307,7 @@ fn build_pointwise_profile(
     profile: &ClassProfile,
     behaviors: &mut PointwiseBehaviorInterner,
     regions: &mut PointwiseRegionInterner,
+    build_cache: &mut PointwiseRegionBuildCache,
 ) -> Option<PointwiseProfile> {
     if domain.is_full()
         || profile.final_weight.as_ref().is_some_and(Weight::is_full)
@@ -1336,6 +1374,7 @@ fn build_pointwise_profile(
                 &active_transitions,
                 behaviors,
                 regions,
+                build_cache,
             )?;
             for tsid in tsid_start..=tsid_end {
                 by_tsid.push((tsid, Arc::clone(&region)));
@@ -1487,6 +1526,7 @@ fn try_build_and_color_pointwise(
     let started_at = Instant::now();
     let mut interner = PointwiseBehaviorInterner::default();
     let mut regions = PointwiseRegionInterner::default();
+    let mut region_build_cache = PointwiseRegionBuildCache::default();
     let profile_started_at = Instant::now();
     let mut pointwise_profiles = Vec::with_capacity(class_profiles.len());
     for (domain, profile) in class_needed_union.iter().zip(class_profiles) {
@@ -1495,6 +1535,7 @@ fn try_build_and_color_pointwise(
             profile,
             &mut interner,
             &mut regions,
+            &mut region_build_cache,
         )?);
     }
     let profile_build_ms = profile_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1574,13 +1615,16 @@ fn try_build_and_color_pointwise(
             })
             .sum::<usize>();
         eprintln!(
-            "[glrmask/profile][weighted_dwa_minimize_pointwise] candidates={} classes={} groups={} behaviors={} interned_regions={} regions={} profile_build_ms={:.3} merge_ms={:.3} total_ms={:.3} group_attempts={} target_rejects={} behavior_rejects={}",
+            "[glrmask/profile][weighted_dwa_minimize_pointwise] candidates={} classes={} groups={} behaviors={} interned_regions={} regions={} region_build_cache_entries={} region_build_cache_hits={} region_build_cache_misses={} profile_build_ms={:.3} merge_ms={:.3} total_ms={:.3} group_attempts={} target_rejects={} behavior_rejects={}",
             candidates.len(),
             class_profiles.len(),
             groups.len(),
             interner.ids.len(),
             regions.regions.len(),
             region_entries,
+            region_build_cache.entries.len(),
+            region_build_cache.hits,
+            region_build_cache.misses,
             profile_build_ms,
             merge_ms,
             started_at.elapsed().as_secs_f64() * 1000.0,
@@ -2144,6 +2188,16 @@ fn build_and_color_hybrid(
         &class_profiles,
         profile_enabled,
     ) {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][weighted_dwa_minimize_pointwise_preamble] candidates={} classes={} partition_refine_ms={:.3} class_union_ms={:.3} class_profiles_ms={:.3}",
+                candidates.len(),
+                num_classes,
+                partition_refine_ms,
+                class_union_ms,
+                class_profiles_ms,
+            );
+        }
         return coloring;
     }
 
@@ -3146,11 +3200,13 @@ mod tests {
         sorted_weights_compatible_on_domain,
         sorted_weights_compatible_on_domain_intersection,
         weight_is_disjoint_from_domain_intersection, weights_equal_on_domain,
-        weights_equal_on_domain_intersection, ClassProfile,
+        weights_equal_on_domain_intersection, ClassProfile, PointwiseBehaviorInterner,
+        PointwiseRegionBuildCache, PointwiseRegionInterner, build_token_behavior_region,
     };
     use crate::automata::weighted_u32::dwa::{DWA, DWAState};
     use crate::ds::weight::Weight;
     use range_set_blaze::RangeSetBlaze;
+    use std::sync::Arc;
 
     fn token_set(ranges: &[(u32, u32)]) -> RangeSetBlaze<u32> {
         ranges.iter().copied().map(|(start, end)| start..=end).collect()
@@ -3179,6 +3235,51 @@ mod tests {
             weights_equal_on_domain_intersection(a, b, left, right),
             weights_equal_on_domain(a, b, &overlap),
         );
+    }
+
+    #[test]
+    fn pointwise_region_build_cache_includes_transition_target() {
+        let domain_tokens = token_set(&[(0, 3)]);
+        let transition_tokens = token_set(&[(0, 3)]);
+        let mut behaviors = PointwiseBehaviorInterner::default();
+        let mut regions = PointwiseRegionInterner::default();
+        let mut cache = PointwiseRegionBuildCache::default();
+        let first_transitions = [(7, 1, &transition_tokens)];
+        let second_transitions = [(7, 2, &transition_tokens)];
+
+        let first = build_token_behavior_region(
+            &domain_tokens,
+            None,
+            &first_transitions,
+            &mut behaviors,
+            &mut regions,
+            &mut cache,
+        )
+        .unwrap();
+        let first_again = build_token_behavior_region(
+            &domain_tokens,
+            None,
+            &first_transitions,
+            &mut behaviors,
+            &mut regions,
+            &mut cache,
+        )
+        .unwrap();
+        let second = build_token_behavior_region(
+            &domain_tokens,
+            None,
+            &second_transitions,
+            &mut behaviors,
+            &mut regions,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &first_again));
+        assert_ne!(first.as_ref(), second.as_ref());
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.hits, 1);
+        assert_eq!(cache.misses, 2);
     }
 
     #[test]
