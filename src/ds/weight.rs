@@ -144,6 +144,10 @@ impl ScopedWeightOpCache {
         value
     }
 
+    pub(crate) fn intersection_entry_count(&self) -> usize {
+        self.intersection_entries.len()
+    }
+
     pub fn difference(&mut self, left: &Weight, right: &Weight) -> Weight {
         if left.is_empty() || right.is_full() {
             return Weight::empty();

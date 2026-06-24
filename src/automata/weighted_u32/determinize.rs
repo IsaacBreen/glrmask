@@ -11,7 +11,7 @@ use smallvec::SmallVec;
 
 use super::dwa::DWA;
 use super::nwa::NWA;
-use crate::ds::weight::{Weight, WeightIntersectionIndex};
+use crate::ds::weight::{ScopedWeightOpCache, Weight, WeightIntersectionIndex};
 use crate::GlrMaskError;
 
 const MAX_INDEXED_FINAL_PATH_RANGES: usize = 8;
@@ -213,6 +213,10 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     // Almost every label has one surviving destination. Keep that common
     // case inline instead of allocating a nested hash map and a Vec per label.
     let mut raw_targets: FxHashMap<i32, SmallVec<[(u32, Weight); 1]>> = FxHashMap::default();
+    // All operands in the expansion loop remain owned by the NWA or subset_map
+    // for the lifetime of this determinization, so a local exact cache avoids
+    // thread-local memo overhead on the heavily reused intersection pairs.
+    let mut scoped_determinize_weight_cache = ScopedWeightOpCache::default();
     let mut profile_subset_entries = 0usize;
     let mut profile_max_subset_entries = 0usize;
     let mut profile_raw_transition_visits = 0usize;
@@ -244,7 +248,8 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                     if profile {
                         profile_raw_transition_visits += 1;
                     }
-                    let next_weight = path_weight.intersection(trans_weight);
+                    let next_weight = scoped_determinize_weight_cache
+                        .intersection(path_weight, trans_weight);
                     if next_weight.is_empty() {
                         continue;
                     }
@@ -342,6 +347,13 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
 
             dwa.add_transition(from_state, label, to_state, edge_weight);
         }
+    }
+
+    if profile {
+        eprintln!(
+            "[glrmask/profile][determinize_scoped_weight_cache] intersections={}",
+            scoped_determinize_weight_cache.intersection_entry_count(),
+        );
     }
 
     // Compute final weights in parallel after the main loop.
