@@ -1080,11 +1080,11 @@ impl Constraint {
         }
 
         let build = |(key, token_set): (usize, &RangeSetBlaze<u32>)| {
-                (
-                    key,
-                    Self::dense_words_from_internal_set_with_words(token_set, internal_token_dense_words),
-                )
-            };
+            (
+                key,
+                Self::dense_words_from_internal_set_with_words(token_set, internal_token_dense_words),
+            )
+        };
         let dense_masks: DenseWeightMaskCache = if rayon::current_num_threads() == 1 {
             unique_sets.into_iter().map(build).collect()
         } else {
@@ -1212,12 +1212,41 @@ impl Constraint {
         dense_word_count: usize,
     ) -> DenseWords {
         let mut words = vec![0u64; dense_word_count];
-        for internal_token in internal_tokens.iter() {
-            let index = internal_token as usize / 64;
-            let bit = internal_token as usize % 64;
-            if let Some(word) = words.get_mut(index) {
-                *word |= 1u64 << bit;
+        let Some(max_token) = dense_word_count.checked_mul(64).and_then(|count| count.checked_sub(1)) else {
+            return Arc::from(words.into_boxed_slice());
+        };
+
+        for token_range in internal_tokens.ranges() {
+            let start = *token_range.start() as usize;
+            if start > max_token {
+                continue;
             }
+            let end = (*token_range.end() as usize).min(max_token);
+            let first_word = start / 64;
+            let last_word = end / 64;
+            let first_bit = start % 64;
+            let last_bit = end % 64;
+
+            if first_word == last_word {
+                let high_mask = if last_bit == 63 {
+                    u64::MAX
+                } else {
+                    (1u64 << (last_bit + 1)) - 1
+                };
+                words[first_word] |= (u64::MAX << first_bit) & high_mask;
+                continue;
+            }
+
+            words[first_word] |= u64::MAX << first_bit;
+            if first_word + 1 < last_word {
+                words[first_word + 1..last_word].fill(u64::MAX);
+            }
+            let last_mask = if last_bit == 63 {
+                u64::MAX
+            } else {
+                (1u64 << (last_bit + 1)) - 1
+            };
+            words[last_word] |= last_mask;
         }
         Arc::from(words.into_boxed_slice())
     }
@@ -2001,4 +2030,38 @@ impl Constraint {
         }
     }
 
+}
+
+#[cfg(test)]
+mod dense_internal_token_mask_tests {
+    use super::*;
+
+    #[test]
+    fn dense_internal_token_masks_match_reference_expansion() {
+        let internal_tokens = RangeSetBlaze::from_iter([
+            0u32..=0,
+            3..=7,
+            62..=65,
+            127..=130,
+            190..=192,
+            300..=302,
+        ]);
+        let actual = Constraint::dense_words_from_internal_set_with_words(&internal_tokens, 5);
+        let mut expected = vec![0u64; 5];
+        for token in internal_tokens.iter() {
+            let word = token as usize / 64;
+            let bit = token as usize % 64;
+            if let Some(slot) = expected.get_mut(word) {
+                *slot |= 1u64 << bit;
+            }
+        }
+        assert_eq!(actual.as_ref(), expected.as_slice());
+    }
+
+    #[test]
+    fn dense_internal_token_masks_ignore_out_of_bounds_ranges() {
+        let internal_tokens = RangeSetBlaze::from_iter([63u32..=65, 190..=400]);
+        let actual = Constraint::dense_words_from_internal_set_with_words(&internal_tokens, 3);
+        assert_eq!(actual.as_ref(), &[1u64 << 63, 0b11, 1u64 << 62 | 1u64 << 63]);
+    }
 }
