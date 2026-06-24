@@ -168,6 +168,10 @@ struct PermRun {
 struct PermutationContext {
     tsid_runs: Vec<PermRun>,
     tsid_perm_is_identity: bool,
+    /// True when the TSID map is a pure permutation. In that case weights can
+    /// be rebuilt from their sparse entries directly, without allocating a
+    /// dense `new_tsid_count` scratch vector per weight.
+    tsid_perm_is_bijection: bool,
     new_tsid_count: usize,
     token_runs: Vec<PermRun>,
     token_perm_is_identity: bool,
@@ -175,17 +179,30 @@ struct PermutationContext {
 
 impl PermutationContext {
     fn new(tsid_perm: &[u32], token_perm: &[u32]) -> Self {
+        let new_tsid_count = tsid_perm
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |max| max as usize + 1);
+        let tsid_perm_is_bijection = if new_tsid_count != tsid_perm.len() {
+            false
+        } else {
+            let mut seen = vec![false; new_tsid_count];
+            tsid_perm.iter().copied().all(|mapped| {
+                let slot = &mut seen[mapped as usize];
+                let was_seen = *slot;
+                *slot = true;
+                !was_seen
+            })
+        };
         Self {
             tsid_runs: permutation_runs(tsid_perm),
             tsid_perm_is_identity: tsid_perm
                 .iter()
                 .enumerate()
                 .all(|(idx, &value)| value == idx as u32),
-            new_tsid_count: tsid_perm
-                .iter()
-                .copied()
-                .max()
-                .map_or(0, |max| max as usize + 1),
+            tsid_perm_is_bijection,
+            new_tsid_count,
             token_runs: permutation_runs(token_perm),
             token_perm_is_identity: token_perm
                 .iter()
@@ -1150,6 +1167,92 @@ fn permute_weight_with_caches(
         return finalize_weight_map(map);
     }
 
+    if perm_context.tsid_perm_is_bijection {
+        return permute_weight_with_bijective_tsid_perm(
+            weight,
+            perm_context,
+            precomputed_token_remaps,
+            fallback_token_cache,
+        );
+    }
+
+    permute_weight_with_general_tsid_remap(
+        weight,
+        perm_context,
+        precomputed_token_remaps,
+        fallback_token_cache,
+    )
+}
+
+/// Fast exact path for a pure TSID permutation. The generic implementation
+/// uses a dense output slot for every TSID because it must union colliding
+/// source IDs. A bijection cannot collide, so rebuilding from the sparse
+/// weight entries gives the same RangeMap without the O(total-TSIDs) scratch
+/// allocation per weight.
+fn permute_weight_with_bijective_tsid_perm(
+    weight: &Weight,
+    perm_context: &PermutationContext,
+    precomputed_token_remaps: &TokenRemapCache,
+    fallback_token_cache: &TokenRemapCache,
+) -> Weight {
+    debug_assert!(perm_context.tsid_perm_is_bijection);
+    let mut entries = Vec::<(u32, Arc<RangeSetBlaze<u32>>)>::new();
+    for (tsid_range, token_set) in weight.0.range_values() {
+        let token_set_ptr = Arc::as_ptr(token_set) as usize;
+        let mapped_tokens = if perm_context.token_perm_is_identity {
+            Arc::clone(token_set)
+        } else {
+            shared_rangeset(lookup_permuted_token_set(
+                token_set,
+                token_set_ptr,
+                perm_context,
+                precomputed_token_remaps,
+                fallback_token_cache,
+            ))
+        };
+        for run in overlapping_perm_runs(
+            &perm_context.tsid_runs,
+            *tsid_range.start(),
+            *tsid_range.end(),
+        ) {
+            debug_assert_eq!(run.start, run.end);
+            entries.push((run.mapped, Arc::clone(&mapped_tokens)));
+        }
+    }
+    entries.sort_unstable_by_key(|(tsid, _)| *tsid);
+
+    let mut map = RangeMapBlaze::new();
+    let mut current: Option<(u32, u32, Arc<RangeSetBlaze<u32>>)> = None;
+    for (tsid, tokens) in entries {
+        match current.as_mut() {
+            Some((_, end, current_tokens))
+                if *end != u32::MAX
+                    && *end + 1 == tsid
+                    && (Arc::ptr_eq(current_tokens, &tokens)
+                        || current_tokens.as_ref() == tokens.as_ref()) =>
+            {
+                *end = tsid;
+            }
+            Some(_) => {
+                let (start, end, previous_tokens) = current.take().unwrap();
+                map.extend_simple(std::iter::once((start..=end, previous_tokens)));
+                current = Some((tsid, tsid, tokens));
+            }
+            None => current = Some((tsid, tsid, tokens)),
+        }
+    }
+    if let Some((start, end, tokens)) = current {
+        map.extend_simple(std::iter::once((start..=end, tokens)));
+    }
+    finalize_weight_map(map)
+}
+
+fn permute_weight_with_general_tsid_remap(
+    weight: &Weight,
+    perm_context: &PermutationContext,
+    precomputed_token_remaps: &TokenRemapCache,
+    fallback_token_cache: &TokenRemapCache,
+) -> Weight {
     let mut tokens_by_new_tsid = vec![None::<RangeSetBlaze<u32>>; perm_context.new_tsid_count];
 
     for (tsid_range, token_set) in weight.0.range_values() {
@@ -1555,6 +1658,31 @@ mod tests {
 
     fn token_set(ranges: &[(u32, u32)]) -> Arc<RangeSetBlaze<u32>> {
         Arc::new(ranges.iter().map(|&(start, end)| start..=end).collect())
+    }
+
+    #[test]
+    fn sparse_bijective_tsid_permutation_matches_general_remap() {
+        let weight = Weight::from_per_tsid_token_sets([
+            (0, RangeSetBlaze::from_iter([0..=1])),
+            (1, RangeSetBlaze::from_iter([2..=2])),
+            (3, RangeSetBlaze::from_iter([1..=3])),
+            (4, RangeSetBlaze::from_iter([0..=0])),
+        ]);
+        let context = PermutationContext::new(&[3, 0, 4, 1, 2], &[1, 4, 0, 3, 2]);
+        assert!(context.tsid_perm_is_bijection);
+        let direct = permute_weight_with_bijective_tsid_perm(
+            &weight,
+            &context,
+            &TokenRemapCache::new(),
+            &TokenRemapCache::new(),
+        );
+        let general = permute_weight_with_general_tsid_remap(
+            &weight,
+            &context,
+            &TokenRemapCache::new(),
+            &TokenRemapCache::new(),
+        );
+        assert_eq!(direct, general);
     }
 
     #[test]
