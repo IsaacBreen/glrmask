@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
-use crate::ds::weight::{Weight, finalize_weight_map, shared_rangeset};
+use crate::ds::weight::{SharedTokenSet, Weight, finalize_weight_map, shared_rangeset};
 
 mod almost_optimal_layout;
 mod default_layout;
@@ -168,6 +168,9 @@ struct PermRun {
 struct PermutationContext {
     tsid_runs: Vec<PermRun>,
     tsid_perm_is_identity: bool,
+    // A bijective TSID remap only reorders states. It never needs the
+    // dense many-to-one accumulator used by merge compaction.
+    tsid_perm_is_bijective: bool,
     new_tsid_count: usize,
     token_runs: Vec<PermRun>,
     token_perm_is_identity: bool,
@@ -175,17 +178,19 @@ struct PermutationContext {
 
 impl PermutationContext {
     fn new(tsid_perm: &[u32], token_perm: &[u32]) -> Self {
+        let new_tsid_count = tsid_perm
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |max| max as usize + 1);
         Self {
             tsid_runs: permutation_runs(tsid_perm),
             tsid_perm_is_identity: tsid_perm
                 .iter()
                 .enumerate()
                 .all(|(idx, &value)| value == idx as u32),
-            new_tsid_count: tsid_perm
-                .iter()
-                .copied()
-                .max()
-                .map_or(0, |max| max as usize + 1),
+            tsid_perm_is_bijective: is_bijective_permutation(tsid_perm, new_tsid_count),
+            new_tsid_count,
             token_runs: permutation_runs(token_perm),
             token_perm_is_identity: token_perm
                 .iter()
@@ -193,6 +198,20 @@ impl PermutationContext {
                 .all(|(idx, &value)| value == idx as u32),
         }
     }
+}
+
+fn is_bijective_permutation(perm: &[u32], new_count: usize) -> bool {
+    if perm.len() != new_count {
+        return false;
+    }
+    let mut seen = vec![false; new_count];
+    for &mapped in perm {
+        let mapped = mapped as usize;
+        if mapped >= new_count || std::mem::replace(&mut seen[mapped], true) {
+            return false;
+        }
+    }
+    true
 }
 
 fn legacy_exact_adjacency_proxy_enabled() -> bool {
@@ -1044,14 +1063,25 @@ fn apply_permutations_to_weight_refs(
     let direct_weight_remaps = perm_context
         .tsid_perm_is_identity
         .then_some(&precomputed_token_compaction.weight_remaps);
-    let has_missing_weight_remaps = unique_weights.iter().any(|weight| {
-        direct_weight_remaps.is_none_or(|remaps| {
-            !remaps.contains_key(&(Arc::as_ptr(&weight.0) as usize))
-        })
-    });
+    // The plan itself applied the token permutation to these exact source
+    // weights in order to derive the TSID compaction. When TSIDs still need
+    // reordering, reuse that materialized intermediate instead of remapping
+    // every token set a second time.
+    let tsid_only_context = (!perm_context.tsid_perm_is_identity
+        && !perm_context.token_perm_is_identity)
+        .then(|| PermutationContext::new(tsid_perm, &identity_perm(token_perm.len())));
+    let needs_token_fallback = !perm_context.token_perm_is_identity
+        && unique_weights.iter().any(|weight| {
+            let ptr = Arc::as_ptr(&weight.0) as usize;
+            direct_weight_remaps
+                .is_none_or(|remaps| !remaps.contains_key(&ptr))
+                && tsid_only_context
+                    .as_ref()
+                    .is_none_or(|_| !precomputed_token_compaction.weight_remaps.contains_key(&ptr))
+        });
 
     let cache_started_at = profile_compaction.then(Instant::now);
-    let fallback_token_cache = if has_missing_weight_remaps {
+    let fallback_token_cache = if needs_token_fallback {
         build_missing_global_permuted_token_cache(
             unique_weights,
             &perm_context,
@@ -1063,19 +1093,30 @@ fn apply_permutations_to_weight_refs(
     let fallback_cache_ms = cache_started_at.map_or(0.0, elapsed_ms);
 
     let transform_started_at = profile_compaction.then(Instant::now);
+    let empty_token_cache = TokenRemapCache::new();
     let permute_entry = |weight: &Weight| {
         let ptr = Arc::as_ptr(&weight.0) as usize;
-        let new_weight = direct_weight_remaps
-            .and_then(|remaps| remaps.get(&ptr))
-            .cloned()
-            .unwrap_or_else(|| {
-                permute_weight_with_caches(
-                    weight,
-                    &perm_context,
-                    &precomputed_token_compaction.token_remaps,
-                    &fallback_token_cache,
-                )
-            });
+        let new_weight = if let Some(remaps) = direct_weight_remaps
+            && let Some(remapped) = remaps.get(&ptr)
+        {
+            remapped.clone()
+        } else if let Some(tsid_only_context) = &tsid_only_context
+            && let Some(token_remapped) = precomputed_token_compaction.weight_remaps.get(&ptr)
+        {
+            permute_weight_with_caches(
+                token_remapped,
+                tsid_only_context,
+                &empty_token_cache,
+                &empty_token_cache,
+            )
+        } else {
+            permute_weight_with_caches(
+                weight,
+                &perm_context,
+                &precomputed_token_compaction.token_remaps,
+                &fallback_token_cache,
+            )
+        };
         (ptr, new_weight)
     };
     let weight_entries: Vec<(usize, Weight)> = if rayon::current_num_threads() == 1 {
@@ -1150,6 +1191,15 @@ fn permute_weight_with_caches(
         return finalize_weight_map(map);
     }
 
+    if perm_context.tsid_perm_is_bijective {
+        return permute_weight_with_bijective_tsid_permutation(
+            weight,
+            perm_context,
+            precomputed_token_remaps,
+            fallback_token_cache,
+        );
+    }
+
     let mut tokens_by_new_tsid = vec![None::<RangeSetBlaze<u32>>; perm_context.new_tsid_count];
 
     for (tsid_range, token_set) in weight.0.range_values() {
@@ -1181,6 +1231,87 @@ fn permute_weight_with_caches(
     }
 
     finalize_weight_map(build_weight_map_from_tsid_tokens(tokens_by_new_tsid))
+}
+
+/// Apply a one-to-one TSID reorder without allocating a slot for every
+/// destination TSID. The dense path below is required only when several old
+/// states merge into one destination and their token sets must be unioned.
+fn permute_weight_with_bijective_tsid_permutation(
+    weight: &Weight,
+    perm_context: &PermutationContext,
+    precomputed_token_remaps: &TokenRemapCache,
+    fallback_token_cache: &TokenRemapCache,
+) -> Weight {
+    debug_assert!(perm_context.tsid_perm_is_bijective);
+
+    let mut mapped_entries = Vec::<(u32, SharedTokenSet)>::with_capacity(weight.num_ranges());
+    let mut mapped_token_sets = HashMap::<usize, SharedTokenSet>::new();
+    for (tsid_range, token_set) in weight.0.range_values() {
+        let token_set_ptr = Arc::as_ptr(token_set) as usize;
+        let mapped_tokens = if let Some(existing) = mapped_token_sets.get(&token_set_ptr) {
+            Arc::clone(existing)
+        } else {
+            let mapped = if perm_context.token_perm_is_identity {
+                Arc::clone(token_set)
+            } else {
+                shared_rangeset(lookup_permuted_token_set(
+                    token_set,
+                    token_set_ptr,
+                    perm_context,
+                    precomputed_token_remaps,
+                    fallback_token_cache,
+                ))
+            };
+            mapped_token_sets.insert(token_set_ptr, Arc::clone(&mapped));
+            mapped
+        };
+
+        for run in overlapping_perm_runs(
+            &perm_context.tsid_runs,
+            *tsid_range.start(),
+            *tsid_range.end(),
+        ) {
+            // A run can contain multiple source TSIDs only for a many-to-one
+            // compaction, excluded by the bijection guard above.
+            debug_assert_eq!(run.start, run.end);
+            mapped_entries.push((run.mapped, Arc::clone(&mapped_tokens)));
+        }
+    }
+
+    finalize_weight_map(build_weight_map_from_bijective_tsid_tokens(mapped_entries))
+}
+
+fn same_shared_token_set(left: &SharedTokenSet, right: &SharedTokenSet) -> bool {
+    Arc::ptr_eq(left, right) || left.as_ref() == right.as_ref()
+}
+
+fn build_weight_map_from_bijective_tsid_tokens(
+    mut entries: Vec<(u32, SharedTokenSet)>,
+) -> RangeMapBlaze<u32, SharedTokenSet> {
+    entries.sort_unstable_by_key(|(tsid, _)| *tsid);
+
+    let mut map = RangeMapBlaze::new();
+    let mut run: Option<(u32, u32, SharedTokenSet)> = None;
+    for (tsid, tokens) in entries {
+        match run.as_mut() {
+            Some((_start, end, run_tokens))
+                if end.checked_add(1) == Some(tsid)
+                    && same_shared_token_set(run_tokens, &tokens) =>
+            {
+                *end = tsid;
+            }
+            Some(_) => {
+                let (start, end, run_tokens) = run.take().expect("existing run");
+                map.extend_simple(std::iter::once((start..=end, run_tokens)));
+                run = Some((tsid, tsid, tokens));
+            }
+            None => run = Some((tsid, tsid, tokens)),
+        }
+    }
+    if let Some((start, end, tokens)) = run {
+        map.extend_simple(std::iter::once((start..=end, tokens)));
+    }
+    map
 }
 
 fn lookup_permuted_token_set(
@@ -1294,7 +1425,7 @@ fn overlapping_perm_runs(runs: &[PermRun], start: u32, end: u32) -> &[PermRun] {
 
 fn build_weight_map_from_tsid_tokens(
     tokens_by_tsid: Vec<Option<RangeSetBlaze<u32>>>,
-) -> RangeMapBlaze<u32, Arc<RangeSetBlaze<u32>>> {
+) -> RangeMapBlaze<u32, SharedTokenSet> {
     let mut map = RangeMapBlaze::new();
     let mut run: Option<(u32, u32, RangeSetBlaze<u32>)> = None;
 
@@ -1555,6 +1686,31 @@ mod tests {
 
     fn token_set(ranges: &[(u32, u32)]) -> Arc<RangeSetBlaze<u32>> {
         Arc::new(ranges.iter().map(|&(start, end)| start..=end).collect())
+    }
+
+    #[test]
+    fn bijective_tsid_permutation_reorders_without_merging_token_sets() {
+        let weight = Weight::from_per_tsid_token_sets([
+            (0, RangeSetBlaze::from_iter([1..=2])),
+            (1, RangeSetBlaze::from_iter([4..=4])),
+            (2, RangeSetBlaze::from_iter([1..=2])),
+            (3, RangeSetBlaze::from_iter([4..=4])),
+        ]);
+        let context = PermutationContext::new(&[2, 0, 3, 1], &[4, 3, 2, 1, 0]);
+        assert!(context.tsid_perm_is_bijective);
+
+        let remapped = permute_weight_with_caches(
+            &weight,
+            &context,
+            &TokenRemapCache::new(),
+            &TokenRemapCache::new(),
+        );
+        let entries = remapped.compact_entries().expect("ordinary weight");
+        assert_eq!(entries.len(), 2);
+        assert_eq!((entries[0].0, entries[0].1), (0, 1));
+        assert_eq!(entries[0].2.as_ref(), &RangeSetBlaze::from_iter([0..=0]));
+        assert_eq!((entries[1].0, entries[1].1), (2, 3));
+        assert_eq!(entries[1].2.as_ref(), &RangeSetBlaze::from_iter([2..=3]));
     }
 
     #[test]
