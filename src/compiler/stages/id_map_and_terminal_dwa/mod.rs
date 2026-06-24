@@ -31,7 +31,8 @@ use l2p::equivalence_analysis::state_equivalence::{
     resolve_global_pipeline_config, run_state_equivalence_pipeline, StateEquivalenceScope,
 };
 use types::{
-    compile_profile_enabled, LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaPhaseProfile,
+    compile_profile_enabled, compile_profile_uses_serial_partition_schedule,
+    LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaPhaseProfile,
 };
 
 fn l2p_partition_cost_fn_from_env() -> classify::L2pPartitionCostFn {
@@ -327,6 +328,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
         external_classify_cache.unwrap_or(&owned_classify_cache);
     let token_path_disallowed_follows =
         ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal);
+    let stage_setup_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let partition_vocab_started_at = Instant::now();
     let partition_scheme =
@@ -493,38 +495,59 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     // ~120ms transpose + byte-class computation each (~480ms CPU saved).
     // The cache validates state counts, so it's safely ignored when simplify
     // changes the DFA (reducing state count via minimization).
+    let shared_cache_setup_started_at = Instant::now();
     let shared_vocab_dfa_cache = l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
     let shared_simplify_cache = l2p::SharedSimplifyCache::default();
     let shared_disallowed_follow_dfa_cache = l2p::postprocess::SharedDisallowedFollowDfaCache::new();
+    let shared_cache_setup_ms =
+        shared_cache_setup_started_at.elapsed().as_secs_f64() * 1000.0;
 
     use rayon::prelude::*;
-    let partition_results: Vec<(Option<(LocalIdMapTerminalDwa, f64)>, usize)> = sub_vocabs
-        .par_iter()
-        .enumerate()
-        .map(|(idx, sub_vocab)| {
-            let started_at = Instant::now();
-            let label = format!("p{}", idx);
-            let result = partition::build_partition_id_map_and_terminal_dwa(
-                &label,
-                tokenizer,
-                sub_vocab,
-                terminal_coloring,
-                use_terminal_coloring,
-                ignore_terminal,
-                grammar,
-                disallowed_follows,
-                &flat_trans,
-                Some(global_max_length_state_map),
-                Some(&shared_vocab_dfa_cache),
-                Some(&shared_simplify_cache),
-                Some(&shared_disallowed_follow_dfa_cache),
-                Some(&shared_classify_cache),
-            )
-            .map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
-            (result, idx)
-        })
-        .collect();
+    let build_partition = |idx: usize,
+                           sub_vocab: &Vocab|
+     -> (Option<(LocalIdMapTerminalDwa, f64)>, usize) {
+        let started_at = Instant::now();
+        let label = format!("p{}", idx);
+        let result = partition::build_partition_id_map_and_terminal_dwa(
+            &label,
+            tokenizer,
+            sub_vocab,
+            terminal_coloring,
+            use_terminal_coloring,
+            ignore_terminal,
+            grammar,
+            disallowed_follows,
+            &flat_trans,
+            Some(global_max_length_state_map),
+            Some(&shared_vocab_dfa_cache),
+            Some(&shared_simplify_cache),
+            Some(&shared_disallowed_follow_dfa_cache),
+            Some(&shared_classify_cache),
+        )
+        .map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
+        (result, idx)
+    };
+    let serial_profile_partition_schedule = compile_profile_uses_serial_partition_schedule();
+    let partition_build_started_at = Instant::now();
+    let partition_results: Vec<(Option<(LocalIdMapTerminalDwa, f64)>, usize)> =
+        if serial_profile_partition_schedule {
+            sub_vocabs
+                .iter()
+                .enumerate()
+                .map(|(idx, sub_vocab)| build_partition(idx, sub_vocab))
+                .collect()
+        } else {
+            sub_vocabs
+                .par_iter()
+                .enumerate()
+                .map(|(idx, sub_vocab)| build_partition(idx, sub_vocab))
+                .collect()
+        };
+    let partition_build_wall_ms =
+        partition_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
+
+    let partition_result_finalize_started_at = Instant::now();
     let partition_ms: Vec<f64> = {
         let mut ms = vec![0.0; sub_vocabs.len()];
         for (result, idx) in &partition_results {
@@ -564,6 +587,8 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
         return (MappedArtifact::new(DWA::new(1, 0), empty_map), profile);
     }
 
+    let partition_result_finalize_ms =
+        partition_result_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
     let num_tokenizer_states = tokenizer.num_states() as usize;
     let max_token_id = vocab.max_token_id();
 
@@ -582,11 +607,23 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
         (merged, global_merge_profile)
     };
     let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let post_merge_bookkeeping_started_at = Instant::now();
     profile.add_assign(dominant_partition_profile);
     profile.add_assign(global_merge_profile);
     profile.global_merge_ms = if did_global_merge { merge_ms } else { 0.0 };
+    let post_merge_bookkeeping_ms =
+        post_merge_bookkeeping_started_at.elapsed().as_secs_f64() * 1000.0;
     let split_terminal_dwa_total_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
     profile.split_terminal_dwa_total_ms = split_terminal_dwa_total_ms;
+    let accounted_wall_ms = stage_setup_ms
+        + partition_vocab_ms
+        + shared_cache_setup_ms
+        + partition_build_wall_ms
+        + partition_result_finalize_ms
+        + merge_ms
+        + post_merge_bookkeeping_ms;
+    let timing_residual_ms = (split_terminal_dwa_total_ms - accounted_wall_ms).max(0.0);
 
     if compile_profile_enabled() {
         let partition_detail: String = sub_vocabs
@@ -604,7 +641,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             .collect::<Vec<_>>()
             .join(" ");
         eprintln!(
-            "[glrmask/profile][split_terminal_dwa] partition_vocab_ms={:.3} {} global_merge_ms={:.3} split_terminal_dwa_total_ms={:.3} accounted_id_map_ms={:.3} accounted_terminal_dwa_ms={:.3} accounted_compact_ms={:.3} accounted_total_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][split_terminal_dwa] partition_vocab_ms={:.3} {} global_merge_ms={:.3} split_terminal_dwa_total_ms={:.3} critical_path_id_map_ms={:.3} critical_path_terminal_dwa_ms={:.3} critical_path_compact_ms={:.3} critical_path_profile_ms={:.3} total_ms={:.3}",
             partition_vocab_ms,
             partition_detail,
             merge_ms,
@@ -613,6 +650,20 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             profile.terminal_dwa_ms,
             profile.compact_ms,
             profile.total_ms(),
+            split_terminal_dwa_total_ms,
+        );
+        eprintln!(
+            "[glrmask/profile][split_terminal_dwa_wall] scheduler={} stage_setup_ms={:.3} partition_vocab_ms={:.3} shared_cache_setup_ms={:.3} partition_build_wall_ms={:.3} partition_result_finalize_ms={:.3} global_merge_ms={:.3} post_merge_bookkeeping_ms={:.3} accounted_wall_ms={:.3} timing_residual_ms={:.3} total_ms={:.3}",
+            if serial_profile_partition_schedule { "serial_profile_1t" } else { "rayon" },
+            stage_setup_ms,
+            partition_vocab_ms,
+            shared_cache_setup_ms,
+            partition_build_wall_ms,
+            partition_result_finalize_ms,
+            merge_ms,
+            post_merge_bookkeeping_ms,
+            accounted_wall_ms,
+            timing_residual_ms,
             split_terminal_dwa_total_ms,
         );
     }

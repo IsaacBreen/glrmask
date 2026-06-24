@@ -85,3 +85,27 @@ pub(crate) fn compile_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
 }
+
+/// Nested Rayon joins can execute sibling outer tasks while an inner task is
+/// pending. With one worker that makes a partition wall timer include unrelated
+/// partitions. Use a serial outer schedule only for this profiling case.
+pub(crate) fn compile_profile_uses_serial_partition_schedule() -> bool {
+    compile_profile_enabled() && rayon::current_num_threads() == 1
+}
+
+/// Preserve the normal Rayon join except in a one-worker compile profile.
+/// In that case an inner join can run sibling outer partition work, making the
+/// caller's inclusive timer non-compositional.
+pub(crate) fn compile_profile_join<A, B, Left, Right>(left: Left, right: Right) -> (A, B)
+where
+    A: Send,
+    B: Send,
+    Left: FnOnce() -> A + Send,
+    Right: FnOnce() -> B + Send,
+{
+    if compile_profile_uses_serial_partition_schedule() {
+        (left(), right())
+    } else {
+        rayon::join(left, right)
+    }
+}
