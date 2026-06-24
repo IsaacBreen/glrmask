@@ -2095,10 +2095,6 @@ fn build_and_color_hybrid(
         }
         class_needed_union[class] = class_needed_union[class].union(&needed[state_id]);
     }
-    let class_tsid_coverage: Vec<Option<RangeSetBlaze<u32>>> = class_needed_union
-        .iter()
-        .map(Weight::tsid_coverage)
-        .collect();
     let class_union_ms = class_union_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let class_profiles_started_at = Instant::now();
@@ -2111,8 +2107,9 @@ fn build_and_color_hybrid(
         let mut coverage_cells = 0usize;
         let mut max_coverage_cells = 0usize;
         let mut coverage_over_256 = 0usize;
-        for coverage in &class_tsid_coverage {
-            let count = coverage
+        for weight in &class_needed_union {
+            let count = weight
+                .tsid_coverage()
                 .as_ref()
                 .map(|set| set.ranges().map(|range| (*range.end() as usize - *range.start() as usize) + 1).sum())
                 .unwrap_or(usize::MAX);
@@ -2135,6 +2132,27 @@ fn build_and_color_hybrid(
             candidates.len(), num_classes, coverage_cells, max_coverage_cells, coverage_over_256, total_profile_weight_ranges, total_profile_weight_cells,
         );
     }
+
+    // Each class is a partial behavior function over its pushed-needed
+    // TSID/token domain. When that representation is finite, compare against
+    // the exact union function of each group instead of revisiting all members.
+    // A full sentinel cannot be enumerated, so it retains the generic path.
+    if let Some(coloring) = try_build_and_color_pointwise(
+        candidates,
+        &class_coloring,
+        &class_needed_union,
+        &class_profiles,
+        profile_enabled,
+    ) {
+        return coloring;
+    }
+
+    // The generic fallback needs per-class TSID coverage for its indexed
+    // overlap probes. Do not build it on the normal pointwise-success path.
+    let class_tsid_coverage: Vec<Option<RangeSetBlaze<u32>>> = class_needed_union
+        .iter()
+        .map(Weight::tsid_coverage)
+        .collect();
     let classes_with_final_weight = class_profiles
         .iter()
         .filter(|profile| profile.final_weight.is_some())
@@ -2169,20 +2187,6 @@ fn build_and_color_hybrid(
         .map(|profile| profile.weights.len() as f64)
         .sum::<f64>()
         / num_classes as f64;
-
-    // Each class is a partial behavior function over its pushed-needed
-    // TSID/token domain. When that representation is finite, compare against
-    // the exact union function of each group instead of revisiting all members.
-    // A full sentinel cannot be enumerated, so it retains the generic path.
-    if let Some(coloring) = try_build_and_color_pointwise(
-        candidates,
-        &class_coloring,
-        &class_needed_union,
-        &class_profiles,
-        profile_enabled,
-    ) {
-        return coloring;
-    }
 
     // Step 3: Greedy merge of classes, handling both disjoint and overlapping
     // needed sets. Instead of building an O(K²) incompatibility graph, we check
