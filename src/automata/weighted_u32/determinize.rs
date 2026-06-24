@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 use super::dwa::DWA;
 use super::nwa::NWA;
@@ -118,7 +119,9 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     subset_map.insert(start_key.clone(), start_id);
     worklist.push_back((start_key, start_entries));
 
-    let mut raw_targets: FxHashMap<i32, FxHashMap<u32, Vec<Weight>>> = FxHashMap::default();
+    // Almost every label has one surviving destination. Keep that common
+    // case inline instead of allocating a nested hash map and a Vec per label.
+    let mut raw_targets: FxHashMap<i32, SmallVec<[(u32, Weight); 1]>> = FxHashMap::default();
     let mut profile_subset_entries = 0usize;
     let mut profile_max_subset_entries = 0usize;
     let mut profile_raw_transition_visits = 0usize;
@@ -155,7 +158,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                         continue;
                     }
 
-                    raw_targets.entry(label).or_default().entry(*dst).or_default().push(next_weight);
+                    raw_targets.entry(label).or_default().push((*dst, next_weight));
                 }
             }
         }
@@ -167,7 +170,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
         for (label, target_contributions) in raw_targets.drain() {
             if profile {
                 profile_labels += 1;
-                profile_target_contributions += target_contributions.values().map(Vec::len).sum::<usize>();
+                profile_target_contributions += target_contributions.len();
             }
             if target_contributions.is_empty() {
                 continue;
@@ -175,10 +178,12 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
 
             let combine_started_at = profile.then(Instant::now);
             let mut target_subset: FxHashMap<u32, Weight> = FxHashMap::default();
-            for (dst, weights) in target_contributions {
-                let combined = Weight::union_all(weights.iter());
-                if !combined.is_empty() {
-                    target_subset.insert(dst, combined);
+            if target_contributions.len() == 1 {
+                let (dst, weight) = target_contributions.into_iter().next().unwrap();
+                target_subset.insert(dst, weight);
+            } else {
+                for (dst, weight) in target_contributions {
+                    union_state_weight(&mut target_subset, dst, weight);
                 }
             }
 
@@ -294,4 +299,31 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     }
 
     Ok(dwa)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use range_set_blaze::RangeSetBlaze;
+
+    fn tokens(values: impl IntoIterator<Item = u32>) -> Weight {
+        Weight::from_per_tsid_token_sets(std::iter::once((
+            0,
+            RangeSetBlaze::from_iter(values.into_iter().map(|value| value..=value)),
+        )))
+    }
+
+    #[test]
+    fn determinize_unions_duplicate_label_target_contributions() {
+        let mut nwa = NWA::new(1, 2);
+        let start = nwa.add_state();
+        let accept = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+        nwa.add_transition(start, 7, accept, tokens([0]));
+        nwa.add_transition(start, 7, accept, tokens([1]));
+        nwa.set_final_weight(accept, tokens([0, 1]));
+
+        let dwa = determinize(&nwa).unwrap();
+        assert_eq!(dwa.eval_word(&[7]), tokens([0, 1]));
+    }
 }
