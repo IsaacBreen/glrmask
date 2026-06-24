@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::dwa::{DWA, DWAState};
 use crate::ds::weight::Weight;
@@ -98,15 +98,20 @@ fn memoized_intersection(
 ///
 /// Returns (changed, topo_order, reachable_sets) so callers can reuse them.
 pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
+    let profile_enabled = weighted_dwa_minimize_profile_enabled();
     let n = dwa.states().len();
     if n == 0 {
         return (false, Some(Vec::new()), Vec::new());
     }
 
     // 1. Topological order (Kahn's algorithm)
+    let topo_started_at = profile_enabled.then(Instant::now);
     let Some(topo) = compute_topo_order(dwa) else {
         return (false, None, Vec::new()); // cyclic
     };
+    let topo_ms = topo_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
     // 2+3 combined: backward reachable sets + push transition weights.
     // In reverse topo order, each state's targets have already been processed,
@@ -114,15 +119,30 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
     let mut reachable: Vec<Weight> = vec![Weight::empty(); n];
     let mut intersection_cache = FxHashMap::default();
     let mut changed = false;
+    let mut target_full = 0usize;
+    let mut target_empty = 0usize;
+    let mut target_partial = 0usize;
+    let mut reachable_parts = 0usize;
+    let mut pushed_transitions = 0usize;
+    let mut intersection_ms = 0.0;
+    let mut union_ms = 0.0;
+    let mut apply_ms = 0.0;
+    let mut union_size_histogram = [0usize; 7];
+    let mut max_union_size = 0usize;
+    let mut union_key_occurrences = 0usize;
+    let mut union_key_repeats = 0usize;
+    let mut union_keys_seen = FxHashSet::<Vec<usize>>::default();
+
     for &u in topo.iter().rev() {
         let state = &dwa.states()[u];
-        let mut reachable_parts: Vec<Weight> = Vec::with_capacity(state.transitions.len() + 1);
+        let mut state_reachable_parts: Vec<Weight> =
+            Vec::with_capacity(state.transitions.len() + 1);
         let mut acc_full = false;
         if let Some(final_weight) = &state.final_weight {
             if final_weight.is_full() {
                 acc_full = true;
             } else if !final_weight.is_empty() {
-                reachable_parts.push(final_weight.clone());
+                state_reachable_parts.push(final_weight.clone());
             }
         }
         let mut pushed: Vec<(Label, u32, Option<Weight>)> = Vec::new();
@@ -132,27 +152,34 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
                 continue;
             }
             if reachable[t].is_full() {
+                target_full += 1;
                 if !acc_full && !w.is_empty() {
                     if w.is_full() {
                         acc_full = true;
-                        reachable_parts.clear();
+                        state_reachable_parts.clear();
                     } else {
-                        reachable_parts.push(w.clone());
+                        state_reachable_parts.push(w.clone());
                     }
                 }
                 // w ∩ all = w, no push needed
             } else if reachable[t].is_empty() {
+                target_empty += 1;
                 // w ∩ empty = empty, remove transition
                 pushed.push((lbl, *target, None));
                 // Contributes nothing to acc
             } else {
+                target_partial += 1;
+                let intersection_started_at = profile_enabled.then(Instant::now);
                 let new_w = memoized_intersection(&mut intersection_cache, w, &reachable[t]);
+                if let Some(started_at) = intersection_started_at {
+                    intersection_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+                }
                 if !acc_full && !new_w.is_empty() {
                     if new_w.is_full() {
                         acc_full = true;
-                        reachable_parts.clear();
+                        state_reachable_parts.clear();
                     } else {
-                        reachable_parts.push(new_w.clone());
+                        state_reachable_parts.push(new_w.clone());
                     }
                 }
                 if new_w != *w {
@@ -163,9 +190,43 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
         reachable[u] = if acc_full {
             Weight::all()
         } else {
-            Weight::union_all(reachable_parts.iter())
+            reachable_parts += state_reachable_parts.len();
+            if profile_enabled {
+                let union_size = state_reachable_parts.len();
+                max_union_size = max_union_size.max(union_size);
+                let bucket = match union_size {
+                    0 => 0,
+                    1 => 1,
+                    2 => 2,
+                    3 => 3,
+                    4 => 4,
+                    5..=16 => 5,
+                    _ => 6,
+                };
+                union_size_histogram[bucket] += 1;
+                if union_size >= 2 {
+                    let mut key: Vec<usize> = state_reachable_parts
+                        .iter()
+                        .map(weight_body_id)
+                        .collect();
+                    key.sort_unstable();
+                    key.dedup();
+                    union_key_occurrences += 1;
+                    if !union_keys_seen.insert(key) {
+                        union_key_repeats += 1;
+                    }
+                }
+            }
+            let union_started_at = profile_enabled.then(Instant::now);
+            let result = Weight::union_all(state_reachable_parts.iter());
+            if let Some(started_at) = union_started_at {
+                union_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+            }
+            result
         };
 
+        pushed_transitions += pushed.len();
+        let apply_started_at = profile_enabled.then(Instant::now);
         for (lbl, target, new_w_opt) in pushed {
             if let Some(new_w) = new_w_opt {
                 dwa.states_mut()[u].transitions.insert(lbl, (target, new_w));
@@ -174,7 +235,39 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
             }
             changed = true;
         }
+        if let Some(started_at) = apply_started_at {
+            apply_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
     }
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][weighted_dwa_minimize_push] states={} topo_ms={:.3} target_full={} target_empty={} target_partial={} intersection_ms={:.3} intersection_cache_entries={} reachable_parts={} union_ms={:.3} union_sizes=[{},{},{},{},{},{},{}] max_union_size={} union_key_occurrences={} union_unique_keys={} union_key_repeats={} pushed_transitions={} apply_ms={:.3}",
+            n,
+            topo_ms,
+            target_full,
+            target_empty,
+            target_partial,
+            intersection_ms,
+            intersection_cache.len(),
+            reachable_parts,
+            union_ms,
+            union_size_histogram[0],
+            union_size_histogram[1],
+            union_size_histogram[2],
+            union_size_histogram[3],
+            union_size_histogram[4],
+            union_size_histogram[5],
+            union_size_histogram[6],
+            max_union_size,
+            union_key_occurrences,
+            union_keys_seen.len(),
+            union_key_repeats,
+            pushed_transitions,
+            apply_ms,
+        );
+    }
+
     (changed, Some(topo), reachable)
 }
 
@@ -2753,23 +2846,64 @@ fn merge_state_into_builder(
 }
 
 fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedStateBuilder>) -> DWA {
+    let profile_enabled = weighted_dwa_minimize_profile_enabled();
+    let mut final_pending_weight_count = 0usize;
+    let mut max_final_pending_weight_count = 0usize;
+    let mut final_batches_over_16 = 0usize;
+    let mut transition_batch_count = 0usize;
+    let mut transition_pending_weight_count = 0usize;
+    let mut max_transition_pending_weight_count = 0usize;
+    let mut transition_batches_over_16 = 0usize;
+    let mut final_union_ms = 0.0;
+    let mut transition_union_ms = 0.0;
+    let mut insert_ms = 0.0;
     let states: Vec<DWAState> = builders
         .into_iter()
         .map(|b| {
             let mut state = DWAState::default();
+            final_pending_weight_count += b.final_weights_pending.len();
+            max_final_pending_weight_count = max_final_pending_weight_count.max(b.final_weights_pending.len());
+            final_batches_over_16 += usize::from(b.final_weights_pending.len() > 16);
+            let final_union_started_at = Instant::now();
             let final_weight = batch_build_weight(b.final_weights_pending);
+            final_union_ms += final_union_started_at.elapsed().as_secs_f64() * 1000.0;
             if !final_weight.is_empty() {
                 state.final_weight = Some(final_weight);
             }
             for (lbl, (target, pending_weights)) in b.transitions_pending {
+                transition_batch_count += 1;
+                transition_pending_weight_count += pending_weights.len();
+                max_transition_pending_weight_count = max_transition_pending_weight_count.max(pending_weights.len());
+                transition_batches_over_16 += usize::from(pending_weights.len() > 16);
+                let transition_union_started_at = Instant::now();
                 let weight = batch_build_weight(pending_weights);
+                transition_union_ms += transition_union_started_at.elapsed().as_secs_f64() * 1000.0;
                 if !weight.is_empty() {
+                    let insert_started_at = Instant::now();
                     state.transitions.insert(lbl, (target, weight));
+                    insert_ms += insert_started_at.elapsed().as_secs_f64() * 1000.0;
                 }
             }
             state
         })
         .collect();
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][weighted_dwa_minimize_reconstruct] output_states={} final_pending_weights={} max_final_pending_weights={} final_batches_over_16={} final_union_ms={:.3} transition_batches={} transition_pending_weights={} max_transition_pending_weights={} transition_batches_over_16={} transition_union_ms={:.3} insert_ms={:.3}",
+            states.len(),
+            final_pending_weight_count,
+            max_final_pending_weight_count,
+            final_batches_over_16,
+            final_union_ms,
+            transition_batch_count,
+            transition_pending_weight_count,
+            max_transition_pending_weight_count,
+            transition_batches_over_16,
+            transition_union_ms,
+            insert_ms,
+        );
+    }
 
     let start_new = old_to_new[start_old];
     DWA::from_parts(
