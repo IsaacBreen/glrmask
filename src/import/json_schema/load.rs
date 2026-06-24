@@ -157,6 +157,21 @@ fn collect_all_ref_pointers(value: &Value, refs: &mut std::collections::BTreeSet
     }
 }
 
+fn contains_local_id_alias(value: &Value, is_root: bool) -> bool {
+    match value {
+        Value::Object(object) => {
+            let has_local_alias = object
+                .get("$id")
+                .or_else(|| object.get("id"))
+                .and_then(Value::as_str)
+                .is_some_and(|alias| alias.starts_with('#') || (is_root && alias.ends_with('#')));
+            has_local_alias || object.values().any(|child| contains_local_id_alias(child, false))
+        }
+        Value::Array(items) => items.iter().any(|child| contains_local_id_alias(child, false)),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
+}
+
 fn local_id_alias(object: &Map<String, Value>, location: &str) -> Option<String> {
     let alias = object
         .get("$id")
@@ -172,33 +187,31 @@ fn local_id_alias(object: &Map<String, Value>, location: &str) -> Option<String>
 }
 
 pub(crate) fn load_document(root: &Value) -> ImportResult<SchemaDocument> {
-    validate_unsupported_conditionals_in_schema_positions(root, "#")?;
-
     let mut definitions = Vec::new();
     collect_definitions(root, "#", &mut definitions)?;
+
+    // JSON-pointer references are materialized below only if named by a $ref.
+    // The independent index is needed solely for explicit local id aliases.
     let mut ref_targets = Vec::new();
-    collect_ref_targets(root, "#", &mut ref_targets)?;
+    if contains_local_id_alias(root, true) {
+        collect_local_id_aliases(root, "#", &mut ref_targets)?;
+    }
 
     let mut ref_pointers = std::collections::BTreeSet::new();
     collect_all_ref_pointers(root, &mut ref_pointers);
-
     for r in ref_pointers {
-        if r == "#" {
+        if r == "#" || !r.starts_with("#/") {
             continue;
         }
-        if r.starts_with("#/") {
-            let pointer_path = &r[1..];
-            let exists = definitions.iter().any(|d| d.pointer == r)
-                || ref_targets.iter().any(|d| d.pointer == r);
-            if !exists {
-                if let Some(resolved_val) = root.pointer(pointer_path) {
-                    let schema = load_schema_at(resolved_val, &r)?;
-                    ref_targets.push(SchemaDefinition {
-                        pointer: r.clone(),
-                        schema,
-                    });
-                }
-            }
+        let pointer_path = &r[1..];
+        let exists = definitions.iter().any(|d| d.pointer == r)
+            || ref_targets.iter().any(|d| d.pointer == r);
+        if !exists && let Some(resolved_val) = root.pointer(pointer_path) {
+            let schema = load_schema_at(resolved_val, &r)?;
+            ref_targets.push(SchemaDefinition {
+                pointer: r,
+                schema,
+            });
         }
     }
 
@@ -207,94 +220,6 @@ pub(crate) fn load_document(root: &Value) -> ImportResult<SchemaDocument> {
         definitions,
         ref_targets,
     })
-}
-
-fn validate_unsupported_conditionals_in_schema_positions(
-    value: &Value,
-    location: &str,
-) -> ImportResult<()> {
-    let Some(object) = value.as_object() else {
-        return Ok(());
-    };
-
-    for map_key in ["properties", "patternProperties"] {
-        let child_location = format!("{location}/{}", escape_pointer_segment(map_key));
-        if let Some(children) = object.get(map_key).and_then(Value::as_object) {
-            for (name, schema_value) in children {
-                let schema_location = format!(
-                    "{child_location}/{}",
-                    escape_pointer_segment(name)
-                );
-                validate_unsupported_conditionals_in_schema_positions(
-                    schema_value,
-                    &schema_location,
-                )?;
-            }
-        }
-    }
-
-    for defs_key in ["$defs", "definitions"] {
-        let child_location = format!("{location}/{}", escape_pointer_segment(defs_key));
-        if let Some(children) = object.get(defs_key).and_then(Value::as_object) {
-            for (name, schema_value) in children {
-                let schema_location = format!(
-                    "{child_location}/{}",
-                    escape_pointer_segment(name)
-                );
-                validate_unsupported_conditionals_in_schema_positions(
-                    schema_value,
-                    &schema_location,
-                )?;
-            }
-        }
-    }
-
-    for schema_key in [
-        "additionalProperties",
-        "additionalItems",
-        "not",
-        "contains",
-        "propertyNames",
-    ] {
-        if let Some(child) = object.get(schema_key) {
-            let child_location = format!("{location}/{}", escape_pointer_segment(schema_key));
-            validate_unsupported_conditionals_in_schema_positions(child, &child_location)?;
-        }
-    }
-
-    if let Some(items) = object.get("items") {
-        let child_location = format!("{location}/items");
-        match items {
-            Value::Array(children) => {
-                for (index, schema_value) in children.iter().enumerate() {
-                    let schema_location = format!("{child_location}/{index}");
-                    validate_unsupported_conditionals_in_schema_positions(
-                        schema_value,
-                        &schema_location,
-                    )?;
-                }
-            }
-            Value::Bool(_) | Value::Object(_) => {
-                validate_unsupported_conditionals_in_schema_positions(items, &child_location)?;
-            }
-            _ => {}
-        }
-    }
-
-    for array_key in ["prefixItems", "anyOf", "oneOf", "allOf"] {
-        let child_location = format!("{location}/{}", escape_pointer_segment(array_key));
-        if let Some(children) = object.get(array_key).and_then(Value::as_array) {
-            for (index, schema_value) in children.iter().enumerate() {
-                let schema_location = format!("{child_location}/{index}");
-                validate_unsupported_conditionals_in_schema_positions(
-                    schema_value,
-                    &schema_location,
-                )?;
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn collect_definitions(
@@ -341,7 +266,8 @@ fn collect_definitions(
     Ok(())
 }
 
-fn collect_ref_targets(
+/// Index explicit local `$id` aliases without eagerly parsing every schema-position path.
+fn collect_local_id_aliases(
     value: &Value,
     location: &str,
     out: &mut Vec<SchemaDefinition>,
@@ -365,11 +291,7 @@ fn collect_ref_targets(
                     "{child_location}/{}",
                     escape_pointer_segment(name)
                 );
-                out.push(SchemaDefinition {
-                    pointer: schema_location.clone(),
-                    schema: load_schema_at(schema_value, &schema_location)?,
-                });
-                collect_ref_targets(schema_value, &schema_location, out)?;
+                collect_local_id_aliases(schema_value, &schema_location, out)?;
             }
         }
     }
@@ -382,7 +304,7 @@ fn collect_ref_targets(
                     "{child_location}/{}",
                     escape_pointer_segment(name)
                 );
-                collect_ref_targets(schema_value, &schema_location, out)?;
+                collect_local_id_aliases(schema_value, &schema_location, out)?;
             }
         }
     }
@@ -398,7 +320,7 @@ fn collect_ref_targets(
     ] {
         if let Some(child) = object.get(schema_key) {
             let child_location = format!("{location}/{}", escape_pointer_segment(schema_key));
-            collect_ref_targets(child, &child_location, out)?;
+            collect_local_id_aliases(child, &child_location, out)?;
         }
     }
 
@@ -408,10 +330,10 @@ fn collect_ref_targets(
             Value::Array(children) => {
                 for (index, schema_value) in children.iter().enumerate() {
                     let schema_location = format!("{child_location}/{index}");
-                    collect_ref_targets(schema_value, &schema_location, out)?;
+                    collect_local_id_aliases(schema_value, &schema_location, out)?;
                 }
             }
-            Value::Bool(_) | Value::Object(_) => collect_ref_targets(items, &child_location, out)?,
+            Value::Bool(_) | Value::Object(_) => collect_local_id_aliases(items, &child_location, out)?,
             _ => {}
         }
     }
@@ -421,7 +343,7 @@ fn collect_ref_targets(
         if let Some(children) = object.get(array_key).and_then(Value::as_array) {
             for (index, schema_value) in children.iter().enumerate() {
                 let schema_location = format!("{child_location}/{index}");
-                collect_ref_targets(schema_value, &schema_location, out)?;
+                collect_local_id_aliases(schema_value, &schema_location, out)?;
             }
         }
     }

@@ -13,6 +13,7 @@ pub(crate) mod string;
 #[cfg(test)]
 mod tests;
 
+use std::borrow::Cow;
 use std::env;
 
 use serde_json::{Map, Value};
@@ -35,14 +36,26 @@ use self::lower::lower_document;
 /// is not forced to carry partially-understood JSON values.
 pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskError> {
     let config = JsonSchemaConfig::from_env();
-    let imported_schema = if config.coerce_one_of_to_any_of {
-        coerce_one_of_to_any_of_schema(schema)
+    // Coercion is default-on, but the large majority of schemas do not contain
+    // oneOf. Preserve the source Value unless there is an actual rewrite.
+    let imported_schema: Cow<'_, Value> = if config.coerce_one_of_to_any_of
+        && schema_contains_one_of(schema)
+    {
+        Cow::Owned(coerce_one_of_to_any_of_schema(schema))
     } else {
-        schema.clone()
+        Cow::Borrowed(schema)
     };
-    preflight::check_schema_preflight(&imported_schema).map_err(GlrMaskError::from)?;
-    let document = load_document(&imported_schema).map_err(GlrMaskError::from)?;
+    preflight::check_schema_preflight(imported_schema.as_ref()).map_err(GlrMaskError::from)?;
+    let document = load_document(imported_schema.as_ref()).map_err(GlrMaskError::from)?;
     lower_document(&document, config).map_err(GlrMaskError::from)
+}
+
+fn schema_contains_one_of(node: &Value) -> bool {
+    match node {
+        Value::Object(object) => object.contains_key("oneOf") || object.values().any(schema_contains_one_of),
+        Value::Array(items) => items.iter().any(schema_contains_one_of),
+        _ => false,
+    }
 }
 
 fn coerce_one_of_to_any_of_schema(schema: &Value) -> Value {
