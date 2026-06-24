@@ -346,6 +346,39 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
         .unwrap_or(0.0);
 
     if profile {
+        let mut final_group_entries = 0usize;
+        let mut final_group_count = 0usize;
+        let mut final_subsets_with_reused_group = 0usize;
+        let mut max_final_groups_per_subset = 0usize;
+        let mut max_final_entries_per_group = 0usize;
+        for entries in subset_map.keys() {
+            let mut groups = FxHashMap::<usize, usize>::default();
+            for (state_id, _) in entries {
+                let Some(state_final) = nwa.states()[*state_id as usize].final_weight.as_ref() else {
+                    continue;
+                };
+                *groups.entry(state_final.ptr_key()).or_default() += 1;
+            }
+            let final_entry_count: usize = groups.values().sum();
+            if final_entry_count > 0 {
+                final_group_entries += final_entry_count;
+                final_group_count += groups.len();
+                max_final_groups_per_subset = max_final_groups_per_subset.max(groups.len());
+                let max_group = groups.values().copied().max().unwrap_or(0);
+                max_final_entries_per_group = max_final_entries_per_group.max(max_group);
+                final_subsets_with_reused_group += usize::from(max_group > 1);
+            }
+        }
+        eprintln!(
+            "[glrmask/profile][determinize_final_groups] entries={} groups={} saved_intersections={} subsets_with_reused_group={} max_groups_per_subset={} max_entries_per_group={}",
+            final_group_entries,
+            final_group_count,
+            final_group_entries.saturating_sub(final_group_count),
+            final_subsets_with_reused_group,
+            max_final_groups_per_subset,
+            max_final_entries_per_group,
+        );
+
         let max_weight_dim = dwa.states().iter()
             .filter_map(|s| s.final_weight.as_ref())
             .map(|w| w.0.ranges_len())
