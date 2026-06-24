@@ -3,6 +3,7 @@
 //! Cyclic inputs are rejected and must be handled by the caller.
 
 use std::collections::{VecDeque, hash_map::Entry as HashMapEntry};
+use std::time::Instant;
 
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -118,17 +119,37 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     worklist.push_back((start_key, start_entries));
 
     let mut raw_targets: FxHashMap<i32, FxHashMap<u32, Vec<Weight>>> = FxHashMap::default();
+    let mut profile_subset_entries = 0usize;
+    let mut profile_max_subset_entries = 0usize;
+    let mut profile_raw_transition_visits = 0usize;
+    let mut profile_labels = 0usize;
+    let mut profile_target_contributions = 0usize;
+    let mut profile_expand_ms = 0.0;
+    let mut profile_combine_ms = 0.0;
+    let mut profile_edge_union_ms = 0.0;
+    let mut profile_closure_ms = 0.0;
+    let mut profile_normalize_ms = 0.0;
+    let mut profile_canonicalize_ms = 0.0;
+    let mut profile_subset_lookup_ms = 0.0;
 
     while let Some((subset_key, subset_entries)) = worklist.pop_front() {
+        if profile {
+            profile_subset_entries += subset_entries.len();
+            profile_max_subset_entries = profile_max_subset_entries.max(subset_entries.len());
+        }
         let from_state = subset_map[&subset_key];
 
         // Final weight computation is deferred to after the main loop
         // and parallelized across all states.
+        let expand_started_at = profile.then(Instant::now);
 
         for (nwa_state_id, path_weight) in &subset_entries {
             let state = &nwa.states()[*nwa_state_id as usize];
             for (&label, targets) in &state.transitions {
                 for (dst, trans_weight) in targets {
+                    if profile {
+                        profile_raw_transition_visits += 1;
+                    }
                     let next_weight = path_weight.intersection(trans_weight);
                     if next_weight.is_empty() {
                         continue;
@@ -139,11 +160,20 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             }
         }
 
+        if let Some(expand_started_at) = expand_started_at {
+            profile_expand_ms += expand_started_at.elapsed().as_secs_f64() * 1000.0;
+        }
+
         for (label, target_contributions) in raw_targets.drain() {
+            if profile {
+                profile_labels += 1;
+                profile_target_contributions += target_contributions.values().map(Vec::len).sum::<usize>();
+            }
             if target_contributions.is_empty() {
                 continue;
             }
 
+            let combine_started_at = profile.then(Instant::now);
             let mut target_subset: FxHashMap<u32, Weight> = FxHashMap::default();
             for (dst, weights) in target_contributions {
                 let combined = Weight::union_all(weights.iter());
@@ -152,20 +182,32 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                 }
             }
 
+            if let Some(combine_started_at) = combine_started_at {
+                profile_combine_ms += combine_started_at.elapsed().as_secs_f64() * 1000.0;
+            }
             if target_subset.is_empty() {
                 continue;
             }
 
+            let edge_union_started_at = profile.then(Instant::now);
             let edge_weight = Weight::union_all(target_subset.values());
+            if let Some(edge_union_started_at) = edge_union_started_at {
+                profile_edge_union_ms += edge_union_started_at.elapsed().as_secs_f64() * 1000.0;
+            }
             if edge_weight.is_empty() {
                 continue;
             }
 
+            let closure_started_at = profile.then(Instant::now);
             let expanded = epsilon_closure(nwa, target_subset);
+            if let Some(closure_started_at) = closure_started_at {
+                profile_closure_ms += closure_started_at.elapsed().as_secs_f64() * 1000.0;
+            }
             if expanded.is_empty() {
                 continue;
             }
 
+            let normalize_started_at = profile.then(Instant::now);
             let edge_complement = edge_weight.complement();
             let normalized: FxHashMap<u32, Weight> = if edge_complement.is_empty() {
                 expanded
@@ -178,10 +220,18 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                     })
                     .collect()
             };
+            if let Some(normalize_started_at) = normalize_started_at {
+                profile_normalize_ms += normalize_started_at.elapsed().as_secs_f64() * 1000.0;
+            }
+            let canonicalize_started_at = profile.then(Instant::now);
             let next_key = canonicalize(&normalized);
+            if let Some(canonicalize_started_at) = canonicalize_started_at {
+                profile_canonicalize_ms += canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
+            }
             if next_key.is_empty() {
                 continue;
             }
+            let subset_lookup_started_at = profile.then(Instant::now);
             let to_state = if let Some(existing) = subset_map.get(&next_key).copied() {
                 existing
             } else {
@@ -190,6 +240,9 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                 worklist.push_back((next_key.clone(), next_key));
                 new_id
             };
+            if let Some(subset_lookup_started_at) = subset_lookup_started_at {
+                profile_subset_lookup_ms += subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
+            }
 
             dwa.add_transition(from_state, label, to_state, edge_weight);
         }
@@ -197,6 +250,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
 
     // Compute final weights in parallel after the main loop.
     // The subset_map already stores all (entries, state_id) pairs.
+    let final_weights_started_at = profile.then(Instant::now);
     let final_weights: Vec<(u32, Weight)> = subset_map
         .par_iter()
         .filter_map(|(entries, &state_id)| {
@@ -207,6 +261,9 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     for (state_id, fw) in final_weights {
         dwa.set_final_weight(state_id, fw);
     }
+    let final_weights_ms = final_weights_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
     if profile {
         let max_weight_dim = dwa.states().iter()
@@ -215,11 +272,24 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             .max()
             .unwrap_or(0);
         eprintln!(
-            "[glrmask/profile][determinize] nwa_states={} dwa_states={} subset_map_entries={} max_weight_dim={}",
+            "[glrmask/profile][determinize] nwa_states={} dwa_states={} subset_map_entries={} max_weight_dim={} subset_entries={} max_subset_entries={} raw_transition_visits={} labels={} target_contributions={} expand_ms={:.3} combine_ms={:.3} edge_union_ms={:.3} closure_ms={:.3} normalize_ms={:.3} canonicalize_ms={:.3} subset_lookup_ms={:.3} final_weights_ms={:.3}",
             nwa.states().len(),
             dwa.states().len(),
             subset_map.len(),
             max_weight_dim,
+            profile_subset_entries,
+            profile_max_subset_entries,
+            profile_raw_transition_visits,
+            profile_labels,
+            profile_target_contributions,
+            profile_expand_ms,
+            profile_combine_ms,
+            profile_edge_union_ms,
+            profile_closure_ms,
+            profile_normalize_ms,
+            profile_canonicalize_ms,
+            profile_subset_lookup_ms,
+            final_weights_ms,
         );
     }
 
