@@ -1326,6 +1326,14 @@ const SUMMARY_PROMOTION_BROAD_PROBES: usize = 4;
 const SUMMARY_WORK_PROMOTION_MAX_PROFILE_WEIGHTS: usize = 128;
 const SUMMARY_PROMOTION_MEMBERWISE_OVERLAP_CHECKS: usize = 4_096;
 
+/// A summary is an exact union over a stable prefix of a merge group.  Updating
+/// that union one member at a time repeatedly normalizes the same growing
+/// weights, which is quadratic for wide terminal-DWA groups.  Keep subsequent
+/// members as an exact bounded suffix and rebuild the immutable snapshot in
+/// batches.  Compatibility checks cover both pieces, so this changes only the
+/// construction schedule, not the merge relation.
+const SUMMARY_SNAPSHOT_BATCH_SIZE: usize = 64;
+
 struct ExactGroupSummary {
     needed_union: Weight,
     merged_final_weight: Option<Weight>,
@@ -1341,7 +1349,10 @@ struct OverlapMergeGroup {
     broad_probe_count: usize,
     max_profile_weights: usize,
     memberwise_overlap_checks: usize,
+    /// Exact aggregate for every member before `summary_pending_classes`.
     summary: Option<ExactGroupSummary>,
+    /// Exact suffix not yet folded into the immutable aggregate.
+    summary_pending_classes: Vec<usize>,
 }
 
 fn should_promote_group_summary(group: &OverlapMergeGroup) -> bool {
@@ -1564,6 +1575,8 @@ fn build_and_color_hybrid(
     let mut summary_checks = 0usize;
     let mut summary_promotions = 0usize;
     let mut summary_work_promotions = 0usize;
+    let mut summary_snapshot_rebuilds = 0usize;
+    let mut summary_pending_member_scans = 0usize;
     let mut overlap_candidate_marks = vec![0u32; num_classes];
     let mut overlap_candidate_mark = 0u32;
     let mut overlap_candidate_members = Vec::<usize>::new();
@@ -1626,6 +1639,58 @@ fn build_and_color_hybrid(
                         }
                     }
 
+                    // The immutable summary covers the stable prefix.  Check the
+                    // bounded suffix memberwise until the next snapshot rebuild.
+                    // This is exact: a candidate is compatible with the whole
+                    // group iff it is compatible with the prefix union and every
+                    // suffix member on their respective overlap domains.
+                    if summary_compatible {
+                        for &member_class in &g.summary_pending_classes {
+                            summary_pending_member_scans += 1;
+                            memberwise_member_scans += 1;
+                            let member_needed = &class_needed_union[member_class];
+                            if cn.is_disjoint(member_needed) {
+                                continue;
+                            }
+                            memberwise_overlap_checks += 1;
+
+                            final_weight_checks += 1;
+                            let final_weight_check_started_at = Instant::now();
+                            let final_weight_ok = final_weights_compatible_on_domain_intersection(
+                                class_profile.final_weight.as_ref(),
+                                class_profiles[member_class].final_weight.as_ref(),
+                                cn,
+                                member_needed,
+                            );
+                            final_weight_check_ms +=
+                                final_weight_check_started_at.elapsed().as_secs_f64() * 1000.0;
+                            if !final_weight_ok {
+                                final_weight_rejects += 1;
+                                summary_compatible = false;
+                                break;
+                            }
+
+                            transition_weight_checks += 1;
+                            let transition_weight_check_started_at = Instant::now();
+                            let transition_weights_ok =
+                                sorted_weights_compatible_on_domain_intersection(
+                                    &class_profile.weights,
+                                    &class_profiles[member_class].weights,
+                                    cn,
+                                    member_needed,
+                                );
+                            transition_weight_check_ms += transition_weight_check_started_at
+                                .elapsed()
+                                .as_secs_f64()
+                                * 1000.0;
+                            if !transition_weights_ok {
+                                transition_weight_rejects += 1;
+                                summary_compatible = false;
+                                break;
+                            }
+                        }
+                    }
+
                     #[cfg(debug_assertions)]
                     debug_assert_eq!(
                         summary_compatible,
@@ -1636,7 +1701,7 @@ fn build_and_color_hybrid(
                             &class_needed_union,
                             &class_profiles,
                         ),
-                        "group summary must be equivalent to checking every member",
+                        "group summary plus pending suffix must be equivalent to checking every member",
                     );
                     summary_compatible
                 }
@@ -1773,8 +1838,17 @@ fn build_and_color_hybrid(
             }
             g.member_classes.push(class);
             g.max_profile_weights = g.max_profile_weights.max(class_profile.weights.len());
-            if let Some(summary) = g.summary.as_mut() {
-                update_exact_group_summary(summary, cn, class_profile);
+            if g.summary.is_some() {
+                g.summary_pending_classes.push(class);
+                if g.summary_pending_classes.len() >= SUMMARY_SNAPSHOT_BATCH_SIZE {
+                    g.summary = Some(build_exact_group_summary(
+                        &g.member_classes,
+                        &class_needed_union,
+                        &class_profiles,
+                    ));
+                    g.summary_pending_classes.clear();
+                    summary_snapshot_rebuilds += 1;
+                }
             } else if should_promote_group_summary(g) {
                 g.summary = Some(build_exact_group_summary(
                     &g.member_classes,
@@ -1829,6 +1903,7 @@ fn build_and_color_hybrid(
                 max_profile_weights: class_profile.weights.len(),
                 memberwise_overlap_checks: 0,
                 summary: None,
+                summary_pending_classes: Vec::new(),
             });
         }
     }
@@ -1875,7 +1950,7 @@ fn build_and_color_hybrid(
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
         eprintln!(
-            "[glrmask/profile][weighted_dwa_minimize_hybrid_detail] candidates={} classes={} groups={} group_attempts={} target_checks={} target_rejects={} target_check_ms={:.3} disjoint_checks={} disjoint_true={} disjoint_check_ms={:.3} final_weight_checks={} final_weight_rejects={} final_weight_check_ms={:.3} transition_weight_checks={} transition_weight_rejects={} transition_weight_check_ms={:.3} group_update_ms={:.3} memberwise_indexed_probes={} memberwise_broad_probes={} memberwise_member_scans={} memberwise_overlap_checks={} summary_checks={} summary_promotions={} summary_work_promotions={} classes_with_final_weight={} min_targets={} max_targets={} avg_targets={:.3} min_weights={} max_weights={} avg_weights={:.3} min_group_size={} max_group_size={}",
+            "[glrmask/profile][weighted_dwa_minimize_hybrid_detail] candidates={} classes={} groups={} group_attempts={} target_checks={} target_rejects={} target_check_ms={:.3} disjoint_checks={} disjoint_true={} disjoint_check_ms={:.3} final_weight_checks={} final_weight_rejects={} final_weight_check_ms={:.3} transition_weight_checks={} transition_weight_rejects={} transition_weight_check_ms={:.3} group_update_ms={:.3} memberwise_indexed_probes={} memberwise_broad_probes={} memberwise_member_scans={} memberwise_overlap_checks={} summary_checks={} summary_promotions={} summary_work_promotions={} summary_snapshot_rebuilds={} summary_pending_member_scans={} classes_with_final_weight={} min_targets={} max_targets={} avg_targets={:.3} min_weights={} max_weights={} avg_weights={:.3} min_group_size={} max_group_size={}",
             candidates.len(),
             num_classes,
             groups.len(),
@@ -1900,6 +1975,8 @@ fn build_and_color_hybrid(
             summary_checks,
             summary_promotions,
             summary_work_promotions,
+            summary_snapshot_rebuilds,
+            summary_pending_member_scans,
             classes_with_final_weight,
             min_targets,
             max_targets,
