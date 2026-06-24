@@ -1186,8 +1186,13 @@ impl Constraint {
             let Some(final_weight) = &state.final_weight else {
                 continue;
             };
-
-            for token_set in final_weight.unique_token_sets() {
+            if final_weight.is_full() || final_weight.is_empty() {
+                continue;
+            }
+            // The global pointer set already removes duplicates. Do not build a
+            // temporary per-weight `unique_token_sets` vector first.
+            for (_tsid_range, token_set) in final_weight.0.range_values() {
+                let token_set = token_set.as_ref();
                 let key = token_set as *const RangeSetBlaze<u32> as usize;
                 if keys.insert(key, ()).is_some() {
                     continue;
