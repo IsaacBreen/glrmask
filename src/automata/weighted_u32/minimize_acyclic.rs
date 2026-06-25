@@ -2853,21 +2853,32 @@ impl MergedStateBuilder {
 
 }
 
-/// Batch-build a Weight from a Vec of pending weights using a hybrid strategy.
+/// Build one exact union from all pending weights.
+///
+/// `Weight::union_all` uses a multiway event sweep for large inputs. Feeding it
+/// the complete pending set avoids rebuilding intermediate weight trees during
+/// minimizer reconstruction.
 fn batch_build_weight(pending: Vec<Weight>) -> Weight {
     match pending.len() {
         0 => Weight::empty(),
         1 => pending.into_iter().next().unwrap(),
-        n if n <= RECONSTRUCTION_UNION_BATCH_SIZE => Weight::union_all(pending.iter()),
+        _ => Weight::union_all(pending.iter()),
+    }
+}
+
+#[cfg(test)]
+fn batch_build_weight_tree_reference(mut pending: Vec<Weight>) -> Weight {
+    match pending.len() {
+        0 => Weight::empty(),
+        1 => pending.pop().unwrap(),
         _ => {
-            let mut current = pending;
-            while current.len() > RECONSTRUCTION_UNION_BATCH_SIZE {
-                current = current
+            while pending.len() > RECONSTRUCTION_UNION_BATCH_SIZE {
+                pending = pending
                     .chunks(RECONSTRUCTION_UNION_BATCH_SIZE)
                     .map(|chunk| Weight::union_all(chunk.iter()))
                     .collect();
             }
-            Weight::union_all(current.iter())
+            Weight::union_all(pending.iter())
         }
     }
 }
@@ -3200,7 +3211,8 @@ mod tests {
         sorted_weights_compatible_on_domain,
         sorted_weights_compatible_on_domain_intersection,
         weight_is_disjoint_from_domain_intersection, weights_equal_on_domain,
-        weights_equal_on_domain_intersection, ClassProfile, PointwiseBehaviorInterner,
+        weights_equal_on_domain_intersection, batch_build_weight,
+        batch_build_weight_tree_reference, ClassProfile, PointwiseBehaviorInterner,
         PointwiseRegionBuildCache, PointwiseRegionInterner, build_token_behavior_region,
     };
     use crate::automata::weighted_u32::dwa::{DWA, DWAState};
@@ -3412,6 +3424,24 @@ mod tests {
         for (word, expected) in words.into_iter().zip(expected) {
             assert_eq!(minimized.eval_word(&word), expected, "word={word:?}");
         }
+    }
+
+    #[test]
+    fn direct_reconstruction_union_matches_bounded_tree_reference() {
+        let pending: Vec<Weight> = (0..257u32)
+            .map(|index| {
+                let tsid = index % 11;
+                let token_start = (index * 3) % 101;
+                Weight::from_per_tsid_token_sets([(
+                    tsid,
+                    RangeSetBlaze::from_iter([token_start..=token_start + 5]),
+                )])
+            })
+            .collect();
+        assert_eq!(
+            batch_build_weight(pending.clone()),
+            batch_build_weight_tree_reference(pending),
+        );
     }
 
     #[test]
