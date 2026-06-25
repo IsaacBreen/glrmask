@@ -250,6 +250,11 @@ fn determinize_impl(
     let mut profile_single_contribution_labels = 0usize;
     let mut profile_single_contribution_no_epsilon_labels = 0usize;
     let mut profile_direct_single_target_labels = 0usize;
+    let mut profile_multi_contribution_single_target_no_epsilon_labels = 0usize;
+    let mut profile_multi_contribution_single_target_no_epsilon_contributions = 0usize;
+    let mut profile_direct_multi_target_labels = 0usize;
+    let mut profile_multi_contribution_all_no_epsilon_labels = 0usize;
+    let mut profile_multi_contribution_all_no_epsilon_contributions = 0usize;
     let mut profile_expand_ms = 0.0;
     let mut profile_combine_ms = 0.0;
     let mut profile_edge_union_ms = 0.0;
@@ -305,24 +310,63 @@ fn determinize_impl(
                     {
                         profile_single_contribution_no_epsilon_labels += 1;
                     }
+                } else {
+                    let dst = target_contributions[0].0;
+                    let all_no_epsilon = target_contributions.iter().all(|(candidate, _)| {
+                        nwa
+                            .states()
+                            .get(*candidate as usize)
+                            .is_some_and(|state| state.epsilons.is_empty())
+                    });
+                    if all_no_epsilon {
+                        profile_multi_contribution_all_no_epsilon_labels += 1;
+                        profile_multi_contribution_all_no_epsilon_contributions +=
+                            target_contributions.len();
+                    }
+                    if target_contributions.iter().all(|(candidate, _)| *candidate == dst)
+                        && all_no_epsilon
+                    {
+                        profile_multi_contribution_single_target_no_epsilon_labels += 1;
+                        profile_multi_contribution_single_target_no_epsilon_contributions +=
+                            target_contributions.len();
+                    }
                 }
             }
             if target_contributions.is_empty() {
                 continue;
             }
 
-            let direct_single_target = direct_single_target_enabled
-                && target_contributions.len() == 1
-                && nwa
-                    .states()
-                    .get(target_contributions[0].0 as usize)
-                    .is_some_and(|state| state.epsilons.is_empty());
-            if direct_single_target {
-                let (dst, edge_weight) = target_contributions.into_iter().next().unwrap();
+            let direct_no_epsilon_targets = direct_single_target_enabled
+                && target_contributions.iter().all(|(dst, _)| {
+                    nwa
+                        .states()
+                        .get(*dst as usize)
+                        .is_some_and(|state| state.epsilons.is_empty())
+                });
+            if direct_no_epsilon_targets {
                 if profile {
-                    profile_direct_single_target_labels += 1;
+                    if target_contributions.len() == 1 {
+                        profile_direct_single_target_labels += 1;
+                    } else {
+                        profile_direct_multi_target_labels += 1;
+                    }
                 }
-                let next_key = vec![(dst, edge_weight.clone())];
+
+                let mut sorted_targets = target_contributions;
+                sorted_targets.sort_unstable_by_key(|(dst, _)| *dst);
+                let mut next_key: Vec<(u32, Weight)> = Vec::with_capacity(sorted_targets.len());
+                for (dst, weight) in sorted_targets {
+                    if let Some((last_dst, last_weight)) = next_key.last_mut() {
+                        if *last_dst == dst {
+                            *last_weight = last_weight.union(&weight);
+                            continue;
+                        }
+                    }
+                    next_key.push((dst, weight));
+                }
+                let edge_weight = Weight::union_all(next_key.iter().map(|(_, weight)| weight));
+                debug_assert!(!edge_weight.is_empty());
+
                 let subset_lookup_started_at = profile.then(Instant::now);
                 let to_state = intern_determinized_subset(
                     next_key,
@@ -551,7 +595,7 @@ fn determinize_impl(
         );
 
         eprintln!(
-            "[glrmask/profile][determinize] nwa_states={} dwa_states={} subset_map_entries={} max_weight_dim={} subset_entries={} max_subset_entries={} raw_transition_visits={} labels={} target_contributions={} single_contribution_labels={} single_contribution_no_epsilon_labels={} direct_single_target_labels={} expand_ms={:.3} combine_ms={:.3} edge_union_ms={:.3} closure_ms={:.3} normalize_ms={:.3} canonicalize_ms={:.3} subset_lookup_ms={:.3} final_weights_ms={:.3} final_subsets={} final_subset_entries={} final_entries={} final_nonempty_contributions={} final_max_entries={} final_intersection_ms={:.3} final_union_ms={:.3}",
+            "[glrmask/profile][determinize] nwa_states={} dwa_states={} subset_map_entries={} max_weight_dim={} subset_entries={} max_subset_entries={} raw_transition_visits={} labels={} target_contributions={} single_contribution_labels={} single_contribution_no_epsilon_labels={} direct_single_target_labels={} multi_contribution_single_target_no_epsilon_labels={} multi_contribution_single_target_no_epsilon_contributions={} direct_multi_target_labels={} multi_contribution_all_no_epsilon_labels={} multi_contribution_all_no_epsilon_contributions={} expand_ms={:.3} combine_ms={:.3} edge_union_ms={:.3} closure_ms={:.3} normalize_ms={:.3} canonicalize_ms={:.3} subset_lookup_ms={:.3} final_weights_ms={:.3} final_subsets={} final_subset_entries={} final_entries={} final_nonempty_contributions={} final_max_entries={} final_intersection_ms={:.3} final_union_ms={:.3}",
             nwa.states().len(),
             dwa.states().len(),
             subset_map.len(),
@@ -564,6 +608,11 @@ fn determinize_impl(
             profile_single_contribution_labels,
             profile_single_contribution_no_epsilon_labels,
             profile_direct_single_target_labels,
+            profile_multi_contribution_single_target_no_epsilon_labels,
+            profile_multi_contribution_single_target_no_epsilon_contributions,
+            profile_direct_multi_target_labels,
+            profile_multi_contribution_all_no_epsilon_labels,
+            profile_multi_contribution_all_no_epsilon_contributions,
             profile_expand_ms,
             profile_combine_ms,
             profile_edge_union_ms,
@@ -607,9 +656,58 @@ mod tests {
         nwa.add_transition(start, 7, accept, tokens([1]));
         nwa.set_final_weight(accept, tokens([0, 1]));
 
-        let dwa = determinize(&nwa).unwrap();
-        assert_eq!(dwa.eval_word(&[7]), tokens([0, 1]));
+        let fast = determinize_impl(&nwa, true).unwrap();
+        let generic = determinize_impl(&nwa, false).unwrap();
+        assert_eq!(bincode::serialize(&fast).unwrap(), bincode::serialize(&generic).unwrap());
+        assert_eq!(fast.eval_word(&[7]), tokens([0, 1]));
     }
+    #[test]
+    fn direct_epsilon_free_subsets_match_generic_across_acyclic_cases() {
+        for case in 0u32..32 {
+            let mut nwa = NWA::new(1, 8);
+            let states: Vec<u32> = (0..5).map(|_| nwa.add_state()).collect();
+            nwa.set_start_states(vec![states[0]]);
+
+            for from in 0..4usize {
+                for to in (from + 1)..5usize {
+                    if (case + (from * 7 + to * 11) as u32) % 3 == 0 {
+                        continue;
+                    }
+                    let label = ((case + (from * 3 + to) as u32) % 4) as i32;
+                    let first = (case + (from * 5 + to) as u32) % 6;
+                    let second = (first + 1 + case % 3) % 7;
+                    nwa.add_transition(states[from], label, states[to], tokens([first, second]));
+                    if (case + from as u32 + to as u32) % 5 == 0 {
+                        let extra = (second + 2) % 8;
+                        nwa.add_transition(states[from], label, states[to], tokens([extra]));
+                    }
+                }
+            }
+
+            for state in 0..5usize {
+                if (case + state as u32) % 2 == 0 {
+                    let first = (case + state as u32) % 7;
+                    nwa.set_final_weight(states[state], tokens([first]));
+                }
+            }
+
+            // Exercise generic fallback as well: a transition into this state
+            // must retain epsilon closure, while the remaining direct targets
+            // may use the optimized path.
+            if case % 4 == 0 {
+                nwa.add_epsilon(states[1], states[4], tokens([case % 6]));
+            }
+
+            let fast = determinize_impl(&nwa, true).unwrap();
+            let generic = determinize_impl(&nwa, false).unwrap();
+            assert_eq!(
+                bincode::serialize(&fast).unwrap(),
+                bincode::serialize(&generic).unwrap(),
+                "case {case}",
+            );
+        }
+    }
+
     #[test]
     fn direct_single_target_path_matches_generic_determinization() {
         let mut nwa = NWA::new(1, 4);
@@ -628,6 +726,21 @@ mod tests {
         assert_eq!(bincode::serialize(&fast).unwrap(), bincode::serialize(&generic).unwrap());
         assert_eq!(fast.eval_word(&[7]), tokens([0, 1]));
         assert_eq!(fast.eval_word(&[8]), tokens([2]));
+
+        let mut multi_destination = NWA::new(1, 4);
+        let start = multi_destination.add_state();
+        let first_accept = multi_destination.add_state();
+        let second_accept = multi_destination.add_state();
+        multi_destination.set_start_states(vec![start]);
+        multi_destination.add_transition(start, 9, first_accept, tokens([0]));
+        multi_destination.add_transition(start, 9, second_accept, tokens([1]));
+        multi_destination.set_final_weight(first_accept, tokens([0]));
+        multi_destination.set_final_weight(second_accept, tokens([1]));
+
+        let fast = determinize_impl(&multi_destination, true).unwrap();
+        let generic = determinize_impl(&multi_destination, false).unwrap();
+        assert_eq!(bincode::serialize(&fast).unwrap(), bincode::serialize(&generic).unwrap());
+        assert_eq!(fast.eval_word(&[9]), tokens([0, 1]));
     }
 
 }
