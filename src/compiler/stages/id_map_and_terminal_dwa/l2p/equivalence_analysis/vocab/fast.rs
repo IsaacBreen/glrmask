@@ -1470,6 +1470,17 @@ fn token_signature(
 
 const TRIE_CHUNK_SIZE: usize = 128;
 const TRIE_WALK_MIN_TOKENS: usize = 256;
+/// Even a small set of tokens benefits from prefix sharing when each signature
+/// spans a large state batch. Keep the direct path for singleton signatures,
+/// where trie setup cannot amortize.
+const TRIE_WALK_MIN_STATES_FOR_SMALL_VOCAB: usize = 256;
+
+#[inline]
+fn should_use_trie_walk(active_token_count: usize, state_batch_len: usize) -> bool {
+    active_token_count > 1
+        && (active_token_count >= TRIE_WALK_MIN_TOKENS
+            || state_batch_len >= TRIE_WALK_MIN_STATES_FOR_SMALL_VOCAB)
+}
 
 static TRIE_WALK_DISABLED: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_DISABLE_TRIE_WALK"));
@@ -2256,7 +2267,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
         let batch_end = (batch_start + batch_size).min(num_initial_states);
         let batch = &ordered_states[batch_start..batch_end];
         let state_group_size = vocab_state_group_size(batch.len(), num_groups);
-        let use_trie_walk = active_indices.len() >= TRIE_WALK_MIN_TOKENS
+        let use_trie_walk = should_use_trie_walk(active_indices.len(), batch.len())
             && !*TRIE_WALK_DISABLED;
         used_trie_walk |= use_trie_walk;
         let active_sigs: Vec<(usize, u64)> = if use_trie_walk {
@@ -2453,4 +2464,23 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     }
 
     groups.into_iter().collect()
+}
+
+
+#[cfg(test)]
+mod trie_selection_tests {
+    use super::*;
+
+    #[test]
+    fn trie_walk_uses_large_state_batches_for_small_vocabularies() {
+        assert!(should_use_trie_walk(61, 500));
+        assert!(should_use_trie_walk(2, 256));
+        assert!(!should_use_trie_walk(1, 10_000));
+        assert!(!should_use_trie_walk(61, 255));
+    }
+
+    #[test]
+    fn trie_walk_keeps_large_vocabularies_on_trie_path() {
+        assert!(should_use_trie_walk(TRIE_WALK_MIN_TOKENS, 1));
+    }
 }
