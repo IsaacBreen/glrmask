@@ -241,6 +241,8 @@ pub(crate) fn build_global_max_length_state_map(
         None,
         StateEquivalenceScope::Global,
         &config,
+        None,
+        None,
     );
 
     if compile_profile_enabled() {
