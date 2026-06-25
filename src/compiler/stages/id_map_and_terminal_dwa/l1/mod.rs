@@ -20,55 +20,67 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /// the signatures. Profile signature IDs reserve zero for the empty signature;
 /// the direct DWA builder numbers non-empty signatures from zero, so the cached
 /// direct-builder view stores that shifted numbering explicitly.
+type L1WalkProfile = Arc<[(u32, Arc<[(u32, u32)]>)]>;
+
+fn freeze_l1_walk_profile(runs: &[(u32, u32, u32)]) -> L1WalkProfile {
+    let mut positions = FxHashMap::<u32, usize>::default();
+    let mut grouped = Vec::<(u32, Vec<(u32, u32)>)>::new();
+    for &(signature_id, start, end) in runs {
+        if signature_id == 0 {
+            continue;
+        }
+        let direct_signature_id = signature_id - 1;
+        let position = if let Some(&position) = positions.get(&direct_signature_id) {
+            position
+        } else {
+            let position = grouped.len();
+            positions.insert(direct_signature_id, position);
+            grouped.push((direct_signature_id, Vec::new()));
+            position
+        };
+        grouped[position].1.push((start, end));
+    }
+    Arc::from(
+        grouped
+            .into_iter()
+            .map(|(signature_id, ranges)| (signature_id, Arc::from(ranges)))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn freeze_l1_walk_profile_from_direct(profile: Vec<(u32, Vec<(u32, u32)>)>) -> L1WalkProfile {
+    Arc::from(
+        profile
+            .into_iter()
+            .map(|(signature_id, ranges)| (signature_id, Arc::from(ranges)))
+            .collect::<Vec<_>>(),
+    )
+}
+
 #[derive(Debug)]
 struct L1ExactProfileReuse {
     target_to_profile_id: FxHashMap<(u8, u32), u32>,
-    profiles_by_id: Vec<Arc<[(u32, u32, u32)]>>,
+    walk_profiles_by_id: Vec<L1WalkProfile>,
     direct_terminal_signatures: Arc<[Vec<u32>]>,
     direct_state_to_terminal_signature: Arc<[u32]>,
 }
 
 impl L1ExactProfileReuse {
-    fn materialize_walk_cache(&self) -> FxHashMap<(u8, u32), Vec<(u32, Vec<(u32, u32)>)>> {
+    fn materialize_walk_cache(&self) -> FxHashMap<(u8, u32), L1WalkProfile> {
         let profiling = compile_profile_enabled();
         let total_started_at = profiling.then(Instant::now);
-        let profile_build_started_at = profiling.then(Instant::now);
-        let mut walk_results_by_profile: Vec<Vec<(u32, Vec<(u32, u32)>)>> =
-            Vec::with_capacity(self.profiles_by_id.len());
-        for runs in &self.profiles_by_id {
-            let mut by_signature = FxHashMap::<u32, Vec<(u32, u32)>>::default();
-            for &(signature_id, start, end) in runs.iter() {
-                if signature_id == 0 {
-                    continue;
-                }
-                by_signature
-                    .entry(signature_id - 1)
-                    .or_default()
-                    .push((start, end));
-            }
-            walk_results_by_profile.push(by_signature.into_iter().collect());
-        }
-        let profile_build_ms = profile_build_started_at.map_or(0.0, |started| {
-            started.elapsed().as_secs_f64() * 1000.0
-        });
-
-        let target_clone_started_at = profiling.then(Instant::now);
         let mut cache = FxHashMap::default();
         for (&target, &profile_id) in &self.target_to_profile_id {
             if profile_id != 0 {
-                cache.insert(target, walk_results_by_profile[profile_id as usize].clone());
+                cache.insert(target, Arc::clone(&self.walk_profiles_by_id[profile_id as usize]));
             }
         }
-        let target_clone_ms = target_clone_started_at.map_or(0.0, |started| {
-            started.elapsed().as_secs_f64() * 1000.0
-        });
         if let Some(total_started_at) = total_started_at {
             eprintln!(
-                "[glrmask/profile][l1_exact_profile_materialize] profiles={} targets={} profile_build_ms={:.3} target_clone_ms={:.3} total_ms={:.3}",
-                self.profiles_by_id.len(),
+                "[glrmask/profile][l1_exact_profile_materialize] profiles={} targets={} profile_build_ms=0.000 target_clone_ms={:.3} total_ms={:.3}",
+                self.walk_profiles_by_id.len(),
                 self.target_to_profile_id.len(),
-                profile_build_ms,
-                target_clone_ms,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -1090,6 +1102,10 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         target_to_profile_id.insert(target_key, profile_id);
     }
     let profile_ids_len = next_profile_id as usize;
+    let walk_profiles_by_id: Vec<L1WalkProfile> = profiles_by_id
+        .iter()
+        .map(|profile| freeze_l1_walk_profile(profile.as_ref()))
+        .collect();
     let profile_intern_ms = profile_intern_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
@@ -1227,7 +1243,7 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         mapping,
         Some(L1ExactProfileReuse {
             target_to_profile_id,
-            profiles_by_id,
+            walk_profiles_by_id,
             // Exact-equivalence signature ids reserve zero for empty. The
             // direct DWA builder uses `u32::MAX` for empty and zero-based ids
             // for non-empty signatures, matching `materialize_walk_cache`.
@@ -2265,7 +2281,7 @@ fn build_l1_terminal_dwa(
     // the raw merged ranges. Self-loop optimization: if the target state
     // has self-loops on all suffix bytes, all tokens end at the target
     // state and the walk can be skipped entirely.
-    let walk_cache: FxHashMap<(u8, u32), Vec<(u32, Vec<(u32, u32)>)>> =
+    let walk_cache: FxHashMap<(u8, u32), L1WalkProfile> =
         if let Some(exact_profile_reuse) = exact_profile_reuse {
             exact_profile_reuse.materialize_walk_cache()
         } else {
@@ -2559,6 +2575,9 @@ fn build_l1_terminal_dwa(
             }
         }
         cache
+            .into_iter()
+            .map(|(target, profile)| (target, freeze_l1_walk_profile_from_direct(profile)))
+            .collect()
     }
         };
 
@@ -2573,14 +2592,15 @@ fn build_l1_terminal_dwa(
                 let indexed: Vec<(usize, &[(u32, u32)], u64, usize)> = results
                     .iter()
                     .map(|(sig_id, ranges)| {
+                        let ranges = ranges.as_ref();
                         let mut h: u64 = 0;
-                        for &(s, e) in ranges.as_slice() {
+                        for &(s, e) in ranges {
                             h = h.wrapping_add(range_hash_val(s, e));
                         }
                         let entry_hash = (ranges.len() as u64).wrapping_add(h);
                         (
                             *sig_id as usize,
-                            ranges.as_slice(),
+                            ranges,
                             entry_hash,
                             ranges.len(),
                         )
@@ -3497,6 +3517,33 @@ mod packed_suffix_product_tests {
             actual.sort_unstable_by_key(|(key, _)| *key);
             assert_eq!(actual, expected, "first byte {first_byte}");
         }
+    }
+
+    #[test]
+    fn frozen_walk_profiles_preserve_signature_ranges() {
+        let empty: Arc<[(u32, u32, u32)]> = Arc::from([]);
+        let profile_one: Arc<[(u32, u32, u32)]> = Arc::from([
+            (1, 2, 3),
+            (2, 4, 4),
+            (1, 7, 8),
+            (0, 9, 10),
+        ]);
+        let reuse = L1ExactProfileReuse {
+            target_to_profile_id: [((b'a', 17), 1u32)].into_iter().collect(),
+            walk_profiles_by_id: vec![
+                freeze_l1_walk_profile(&empty),
+                freeze_l1_walk_profile(&profile_one),
+            ],
+            direct_terminal_signatures: Arc::from([]),
+            direct_state_to_terminal_signature: Arc::from([]),
+        };
+        let cache = reuse.materialize_walk_cache();
+        let profile = cache.get(&(b'a', 17)).expect("profile present");
+        let grouped: Vec<(u32, Vec<(u32, u32)>)> = profile
+            .iter()
+            .map(|(signature, ranges)| (*signature, ranges.as_ref().to_vec()))
+            .collect();
+        assert_eq!(grouped, vec![(0, vec![(2, 3), (7, 8)]), (1, vec![(4, 4)])]);
     }
 
     #[test]
