@@ -4,13 +4,15 @@
 //! and disjoint vocabs (e.g., different character-type partitions) uniformly
 //! via composite-key refinement.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
+use rustc_hash::FxHashMap;
 
 use crate::automata::weighted::determinize::determinize;
+use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
@@ -43,6 +45,188 @@ fn compact_merged_terminal_dwa_enabled() -> bool {
     })
 }
 
+/// Return whether each source owns a disjoint set of original vocabulary tokens.
+///
+/// After remapping, this is stronger than a representation detail: every
+/// non-empty weight from a source is contained in that source's global token
+/// domain.  Consequently intersections of contributions from different
+/// sources are empty, which lets `direct_union_disjoint_token_domain_dwas`
+/// distribute the weighted path intersection over the branch union exactly.
+fn inputs_have_disjoint_token_domains(inputs: &[LocalIdMapTerminalDwa], max_token_id: u32) -> bool {
+    let mut owner = vec![u32::MAX; max_token_id as usize + 1];
+
+    for (input_index, input) in inputs.iter().enumerate() {
+        for (original_token, &local_token) in input
+            .id_map
+            .vocab_tokens
+            .original_to_internal
+            .iter()
+            .enumerate()
+        {
+            if local_token == u32::MAX {
+                continue;
+            }
+            let slot = &mut owner[original_token];
+            if *slot != u32::MAX {
+                return false;
+            }
+            *slot = input_index as u32;
+        }
+    }
+
+    true
+}
+
+/// Remap a deterministic weighted automaton directly, preserving the same
+/// branch-local token domain handling as `remap_nwa_with_maps`.
+fn remap_dwa_with_maps(
+    dwa: &mut DWA,
+    local_to_global_tsids: &[Vec<u32>],
+    local_to_global_tokens: &[Vec<u32>],
+    global_tsid_count: usize,
+) {
+    let mut weight_cache = HashMap::<usize, Weight>::new();
+    let mut token_cache = HashMap::<usize, Arc<RangeSetBlaze<u32>>>::new();
+
+    for state in dwa.states_mut() {
+        if let Some(final_weight) = state.final_weight.as_mut() {
+            *final_weight = remap_weight_cached(
+                final_weight,
+                local_to_global_tsids,
+                local_to_global_tokens,
+                global_tsid_count,
+                &mut weight_cache,
+                &mut token_cache,
+            );
+            if final_weight.is_empty() {
+                state.final_weight = None;
+            }
+        }
+
+        for (_, weight) in state.transitions.values_mut() {
+            *weight = remap_weight_cached(
+                weight,
+                local_to_global_tsids,
+                local_to_global_tokens,
+                global_tsid_count,
+                &mut weight_cache,
+                &mut token_cache,
+            );
+        }
+        state.transitions.retain(|_, (_, weight)| !weight.is_empty());
+    }
+}
+
+/// Deterministically union automata whose global token domains are disjoint.
+///
+/// For a word `x`, source `i` contributes `W_i(x)`, the intersection of its
+/// edge and final weights.  Disjoint source domains imply
+/// `(⋃ A_i) ∩ (⋃ B_i) = ⋃ (A_i ∩ B_i)`, so the subset construction need only
+/// remember one deterministic state per source rather than a weighted subset.
+/// Missing component states represent dead paths.  The output is exactly the
+/// ordinary NWA-union determinization, before minimization.
+fn direct_union_disjoint_token_domain_dwas(inputs: &[DWA]) -> DWA {
+    assert!(!inputs.is_empty());
+
+    const DEAD: u32 = u32::MAX;
+
+    let mut output = DWA::new(0, 0);
+    let start_tuple: Vec<u32> = inputs.iter().map(DWA::start_state).collect();
+    let mut state_ids = FxHashMap::<Vec<u32>, u32>::default();
+    let mut worklist = VecDeque::<Vec<u32>>::new();
+    state_ids.insert(start_tuple.clone(), output.start_state());
+    worklist.push_back(start_tuple);
+
+    while let Some(component_states) = worklist.pop_front() {
+        let from_state = state_ids[&component_states];
+
+        let final_weight = Weight::union_all(
+            component_states
+                .iter()
+                .enumerate()
+                .filter_map(|(input_index, &state_id)| {
+                    (state_id != DEAD)
+                        .then(|| inputs[input_index].states()[state_id as usize].final_weight.as_ref())
+                        .flatten()
+                }),
+        );
+        if !final_weight.is_empty() {
+            output.set_final_weight(from_state, final_weight);
+        }
+
+        let mut by_label = FxHashMap::<i32, Vec<(usize, u32, Weight)>>::default();
+        for (input_index, &state_id) in component_states.iter().enumerate() {
+            if state_id == DEAD {
+                continue;
+            }
+            for (&label, &(target, ref weight)) in &inputs[input_index].states()[state_id as usize].transitions {
+                by_label
+                    .entry(label)
+                    .or_default()
+                    .push((input_index, target, weight.clone()));
+            }
+        }
+
+        for (label, transitions) in by_label {
+            let edge_weight = Weight::union_all(transitions.iter().map(|(_, _, weight)| weight));
+            if edge_weight.is_empty() {
+                continue;
+            }
+
+            let mut target_tuple = vec![DEAD; inputs.len()];
+            for (input_index, target, _) in transitions {
+                target_tuple[input_index] = target;
+            }
+
+            let to_state = if let Some(&existing) = state_ids.get(&target_tuple) {
+                existing
+            } else {
+                let new_state = output.add_state();
+                state_ids.insert(target_tuple.clone(), new_state);
+                worklist.push_back(target_tuple);
+                new_state
+            };
+            output.add_transition(from_state, label, to_state, edge_weight);
+        }
+    }
+
+    debug_assert!(output.is_acyclic());
+    output
+}
+
+/// Build the exact deterministic union without subset determinization whenever
+/// the source vocabularies are disjoint.  The generic NWA route remains the
+/// fallback for overlapping domains.
+fn try_merge_disjoint_token_domain_dwas(
+    inputs: &[LocalIdMapTerminalDwa],
+    global_id_map: &InternalIdMap,
+    direct_local_to_global_token_maps: Option<&Vec<Vec<u32>>>,
+    max_token_id: u32,
+) -> Option<DWA> {
+    if !inputs_have_disjoint_token_domains(inputs, max_token_id) {
+        return None;
+    }
+
+    let mut remapped = Vec::with_capacity(inputs.len());
+    for (input_index, input) in inputs.iter().enumerate() {
+        let tsid_map = build_local_to_global_tsid_map(&input.id_map, global_id_map);
+        let token_map = direct_local_to_global_token_maps
+            .and_then(|maps| maps.get(input_index))
+            .map(|direct_map| build_direct_local_to_global_token_map(direct_map))
+            .unwrap_or_else(|| build_local_to_global_token_map(&input.id_map, global_id_map));
+        let mut dwa = input.dwa.clone();
+        remap_dwa_with_maps(
+            &mut dwa,
+            &tsid_map,
+            &token_map,
+            global_id_map.num_tsids() as usize,
+        );
+        remapped.push(dwa);
+    }
+
+    Some(direct_union_disjoint_token_domain_dwas(&remapped))
+}
+
 /// Merge local branch outputs for a single partition into one compacted DWA.
 pub(crate) fn merge_local_id_maps_and_terminal_dwas(
     inputs: Vec<LocalIdMapTerminalDwa>,
@@ -59,32 +243,38 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
 
     let input_refs: Vec<&LocalIdMapTerminalDwa> = inputs.iter().collect();
     let id_map_refs: Vec<&InternalIdMap> = input_refs.iter().map(|input| &input.id_map).collect();
-    let (global_id_map, _) =
+    let (global_id_map, direct_local_to_global_token_maps) =
         build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
 
-    let mut global_nwa = NWA::new(
-        global_id_map.num_tsids(),
-        global_id_map.max_internal_token_id(),
-    );
-    let mut global_body = global_nwa.body();
-
-    for local in &inputs {
-        let mut nwa = local.dwa.to_nwa();
-        let tsid_map = build_local_to_global_tsid_map(&local.id_map, &global_id_map);
-        let token_map = build_local_to_global_token_map(&local.id_map, &global_id_map);
-        remap_nwa_with_maps(
-            &mut nwa,
-            &tsid_map,
-            &token_map,
-            global_id_map.num_tsids() as usize,
+    let pre_minimize = try_merge_disjoint_token_domain_dwas(
+        &inputs,
+        &global_id_map,
+        direct_local_to_global_token_maps.as_ref(),
+        max_token_id,
+    )
+    .unwrap_or_else(|| {
+        let mut global_nwa = NWA::new(
+            global_id_map.num_tsids(),
+            global_id_map.max_internal_token_id(),
         );
-        global_body = global_nwa.union_in_place(&nwa, &global_body);
-    }
-    global_nwa.set_start_states(global_body.start_states);
+        let mut global_body = global_nwa.body();
 
-    let det = determinize(&global_nwa)
-        .expect("merge terminal NWA determinization failed");
-    let dwa = minimize(&det);
+        for local in &inputs {
+            let mut nwa = local.dwa.to_nwa();
+            let tsid_map = build_local_to_global_tsid_map(&local.id_map, &global_id_map);
+            let token_map = build_local_to_global_token_map(&local.id_map, &global_id_map);
+            remap_nwa_with_maps(
+                &mut nwa,
+                &tsid_map,
+                &token_map,
+                global_id_map.num_tsids() as usize,
+            );
+            global_body = global_nwa.union_in_place(&nwa, &global_body);
+        }
+        global_nwa.set_start_states(global_body.start_states);
+        determinize(&global_nwa).expect("merge terminal NWA determinization failed")
+    });
+    let dwa = minimize(&pre_minimize);
 
     LocalIdMapTerminalDwa {
         id_map: global_id_map,
@@ -786,4 +976,78 @@ fn remap_weight_general(
     }
 
     finalize_weight_map(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn singleton_weight(token: u32) -> Weight {
+        Weight::from_per_tsid_token_sets(std::iter::once((
+            0,
+            RangeSetBlaze::from_iter(std::iter::once(token..=token)),
+        )))
+    }
+
+    fn generic_union(inputs: &[DWA]) -> DWA {
+        let mut nwa = NWA::new(1, 2);
+        let mut body = nwa.body();
+        for input in inputs {
+            let branch = input.to_nwa();
+            body = nwa.union_in_place(&branch, &body);
+        }
+        nwa.set_start_states(body.start_states);
+        determinize(&nwa).expect("test NWA should determinize")
+    }
+
+    fn all_words(labels: &[i32], max_len: usize) -> Vec<Vec<i32>> {
+        let mut words = vec![Vec::new()];
+        let mut frontier = vec![Vec::new()];
+        for _ in 0..max_len {
+            let mut next = Vec::new();
+            for prefix in frontier {
+                for &label in labels {
+                    let mut word = prefix.clone();
+                    word.push(label);
+                    words.push(word.clone());
+                    next.push(word);
+                }
+            }
+            frontier = next;
+        }
+        words
+    }
+
+    #[test]
+    fn direct_disjoint_union_matches_generic_subset_determinization() {
+        let left_weight = singleton_weight(0);
+        let mut left = DWA::new(1, 1);
+        let left_mid = left.add_state();
+        let left_end = left.add_state();
+        left.add_transition(left.start_state(), 7, left_mid, left_weight.clone());
+        left.add_transition(left_mid, 8, left_end, left_weight.clone());
+        left.set_final_weight(left_mid, left_weight.clone());
+        left.set_final_weight(left_end, left_weight);
+
+        let right_weight = singleton_weight(1);
+        let mut right = DWA::new(1, 1);
+        let right_mid = right.add_state();
+        let right_end = right.add_state();
+        right.add_transition(right.start_state(), 7, right_mid, right_weight.clone());
+        right.add_transition(right_mid, 9, right_end, right_weight.clone());
+        right.set_final_weight(right_mid, right_weight.clone());
+        right.set_final_weight(right_end, right_weight);
+
+        let inputs = vec![left, right];
+        let direct = direct_union_disjoint_token_domain_dwas(&inputs);
+        let generic = generic_union(&inputs);
+
+        for word in all_words(&[7, 8, 9], 3) {
+            assert_eq!(
+                direct.eval_word(&word),
+                generic.eval_word(&word),
+                "word={word:?}"
+            );
+        }
+    }
 }
