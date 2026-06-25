@@ -303,23 +303,32 @@ fn determinize_impl(
                     nwa.states()[*target as usize].epsilons.is_empty()
                 });
             if direct_epsilon_free_targets {
-                let mut by_target: FxHashMap<u32, SmallVec<[Weight; 2]>> = FxHashMap::default();
-                for (target, weight) in target_contributions {
-                    by_target.entry(target).or_default().push(weight);
-                }
-                let mut next_key: Vec<(u32, Weight)> = by_target
-                    .into_iter()
-                    .map(|(target, weights)| (target, Weight::union_all(weights.iter())))
-                    .filter(|(_, weight)| !weight.is_empty())
-                    .collect();
-                if next_key.is_empty() {
-                    continue;
-                }
-                next_key.sort_unstable_by_key(|(target, _)| *target);
-                let edge_weight = Weight::union_all(next_key.iter().map(|(_, weight)| weight));
-                if edge_weight.is_empty() {
-                    continue;
-                }
+                let (mut next_key, edge_weight) = if target_contributions.len() == 1 {
+                    let (target, weight) = target_contributions.into_iter().next().unwrap();
+                    if weight.is_empty() {
+                        continue;
+                    }
+                    (vec![(target, weight.clone())], weight)
+                } else {
+                    let mut by_target: FxHashMap<u32, SmallVec<[Weight; 2]>> = FxHashMap::default();
+                    for (target, weight) in target_contributions {
+                        by_target.entry(target).or_default().push(weight);
+                    }
+                    let mut next_key: Vec<(u32, Weight)> = by_target
+                        .into_iter()
+                        .map(|(target, weights)| (target, Weight::union_all(weights.iter())))
+                        .filter(|(_, weight)| !weight.is_empty())
+                        .collect();
+                    if next_key.is_empty() {
+                        continue;
+                    }
+                    next_key.sort_unstable_by_key(|(target, _)| *target);
+                    let edge_weight = Weight::union_all(next_key.iter().map(|(_, weight)| weight));
+                    if edge_weight.is_empty() {
+                        continue;
+                    }
+                    (next_key, edge_weight)
+                };
                 let edge_complement = edge_weight.complement();
                 if !edge_complement.is_empty() {
                     for (_, weight) in &mut next_key {
@@ -659,6 +668,21 @@ mod tests {
 
         let dwa = determinize(&nwa).unwrap();
         assert_eq!(dwa.eval_word(&[7]), tokens(0..=6));
+    }
+
+    #[test]
+    fn direct_single_epsilon_free_target_matches_generic_determinization() {
+        let mut nwa = NWA::new(1, 4);
+        let start = nwa.add_state();
+        let accept = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+        nwa.add_transition(start, 7, accept, tokens([0, 1]));
+        nwa.set_final_weight(accept, tokens([0, 1]));
+
+        let direct = determinize_impl(&nwa, true).unwrap();
+        let generic = determinize_impl(&nwa, false).unwrap();
+        assert_eq!(bincode::serialize(&direct).unwrap(), bincode::serialize(&generic).unwrap());
+        assert_eq!(direct.eval_word(&[7]), tokens([0, 1]));
     }
 
     #[test]
