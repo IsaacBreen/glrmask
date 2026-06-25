@@ -210,7 +210,12 @@ impl<T: WeightRefs> MappedArtifact<T> {
         // L1's preceding exact state quotient is a complete row distinction
         // proof for this terminal relation. Exact token merging preserves every
         // differing row bit, so a later TSID merge cannot succeed.
-        let plan = self.plan_dimensions_compaction_with_options(false, true, true, true);
+        //
+        // Keep the exact token classes in first-occurrence order. For an L1
+        // terminal relation that order follows the byte-sorted vocabulary's
+        // local lexer topology; the generic sketch layout both costs extra work
+        // and can split those local runs into more token ranges.
+        let plan = self.plan_dimensions_compaction_with_options(false, false, true, true);
         self.apply_compaction_plan_with_stats(&plan)
     }
 
@@ -220,7 +225,7 @@ impl<T: WeightRefs> MappedArtifact<T> {
     }
 
     pub(crate) fn compact_dimensions_fast_l1(&mut self) -> CompactReport {
-        let plan = self.plan_dimensions_compaction_with_options(false, true, true, true);
+        let plan = self.plan_dimensions_compaction_with_options(false, false, true, true);
         self.apply_compaction_plan(&plan)
     }
 
