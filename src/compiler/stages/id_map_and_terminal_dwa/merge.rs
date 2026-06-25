@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
+use rustc_hash::FxHashMap;
 
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::minimize::minimize;
@@ -581,8 +582,8 @@ fn remap_nwa_with_maps(
     local_to_global_tokens: &[Vec<u32>],
     global_tsid_count: usize,
 ) {
-    let mut weight_cache = HashMap::<usize, Weight>::new();
-    let mut token_cache = HashMap::<usize, Arc<RangeSetBlaze<u32>>>::new();
+    let mut weight_cache = FxHashMap::<usize, Weight>::default();
+    let mut token_cache = FxHashMap::<usize, Arc<RangeSetBlaze<u32>>>::default();
 
     for state in  nwa.states_mut() {
         if let Some(final_weight) = state.final_weight.as_mut() {
@@ -634,8 +635,8 @@ fn remap_weight_cached(
     local_to_global_tsids: &[Vec<u32>],
     local_to_global_tokens: &[Vec<u32>],
     global_tsid_count: usize,
-    cache: &mut HashMap<usize, Weight>,
-    token_cache: &mut HashMap<usize, Arc<RangeSetBlaze<u32>>>,
+    cache: &mut FxHashMap<usize, Weight>,
+    token_cache: &mut FxHashMap<usize, Arc<RangeSetBlaze<u32>>>,
 ) -> Weight {
     let ptr = Arc::as_ptr(&weight.0) as usize;
     if let Some(cached) = cache.get(&ptr) {
@@ -657,7 +658,7 @@ fn remap_weight_general(
     local_to_global_tsids: &[Vec<u32>],
     local_to_global_tokens: &[Vec<u32>],
     global_tsid_count: usize,
-    token_cache: &mut HashMap<usize, Arc<RangeSetBlaze<u32>>>,
+    token_cache: &mut FxHashMap<usize, Arc<RangeSetBlaze<u32>>>,
 ) -> Weight {
     if weight.is_empty() {
         return weight.clone();
