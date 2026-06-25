@@ -307,21 +307,36 @@ fn prune_dead_weights() {
     });
 }
 
+/// Count a fresh interner insertion and claim the next global sweep exactly once.
+///
+/// A plain `store(0)` after crossing the threshold lets every racing producer
+/// observe the stale high count and run an expensive `DashMap::retain`. The CAS
+/// makes the reset itself the cleanup claim; losing threads continue immediately.
+#[inline]
+fn claim_interner_cleanup(counter: &AtomicUsize) -> bool {
+    let previous = counter.fetch_add(1, Ordering::Relaxed);
+    if previous + 1 < INTERNER_CLEANUP_INTERVAL {
+        return false;
+    }
+
+    counter
+        .compare_exchange(
+            previous + 1,
+            0,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        )
+        .is_ok()
+}
+
 fn maybe_cleanup_token_sets() {
-    if TOKEN_INSERTS_SINCE_CLEANUP.fetch_add(1, Ordering::Relaxed) + 1
-        >= INTERNER_CLEANUP_INTERVAL
-    {
-        // Best-effort: swap counter to 0 and prune. Racy but harmless.
-        TOKEN_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
+    if claim_interner_cleanup(&TOKEN_INSERTS_SINCE_CLEANUP) {
         prune_dead_token_sets();
     }
 }
 
 fn maybe_cleanup_weights() {
-    if WEIGHT_INSERTS_SINCE_CLEANUP.fetch_add(1, Ordering::Relaxed) + 1
-        >= INTERNER_CLEANUP_INTERVAL
-    {
-        WEIGHT_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
+    if claim_interner_cleanup(&WEIGHT_INSERTS_SINCE_CLEANUP) {
         prune_dead_weights();
     }
 }
@@ -2431,6 +2446,28 @@ mod tests {
     fn weight_for_tsid(tsid: u32, ranges: &[(u32, u32)]) -> Weight {
         let token_set = rangeset_from_ranges(ranges.iter().map(|(start, end)| *start..=*end));
         Weight::from_token_set_for_tsid(tsid, token_set)
+    }
+
+    #[test]
+    fn interner_cleanup_threshold_has_one_concurrent_claimant() {
+        use std::sync::{Arc, Barrier};
+
+        let counter = Arc::new(AtomicUsize::new(INTERNER_CLEANUP_INTERVAL - 1));
+        let barrier = Arc::new(Barrier::new(16));
+        let workers: Vec<_> = (0..16)
+            .map(|_| {
+                let counter = Arc::clone(&counter);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    usize::from(claim_interner_cleanup(&counter))
+                })
+            })
+            .collect();
+        let claims: usize = workers.into_iter().map(|worker| worker.join().unwrap()).sum();
+
+        assert_eq!(claims, 1);
+        assert!(counter.load(Ordering::Relaxed) < 16);
     }
 
     #[test]
