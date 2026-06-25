@@ -11,6 +11,7 @@ use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::super::disallowed_follows::normalize_disallowed_follows;
@@ -50,7 +51,7 @@ struct Dfa {
     byte_to_class: [u8; 256],
     /// Transposed transition table: `trans_by_class[class * num_states + state]`.
     /// For a given byte class, all state transitions are contiguous in memory.
-    trans_by_class: Vec<u32>,
+    trans_by_class: Arc<[u32]>,
     finalizers: Vec<SmallVec<[usize; 4]>>,
     is_dead_end: Vec<bool>,
     num_groups: usize,
@@ -58,7 +59,7 @@ struct Dfa {
     completion_hash: Vec<u64>,
     none_completion_hash: u64,
     /// Per-state bitset: which bytes cause a self-loop (transition back to same state).
-    self_loop_bytes: Vec<U8Set>,
+    self_loop_bytes: Arc<[U8Set]>,
     disallowed_follows: Vec<BitSet>,
 }
 
@@ -71,25 +72,82 @@ struct Dfa {
 pub struct SharedVocabDfaBase {
     byte_to_class: [u8; 256],
     pub num_classes: usize,
-    trans_by_class: Vec<u32>,
+    trans_by_class: Arc<[u32]>,
     /// Row-major transition table: `trans_by_state_class[state * num_classes + class]`.
     /// State equivalence walks one state through a token at a time, so it needs
     /// this complementary locality. Both layouts share the same exact classes.
-    trans_by_state_class: Vec<u32>,
-    self_loop_bytes: Vec<U8Set>,
+    trans_by_state_class: Arc<[u32]>,
+    self_loop_bytes: Arc<[U8Set]>,
     none_completion_hash: u64,
-    transition_ptr: usize,
-    transition_len: usize,
-    /// Hash of the full transition table used to build this cache.
-    /// Used to detect incompatible DFAs that happen to share the same state count.
-    transition_hash: u64,
+    /// Exact source table for pointer-fast and value-exact compatibility checks.
+    source_transitions: Arc<[u32]>,
+}
+
+fn compute_byte_classes_and_self_loops(
+    dfa: &super::super::compat::FlatDfa,
+) -> ([u8; 256], Vec<U8Set>) {
+    // Exact byte-class discovery already requires a full DFA-table pass. Build
+    // self-loop masks in that same pass rather than paying for another scan.
+    let mut column_hashes = [0u64; 256];
+    let mut self_loop_bytes = Vec::with_capacity(dfa.states.len());
+    for state in 0..dfa.states.len() {
+        let mut self_loops = U8Set::empty();
+        let base = state * 256;
+        for byte in 0..256usize {
+            let target = dfa.transitions[base + byte];
+            column_hashes[byte] = column_hashes[byte]
+                .wrapping_mul(0x517cc1b727220a95)
+                .wrapping_add(target as u64);
+            if target == state as u32 {
+                self_loops.insert(byte as u8);
+            }
+        }
+        self_loop_bytes.push(self_loops);
+    }
+
+    let mut sorted_indices: [u8; 256] = std::array::from_fn(|i| i as u8);
+    sorted_indices.sort_unstable_by_key(|&byte| column_hashes[byte as usize]);
+    let mut byte_to_class = [0u8; 256];
+    let mut next_class = 0u8;
+    byte_to_class[sorted_indices[0] as usize] = 0;
+    for i in 1..256 {
+        let current = sorted_indices[i];
+        let hash = column_hashes[current as usize];
+        if hash != column_hashes[sorted_indices[i - 1] as usize] {
+            next_class += 1;
+            byte_to_class[current as usize] = next_class;
+            continue;
+        }
+        let mut assigned = false;
+        for j in (0..i).rev() {
+            let previous = sorted_indices[j];
+            if column_hashes[previous as usize] != hash {
+                break;
+            }
+            let same = (0..dfa.states.len()).all(|state| {
+                let base = state * 256;
+                dfa.transitions[base + current as usize]
+                    == dfa.transitions[base + previous as usize]
+            });
+            if same {
+                byte_to_class[current as usize] = byte_to_class[previous as usize];
+                assigned = true;
+                break;
+            }
+        }
+        if !assigned {
+            next_class += 1;
+            byte_to_class[current as usize] = next_class;
+        }
+    }
+    (byte_to_class, self_loop_bytes)
 }
 
 impl SharedVocabDfaBase {
     /// Build from a FlatDfa. Called lazily via OnceLock on first use.
     pub fn build_from_dfa(dfa: &super::super::compat::FlatDfa) -> Self {
         let num_dfa_states = dfa.states.len();
-        let byte_to_class = compute_byte_classes(dfa);
+        let (byte_to_class, self_loop_bytes) = compute_byte_classes_and_self_loops(dfa);
         let num_classes = byte_to_class
             .iter()
             .copied()
@@ -110,20 +168,12 @@ impl SharedVocabDfaBase {
         // 51 column-major passes for trans_by_class + 1 pass for self_loop_bytes.
         let mut trans_by_class = vec![NONE; num_classes * num_dfa_states];
         let mut trans_by_state_class = vec![NONE; num_classes * num_dfa_states];
-        let mut self_loop_bytes = Vec::with_capacity(num_dfa_states);
         for s in 0..dfa.states.len() {
             for c in 0..num_classes {
                 let target = dfa.trans(s, class_repr[c] as usize);
                 trans_by_class[c * num_dfa_states + s] = target;
                 trans_by_state_class[s * num_classes + c] = target;
             }
-            let mut bits = U8Set::empty();
-            for (byte_idx, &target) in dfa.transitions_for(s).iter().enumerate() {
-                if target == s as u32 {
-                    bits.insert(byte_idx as u8);
-                }
-            }
-            self_loop_bytes.push(bits);
         }
 
         let none_completion_hash = {
@@ -132,26 +182,16 @@ impl SharedVocabDfaBase {
             h.finish()
         };
 
-        let transition_hash = {
-            let mut h = new_hasher();
-            for s in 0..dfa.states.len() {
-                for &t in dfa.transitions_for(s) {
-                    h.write_u32(t);
-                }
-            }
-            h.finish()
-        };
+
 
         SharedVocabDfaBase {
             byte_to_class,
             num_classes,
-            trans_by_class,
-            trans_by_state_class,
-            self_loop_bytes,
+            trans_by_class: Arc::from(trans_by_class),
+            trans_by_state_class: Arc::from(trans_by_state_class),
+            self_loop_bytes: Arc::from(self_loop_bytes),
             none_completion_hash,
-            transition_ptr: dfa.transitions.as_ptr() as usize,
-            transition_len: dfa.transitions.len(),
-            transition_hash,
+            source_transitions: Arc::clone(&dfa.transitions),
         }
     }
 
@@ -178,20 +218,12 @@ impl SharedVocabDfaBase {
         if self.trans_by_class.len() != self.num_classes * num_dfa_states
             || self.trans_by_state_class.len() != self.num_classes * num_dfa_states
             || self.self_loop_bytes.len() != num_dfa_states
-            || self.transition_len != dfa.transitions.len()
+            || self.source_transitions.len() != dfa.transitions.len()
         {
             return false;
         }
-        if self.transition_ptr == dfa.transitions.as_ptr() as usize {
-            return true;
-        }
-        let mut h = new_hasher();
-        for s in 0..num_dfa_states {
-            for &t in dfa.transitions_for(s) {
-                h.write_u32(t);
-            }
-        }
-        h.finish() == self.transition_hash
+        Arc::ptr_eq(&self.source_transitions, &dfa.transitions)
+            || self.source_transitions.as_ref() == dfa.transitions.as_ref()
     }
 }
 
@@ -458,7 +490,12 @@ fn build_dfa_with_group_filter(
     let (byte_to_class, trans_by_class, self_loop_bytes, none_completion_hash) =
         if let Some(base) = compatible_shared_base {
             let btc = byte_to_class_override.copied().unwrap_or(base.byte_to_class);
-            (btc, base.trans_by_class.clone(), base.self_loop_bytes.clone(), base.none_completion_hash)
+            (
+                btc,
+                Arc::clone(&base.trans_by_class),
+                Arc::clone(&base.self_loop_bytes),
+                base.none_completion_hash,
+            )
         } else {
             let btc = byte_to_class_override.copied().unwrap_or_else(|| compute_byte_classes(dfa));
             let num_classes = btc
@@ -502,7 +539,7 @@ fn build_dfa_with_group_filter(
                 h.finish()
             };
 
-            (btc, tbc, slb, nch)
+            (btc, Arc::from(tbc), Arc::from(slb), nch)
         };
 
     Dfa {
@@ -2157,14 +2194,14 @@ fn compact_dfa_for_tokens<S: AsRef<[u8]>>(
         },
         num_states: compact_num,
         byte_to_class: dfa.byte_to_class,
-        trans_by_class: compact_trans,
+        trans_by_class: Arc::from(compact_trans),
         finalizers: compact_finalizers,
         is_dead_end: compact_is_dead_end,
         num_groups: dfa.num_groups,
         possible_future_groups: compact_pfg,
         completion_hash: compact_completion_hash,
         none_completion_hash: dfa.none_completion_hash,
-        self_loop_bytes: compact_self_loop,
+        self_loop_bytes: Arc::from(compact_self_loop),
         disallowed_follows: dfa.disallowed_follows.clone(),
     };
 
@@ -2266,6 +2303,14 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     let mut used_trie_walk = false;
     let mut trie_walk_stats = TrieWalkChunkStats::default();
 
+    // A single Rayon worker previously rebuilt the full scratch arena for every
+    // state batch. The arena is deliberately reset by the signature routines,
+    // so one owner can safely reuse it across all batches without altering the
+    // parallel path or the refinement semantics.
+    let single_threaded = rayon::current_num_threads() == 1;
+    let mut single_thread_scratch = single_threaded.then(|| Scratch::new(batch_size, num_groups));
+    let mut single_thread_trie = single_threaded.then(TrieWalkState::new);
+
     for (_batch_index, batch_start) in (0..num_initial_states).step_by(batch_size).enumerate() {
         if active_indices.is_empty() {
             break;
@@ -2286,45 +2331,64 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
             });
             sort_tokens_ms += elapsed_ms(sort_started_at);
             let signature_started_at = profiling.then(Instant::now);
-            let chunk_results: Vec<(Vec<(usize, u64)>, TrieWalkChunkStats)> = sorted_indices
-                .par_chunks(TRIE_CHUNK_SIZE)
-                .map_init(
-                    || {
-                        (
-                            Scratch::new(batch.len(), num_groups),
-                            TrieWalkState::new(),
-                        )
-                    },
-                    |(scratch, trie_state), chunk| {
-                        trie_walk_chunk_signatures(
-                            dfa_ref,
-                            strings,
-                            chunk,
-                            batch,
-                            state_group_size,
-                            scratch,
-                            trie_state,
-                            profiling,
-                        )
-                    },
-                )
-                .collect();
-            signature_ms += elapsed_ms(signature_started_at);
             let mut flat_results = Vec::with_capacity(sorted_indices.len());
-            for (chunk_result, chunk_stats) in chunk_results {
+            if let (Some(scratch), Some(trie_state)) = (
+                single_thread_scratch.as_mut(),
+                single_thread_trie.as_mut(),
+            ) {
+                let (chunk_result, chunk_stats) = trie_walk_chunk_signatures(
+                    dfa_ref,
+                    strings,
+                    &sorted_indices,
+                    batch,
+                    state_group_size,
+                    scratch,
+                    trie_state,
+                    profiling,
+                );
                 flat_results.extend(chunk_result);
                 if profiling {
                     trie_walk_stats.add_assign(chunk_stats);
                 }
+            } else {
+                let chunk_results: Vec<(Vec<(usize, u64)>, TrieWalkChunkStats)> = sorted_indices
+                    .par_chunks(TRIE_CHUNK_SIZE)
+                    .map_init(
+                        || {
+                            (
+                                Scratch::new(batch.len(), num_groups),
+                                TrieWalkState::new(),
+                            )
+                        },
+                        |(scratch, trie_state), chunk| {
+                            trie_walk_chunk_signatures(
+                                dfa_ref,
+                                strings,
+                                chunk,
+                                batch,
+                                state_group_size,
+                                scratch,
+                                trie_state,
+                                profiling,
+                            )
+                        },
+                    )
+                    .collect();
+                for (chunk_result, chunk_stats) in chunk_results {
+                    flat_results.extend(chunk_result);
+                    if profiling {
+                        trie_walk_stats.add_assign(chunk_stats);
+                    }
+                }
             }
+            signature_ms += elapsed_ms(signature_started_at);
             flat_results
         } else {
             let signature_started_at = profiling.then(Instant::now);
-            let result = active_indices
-                .par_iter()
-                .map_init(
-                    || Scratch::new(batch.len(), num_groups),
-                    |scratch, &token_idx| {
+            let result = if let Some(scratch) = single_thread_scratch.as_mut() {
+                active_indices
+                    .iter()
+                    .map(|&token_idx| {
                         let token = strings[token_idx].as_ref();
                         (
                             token_idx,
@@ -2337,9 +2401,30 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
                                 false,
                             ),
                         )
-                    },
-                )
-                .collect();
+                    })
+                    .collect()
+            } else {
+                active_indices
+                    .par_iter()
+                    .map_init(
+                        || Scratch::new(batch.len(), num_groups),
+                        |scratch, &token_idx| {
+                            let token = strings[token_idx].as_ref();
+                            (
+                                token_idx,
+                                token_signature(
+                                    dfa_ref,
+                                    token,
+                                    batch,
+                                    state_group_size,
+                                    scratch,
+                                    false,
+                                ),
+                            )
+                        },
+                    )
+                    .collect()
+            };
             signature_ms += elapsed_ms(signature_started_at);
             result
         };
@@ -2521,5 +2606,12 @@ mod shared_base_tests {
             }
         }
         assert!(base.is_compatible_with_dfa(&dfa));
+
+        let independently_allocated = FlatDfa {
+            states: dfa.states.clone(),
+            start_state: dfa.start_state,
+            transitions: Arc::from(dfa.transitions.to_vec()),
+        };
+        assert!(base.is_compatible_with_dfa(&independently_allocated));
     }
 }
