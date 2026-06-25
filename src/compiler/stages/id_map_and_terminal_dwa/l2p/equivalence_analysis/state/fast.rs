@@ -4,6 +4,7 @@
 //! Any coarse max-length reduction happens in combined equivalence analysis.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Mutex;
 
 use rayon::prelude::*;
 
@@ -18,6 +19,76 @@ struct WalkFrame {
     state: u32,
     dead_at_depth: Option<usize>,
     changes_len: usize,
+}
+
+struct StateBatchScratch {
+    walk_frames: Vec<WalkFrame>,
+    positions: Vec<i32>,
+    active_bits: Vec<u64>,
+    changes: Vec<(usize, i32)>,
+}
+
+impl StateBatchScratch {
+    fn new(num_groups: usize) -> Self {
+        Self {
+            walk_frames: Vec::new(),
+            positions: vec![-1; num_groups],
+            active_bits: vec![0u64; bit_words(num_groups)],
+            changes: Vec::new(),
+        }
+    }
+}
+
+struct StateBatchScratchPool {
+    enabled: bool,
+    available: Mutex<Vec<StateBatchScratch>>,
+}
+
+impl StateBatchScratchPool {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            available: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn checkout(&self, num_groups: usize) -> StateBatchScratchLease<'_> {
+        let scratch = if self.enabled {
+            self.available
+                .lock()
+                .unwrap()
+                .pop()
+                .unwrap_or_else(|| StateBatchScratch::new(num_groups))
+        } else {
+            StateBatchScratch::new(num_groups)
+        };
+        debug_assert_eq!(scratch.positions.len(), num_groups);
+        StateBatchScratchLease {
+            pool: self,
+            scratch: Some(scratch),
+        }
+    }
+}
+
+struct StateBatchScratchLease<'a> {
+    pool: &'a StateBatchScratchPool,
+    scratch: Option<StateBatchScratch>,
+}
+
+impl StateBatchScratchLease<'_> {
+    fn scratch_mut(&mut self) -> &mut StateBatchScratch {
+        self.scratch.as_mut().expect("state scratch lease must be populated")
+    }
+}
+
+impl Drop for StateBatchScratchLease<'_> {
+    fn drop(&mut self) {
+        if self.pool.enabled {
+            if let Some(scratch) = self.scratch.take() {
+                self.pool.available.lock().unwrap().push(scratch);
+            }
+        }
+    }
 }
 
 #[inline(always)]
@@ -686,6 +757,10 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     let mut stable_batches = 0usize;
     let mut tokens_tested = 0usize;
     let mut batches_processed = 0usize;
+    let state_batch_scratch_pool_enabled = std::env::var("GLRMASK_DISABLE_STATE_EQUIV_SCRATCH_POOL")
+        .map(|value| value != "1")
+        .unwrap_or(true);
+    let batch_scratch_pool = StateBatchScratchPool::new(state_batch_scratch_pool_enabled);
     for batch_indices in &batches {
         if active_indices.is_empty() {
             break;
@@ -743,15 +818,8 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         let mut batch_hashes: Vec<(usize, u128)> = active_indices
             .par_iter()
             .map_init(
-                || {
-                    (
-                        Vec::<WalkFrame>::new(),
-                        vec![-1; num_groups],
-                        vec![0u64; bit_words(num_groups)],
-                        Vec::<(usize, i32)>::new(),
-                    )
-                },
-                |scratch, &state_idx| {
+                || batch_scratch_pool.checkout(num_groups),
+                |lease, &state_idx| {
                     let state = states[state_idx] as u32;
                     let mut hash_delta: u128 = 0;
                     let state_ct_base = (state as usize) * num_bc;
@@ -777,7 +845,11 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                             live_ranges.push((range_start, range_end));
                         }
                     }
-                    let (walk_frames, positions, active_bits, changes) = scratch;
+                    let scratch = lease.scratch_mut();
+                    let walk_frames = &mut scratch.walk_frames;
+                    let positions = &mut scratch.positions;
+                    let active_bits = &mut scratch.active_bits;
+                    let changes = &mut scratch.changes;
 
                     for (range_start, range_end) in live_ranges {
                         if range_start >= range_end {
