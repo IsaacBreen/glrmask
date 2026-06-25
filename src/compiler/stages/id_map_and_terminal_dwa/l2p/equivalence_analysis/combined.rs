@@ -250,13 +250,39 @@ fn skip_max_length_for_partition(partition_label: &str) -> bool {
 }
 
 #[inline]
+fn direct_refinement_work_is_no_larger(
+    direct_token_bytes: usize,
+    max_token_len: usize,
+    active_byte_count: usize,
+) -> bool {
+    direct_token_bytes <= max_token_len.saturating_mul(active_byte_count)
+}
+
+#[inline]
 fn should_skip_max_length_for_partition(
     partition_label: &str,
     initial_state_count: usize,
     projected_by_global: bool,
+    direct_token_bytes: usize,
+    max_token_len: usize,
+    active_byte_count: usize,
 ) -> bool {
-    skip_max_length_for_partition(partition_label)
+    if skip_max_length_for_partition(partition_label)
         || (projected_by_global && initial_state_count <= 8192)
+    {
+        return true;
+    }
+
+    // Both routes are exact. The k-bounded prepass performs up to one
+    // state-transition refinement for every (length, active-byte) pair;
+    // direct finite-vocabulary refinement must at least read every token byte.
+    // Prefer the direct route when its input bound is no larger, avoiding a
+    // prepass that cannot amortize its own full-DFA scans.
+    direct_refinement_work_is_no_larger(
+        direct_token_bytes,
+        max_token_len,
+        active_byte_count,
+    )
 }
 
 const EXACT_REP_CONFIRMATION_MIN_STATES: usize = 2_000;
@@ -389,11 +415,20 @@ fn analyze_equivalences_impl(
             relevant_bytes[byte as usize] = true;
         }
     }
+    let direct_token_bytes: usize = dedup
+        .representative_token_bytes
+        .iter()
+        .map(|token| token.len())
+        .sum();
+    let active_byte_count = relevant_bytes.iter().filter(|&&active| active).count();
     let projected_by_global = prepared.initial_states.len() < tokenizer.num_states() as usize;
     let max_length_skipped = should_skip_max_length_for_partition(
         partition_label,
         prepared.initial_states.len(),
         projected_by_global,
+        direct_token_bytes,
+        max_token_len,
+        active_byte_count,
     );
     let pipeline_config = resolve_l2p_pipeline_config(!max_length_skipped);
     let (pre_state_map, pipeline_profile) = run_state_equivalence_pipeline(
@@ -507,4 +542,19 @@ fn analyze_equivalences_impl(
             exact_rep_confirmation_used,
         },
     )
+}
+
+#[cfg(test)]
+mod prepass_selection_tests {
+    use super::direct_refinement_work_is_no_larger;
+
+    #[test]
+    fn selects_direct_refinement_when_byte_bounded_prepass_cannot_amortize() {
+        // Small vocabulary with many relevant bytes: direct token walks are
+        // cheaper than a full k-bounded byte refinement per lexer state.
+        assert!(direct_refinement_work_is_no_larger(100, 10, 41));
+        // Larger vocabulary over a smaller byte alphabet amortizes the exact
+        // prepass and should retain it.
+        assert!(!direct_refinement_work_is_no_larger(900, 14, 19));
+    }
 }
