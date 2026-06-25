@@ -17,7 +17,6 @@ use super::shared::{
     TokenDedup,
     expand_vocab_classes,
     hash_byte_class_seq,
-    representative_tokens_for_vocab_classes,
     tokenizer_group_count,
 };
 use super::state::fast as state_equivalence_analysis;
@@ -449,28 +448,18 @@ fn analyze_equivalences_impl(
     let normalized_disallowed_follows =
         normalize_disallowed_follows(tokenizer_group_count(&tokenizer_view), effective_disallowed);
 
-    let vocab_equiv_started_at = Instant::now();
-    let dedup_vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
-        &tokenizer_view,
-        &dedup.representative_token_bytes,
-        &pre_reduced_states,
-        effective_disallowed,
-        Some(&byte_to_class),
-        active_groups,
-        shared_vocab_dfa_cache,
-    );
-    let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
-    let vocab_representative_tokens = representative_tokens_for_vocab_classes(
-        &dedup_vocab_classes,
-        &dedup.representative_token_bytes,
-    );
+    // First finalize state equivalence against every deduplicated token.
+    // A final state representative is indistinguishable from each state it
+    // represents for every token, so token equivalence may then be computed
+    // over only those representatives. This reverses two exact quotients and
+    // avoids classifying tokens over the much larger pre-refinement state set.
     let exact_rep_confirmation_used = pre_reduced_states.len() >= EXACT_REP_CONFIRMATION_MIN_STATES
-        && vocab_representative_tokens.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
+        && dedup.representative_token_bytes.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
     let exact_started_at = Instant::now();
     let reduced_state_reps_for_pre_reduced = if exact_rep_confirmation_used {
         state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
             &tokenizer_view,
-            &vocab_representative_tokens,
+            &dedup.representative_token_bytes,
             &pre_reduced_states,
             &normalized_disallowed_follows,
             None,
@@ -481,13 +470,14 @@ fn analyze_equivalences_impl(
     } else {
         state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
             &tokenizer_view,
-            &vocab_representative_tokens,
+            &dedup.representative_token_bytes,
             &pre_reduced_states,
             &normalized_disallowed_follows,
             compatible_cache,
         )
     };
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
+
     let rep_to_final: BTreeMap<usize, usize> = pre_reduced_states
         .iter()
         .copied()
@@ -501,6 +491,21 @@ fn analyze_equivalences_impl(
             rep_to_final[&pre_rep]
         })
         .collect::<Vec<_>>();
+    let mut final_state_representatives = reduced_state_reps_for_pre_reduced;
+    final_state_representatives.sort_unstable();
+    final_state_representatives.dedup();
+
+    let vocab_equiv_started_at = Instant::now();
+    let dedup_vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
+        &tokenizer_view,
+        &dedup.representative_token_bytes,
+        &final_state_representatives,
+        effective_disallowed,
+        Some(&byte_to_class),
+        active_groups,
+        shared_vocab_dfa_cache,
+    );
+    let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let id_map_finalize_started_at = Instant::now();
     let vocab_classes = expand_vocab_classes(
@@ -546,7 +551,130 @@ fn analyze_equivalences_impl(
 
 #[cfg(test)]
 mod prepass_selection_tests {
-    use super::direct_refinement_work_is_no_larger;
+    use super::*;
+    use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::{
+        FlatDfa, FlatDfaState,
+    };
+    use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::shared::representative_tokens_for_vocab_classes;
+    use std::sync::Arc;
+
+    fn partition_from_representatives<T: Ord + Copy>(
+        values: &[T],
+        representatives: &[T],
+    ) -> BTreeSet<BTreeSet<T>> {
+        let mut by_representative = BTreeMap::<T, BTreeSet<T>>::new();
+        for (&value, &representative) in values.iter().zip(representatives) {
+            by_representative.entry(representative).or_default().insert(value);
+        }
+        by_representative.into_values().collect()
+    }
+
+    fn synthetic_view() -> TokenizerView {
+        let state_count = 5usize;
+        let mut transitions = vec![u32::MAX; state_count * 256];
+        let set = |transitions: &mut [u32], state: usize, byte: u8, target: u32| {
+            transitions[state * 256 + byte as usize] = target;
+        };
+        set(&mut transitions, 0, b'a', 1);
+        set(&mut transitions, 0, b'b', 2);
+        set(&mut transitions, 1, b'a', 1);
+        set(&mut transitions, 1, b'b', 3);
+        set(&mut transitions, 2, b'a', 3);
+        set(&mut transitions, 2, b'b', 2);
+        set(&mut transitions, 3, b'a', 3);
+        set(&mut transitions, 3, b'b', 3);
+        // State 4 is behaviorally identical to state 1.
+        set(&mut transitions, 4, b'a', 4);
+        set(&mut transitions, 4, b'b', 3);
+
+        TokenizerView {
+            flat_dfa: FlatDfa {
+                start_state: 0,
+                transitions: Arc::from(transitions),
+                states: vec![
+                    FlatDfaState {
+                        finalizers: vec![],
+                        possible_future_group_ids: vec![0, 1],
+                    },
+                    FlatDfaState {
+                        finalizers: vec![0],
+                        possible_future_group_ids: vec![0, 1],
+                    },
+                    FlatDfaState {
+                        finalizers: vec![1],
+                        possible_future_group_ids: vec![0, 1],
+                    },
+                    FlatDfaState {
+                        finalizers: vec![0, 1],
+                        possible_future_group_ids: vec![0, 1],
+                    },
+                    FlatDfaState {
+                        finalizers: vec![0],
+                        possible_future_group_ids: vec![0, 1],
+                    },
+                ],
+            },
+        }
+    }
+
+    #[test]
+    fn state_then_vocab_equivalence_matches_vocab_then_state() {
+        let view = synthetic_view();
+        let tokens: Vec<&[u8]> = vec![
+            b"a", b"b", b"aa", b"ab", b"ba", b"bb", b"x", b"y",
+        ];
+        let states: Vec<usize> = (0..view.dfa().states.len()).collect();
+        let byte_to_class = super::super::compat::compute_byte_classes(view.dfa());
+        let disallowed = BTreeMap::<u32, BitSet>::new();
+        let normalized = normalize_disallowed_follows(2, &disallowed);
+
+        let old_vocab = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
+            &view,
+            &tokens,
+            &states,
+            &disallowed,
+            Some(&byte_to_class),
+            None,
+            None,
+        );
+        let old_token_reps = representative_tokens_for_vocab_classes(&old_vocab, &tokens);
+        let old_state_reps =
+            state_equivalence_analysis::find_state_equivalence_classes_with_disallowed(
+                &view,
+                &old_token_reps,
+                &states,
+                &normalized,
+            );
+
+        let reversed_state_reps =
+            state_equivalence_analysis::find_state_equivalence_classes_with_disallowed(
+                &view,
+                &tokens,
+                &states,
+                &normalized,
+            );
+        let final_state_reps: Vec<usize> = {
+            let mut reps = reversed_state_reps.clone();
+            reps.sort_unstable();
+            reps.dedup();
+            reps
+        };
+        let reversed_vocab = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
+            &view,
+            &tokens,
+            &final_state_reps,
+            &disallowed,
+            Some(&byte_to_class),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            partition_from_representatives(&states, &old_state_reps),
+            partition_from_representatives(&states, &reversed_state_reps),
+        );
+        assert_eq!(old_vocab, reversed_vocab);
+    }
 
     #[test]
     fn selects_direct_refinement_when_byte_bounded_prepass_cannot_amortize() {
