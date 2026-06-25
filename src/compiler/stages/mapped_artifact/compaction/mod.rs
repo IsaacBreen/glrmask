@@ -212,6 +212,7 @@ impl PermutationContext {
     }
 }
 
+
 fn legacy_exact_adjacency_proxy_enabled() -> bool {
     // Historical name retained for compatibility.  This is *not* globally
     // exact compaction; it only solves the old adjacency-proxy layout when the
@@ -542,26 +543,34 @@ fn build_default_dimension_compaction(
     };
     let token_order_ms = token_order_started_at.map_or(0.0, elapsed_ms);
 
-    let apply_token_started_at = profile_compaction.then(Instant::now);
-    let (token_compacted_weights, precomputed_token_compaction) =
-        apply_permutations_to_weight_set_with_cache(
-            unique_weights,
-            &identity_perm(num_tsids),
-            &token_perm,
-        );
-    let apply_token_ms = apply_token_started_at.map_or(0.0, elapsed_ms);
-    let token_compacted_refs = weight_refs(&token_compacted_weights);
+    let token_context = PermutationContext::new(&identity_perm(num_tsids), &token_perm);
+    let token_remap_started_at = profile_compaction.then(Instant::now);
+    let token_remaps = build_global_permuted_token_cache(unique_weights, &token_context);
+    let token_remap_ms = token_remap_started_at.map_or(0.0, elapsed_ms);
     let tsid_merge_started_at = profile_compaction.then(Instant::now);
     let (tsid_merge_perm, merged_num_tsids) =
-        build_exact_tsid_merge_permutation(&token_compacted_refs, num_tsids);
+        build_exact_tsid_merge_permutation_with_token_remaps(
+            &original_weight_refs,
+            num_tsids,
+            &token_context,
+            &token_remaps,
+        );
     let tsid_merge_ms = tsid_merge_started_at.map_or(0.0, elapsed_ms);
+
+    // Only ordering merged TSID groups needs token-remapped Weight objects.
+    // When there are no TSID merges, the plan can carry its token remap cache
+    // straight to the final rewrite and materialize every weight exactly once.
+    let needs_token_compacted_weights = merged_num_tsids != num_tsids && use_default_layout;
     let tsid_order_started_at = profile_compaction.then(Instant::now);
-    let tsid_perm = if merged_num_tsids == num_tsids && keep_unmerged_tsid_identity {
-        identity_perm(num_tsids)
-    } else if merged_num_tsids == num_tsids || !use_default_layout {
-        tsid_merge_perm
-    } else {
-        if adaptive_layout {
+    let (tsid_perm, precomputed_token_compaction) = if needs_token_compacted_weights {
+        let (token_compacted_weights, precomputed) =
+            apply_permutations_to_weight_set_with_token_remaps(
+                unique_weights,
+                &identity_perm(num_tsids),
+                &token_perm,
+                token_remaps,
+            );
+        let tsid_perm = if adaptive_layout {
             order_tsid_groups_exact_profile(
                 &token_compacted_weights,
                 tsid_merge_perm,
@@ -575,13 +584,27 @@ fn build_default_dimension_compaction(
                 merged_num_tsids,
                 merged_num_tokens,
             )
-        }
+        };
+        (tsid_perm, precomputed)
+    } else {
+        let tsid_perm = if merged_num_tsids == num_tsids && keep_unmerged_tsid_identity {
+            identity_perm(num_tsids)
+        } else {
+            tsid_merge_perm
+        };
+        (
+            tsid_perm,
+            PrecomputedTokenCompaction {
+                token_remaps,
+                weight_remaps: HashMap::new(),
+            },
+        )
     };
     let tsid_order_ms = tsid_order_started_at.map_or(0.0, elapsed_ms);
 
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][mapped_compaction_default_detail] unique_weights={} num_tsids={} num_tokens={} merged_tokens={} merged_tsids={} token_merge_ms={:.3} token_order_ms={:.3} apply_token_ms={:.3} tsid_merge_ms={:.3} tsid_order_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][mapped_compaction_default_detail] unique_weights={} num_tsids={} num_tokens={} merged_tokens={} merged_tsids={} token_merge_ms={:.3} token_order_ms={:.3} token_remap_ms={:.3} tsid_merge_ms={:.3} tsid_order_ms={:.3} materialized_token_weights={} total_ms={:.3}",
             unique_weights.len(),
             num_tsids,
             num_tokens,
@@ -589,9 +612,10 @@ fn build_default_dimension_compaction(
             merged_num_tsids,
             token_merge_ms,
             token_order_ms,
-            apply_token_ms,
+            token_remap_ms,
             tsid_merge_ms,
             tsid_order_ms,
+            needs_token_compacted_weights,
             elapsed_ms(total_started_at),
         );
     }
@@ -742,6 +766,46 @@ struct TokenProfileWordEvent {
     add: bool,
 }
 
+fn sort_token_profile_word_events(
+    events: &mut Vec<TokenProfileWordEvent>,
+    num_tokens: usize,
+) {
+    // Counting by token position avoids comparison sorting for dense boundary
+    // sets. Event order within a position is intentionally irrelevant: the
+    // sweep processes all removals, then all additions, and bit operations
+    // commute within either phase.
+    let use_counting_sort = events.len() > num_tokens.saturating_mul(2);
+    if !use_counting_sort {
+        events.sort_unstable_by_key(|event| (event.pos, event.add, event.word, event.bit));
+        return;
+    }
+
+    let mut counts = vec![0usize; num_tokens];
+    for event in events.iter() {
+        counts[event.pos] += 1;
+    }
+    let mut offsets = vec![0usize; num_tokens + 1];
+    for position in 0..num_tokens {
+        offsets[position + 1] = offsets[position] + counts[position];
+    }
+    let mut next = offsets[..num_tokens].to_vec();
+    let mut ordered = vec![
+        TokenProfileWordEvent {
+            pos: 0,
+            word: 0,
+            bit: 0,
+            add: false,
+        };
+        events.len()
+    ];
+    for &event in events.iter() {
+        let slot = next[event.pos];
+        ordered[slot] = event;
+        next[event.pos] += 1;
+    }
+    *events = ordered;
+}
+
 fn build_exact_token_merge_permutation_multiword_sweep(
     token_sets: &[Arc<RangeSetBlaze<u32>>],
     num_tokens: usize,
@@ -781,7 +845,7 @@ fn build_exact_token_merge_permutation_multiword_sweep(
 
     // At a boundary, remove old membership before adding new membership. This
     // also makes the behavior match the one-word sweep implementation.
-    events.sort_unstable_by_key(|event| (event.pos, event.add, event.word, event.bit));
+    sort_token_profile_word_events(&mut events, num_tokens);
 
     let mut active_profile = vec![0u64; profile_words];
     let mut profile_to_group = HashMap::<Vec<u64>, u32>::new();
@@ -804,13 +868,19 @@ fn build_exact_token_merge_permutation_multiword_sweep(
             cursor = pos;
         }
 
-        while idx < events.len() && events[idx].pos == pos && !events[idx].add {
-            active_profile[events[idx].word] &= !events[idx].bit;
+        let bucket_start = idx;
+        while idx < events.len() && events[idx].pos == pos {
             idx += 1;
         }
-        while idx < events.len() && events[idx].pos == pos && events[idx].add {
-            active_profile[events[idx].word] |= events[idx].bit;
-            idx += 1;
+        for event in &events[bucket_start..idx] {
+            if !event.add {
+                active_profile[event.word] &= !event.bit;
+            }
+        }
+        for event in &events[bucket_start..idx] {
+            if event.add {
+                active_profile[event.word] |= event.bit;
+            }
         }
     }
 
@@ -926,6 +996,53 @@ fn mix_profile_word(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
+/// Compute the exact TSID merge profile after a token permutation without
+/// first materializing a token-remapped copy of every weight. The materialized
+/// path below exists for TSID ordering; this path is sufficient for exact
+/// merging and preserves the same per-weight context numbering.
+fn build_exact_tsid_merge_permutation_with_token_remaps(
+    weights: &[&Weight],
+    num_tsids: usize,
+    token_context: &PermutationContext,
+    token_remaps: &TokenRemapCache,
+) -> (Vec<u32>, usize) {
+    if num_tsids == 0 {
+        return (Vec::new(), 0);
+    }
+
+    let mut profiles = vec![Vec::<u32>::new(); num_tsids];
+    let mut context = 0u32;
+    for weight in weights {
+        if weight.is_full() || weight.is_empty() {
+            continue;
+        }
+        let mut contexts_by_token_set = HashMap::<Vec<(u32, u32)>, u32>::new();
+        for (tsid_range, token_set) in weight.0.range_values() {
+            let token_set_ptr = Arc::as_ptr(token_set) as usize;
+            let remapped_tokens = if token_context.token_perm_is_identity {
+                token_set.as_ref()
+            } else {
+                token_remaps
+                    .get(&token_set_ptr)
+                    .expect("token plan must remap every source token set")
+            };
+            let key = rangeset_key(remapped_tokens);
+            let token_set_context = *contexts_by_token_set.entry(key).or_insert_with(|| {
+                let current = context;
+                context += 1;
+                current
+            });
+            let start = *tsid_range.start();
+            let end = (*tsid_range.end()).min(num_tsids.saturating_sub(1) as u32);
+            for tsid in start..=end {
+                profiles[tsid as usize].push(token_set_context);
+            }
+        }
+    }
+
+    build_profile_merge_permutation(&profiles)
+}
+
 fn build_exact_tsid_merge_permutation(weights: &[&Weight], num_tsids: usize) -> (Vec<u32>, usize) {
     if num_tsids == 0 {
         return (Vec::new(), 0);
@@ -1025,6 +1142,21 @@ fn apply_permutations_to_weight_set_with_cache(
 ) -> (Vec<Weight>, PrecomputedTokenCompaction) {
     let perm_context = PermutationContext::new(tsid_perm, token_perm);
     let token_remaps = build_global_permuted_token_cache(weights, &perm_context);
+    apply_permutations_to_weight_set_with_token_remaps(
+        weights,
+        tsid_perm,
+        token_perm,
+        token_remaps,
+    )
+}
+
+fn apply_permutations_to_weight_set_with_token_remaps(
+    weights: &[Weight],
+    tsid_perm: &[u32],
+    token_perm: &[u32],
+    token_remaps: TokenRemapCache,
+) -> (Vec<Weight>, PrecomputedTokenCompaction) {
+    let perm_context = PermutationContext::new(tsid_perm, token_perm);
     let empty_cache = TokenRemapCache::new();
     let weight_entries: Vec<(usize, Weight)> = weights
         .iter()
@@ -1061,14 +1193,25 @@ fn apply_permutations_to_weight_refs(
     let direct_weight_remaps = perm_context
         .tsid_perm_is_identity
         .then_some(&precomputed_token_compaction.weight_remaps);
-    let has_missing_weight_remaps = unique_weights.iter().any(|weight| {
-        direct_weight_remaps.is_none_or(|remaps| {
-            !remaps.contains_key(&(Arc::as_ptr(&weight.0) as usize))
-        })
-    });
+    // The plan itself applied the token permutation to these exact source
+    // weights in order to derive the TSID compaction. When TSIDs still need
+    // reordering, reuse that materialized intermediate instead of remapping
+    // every token set a second time.
+    let tsid_only_context = (!perm_context.tsid_perm_is_identity
+        && !perm_context.token_perm_is_identity)
+        .then(|| PermutationContext::new(tsid_perm, &identity_perm(token_perm.len())));
+    let needs_token_fallback = !perm_context.token_perm_is_identity
+        && unique_weights.iter().any(|weight| {
+            let ptr = Arc::as_ptr(&weight.0) as usize;
+            direct_weight_remaps
+                .is_none_or(|remaps| !remaps.contains_key(&ptr))
+                && tsid_only_context
+                    .as_ref()
+                    .is_none_or(|_| !precomputed_token_compaction.weight_remaps.contains_key(&ptr))
+        });
 
     let cache_started_at = profile_compaction.then(Instant::now);
-    let fallback_token_cache = if has_missing_weight_remaps {
+    let fallback_token_cache = if needs_token_fallback {
         build_missing_global_permuted_token_cache(
             unique_weights,
             &perm_context,
@@ -1080,19 +1223,30 @@ fn apply_permutations_to_weight_refs(
     let fallback_cache_ms = cache_started_at.map_or(0.0, elapsed_ms);
 
     let transform_started_at = profile_compaction.then(Instant::now);
+    let empty_token_cache = TokenRemapCache::new();
     let permute_entry = |weight: &Weight| {
         let ptr = Arc::as_ptr(&weight.0) as usize;
-        let new_weight = direct_weight_remaps
-            .and_then(|remaps| remaps.get(&ptr))
-            .cloned()
-            .unwrap_or_else(|| {
-                permute_weight_with_caches(
-                    weight,
-                    &perm_context,
-                    &precomputed_token_compaction.token_remaps,
-                    &fallback_token_cache,
-                )
-            });
+        let new_weight = if let Some(remaps) = direct_weight_remaps
+            && let Some(remapped) = remaps.get(&ptr)
+        {
+            remapped.clone()
+        } else if let Some(tsid_only_context) = &tsid_only_context
+            && let Some(token_remapped) = precomputed_token_compaction.weight_remaps.get(&ptr)
+        {
+            permute_weight_with_caches(
+                token_remapped,
+                tsid_only_context,
+                &empty_token_cache,
+                &empty_token_cache,
+            )
+        } else {
+            permute_weight_with_caches(
+                weight,
+                &perm_context,
+                &precomputed_token_compaction.token_remaps,
+                &fallback_token_cache,
+            )
+        };
         (ptr, new_weight)
     };
     let weight_entries: Vec<(usize, Weight)> = if rayon::current_num_threads() == 1 {
@@ -1434,7 +1588,7 @@ fn overlapping_perm_runs(runs: &[PermRun], start: u32, end: u32) -> &[PermRun] {
 
 fn build_weight_map_from_tsid_tokens(
     tokens_by_tsid: Vec<Option<RangeSetBlaze<u32>>>,
-) -> RangeMapBlaze<u32, Arc<RangeSetBlaze<u32>>> {
+) -> RangeMapBlaze<u32, SharedTokenSet> {
     let mut map = RangeMapBlaze::new();
     let mut run: Option<(u32, u32, RangeSetBlaze<u32>)> = None;
 
@@ -1751,6 +1905,45 @@ mod tests {
             let source_ptr = Arc::as_ptr(source_tokens) as usize;
             assert!(Arc::ptr_eq(cached_tokens, cache.get(&source_ptr).unwrap()));
         }
+    }
+
+    #[test]
+    fn direct_tsid_profiles_match_materialized_token_compaction() {
+        let weights = vec![
+            Weight::from_per_tsid_token_sets([
+                (0, RangeSetBlaze::from_iter([0..=0])),
+                (1, RangeSetBlaze::from_iter([1..=1])),
+                (2, RangeSetBlaze::from_iter([2..=2])),
+                (3, RangeSetBlaze::from_iter([3..=3])),
+            ]),
+            Weight::from_per_tsid_token_sets([
+                (0, RangeSetBlaze::from_iter([0..=1])),
+                (1, RangeSetBlaze::from_iter([0..=1])),
+                (2, RangeSetBlaze::from_iter([2..=3])),
+                (3, RangeSetBlaze::from_iter([2..=3])),
+            ]),
+        ];
+        let tsid_perm = identity_perm(4);
+        let token_perm = vec![0, 0, 1, 1];
+        let token_context = PermutationContext::new(&tsid_perm, &token_perm);
+        let original_refs = weight_refs(&weights);
+        let token_remaps = build_global_permuted_token_cache(&weights, &token_context);
+        let direct = build_exact_tsid_merge_permutation_with_token_remaps(
+            &original_refs,
+            4,
+            &token_context,
+            &token_remaps,
+        );
+
+        let (materialized, _) = apply_permutations_to_weight_set_with_cache(
+            &weights,
+            &tsid_perm,
+            &token_perm,
+        );
+        let materialized_refs = weight_refs(&materialized);
+        let expected = build_exact_tsid_merge_permutation(&materialized_refs, 4);
+
+        assert_eq!(direct, expected);
     }
 
     #[test]

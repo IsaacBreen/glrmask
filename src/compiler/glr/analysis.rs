@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
+use rustc_hash::FxHashSet;
+
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::{GrammarDef, NonterminalID, Rule, Symbol, TerminalID};
 
@@ -275,9 +277,10 @@ impl AnalyzedGrammar {
 pub(crate) fn eliminate_right_recursion(
     rules: &mut Vec<Rule>,
     fresh_nt: &mut impl FnMut() -> NonterminalID,
-) {
+) -> bool {
     // Resolve indirect right recursion by inlining right ends.
     const MAX_INDIRECT_ROUNDS: usize = 200;
+    let mut completed = false;
     for _ in 0..MAX_INDIRECT_ROUNDS {
         let num_nt = max_nt_id(rules) + 1;
         let nullable = compute_nullable(rules, num_nt);
@@ -288,7 +291,10 @@ pub(crate) fn eliminate_right_recursion(
                 let to = cycle[1 % cycle.len()];
                 inline_right_end(rules, from, to, &nullable);
             }
-            None => break,
+            None => {
+                completed = true;
+                break;
+            }
         }
     }
 
@@ -306,6 +312,7 @@ pub(crate) fn eliminate_right_recursion(
     if !rr_nts.is_empty() {
         resolve_direct_rr_batched(rules, &rr_nts);
     }
+    completed
 }
 
 fn max_nt_id(rules: &[Rule]) -> u32 {
@@ -1403,8 +1410,9 @@ fn eliminate_hidden_left_recursion(
     rules: &mut Vec<Rule>,
     nullable: &BTreeSet<NonterminalID>,
     normalize_iteration: usize,
-) {
+) -> bool {
     let profile_enabled = compile_profile_enabled();
+    let mut changed = false;
 
     loop {
         let rules_len = rules.len();
@@ -1437,7 +1445,7 @@ fn eliminate_hidden_left_recursion(
                     ),
                 );
             }
-            return;
+            return changed;
         }
         let rhs_by_lhs_started_at = profile_enabled.then(Instant::now);
         let rhs_by_lhs = build_rhs_by_lhs(rules);
@@ -1524,12 +1532,14 @@ fn eliminate_hidden_left_recursion(
 
         if !replaced_cycle_rules.is_empty() {
             rules.retain(|rule| !replaced_cycle_rules.contains(rule));
+            changed = true;
         }
 
         if additions.is_empty() {
-            return;
+            return changed;
         }
         rules.extend(additions);
+        changed = true;
     }
 }
 
@@ -1599,33 +1609,33 @@ fn nullable_prefix_len(rhs: &[Symbol], nullable: &BTreeSet<NonterminalID>) -> us
 
 /// Remove rules for nonterminals not reachable from the start symbol.
 fn remove_unreachable_rules(rules: &[Rule], start: NonterminalID) -> Vec<Rule> {
-    // Build index: lhs → rule indices for O(1) lookup per NT.
-    let mut rules_by_lhs = BTreeMap::<NonterminalID, Vec<usize>>::new();
-    for (i, rule) in rules.iter().enumerate() {
-        rules_by_lhs.entry(rule.lhs).or_default().push(i);
+    let num_nonterminals = max_nt_id(rules) as usize + 1;
+    let mut rules_by_lhs = vec![Vec::<usize>::new(); num_nonterminals];
+    for (index, rule) in rules.iter().enumerate() {
+        rules_by_lhs[rule.lhs as usize].push(index);
     }
 
-    let mut reachable = BTreeSet::new();
+    let mut reachable = vec![false; num_nonterminals];
     let mut worklist = vec![start];
-    while let Some(nt) = worklist.pop() {
-        if !reachable.insert(nt) {
+    while let Some(nonterminal) = worklist.pop() {
+        let nonterminal_index = nonterminal as usize;
+        if reachable[nonterminal_index] {
             continue;
         }
-        if let Some(indexes) = rules_by_lhs.get(&nt) {
-            for &idx in indexes {
-                for sym in &rules[idx].rhs {
-                    if let Symbol::Nonterminal(n) = sym {
-                        if !reachable.contains(n) {
-                            worklist.push(*n);
-                        }
-                    }
+        reachable[nonterminal_index] = true;
+        for &rule_index in &rules_by_lhs[nonterminal_index] {
+            for symbol in &rules[rule_index].rhs {
+                if let Symbol::Nonterminal(next_nonterminal) = symbol
+                    && !reachable[*next_nonterminal as usize]
+                {
+                    worklist.push(*next_nonterminal);
                 }
             }
         }
     }
     rules
         .iter()
-        .filter(|r| reachable.contains(&r.lhs))
+        .filter(|rule| reachable[rule.lhs as usize])
         .cloned()
         .collect()
 }
@@ -1785,6 +1795,221 @@ fn flatten_rhs_symbols(
     flattened
 }
 
+/// Borrowed, dense indexing for rule deduplication.
+///
+/// This preserves the old distinction between a sole *physical* production
+/// (which cannot need deduplication) and a sole *distinct* RHS (which can be
+/// expanded while testing whether sibling productions deduplicate).  The index
+/// stores positions into `rules`, rather than cloning every RHS into an ordered
+/// map and set.
+struct DedupSingleProductionIndex {
+    first_rule_by_lhs: Vec<Option<usize>>,
+    has_multiple_distinct_rhs: Vec<bool>,
+    rule_count_by_lhs: Vec<usize>,
+    expandable_by_lhs: Vec<bool>,
+}
+
+impl DedupSingleProductionIndex {
+    fn build(rules: &[Rule]) -> Self {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum VisitState {
+            Unseen,
+            Visiting,
+            Expandable,
+            NotExpandable,
+        }
+
+        fn visit(
+            nonterminal: NonterminalID,
+            rules: &[Rule],
+            first_rule_by_lhs: &[Option<usize>],
+            has_multiple_distinct_rhs: &[bool],
+            states: &mut [VisitState],
+        ) -> bool {
+            let index = nonterminal as usize;
+            if index >= first_rule_by_lhs.len()
+                || has_multiple_distinct_rhs[index]
+                || first_rule_by_lhs[index].is_none()
+            {
+                // As in the old map-based implementation, a child with no
+                // unique production is an opaque symbol for this flattening
+                // analysis and does not block its parent's expansion.
+                return true;
+            }
+
+            match states[index] {
+                VisitState::Visiting | VisitState::NotExpandable => return false,
+                VisitState::Expandable => return true,
+                VisitState::Unseen => {}
+            }
+
+            states[index] = VisitState::Visiting;
+            let rule = &rules[first_rule_by_lhs[index].expect("checked above")];
+            let expandable = rule.rhs.iter().all(|symbol| match symbol {
+                Symbol::Terminal(_) => true,
+                Symbol::Nonterminal(child) => visit(
+                    *child,
+                    rules,
+                    first_rule_by_lhs,
+                    has_multiple_distinct_rhs,
+                    states,
+                ),
+            });
+            states[index] = if expandable {
+                VisitState::Expandable
+            } else {
+                VisitState::NotExpandable
+            };
+            expandable
+        }
+
+        let len = max_nt_id(rules) as usize + 1;
+        let mut first_rule_by_lhs: Vec<Option<usize>> = vec![None; len];
+        let mut has_multiple_distinct_rhs = vec![false; len];
+        let mut rule_count_by_lhs = vec![0usize; len];
+
+        for (rule_index, rule) in rules.iter().enumerate() {
+            let lhs = rule.lhs as usize;
+            rule_count_by_lhs[lhs] += 1;
+            match first_rule_by_lhs[lhs] {
+                Some(first_rule_index) => {
+                    if rules[first_rule_index].rhs != rule.rhs {
+                        has_multiple_distinct_rhs[lhs] = true;
+                    }
+                }
+                None => first_rule_by_lhs[lhs] = Some(rule_index),
+            }
+        }
+
+        let mut states = vec![VisitState::Unseen; len];
+        let mut expandable_by_lhs = vec![false; len];
+        for nonterminal in 0..len {
+            if first_rule_by_lhs[nonterminal].is_some()
+                && !has_multiple_distinct_rhs[nonterminal]
+            {
+                expandable_by_lhs[nonterminal] = visit(
+                    nonterminal as NonterminalID,
+                    rules,
+                    &first_rule_by_lhs,
+                    &has_multiple_distinct_rhs,
+                    &mut states,
+                );
+            }
+        }
+
+        Self {
+            first_rule_by_lhs,
+            has_multiple_distinct_rhs,
+            rule_count_by_lhs,
+            expandable_by_lhs,
+        }
+    }
+
+    #[inline]
+    fn rule_count(&self, nonterminal: NonterminalID) -> usize {
+        self.rule_count_by_lhs
+            .get(nonterminal as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    #[inline]
+    fn is_expandable(&self, nonterminal: NonterminalID) -> bool {
+        self.expandable_by_lhs
+            .get(nonterminal as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    #[inline]
+    fn unique_rhs<'a>(&self, rules: &'a [Rule], nonterminal: NonterminalID) -> Option<&'a [Symbol]> {
+        let index = nonterminal as usize;
+        (!self.has_multiple_distinct_rhs.get(index).copied().unwrap_or(true))
+            .then_some(())
+            .and_then(|_| self.first_rule_by_lhs.get(index).copied().flatten())
+            .map(|rule_index| rules[rule_index].rhs.as_slice())
+    }
+
+    fn len(&self) -> usize {
+        self.first_rule_by_lhs.len()
+    }
+}
+
+fn flatten_rhs_symbols_for_dedup(
+    rhs: &[Symbol],
+    rules: &[Rule],
+    index: &DedupSingleProductionIndex,
+    flatten_cache: &mut [Option<Option<Vec<Symbol>>>],
+) -> Vec<Symbol> {
+    const MAX_FLATTENED_RHS_LEN: usize = 4096;
+
+    fn flatten_symbol(
+        symbol: &Symbol,
+        out: &mut Vec<Symbol>,
+        rules: &[Rule],
+        index: &DedupSingleProductionIndex,
+        flatten_cache: &mut [Option<Option<Vec<Symbol>>>],
+    ) {
+        match symbol {
+            Symbol::Terminal(_) => out.push(symbol.clone()),
+            Symbol::Nonterminal(nonterminal) if index.is_expandable(*nonterminal) => {
+                let nonterminal_index = *nonterminal as usize;
+                if let Some(cached) = flatten_cache
+                    .get(nonterminal_index)
+                    .and_then(Option::as_ref)
+                {
+                    match cached {
+                        Some(flattened)
+                            if out.len() + flattened.len() <= MAX_FLATTENED_RHS_LEN =>
+                        {
+                            out.extend(flattened.iter().cloned());
+                        }
+                        _ => out.push(symbol.clone()),
+                    }
+                    return;
+                }
+
+                let Some(expanded_rhs) = index.unique_rhs(rules, *nonterminal) else {
+                    out.push(symbol.clone());
+                    return;
+                };
+                let mut flattened_nonterminal = Vec::new();
+                for expanded_symbol in expanded_rhs {
+                    flatten_symbol(
+                        expanded_symbol,
+                        &mut flattened_nonterminal,
+                        rules,
+                        index,
+                        flatten_cache,
+                    );
+                    if flattened_nonterminal.len() > MAX_FLATTENED_RHS_LEN {
+                        if let Some(slot) = flatten_cache.get_mut(nonterminal_index) {
+                            *slot = Some(None);
+                        }
+                        out.push(symbol.clone());
+                        return;
+                    }
+                }
+
+                if let Some(slot) = flatten_cache.get_mut(nonterminal_index) {
+                    *slot = Some(Some(flattened_nonterminal.clone()));
+                }
+                out.extend(flattened_nonterminal);
+            }
+            Symbol::Nonterminal(_) => out.push(symbol.clone()),
+        }
+    }
+
+    let mut flattened = Vec::new();
+    for symbol in rhs {
+        flatten_symbol(symbol, &mut flattened, rules, index, flatten_cache);
+        if flattened.len() > MAX_FLATTENED_RHS_LEN {
+            return rhs.to_vec();
+        }
+    }
+    flattened
+}
+
 /// Deduplicate rules, preserving order of first occurrence.
 enum RuleDedupKey<'a> {
     Borrowed(NonterminalID, &'a [Symbol]),
@@ -1822,24 +2047,28 @@ impl Hash for RuleDedupKey<'_> {
 }
 
 fn dedup_rules(rules: &mut Vec<Rule>) {
-    let rhs_by_lhs = build_rhs_by_lhs(rules);
-    let (unique_rhs_by_lhs, expandable_single_productions) =
-        compute_expandable_single_productions(&rhs_by_lhs);
+    let index = DedupSingleProductionIndex::build(rules);
     let mut keep = Vec::with_capacity(rules.len());
     {
-        let mut seen = HashSet::with_capacity(rules.len());
-        let mut flatten_cache = HashMap::<NonterminalID, Option<Vec<Symbol>>>::new();
+        let mut seen = FxHashSet::with_capacity_and_hasher(rules.len(), Default::default());
+        let mut flatten_cache = vec![None; index.len()];
         for rule in rules.iter() {
+            // Rule equality includes the LHS. A sole physical production for an
+            // LHS cannot duplicate any other rule, even after flattening chains.
+            if index.rule_count(rule.lhs) == 1 {
+                keep.push(true);
+                continue;
+            }
             let can_flatten = rule.rhs.iter().any(|symbol| {
-                matches!(symbol, Symbol::Nonterminal(nt) if expandable_single_productions.contains(nt))
+                matches!(symbol, Symbol::Nonterminal(nonterminal) if index.is_expandable(*nonterminal))
             });
             let key = if can_flatten {
                 RuleDedupKey::Owned(
                     rule.lhs,
-                    flatten_rhs_symbols(
+                    flatten_rhs_symbols_for_dedup(
                         &rule.rhs,
-                        &unique_rhs_by_lhs,
-                        &expandable_single_productions,
+                        rules,
+                        &index,
                         &mut flatten_cache,
                     ),
                 )
@@ -1849,7 +2078,6 @@ fn dedup_rules(rules: &mut Vec<Rule>) {
             keep.push(seen.insert(key));
         }
     }
-
     let mut keep_iter = keep.into_iter();
     rules.retain(|_| keep_iter.next().unwrap_or(false));
 }
@@ -2255,6 +2483,7 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
     };
 
     let mut iteration = 0;
+    let mut nullable_eliminated_before_exit = false;
     loop {
         let iteration_rules_before = rules.len();
         let iteration_started_at = profiling.then(Instant::now);
@@ -2275,6 +2504,7 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
         let inline_rules_before = rules.len();
         let inline_started_at = profiling.then(Instant::now);
         replace_rules_with_resync(rules, &next_nt, inline_null_productions);
+        let inline_unchanged = *rules == snap;
         if let Some(started_at) = inline_started_at {
             emit_normalize_profile(
                 "inline_null_productions",
@@ -2282,14 +2512,16 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
                 elapsed_ms(started_at),
                 inline_rules_before,
                 rules.len(),
-                " phase=fixed_point",
+                &format!(" phase=fixed_point changed={}", !inline_unchanged),
             );
         }
 
+        let no_nullable_nonterminals =
+            compute_nullable(rules, max_nt_id(rules) + 1).is_empty();
         let rr_rules_before = rules.len();
         let rr_started_at = profiling.then(Instant::now);
-        with_resynced_next_nonterminal(rules, &next_nt, |rules| {
-            eliminate_right_recursion(rules, &mut fresh_nt);
+        let right_recursion_completed = with_resynced_next_nonterminal(rules, &next_nt, |rules| {
+            eliminate_right_recursion(rules, &mut fresh_nt)
         });
         if let Some(started_at) = rr_started_at {
             emit_normalize_profile(
@@ -2305,10 +2537,17 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
         let hlr_rules_before = rules.len();
         let hlr_started_at = profiling.then(Instant::now);
         let mut nullable_count = 0usize;
-        with_resynced_next_nonterminal(rules, &next_nt, |rules| {
+        let hidden_left_recursion_changed = with_resynced_next_nonterminal(rules, &next_nt, |rules| {
             let nullable = compute_nullable(rules, max_nt_id(rules) + 1);
             nullable_count = nullable.len();
-            eliminate_hidden_left_recursion(rules, &nullable, iteration + 1);
+            // Hidden left recursion requires a nullable prefix. Once epsilon
+            // inlining has removed every nullable nonterminal, the graph pass
+            // cannot add or replace a rule.
+            if nullable.is_empty() {
+                false
+            } else {
+                eliminate_hidden_left_recursion(rules, &nullable, iteration + 1)
+            }
         });
 
         if let Some(started_at) = hlr_started_at {
@@ -2361,6 +2600,15 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
             );
         }
 
+        if no_nullable_nonterminals
+            && right_recursion_completed
+            && !hidden_left_recursion_changed
+        {
+            // Subsequent passes cannot create nullability, indirect right
+            // recursion, or hidden left recursion: dedup only removes rules.
+            nullable_eliminated_before_exit = true;
+            break;
+        }
         iteration += 1;
 
         if converged {
@@ -2369,16 +2617,27 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
     }
 
     let post_inline_rules_before = rules.len();
+    let post_inline_snapshot = (!nullable_eliminated_before_exit).then(|| rules.clone());
     let post_inline_started_at = profiling.then(Instant::now);
-    replace_rules_with_resync(rules, &next_nt, inline_null_productions);
+    if !nullable_eliminated_before_exit {
+        replace_rules_with_resync(rules, &next_nt, inline_null_productions);
+    }
+    let post_inline_changed = post_inline_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| *rules != *snapshot);
     if let Some(started_at) = post_inline_started_at {
+        let post_inline_extra = if nullable_eliminated_before_exit {
+            " phase=post_loop skipped=nullable_eliminated".to_string()
+        } else {
+            format!(" phase=post_loop changed={post_inline_changed}")
+        };
         emit_normalize_profile(
             "inline_null_productions",
             None,
             elapsed_ms(started_at),
             post_inline_rules_before,
             rules.len(),
-            " phase=post_loop",
+            &post_inline_extra,
         );
     }
 
@@ -2398,7 +2657,9 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
 
     let final_dedup_rules_before = rules.len();
     let final_dedup_started_at = profiling.then(Instant::now);
-    dedup_rules(rules);
+    if post_inline_changed {
+        dedup_rules(rules);
+    }
     if let Some(started_at) = final_dedup_started_at {
         emit_normalize_profile(
             "dedup_rules",
@@ -2406,7 +2667,11 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
             elapsed_ms(started_at),
             final_dedup_rules_before,
             rules.len(),
-            " phase=final",
+            if post_inline_changed {
+                " phase=final"
+            } else {
+                " phase=final skipped=post_inline_unchanged"
+            },
         );
     }
 }
@@ -2420,13 +2685,14 @@ fn replace_rules_with_resync(
     resync_next_nonterminal(rules, next_nt);
 }
 
-fn with_resynced_next_nonterminal(
+fn with_resynced_next_nonterminal<R>(
     rules: &mut Vec<Rule>,
     next_nt: &std::cell::Cell<u32>,
-    update: impl FnOnce(&mut Vec<Rule>),
-) {
-    update(rules);
+    update: impl FnOnce(&mut Vec<Rule>) -> R,
+) -> R {
+    let result = update(rules);
     resync_next_nonterminal(rules, next_nt);
+    result
 }
 
 fn resync_next_nonterminal(rules: &[Rule], next_nt: &std::cell::Cell<u32>) {
@@ -2740,6 +3006,202 @@ mod tests {
         sccs.sort_by_key(|component| component.iter().next().copied().unwrap_or(u32::MAX));
 
         assert_eq!(sccs, vec![BTreeSet::from([0, 1]), BTreeSet::from([2, 3, 4])]);
+    }
+
+    fn dedup_rules_reference(rules: &mut Vec<Rule>) {
+        let mut rhs_by_lhs = BTreeMap::<NonterminalID, BTreeSet<Vec<Symbol>>>::new();
+        let mut rule_counts_by_lhs = HashMap::<NonterminalID, usize>::new();
+        for rule in rules.iter() {
+            rhs_by_lhs
+                .entry(rule.lhs)
+                .or_default()
+                .insert(rule.rhs.clone());
+            *rule_counts_by_lhs.entry(rule.lhs).or_default() += 1;
+        }
+        let (unique_rhs_by_lhs, expandable_single_productions) =
+            compute_expandable_single_productions(&rhs_by_lhs);
+        let mut keep = Vec::with_capacity(rules.len());
+        {
+            let mut seen = HashSet::with_capacity(rules.len());
+            let mut flatten_cache = HashMap::<NonterminalID, Option<Vec<Symbol>>>::new();
+            for rule in rules.iter() {
+                if rule_counts_by_lhs[&rule.lhs] == 1 {
+                    keep.push(true);
+                    continue;
+                }
+                let can_flatten = rule.rhs.iter().any(|symbol| {
+                    matches!(symbol, Symbol::Nonterminal(nonterminal) if expandable_single_productions.contains(nonterminal))
+                });
+                let key = if can_flatten {
+                    RuleDedupKey::Owned(
+                        rule.lhs,
+                        flatten_rhs_symbols(
+                            &rule.rhs,
+                            &unique_rhs_by_lhs,
+                            &expandable_single_productions,
+                            &mut flatten_cache,
+                        ),
+                    )
+                } else {
+                    RuleDedupKey::Borrowed(rule.lhs, &rule.rhs)
+                };
+                keep.push(seen.insert(key));
+            }
+        }
+        let mut keep_iter = keep.into_iter();
+        rules.retain(|_| keep_iter.next().unwrap_or(false));
+    }
+
+    #[test]
+    fn dedup_rules_matches_reference_on_varied_small_grammars() {
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        let mut seed = 0x17a1_ded0_0c42_u64;
+        for case_index in 0..512 {
+            let nonterminals = (next(&mut seed) % 7 + 1) as u32;
+            let rules_len = (next(&mut seed) % 28 + 1) as usize;
+            let mut rules = Vec::with_capacity(rules_len);
+            for _ in 0..rules_len {
+                let lhs = (next(&mut seed) % u64::from(nonterminals)) as u32;
+                let rhs_len = (next(&mut seed) % 5) as usize;
+                let mut rhs = Vec::with_capacity(rhs_len);
+                for _ in 0..rhs_len {
+                    if next(&mut seed) & 1 == 0 {
+                        rhs.push(Symbol::Terminal((next(&mut seed) % 5) as u32));
+                    } else {
+                        rhs.push(Symbol::Nonterminal(
+                            (next(&mut seed) % u64::from(nonterminals)) as u32,
+                        ));
+                    }
+                }
+                rules.push(Rule { lhs, rhs });
+            }
+
+            let mut expected = rules.clone();
+            dedup_rules_reference(&mut expected);
+            let mut actual = rules;
+            dedup_rules(&mut actual);
+            assert_eq!(actual, expected, "case_index={case_index}");
+        }
+    }
+
+    #[test]
+    fn dedup_rules_collapses_duplicate_physical_single_productions() {
+        let mut rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(1)],
+            },
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(1)],
+            },
+            Rule {
+                lhs: 1,
+                rhs: vec![Symbol::Terminal(0)],
+            },
+        ];
+
+        dedup_rules(&mut rules);
+
+        assert_eq!(
+            rules,
+            vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn dedup_rules_detects_duplicates_after_single_production_flattening() {
+        let mut rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(1)],
+            },
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            },
+            Rule {
+                lhs: 1,
+                rhs: vec![Symbol::Terminal(0)],
+            },
+        ];
+
+        dedup_rules(&mut rules);
+
+        assert_eq!(
+            rules,
+            vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn dedup_rules_does_not_flatten_cyclic_single_productions() {
+        let mut rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(1)],
+            },
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(2)],
+            },
+            Rule {
+                lhs: 1,
+                rhs: vec![Symbol::Nonterminal(2)],
+            },
+            Rule {
+                lhs: 2,
+                rhs: vec![Symbol::Nonterminal(1)],
+            },
+        ];
+
+        dedup_rules(&mut rules);
+
+        assert_eq!(
+            rules,
+            vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(1)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(2)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Nonterminal(2)],
+                },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![Symbol::Nonterminal(1)],
+                },
+            ]
+        );
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::grammar::expr_nfa::ExprNfaBuilder;
@@ -246,6 +247,32 @@ impl<'a> Lowerer<'a> {
         self.lower_object_internal(schema, None, Some((exclusive_names, require_one)))
     }
 
+    fn schema_contains_any_ref(schema: &Schema) -> bool {
+        match &schema.kind {
+            SchemaKind::Ref(_) => true,
+            SchemaKind::Any | SchemaKind::Never => false,
+            SchemaKind::Assertions(assertions) => {
+                assertions.object.as_ref().is_some_and(|object| {
+                    object.properties.iter().any(|property| Self::schema_contains_any_ref(&property.schema))
+                        || object.pattern_properties.iter().any(|property| {
+                            Self::schema_contains_any_ref(&property.schema)
+                        })
+                        || object.property_names.as_ref().is_some_and(Self::schema_contains_any_ref)
+                        || matches!(
+                            &object.additional_properties,
+                            AdditionalProperties::Schema(schema) if Self::schema_contains_any_ref(schema)
+                        )
+                }) || assertions.array.as_ref().is_some_and(|array| {
+                    Self::schema_contains_any_ref(&array.items)
+                        || array.prefix_items.iter().any(Self::schema_contains_any_ref)
+                }) || assertions.any_of.iter().any(Self::schema_contains_any_ref)
+                    || assertions.one_of.iter().any(Self::schema_contains_any_ref)
+                    || assertions.all_of.iter().any(Self::schema_contains_any_ref)
+                    || assertions.not.as_ref().is_some_and(Self::schema_contains_any_ref)
+            }
+        }
+    }
+
     pub(crate) fn try_lower_closed_object_any_of_variants(
         &mut self,
         branches: &[Schema],
@@ -254,7 +281,9 @@ impl<'a> Lowerer<'a> {
         if branches.len() < 2 {
             return Ok(None);
         }
-        if self.has_recursive_ref_branch(branches)? {
+        if branches.iter().any(Self::schema_contains_any_ref)
+            && self.has_recursive_ref_branch(branches)?
+        {
             return Ok(None);
         }
         if self.has_duplicate_recursive_ref_branches(branches)? {
@@ -287,7 +316,9 @@ impl<'a> Lowerer<'a> {
         if branches.len() < 2 {
             return Ok(None);
         }
-        if self.has_recursive_ref_branch(branches)? {
+        if branches.iter().any(Self::schema_contains_any_ref)
+            && self.has_recursive_ref_branch(branches)?
+        {
             return Ok(None);
         }
         if self.has_duplicate_recursive_ref_branches(branches)? {
@@ -3412,10 +3443,19 @@ impl<'a> Lowerer<'a> {
         Ok(expr)
     }
 
-    fn object_with_required_synthetic_properties(
+    fn object_with_required_synthetic_properties<'schema>(
         &self,
-        schema: &ObjectSchema,
-    ) -> ImportResult<ObjectSchema> {
+        schema: &'schema ObjectSchema,
+    ) -> ImportResult<Cow<'schema, ObjectSchema>> {
+        let all_required_are_declared = schema
+            .required_order
+            .iter()
+            .chain(schema.required.iter())
+            .all(|required_name| schema.properties.iter().any(|property| property.name == *required_name));
+        if all_required_are_declared {
+            return Ok(Cow::Borrowed(schema));
+        }
+
         let mut normalized = schema.clone();
         let mut known = normalized
             .properties
@@ -3465,7 +3505,7 @@ impl<'a> Lowerer<'a> {
             known.insert(required_name.clone());
         }
 
-        Ok(normalized)
+        Ok(Cow::Owned(normalized))
     }
 }
 

@@ -58,7 +58,7 @@ impl<'a> Lowerer<'a> {
         let factoring_branches = if has_ref_branch {
             self.inline_all_of_refs_for_any_of_factoring(&branches)?
         } else {
-            branches.clone()
+            branches
         };
         let suppress_untyped_non_object_alts = has_ref_branch
             || assertions.types.as_ref().is_some_and(|types| {

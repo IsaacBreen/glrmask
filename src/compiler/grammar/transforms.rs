@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Instant;
 
+use rustc_hash::FxHashSet;
+
 use crate::automata::regex::Expr;
 use crate::automata::lexer::regex::parse_regex;
 use crate::compiler::glr::analysis::{eliminate_right_recursion, merge_identical_nonterminals, normalize_grammar};
@@ -230,6 +232,93 @@ fn remap_terminal_names(
         .collect()
 }
 
+struct SingleUseInlineIndexes {
+    only_production_index: Vec<Option<usize>>,
+    has_multiple_productions: Vec<bool>,
+    use_counts: Vec<usize>,
+    sole_user_index: Vec<Option<usize>>,
+    position_0_edges: FxHashSet<(NonterminalID, NonterminalID)>,
+}
+
+impl SingleUseInlineIndexes {
+    fn build(rules: &[Rule]) -> Self {
+        let max_nonterminal = rules
+            .iter()
+            .flat_map(|rule| {
+                std::iter::once(rule.lhs).chain(rule.rhs.iter().filter_map(|symbol| match symbol {
+                    Symbol::Nonterminal(nonterminal) => Some(*nonterminal),
+                    Symbol::Terminal(_) => None,
+                }))
+            })
+            .max()
+            .unwrap_or(0) as usize;
+        let len = max_nonterminal + 1;
+        let mut only_production_index = vec![None; len];
+        let mut has_multiple_productions = vec![false; len];
+        let mut use_counts = vec![0usize; len];
+        let mut sole_user_index = vec![None; len];
+        let mut position_0_edges = FxHashSet::default();
+        position_0_edges.reserve(rules.len());
+
+        for (index, rule) in rules.iter().enumerate() {
+            let lhs = rule.lhs as usize;
+            if only_production_index[lhs].replace(index).is_some() {
+                has_multiple_productions[lhs] = true;
+            }
+            for symbol in &rule.rhs {
+                if let Symbol::Nonterminal(nonterminal) = symbol {
+                    let nonterminal = *nonterminal as usize;
+                    use_counts[nonterminal] += 1;
+                    if use_counts[nonterminal] == 1 {
+                        sole_user_index[nonterminal] = Some(index);
+                    } else {
+                        sole_user_index[nonterminal] = None;
+                    }
+                }
+            }
+            if let Some(Symbol::Nonterminal(first_nonterminal)) = rule.rhs.first() {
+                position_0_edges.insert((*first_nonterminal, rule.lhs));
+            }
+        }
+
+        Self {
+            only_production_index,
+            has_multiple_productions,
+            use_counts,
+            sole_user_index,
+            position_0_edges,
+        }
+    }
+
+    fn single_production(&self, nonterminal: NonterminalID) -> Option<usize> {
+        let index = nonterminal as usize;
+        (!self.has_multiple_productions[index])
+            .then_some(self.only_production_index[index])
+            .flatten()
+    }
+
+    fn use_count(&self, nonterminal: NonterminalID) -> usize {
+        self.use_counts[nonterminal as usize]
+    }
+
+    fn sole_user(&self, nonterminal: NonterminalID) -> Option<usize> {
+        self.sole_user_index[nonterminal as usize]
+    }
+
+    fn creates_direct_left_recursion(
+        &self,
+        nonterminal: NonterminalID,
+        replacement_first: NonterminalID,
+    ) -> bool {
+        self.position_0_edges
+            .contains(&(nonterminal, replacement_first))
+    }
+
+    fn nonterminals(&self) -> impl Iterator<Item = NonterminalID> + '_ {
+        (0..self.only_production_index.len()).map(|index| index as NonterminalID)
+    }
+}
+
 pub(crate) fn inline_single_use_nonterminals(
     rules: &mut Vec<Rule>,
     protected_nonterminals: &BTreeSet<NonterminalID>,
@@ -237,33 +326,14 @@ pub(crate) fn inline_single_use_nonterminals(
     let inline_protected_nonterminals = env_var_enabled(INLINE_PROTECTED_NONTERMINALS_ENV, true);
 
     loop {
-        // Build indexes
-        let mut productions_by_lhs = BTreeMap::<NonterminalID, Vec<usize>>::new();
-        let mut use_counts = BTreeMap::<NonterminalID, usize>::new();
-        // For each nonterminal, track which rule LHS values have it at RHS position 0.
-        let mut position_0_users = BTreeMap::<NonterminalID, BTreeSet<NonterminalID>>::new();
-
-        for (index, rule) in rules.iter().enumerate() {
-            productions_by_lhs.entry(rule.lhs).or_default().push(index);
-            for symbol in &rule.rhs {
-                if let Symbol::Nonterminal(nonterminal) = symbol {
-                    *use_counts.entry(*nonterminal).or_default() += 1;
-                }
-            }
-            if let Some(Symbol::Nonterminal(first_nt)) = rule.rhs.first() {
-                position_0_users.entry(*first_nt).or_default().insert(rule.lhs);
-            }
-        }
-
-        // Collect inline candidates in one pass.
+        let indexes = SingleUseInlineIndexes::build(rules);
         let mut inline_candidates = BTreeMap::<NonterminalID, (usize, Vec<Symbol>)>::new();
 
-        for (&nonterminal, production_indexes) in &productions_by_lhs {
-            if production_indexes.len() != 1 {
+        for nonterminal in indexes.nonterminals() {
+            let Some(production_index) = indexes.single_production(nonterminal) else {
                 continue;
-            }
-
-            let rule = &rules[production_indexes[0]];
+            };
+            let rule = &rules[production_index];
             if rule.rhs.is_empty()
                 || rule
                     .rhs
@@ -272,100 +342,44 @@ pub(crate) fn inline_single_use_nonterminals(
             {
                 continue;
             }
-            let use_count = use_counts.get(&nonterminal).copied().unwrap_or(0);
+            let use_count = indexes.use_count(nonterminal);
             if use_count == 0 {
-                // Nothing references this nonterminal, so there is nowhere to inline it.
                 continue;
             }
-
             if protected_nonterminals.contains(&nonterminal) && !inline_protected_nonterminals {
                 continue;
             }
-
-            let should_inline = rule.rhs.len() == 1 || use_count == 1;
-            if !should_inline {
+            if rule.rhs.len() != 1 && use_count != 1 {
                 continue;
             }
-
-            // Inlining `nonterminal → first ...` into a rule `X → nonterminal ...`
-            // creates direct left recursion if X == first. Use precomputed index.
-            let creates_direct_left_recursion =
-                if let Some(Symbol::Nonterminal(first)) = rule.rhs.first() {
-                    position_0_users
-                        .get(&nonterminal)
-                        .map_or(false, |lhss| lhss.contains(first))
-                } else {
-                    false
-                };
-            if creates_direct_left_recursion {
+            if let Some(Symbol::Nonterminal(first)) = rule.rhs.first()
+                && indexes.creates_direct_left_recursion(nonterminal, *first)
+            {
                 continue;
             }
-
-            inline_candidates.insert(nonterminal, (production_indexes[0], rule.rhs.clone()));
+            inline_candidates.insert(nonterminal, (production_index, rule.rhs.clone()));
         }
 
         if inline_candidates.is_empty() {
             break;
         }
-
         remove_cyclic_inline_candidates(&mut inline_candidates);
         if inline_candidates.is_empty() {
             break;
         }
 
-        // Transitively expand candidate RHS: if a candidate's RHS references
-        // another candidate, substitute it. Iterate until stable.
-        let inline_candidate_ids: BTreeSet<NonterminalID> =
-            inline_candidates.keys().copied().collect();
-        let mut expanded = true;
-        while expanded {
-            expanded = false;
-            let snapshot: Vec<(NonterminalID, Vec<Symbol>)> = inline_candidates
-                .iter()
-                .map(|(&nt, (_, rhs))| (nt, rhs.clone()))
-                .collect();
-            for (nt, rhs) in snapshot {
-                if rhs.iter().any(|s| {
-                    matches!(s, Symbol::Nonterminal(id) if inline_candidate_ids.contains(id) && *id != nt)
-                }) {
-                    let mut new_rhs = Vec::with_capacity(rhs.len());
-                    for symbol in &rhs {
-                        if let Symbol::Nonterminal(id) = symbol {
-                            if *id != nt {
-                                if let Some((_, sub_rhs)) = inline_candidates.get(id) {
-                                    new_rhs.extend(sub_rhs.iter().cloned());
-                                    continue;
-                                }
-                            }
-                        }
-                        new_rhs.push(symbol.clone());
-                    }
-                    if new_rhs != rhs {
-                        inline_candidates
-                            .get_mut(&nt)
-                            .expect("inline candidate should still exist")
-                            .1 = new_rhs;
-                        expanded = true;
-                    }
-                }
-            }
-        }
+        expand_inline_candidates(&mut inline_candidates);
 
-        // Collect production indexes to remove
         let remove_indexes: BTreeSet<usize> =
-            inline_candidates.values().map(|(idx, _)| *idx).collect();
-
-        // Rewrite all rules in one pass
+            inline_candidates.values().map(|(index, _)| *index).collect();
         let mut rewritten = Vec::with_capacity(rules.len());
         for (index, rule) in rules.iter().enumerate() {
             if remove_indexes.contains(&index) {
                 continue;
             }
-
-            let has_candidate = rule.rhs.iter().any(|s| {
-                matches!(s, Symbol::Nonterminal(id) if inline_candidates.contains_key(id))
+            let has_candidate = rule.rhs.iter().any(|symbol| {
+                matches!(symbol, Symbol::Nonterminal(id) if inline_candidates.contains_key(id))
             });
-
             if has_candidate {
                 let mut new_rhs = Vec::with_capacity(rule.rhs.len());
                 for symbol in &rule.rhs {
@@ -385,7 +399,6 @@ pub(crate) fn inline_single_use_nonterminals(
                 rewritten.push(rule.clone());
             }
         }
-
         *rules = rewritten;
     }
 }
@@ -393,46 +406,218 @@ pub(crate) fn inline_single_use_nonterminals(
 fn remove_cyclic_inline_candidates(
     inline_candidates: &mut BTreeMap<NonterminalID, (usize, Vec<Symbol>)>,
 ) {
-    fn reaches_start(
-        start: NonterminalID,
-        current: NonterminalID,
-        deps: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
-        seen: &mut BTreeSet<NonterminalID>,
-    ) -> bool {
-        if !seen.insert(current) {
-            return false;
-        }
-        deps.get(&current).is_some_and(|nexts| {
-            nexts
-                .iter()
-                .any(|&next| next == start || reaches_start(start, next, deps, seen))
-        })
+    if inline_candidates.is_empty() {
+        return;
     }
 
+    // Preserve the old per-candidate reachability semantics, but avoid building
+    // ordered dependency maps and allocating a new visited set for each start.
+    // Candidate IDs are grammar nonterminal IDs, so one dense index plus visit
+    // stamps gives the same search with substantially less bookkeeping.
+    let candidate_ids: Vec<NonterminalID> = inline_candidates.keys().copied().collect();
+    let max_nonterminal = candidate_ids.last().copied().unwrap_or(0) as usize;
+    let mut candidate_index_by_nonterminal = vec![usize::MAX; max_nonterminal + 1];
+    for (candidate_index, &nonterminal) in candidate_ids.iter().enumerate() {
+        candidate_index_by_nonterminal[nonterminal as usize] = candidate_index;
+    }
+
+    let mut visited_at = vec![0usize; candidate_ids.len()];
+    let mut search_stamp = 0usize;
+    let mut stack = Vec::new();
+    let mut cyclic = vec![false; candidate_ids.len()];
+
+    for (start_index, &start_nonterminal) in candidate_ids.iter().enumerate() {
+        search_stamp = search_stamp.checked_add(1).expect("cycle-search stamp overflow");
+        stack.clear();
+        stack.push(start_index);
+        visited_at[start_index] = search_stamp;
+
+        let mut reaches_start = false;
+        while let Some(current_index) = stack.pop() {
+            let current_nonterminal = candidate_ids[current_index];
+            let (_, rhs) = inline_candidates
+                .get(&current_nonterminal)
+                .expect("candidate id must be present");
+            for symbol in rhs {
+                let Symbol::Nonterminal(child) = symbol else {
+                    continue;
+                };
+                if *child == start_nonterminal {
+                    reaches_start = true;
+                    break;
+                }
+                let child_index = candidate_index_by_nonterminal
+                    .get(*child as usize)
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                if child_index != usize::MAX && visited_at[child_index] != search_stamp {
+                    visited_at[child_index] = search_stamp;
+                    stack.push(child_index);
+                }
+            }
+            if reaches_start {
+                break;
+            }
+        }
+
+        cyclic[start_index] = reaches_start;
+    }
+
+    for (candidate_index, nonterminal) in candidate_ids.into_iter().enumerate() {
+        if cyclic[candidate_index] {
+            inline_candidates.remove(&nonterminal);
+        }
+    }
+}
+
+
+/// Expand acyclic inline candidates bottom-up.
+///
+/// Candidate cycles are removed before this runs.  The old implementation
+/// repeatedly cloned every candidate map snapshot until no replacement was
+/// possible.  Scheduling candidates after their dependencies computes the same
+/// transitive substitutions once per candidate, without recursive traversal.
+fn expand_inline_candidates(
+    inline_candidates: &mut BTreeMap<NonterminalID, (usize, Vec<Symbol>)>,
+) {
+    if inline_candidates.is_empty() {
+        return;
+    }
+
+    let candidate_ids: Vec<NonterminalID> = inline_candidates.keys().copied().collect();
+    let max_nonterminal = candidate_ids.last().copied().unwrap_or(0) as usize;
+    let mut candidate_index_by_nonterminal = vec![usize::MAX; max_nonterminal + 1];
+    for (candidate_index, &nonterminal) in candidate_ids.iter().enumerate() {
+        candidate_index_by_nonterminal[nonterminal as usize] = candidate_index;
+    }
+
+    let mut remaining_dependencies = vec![0usize; candidate_ids.len()];
+    let mut dependents = vec![Vec::<usize>::new(); candidate_ids.len()];
+    for (candidate_index, &nonterminal) in candidate_ids.iter().enumerate() {
+        let (_, rhs) = inline_candidates
+            .get(&nonterminal)
+            .expect("candidate id must be present");
+        let mut dependencies = Vec::new();
+        for symbol in rhs {
+            let Symbol::Nonterminal(child) = symbol else {
+                continue;
+            };
+            let child_index = candidate_index_by_nonterminal
+                .get(*child as usize)
+                .copied()
+                .unwrap_or(usize::MAX);
+            // Self references are intentionally left untouched, matching the
+            // legacy loop. They should already have been removed as cycles.
+            if child_index != usize::MAX
+                && child_index != candidate_index
+                && !dependencies.contains(&child_index)
+            {
+                dependencies.push(child_index);
+            }
+        }
+        remaining_dependencies[candidate_index] = dependencies.len();
+        for dependency in dependencies {
+            dependents[dependency].push(candidate_index);
+        }
+    }
+
+    let mut ready: Vec<usize> = remaining_dependencies
+        .iter()
+        .enumerate()
+        .filter_map(|(candidate_index, &count)| (count == 0).then_some(candidate_index))
+        .collect();
+    let mut expanded_rhs: Vec<Option<Vec<Symbol>>> = vec![None; candidate_ids.len()];
+    let mut expanded_count = 0usize;
+
+    while let Some(candidate_index) = ready.pop() {
+        let nonterminal = candidate_ids[candidate_index];
+        let (_, rhs) = inline_candidates
+            .get(&nonterminal)
+            .expect("candidate id must be present");
+        let mut expanded = Vec::with_capacity(rhs.len());
+        for symbol in rhs {
+            let replacement_index = match symbol {
+                Symbol::Nonterminal(child) => candidate_index_by_nonterminal
+                    .get(*child as usize)
+                    .copied()
+                    .filter(|&index| index != usize::MAX && index != candidate_index),
+                Symbol::Terminal(_) => None,
+            };
+            if let Some(replacement_index) = replacement_index {
+                let replacement = expanded_rhs[replacement_index]
+                    .as_ref()
+                    .expect("dependency must be expanded before its dependent");
+                expanded.extend(replacement.iter().cloned());
+            } else {
+                expanded.push(symbol.clone());
+            }
+        }
+        expanded_rhs[candidate_index] = Some(expanded);
+        expanded_count += 1;
+
+        for &dependent in &dependents[candidate_index] {
+            remaining_dependencies[dependent] -= 1;
+            if remaining_dependencies[dependent] == 0 {
+                ready.push(dependent);
+            }
+        }
+    }
+
+    if expanded_count != candidate_ids.len() {
+        // `remove_cyclic_inline_candidates` should make this unreachable. Keep
+        // the legacy iterative algorithm as an exact fallback if a malformed
+        // candidate graph somehow violates that invariant.
+        expand_inline_candidates_iteratively(inline_candidates);
+        return;
+    }
+
+    for (candidate_index, nonterminal) in candidate_ids.into_iter().enumerate() {
+        inline_candidates
+            .get_mut(&nonterminal)
+            .expect("candidate id must be present")
+            .1 = expanded_rhs[candidate_index]
+            .take()
+            .expect("all candidates must have expanded RHS");
+    }
+}
+
+fn expand_inline_candidates_iteratively(
+    inline_candidates: &mut BTreeMap<NonterminalID, (usize, Vec<Symbol>)>,
+) {
     let inline_candidate_ids: BTreeSet<NonterminalID> =
         inline_candidates.keys().copied().collect();
-    let deps: BTreeMap<NonterminalID, BTreeSet<NonterminalID>> = inline_candidates
-        .iter()
-        .map(|(&nt, (_, rhs))| {
-            let rhs_deps = rhs
-                .iter()
-                .filter_map(|symbol| match symbol {
-                    Symbol::Nonterminal(id) if inline_candidate_ids.contains(id) => Some(*id),
-                    _ => None,
-                })
-                .collect();
-            (nt, rhs_deps)
-        })
-        .collect();
-
-    let cyclic: Vec<NonterminalID> = inline_candidate_ids
-        .iter()
-        .copied()
-        .filter(|&nt| reaches_start(nt, nt, &deps, &mut BTreeSet::new()))
-        .collect();
-
-    for nt in cyclic {
-        inline_candidates.remove(&nt);
+    let mut expanded = true;
+    while expanded {
+        expanded = false;
+        let snapshot: Vec<(NonterminalID, Vec<Symbol>)> = inline_candidates
+            .iter()
+            .map(|(&nonterminal, (_, rhs))| (nonterminal, rhs.clone()))
+            .collect();
+        for (nonterminal, rhs) in snapshot {
+            if rhs.iter().any(|symbol| {
+                matches!(symbol, Symbol::Nonterminal(id) if inline_candidate_ids.contains(id) && *id != nonterminal)
+            }) {
+                let mut new_rhs = Vec::with_capacity(rhs.len());
+                for symbol in &rhs {
+                    if let Symbol::Nonterminal(id) = symbol {
+                        if *id != nonterminal {
+                            if let Some((_, replacement_rhs)) = inline_candidates.get(id) {
+                                new_rhs.extend(replacement_rhs.iter().cloned());
+                                continue;
+                            }
+                        }
+                    }
+                    new_rhs.push(symbol.clone());
+                }
+                if new_rhs != rhs {
+                    inline_candidates
+                        .get_mut(&nonterminal)
+                        .expect("inline candidate should still exist")
+                        .1 = new_rhs;
+                    expanded = true;
+                }
+            }
+        }
     }
 }
 
@@ -444,39 +629,19 @@ fn inline_post_bound_single_use_nonterminals(
     let inline_protected_nonterminals = env_var_enabled(INLINE_PROTECTED_NONTERMINALS_ENV, true);
 
     loop {
-        let mut productions_by_lhs = BTreeMap::<NonterminalID, Vec<usize>>::new();
-        let mut use_counts = BTreeMap::<NonterminalID, usize>::new();
-        let mut position_0_users = BTreeMap::<NonterminalID, BTreeSet<NonterminalID>>::new();
-
-        for (index, rule) in rules.iter().enumerate() {
-            productions_by_lhs.entry(rule.lhs).or_default().push(index);
-            for symbol in &rule.rhs {
-                if let Symbol::Nonterminal(nonterminal) = symbol {
-                    *use_counts.entry(*nonterminal).or_default() += 1;
-                }
-            }
-            if let Some(Symbol::Nonterminal(first_nt)) = rule.rhs.first() {
-                position_0_users.entry(*first_nt).or_default().insert(rule.lhs);
-            }
-        }
-
+        let indexes = SingleUseInlineIndexes::build(rules);
         let mut candidate = None;
 
-        for (&nonterminal, production_indexes) in &productions_by_lhs {
-            if production_indexes.len() != 1 {
+        for nonterminal in indexes.nonterminals() {
+            let Some(candidate_rule_index) = indexes.single_production(nonterminal) else {
+                continue;
+            };
+            if indexes.use_count(nonterminal) != 1 {
                 continue;
             }
-
-            let use_count = use_counts.get(&nonterminal).copied().unwrap_or(0);
-            if use_count != 1 {
-                continue;
-            }
-
             if protected_nonterminals.contains(&nonterminal) && !inline_protected_nonterminals {
                 continue;
             }
-
-            let candidate_rule_index = production_indexes[0];
             let candidate_rule = &rules[candidate_rule_index];
             if candidate_rule.rhs.is_empty()
                 || candidate_rule
@@ -486,53 +651,36 @@ fn inline_post_bound_single_use_nonterminals(
             {
                 continue;
             }
-
-            let creates_direct_left_recursion = if let Some(Symbol::Nonterminal(first)) = candidate_rule.rhs.first() {
-                position_0_users
-                    .get(&nonterminal)
-                    .map_or(false, |lhss| lhss.contains(first))
-            } else {
-                false
-            };
-            if creates_direct_left_recursion {
+            if let Some(Symbol::Nonterminal(first)) = candidate_rule.rhs.first()
+                && indexes.creates_direct_left_recursion(nonterminal, *first)
+            {
                 continue;
             }
 
-            let Some((user_index, user_rule)) = rules
-                .iter()
-                .enumerate()
-                .find(|(_, rule)| {
-                    rule.rhs.iter().any(|symbol| {
-                        matches!(symbol, Symbol::Nonterminal(id) if *id == nonterminal)
-                    })
-                })
-            else {
-                continue;
-            };
-
+            let user_index = indexes
+                .sole_user(nonterminal)
+                .expect("one use must have a recorded user rule");
+            let user_rule = &rules[user_index];
             let mut new_rhs = Vec::with_capacity(user_rule.rhs.len() + candidate_rule.rhs.len());
             for symbol in &user_rule.rhs {
-                if let Symbol::Nonterminal(id) = symbol {
-                    if *id == nonterminal {
-                        new_rhs.extend(candidate_rule.rhs.iter().cloned());
-                        continue;
-                    }
+                if let Symbol::Nonterminal(id) = symbol
+                    && *id == nonterminal
+                {
+                    new_rhs.extend(candidate_rule.rhs.iter().cloned());
+                    continue;
                 }
                 new_rhs.push(symbol.clone());
             }
-
             if new_rhs.len() > max_rhs_len {
                 continue;
             }
-
-            candidate = Some((candidate_rule_index, user_index, nonterminal, new_rhs));
+            candidate = Some((candidate_rule_index, user_index, new_rhs));
             break;
         }
 
-        let Some((candidate_rule_index, user_index, nonterminal, new_rhs)) = candidate else {
+        let Some((candidate_rule_index, user_index, new_rhs)) = candidate else {
             break;
         };
-
         let mut rewritten = Vec::with_capacity(rules.len().saturating_sub(1));
         for (index, rule) in rules.iter().enumerate() {
             if index == candidate_rule_index {
@@ -547,16 +695,7 @@ fn inline_post_bound_single_use_nonterminals(
                 rewritten.push(rule.clone());
             }
         }
-
         *rules = rewritten;
-
-        if !rules.iter().any(|rule| {
-            rule.rhs
-                .iter()
-                .any(|symbol| matches!(symbol, Symbol::Nonterminal(id) if *id == nonterminal))
-        }) {
-            continue;
-        }
     }
 }
 
@@ -857,6 +996,128 @@ mod tests {
 
     fn t(id: TerminalID) -> Symbol {
         Symbol::Terminal(id)
+    }
+
+    fn remove_cyclic_inline_candidates_reference(
+        inline_candidates: &mut BTreeMap<NonterminalID, (usize, Vec<Symbol>)>,
+    ) {
+        fn reaches_start(
+            start: NonterminalID,
+            current: NonterminalID,
+            deps: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
+            seen: &mut BTreeSet<NonterminalID>,
+        ) -> bool {
+            if !seen.insert(current) {
+                return false;
+            }
+            deps.get(&current).is_some_and(|nexts| {
+                nexts
+                    .iter()
+                    .any(|&next| next == start || reaches_start(start, next, deps, seen))
+            })
+        }
+
+        let inline_candidate_ids: BTreeSet<NonterminalID> =
+            inline_candidates.keys().copied().collect();
+        let deps: BTreeMap<NonterminalID, BTreeSet<NonterminalID>> = inline_candidates
+            .iter()
+            .map(|(&nt, (_, rhs))| {
+                let rhs_deps = rhs
+                    .iter()
+                    .filter_map(|symbol| match symbol {
+                        Symbol::Nonterminal(id) if inline_candidate_ids.contains(id) => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                (nt, rhs_deps)
+            })
+            .collect();
+
+        let cyclic: Vec<NonterminalID> = inline_candidate_ids
+            .iter()
+            .copied()
+            .filter(|&nt| reaches_start(nt, nt, &deps, &mut BTreeSet::new()))
+            .collect();
+        for nt in cyclic {
+            inline_candidates.remove(&nt);
+        }
+    }
+
+    #[test]
+    fn inline_candidate_expansion_matches_reference_on_varied_graphs() {
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        let mut seed = 0x1a11_e7a0_5eed_u64;
+        for case_index in 0..512 {
+            let nonterminals = (next(&mut seed) % 10 + 1) as u32;
+            let mut candidates = BTreeMap::new();
+            for nonterminal in 0..nonterminals {
+                if next(&mut seed) % 4 == 0 {
+                    continue;
+                }
+                let rhs_len = (next(&mut seed) % 5) as usize;
+                let mut rhs = Vec::with_capacity(rhs_len);
+                for _ in 0..rhs_len {
+                    if next(&mut seed) & 1 == 0 {
+                        rhs.push(Symbol::Terminal((next(&mut seed) % 5) as u32));
+                    } else {
+                        rhs.push(Symbol::Nonterminal(
+                            (next(&mut seed) % u64::from(nonterminals + 2)) as u32,
+                        ));
+                    }
+                }
+                candidates.insert(nonterminal, (nonterminal as usize, rhs));
+            }
+
+            remove_cyclic_inline_candidates(&mut candidates);
+            let mut expected = candidates.clone();
+            expand_inline_candidates_iteratively(&mut expected);
+            expand_inline_candidates(&mut candidates);
+            assert_eq!(candidates, expected, "case_index={case_index}");
+        }
+    }
+
+    #[test]
+    fn inline_cycle_pruning_matches_reference_on_varied_candidate_graphs() {
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *seed
+        }
+
+        let mut seed = 0x1a11_c7c1_e55_u64;
+        for case_index in 0..512 {
+            let nonterminals = (next(&mut seed) % 9 + 1) as u32;
+            let mut candidates = BTreeMap::new();
+            for nonterminal in 0..nonterminals {
+                if next(&mut seed) % 4 == 0 {
+                    continue;
+                }
+                let rhs_len = (next(&mut seed) % 5) as usize;
+                let mut rhs = Vec::with_capacity(rhs_len);
+                for _ in 0..rhs_len {
+                    if next(&mut seed) & 1 == 0 {
+                        rhs.push(Symbol::Terminal((next(&mut seed) % 5) as u32));
+                    } else {
+                        rhs.push(Symbol::Nonterminal(
+                            (next(&mut seed) % u64::from(nonterminals + 2)) as u32,
+                        ));
+                    }
+                }
+                candidates.insert(nonterminal, (nonterminal as usize, rhs));
+            }
+
+            let mut expected = candidates.clone();
+            remove_cyclic_inline_candidates_reference(&mut expected);
+            remove_cyclic_inline_candidates(&mut candidates);
+            assert_eq!(candidates, expected, "case_index={case_index}");
+        }
     }
 
     #[test]
