@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use super::super::disallowed_follows::normalize_disallowed_follows;
@@ -278,6 +278,33 @@ impl SharedVocabDfaBase {
 
 /// Cache type for lazy SharedVocabDfaBase initialization across partitions.
 pub type SharedVocabDfaCache = std::sync::OnceLock<SharedVocabDfaBase>;
+
+/// Stage-local cache for the immutable, full vocabulary-equivalence DFA.
+///
+/// It is valid only for unsimplified tokenizer views with the same ignored
+/// terminal context. The key is intentionally local to a terminal-DWA stage,
+/// where the source DFA and base disallowed-follows relation are fixed.
+#[derive(Default)]
+pub struct SharedVocabAnalysisDfaCache {
+    entries: Mutex<HashMap<Option<u32>, Arc<OnceLock<Arc<Dfa>>>>>,
+}
+
+impl SharedVocabAnalysisDfaCache {
+    fn get_or_init(
+        &self,
+        ignored_terminal: Option<u32>,
+        build: impl FnOnce() -> Dfa,
+    ) -> Arc<Dfa> {
+        let entry = {
+            let mut entries = self.entries.lock().expect("vocab analysis DFA cache poisoned");
+            entries
+                .entry(ignored_terminal)
+                .or_insert_with(|| Arc::new(OnceLock::new()))
+                .clone()
+        };
+        Arc::clone(entry.get_or_init(|| Arc::new(build())))
+    }
+}
 
 impl Dfa {
     /// Get completion hash for a state (or none_completion_hash for STATE_NONE).
@@ -2352,6 +2379,8 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     byte_to_class: Option<&[u8; 256]>,
     active_groups: Option<&[bool]>,
     shared_cache: Option<&SharedVocabDfaCache>,
+    shared_analysis_dfa_cache: Option<&SharedVocabAnalysisDfaCache>,
+    ignored_terminal: Option<u32>,
 ) -> VocabEquivalenceResult {
     let profiling = compile_profile_enabled();
     let elapsed_ms = |started_at: Option<Instant>| {
@@ -2360,14 +2389,32 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
 
     let total_started_at = profiling.then(Instant::now);
     let build_dfa_started_at = profiling.then(Instant::now);
-    let dfa = build_dfa_with_group_filter(tokenizer, disallowed_follows, byte_to_class, active_groups, shared_cache);
+    let dfa = if let Some(cache) = shared_analysis_dfa_cache {
+        cache.get_or_init(ignored_terminal, || {
+            build_dfa_with_group_filter(
+                tokenizer,
+                disallowed_follows,
+                byte_to_class,
+                active_groups,
+                shared_cache,
+            )
+        })
+    } else {
+        Arc::new(build_dfa_with_group_filter(
+            tokenizer,
+            disallowed_follows,
+            byte_to_class,
+            active_groups,
+            shared_cache,
+        ))
+    };
     let build_dfa_ms = elapsed_ms(build_dfa_started_at);
 
     // Compact DFA: restrict to states reachable from initial_states via the
     // partition's token bytes.  This can dramatically shrink the transition
     // table (e.g. 77260 → 36598 for p0 of o62058) improving cache locality.
     let compact_dfa_started_at = profiling.then(Instant::now);
-    let compacted = compact_dfa_for_tokens(&dfa, initial_states, strings);
+    let compacted = compact_dfa_for_tokens(dfa.as_ref(), initial_states, strings);
     let compact_dfa_ms = elapsed_ms(compact_dfa_started_at);
     let (dfa_ref, initial_states_ref, compact_to_original): (&Dfa, &[usize], Option<&Vec<usize>>) = if let Some((ref cdfa, ref cstates, ref compact_to_original)) = compacted {
         (cdfa, cstates, Some(compact_to_original))
@@ -2697,7 +2744,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
 mod shared_base_tests {
     use super::*;
     use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::{
-        FlatDfa, FlatDfaState,
+        FlatDfa, FlatDfaState, TokenizerView,
     };
     use std::sync::Arc;
 
@@ -2713,13 +2760,67 @@ mod shared_base_tests {
             states: vec![
                 FlatDfaState {
                     finalizers: vec![],
-                    possible_future_group_ids: vec![],
-                };
-                3
+                    possible_future_group_ids: vec![0],
+                },
+                FlatDfaState {
+                    finalizers: vec![0],
+                    possible_future_group_ids: vec![0],
+                },
+                FlatDfaState {
+                    finalizers: vec![1],
+                    possible_future_group_ids: vec![0, 1],
+                },
             ],
             start_state: 0,
             transitions: Arc::from(transitions),
         }
+    }
+
+    #[test]
+    fn shared_analysis_dfa_cache_matches_uncached_vocab_equivalence() {
+        let view = TokenizerView { flat_dfa: sample_dfa() };
+        let tokens: Vec<&[u8]> = vec![b"a", b"b", b"aa", b"ba"];
+        let initial_states = vec![0usize, 1, 2];
+        let disallowed = BTreeMap::<u32, BitSet>::new();
+
+        let uncached = find_vocab_equivalence_classes_with_group_filter(
+            &view,
+            &tokens,
+            &initial_states,
+            &disallowed,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let cache = SharedVocabAnalysisDfaCache::default();
+        let cached_first = find_vocab_equivalence_classes_with_group_filter(
+            &view,
+            &tokens,
+            &initial_states,
+            &disallowed,
+            None,
+            None,
+            None,
+            Some(&cache),
+            None,
+        );
+        let cached_hit = find_vocab_equivalence_classes_with_group_filter(
+            &view,
+            &tokens,
+            &initial_states,
+            &disallowed,
+            None,
+            None,
+            None,
+            Some(&cache),
+            None,
+        );
+
+        assert_eq!(cached_first, uncached);
+        assert_eq!(cached_hit, uncached);
+        assert_eq!(cache.entries.lock().unwrap().len(), 1);
     }
 
     #[test]

@@ -343,6 +343,7 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
+    shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_base_setup_ms: f64,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
@@ -355,6 +356,7 @@ pub(crate) fn analyze_equivalences_with_group_filter(
         ignore_terminal,
         active_groups,
         shared_vocab_dfa_cache,
+        shared_analysis_dfa_cache,
         shared_base_setup_ms,
         flat_trans,
         initial_state_map,
@@ -373,6 +375,7 @@ fn analyze_equivalences_impl(
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
+    shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_base_setup_ms: f64,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
@@ -518,6 +521,8 @@ fn analyze_equivalences_impl(
         Some(&byte_to_class),
         active_groups,
         shared_vocab_dfa_cache,
+        shared_analysis_dfa_cache.filter(|_| active_groups.is_none()),
+        ignore_terminal,
     );
     let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -650,6 +655,8 @@ mod prepass_selection_tests {
             Some(&byte_to_class),
             None,
             None,
+            None,
+            None,
         );
         let old_token_reps = representative_tokens_for_vocab_classes(&old_vocab, &tokens);
         let old_state_reps =
@@ -679,6 +686,8 @@ mod prepass_selection_tests {
             &final_state_reps,
             &disallowed,
             Some(&byte_to_class),
+            None,
+            None,
             None,
             None,
         );

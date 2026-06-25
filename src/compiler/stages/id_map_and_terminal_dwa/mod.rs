@@ -503,6 +503,8 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     // from occupying the transition base needed by unsimplified L2P work.
     let shared_original_vocab_dfa_cache =
         l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
+    let shared_original_vocab_analysis_dfa_cache =
+        l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache::default();
     let shared_transition_cache = OnceLock::new();
     let shared_simplify_cache = l2p::SharedSimplifyCache::default();
     let shared_disallowed_follow_dfa_cache = l2p::postprocess::SharedDisallowedFollowDfaCache::new();
@@ -528,6 +530,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             Some(global_max_length_state_map),
             Some(&shared_vocab_dfa_cache),
             Some(&shared_original_vocab_dfa_cache),
+            Some(&shared_original_vocab_analysis_dfa_cache),
             Some(&shared_transition_cache),
             Some(&shared_simplify_cache),
             Some(&shared_disallowed_follow_dfa_cache),
