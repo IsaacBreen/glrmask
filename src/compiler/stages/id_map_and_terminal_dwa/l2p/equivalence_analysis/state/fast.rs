@@ -39,29 +39,19 @@ impl StateBatchScratch {
     }
 }
 
+#[derive(Default)]
 struct StateBatchScratchPool {
-    enabled: bool,
     available: Mutex<Vec<StateBatchScratch>>,
 }
 
 impl StateBatchScratchPool {
-    fn new(enabled: bool) -> Self {
-        Self {
-            enabled,
-            available: Mutex::new(Vec::new()),
-        }
-    }
-
     fn checkout(&self, num_groups: usize) -> StateBatchScratchLease<'_> {
-        let scratch = if self.enabled {
-            self.available
-                .lock()
-                .unwrap()
-                .pop()
-                .unwrap_or_else(|| StateBatchScratch::new(num_groups))
-        } else {
-            StateBatchScratch::new(num_groups)
-        };
+        let scratch = self
+            .available
+            .lock()
+            .unwrap()
+            .pop()
+            .unwrap_or_else(|| StateBatchScratch::new(num_groups));
         debug_assert_eq!(scratch.positions.len(), num_groups);
         StateBatchScratchLease {
             pool: self,
@@ -83,10 +73,8 @@ impl StateBatchScratchLease<'_> {
 
 impl Drop for StateBatchScratchLease<'_> {
     fn drop(&mut self) {
-        if self.pool.enabled {
-            if let Some(scratch) = self.scratch.take() {
-                self.pool.available.lock().unwrap().push(scratch);
-            }
+        if let Some(scratch) = self.scratch.take() {
+            self.pool.available.lock().unwrap().push(scratch);
         }
     }
 }
@@ -757,10 +745,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     let mut stable_batches = 0usize;
     let mut tokens_tested = 0usize;
     let mut batches_processed = 0usize;
-    let state_batch_scratch_pool_enabled = std::env::var("GLRMASK_DISABLE_STATE_EQUIV_SCRATCH_POOL")
-        .map(|value| value != "1")
-        .unwrap_or(true);
-    let batch_scratch_pool = StateBatchScratchPool::new(state_batch_scratch_pool_enabled);
+    let batch_scratch_pool = StateBatchScratchPool::default();
     for batch_indices in &batches {
         if active_indices.is_empty() {
             break;
@@ -1120,4 +1105,34 @@ pub fn mapping_to_equivalence_classes(
     }
 
     rep_to_class.into_values().collect()
+}
+
+
+#[cfg(test)]
+mod state_batch_scratch_pool_tests {
+    use super::*;
+
+    #[test]
+    fn recycled_scratch_can_be_scrubbed_before_next_walk() {
+        let pool = StateBatchScratchPool::default();
+        let positions_ptr;
+        {
+            let mut lease = pool.checkout(65);
+            let scratch = lease.scratch_mut();
+            positions_ptr = scratch.positions.as_ptr();
+            scratch.positions[0] = 7;
+            scratch.positions[64] = 11;
+            bitset_set(&mut scratch.active_bits, 0);
+            bitset_set(&mut scratch.active_bits, 64);
+        }
+
+        {
+            let mut lease = pool.checkout(65);
+            let scratch = lease.scratch_mut();
+            assert_eq!(scratch.positions.as_ptr(), positions_ptr);
+            clear_active_positions(&mut scratch.positions, &mut scratch.active_bits);
+            assert!(scratch.positions.iter().all(|&position| position == -1));
+            assert!(scratch.active_bits.iter().all(|&word| word == 0));
+        }
+    }
 }
