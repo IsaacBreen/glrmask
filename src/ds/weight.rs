@@ -144,6 +144,10 @@ impl ScopedWeightOpCache {
         value
     }
 
+    pub(crate) fn intersection_entry_count(&self) -> usize {
+        self.intersection_entries.len()
+    }
+
     pub fn difference(&mut self, left: &Weight, right: &Weight) -> Weight {
         if left.is_empty() || right.is_full() {
             return Weight::empty();
@@ -1077,6 +1081,75 @@ struct WeightRangeEntry {
     tokens: SharedTokenSet,
 }
 
+#[derive(Clone)]
+pub(crate) struct WeightIntersectionIndex {
+    source: Weight,
+    entries: Vec<WeightRangeEntry>,
+}
+
+impl WeightIntersectionIndex {
+    fn new(source: &Weight) -> Self {
+        Self {
+            source: source.clone(),
+            entries: source
+                .0
+                .range_values()
+                .map(|(range, tokens)| WeightRangeEntry {
+                    start: *range.start(),
+                    end: *range.end(),
+                    tokens: Arc::clone(tokens),
+                })
+                .collect(),
+        }
+    }
+}
+
+fn intersect_weight_with_index(sparse: &Weight, index: &WeightIntersectionIndex) -> Weight {
+    let mut builder = CompactRangeBuilder::new();
+    let mut overlap_cache: SmallVec<[(
+        *const RangeSetBlaze<u32>,
+        *const RangeSetBlaze<u32>,
+        Option<SharedTokenSet>,
+    ); 8]> = SmallVec::new();
+
+    for (sparse_range, sparse_tokens) in sparse.0.range_values() {
+        let sparse_start = *sparse_range.start();
+        let sparse_end = *sparse_range.end();
+        let mut entry_index = index
+            .entries
+            .partition_point(|entry| entry.end < sparse_start);
+
+        while let Some(entry) = index.entries.get(entry_index) {
+            if entry.start > sparse_end {
+                break;
+            }
+
+            let start = sparse_start.max(entry.start);
+            let end = sparse_end.min(entry.end);
+            let sparse_ptr = Arc::as_ptr(sparse_tokens);
+            let dense_ptr = Arc::as_ptr(&entry.tokens);
+            let tokens = if let Some((_, _, cached)) = overlap_cache.iter().find(
+                |(cached_sparse, cached_dense, _)| {
+                    *cached_sparse == sparse_ptr && *cached_dense == dense_ptr
+                },
+            ) {
+                cached.clone()
+            } else {
+                let overlap = shared_token_intersection(sparse_tokens, &entry.tokens);
+                overlap_cache.push((sparse_ptr, dense_ptr, overlap.clone()));
+                overlap
+            };
+
+            if let Some(tokens) = tokens {
+                builder.push(start, end, tokens);
+            }
+            entry_index += 1;
+        }
+    }
+
+    builder.finish()
+}
+
 struct CompactRangeBuilder {
     map: WeightMap,
     pending_start: Option<u32>,
@@ -1241,10 +1314,12 @@ fn union_disjoint_tsid_ranges(left: &Weight, right: &Weight) -> Option<Weight> {
 }
 
 /// Direct multi-way union that avoids creating O(N) intermediate Weight objects.
-/// Uses a sweep-line approach: collects all range entries, sorts boundary points,
-/// and computes the union of active token sets at each boundary interval.
+///
+/// For large inputs, this uses an event sweep over start and end boundaries.
+/// The previous implementation re-scanned every started entry at every
+/// boundary, which is quadratic for long overlapping ranges.  The event sweep
+/// maintains the active distinct token sets incrementally instead.
 fn union_all_multiway(weights: &[&Weight]) -> Weight {
-    // Collect all (start, end, tokens) entries from all weights
     let total_entry_hint: usize = weights.iter().map(|w| w.0.ranges().count()).sum();
     let mut all_entries: Vec<WeightRangeEntry> = Vec::with_capacity(total_entry_hint);
     for weight in weights {
@@ -1261,7 +1336,17 @@ fn union_all_multiway(weights: &[&Weight]) -> Weight {
         return Weight::empty();
     }
 
-    // Compute sorted unique boundaries
+    // The compact rescan path avoids tree-map overhead for the small common
+    // case; the event sweep avoids pathological repeated scans for larger
+    // overlapping unions.
+    const INCREMENTAL_SWEEP_MIN_ENTRIES: usize = 64;
+    if all_entries.len() < INCREMENTAL_SWEEP_MIN_ENTRIES {
+        return union_all_multiway_rescan(all_entries);
+    }
+    union_all_multiway_incremental(all_entries)
+}
+
+fn union_all_multiway_rescan(mut all_entries: Vec<WeightRangeEntry>) -> Weight {
     let mut boundaries = Vec::with_capacity(all_entries.len() * 2);
     for entry in &all_entries {
         boundaries.push(u64::from(entry.start));
@@ -1274,8 +1359,7 @@ fn union_all_multiway(weights: &[&Weight]) -> Weight {
         return Weight::empty();
     }
 
-    // Sort entries by start for efficient scanning
-    all_entries.sort_unstable_by_key(|e| e.start);
+    all_entries.sort_unstable_by_key(|entry| entry.start);
 
     let mut builder = CompactRangeBuilder::new();
     let mut scan_start = 0usize;
@@ -1286,18 +1370,16 @@ fn union_all_multiway(weights: &[&Weight]) -> Weight {
         let interval_start = window[0] as u32;
         let interval_end = (window[1] - 1) as u32;
 
-        // Advance scan_start past entries that end before this interval
         while scan_start < all_entries.len() && all_entries[scan_start].end < interval_start {
             scan_start += 1;
         }
 
-        // Collect all token sets active in this interval
         active_tokens.clear();
         for entry in &all_entries[scan_start..] {
             if entry.start > interval_start {
                 break;
             }
-            if entry.start <= interval_start && entry.end >= interval_end {
+            if entry.end >= interval_end {
                 active_tokens.push(Arc::clone(&entry.tokens));
             }
         }
@@ -1305,27 +1387,7 @@ fn union_all_multiway(weights: &[&Weight]) -> Weight {
         active_tokens.sort_unstable_by_key(|tokens| Arc::as_ptr(tokens) as usize);
         active_tokens.dedup_by_key(|tokens| Arc::as_ptr(tokens) as usize);
 
-        let tokens = match active_tokens.len() {
-            0 => None,
-            1 => Some(Arc::clone(&active_tokens[0])),
-            2 => Some(shared_token_union(&active_tokens[0], &active_tokens[1])),
-            _ => {
-                let key: Vec<usize> = active_tokens
-                    .iter()
-                    .map(|tokens| Arc::as_ptr(tokens) as usize)
-                    .collect();
-                if let Some(cached) = token_union_cache.get(&key) {
-                    Some(Arc::clone(cached))
-                } else {
-                    let tokens = shared_token_union_many(&active_tokens);
-                    if let Some(tokens) = &tokens {
-                        token_union_cache.insert(key, Arc::clone(tokens));
-                    }
-                    tokens
-                }
-            }
-        };
-
+        let tokens = union_active_token_sets(&active_tokens, &mut token_union_cache);
         if let Some(tokens) = tokens {
             builder.push(interval_start, interval_end, tokens);
         } else {
@@ -1334,6 +1396,119 @@ fn union_all_multiway(weights: &[&Weight]) -> Weight {
     }
 
     builder.finish()
+}
+
+fn union_all_multiway_incremental(mut all_entries: Vec<WeightRangeEntry>) -> Weight {
+    all_entries.sort_unstable_by_key(|entry| entry.start);
+
+    // End events are exclusive so entries ending at `boundary - 1` leave the
+    // active set before entries beginning at `boundary` enter it.
+    let mut end_events: Vec<(u64, SharedTokenSet)> = all_entries
+        .iter()
+        .map(|entry| (u64::from(entry.end) + 1, Arc::clone(&entry.tokens)))
+        .collect();
+    end_events.sort_unstable_by_key(|(end_exclusive, _)| *end_exclusive);
+
+    let mut builder = CompactRangeBuilder::new();
+    let mut active: BTreeMap<usize, (SharedTokenSet, usize)> = BTreeMap::new();
+    let mut active_tokens = Vec::<SharedTokenSet>::new();
+    let mut token_union_cache: FxHashMap<Vec<usize>, SharedTokenSet> = FxHashMap::default();
+    let mut start_index = 0usize;
+    let mut end_index = 0usize;
+
+    while start_index < all_entries.len() || end_index < end_events.len() {
+        let next_start = all_entries
+            .get(start_index)
+            .map(|entry| u64::from(entry.start));
+        let next_end = end_events.get(end_index).map(|(end, _)| *end);
+        let boundary = match (next_start, next_end) {
+            (Some(start), Some(end)) => start.min(end),
+            (Some(start), None) => start,
+            (None, Some(end)) => end,
+            (None, None) => break,
+        };
+
+        while end_index < end_events.len() && end_events[end_index].0 == boundary {
+            let tokens = &end_events[end_index].1;
+            let key = Arc::as_ptr(tokens) as usize;
+            let mut remove = false;
+            if let Some((_, count)) = active.get_mut(&key) {
+                debug_assert!(*count > 0);
+                *count -= 1;
+                remove = *count == 0;
+            } else {
+                debug_assert!(false, "every end event must have an active start event");
+            }
+            if remove {
+                active.remove(&key);
+            }
+            end_index += 1;
+        }
+
+        while start_index < all_entries.len()
+            && u64::from(all_entries[start_index].start) == boundary
+        {
+            let tokens = Arc::clone(&all_entries[start_index].tokens);
+            let key = Arc::as_ptr(&tokens) as usize;
+            active
+                .entry(key)
+                .and_modify(|(_, count)| *count += 1)
+                .or_insert((tokens, 1));
+            start_index += 1;
+        }
+
+        let following_start = all_entries
+            .get(start_index)
+            .map(|entry| u64::from(entry.start));
+        let following_end = end_events.get(end_index).map(|(end, _)| *end);
+        let Some(next_boundary) = (match (following_start, following_end) {
+            (Some(start), Some(end)) => Some(start.min(end)),
+            (Some(start), None) => Some(start),
+            (None, Some(end)) => Some(end),
+            (None, None) => None,
+        }) else {
+            break;
+        };
+
+        if active.is_empty() {
+            builder.flush();
+            continue;
+        }
+
+        active_tokens.clear();
+        active_tokens.extend(active.values().map(|(tokens, _)| Arc::clone(tokens)));
+        let tokens = union_active_token_sets(&active_tokens, &mut token_union_cache)
+            .expect("non-empty active set has a token union");
+        builder.push(boundary as u32, (next_boundary - 1) as u32, tokens);
+    }
+
+    builder.finish()
+}
+
+fn union_active_token_sets(
+    active_tokens: &[SharedTokenSet],
+    token_union_cache: &mut FxHashMap<Vec<usize>, SharedTokenSet>,
+) -> Option<SharedTokenSet> {
+    match active_tokens.len() {
+        0 => None,
+        1 => Some(Arc::clone(&active_tokens[0])),
+        2 => Some(shared_token_union(&active_tokens[0], &active_tokens[1])),
+        _ => {
+            let key: Vec<usize> = active_tokens
+                .iter()
+                .map(|tokens| Arc::as_ptr(tokens) as usize)
+                .collect();
+            if let Some(cached) = token_union_cache.get(&key) {
+                Some(Arc::clone(cached))
+            } else {
+                let tokens = shared_token_union_many(active_tokens);
+                if let Some(tokens) = &tokens {
+                    token_union_cache.insert(key, Arc::clone(tokens));
+                }
+                tokens
+            }
+        }
+    }
 }
 
 fn union_all_single_tsid_entries(weights: &[&Weight]) -> Option<Weight> {
@@ -1626,6 +1801,34 @@ fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight)
 }
 
 impl Weight {
+    pub(crate) fn intersection_index(&self) -> WeightIntersectionIndex {
+        WeightIntersectionIndex::new(self)
+    }
+
+    pub(crate) fn intersection_with_index(&self, index: &WeightIntersectionIndex) -> Self {
+        let other = &index.source;
+        if self.is_empty() || other.is_empty() {
+            return Self::empty();
+        }
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return self.clone();
+        }
+        if self.is_full() {
+            return other.clone();
+        }
+        if other.is_full() {
+            return self.clone();
+        }
+
+        if let Some(existing) = with_public_weight_intersection_memo(|memo| memo.lookup(self, other)) {
+            return existing;
+        }
+
+        let result = intersect_weight_with_index(self, index);
+        with_public_weight_intersection_memo(|memo| memo.store(self, other, &result));
+        result
+    }
+
     pub(crate) fn ptr_key(&self) -> usize {
         Arc::as_ptr(&self.0) as usize
     }
@@ -2251,6 +2454,95 @@ mod tests {
 
         let sequential = left.union(&middle).union(&right).union(&Weight::empty());
         assert_eq!(bulk, sequential);
+    }
+
+    #[test]
+    fn multiway_union_matches_sequential_union_for_overlapping_ranges() {
+        let mut weights = Vec::new();
+        for index in 0..80u32 {
+            weights.push(Weight::from_uniform(
+                index..=index + 20,
+                RangeSetBlaze::from_iter([index % 11..=(index % 11) + 3]),
+            ));
+        }
+        weights.push(Weight::from_uniform(
+            (u32::MAX - 2)..=u32::MAX,
+            RangeSetBlaze::from_iter([99..=101]),
+        ));
+
+        let bulk = Weight::union_all(weights.iter());
+        let sequential = weights
+            .iter()
+            .fold(Weight::empty(), |acc, weight| acc.union(weight));
+
+        assert_eq!(bulk, sequential);
+    }
+
+    #[test]
+    fn indexed_intersection_matches_generic_intersection() {
+        fn assert_matches(sparse: Weight, dense: Weight) {
+            let index = dense.intersection_index();
+            clear_weight_op_caches();
+            let indexed = sparse.intersection_with_index(&index);
+            clear_weight_op_caches();
+            let generic = sparse.intersection_uncached(&dense);
+            assert_eq!(indexed, generic);
+        }
+
+        let dense = Weight::from_per_tsid_token_sets((0..160u32).map(|tsid| {
+            let tokens = match tsid % 5 {
+                0 => RangeSetBlaze::from_iter([0..=7, 40..=47]),
+                1 => RangeSetBlaze::from_iter([4..=13]),
+                2 => RangeSetBlaze::from_iter([20..=29]),
+                3 => RangeSetBlaze::from_iter([8..=11, 30..=36]),
+                _ => RangeSetBlaze::from_iter([50..=65]),
+            };
+            (tsid * 3, tokens)
+        }));
+        let sparse = Weight::from_per_tsid_token_sets([
+            (2, RangeSetBlaze::from_iter([3..=10])),
+            (93, RangeSetBlaze::from_iter([0..=5, 44..=52])),
+            (231, RangeSetBlaze::from_iter([7..=35])),
+            (351, RangeSetBlaze::from_iter([30..=70])),
+        ]);
+        assert_matches(sparse, dense.clone());
+
+        let index = dense.intersection_index();
+        assert_eq!(Weight::all().intersection_with_index(&index), dense);
+        assert_eq!(Weight::empty().intersection_with_index(&index), Weight::empty());
+
+        for case in 0..64u32 {
+            let dense = Weight::from_per_tsid_token_sets((0..192u32).map(|tsid| {
+                let tokens = match (tsid / 3 + case) % 7 {
+                    0 => RangeSetBlaze::from_iter([0..=9, 42..=57]),
+                    1 => RangeSetBlaze::from_iter([5..=18]),
+                    2 => RangeSetBlaze::from_iter([20..=37]),
+                    3 => RangeSetBlaze::from_iter([11..=14, 30..=45]),
+                    4 => RangeSetBlaze::from_iter([48..=66]),
+                    5 => RangeSetBlaze::from_iter([3..=7, 70..=79]),
+                    _ => RangeSetBlaze::from_iter([25..=31, 60..=73]),
+                };
+                (tsid, tokens)
+            }));
+            let sparse = Weight::from_per_tsid_token_sets((0..192u32).filter_map(|tsid| {
+                if (tsid * 17 + case * 11) % 5 == 0 {
+                    return None;
+                }
+                let tokens = match (tsid / 2 + case * 3) % 9 {
+                    0 => RangeSetBlaze::from_iter([0..=6, 40..=53]),
+                    1 => RangeSetBlaze::from_iter([4..=15]),
+                    2 => RangeSetBlaze::from_iter([16..=29]),
+                    3 => RangeSetBlaze::from_iter([8..=12, 28..=38]),
+                    4 => RangeSetBlaze::from_iter([32..=51]),
+                    5 => RangeSetBlaze::from_iter([50..=69]),
+                    6 => RangeSetBlaze::from_iter([65..=82]),
+                    7 => RangeSetBlaze::from_iter([2..=4, 75..=91]),
+                    _ => RangeSetBlaze::from_iter([24..=27, 56..=64]),
+                };
+                Some((tsid, tokens))
+            }));
+            assert_matches(sparse, dense);
+        }
     }
 
     #[test]

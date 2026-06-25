@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 
 use super::dwa::{DWA, DWAState};
 use crate::ds::weight::Weight;
@@ -17,6 +18,10 @@ use crate::ds::weight::Weight;
 type Label = i32;
 
 const UNMAPPED: u32 = u32::MAX;
+// Reconstruction reduces large exact weight unions in a bounded tree. 64 is
+// the best measured fan-in for the global terminal-DWA merge: it avoids the
+// additional rounds of 16 while keeping intermediate event sweeps bounded.
+const RECONSTRUCTION_UNION_BATCH_SIZE: usize = 64;
 
 fn weighted_dwa_minimize_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
@@ -98,15 +103,20 @@ fn memoized_intersection(
 ///
 /// Returns (changed, topo_order, reachable_sets) so callers can reuse them.
 pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
+    let profile_enabled = weighted_dwa_minimize_profile_enabled();
     let n = dwa.states().len();
     if n == 0 {
         return (false, Some(Vec::new()), Vec::new());
     }
 
     // 1. Topological order (Kahn's algorithm)
+    let topo_started_at = profile_enabled.then(Instant::now);
     let Some(topo) = compute_topo_order(dwa) else {
         return (false, None, Vec::new()); // cyclic
     };
+    let topo_ms = topo_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
     // 2+3 combined: backward reachable sets + push transition weights.
     // In reverse topo order, each state's targets have already been processed,
@@ -114,15 +124,30 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
     let mut reachable: Vec<Weight> = vec![Weight::empty(); n];
     let mut intersection_cache = FxHashMap::default();
     let mut changed = false;
+    let mut target_full = 0usize;
+    let mut target_empty = 0usize;
+    let mut target_partial = 0usize;
+    let mut reachable_parts = 0usize;
+    let mut pushed_transitions = 0usize;
+    let mut intersection_ms = 0.0;
+    let mut union_ms = 0.0;
+    let mut apply_ms = 0.0;
+    let mut union_size_histogram = [0usize; 7];
+    let mut max_union_size = 0usize;
+    let mut union_key_occurrences = 0usize;
+    let mut union_key_repeats = 0usize;
+    let mut union_keys_seen = FxHashSet::<Vec<usize>>::default();
+
     for &u in topo.iter().rev() {
         let state = &dwa.states()[u];
-        let mut reachable_parts: Vec<Weight> = Vec::with_capacity(state.transitions.len() + 1);
+        let mut state_reachable_parts: Vec<Weight> =
+            Vec::with_capacity(state.transitions.len() + 1);
         let mut acc_full = false;
         if let Some(final_weight) = &state.final_weight {
             if final_weight.is_full() {
                 acc_full = true;
             } else if !final_weight.is_empty() {
-                reachable_parts.push(final_weight.clone());
+                state_reachable_parts.push(final_weight.clone());
             }
         }
         let mut pushed: Vec<(Label, u32, Option<Weight>)> = Vec::new();
@@ -132,27 +157,34 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
                 continue;
             }
             if reachable[t].is_full() {
+                target_full += 1;
                 if !acc_full && !w.is_empty() {
                     if w.is_full() {
                         acc_full = true;
-                        reachable_parts.clear();
+                        state_reachable_parts.clear();
                     } else {
-                        reachable_parts.push(w.clone());
+                        state_reachable_parts.push(w.clone());
                     }
                 }
                 // w ∩ all = w, no push needed
             } else if reachable[t].is_empty() {
+                target_empty += 1;
                 // w ∩ empty = empty, remove transition
                 pushed.push((lbl, *target, None));
                 // Contributes nothing to acc
             } else {
+                target_partial += 1;
+                let intersection_started_at = profile_enabled.then(Instant::now);
                 let new_w = memoized_intersection(&mut intersection_cache, w, &reachable[t]);
+                if let Some(started_at) = intersection_started_at {
+                    intersection_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+                }
                 if !acc_full && !new_w.is_empty() {
                     if new_w.is_full() {
                         acc_full = true;
-                        reachable_parts.clear();
+                        state_reachable_parts.clear();
                     } else {
-                        reachable_parts.push(new_w.clone());
+                        state_reachable_parts.push(new_w.clone());
                     }
                 }
                 if new_w != *w {
@@ -163,9 +195,43 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
         reachable[u] = if acc_full {
             Weight::all()
         } else {
-            Weight::union_all(reachable_parts.iter())
+            reachable_parts += state_reachable_parts.len();
+            if profile_enabled {
+                let union_size = state_reachable_parts.len();
+                max_union_size = max_union_size.max(union_size);
+                let bucket = match union_size {
+                    0 => 0,
+                    1 => 1,
+                    2 => 2,
+                    3 => 3,
+                    4 => 4,
+                    5..=16 => 5,
+                    _ => 6,
+                };
+                union_size_histogram[bucket] += 1;
+                if union_size >= 2 {
+                    let mut key: Vec<usize> = state_reachable_parts
+                        .iter()
+                        .map(weight_body_id)
+                        .collect();
+                    key.sort_unstable();
+                    key.dedup();
+                    union_key_occurrences += 1;
+                    if !union_keys_seen.insert(key) {
+                        union_key_repeats += 1;
+                    }
+                }
+            }
+            let union_started_at = profile_enabled.then(Instant::now);
+            let result = Weight::union_all(state_reachable_parts.iter());
+            if let Some(started_at) = union_started_at {
+                union_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+            }
+            result
         };
 
+        pushed_transitions += pushed.len();
+        let apply_started_at = profile_enabled.then(Instant::now);
         for (lbl, target, new_w_opt) in pushed {
             if let Some(new_w) = new_w_opt {
                 dwa.states_mut()[u].transitions.insert(lbl, (target, new_w));
@@ -174,7 +240,39 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
             }
             changed = true;
         }
+        if let Some(started_at) = apply_started_at {
+            apply_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
     }
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][weighted_dwa_minimize_push] states={} topo_ms={:.3} target_full={} target_empty={} target_partial={} intersection_ms={:.3} intersection_cache_entries={} reachable_parts={} union_ms={:.3} union_sizes=[{},{},{},{},{},{},{}] max_union_size={} union_key_occurrences={} union_unique_keys={} union_key_repeats={} pushed_transitions={} apply_ms={:.3}",
+            n,
+            topo_ms,
+            target_full,
+            target_empty,
+            target_partial,
+            intersection_ms,
+            intersection_cache.len(),
+            reachable_parts,
+            union_ms,
+            union_size_histogram[0],
+            union_size_histogram[1],
+            union_size_histogram[2],
+            union_size_histogram[3],
+            union_size_histogram[4],
+            union_size_histogram[5],
+            union_size_histogram[6],
+            max_union_size,
+            union_key_occurrences,
+            union_keys_seen.len(),
+            union_key_repeats,
+            pushed_transitions,
+            apply_ms,
+        );
+    }
+
     (changed, Some(topo), reachable)
 }
 
@@ -998,6 +1096,546 @@ fn build_class_profile(
     }
 }
 
+/// Sparse pointwise behavior used to compare one group against a candidate
+/// without rescanning all overlapping members.
+#[derive(Clone, Eq, PartialEq, Hash)]
+struct PointwiseBehavior {
+    final_active: bool,
+    transitions: Vec<(Label, u32)>,
+}
+
+#[derive(Default)]
+struct PointwiseBehaviorInterner {
+    ids: FxHashMap<PointwiseBehavior, u32>,
+}
+
+impl PointwiseBehaviorInterner {
+    fn intern(&mut self, final_active: bool, transitions: Vec<(Label, u32)>) -> u32 {
+        let behavior = PointwiseBehavior { final_active, transitions };
+        if let Some(&id) = self.ids.get(&behavior) {
+            return id;
+        }
+        let id = self.ids.len() as u32;
+        self.ids.insert(behavior, id);
+        id
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+struct TokenBehaviorRange {
+    start: u32,
+    end: u32,
+    behavior: u32,
+}
+
+#[derive(Clone, Eq, PartialEq, Hash)]
+struct PointwiseRegionBuildKey {
+    domain_tokens: usize,
+    final_tokens: usize,
+    transitions: SmallVec<[(Label, u32, usize); 4]>,
+}
+
+#[derive(Default)]
+struct PointwiseRegionBuildCache {
+    entries: FxHashMap<PointwiseRegionBuildKey, Option<Arc<Vec<TokenBehaviorRange>>>>,
+    hits: usize,
+    misses: usize,
+}
+
+#[derive(Default)]
+struct PointwiseRegionInterner {
+    regions: FxHashMap<Vec<TokenBehaviorRange>, Arc<Vec<TokenBehaviorRange>>>,
+}
+
+impl PointwiseRegionInterner {
+    fn intern(&mut self, ranges: Vec<TokenBehaviorRange>) -> Arc<Vec<TokenBehaviorRange>> {
+        if let Some(existing) = self.regions.get(&ranges) {
+            return Arc::clone(existing);
+        }
+        let ranges = Arc::new(ranges);
+        self.regions.insert((*ranges).clone(), Arc::clone(&ranges));
+        ranges
+    }
+}
+
+#[derive(Default)]
+struct PointwiseProfile {
+    /// Sorted by TSID. Each behavior region is immutable and shared by every
+    /// TSID whose weight behavior is identical.
+    by_tsid: Vec<(u32, Arc<Vec<TokenBehaviorRange>>)>,
+}
+
+#[derive(Default)]
+struct PointwiseMergeGroup {
+    targets_by_label: FxHashMap<Label, u32>,
+    /// Exact partial behavior function of all members already in this group.
+    behavior_by_tsid: FxHashMap<u32, Arc<Vec<TokenBehaviorRange>>>,
+    member_classes: Vec<usize>,
+}
+
+fn range_set_contains(tokens: &RangeSetBlaze<u32>, value: u32) -> bool {
+    tokens.contains(value)
+}
+
+fn profile_target_for_label(profile: &ClassProfile, label: Label) -> Option<u32> {
+    profile
+        .targets
+        .binary_search_by_key(&label, |(candidate, _)| *candidate)
+        .ok()
+        .map(|index| profile.targets[index].1)
+}
+
+fn push_token_behavior_range(
+    ranges: &mut Vec<TokenBehaviorRange>,
+    start: u32,
+    end: u32,
+    behavior: u32,
+) {
+    if start > end {
+        return;
+    }
+    if let Some(previous) = ranges.last_mut() {
+        if previous.behavior == behavior
+            && previous.end != u32::MAX
+            && previous.end + 1 == start
+        {
+            previous.end = end;
+            return;
+        }
+    }
+    ranges.push(TokenBehaviorRange { start, end, behavior });
+}
+
+fn add_tsid_boundary_if_overlapping(
+    boundaries: &mut Vec<u64>,
+    domain_start: u32,
+    domain_end: u32,
+    range_start: u32,
+    range_end: u32,
+) {
+    let start = domain_start.max(range_start);
+    let end = domain_end.min(range_end);
+    if start <= end {
+        boundaries.push(u64::from(start));
+        boundaries.push(u64::from(end) + 1);
+    }
+}
+
+fn build_token_behavior_region(
+    domain_tokens: &RangeSetBlaze<u32>,
+    final_tokens: Option<&RangeSetBlaze<u32>>,
+    active_transitions: &[(Label, u32, &RangeSetBlaze<u32>)],
+    behaviors: &mut PointwiseBehaviorInterner,
+    regions: &mut PointwiseRegionInterner,
+    build_cache: &mut PointwiseRegionBuildCache,
+) -> Option<Arc<Vec<TokenBehaviorRange>>> {
+    // Token sets are immutable and retained by the DWA/needed weights for this
+    // whole coloring pass, so their addresses form an exact local cache key.
+    let key = PointwiseRegionBuildKey {
+        domain_tokens: domain_tokens as *const RangeSetBlaze<u32> as usize,
+        final_tokens: final_tokens
+            .map(|tokens| tokens as *const RangeSetBlaze<u32> as usize)
+            .unwrap_or(0),
+        transitions: active_transitions
+            .iter()
+            .map(|(label, target, tokens)| {
+                (*label, *target, *tokens as *const RangeSetBlaze<u32> as usize)
+            })
+            .collect(),
+    };
+    if let Some(existing) = build_cache.entries.get(&key) {
+        build_cache.hits += 1;
+        return existing.clone();
+    }
+    build_cache.misses += 1;
+    let mut boundaries = Vec::<u64>::new();
+    for range in domain_tokens.ranges() {
+        boundaries.push(u64::from(*range.start()));
+        boundaries.push(u64::from(*range.end()) + 1);
+    }
+    if let Some(tokens) = final_tokens {
+        for range in tokens.ranges() {
+            boundaries.push(u64::from(*range.start()));
+            boundaries.push(u64::from(*range.end()) + 1);
+        }
+    }
+    for (_, _, tokens) in active_transitions {
+        for range in tokens.ranges() {
+            boundaries.push(u64::from(*range.start()));
+            boundaries.push(u64::from(*range.end()) + 1);
+        }
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut token_ranges = Vec::new();
+    for pair in boundaries.windows(2) {
+        let start64 = pair[0];
+        let next = pair[1];
+        if start64 > u64::from(u32::MAX) || start64 >= next {
+            continue;
+        }
+        let start = start64 as u32;
+        let end = (next - 1) as u32;
+        if !range_set_contains(domain_tokens, start) {
+            continue;
+        }
+        let final_active = final_tokens.is_some_and(|tokens| range_set_contains(tokens, start));
+        let mut transitions = Vec::new();
+        for (label, target, tokens) in active_transitions {
+            if range_set_contains(tokens, start) {
+                transitions.push((*label, *target));
+            }
+        }
+        debug_assert!(final_active || !transitions.is_empty());
+        if !final_active && transitions.is_empty() {
+            return None;
+        }
+        let behavior = behaviors.intern(final_active, transitions);
+        push_token_behavior_range(&mut token_ranges, start, end, behavior);
+    }
+    let result = (!token_ranges.is_empty()).then(|| regions.intern(token_ranges));
+    build_cache.entries.insert(key, result.clone());
+    result
+}
+
+/// Materialize a complete observable behavior function. A profile is constant
+/// over large TSID intervals, so build its token behavior once per interval
+/// then share that immutable region for every TSID in the interval.
+fn build_pointwise_profile(
+    domain: &Weight,
+    profile: &ClassProfile,
+    behaviors: &mut PointwiseBehaviorInterner,
+    regions: &mut PointwiseRegionInterner,
+    build_cache: &mut PointwiseRegionBuildCache,
+) -> Option<PointwiseProfile> {
+    if domain.is_full()
+        || profile.final_weight.as_ref().is_some_and(Weight::is_full)
+        || profile.weights.iter().any(|(_, weight)| weight.is_full())
+    {
+        return None;
+    }
+
+    let transitions: Vec<(Label, u32, &Weight)> = profile
+        .weights
+        .iter()
+        .map(|(label, weight)| Some((*label, profile_target_for_label(profile, *label)?, weight)))
+        .collect::<Option<_>>()?;
+    let mut by_tsid = Vec::new();
+    for (domain_start, domain_end, domain_tokens) in domain.compact_entries()? {
+        let mut boundaries = vec![u64::from(domain_start), u64::from(domain_end) + 1];
+        if let Some(final_weight) = &profile.final_weight {
+            for (tsid_range, _) in final_weight.0.range_values() {
+                add_tsid_boundary_if_overlapping(
+                    &mut boundaries,
+                    domain_start,
+                    domain_end,
+                    *tsid_range.start(),
+                    *tsid_range.end(),
+                );
+            }
+        }
+        for (_, _, weight) in &transitions {
+            for (tsid_range, _) in weight.0.range_values() {
+                add_tsid_boundary_if_overlapping(
+                    &mut boundaries,
+                    domain_start,
+                    domain_end,
+                    *tsid_range.start(),
+                    *tsid_range.end(),
+                );
+            }
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
+
+        for pair in boundaries.windows(2) {
+            let start64 = pair[0];
+            let next = pair[1];
+            if start64 > u64::from(u32::MAX) || start64 >= next {
+                continue;
+            }
+            let tsid_start = start64 as u32;
+            let tsid_end = (next - 1) as u32;
+            let final_tokens = profile
+                .final_weight
+                .as_ref()
+                .and_then(|weight| weight.0.get(tsid_start))
+                .map(|tokens| tokens.as_ref());
+            let mut active_transitions = Vec::new();
+            for (label, target, weight) in &transitions {
+                if let Some(tokens) = weight.0.get(tsid_start) {
+                    active_transitions.push((*label, *target, tokens.as_ref()));
+                }
+            }
+            let region = build_token_behavior_region(
+                domain_tokens.as_ref(),
+                final_tokens,
+                &active_transitions,
+                behaviors,
+                regions,
+                build_cache,
+            )?;
+            for tsid in tsid_start..=tsid_end {
+                by_tsid.push((tsid, Arc::clone(&region)));
+            }
+        }
+    }
+    Some(PointwiseProfile { by_tsid })
+}
+
+fn token_behavior_ranges_compatible(
+    left: &[TokenBehaviorRange],
+    right: &[TokenBehaviorRange],
+) -> bool {
+    let mut left_index = 0usize;
+    let mut right_index = 0usize;
+    while left_index < left.len() && right_index < right.len() {
+        let left_range = left[left_index];
+        let right_range = right[right_index];
+        if left_range.end < right_range.start {
+            left_index += 1;
+            continue;
+        }
+        if right_range.end < left_range.start {
+            right_index += 1;
+            continue;
+        }
+        if left_range.behavior != right_range.behavior {
+            return false;
+        }
+        if left_range.end <= right_range.end {
+            left_index += 1;
+        }
+        if right_range.end <= left_range.end {
+            right_index += 1;
+        }
+    }
+    true
+}
+
+/// Overlay two compatible sparse functions. Equal behavior is required where
+/// both inputs are defined; the output preserves their exact union.
+fn overlay_compatible_token_behavior_ranges(
+    existing: &[TokenBehaviorRange],
+    add: &[TokenBehaviorRange],
+) -> Vec<TokenBehaviorRange> {
+    let mut result = Vec::with_capacity(existing.len() + add.len());
+    let mut existing_index = 0usize;
+    let mut add_index = 0usize;
+    let mut current_existing = existing.get(existing_index).copied();
+    let mut current_add = add.get(add_index).copied();
+
+    loop {
+        match (current_existing, current_add) {
+            (None, None) => break,
+            (Some(range), None) => {
+                push_token_behavior_range(&mut result, range.start, range.end, range.behavior);
+                existing_index += 1;
+                current_existing = existing.get(existing_index).copied();
+            }
+            (None, Some(range)) => {
+                push_token_behavior_range(&mut result, range.start, range.end, range.behavior);
+                add_index += 1;
+                current_add = add.get(add_index).copied();
+            }
+            (Some(mut left), Some(mut right)) => {
+                if left.end < right.start {
+                    push_token_behavior_range(&mut result, left.start, left.end, left.behavior);
+                    existing_index += 1;
+                    current_existing = existing.get(existing_index).copied();
+                    continue;
+                }
+                if right.end < left.start {
+                    push_token_behavior_range(&mut result, right.start, right.end, right.behavior);
+                    add_index += 1;
+                    current_add = add.get(add_index).copied();
+                    continue;
+                }
+
+                debug_assert_eq!(left.behavior, right.behavior);
+                if left.start < right.start {
+                    push_token_behavior_range(&mut result, left.start, right.start - 1, left.behavior);
+                    left.start = right.start;
+                } else if right.start < left.start {
+                    push_token_behavior_range(&mut result, right.start, left.start - 1, right.behavior);
+                    right.start = left.start;
+                }
+
+                let end = left.end.min(right.end);
+                push_token_behavior_range(&mut result, left.start, end, left.behavior);
+                if left.end == end {
+                    existing_index += 1;
+                    current_existing = existing.get(existing_index).copied();
+                } else {
+                    left.start = end + 1;
+                    current_existing = Some(left);
+                }
+                if right.end == end {
+                    add_index += 1;
+                    current_add = add.get(add_index).copied();
+                } else {
+                    right.start = end + 1;
+                    current_add = Some(right);
+                }
+            }
+        }
+    }
+    result
+}
+
+fn pointwise_profile_compatible(group: &PointwiseMergeGroup, profile: &PointwiseProfile) -> bool {
+    profile.by_tsid.iter().all(|(tsid, ranges)| {
+        group.behavior_by_tsid.get(tsid).is_none_or(|existing| {
+            Arc::ptr_eq(existing, ranges)
+                || token_behavior_ranges_compatible(existing.as_ref(), ranges.as_ref())
+        })
+    })
+}
+
+fn merge_pointwise_profile_into_group(
+    group: &mut PointwiseMergeGroup,
+    profile: &PointwiseProfile,
+    regions: &mut PointwiseRegionInterner,
+) {
+    for (tsid, ranges) in &profile.by_tsid {
+        match group.behavior_by_tsid.get_mut(tsid) {
+            Some(existing) if Arc::ptr_eq(existing, ranges) => {}
+            Some(existing) => {
+                *existing = regions.intern(overlay_compatible_token_behavior_ranges(
+                    existing.as_ref(),
+                    ranges.as_ref(),
+                ));
+            }
+            None => {
+                group.behavior_by_tsid.insert(*tsid, Arc::clone(ranges));
+            }
+        }
+    }
+}
+/// Exact greedy grouping using one sparse partial behavior function per group.
+/// The class order and target-map restriction are identical to the memberwise
+/// path; only the witness representation changes.
+fn try_build_and_color_pointwise(
+    candidates: &[usize],
+    class_coloring: &[usize],
+    class_needed_union: &[Weight],
+    class_profiles: &[ClassProfile],
+    profile_enabled: bool,
+) -> Option<Vec<usize>> {
+    let started_at = Instant::now();
+    let mut interner = PointwiseBehaviorInterner::default();
+    let mut regions = PointwiseRegionInterner::default();
+    let mut region_build_cache = PointwiseRegionBuildCache::default();
+    let profile_started_at = Instant::now();
+    let mut pointwise_profiles = Vec::with_capacity(class_profiles.len());
+    for (domain, profile) in class_needed_union.iter().zip(class_profiles) {
+        pointwise_profiles.push(build_pointwise_profile(
+            domain,
+            profile,
+            &mut interner,
+            &mut regions,
+            &mut region_build_cache,
+        )?);
+    }
+    let profile_build_ms = profile_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let merge_started_at = Instant::now();
+    let mut groups = Vec::<PointwiseMergeGroup>::new();
+    let mut group_attempts = 0usize;
+    let mut target_rejects = 0usize;
+    let mut behavior_rejects = 0usize;
+    for class in 0..class_profiles.len() {
+        let class_profile = &class_profiles[class];
+        let pointwise_profile = &pointwise_profiles[class];
+        let mut placed = false;
+        for group in &mut groups {
+            group_attempts += 1;
+            if !targets_compatible_with_group_map(&class_profile.targets, &group.targets_by_label) {
+                target_rejects += 1;
+                continue;
+            }
+            if !pointwise_profile_compatible(group, pointwise_profile) {
+                behavior_rejects += 1;
+                continue;
+            }
+            #[cfg(debug_assertions)]
+            debug_assert!(memberwise_group_compatible(
+                &class_needed_union[class],
+                class_profile,
+                &group.member_classes,
+                class_needed_union,
+                class_profiles,
+            ));
+            for (label, target) in &class_profile.targets {
+                group.targets_by_label.entry(*label).or_insert(*target);
+            }
+            merge_pointwise_profile_into_group(group, pointwise_profile, &mut regions);
+            group.member_classes.push(class);
+            placed = true;
+            break;
+        }
+        if !placed {
+            let mut targets_by_label = FxHashMap::default();
+            targets_by_label.reserve(class_profile.targets.len());
+            for (label, target) in &class_profile.targets {
+                targets_by_label.insert(*label, *target);
+            }
+            let mut group = PointwiseMergeGroup {
+                targets_by_label,
+                behavior_by_tsid: FxHashMap::default(),
+                member_classes: vec![class],
+            };
+            merge_pointwise_profile_into_group(&mut group, pointwise_profile, &mut regions);
+            groups.push(group);
+        }
+    }
+    let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let mut class_to_group = vec![0usize; class_profiles.len()];
+    for (group_id, group) in groups.iter().enumerate() {
+        for &class in &group.member_classes {
+            class_to_group[class] = group_id;
+        }
+    }
+    let coloring = class_coloring
+        .iter()
+        .map(|class| class_to_group[*class])
+        .collect();
+
+    if profile_enabled {
+        let region_entries = groups
+            .iter()
+            .map(|group| {
+                group
+                    .behavior_by_tsid
+                    .values()
+                    .map(|ranges| ranges.len())
+                    .sum::<usize>()
+            })
+            .sum::<usize>();
+        eprintln!(
+            "[glrmask/profile][weighted_dwa_minimize_pointwise] candidates={} classes={} groups={} behaviors={} interned_regions={} regions={} region_build_cache_entries={} region_build_cache_hits={} region_build_cache_misses={} profile_build_ms={:.3} merge_ms={:.3} total_ms={:.3} group_attempts={} target_rejects={} behavior_rejects={}",
+            candidates.len(),
+            class_profiles.len(),
+            groups.len(),
+            interner.ids.len(),
+            regions.regions.len(),
+            region_entries,
+            region_build_cache.entries.len(),
+            region_build_cache.hits,
+            region_build_cache.misses,
+            profile_build_ms,
+            merge_ms,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+            group_attempts,
+            target_rejects,
+            behavior_rejects,
+        );
+    }
+    Some(coloring)
+}
+
 fn sorted_targets_compatible(class_targets: &[(Label, u32)], group_targets: &[(Label, u32)]) -> bool {
     let mut class_idx = 0;
     let mut group_idx = 0;
@@ -1326,6 +1964,14 @@ const SUMMARY_PROMOTION_BROAD_PROBES: usize = 4;
 const SUMMARY_WORK_PROMOTION_MAX_PROFILE_WEIGHTS: usize = 128;
 const SUMMARY_PROMOTION_MEMBERWISE_OVERLAP_CHECKS: usize = 4_096;
 
+/// A summary is an exact union over a stable prefix of a merge group.  Updating
+/// that union one member at a time repeatedly normalizes the same growing
+/// weights, which is quadratic for wide terminal-DWA groups.  Keep subsequent
+/// members as an exact bounded suffix and rebuild the immutable snapshot in
+/// batches.  Compatibility checks cover both pieces, so this changes only the
+/// construction schedule, not the merge relation.
+const SUMMARY_SNAPSHOT_BATCH_SIZE: usize = 64;
+
 struct ExactGroupSummary {
     needed_union: Weight,
     merged_final_weight: Option<Weight>,
@@ -1341,7 +1987,10 @@ struct OverlapMergeGroup {
     broad_probe_count: usize,
     max_profile_weights: usize,
     memberwise_overlap_checks: usize,
+    /// Exact aggregate for every member before `summary_pending_classes`.
     summary: Option<ExactGroupSummary>,
+    /// Exact suffix not yet folded into the immutable aggregate.
+    summary_pending_classes: Vec<usize>,
 }
 
 fn should_promote_group_summary(group: &OverlapMergeGroup) -> bool {
@@ -1490,10 +2139,6 @@ fn build_and_color_hybrid(
         }
         class_needed_union[class] = class_needed_union[class].union(&needed[state_id]);
     }
-    let class_tsid_coverage: Vec<Option<RangeSetBlaze<u32>>> = class_needed_union
-        .iter()
-        .map(Weight::tsid_coverage)
-        .collect();
     let class_union_ms = class_union_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let class_profiles_started_at = Instant::now();
@@ -1502,6 +2147,66 @@ fn build_and_color_hybrid(
         .map(|&rep| build_class_profile(rep, old_to_new, productive_transitions, dwa))
         .collect();
     let class_profiles_ms = class_profiles_started_at.elapsed().as_secs_f64() * 1000.0;
+    if profile_enabled {
+        let mut coverage_cells = 0usize;
+        let mut max_coverage_cells = 0usize;
+        let mut coverage_over_256 = 0usize;
+        for weight in &class_needed_union {
+            let count = weight
+                .tsid_coverage()
+                .as_ref()
+                .map(|set| set.ranges().map(|range| (*range.end() as usize - *range.start() as usize) + 1).sum())
+                .unwrap_or(usize::MAX);
+            coverage_cells = coverage_cells.saturating_add(count);
+            max_coverage_cells = max_coverage_cells.max(count);
+            coverage_over_256 += usize::from(count > 256);
+        }
+        let total_profile_weight_ranges: usize = class_profiles
+            .iter()
+            .flat_map(|profile| profile.weights.iter())
+            .map(|(_, weight)| weight.outer_range_count())
+            .sum();
+        let total_profile_weight_cells: usize = class_profiles
+            .iter()
+            .flat_map(|profile| profile.weights.iter())
+            .map(|(_, weight)| weight.tsid_coverage().map(|set| set.ranges().map(|range| (*range.end() as usize - *range.start() as usize) + 1).sum()).unwrap_or(usize::MAX))
+            .fold(0usize, usize::saturating_add);
+        eprintln!(
+            "[glrmask/profile][weighted_dwa_minimize_hybrid_shape] candidates={} classes={} coverage_cells={} max_coverage_cells={} coverage_over_256={} total_profile_weight_ranges={} total_profile_weight_cells={}",
+            candidates.len(), num_classes, coverage_cells, max_coverage_cells, coverage_over_256, total_profile_weight_ranges, total_profile_weight_cells,
+        );
+    }
+
+    // Each class is a partial behavior function over its pushed-needed
+    // TSID/token domain. When that representation is finite, compare against
+    // the exact union function of each group instead of revisiting all members.
+    // A full sentinel cannot be enumerated, so it retains the generic path.
+    if let Some(coloring) = try_build_and_color_pointwise(
+        candidates,
+        &class_coloring,
+        &class_needed_union,
+        &class_profiles,
+        profile_enabled,
+    ) {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][weighted_dwa_minimize_pointwise_preamble] candidates={} classes={} partition_refine_ms={:.3} class_union_ms={:.3} class_profiles_ms={:.3}",
+                candidates.len(),
+                num_classes,
+                partition_refine_ms,
+                class_union_ms,
+                class_profiles_ms,
+            );
+        }
+        return coloring;
+    }
+
+    // The generic fallback needs per-class TSID coverage for its indexed
+    // overlap probes. Do not build it on the normal pointwise-success path.
+    let class_tsid_coverage: Vec<Option<RangeSetBlaze<u32>>> = class_needed_union
+        .iter()
+        .map(Weight::tsid_coverage)
+        .collect();
     let classes_with_final_weight = class_profiles
         .iter()
         .filter(|profile| profile.final_weight.is_some())
@@ -1564,6 +2269,8 @@ fn build_and_color_hybrid(
     let mut summary_checks = 0usize;
     let mut summary_promotions = 0usize;
     let mut summary_work_promotions = 0usize;
+    let mut summary_snapshot_rebuilds = 0usize;
+    let mut summary_pending_member_scans = 0usize;
     let mut overlap_candidate_marks = vec![0u32; num_classes];
     let mut overlap_candidate_mark = 0u32;
     let mut overlap_candidate_members = Vec::<usize>::new();
@@ -1626,6 +2333,58 @@ fn build_and_color_hybrid(
                         }
                     }
 
+                    // The immutable summary covers the stable prefix.  Check the
+                    // bounded suffix memberwise until the next snapshot rebuild.
+                    // This is exact: a candidate is compatible with the whole
+                    // group iff it is compatible with the prefix union and every
+                    // suffix member on their respective overlap domains.
+                    if summary_compatible {
+                        for &member_class in &g.summary_pending_classes {
+                            summary_pending_member_scans += 1;
+                            memberwise_member_scans += 1;
+                            let member_needed = &class_needed_union[member_class];
+                            if cn.is_disjoint(member_needed) {
+                                continue;
+                            }
+                            memberwise_overlap_checks += 1;
+
+                            final_weight_checks += 1;
+                            let final_weight_check_started_at = Instant::now();
+                            let final_weight_ok = final_weights_compatible_on_domain_intersection(
+                                class_profile.final_weight.as_ref(),
+                                class_profiles[member_class].final_weight.as_ref(),
+                                cn,
+                                member_needed,
+                            );
+                            final_weight_check_ms +=
+                                final_weight_check_started_at.elapsed().as_secs_f64() * 1000.0;
+                            if !final_weight_ok {
+                                final_weight_rejects += 1;
+                                summary_compatible = false;
+                                break;
+                            }
+
+                            transition_weight_checks += 1;
+                            let transition_weight_check_started_at = Instant::now();
+                            let transition_weights_ok =
+                                sorted_weights_compatible_on_domain_intersection(
+                                    &class_profile.weights,
+                                    &class_profiles[member_class].weights,
+                                    cn,
+                                    member_needed,
+                                );
+                            transition_weight_check_ms += transition_weight_check_started_at
+                                .elapsed()
+                                .as_secs_f64()
+                                * 1000.0;
+                            if !transition_weights_ok {
+                                transition_weight_rejects += 1;
+                                summary_compatible = false;
+                                break;
+                            }
+                        }
+                    }
+
                     #[cfg(debug_assertions)]
                     debug_assert_eq!(
                         summary_compatible,
@@ -1636,7 +2395,7 @@ fn build_and_color_hybrid(
                             &class_needed_union,
                             &class_profiles,
                         ),
-                        "group summary must be equivalent to checking every member",
+                        "group summary plus pending suffix must be equivalent to checking every member",
                     );
                     summary_compatible
                 }
@@ -1773,8 +2532,17 @@ fn build_and_color_hybrid(
             }
             g.member_classes.push(class);
             g.max_profile_weights = g.max_profile_weights.max(class_profile.weights.len());
-            if let Some(summary) = g.summary.as_mut() {
-                update_exact_group_summary(summary, cn, class_profile);
+            if g.summary.is_some() {
+                g.summary_pending_classes.push(class);
+                if g.summary_pending_classes.len() >= SUMMARY_SNAPSHOT_BATCH_SIZE {
+                    g.summary = Some(build_exact_group_summary(
+                        &g.member_classes,
+                        &class_needed_union,
+                        &class_profiles,
+                    ));
+                    g.summary_pending_classes.clear();
+                    summary_snapshot_rebuilds += 1;
+                }
             } else if should_promote_group_summary(g) {
                 g.summary = Some(build_exact_group_summary(
                     &g.member_classes,
@@ -1829,6 +2597,7 @@ fn build_and_color_hybrid(
                 max_profile_weights: class_profile.weights.len(),
                 memberwise_overlap_checks: 0,
                 summary: None,
+                summary_pending_classes: Vec::new(),
             });
         }
     }
@@ -1875,7 +2644,7 @@ fn build_and_color_hybrid(
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
         eprintln!(
-            "[glrmask/profile][weighted_dwa_minimize_hybrid_detail] candidates={} classes={} groups={} group_attempts={} target_checks={} target_rejects={} target_check_ms={:.3} disjoint_checks={} disjoint_true={} disjoint_check_ms={:.3} final_weight_checks={} final_weight_rejects={} final_weight_check_ms={:.3} transition_weight_checks={} transition_weight_rejects={} transition_weight_check_ms={:.3} group_update_ms={:.3} memberwise_indexed_probes={} memberwise_broad_probes={} memberwise_member_scans={} memberwise_overlap_checks={} summary_checks={} summary_promotions={} summary_work_promotions={} classes_with_final_weight={} min_targets={} max_targets={} avg_targets={:.3} min_weights={} max_weights={} avg_weights={:.3} min_group_size={} max_group_size={}",
+            "[glrmask/profile][weighted_dwa_minimize_hybrid_detail] candidates={} classes={} groups={} group_attempts={} target_checks={} target_rejects={} target_check_ms={:.3} disjoint_checks={} disjoint_true={} disjoint_check_ms={:.3} final_weight_checks={} final_weight_rejects={} final_weight_check_ms={:.3} transition_weight_checks={} transition_weight_rejects={} transition_weight_check_ms={:.3} group_update_ms={:.3} memberwise_indexed_probes={} memberwise_broad_probes={} memberwise_member_scans={} memberwise_overlap_checks={} summary_checks={} summary_promotions={} summary_work_promotions={} summary_snapshot_rebuilds={} summary_pending_member_scans={} classes_with_final_weight={} min_targets={} max_targets={} avg_targets={:.3} min_weights={} max_weights={} avg_weights={:.3} min_group_size={} max_group_size={}",
             candidates.len(),
             num_classes,
             groups.len(),
@@ -1900,6 +2669,8 @@ fn build_and_color_hybrid(
             summary_checks,
             summary_promotions,
             summary_work_promotions,
+            summary_snapshot_rebuilds,
+            summary_pending_member_scans,
             classes_with_final_weight,
             min_targets,
             max_targets,
@@ -2087,12 +2858,12 @@ fn batch_build_weight(pending: Vec<Weight>) -> Weight {
     match pending.len() {
         0 => Weight::empty(),
         1 => pending.into_iter().next().unwrap(),
-        n if n <= 16 => Weight::union_all(pending.iter()),
+        n if n <= RECONSTRUCTION_UNION_BATCH_SIZE => Weight::union_all(pending.iter()),
         _ => {
             let mut current = pending;
-            while current.len() > 16 {
+            while current.len() > RECONSTRUCTION_UNION_BATCH_SIZE {
                 current = current
-                    .chunks(16)
+                    .chunks(RECONSTRUCTION_UNION_BATCH_SIZE)
                     .map(|chunk| Weight::union_all(chunk.iter()))
                     .collect();
             }
@@ -2137,23 +2908,64 @@ fn merge_state_into_builder(
 }
 
 fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedStateBuilder>) -> DWA {
+    let profile_enabled = weighted_dwa_minimize_profile_enabled();
+    let mut final_pending_weight_count = 0usize;
+    let mut max_final_pending_weight_count = 0usize;
+    let mut final_batches_over_16 = 0usize;
+    let mut transition_batch_count = 0usize;
+    let mut transition_pending_weight_count = 0usize;
+    let mut max_transition_pending_weight_count = 0usize;
+    let mut transition_batches_over_16 = 0usize;
+    let mut final_union_ms = 0.0;
+    let mut transition_union_ms = 0.0;
+    let mut insert_ms = 0.0;
     let states: Vec<DWAState> = builders
         .into_iter()
         .map(|b| {
             let mut state = DWAState::default();
+            final_pending_weight_count += b.final_weights_pending.len();
+            max_final_pending_weight_count = max_final_pending_weight_count.max(b.final_weights_pending.len());
+            final_batches_over_16 += usize::from(b.final_weights_pending.len() > 16);
+            let final_union_started_at = Instant::now();
             let final_weight = batch_build_weight(b.final_weights_pending);
+            final_union_ms += final_union_started_at.elapsed().as_secs_f64() * 1000.0;
             if !final_weight.is_empty() {
                 state.final_weight = Some(final_weight);
             }
             for (lbl, (target, pending_weights)) in b.transitions_pending {
+                transition_batch_count += 1;
+                transition_pending_weight_count += pending_weights.len();
+                max_transition_pending_weight_count = max_transition_pending_weight_count.max(pending_weights.len());
+                transition_batches_over_16 += usize::from(pending_weights.len() > 16);
+                let transition_union_started_at = Instant::now();
                 let weight = batch_build_weight(pending_weights);
+                transition_union_ms += transition_union_started_at.elapsed().as_secs_f64() * 1000.0;
                 if !weight.is_empty() {
+                    let insert_started_at = Instant::now();
                     state.transitions.insert(lbl, (target, weight));
+                    insert_ms += insert_started_at.elapsed().as_secs_f64() * 1000.0;
                 }
             }
             state
         })
         .collect();
+
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][weighted_dwa_minimize_reconstruct] output_states={} final_pending_weights={} max_final_pending_weights={} final_batches_over_16={} final_union_ms={:.3} transition_batches={} transition_pending_weights={} max_transition_pending_weights={} transition_batches_over_16={} transition_union_ms={:.3} insert_ms={:.3}",
+            states.len(),
+            final_pending_weight_count,
+            max_final_pending_weight_count,
+            final_batches_over_16,
+            final_union_ms,
+            transition_batch_count,
+            transition_pending_weight_count,
+            max_transition_pending_weight_count,
+            transition_batches_over_16,
+            transition_union_ms,
+            insert_ms,
+        );
+    }
 
     let start_new = old_to_new[start_old];
     DWA::from_parts(
@@ -2388,11 +3200,13 @@ mod tests {
         sorted_weights_compatible_on_domain,
         sorted_weights_compatible_on_domain_intersection,
         weight_is_disjoint_from_domain_intersection, weights_equal_on_domain,
-        weights_equal_on_domain_intersection, ClassProfile,
+        weights_equal_on_domain_intersection, ClassProfile, PointwiseBehaviorInterner,
+        PointwiseRegionBuildCache, PointwiseRegionInterner, build_token_behavior_region,
     };
     use crate::automata::weighted_u32::dwa::{DWA, DWAState};
     use crate::ds::weight::Weight;
     use range_set_blaze::RangeSetBlaze;
+    use std::sync::Arc;
 
     fn token_set(ranges: &[(u32, u32)]) -> RangeSetBlaze<u32> {
         ranges.iter().copied().map(|(start, end)| start..=end).collect()
@@ -2421,6 +3235,51 @@ mod tests {
             weights_equal_on_domain_intersection(a, b, left, right),
             weights_equal_on_domain(a, b, &overlap),
         );
+    }
+
+    #[test]
+    fn pointwise_region_build_cache_includes_transition_target() {
+        let domain_tokens = token_set(&[(0, 3)]);
+        let transition_tokens = token_set(&[(0, 3)]);
+        let mut behaviors = PointwiseBehaviorInterner::default();
+        let mut regions = PointwiseRegionInterner::default();
+        let mut cache = PointwiseRegionBuildCache::default();
+        let first_transitions = [(7, 1, &transition_tokens)];
+        let second_transitions = [(7, 2, &transition_tokens)];
+
+        let first = build_token_behavior_region(
+            &domain_tokens,
+            None,
+            &first_transitions,
+            &mut behaviors,
+            &mut regions,
+            &mut cache,
+        )
+        .unwrap();
+        let first_again = build_token_behavior_region(
+            &domain_tokens,
+            None,
+            &first_transitions,
+            &mut behaviors,
+            &mut regions,
+            &mut cache,
+        )
+        .unwrap();
+        let second = build_token_behavior_region(
+            &domain_tokens,
+            None,
+            &second_transitions,
+            &mut behaviors,
+            &mut regions,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &first_again));
+        assert_ne!(first.as_ref(), second.as_ref());
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.hits, 1);
+        assert_eq!(cache.misses, 2);
     }
 
     #[test]
