@@ -207,7 +207,10 @@ impl<T: WeightRefs> MappedArtifact<T> {
     /// does not merge any TSIDs, preserve their existing order so the already
     /// planned token-remapped weights can be reused directly.
     pub(crate) fn compact_dimensions_fast_l1_with_stats(&mut self) -> CompactReport {
-        let plan = self.plan_dimensions_compaction_with_options(false, true, true);
+        // L1's preceding exact state quotient is a complete row distinction
+        // proof for this terminal relation. Exact token merging preserves every
+        // differing row bit, so a later TSID merge cannot succeed.
+        let plan = self.plan_dimensions_compaction_with_options(false, true, true, true);
         self.apply_compaction_plan_with_stats(&plan)
     }
 
@@ -217,7 +220,7 @@ impl<T: WeightRefs> MappedArtifact<T> {
     }
 
     pub(crate) fn compact_dimensions_fast_l1(&mut self) -> CompactReport {
-        let plan = self.plan_dimensions_compaction_with_options(false, true, true);
+        let plan = self.plan_dimensions_compaction_with_options(false, true, true, true);
         self.apply_compaction_plan(&plan)
     }
 
@@ -235,6 +238,7 @@ impl<T: WeightRefs> MappedArtifact<T> {
             allow_expensive_layout,
             use_default_layout,
             false,
+            false,
         )
     }
 
@@ -243,6 +247,7 @@ impl<T: WeightRefs> MappedArtifact<T> {
         allow_expensive_layout: bool,
         use_default_layout: bool,
         keep_unmerged_tsid_identity: bool,
+        tsids_proven_irredundant: bool,
     ) -> CompactPlan {
         let weights = self.artifact.weight_refs();
         compaction::plan_compaction_for_weight_refs(
@@ -251,6 +256,7 @@ impl<T: WeightRefs> MappedArtifact<T> {
             allow_expensive_layout,
             use_default_layout,
             keep_unmerged_tsid_identity,
+            tsids_proven_irredundant,
         )
     }
 
