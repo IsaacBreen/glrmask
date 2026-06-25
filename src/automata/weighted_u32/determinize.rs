@@ -278,8 +278,38 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                 let (dst, weight) = target_contributions.into_iter().next().unwrap();
                 target_subset.insert(dst, weight);
             } else {
+                // Keep the first contribution per destination in the compact
+                // target map. On the first repeat, move that destination's
+                // operands into a side bucket and union them once at the end.
+                // This preserves the exact subset construction while avoiding
+                // quadratic growth from repeatedly rebuilding wide weights.
+                let mut duplicate_weights: Option<FxHashMap<u32, SmallVec<[Weight; 2]>>> = None;
                 for (dst, weight) in target_contributions {
-                    union_state_weight(&mut target_subset, dst, weight);
+                    if let Some(duplicates) = duplicate_weights.as_mut() {
+                        if let Some(weights) = duplicates.get_mut(&dst) {
+                            weights.push(weight);
+                            continue;
+                        }
+                    }
+
+                    match target_subset.entry(dst) {
+                        HashMapEntry::Vacant(vacant) => {
+                            vacant.insert(weight);
+                        }
+                        HashMapEntry::Occupied(occupied) => {
+                            let previous = occupied.remove();
+                            let mut weights = SmallVec::<[Weight; 2]>::new();
+                            weights.push(previous);
+                            weights.push(weight);
+                            let duplicates = duplicate_weights.get_or_insert_with(FxHashMap::default);
+                            debug_assert!(duplicates.insert(dst, weights).is_none());
+                        }
+                    }
+                }
+                if let Some(duplicates) = duplicate_weights {
+                    for (dst, weights) in duplicates {
+                        target_subset.insert(dst, Weight::union_all(weights.iter()));
+                    }
                 }
             }
 
@@ -542,5 +572,26 @@ mod tests {
 
         let dwa = determinize(&nwa).unwrap();
         assert_eq!(dwa.eval_word(&[7]), tokens([0, 1]));
+    }
+
+    #[test]
+    fn determinize_batches_many_repeated_destinations_exactly() {
+        let mut nwa = NWA::new(1, 7);
+        let start = nwa.add_state();
+        let left = nwa.add_state();
+        let right = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+
+        for token in 0..=4 {
+            nwa.add_transition(start, 7, left, tokens([token]));
+        }
+        for token in 5..=6 {
+            nwa.add_transition(start, 7, right, tokens([token]));
+        }
+        nwa.set_final_weight(left, tokens(0..=4));
+        nwa.set_final_weight(right, tokens(5..=6));
+
+        let dwa = determinize(&nwa).unwrap();
+        assert_eq!(dwa.eval_word(&[7]), tokens(0..=6));
     }
 }
