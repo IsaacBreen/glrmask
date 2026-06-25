@@ -139,14 +139,39 @@ fn seed_start_subset(nwa: &NWA) -> FxHashMap<u32, Weight> {
     start_subset
 }
 
+fn intern_determinized_subset(
+    next_key: Vec<(u32, Weight)>,
+    subset_map: &mut FxHashMap<Vec<(u32, Weight)>, u32>,
+    worklist: &mut VecDeque<(Vec<(u32, Weight)>, Vec<(u32, Weight)>)>,
+    dwa: &mut DWA,
+) -> u32 {
+    if let Some(existing) = subset_map.get(&next_key).copied() {
+        existing
+    } else {
+        let new_id = dwa.add_state();
+        subset_map.insert(next_key.clone(), new_id);
+        worklist.push_back((next_key.clone(), next_key));
+        new_id
+    }
+}
+
 pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
+    determinize_impl(nwa, true)
+}
+
+fn determinize_impl(
+    nwa: &NWA,
+    direct_single_target_enabled: bool,
+) -> Result<DWA, GlrMaskError> {
     if !nwa.is_acyclic() {
         return Err(GlrMaskError::Compilation(
             "weighted determinization currently supports only acyclic NWAs".into(),
         ));
     }
 
-    let profile = std::env::var("GLRMASK_PROFILE_DETERMINIZE").map(|v| v == "1").unwrap_or(false);
+    let profile = std::env::var("GLRMASK_PROFILE_DETERMINIZE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
 
     fn canonicalize(subset: &FxHashMap<u32, Weight>) -> Vec<(u32, Weight)> {
         let mut entries: Vec<_> = subset
@@ -222,6 +247,9 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     let mut profile_raw_transition_visits = 0usize;
     let mut profile_labels = 0usize;
     let mut profile_target_contributions = 0usize;
+    let mut profile_single_contribution_labels = 0usize;
+    let mut profile_single_contribution_no_epsilon_labels = 0usize;
+    let mut profile_direct_single_target_labels = 0usize;
     let mut profile_expand_ms = 0.0;
     let mut profile_combine_ms = 0.0;
     let mut profile_edge_union_ms = 0.0;
@@ -267,8 +295,46 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             if profile {
                 profile_labels += 1;
                 profile_target_contributions += target_contributions.len();
+                if target_contributions.len() == 1 {
+                    profile_single_contribution_labels += 1;
+                    let (dst, _) = &target_contributions[0];
+                    if nwa
+                        .states()
+                        .get(*dst as usize)
+                        .is_some_and(|state| state.epsilons.is_empty())
+                    {
+                        profile_single_contribution_no_epsilon_labels += 1;
+                    }
+                }
             }
             if target_contributions.is_empty() {
+                continue;
+            }
+
+            let direct_single_target = direct_single_target_enabled
+                && target_contributions.len() == 1
+                && nwa
+                    .states()
+                    .get(target_contributions[0].0 as usize)
+                    .is_some_and(|state| state.epsilons.is_empty());
+            if direct_single_target {
+                let (dst, edge_weight) = target_contributions.into_iter().next().unwrap();
+                if profile {
+                    profile_direct_single_target_labels += 1;
+                }
+                let next_key = vec![(dst, edge_weight.clone())];
+                let subset_lookup_started_at = profile.then(Instant::now);
+                let to_state = intern_determinized_subset(
+                    next_key,
+                    &mut subset_map,
+                    &mut worklist,
+                    &mut dwa,
+                );
+                if let Some(subset_lookup_started_at) = subset_lookup_started_at {
+                    profile_subset_lookup_ms +=
+                        subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
+                }
+                dwa.add_transition(from_state, label, to_state, edge_weight);
                 continue;
             }
 
@@ -333,14 +399,12 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                 continue;
             }
             let subset_lookup_started_at = profile.then(Instant::now);
-            let to_state = if let Some(existing) = subset_map.get(&next_key).copied() {
-                existing
-            } else {
-                let new_id = dwa.add_state();
-                subset_map.insert(next_key.clone(), new_id);
-                worklist.push_back((next_key.clone(), next_key));
-                new_id
-            };
+            let to_state = intern_determinized_subset(
+                next_key,
+                &mut subset_map,
+                &mut worklist,
+                &mut dwa,
+            );
             if let Some(subset_lookup_started_at) = subset_lookup_started_at {
                 profile_subset_lookup_ms += subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
             }
@@ -487,7 +551,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
         );
 
         eprintln!(
-            "[glrmask/profile][determinize] nwa_states={} dwa_states={} subset_map_entries={} max_weight_dim={} subset_entries={} max_subset_entries={} raw_transition_visits={} labels={} target_contributions={} expand_ms={:.3} combine_ms={:.3} edge_union_ms={:.3} closure_ms={:.3} normalize_ms={:.3} canonicalize_ms={:.3} subset_lookup_ms={:.3} final_weights_ms={:.3} final_subsets={} final_subset_entries={} final_entries={} final_nonempty_contributions={} final_max_entries={} final_intersection_ms={:.3} final_union_ms={:.3}",
+            "[glrmask/profile][determinize] nwa_states={} dwa_states={} subset_map_entries={} max_weight_dim={} subset_entries={} max_subset_entries={} raw_transition_visits={} labels={} target_contributions={} single_contribution_labels={} single_contribution_no_epsilon_labels={} direct_single_target_labels={} expand_ms={:.3} combine_ms={:.3} edge_union_ms={:.3} closure_ms={:.3} normalize_ms={:.3} canonicalize_ms={:.3} subset_lookup_ms={:.3} final_weights_ms={:.3} final_subsets={} final_subset_entries={} final_entries={} final_nonempty_contributions={} final_max_entries={} final_intersection_ms={:.3} final_union_ms={:.3}",
             nwa.states().len(),
             dwa.states().len(),
             subset_map.len(),
@@ -497,6 +561,9 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             profile_raw_transition_visits,
             profile_labels,
             profile_target_contributions,
+            profile_single_contribution_labels,
+            profile_single_contribution_no_epsilon_labels,
+            profile_direct_single_target_labels,
             profile_expand_ms,
             profile_combine_ms,
             profile_edge_union_ms,
@@ -543,4 +610,24 @@ mod tests {
         let dwa = determinize(&nwa).unwrap();
         assert_eq!(dwa.eval_word(&[7]), tokens([0, 1]));
     }
+    #[test]
+    fn direct_single_target_path_matches_generic_determinization() {
+        let mut nwa = NWA::new(1, 4);
+        let start = nwa.add_state();
+        let first_accept = nwa.add_state();
+        let second_accept = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+        nwa.add_transition(start, 7, first_accept, tokens([0, 1]));
+        nwa.add_transition(start, 8, second_accept, tokens([2]));
+        nwa.set_final_weight(first_accept, tokens([0, 1]));
+        nwa.set_final_weight(second_accept, tokens([2]));
+
+        let fast = determinize_impl(&nwa, true).unwrap();
+        let generic = determinize_impl(&nwa, false).unwrap();
+
+        assert_eq!(bincode::serialize(&fast).unwrap(), bincode::serialize(&generic).unwrap());
+        assert_eq!(fast.eval_word(&[7]), tokens([0, 1]));
+        assert_eq!(fast.eval_word(&[8]), tokens([2]));
+    }
+
 }
