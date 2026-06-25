@@ -18,7 +18,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
 use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::ignore_transparent_disallowed_follows;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::{
     LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaPhaseProfile, TerminalPathLength,
-    compile_profile_enabled,
+    compile_profile_enabled, compile_profile_join,
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_local_id_maps_and_terminal_dwas;
 use crate::ds::bitset::BitSet;
@@ -66,6 +66,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     }
 
     let total_started_at = Instant::now();
+    let pre_classify_setup_started_at = Instant::now();
     let num_terminals = grammar.num_terminals as u32;
     // Classify terminals into L1 (single-byte paths) vs L2+ by default.
     // Set GLRMASK_FORCE_ALL_L2P=1 to skip L1 and route everything through L2P.
@@ -73,6 +74,8 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
 
     let token_path_disallowed_follows =
         ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal);
+    let pre_classify_setup_ms =
+        pre_classify_setup_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let classify_started_at = Instant::now();
     let terminal_path_lengths = if force_all_l2p {
@@ -88,6 +91,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     };
     let classify_ms = classify_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let routing_started_at = Instant::now();
     let mut l1_mask = vec![false; num_terminals as usize];
     let mut l2p_mask = vec![false; num_terminals as usize];
     let mut has_l1 = false;
@@ -153,13 +157,15 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     };
     let defer_l2p_minimization_to_local_merge =
         expected_l1_branches + expected_l2p_branches > 1;
+    let routing_ms = routing_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // Build L1 and L2+ terminal DWAs in parallel. L2+ terminals get an
     // additional token split: only tokens that can actually cross an active
     // L2+ terminal boundary go through the expensive L2P NWA builder; the
     // remaining active-terminal-relevant tokens are routed through the cheap
     // L1-style builder over the same L2P terminal set.
-    let (l1_result, l2p_result) = rayon::join(
+    let branch_build_started_at = Instant::now();
+    let (l1_result, l2p_result) = compile_profile_join(
         || {
             if has_l1 {
                 let started_at = Instant::now();
@@ -224,7 +230,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     }
                     return (Vec::new(), 0.0);
                 }
-                let ((boundary_result, boundary_ms), (single_result, single_ms)) = rayon::join(
+                let ((boundary_result, boundary_ms), (single_result, single_ms)) = compile_profile_join(
                     || {
                         if split.boundary_vocab.is_empty() {
                             (None, 0.0)
@@ -300,7 +306,9 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             }
         },
     );
+    let branch_build_wall_ms = branch_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let post_branch_started_at = Instant::now();
     let (l1_pair, l1_ms) = l1_result;
     let (l2p_pairs, l2p_ms) = l2p_result;
     let mut dominant_branch: Option<(f64, TerminalDwaPhaseProfile)> = None;
@@ -324,6 +332,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     for (l2p, _) in l2p_pairs {
         pairs.push(l2p);
     }
+    let post_branch_ms = post_branch_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let num_tokenizer_states = tokenizer.num_states() as usize;
     let max_token_id = vocab.max_token_id();
@@ -333,27 +342,47 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         num_tokenizer_states,
         max_token_id,
     );
+    let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let profile_bookkeeping_started_at = Instant::now();
     merged.profile.add_assign(dominant_branch_profile);
     merged.profile.id_map_ms += classify_ms;
-    let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+    let profile_bookkeeping_ms =
+        profile_bookkeeping_started_at.elapsed().as_secs_f64() * 1000.0;
+    let total_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
+    let accounted_wall_ms = pre_classify_setup_ms
+        + classify_ms
+        + routing_ms
+        + branch_build_wall_ms
+        + post_branch_ms
+        + merge_ms
+        + profile_bookkeeping_ms;
+    let timing_residual_ms = (total_ms - accounted_wall_ms).max(0.0);
 
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][partition] label={} vocab_tokens={} length0={} length1={} length2plus={} classify_ms={:.3} l1_ms={:.3} l2p_ms={:.3} merge_ms={:.3} accounted_id_map_ms={:.3} accounted_terminal_dwa_ms={:.3} accounted_compact_ms={:.3} accounted_total_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][partition] label={} vocab_tokens={} length0={} length1={} length2plus={} pre_classify_setup_ms={:.3} classify_ms={:.3} routing_ms={:.3} branch_build_wall_ms={:.3} l1_branch_wall_ms={:.3} l2p_branch_wall_ms={:.3} post_branch_ms={:.3} merge_ms={:.3} profile_bookkeeping_ms={:.3} critical_path_id_map_ms={:.3} critical_path_terminal_dwa_ms={:.3} critical_path_compact_ms={:.3} critical_path_profile_ms={:.3} accounted_wall_ms={:.3} timing_residual_ms={:.3} total_ms={:.3}",
             partition_label,
             vocab.entries.len(),
             num_zero,
             num_one,
             num_two_plus,
+            pre_classify_setup_ms,
             classify_ms,
+            routing_ms,
+            branch_build_wall_ms,
             l1_ms,
             l2p_ms,
+            post_branch_ms,
             merge_ms,
+            profile_bookkeeping_ms,
             merged.profile.id_map_ms,
             merged.profile.terminal_dwa_ms,
             merged.profile.compact_ms,
             merged.profile.total_ms(),
-            total_started_at.elapsed().as_secs_f64() * 1000.0,
+            accounted_wall_ms,
+            timing_residual_ms,
+            total_ms,
         );
     }
 
