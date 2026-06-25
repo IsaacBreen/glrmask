@@ -2868,7 +2868,7 @@ fn build_l1_terminal_dwa(
     let terminal_group_ms = terminal_group_started_at.elapsed().as_secs_f64() * 1000.0;
     let num_groups = unique_groups.len();
     let contribution_seed_started_at = Instant::now();
-    let (signature_group_masks, words_per_mask) = build_end_rep_group_masks(
+    let signature_groups = build_end_rep_groups(
         &unique_groups,
         &terminal_to_signatures,
         deferred_arced.len(),
@@ -2876,9 +2876,7 @@ fn build_l1_terminal_dwa(
     let mut tsid_group_contributions: Vec<Vec<(usize, Arc<RangeSetBlaze<u32>>)>> =
         (0..num_tsids).map(|_| Vec::new()).collect();
     for (sig_id, entries) in deferred_arced.iter().enumerate() {
-        let mask_offset = sig_id * words_per_mask;
-        let mask_slice = &signature_group_masks[mask_offset..mask_offset + words_per_mask];
-        if mask_slice.iter().all(|&w| w == 0) {
+        if signature_groups[sig_id].is_empty() {
             continue;
         }
         for &(tsid, ref arc) in entries {
@@ -2915,23 +2913,14 @@ fn build_l1_terminal_dwa(
                 touched_groups.clear();
 
                 for &(sig_id, ref arc) in contributions {
-                    let mask_offset = sig_id * words_per_mask;
-                    let mask_slice =
-                        &signature_group_masks[mask_offset..mask_offset + words_per_mask];
-                    for (word_idx, &word) in mask_slice.iter().enumerate() {
-                        let mut remaining = word;
-                        while remaining != 0 {
-                            let bit_idx = remaining.trailing_zeros() as usize;
-                            remaining &= remaining - 1;
-                            let group_idx = word_idx * 64 + bit_idx;
-                            if group_counts[group_idx] == 0 {
-                                touched_groups.push(group_idx);
-                            }
-                            group_counts[group_idx] += 1;
-                            group_ranges[group_idx].extend(
-                                arc.ranges().map(|range| (*range.start(), *range.end())),
-                            );
+                    for &group_idx in &signature_groups[sig_id] {
+                        if group_counts[group_idx] == 0 {
+                            touched_groups.push(group_idx);
                         }
+                        group_counts[group_idx] += 1;
+                        group_ranges[group_idx].extend(
+                            arc.ranges().map(|range| (*range.start(), *range.end())),
+                        );
                     }
                 }
 
@@ -2970,23 +2959,14 @@ fn build_l1_terminal_dwa(
                         let mut touched_groups: Vec<usize> = Vec::new();
 
                         for &(sig_id, ref arc) in contributions {
-                            let mask_offset = sig_id * words_per_mask;
-                            let mask_slice =
-                                &signature_group_masks[mask_offset..mask_offset + words_per_mask];
-                            for (word_idx, &word) in mask_slice.iter().enumerate() {
-                                let mut remaining = word;
-                                while remaining != 0 {
-                                    let bit_idx = remaining.trailing_zeros() as usize;
-                                    remaining &= remaining - 1;
-                                    let group_idx = word_idx * 64 + bit_idx;
-                                    if group_counts[group_idx] == 0 {
-                                        touched_groups.push(group_idx);
-                                    }
-                                    group_counts[group_idx] += 1;
-                                    for range in arc.ranges() {
-                                        group_ranges[group_idx]
-                                            .push((*range.start(), *range.end()));
-                                    }
+                            for &group_idx in &signature_groups[sig_id] {
+                                if group_counts[group_idx] == 0 {
+                                    touched_groups.push(group_idx);
+                                }
+                                group_counts[group_idx] += 1;
+                                for range in arc.ranges() {
+                                    group_ranges[group_idx]
+                                        .push((*range.start(), *range.end()));
                                 }
                             }
                         }
@@ -3252,24 +3232,18 @@ fn shared_rangeset_from_unsorted_pairs(ranges: &[(u32, u32)]) -> Option<Arc<Rang
     ))
 }
 
-fn build_end_rep_group_masks(
+fn build_end_rep_groups(
     unique_groups: &[Vec<usize>],
     terminal_to_active_states: &[Vec<u32>],
     num_end_reps: usize,
-) -> (Vec<u64>, usize) {
-    let num_groups = unique_groups.len();
-    let words_per_mask = num_groups.div_ceil(64);
-    let mut end_rep_group_masks = vec![0u64; num_end_reps * words_per_mask];
-
+) -> Vec<Vec<usize>> {
+    let mut groups_by_end_rep = vec![Vec::new(); num_end_reps];
     for (group_idx, tids) in unique_groups.iter().enumerate() {
-        let word = group_idx / 64;
-        let bit = 1u64 << (group_idx % 64);
         for &state in &terminal_to_active_states[tids[0]] {
-            end_rep_group_masks[state as usize * words_per_mask + word] |= bit;
+            groups_by_end_rep[state as usize].push(group_idx);
         }
     }
-
-    (end_rep_group_masks, words_per_mask)
+    groups_by_end_rep
 }
 
 fn merge_deferred_equivalent_tsids(
@@ -3517,6 +3491,16 @@ mod packed_suffix_product_tests {
             actual.sort_unstable_by_key(|(key, _)| *key);
             assert_eq!(actual, expected, "first byte {first_byte}");
         }
+    }
+
+    #[test]
+    fn sparse_end_rep_groups_match_terminal_membership() {
+        let groups = vec![vec![0usize, 2usize], vec![1usize], vec![3usize]];
+        let terminal_to_end_reps = vec![vec![0u32, 2], vec![1], vec![0, 2], vec![3]];
+        assert_eq!(
+            build_end_rep_groups(&groups, &terminal_to_end_reps, 4),
+            vec![vec![0], vec![1], vec![0], vec![2]],
+        );
     }
 
     #[test]
