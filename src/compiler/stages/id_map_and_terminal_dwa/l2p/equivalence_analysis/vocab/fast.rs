@@ -11,6 +11,7 @@ use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{BuildHasher, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -696,6 +697,24 @@ impl Scratch {
             suffix_match_positions: vec![NONE; num_groups],
             suffix_dirty_groups: SmallVec::new(),
         }
+    }
+
+    /// Reuse the allocation for a later state batch with the same vocabulary
+    /// group axis. Token-signature cleanup leaves the active prefix clean.
+    fn ensure_capacity(&mut self, num_states: usize, num_groups: usize) {
+        let dirty_words = (num_groups + 63) / 64;
+        if self.dirty_words != dirty_words || self.single_target_seen.len() != num_groups {
+            *self = Self::new(num_states, num_groups);
+            return;
+        }
+        if self.current_states.len() >= num_states {
+            return;
+        }
+        self.current_states.resize(num_states, 0);
+        self.match_positions.resize(num_states * num_groups, NONE);
+        self.dirty_state_flags.resize(num_states, 0);
+        self.dirty_group_masks
+            .resize(num_states * dirty_words.max(1), 0);
     }
 }
 
@@ -1751,6 +1770,68 @@ impl TrieWalkState {
     }
 }
 
+struct ScratchWorker {
+    scratch: Scratch,
+    trie_state: TrieWalkState,
+}
+
+#[derive(Default)]
+struct ScratchPool {
+    available: Mutex<Vec<ScratchWorker>>,
+    allocations: AtomicUsize,
+    reuses: AtomicUsize,
+}
+
+impl ScratchPool {
+    fn checkout(&self, num_states: usize, num_groups: usize) -> ScratchLease<'_> {
+        let worker = self.available.lock().unwrap().pop();
+        let mut worker = match worker {
+            Some(worker) => {
+                self.reuses.fetch_add(1, Ordering::Relaxed);
+                worker
+            }
+            None => {
+                self.allocations.fetch_add(1, Ordering::Relaxed);
+                ScratchWorker {
+                    scratch: Scratch::new(num_states, num_groups),
+                    trie_state: TrieWalkState::new(),
+                }
+            }
+        };
+        worker.scratch.ensure_capacity(num_states, num_groups);
+        ScratchLease {
+            pool: self,
+            worker: Some(worker),
+        }
+    }
+
+    fn stats(&self) -> (usize, usize) {
+        (
+            self.allocations.load(Ordering::Relaxed),
+            self.reuses.load(Ordering::Relaxed),
+        )
+    }
+}
+
+struct ScratchLease<'a> {
+    pool: &'a ScratchPool,
+    worker: Option<ScratchWorker>,
+}
+
+impl ScratchLease<'_> {
+    fn worker_mut(&mut self) -> &mut ScratchWorker {
+        self.worker.as_mut().expect("scratch lease must hold its worker")
+    }
+}
+
+impl Drop for ScratchLease<'_> {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            self.pool.available.lock().unwrap().push(worker);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct TrieWalkChunkStats {
     dfs_step_ms: f64,
@@ -2483,6 +2564,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     let mut batches = 0usize;
     let mut used_trie_walk = false;
     let mut trie_walk_stats = TrieWalkChunkStats::default();
+    let scratch_pool = Arc::new(ScratchPool::default());
 
     // A single Rayon worker previously rebuilt the full scratch arena for every
     // state batch. The arena is deliberately reset by the signature routines,
@@ -2532,24 +2614,21 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
                     trie_walk_stats.add_assign(chunk_stats);
                 }
             } else {
+                let scratch_pool = Arc::clone(&scratch_pool);
                 let chunk_results: Vec<(Vec<(usize, u64)>, TrieWalkChunkStats)> = sorted_indices
                     .par_chunks(TRIE_CHUNK_SIZE)
                     .map_init(
-                        || {
-                            (
-                                Scratch::new(batch.len(), num_groups),
-                                TrieWalkState::new(),
-                            )
-                        },
-                        |(scratch, trie_state), chunk| {
+                        || scratch_pool.checkout(batch.len(), num_groups),
+                        |lease, chunk| {
+                            let worker = lease.worker_mut();
                             trie_walk_chunk_signatures(
                                 dfa_ref,
                                 strings,
                                 chunk,
                                 batch,
                                 state_group_size,
-                                scratch,
-                                trie_state,
+                                &mut worker.scratch,
+                                &mut worker.trie_state,
                                 profiling,
                             )
                         },
@@ -2585,12 +2664,14 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
                     })
                     .collect()
             } else {
+                let scratch_pool = Arc::clone(&scratch_pool);
                 active_indices
                     .par_iter()
                     .map_init(
-                        || Scratch::new(batch.len(), num_groups),
-                        |scratch, &token_idx| {
+                        || scratch_pool.checkout(batch.len(), num_groups),
+                        |lease, &token_idx| {
                             let token = strings[token_idx].as_ref();
+                            let worker = lease.worker_mut();
                             (
                                 token_idx,
                                 token_signature(
@@ -2598,7 +2679,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
                                     token,
                                     batch,
                                     state_group_size,
-                                    scratch,
+                                    &mut worker.scratch,
                                     false,
                                 ),
                             )
@@ -2698,9 +2779,11 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
         );
     }
 
+    let (scratch_pool_allocations, scratch_pool_reuses) = scratch_pool.stats();
+
     if profiling {
         eprintln!(
-            "[glrmask/profile][vocab_equiv] strings={} initial_states={} batches={} used_trie_walk={} active_final={} original_states={} effective_states={} compacted={} build_dfa_ms={:.3} compact_dfa_ms={:.3} state_order_ms={:.3} sort_tokens_ms={:.3} signature_ms={:.3} refinement_ms={:.3} final_groups_ms={:.3} dfs_step_ms={:.3} collect_targets_ms={:.3} single_target_suffix_ms={:.3} multi_target_suffix_ms={:.3} finish_signature_ms={:.3} dfs_steps={} dfs_steps_without_new_dirty={} dfs_states_visited={} dfs_dead_transitions={} dfs_dead_without_new_dirty={} dfs_new_dirty_groups={} dfs_new_dirty_states={} clean_tokens={} dirty_tokens={} single_target_tokens={} multi_target_tokens={} total_targets={} total_ms={:.3}",
+            "[glrmask/profile][vocab_equiv] strings={} initial_states={} batches={} used_trie_walk={} active_final={} original_states={} effective_states={} compacted={} build_dfa_ms={:.3} compact_dfa_ms={:.3} state_order_ms={:.3} sort_tokens_ms={:.3} signature_ms={:.3} refinement_ms={:.3} final_groups_ms={:.3} dfs_step_ms={:.3} collect_targets_ms={:.3} single_target_suffix_ms={:.3} multi_target_suffix_ms={:.3} finish_signature_ms={:.3} dfs_steps={} dfs_steps_without_new_dirty={} dfs_states_visited={} dfs_dead_transitions={} dfs_dead_without_new_dirty={} dfs_new_dirty_groups={} dfs_new_dirty_states={} clean_tokens={} dirty_tokens={} single_target_tokens={} multi_target_tokens={} total_targets={} scratch_pool_allocations={} scratch_pool_reuses={} total_ms={:.3}",
             num_tokens,
             num_initial_states,
             batches,
@@ -2733,6 +2816,8 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
             trie_walk_stats.single_target_tokens,
             trie_walk_stats.multi_target_tokens,
             trie_walk_stats.total_targets,
+            scratch_pool_allocations,
+            scratch_pool_reuses,
             elapsed_ms(total_started_at),
         );
     }
@@ -2891,5 +2976,40 @@ mod shared_base_tests {
             transitions: Arc::from(dfa.transitions.to_vec()),
         };
         assert!(base.is_compatible_with_dfa(&independently_allocated));
+    }
+}
+
+#[cfg(test)]
+mod scratch_pool_tests {
+    use super::*;
+
+    #[test]
+    fn scratch_keeps_same_group_buffers_for_smaller_batches() {
+        let mut scratch = Scratch::new(8, 5);
+        let positions_ptr = scratch.match_positions.as_ptr();
+        scratch.ensure_capacity(3, 5);
+        assert_eq!(scratch.match_positions.as_ptr(), positions_ptr);
+        assert!(scratch.current_states.len() >= 8);
+
+        scratch.ensure_capacity(12, 5);
+        assert!(scratch.current_states.len() >= 12);
+        assert!(scratch.match_positions.len() >= 12 * 5);
+
+        scratch.ensure_capacity(4, 6);
+        assert_eq!(scratch.current_states.len(), 4);
+        assert_eq!(scratch.match_positions.len(), 4 * 6);
+        assert!(scratch.match_positions.iter().all(|&value| value == NONE));
+    }
+
+    #[test]
+    fn scratch_pool_returns_leased_workers() {
+        let pool = ScratchPool::default();
+        {
+            let _lease = pool.checkout(4, 3);
+        }
+        {
+            let _lease = pool.checkout(2, 3);
+        }
+        assert_eq!(pool.stats(), (1, 1));
     }
 }

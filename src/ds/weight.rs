@@ -7,7 +7,7 @@ use dashmap::DashMap;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 // STICKY NOTE: DO NOT REMOVE THIS COMMENT.
@@ -282,6 +282,9 @@ static GLOBAL_TOKEN_SETS: Lazy<DashMap<RangeSetBlaze<u32>, Weak<RangeSetBlaze<u3
 static GLOBAL_WEIGHTS: Lazy<DashMap<u64, Vec<Weak<WeightMap>>>> = Lazy::new(DashMap::new);
 static TOKEN_INSERTS_SINCE_CLEANUP: AtomicUsize = AtomicUsize::new(0);
 static WEIGHT_INSERTS_SINCE_CLEANUP: AtomicUsize = AtomicUsize::new(0);
+static TOKEN_CLEANUP_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static WEIGHT_CLEANUP_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static INTERNER_CLEANUP_DEFERRAL_DEPTH: AtomicUsize = AtomicUsize::new(0);
 
 static EMPTY_RANGESET: Lazy<SharedTokenSet> = Lazy::new(|| Arc::new(RangeSetBlaze::new()));
 
@@ -296,6 +299,40 @@ static ALL_WEIGHT: Lazy<Weight> = Lazy::new(|| {
     finalize_weight_map(map)
 });
 
+/// Defers expensive global interner sweeps until the last active compiler
+/// exits. Fresh interning remains exact; only the timing of weak-entry removal
+/// changes.
+pub(crate) struct WeightInternerCleanupDeferral {
+    active: bool,
+}
+
+pub(crate) fn defer_weight_interner_cleanup() -> WeightInternerCleanupDeferral {
+    INTERNER_CLEANUP_DEFERRAL_DEPTH.fetch_add(1, Ordering::AcqRel);
+    WeightInternerCleanupDeferral { active: true }
+}
+
+impl WeightInternerCleanupDeferral {
+    pub(crate) fn finish(mut self) {
+        self.release();
+    }
+
+    fn release(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        if INTERNER_CLEANUP_DEFERRAL_DEPTH.fetch_sub(1, Ordering::AcqRel) == 1 {
+            interner_clear_stale();
+        }
+    }
+}
+
+impl Drop for WeightInternerCleanupDeferral {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 fn prune_dead_token_sets() {
     GLOBAL_TOKEN_SETS.retain(|_, weak| weak.strong_count() > 0);
 }
@@ -307,22 +344,46 @@ fn prune_dead_weights() {
     });
 }
 
-fn maybe_cleanup_token_sets() {
-    if TOKEN_INSERTS_SINCE_CLEANUP.fetch_add(1, Ordering::Relaxed) + 1
-        >= INTERNER_CLEANUP_INTERVAL
+/// Count a fresh interner insertion and claim a global sweep exactly once.
+///
+/// `DashMap::retain` scans every shard. A completed cleanup resets the counter,
+/// but producers may cross another interval while that scan is still running.
+/// The in-progress gate ensures those later producers never start an overlapping
+/// scan; after the owner releases the gate, the accumulated counter makes a
+/// subsequent insertion schedule the next sweep normally.
+#[inline]
+fn claim_interner_cleanup(counter: &AtomicUsize, in_progress: &AtomicBool) -> bool {
+    let previous = counter.fetch_add(1, Ordering::Relaxed);
+    if previous + 1 < INTERNER_CLEANUP_INTERVAL {
+        return false;
+    }
+    if in_progress
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
     {
-        // Best-effort: swap counter to 0 and prune. Racy but harmless.
-        TOKEN_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
+        return false;
+    }
+    counter.store(0, Ordering::Release);
+    true
+}
+
+fn maybe_cleanup_token_sets() {
+    if INTERNER_CLEANUP_DEFERRAL_DEPTH.load(Ordering::Acquire) != 0 {
+        return;
+    }
+    if claim_interner_cleanup(&TOKEN_INSERTS_SINCE_CLEANUP, &TOKEN_CLEANUP_IN_PROGRESS) {
         prune_dead_token_sets();
+        TOKEN_CLEANUP_IN_PROGRESS.store(false, Ordering::Release);
     }
 }
 
 fn maybe_cleanup_weights() {
-    if WEIGHT_INSERTS_SINCE_CLEANUP.fetch_add(1, Ordering::Relaxed) + 1
-        >= INTERNER_CLEANUP_INTERVAL
-    {
-        WEIGHT_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
+    if INTERNER_CLEANUP_DEFERRAL_DEPTH.load(Ordering::Acquire) != 0 {
+        return;
+    }
+    if claim_interner_cleanup(&WEIGHT_INSERTS_SINCE_CLEANUP, &WEIGHT_CLEANUP_IN_PROGRESS) {
         prune_dead_weights();
+        WEIGHT_CLEANUP_IN_PROGRESS.store(false, Ordering::Release);
     }
 }
 
@@ -331,6 +392,8 @@ fn interner_clear_all() {
     GLOBAL_WEIGHTS.clear();
     TOKEN_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
     WEIGHT_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
+    TOKEN_CLEANUP_IN_PROGRESS.store(false, Ordering::Release);
+    WEIGHT_CLEANUP_IN_PROGRESS.store(false, Ordering::Release);
 }
 
 fn interner_clear_stale() {
@@ -338,6 +401,8 @@ fn interner_clear_stale() {
     prune_dead_weights();
     TOKEN_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
     WEIGHT_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
+    TOKEN_CLEANUP_IN_PROGRESS.store(false, Ordering::Release);
+    WEIGHT_CLEANUP_IN_PROGRESS.store(false, Ordering::Release);
 }
 
 
@@ -1896,6 +1961,39 @@ impl Weight {
         builder.finish()
     }
 
+    /// Build the exact union of sorted point-TSID entries.
+    ///
+    /// The entries must be nondecreasing by TSID. Equal TSIDs are reduced with
+    /// the canonical token-set union before the compact map is built, avoiding
+    /// a sequence of whole-weight unions for point-entry workloads.
+    pub(crate) fn union_sorted_point_entries(
+        entries: impl IntoIterator<Item = (u32, SharedTokenSet)>,
+    ) -> Self {
+        let mut builder = CompactRangeBuilder::new();
+        let mut current: Option<(u32, SharedTokenSet)> = None;
+
+        for (tsid, tokens) in entries {
+            if tokens.is_empty() {
+                continue;
+            }
+            match current.as_mut() {
+                Some((current_tsid, current_tokens)) if *current_tsid == tsid => {
+                    *current_tokens = shared_token_union(current_tokens, &tokens);
+                }
+                Some((current_tsid, current_tokens)) => {
+                    builder.push(*current_tsid, *current_tsid, Arc::clone(current_tokens));
+                    current = Some((tsid, tokens));
+                }
+                None => current = Some((tsid, tokens)),
+            }
+        }
+
+        if let Some((tsid, tokens)) = current {
+            builder.push(tsid, tsid, tokens);
+        }
+        builder.finish()
+    }
+
     pub fn insert(
         &mut self,
         tsid_range: std::ops::RangeInclusive<u32>,
@@ -2434,6 +2532,56 @@ mod tests {
     }
 
     #[test]
+    fn interner_cleanup_deferral_releases_once() {
+        let initial = INTERNER_CLEANUP_DEFERRAL_DEPTH.load(Ordering::Acquire);
+        let first = defer_weight_interner_cleanup();
+        let second = defer_weight_interner_cleanup();
+        assert_eq!(
+            INTERNER_CLEANUP_DEFERRAL_DEPTH.load(Ordering::Acquire),
+            initial + 2,
+        );
+        second.finish();
+        assert_eq!(
+            INTERNER_CLEANUP_DEFERRAL_DEPTH.load(Ordering::Acquire),
+            initial + 1,
+        );
+        first.finish();
+        assert_eq!(INTERNER_CLEANUP_DEFERRAL_DEPTH.load(Ordering::Acquire), initial);
+    }
+
+    #[test]
+    fn interner_cleanup_threshold_has_one_concurrent_claimant() {
+        use std::sync::{Arc, Barrier};
+
+        let counter = Arc::new(AtomicUsize::new(INTERNER_CLEANUP_INTERVAL - 1));
+        let in_progress = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(Barrier::new(16));
+        let workers: Vec<_> = (0..16)
+            .map(|_| {
+                let counter = Arc::clone(&counter);
+                let in_progress = Arc::clone(&in_progress);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    usize::from(claim_interner_cleanup(&counter, &in_progress))
+                })
+            })
+            .collect();
+        let claims: usize = workers.into_iter().map(|worker| worker.join().unwrap()).sum();
+
+        assert_eq!(claims, 1);
+        assert!(in_progress.load(Ordering::Acquire));
+
+        // Crossing additional intervals while the first caller is still
+        // sweeping cannot claim another concurrent retain.
+        for _ in 0..(INTERNER_CLEANUP_INTERVAL * 2) {
+            assert!(!claim_interner_cleanup(&counter, &in_progress));
+        }
+        in_progress.store(false, Ordering::Release);
+        assert!(claim_interner_cleanup(&counter, &in_progress));
+    }
+
+    #[test]
     fn scoped_weight_bulk_ops_union_all_identities() {
         let mut cache = ScopedWeightOpCache::default();
 
@@ -2454,6 +2602,26 @@ mod tests {
 
         let sequential = left.union(&middle).union(&right).union(&Weight::empty());
         assert_eq!(bulk, sequential);
+    }
+
+    #[test]
+    fn sorted_point_entry_union_matches_sequential_weight_union() {
+        let first = shared_rangeset(rangeset_from_ranges([1..=3]));
+        let second = shared_rangeset(rangeset_from_ranges([3..=5]));
+        let third = shared_rangeset(rangeset_from_ranges([7..=9]));
+        let entries = vec![
+            (2, Arc::clone(&first)),
+            (2, Arc::clone(&second)),
+            (4, Arc::clone(&third)),
+        ];
+        let direct = Weight::union_sorted_point_entries(entries.clone());
+        let sequential = entries.into_iter().fold(Weight::empty(), |acc, (tsid, tokens)| {
+            acc.union(&Weight::from_per_tsid_shared(std::iter::once((tsid, tokens))))
+        });
+
+        assert_eq!(direct, sequential);
+        assert_eq!(direct.tokens_for_tsid(2), rangeset_from_ranges([1..=5]));
+        assert_eq!(direct.tokens_for_tsid(4), rangeset_from_ranges([7..=9]));
     }
 
     #[test]
