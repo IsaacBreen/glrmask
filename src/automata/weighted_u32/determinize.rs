@@ -139,7 +139,30 @@ fn seed_start_subset(nwa: &NWA) -> FxHashMap<u32, Weight> {
     start_subset
 }
 
+fn intern_determinized_subset(
+    next_key: Vec<(u32, Weight)>,
+    subset_map: &mut FxHashMap<Vec<(u32, Weight)>, u32>,
+    worklist: &mut VecDeque<(Vec<(u32, Weight)>, Vec<(u32, Weight)>)>,
+    dwa: &mut DWA,
+) -> u32 {
+    if let Some(existing) = subset_map.get(&next_key).copied() {
+        existing
+    } else {
+        let new_id = dwa.add_state();
+        subset_map.insert(next_key.clone(), new_id);
+        worklist.push_back((next_key.clone(), next_key));
+        new_id
+    }
+}
+
 pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
+    determinize_impl(nwa, true)
+}
+
+fn determinize_impl(
+    nwa: &NWA,
+    direct_epsilon_free_targets_enabled: bool,
+) -> Result<DWA, GlrMaskError> {
     if !nwa.is_acyclic() {
         return Err(GlrMaskError::Compilation(
             "weighted determinization currently supports only acyclic NWAs".into(),
@@ -272,6 +295,51 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                 continue;
             }
 
+            // Epsilon-free successor sets need no closure. Build the exact
+            // normalized subset directly, avoiding temporary hash maps and
+            // canonicalization on the dominant acyclic-NWA path.
+            let direct_epsilon_free_targets = direct_epsilon_free_targets_enabled
+                && target_contributions.iter().all(|(target, _)| {
+                    nwa.states()[*target as usize].epsilons.is_empty()
+                });
+            if direct_epsilon_free_targets {
+                let mut by_target: FxHashMap<u32, SmallVec<[Weight; 2]>> = FxHashMap::default();
+                for (target, weight) in target_contributions {
+                    by_target.entry(target).or_default().push(weight);
+                }
+                let mut next_key: Vec<(u32, Weight)> = by_target
+                    .into_iter()
+                    .map(|(target, weights)| (target, Weight::union_all(weights.iter())))
+                    .filter(|(_, weight)| !weight.is_empty())
+                    .collect();
+                if next_key.is_empty() {
+                    continue;
+                }
+                next_key.sort_unstable_by_key(|(target, _)| *target);
+                let edge_weight = Weight::union_all(next_key.iter().map(|(_, weight)| weight));
+                if edge_weight.is_empty() {
+                    continue;
+                }
+                let edge_complement = edge_weight.complement();
+                if !edge_complement.is_empty() {
+                    for (_, weight) in &mut next_key {
+                        *weight = weight.union(&edge_complement);
+                    }
+                    next_key.retain(|(_, weight)| !weight.is_empty());
+                }
+                if next_key.is_empty() {
+                    continue;
+                }
+                let to_state = intern_determinized_subset(
+                    next_key,
+                    &mut subset_map,
+                    &mut worklist,
+                    &mut dwa,
+                );
+                dwa.add_transition(from_state, label, to_state, edge_weight);
+                continue;
+            }
+
             let combine_started_at = profile.then(Instant::now);
             let mut target_subset: FxHashMap<u32, Weight> = FxHashMap::default();
             if target_contributions.len() == 1 {
@@ -363,14 +431,12 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                 continue;
             }
             let subset_lookup_started_at = profile.then(Instant::now);
-            let to_state = if let Some(existing) = subset_map.get(&next_key).copied() {
-                existing
-            } else {
-                let new_id = dwa.add_state();
-                subset_map.insert(next_key.clone(), new_id);
-                worklist.push_back((next_key.clone(), next_key));
-                new_id
-            };
+            let to_state = intern_determinized_subset(
+                next_key,
+                &mut subset_map,
+                &mut worklist,
+                &mut dwa,
+            );
             if let Some(subset_lookup_started_at) = subset_lookup_started_at {
                 profile_subset_lookup_ms += subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
             }
@@ -594,4 +660,44 @@ mod tests {
         let dwa = determinize(&nwa).unwrap();
         assert_eq!(dwa.eval_word(&[7]), tokens(0..=6));
     }
+
+    #[test]
+    fn epsilon_successors_use_the_generic_determinization_path() {
+        let mut nwa = NWA::new(1, 4);
+        let start = nwa.add_state();
+        let epsilon_source = nwa.add_state();
+        let accept = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+        nwa.add_transition(start, 7, epsilon_source, tokens([0, 1]));
+        nwa.add_epsilon(epsilon_source, accept, tokens([1]));
+        nwa.set_final_weight(accept, tokens([1]));
+
+        let direct = determinize_impl(&nwa, true).unwrap();
+        let generic = determinize_impl(&nwa, false).unwrap();
+        assert_eq!(bincode::serialize(&direct).unwrap(), bincode::serialize(&generic).unwrap());
+        assert_eq!(direct.eval_word(&[7]), tokens([1]));
+    }
+
+    #[test]
+    fn direct_epsilon_free_targets_match_generic_determinization() {
+        let mut nwa = NWA::new(1, 8);
+        let start = nwa.add_state();
+        let left = nwa.add_state();
+        let right = nwa.add_state();
+        let end = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+        nwa.add_transition(start, 7, left, tokens([0, 1]));
+        nwa.add_transition(start, 7, left, tokens([1, 2]));
+        nwa.add_transition(start, 7, right, tokens([3]));
+        nwa.add_transition(left, 8, end, tokens([0, 2]));
+        nwa.add_transition(right, 8, end, tokens([3, 4]));
+        nwa.set_final_weight(left, tokens([0, 1, 2]));
+        nwa.set_final_weight(right, tokens([3]));
+        nwa.set_final_weight(end, tokens([0, 2, 3, 4]));
+
+        let direct = determinize_impl(&nwa, true).unwrap();
+        let generic = determinize_impl(&nwa, false).unwrap();
+        assert_eq!(bincode::serialize(&direct).unwrap(), bincode::serialize(&generic).unwrap());
+    }
+
 }
