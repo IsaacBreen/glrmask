@@ -446,6 +446,8 @@ pub(crate) fn compute_state_map(
     initial_state_map: Option<&ManyToOneIdMap>,
     active_groups: Option<&[bool]>,
     mode: MaxLengthMode,
+    kbounded_tokenizer_view: Option<&TokenizerView>,
+    kbounded_byte_to_class: Option<&[u8; 256]>,
 ) -> ManyToOneIdMap {
     let num_states = tokenizer.num_states() as usize;
     let states: Vec<usize> = match initial_state_map {
@@ -462,9 +464,15 @@ pub(crate) fn compute_state_map(
             .unwrap_or_else(|| super::identity_state_map(num_states));
     }
 
-    let byte_to_class = compute_byte_classes(tokenizer);
+    let owned_byte_to_class;
+    let byte_to_class = if let Some(byte_to_class) = kbounded_byte_to_class {
+        byte_to_class
+    } else {
+        owned_byte_to_class = compute_byte_classes(tokenizer);
+        &owned_byte_to_class
+    };
     let active_bytes =
-        active_byte_representatives(Some(&statistic.relevant_bytes), Some(&byte_to_class));
+        active_byte_representatives(Some(&statistic.relevant_bytes), Some(byte_to_class));
     let representative_states = match mode {
         MaxLengthMode::StableByteRestricted => {
             let blocks = stable_refinement_blocks(tokenizer, active_groups, &active_bytes);
@@ -472,17 +480,24 @@ pub(crate) fn compute_state_map(
             build_subset_mapping(&states, &full_mapping)
         }
         MaxLengthMode::KBoundedByteRestricted => {
-            let tokenizer_view = match active_groups {
-                Some(active_groups) => TokenizerView::new_filtered(tokenizer, active_groups),
-                None => TokenizerView::new(tokenizer),
+            let owned_tokenizer_view;
+            let tokenizer_view = if let Some(tokenizer_view) = kbounded_tokenizer_view {
+                debug_assert_eq!(tokenizer_view.dfa().states.len(), num_states);
+                tokenizer_view
+            } else {
+                owned_tokenizer_view = match active_groups {
+                    Some(active_groups) => TokenizerView::new_filtered(tokenizer, active_groups),
+                    None => TokenizerView::new(tokenizer),
+                };
+                &owned_tokenizer_view
             };
             super::super::state::max_length::find_state_equivalence_classes_kbounded(
-                &tokenizer_view,
+                tokenizer_view,
                 &states,
                 statistic.max_token_len,
                 active_groups,
                 Some(&statistic.relevant_bytes),
-                Some(&byte_to_class),
+                Some(byte_to_class),
                 "pipeline_kbounded",
             )
         }

@@ -3,6 +3,8 @@ use std::time::Instant;
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
+
+use super::super::compat::TokenizerView;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
 use super::identity_state_map;
@@ -109,6 +111,8 @@ pub(crate) fn run_state_equivalence_pipeline(
     active_groups: Option<&[bool]>,
     scope: StateEquivalenceScope,
     config: &StateEquivalencePipelineConfig,
+    kbounded_tokenizer_view: Option<&TokenizerView>,
+    kbounded_byte_to_class: Option<&[u8; 256]>,
 ) -> (ManyToOneIdMap, StateEquivalencePipelineProfile) {
     let mut current_state_map = initial_state_map
         .cloned()
@@ -137,6 +141,8 @@ pub(crate) fn run_state_equivalence_pipeline(
                     Some(&current_state_map),
                     active_groups,
                     mode,
+                    kbounded_tokenizer_view,
+                    kbounded_byte_to_class,
                 );
                 record_max_length_profile(
                     &mut profile,

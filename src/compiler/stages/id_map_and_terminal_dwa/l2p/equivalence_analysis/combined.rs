@@ -403,6 +403,8 @@ fn analyze_equivalences_impl(
         active_groups,
         StateEquivalenceScope::L2p,
         &pipeline_config,
+        Some(&tokenizer_view),
+        Some(&byte_to_class),
     );
     let pre_reduced_states: Vec<usize> = pre_state_map
         .representative_original_ids
