@@ -11,7 +11,7 @@ use smallvec::SmallVec;
 
 use super::dwa::DWA;
 use super::nwa::NWA;
-use crate::ds::weight::{ScopedWeightOpCache, Weight, WeightIntersectionIndex};
+use crate::ds::weight::{SharedTokenSet, ScopedWeightOpCache, Weight, WeightIntersectionIndex};
 use crate::GlrMaskError;
 
 const MAX_INDEXED_FINAL_PATH_RANGES: usize = 8;
@@ -137,6 +137,52 @@ fn seed_start_subset(nwa: &NWA) -> FxHashMap<u32, Weight> {
         union_state_weight(&mut start_subset, state_id, Weight::all());
     }
     start_subset
+}
+
+/// Aggregate direct epsilon-free point-entry contributions without repeatedly
+/// rebuilding whole weight maps. Each contribution carries exactly one TSID;
+/// sorting lets us reduce token sets locally for a `(destination, TSID)` pair
+/// and construct the canonical per-destination and edge weights in one pass.
+fn aggregate_direct_point_entries(
+    target_contributions: SmallVec<[(u32, Weight); 1]>,
+) -> (Vec<(u32, Weight)>, Weight) {
+    let mut points: Vec<(u32, u32, SharedTokenSet)> = target_contributions
+        .into_iter()
+        .map(|(dst, weight)| {
+            let (tsid, tokens) = weight
+                .single_tsid_shared_entry()
+                .expect("point-entry aggregation requires point weights");
+            (dst, tsid, tokens)
+        })
+        .collect();
+
+    let mut edge_entries: Vec<(u32, SharedTokenSet)> = points
+        .iter()
+        .map(|(_, tsid, tokens)| (*tsid, std::sync::Arc::clone(tokens)))
+        .collect();
+    edge_entries.sort_unstable_by_key(|(tsid, _)| *tsid);
+    let edge_weight = Weight::union_sorted_point_entries(edge_entries);
+
+    points.sort_unstable_by_key(|(dst, tsid, _)| (*dst, *tsid));
+    let mut next_key = Vec::new();
+    let mut group_start = 0usize;
+    while group_start < points.len() {
+        let dst = points[group_start].0;
+        let mut group_end = group_start + 1;
+        while group_end < points.len() && points[group_end].0 == dst {
+            group_end += 1;
+        }
+        let weight = Weight::union_sorted_point_entries(
+            points[group_start..group_end]
+                .iter()
+                .map(|(_, tsid, tokens)| (*tsid, std::sync::Arc::clone(tokens))),
+        );
+        debug_assert!(!weight.is_empty());
+        next_key.push((dst, weight));
+        group_start = group_end;
+    }
+
+    (next_key, edge_weight)
 }
 
 fn intern_determinized_subset(
@@ -344,6 +390,27 @@ fn determinize_impl(
                         .is_some_and(|state| state.epsilons.is_empty())
                 });
             if direct_no_epsilon_targets {
+                let direct_point_entries = target_contributions
+                    .iter()
+                    .all(|(_, weight)| weight.single_tsid_shared_entry().is_some());
+                if direct_point_entries {
+                    let (next_key, edge_weight) = aggregate_direct_point_entries(target_contributions);
+                    debug_assert!(!edge_weight.is_empty());
+                    let subset_lookup_started_at = profile.then(Instant::now);
+                    let to_state = intern_determinized_subset(
+                        next_key,
+                        &mut subset_map,
+                        &mut worklist,
+                        &mut dwa,
+                    );
+                    if let Some(subset_lookup_started_at) = subset_lookup_started_at {
+                        profile_subset_lookup_ms +=
+                            subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
+                    }
+                    dwa.add_transition(from_state, label, to_state, edge_weight);
+                    continue;
+                }
+
                 let (next_key, edge_weight) = if target_contributions.len() == 1 {
                     if profile {
                         profile_direct_single_target_labels += 1;
@@ -712,6 +779,26 @@ mod tests {
                 "case {case}",
             );
         }
+    }
+
+    #[test]
+    fn point_entry_aggregation_matches_generic_determinization() {
+        let mut nwa = NWA::new(1, 8);
+        let start = nwa.add_state();
+        let first_accept = nwa.add_state();
+        let second_accept = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+        nwa.add_transition(start, 5, first_accept, tokens([0, 2]));
+        nwa.add_transition(start, 5, first_accept, tokens([1, 3]));
+        nwa.add_transition(start, 5, second_accept, tokens([2, 4]));
+        nwa.add_transition(start, 5, second_accept, tokens([5]));
+        nwa.set_final_weight(first_accept, tokens([0, 1, 2, 3]));
+        nwa.set_final_weight(second_accept, tokens([2, 4, 5]));
+
+        let fast = determinize_impl(&nwa, true).unwrap();
+        let generic = determinize_impl(&nwa, false).unwrap();
+        assert_eq!(bincode::serialize(&fast).unwrap(), bincode::serialize(&generic).unwrap());
+        assert_eq!(fast.eval_word(&[5]), tokens([0, 1, 2, 3, 4, 5]));
     }
 
     #[test]

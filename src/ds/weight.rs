@@ -1961,6 +1961,39 @@ impl Weight {
         builder.finish()
     }
 
+    /// Build the exact union of sorted point-TSID entries.
+    ///
+    /// The entries must be nondecreasing by TSID. Equal TSIDs are reduced with
+    /// the canonical token-set union before the compact map is built, avoiding
+    /// a sequence of whole-weight unions for point-entry workloads.
+    pub(crate) fn union_sorted_point_entries(
+        entries: impl IntoIterator<Item = (u32, SharedTokenSet)>,
+    ) -> Self {
+        let mut builder = CompactRangeBuilder::new();
+        let mut current: Option<(u32, SharedTokenSet)> = None;
+
+        for (tsid, tokens) in entries {
+            if tokens.is_empty() {
+                continue;
+            }
+            match current.as_mut() {
+                Some((current_tsid, current_tokens)) if *current_tsid == tsid => {
+                    *current_tokens = shared_token_union(current_tokens, &tokens);
+                }
+                Some((current_tsid, current_tokens)) => {
+                    builder.push(*current_tsid, *current_tsid, Arc::clone(current_tokens));
+                    current = Some((tsid, tokens));
+                }
+                None => current = Some((tsid, tokens)),
+            }
+        }
+
+        if let Some((tsid, tokens)) = current {
+            builder.push(tsid, tsid, tokens);
+        }
+        builder.finish()
+    }
+
     pub fn insert(
         &mut self,
         tsid_range: std::ops::RangeInclusive<u32>,
@@ -2569,6 +2602,26 @@ mod tests {
 
         let sequential = left.union(&middle).union(&right).union(&Weight::empty());
         assert_eq!(bulk, sequential);
+    }
+
+    #[test]
+    fn sorted_point_entry_union_matches_sequential_weight_union() {
+        let first = shared_rangeset(rangeset_from_ranges([1..=3]));
+        let second = shared_rangeset(rangeset_from_ranges([3..=5]));
+        let third = shared_rangeset(rangeset_from_ranges([7..=9]));
+        let entries = vec![
+            (2, Arc::clone(&first)),
+            (2, Arc::clone(&second)),
+            (4, Arc::clone(&third)),
+        ];
+        let direct = Weight::union_sorted_point_entries(entries.clone());
+        let sequential = entries.into_iter().fold(Weight::empty(), |acc, (tsid, tokens)| {
+            acc.union(&Weight::from_per_tsid_shared(std::iter::once((tsid, tokens))))
+        });
+
+        assert_eq!(direct, sequential);
+        assert_eq!(direct.tokens_for_tsid(2), rangeset_from_ranges([1..=5]));
+        assert_eq!(direct.tokens_for_tsid(4), rangeset_from_ranges([7..=9]));
     }
 
     #[test]
