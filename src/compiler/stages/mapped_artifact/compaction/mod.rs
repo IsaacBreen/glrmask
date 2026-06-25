@@ -324,6 +324,7 @@ pub(super) fn compact_weights_with_id_map(
         allow_expensive_layout,
         use_default_layout,
         false,
+        false,
     );
     apply_compaction_plan_to_weight_refs(weights, id_map, collect_profile_stats, &plan)
 }
@@ -334,6 +335,7 @@ pub(super) fn plan_compaction_for_weight_refs(
     allow_expensive_layout: bool,
     use_default_layout: bool,
     keep_unmerged_tsid_identity: bool,
+    tsids_proven_irredundant: bool,
 ) -> CompactPlan {
     let profile_compaction = env_flag("GLRMASK_PROFILE_COMPILE");
     let total_started_at = profile_compaction.then(Instant::now);
@@ -354,6 +356,7 @@ pub(super) fn plan_compaction_for_weight_refs(
             allow_expensive_layout,
             use_default_layout,
             keep_unmerged_tsid_identity,
+            tsids_proven_irredundant,
         )
     };
     let compaction = if use_thread_pool {
@@ -495,6 +498,7 @@ fn build_dimension_compaction(
     allow_expensive_layout: bool,
     use_default_layout: bool,
     keep_unmerged_tsid_identity: bool,
+    tsids_proven_irredundant: bool,
 ) -> DimensionCompaction {
     if allow_expensive_layout
         && (globally_exact_compaction_enabled() || almost_optimal_compaction_enabled())
@@ -512,6 +516,7 @@ fn build_dimension_compaction(
         use_default_layout,
         use_exact_profile_layout,
         keep_unmerged_tsid_identity,
+        tsids_proven_irredundant,
     )
 }
 
@@ -522,6 +527,7 @@ fn build_default_dimension_compaction(
     use_default_layout: bool,
     adaptive_layout: bool,
     keep_unmerged_tsid_identity: bool,
+    tsids_proven_irredundant: bool,
 ) -> DimensionCompaction {
     let profile_compaction = env_flag("GLRMASK_PROFILE_COMPILE");
     let total_started_at = profile_compaction.then(Instant::now);
@@ -548,13 +554,16 @@ fn build_default_dimension_compaction(
     let token_remaps = build_global_permuted_token_cache(unique_weights, &token_context);
     let token_remap_ms = token_remap_started_at.map_or(0.0, elapsed_ms);
     let tsid_merge_started_at = profile_compaction.then(Instant::now);
-    let (tsid_merge_perm, merged_num_tsids) =
+    let (tsid_merge_perm, merged_num_tsids) = if tsids_proven_irredundant {
+        (identity_perm(num_tsids), num_tsids)
+    } else {
         build_exact_tsid_merge_permutation_with_token_remaps(
             &original_weight_refs,
             num_tsids,
             &token_context,
             &token_remaps,
-        );
+        )
+    };
     let tsid_merge_ms = tsid_merge_started_at.map_or(0.0, elapsed_ms);
 
     // Only ordering merged TSID groups needs token-remapped Weight objects.

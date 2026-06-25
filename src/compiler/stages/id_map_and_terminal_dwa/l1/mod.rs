@@ -14,58 +14,73 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Exact first-byte target profiles computed for L1 state equivalence.
 ///
-/// The L1 terminal-DWA builder needs the same whole-token walks. Reusing these
-/// profiles avoids rebuilding the walk cache after exact equivalence has already
-/// established it. Signature IDs in these profiles reserve zero for the empty
-/// signature; the direct DWA builder numbers non-empty signatures from zero, so
-/// `materialize_walk_cache` shifts them by one.
+/// The L1 terminal-DWA builder needs the same whole-token walks *and* the same
+/// active-terminal signature at each tokenizer state. Reusing both avoids a
+/// second full tokenizer-state scan after exact equivalence has already proved
+/// the signatures. Profile signature IDs reserve zero for the empty signature;
+/// the direct DWA builder numbers non-empty signatures from zero, so the cached
+/// direct-builder view stores that shifted numbering explicitly.
+type L1WalkProfile = Arc<[(u32, Arc<[(u32, u32)]>)]>;
+
+fn freeze_l1_walk_profile(runs: &[(u32, u32, u32)]) -> L1WalkProfile {
+    let mut positions = FxHashMap::<u32, usize>::default();
+    let mut grouped = Vec::<(u32, Vec<(u32, u32)>)>::new();
+    for &(signature_id, start, end) in runs {
+        if signature_id == 0 {
+            continue;
+        }
+        let direct_signature_id = signature_id - 1;
+        let position = if let Some(&position) = positions.get(&direct_signature_id) {
+            position
+        } else {
+            let position = grouped.len();
+            positions.insert(direct_signature_id, position);
+            grouped.push((direct_signature_id, Vec::new()));
+            position
+        };
+        grouped[position].1.push((start, end));
+    }
+    Arc::from(
+        grouped
+            .into_iter()
+            .map(|(signature_id, ranges)| (signature_id, Arc::from(ranges)))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn freeze_l1_walk_profile_from_direct(profile: Vec<(u32, Vec<(u32, u32)>)>) -> L1WalkProfile {
+    Arc::from(
+        profile
+            .into_iter()
+            .map(|(signature_id, ranges)| (signature_id, Arc::from(ranges)))
+            .collect::<Vec<_>>(),
+    )
+}
+
 #[derive(Debug)]
 struct L1ExactProfileReuse {
     target_to_profile_id: FxHashMap<(u8, u32), u32>,
-    profiles_by_id: Vec<Arc<[(u32, u32, u32)]>>,
+    walk_profiles_by_id: Vec<L1WalkProfile>,
+    direct_terminal_signatures: Arc<[Vec<u32>]>,
+    direct_state_to_terminal_signature: Arc<[u32]>,
 }
 
 impl L1ExactProfileReuse {
-    fn materialize_walk_cache(&self) -> FxHashMap<(u8, u32), Vec<(u32, Vec<(u32, u32)>)>> {
+    fn materialize_walk_cache(&self) -> FxHashMap<(u8, u32), L1WalkProfile> {
         let profiling = compile_profile_enabled();
         let total_started_at = profiling.then(Instant::now);
-        let profile_build_started_at = profiling.then(Instant::now);
-        let mut walk_results_by_profile: Vec<Vec<(u32, Vec<(u32, u32)>)>> =
-            Vec::with_capacity(self.profiles_by_id.len());
-        for runs in &self.profiles_by_id {
-            let mut by_signature = FxHashMap::<u32, Vec<(u32, u32)>>::default();
-            for &(signature_id, start, end) in runs.iter() {
-                if signature_id == 0 {
-                    continue;
-                }
-                by_signature
-                    .entry(signature_id - 1)
-                    .or_default()
-                    .push((start, end));
-            }
-            walk_results_by_profile.push(by_signature.into_iter().collect());
-        }
-        let profile_build_ms = profile_build_started_at.map_or(0.0, |started| {
-            started.elapsed().as_secs_f64() * 1000.0
-        });
-
-        let target_clone_started_at = profiling.then(Instant::now);
         let mut cache = FxHashMap::default();
         for (&target, &profile_id) in &self.target_to_profile_id {
             if profile_id != 0 {
-                cache.insert(target, walk_results_by_profile[profile_id as usize].clone());
+                cache.insert(target, Arc::clone(&self.walk_profiles_by_id[profile_id as usize]));
             }
         }
-        let target_clone_ms = target_clone_started_at.map_or(0.0, |started| {
-            started.elapsed().as_secs_f64() * 1000.0
-        });
         if let Some(total_started_at) = total_started_at {
             eprintln!(
-                "[glrmask/profile][l1_exact_profile_materialize] profiles={} targets={} profile_build_ms={:.3} target_clone_ms={:.3} total_ms={:.3}",
-                self.profiles_by_id.len(),
+                "[glrmask/profile][l1_exact_profile_materialize] profiles={} targets={} profile_build_ms=0.000 target_clone_ms={:.3} total_ms={:.3}",
+                self.walk_profiles_by_id.len(),
                 self.target_to_profile_id.len(),
-                profile_build_ms,
-                target_clone_ms,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -995,8 +1010,8 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     // its first-byte transitions.
     let sorted_entries = vocab_order.token_entries_sorted.as_ref();
     let terminal_signature_started_at = profile_enabled.then(Instant::now);
-    let state_to_terminal_signature =
-        build_l1_state_to_terminal_signature(tokenizer, active_terminals);
+    let (state_to_terminal_signature, terminal_signatures) =
+        build_l1_state_to_terminal_signatures(tokenizer, active_terminals);
     let terminal_signature_ms = terminal_signature_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
@@ -1041,7 +1056,7 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         .collect();
     let build_byte_profiles = |(byte, targets): &(u8, Vec<u32>)| {
         let byte_idx = *byte as usize;
-        l1_bucket_suffix_signature_profiles_batched(
+        l1_bucket_suffix_signature_profiles_packed(
             *byte,
             targets,
             sorted_entries,
@@ -1054,13 +1069,13 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
             flat_trans,
         )
     };
-    let target_profile_batches: Vec<Vec<((u8, u32), Vec<(u32, u32, u32)>)>> =
+    let target_profile_batches: Vec<Vec<((u8, u32), Arc<[(u32, u32, u32)]>)>> =
         if rayon::current_num_threads() == 1 {
             byte_target_groups.iter().map(build_byte_profiles).collect()
         } else {
             byte_target_groups.par_iter().map(build_byte_profiles).collect()
         };
-    let target_profiles: Vec<((u8, u32), Vec<(u32, u32, u32)>)> =
+    let target_profiles: Vec<((u8, u32), Arc<[(u32, u32, u32)]>)> =
         target_profile_batches.into_iter().flatten().collect();
     let target_profiles_ms = target_profiles_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
@@ -1074,7 +1089,6 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     let mut next_profile_id = 1u32;
     let mut target_to_profile_id = FxHashMap::<(u8, u32), u32>::default();
     for (target_key, profile) in target_profiles {
-        let profile: Arc<[(u32, u32, u32)]> = Arc::from(profile);
         let profile_id = if let Some(&profile_id) = profile_to_id.get(&profile) {
             profile_id
         } else {
@@ -1087,55 +1101,121 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         target_to_profile_id.insert(target_key, profile_id);
     }
     let profile_ids_len = next_profile_id as usize;
+    let walk_profiles_by_id: Vec<L1WalkProfile> = profiles_by_id
+        .iter()
+        .map(|profile| freeze_l1_walk_profile(profile.as_ref()))
+        .collect();
     let profile_intern_ms = profile_intern_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
 
+    // State keys are a fixed-width vector of per-first-byte profile IDs.  The
+    // old representation allocated one Vec per tokenizer state and hashed the
+    // whole Vec into a map.  Materialize the profile lookup densely once, then
+    // use a collision-checked scalar fingerprint for grouping.  Equality is
+    // still the full exact profile vector.
     let state_keys_started_at = profile_enabled.then(Instant::now);
-    let build_state_key = |&state: &usize| {
-        let mut key = Vec::<(u16, u32)>::with_capacity(nonempty_first_bytes.len() + 1);
-
-        if !token_buckets.empty_token_indices.is_empty() {
-            let start_sig = state_to_terminal_signature[state];
-            if start_sig != 0 {
-                key.push((256, start_sig));
-            }
+    let num_tokenizer_states = tokenizer.num_states() as usize;
+    let mut byte_slots = [u16::MAX; 256];
+    for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
+        byte_slots[byte] = slot as u16;
+    }
+    let mut profile_by_first_byte =
+        vec![0u32; nonempty_first_bytes.len() * num_tokenizer_states];
+    for (&(byte, target), &profile_id) in &target_to_profile_id {
+        let slot = byte_slots[byte as usize];
+        debug_assert_ne!(slot, u16::MAX);
+        profile_by_first_byte[slot as usize * num_tokenizer_states + target as usize] = profile_id;
+    }
+    let has_empty_tokens = !token_buckets.empty_token_indices.is_empty();
+    let hash_state_key = |&state: &usize| {
+        let mut hash = 0x9e37_79b9_7f4a_7c15u64;
+        if has_empty_tokens {
+            hash ^= state_to_terminal_signature[state] as u64;
+            hash = hash.rotate_left(17).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         }
-
         let base = state * 256;
-        for &byte in &nonempty_first_bytes {
+        for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
             let target = flat_trans[base + byte];
-            if target == dead {
-                continue;
-            }
-            let profile_id = target_to_profile_id
-                .get(&(byte as u8, target))
-                .copied()
-                .unwrap_or(0);
-            if profile_id != 0 {
-                key.push((byte as u16, profile_id));
-            }
+            let profile_id = if target == dead {
+                0
+            } else {
+                profile_by_first_byte[slot * num_tokenizer_states + target as usize]
+            };
+            hash ^= (profile_id as u64)
+                .wrapping_add(0x9e37_79b9_7f4a_7c15)
+                .wrapping_add((slot as u64).wrapping_mul(0x517c_c1b7_2722_0a95));
+            hash = hash.rotate_left(17).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         }
-
-        key
+        hash
     };
-    let state_keys: Vec<Vec<(u16, u32)>> = if rayon::current_num_threads() == 1 {
-        states.iter().map(build_state_key).collect()
+    let state_key_hashes: Vec<u64> = if rayon::current_num_threads() == 1 {
+        states.iter().map(hash_state_key).collect()
     } else {
-        states.par_iter().map(build_state_key).collect()
+        states.par_iter().map(hash_state_key).collect()
     };
     let state_keys_ms = state_keys_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
 
     let group_started_at = profile_enabled.then(Instant::now);
-    let mut key_to_rep = FxHashMap::<Vec<(u16, u32)>, usize>::default();
+    let same_state_key = |left: usize, right: usize| {
+        if has_empty_tokens
+            && state_to_terminal_signature[left] != state_to_terminal_signature[right]
+        {
+            return false;
+        }
+        let left_base = left * 256;
+        let right_base = right * 256;
+        for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
+            let left_target = flat_trans[left_base + byte];
+            let right_target = flat_trans[right_base + byte];
+            let left_profile = if left_target == dead {
+                0
+            } else {
+                profile_by_first_byte[slot * num_tokenizer_states + left_target as usize]
+            };
+            let right_profile = if right_target == dead {
+                0
+            } else {
+                profile_by_first_byte[slot * num_tokenizer_states + right_target as usize]
+            };
+            if left_profile != right_profile {
+                return false;
+            }
+        }
+        true
+    };
+    let mut primary_representative_by_hash = FxHashMap::<u64, usize>::default();
+    let mut collision_representatives_by_hash = FxHashMap::<u64, Vec<usize>>::default();
     let mut mapping = Vec::<usize>::with_capacity(states.len());
-    for (&state, key) in states.iter().zip(state_keys) {
-        let rep = *key_to_rep.entry(key).or_insert(state);
-        mapping.push(rep);
+    let mut groups_len = 0usize;
+    for (&state, &hash) in states.iter().zip(&state_key_hashes) {
+        let representative = if let Some(&primary) = primary_representative_by_hash.get(&hash) {
+            if same_state_key(primary, state) {
+                primary
+            } else {
+                let representatives = collision_representatives_by_hash
+                    .entry(hash)
+                    .or_insert_with(|| vec![primary]);
+                if let Some(&existing) = representatives
+                    .iter()
+                    .find(|&&existing| same_state_key(existing, state))
+                {
+                    existing
+                } else {
+                    representatives.push(state);
+                    groups_len += 1;
+                    state
+                }
+            }
+        } else {
+            primary_representative_by_hash.insert(hash, state);
+            groups_len += 1;
+            state
+        };
+        mapping.push(representative);
     }
-    let groups_len = key_to_rep.len();
     let group_ms = group_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
@@ -1162,7 +1242,22 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         mapping,
         Some(L1ExactProfileReuse {
             target_to_profile_id,
-            profiles_by_id,
+            walk_profiles_by_id,
+            // Exact-equivalence signature ids reserve zero for empty. The
+            // direct DWA builder uses `u32::MAX` for empty and zero-based ids
+            // for non-empty signatures, matching `materialize_walk_cache`.
+            direct_terminal_signatures: terminal_signatures[1..].to_vec().into(),
+            direct_state_to_terminal_signature: state_to_terminal_signature
+                .into_iter()
+                .map(|signature_id| {
+                    if signature_id == 0 {
+                        u32::MAX
+                    } else {
+                        signature_id - 1
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into(),
         }),
     )
 }
@@ -1321,6 +1416,713 @@ fn l1_bucket_suffix_signature_profiles_batched(
 }
 
 
+const L1_NONE: u32 = u32::MAX;
+
+/// Compact suffix trie for one first-byte vocabulary bucket. Token IDs are
+/// byte-sorted, so each node's subtree is one contiguous token interval.
+#[derive(Clone, Copy)]
+struct L1PackedSuffixTrieNode {
+    incoming_byte: u8,
+    terminal_token: u32,
+    subtree_start: u32,
+    subtree_end: u32,
+    first_child: u32,
+    last_child: u32,
+    next_sibling: u32,
+    first_edge: u32,
+    edge_len: u32,
+}
+
+impl L1PackedSuffixTrieNode {
+    fn root() -> Self {
+        Self {
+            incoming_byte: 0,
+            terminal_token: L1_NONE,
+            subtree_start: L1_NONE,
+            subtree_end: L1_NONE,
+            first_child: L1_NONE,
+            last_child: L1_NONE,
+            next_sibling: L1_NONE,
+            first_edge: 0,
+            edge_len: 0,
+        }
+    }
+
+    fn child(byte: u8) -> Self {
+        Self {
+            incoming_byte: byte,
+            ..Self::root()
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct L1PackedSuffixTrieEdge {
+    byte: u8,
+    child: u32,
+}
+
+struct L1PackedSuffixTrie {
+    nodes: Vec<L1PackedSuffixTrieNode>,
+    edges: Vec<L1PackedSuffixTrieEdge>,
+}
+
+impl L1PackedSuffixTrie {
+    fn build(
+        sorted_entries: &[(u32, Arc<[u8]>)],
+        token_ids: &[usize],
+        suffix_lcps: &[usize],
+    ) -> Self {
+        let mut nodes = vec![L1PackedSuffixTrieNode::root()];
+        let mut path = vec![0u32];
+
+        for (bucket_pos, &internal_token_id) in token_ids.iter().enumerate() {
+            let suffix = &sorted_entries[internal_token_id].1[1..];
+            let lcp = suffix_lcps[bucket_pos]
+                .min(suffix.len())
+                .min(path.len().saturating_sub(1));
+            path.truncate(lcp + 1);
+            for &byte in &suffix[lcp..] {
+                let parent = *path.last().expect("suffix trie path") as usize;
+                let child = nodes.len() as u32;
+                nodes.push(L1PackedSuffixTrieNode::child(byte));
+                if nodes[parent].first_child == L1_NONE {
+                    nodes[parent].first_child = child;
+                } else {
+                    let last = nodes[parent].last_child as usize;
+                    nodes[last].next_sibling = child;
+                }
+                nodes[parent].last_child = child;
+                path.push(child);
+            }
+
+            let token_id = internal_token_id as u32;
+            let terminal = *path.last().expect("suffix trie terminal path") as usize;
+            debug_assert_eq!(nodes[terminal].terminal_token, L1_NONE);
+            nodes[terminal].terminal_token = token_id;
+        }
+
+        // Token IDs follow the byte-sorted vocabulary order. Every suffix-trie
+        // subtree therefore spans one contiguous leaf-token interval. Computing
+        // that interval once bottom-up avoids rewriting it along each token path.
+        for node_index in (0..nodes.len()).rev() {
+            let mut subtree_start = nodes[node_index].terminal_token;
+            let mut subtree_end = nodes[node_index].terminal_token;
+            let mut child = nodes[node_index].first_child;
+            while child != L1_NONE {
+                let child_node = nodes[child as usize];
+                if subtree_start == L1_NONE || child_node.subtree_start < subtree_start {
+                    subtree_start = child_node.subtree_start;
+                }
+                if subtree_end == L1_NONE || child_node.subtree_end > subtree_end {
+                    subtree_end = child_node.subtree_end;
+                }
+                child = child_node.next_sibling;
+            }
+            debug_assert_ne!(subtree_start, L1_NONE);
+            debug_assert_ne!(subtree_end, L1_NONE);
+            nodes[node_index].subtree_start = subtree_start;
+            nodes[node_index].subtree_end = subtree_end;
+        }
+
+        let mut edges = Vec::with_capacity(nodes.len().saturating_sub(1));
+        for node_index in 0..nodes.len() {
+            let first_edge = edges.len() as u32;
+            let mut child = nodes[node_index].first_child;
+            while child != L1_NONE {
+                let child_node = nodes[child as usize];
+                edges.push(L1PackedSuffixTrieEdge {
+                    byte: child_node.incoming_byte,
+                    child,
+                });
+                child = child_node.next_sibling;
+            }
+            nodes[node_index].first_edge = first_edge;
+            nodes[node_index].edge_len = edges.len() as u32 - first_edge;
+        }
+        Self { nodes, edges }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct L1PackedProductNodeData {
+    states_start: u32,
+    states_len: u32,
+    behaviors_start: u32,
+    records_start: u32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct L1PackedProductEdgeData {
+    map_start: u32,
+}
+
+#[derive(Clone, Copy)]
+struct L1PackedProductBehaviorRecord {
+    terminal_signature: u32,
+    child_behaviors_start: u32,
+    uniform_signature: u32,
+    hash_next: u32,
+}
+
+#[inline]
+fn l1_packed_hash_behavior(terminal_signature: u32, child_behaviors: &[u32]) -> u64 {
+    let mut hash = terminal_signature as u64 ^ 0x9e37_79b9_7f4a_7c15;
+    for &child in child_behaviors {
+        hash = hash.rotate_left(13) ^ (child as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+        hash = hash.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    hash
+}
+
+fn l1_packed_uniform_signature(
+    trie: &L1PackedSuffixTrie,
+    node_index: usize,
+    behavior_id: u32,
+    data: &[L1PackedProductNodeData],
+    records: &[L1PackedProductBehaviorRecord],
+) -> u32 {
+    if behavior_id == 0 {
+        return 0;
+    }
+    let node = trie.nodes[node_index];
+    if node.edge_len == 0 {
+        return behavior_id;
+    }
+    if node.terminal_token == L1_NONE && node.edge_len == 1 {
+        let child = trie.edges[node.first_edge as usize].child as usize;
+        return l1_packed_uniform_signature(trie, child, behavior_id, data, records);
+    }
+    records[data[node_index].records_start as usize + behavior_id as usize - 1].uniform_signature
+}
+
+fn l1_packed_append_behavior(
+    trie: &L1PackedSuffixTrie,
+    node_index: usize,
+    behavior_id: u32,
+    data: &[L1PackedProductNodeData],
+    records: &[L1PackedProductBehaviorRecord],
+    record_child_behaviors: &[u32],
+    profile: &mut Vec<(u32, u32, u32)>,
+) {
+    if behavior_id == 0 {
+        return;
+    }
+    let node = trie.nodes[node_index];
+    if node.edge_len == 0 {
+        append_l1_signature_profile_run(profile, behavior_id, node.subtree_start);
+        return;
+    }
+    if node.terminal_token == L1_NONE && node.edge_len == 1 {
+        let child = trie.edges[node.first_edge as usize].child as usize;
+        l1_packed_append_behavior(
+            trie,
+            child,
+            behavior_id,
+            data,
+            records,
+            record_child_behaviors,
+            profile,
+        );
+        return;
+    }
+
+    let record = records[data[node_index].records_start as usize + behavior_id as usize - 1];
+    if record.uniform_signature != 0 {
+        append_l1_signature_profile_run(profile, record.uniform_signature, node.subtree_start);
+        if node.subtree_end != node.subtree_start {
+            profile.last_mut().expect("uniform packed profile run").2 = node.subtree_end;
+        }
+        return;
+    }
+    if record.terminal_signature != 0 {
+        append_l1_signature_profile_run(profile, record.terminal_signature, node.terminal_token);
+    }
+    let children_start = record.child_behaviors_start as usize;
+    for edge_offset in 0..node.edge_len as usize {
+        let edge = trie.edges[node.first_edge as usize + edge_offset];
+        l1_packed_append_behavior(
+            trie,
+            edge.child as usize,
+            record_child_behaviors[children_start + edge_offset],
+            data,
+            records,
+            record_child_behaviors,
+            profile,
+        );
+    }
+}
+
+fn l1_bucket_suffix_signature_profiles_packed(
+    first_byte: u8,
+    targets: &[u32],
+    sorted_entries: &[(u32, Arc<[u8]>)],
+    token_ids: &[usize],
+    suffix_lcps: &[usize],
+    suffix_subtree: &[u64; 4],
+    suffix_first_bytes: &[u64; 4],
+    has_empty_suffix: bool,
+    state_to_terminal_signature: &[u32],
+    flat_trans: &[u32],
+) -> Vec<((u8, u32), Arc<[(u32, u32, u32)]>)> {
+    let profiling = compile_profile_enabled();
+    let total_started_at = profiling.then(Instant::now);
+    let dead = u32::MAX;
+    let mut results = Vec::<((u8, u32), Arc<[(u32, u32, u32)]>)>::with_capacity(targets.len());
+    if token_ids.is_empty() {
+        for &target in targets {
+            results.push(((first_byte, target), Arc::from([])));
+        }
+        return results;
+    }
+
+    let mut walk_targets = Vec::<u32>::new();
+    for &target in targets {
+        if l1_target_self_loop_covers_suffix_subtree(target, suffix_subtree, flat_trans) {
+            let mut profile = Vec::<(u32, u32, u32)>::new();
+            let sig_id = state_to_terminal_signature[target as usize];
+            if sig_id != 0 {
+                profile.push((sig_id, token_ids[0] as u32, *token_ids.last().unwrap() as u32));
+            }
+            results.push(((first_byte, target), Arc::from(profile)));
+        } else {
+            walk_targets.push(target);
+        }
+    }
+    if walk_targets.is_empty() {
+        return results;
+    }
+
+    let mut dedup_others: Option<Vec<Vec<u32>>> = None;
+    if !has_empty_suffix {
+        let mut first_suffix_bytes = Vec::<u8>::new();
+        for word in 0..4u8 {
+            let mut bits = suffix_first_bytes[word as usize];
+            while bits != 0 {
+                let offset = bits.trailing_zeros() as u8;
+                first_suffix_bytes.push(word * 64 + offset);
+                bits &= bits - 1;
+            }
+        }
+        if !first_suffix_bytes.is_empty() {
+            let mut fp_groups = FxHashMap::<Vec<u32>, Vec<u32>>::default();
+            for &target in &walk_targets {
+                let fp: Vec<u32> = first_suffix_bytes
+                    .iter()
+                    .map(|&byte| flat_trans[target as usize * 256 + byte as usize])
+                    .collect();
+                fp_groups.entry(fp).or_default().push(target);
+            }
+            let mut deduped_targets = Vec::<u32>::new();
+            let mut others = Vec::<Vec<u32>>::new();
+            for (fp, group) in fp_groups {
+                if fp.iter().all(|&state| state == dead) {
+                    for target in group {
+                        results.push(((first_byte, target), Arc::from([])));
+                    }
+                    continue;
+                }
+                deduped_targets.push(group[0]);
+                others.push(group[1..].to_vec());
+            }
+            if deduped_targets.len() < walk_targets.len() {
+                walk_targets = deduped_targets;
+                dedup_others = Some(others);
+            }
+        }
+    }
+    if walk_targets.is_empty() {
+        return results;
+    }
+
+    let trie_started_at = profiling.then(Instant::now);
+    let trie = L1PackedSuffixTrie::build(sorted_entries, token_ids, suffix_lcps);
+    let trie_ms = trie_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let propagate_started_at = profiling.then(Instant::now);
+    let mut data = vec![L1PackedProductNodeData::default(); trie.nodes.len()];
+    let mut edge_data = vec![L1PackedProductEdgeData::default(); trie.edges.len()];
+    let mut states = Vec::<u32>::new();
+    let mut transition_maps = Vec::<u32>::new();
+    states.extend_from_slice(&walk_targets);
+    data[0].states_start = 0;
+    data[0].states_len = walk_targets.len() as u32;
+
+    let num_lexer_states = flat_trans.len() / 256;
+    let mut seen_stamp = vec![0u32; num_lexer_states];
+    let mut seen_index = vec![0u32; num_lexer_states];
+    let mut stamp = 0u32;
+    for node_index in 0..trie.nodes.len() {
+        let node = trie.nodes[node_index];
+        let parent_start = data[node_index].states_start as usize;
+        let parent_len = data[node_index].states_len as usize;
+        if parent_len == 0 {
+            continue;
+        }
+        for edge_offset in 0..node.edge_len as usize {
+            let edge_index = node.first_edge as usize + edge_offset;
+            let edge = trie.edges[edge_index];
+            let child = edge.child as usize;
+            stamp = stamp.wrapping_add(1);
+            if stamp == 0 {
+                seen_stamp.fill(0);
+                stamp = 1;
+            }
+            edge_data[edge_index].map_start = transition_maps.len() as u32;
+            let child_start = states.len() as u32;
+            for state_offset in 0..parent_len {
+                let state = states[parent_start + state_offset];
+                let next = flat_trans[state as usize * 256 + edge.byte as usize];
+                if next == dead {
+                    transition_maps.push(L1_NONE);
+                } else if seen_stamp[next as usize] == stamp {
+                    transition_maps.push(seen_index[next as usize]);
+                } else {
+                    let child_index = states.len() as u32 - child_start;
+                    seen_stamp[next as usize] = stamp;
+                    seen_index[next as usize] = child_index;
+                    states.push(next);
+                    transition_maps.push(child_index);
+                }
+            }
+            data[child].states_start = child_start;
+            data[child].states_len = states.len() as u32 - child_start;
+        }
+    }
+
+    let propagate_ms = propagate_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let behavior_started_at = profiling.then(Instant::now);
+    let mut behavior_ids = Vec::<u32>::with_capacity(states.len());
+    let mut records = Vec::<L1PackedProductBehaviorRecord>::new();
+    let mut record_child_behaviors = Vec::<u32>::new();
+    // Behavior interning is local to each trie node. Reusing the table avoids
+    // an allocation and rehash-table growth for every branching node while
+    // preserving the node-local behavior IDs and collision chains.
+    let mut behavior_hash_heads = FxHashMap::<u64, u32>::default();
+    let mut unary_behavior_ids = FxHashMap::<(u32, u32), u32>::default();
+    let mut binary_behavior_ids = FxHashMap::<(u32, u32, u32), u32>::default();
+    let mut scratch_children = Vec::<u32>::new();
+    for node_index in (0..trie.nodes.len()).rev() {
+        let node = trie.nodes[node_index];
+        let state_start = data[node_index].states_start as usize;
+        let state_len = data[node_index].states_len as usize;
+        data[node_index].behaviors_start = behavior_ids.len() as u32;
+        data[node_index].records_start = records.len() as u32;
+        if state_len == 0 {
+            continue;
+        }
+        if node.edge_len == 0 {
+            for state_offset in 0..state_len {
+                behavior_ids.push(state_to_terminal_signature[states[state_start + state_offset] as usize]);
+            }
+            continue;
+        }
+        if node.terminal_token == L1_NONE && node.edge_len == 1 {
+            let edge_index = node.first_edge as usize;
+            let child = trie.edges[edge_index].child as usize;
+            let child_behavior_start = data[child].behaviors_start as usize;
+            let map_start = edge_data[edge_index].map_start as usize;
+            for state_offset in 0..state_len {
+                let child_state_index = transition_maps[map_start + state_offset];
+                behavior_ids.push(if child_state_index == L1_NONE {
+                    0
+                } else {
+                    behavior_ids[child_behavior_start + child_state_index as usize]
+                });
+            }
+            continue;
+        }
+        if node.edge_len == 1 {
+            let edge_index = node.first_edge as usize;
+            let child = trie.edges[edge_index].child as usize;
+            let child_behavior_start = data[child].behaviors_start as usize;
+            let map_start = edge_data[edge_index].map_start as usize;
+            unary_behavior_ids.clear();
+            for state_offset in 0..state_len {
+                let state = states[state_start + state_offset];
+                let terminal_signature = state_to_terminal_signature[state as usize];
+                let child_state_index = transition_maps[map_start + state_offset];
+                let child_behavior = if child_state_index == L1_NONE {
+                    0
+                } else {
+                    behavior_ids[child_behavior_start + child_state_index as usize]
+                };
+                if terminal_signature == 0 && child_behavior == 0 {
+                    behavior_ids.push(0);
+                    continue;
+                }
+                let key = (terminal_signature, child_behavior);
+                let behavior_id = if let Some(&id) = unary_behavior_ids.get(&key) {
+                    id
+                } else {
+                    let child_behaviors_start = record_child_behaviors.len() as u32;
+                    record_child_behaviors.push(child_behavior);
+                    let child_uniform = l1_packed_uniform_signature(
+                        &trie,
+                        child,
+                        child_behavior,
+                        &data,
+                        &records,
+                    );
+                    let uniform_signature = if terminal_signature != 0
+                        && child_uniform == terminal_signature
+                    {
+                        terminal_signature
+                    } else {
+                        0
+                    };
+                    let id = records.len() as u32 - data[node_index].records_start + 1;
+                    records.push(L1PackedProductBehaviorRecord {
+                        terminal_signature,
+                        child_behaviors_start,
+                        uniform_signature,
+                        hash_next: L1_NONE,
+                    });
+                    unary_behavior_ids.insert(key, id);
+                    id
+                };
+                behavior_ids.push(behavior_id);
+            }
+            continue;
+        }
+        if node.edge_len == 2 {
+            let first_edge_index = node.first_edge as usize;
+            let second_edge_index = first_edge_index + 1;
+            let first_child = trie.edges[first_edge_index].child as usize;
+            let second_child = trie.edges[second_edge_index].child as usize;
+            let first_behavior_start = data[first_child].behaviors_start as usize;
+            let second_behavior_start = data[second_child].behaviors_start as usize;
+            let first_map_start = edge_data[first_edge_index].map_start as usize;
+            let second_map_start = edge_data[second_edge_index].map_start as usize;
+            binary_behavior_ids.clear();
+            for state_offset in 0..state_len {
+                let state = states[state_start + state_offset];
+                let terminal_signature = if node.terminal_token == L1_NONE {
+                    0
+                } else {
+                    state_to_terminal_signature[state as usize]
+                };
+                let first_state_index = transition_maps[first_map_start + state_offset];
+                let first_behavior = if first_state_index == L1_NONE {
+                    0
+                } else {
+                    behavior_ids[first_behavior_start + first_state_index as usize]
+                };
+                let second_state_index = transition_maps[second_map_start + state_offset];
+                let second_behavior = if second_state_index == L1_NONE {
+                    0
+                } else {
+                    behavior_ids[second_behavior_start + second_state_index as usize]
+                };
+                if terminal_signature == 0 && first_behavior == 0 && second_behavior == 0 {
+                    behavior_ids.push(0);
+                    continue;
+                }
+                let key = (terminal_signature, first_behavior, second_behavior);
+                let behavior_id = if let Some(&id) = binary_behavior_ids.get(&key) {
+                    id
+                } else {
+                    let child_behaviors_start = record_child_behaviors.len() as u32;
+                    record_child_behaviors.push(first_behavior);
+                    record_child_behaviors.push(second_behavior);
+                    let first_uniform = l1_packed_uniform_signature(
+                        &trie,
+                        first_child,
+                        first_behavior,
+                        &data,
+                        &records,
+                    );
+                    let second_uniform = l1_packed_uniform_signature(
+                        &trie,
+                        second_child,
+                        second_behavior,
+                        &data,
+                        &records,
+                    );
+                    let uniform_signature = if node.terminal_token == L1_NONE {
+                        if first_uniform != 0 && first_uniform == second_uniform {
+                            first_uniform
+                        } else {
+                            0
+                        }
+                    } else if terminal_signature != 0
+                        && first_uniform == terminal_signature
+                        && second_uniform == terminal_signature
+                    {
+                        terminal_signature
+                    } else {
+                        0
+                    };
+                    let id = records.len() as u32 - data[node_index].records_start + 1;
+                    records.push(L1PackedProductBehaviorRecord {
+                        terminal_signature,
+                        child_behaviors_start,
+                        uniform_signature,
+                        hash_next: L1_NONE,
+                    });
+                    binary_behavior_ids.insert(key, id);
+                    id
+                };
+                behavior_ids.push(behavior_id);
+            }
+            continue;
+        }
+
+        let child_count = node.edge_len as usize;
+        behavior_hash_heads.clear();
+        scratch_children.clear();
+        if scratch_children.capacity() < child_count {
+            scratch_children.reserve(child_count - scratch_children.capacity());
+        }
+        for state_offset in 0..state_len {
+            let state = states[state_start + state_offset];
+            let terminal_signature = if node.terminal_token == L1_NONE {
+                0
+            } else {
+                state_to_terminal_signature[state as usize]
+            };
+            scratch_children.clear();
+            for edge_offset in 0..child_count {
+                let edge_index = node.first_edge as usize + edge_offset;
+                let child = trie.edges[edge_index].child as usize;
+                let child_state_index = transition_maps[edge_data[edge_index].map_start as usize + state_offset];
+                scratch_children.push(if child_state_index == L1_NONE {
+                    0
+                } else {
+                    behavior_ids[data[child].behaviors_start as usize + child_state_index as usize]
+                });
+            }
+            if terminal_signature == 0 && scratch_children.iter().all(|&id| id == 0) {
+                behavior_ids.push(0);
+                continue;
+            }
+            let hash = l1_packed_hash_behavior(terminal_signature, &scratch_children);
+            let mut found = None;
+            let mut candidate = behavior_hash_heads.get(&hash).copied().unwrap_or(L1_NONE);
+            while candidate != L1_NONE {
+                let record = records[data[node_index].records_start as usize + candidate as usize - 1];
+                if record.terminal_signature == terminal_signature
+                    && record_child_behaviors[record.child_behaviors_start as usize..record.child_behaviors_start as usize + child_count]
+                        == scratch_children[..]
+                {
+                    found = Some(candidate);
+                    break;
+                }
+                candidate = record.hash_next;
+            }
+            let behavior_id = if let Some(id) = found {
+                id
+            } else {
+                let child_behaviors_start = record_child_behaviors.len() as u32;
+                record_child_behaviors.extend_from_slice(&scratch_children);
+                let mut uniform_signature = if node.terminal_token == L1_NONE {
+                    0
+                } else {
+                    terminal_signature
+                };
+                if uniform_signature != 0 {
+                    for edge_offset in 0..child_count {
+                        let edge_index = node.first_edge as usize + edge_offset;
+                        let child = trie.edges[edge_index].child as usize;
+                        let child_uniform = l1_packed_uniform_signature(
+                            &trie,
+                            child,
+                            scratch_children[edge_offset],
+                            &data,
+                            &records,
+                        );
+                        if child_uniform != uniform_signature {
+                            uniform_signature = 0;
+                            break;
+                        }
+                    }
+                } else if node.terminal_token == L1_NONE {
+                    let mut candidate_uniform = 0u32;
+                    for edge_offset in 0..child_count {
+                        let edge_index = node.first_edge as usize + edge_offset;
+                        let child = trie.edges[edge_index].child as usize;
+                        let child_uniform = l1_packed_uniform_signature(
+                            &trie,
+                            child,
+                            scratch_children[edge_offset],
+                            &data,
+                            &records,
+                        );
+                        if child_uniform == 0
+                            || (candidate_uniform != 0 && candidate_uniform != child_uniform)
+                        {
+                            candidate_uniform = 0;
+                            break;
+                        }
+                        candidate_uniform = child_uniform;
+                    }
+                    uniform_signature = candidate_uniform;
+                }
+                let id = records.len() as u32 - data[node_index].records_start + 1;
+                records.push(L1PackedProductBehaviorRecord {
+                    terminal_signature,
+                    child_behaviors_start,
+                    uniform_signature,
+                    hash_next: behavior_hash_heads.get(&hash).copied().unwrap_or(L1_NONE),
+                });
+                behavior_hash_heads.insert(hash, id);
+                id
+            };
+            behavior_ids.push(behavior_id);
+        }
+    }
+
+    let behavior_ms = behavior_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let materialize_started_at = profiling.then(Instant::now);
+    let root_behavior_start = data[0].behaviors_start as usize;
+    let mut profiles_by_behavior = FxHashMap::<u32, Arc<[(u32, u32, u32)]>>::default();
+    for (target_index, &target) in walk_targets.iter().enumerate() {
+        let behavior_id = behavior_ids[root_behavior_start + target_index];
+        let profile = if let Some(profile) = profiles_by_behavior.get(&behavior_id) {
+            Arc::clone(profile)
+        } else {
+            let mut profile = Vec::new();
+            l1_packed_append_behavior(
+                &trie,
+                0,
+                behavior_id,
+                &data,
+                &records,
+                &record_child_behaviors,
+                &mut profile,
+            );
+            let profile: Arc<[(u32, u32, u32)]> = Arc::from(profile);
+            profiles_by_behavior.insert(behavior_id, Arc::clone(&profile));
+            profile
+        };
+        if let Some(ref others) = dedup_others {
+            for &other_target in &others[target_index] {
+                results.push(((first_byte, other_target), Arc::clone(&profile)));
+            }
+        }
+        results.push(((first_byte, target), profile));
+    }
+    let materialize_ms = materialize_started_at.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][l1_packed_product] first_byte={} tokens={} targets={} trie_nodes={} states={} trie_ms={:.3} propagate_ms={:.3} behavior_ms={:.3} materialize_ms={:.3} total_ms={:.3}",
+            first_byte,
+            token_ids.len(),
+            walk_targets.len(),
+            trie.nodes.len(),
+            states.len(),
+            trie_ms,
+            propagate_ms,
+            behavior_ms,
+            materialize_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    results
+}
+
+
 #[derive(Debug)]
 struct L1SortedTokenBuckets {
     empty_token_indices: Vec<usize>,
@@ -1404,27 +2206,72 @@ fn collect_active_terminal_signature(
     signature
 }
 
-fn build_l1_state_to_terminal_signature(
+/// Intern the exact active-terminal signature of every tokenizer state.
+///
+/// Signature zero is the empty signature. Keeping the reverse table lets the
+/// L1 terminal-DWA builder reuse the same proof object rather than redoing this
+/// full state scan with a separately numbered signature map.
+fn build_l1_state_to_terminal_signatures(
     tokenizer: &Tokenizer,
     active_terminals: &[bool],
-) -> Vec<u32> {
+) -> (Vec<u32>, Vec<Vec<u32>>) {
     let mut signature_to_id = FxHashMap::<Vec<u32>, u32>::default();
     signature_to_id.insert(Vec::new(), 0);
-    let mut next_signature_id = 1u32;
+    let mut terminal_signatures = vec![Vec::new()];
     let mut state_to_terminal_signature = vec![0u32; tokenizer.num_states() as usize];
 
     for state in 0..tokenizer.num_states() as usize {
         let signature =
             collect_active_terminal_signature(tokenizer, state as u32, active_terminals);
-        let sig_id = *signature_to_id.entry(signature).or_insert_with(|| {
-            let id = next_signature_id;
-            next_signature_id += 1;
-            id
+        let next_signature_id = terminal_signatures.len() as u32;
+        let sig_id = *signature_to_id.entry(signature.clone()).or_insert_with(|| {
+            terminal_signatures.push(signature);
+            next_signature_id
         });
         state_to_terminal_signature[state] = sig_id;
     }
 
-    state_to_terminal_signature
+    if compile_profile_enabled() {
+        let mut nonempty_states = 0usize;
+        let mut singleton_states = 0usize;
+        let mut membership_sum = 0usize;
+        let mut max_membership = 0usize;
+        for &signature_id in &state_to_terminal_signature {
+            let len = terminal_signatures[signature_id as usize].len();
+            if len != 0 {
+                nonempty_states += 1;
+                membership_sum += len;
+                max_membership = max_membership.max(len);
+                if len == 1 {
+                    singleton_states += 1;
+                }
+            }
+        }
+        let mut signature_histogram = [0usize; 6];
+        for signature in &terminal_signatures {
+            let bucket = match signature.len() {
+                0 => 0,
+                1 => 1,
+                2..=4 => 2,
+                5..=16 => 3,
+                17..=64 => 4,
+                _ => 5,
+            };
+            signature_histogram[bucket] += 1;
+        }
+        eprintln!(
+            "[glrmask/profile][l1_terminal_signatures] states={} signature_ids={} nonempty_states={} singleton_states={} membership_sum={} max_membership={} signature_histogram={:?}",
+            state_to_terminal_signature.len(),
+            terminal_signatures.len(),
+            nonempty_states,
+            singleton_states,
+            membership_sum,
+            max_membership,
+            signature_histogram,
+        );
+    }
+
+    (state_to_terminal_signature, terminal_signatures)
 }
 
 fn l1_token_signature_profile_for_state(
@@ -1532,24 +2379,38 @@ fn build_l1_terminal_dwa(
     }
     let state_seed_ms = state_seed_started_at.elapsed().as_secs_f64() * 1000.0;
     let dead = u32::MAX;
-    let num_dfa_states = tokenizer.num_states() as usize;
-
-    let mut signature_to_id = FxHashMap::<Vec<u32>, u32>::default();
-    let mut terminal_signatures = Vec::<Vec<u32>>::new();
-    let mut state_to_terminal_signature = vec![u32::MAX; num_dfa_states];
-    for state in 0..num_dfa_states {
-        let signature =
-            collect_active_terminal_signature(tokenizer, state as u32, active_terminals);
-        if signature.is_empty() {
-            continue;
-        }
-        let next_id = signature_to_id.len() as u32;
-        let sig_id = *signature_to_id.entry(signature.clone()).or_insert_with(|| {
-            terminal_signatures.push(signature);
-            next_id
-        });
-        state_to_terminal_signature[state] = sig_id;
-    }
+    // Exact equivalence has already built this state-signature index on the
+    // normal L1 path. Reuse it verbatim. The fallback keeps the direct builder
+    // self-contained for callers that intentionally bypass exact-profile reuse.
+    let fallback_signatures = exact_profile_reuse.is_none().then(|| {
+        let (state_to_exact_signature, signatures_with_empty) =
+            build_l1_state_to_terminal_signatures(tokenizer, active_terminals);
+        let terminal_signatures: Vec<Vec<u32>> =
+            signatures_with_empty.into_iter().skip(1).collect();
+        let state_to_terminal_signature: Vec<u32> = state_to_exact_signature
+            .into_iter()
+            .map(|signature_id| {
+                if signature_id == 0 {
+                    u32::MAX
+                } else {
+                    signature_id - 1
+                }
+            })
+            .collect();
+        (terminal_signatures, state_to_terminal_signature)
+    });
+    let (terminal_signatures, state_to_terminal_signature): (&[Vec<u32>], &[u32]) =
+        if let Some(reuse) = exact_profile_reuse {
+            (
+                reuse.direct_terminal_signatures.as_ref(),
+                reuse.direct_state_to_terminal_signature.as_ref(),
+            )
+        } else {
+            let (terminal_signatures, state_to_terminal_signature) = fallback_signatures
+                .as_ref()
+                .expect("missing fallback L1 terminal signatures");
+            (terminal_signatures.as_slice(), state_to_terminal_signature.as_slice())
+        };
 
     // Batch simulation: for each unique start state, simulate all tokens through
     // the DFA and accumulate terminal_signature(final concrete state) → (tsid → token_ids).
@@ -1572,7 +2433,7 @@ fn build_l1_terminal_dwa(
     // the raw merged ranges. Self-loop optimization: if the target state
     // has self-loops on all suffix bytes, all tokens end at the target
     // state and the walk can be skipped entirely.
-    let walk_cache: FxHashMap<(u8, u32), Vec<(u32, Vec<(u32, u32)>)>> =
+    let walk_cache: FxHashMap<(u8, u32), L1WalkProfile> =
         if let Some(exact_profile_reuse) = exact_profile_reuse {
             exact_profile_reuse.materialize_walk_cache()
         } else {
@@ -1866,6 +2727,9 @@ fn build_l1_terminal_dwa(
             }
         }
         cache
+            .into_iter()
+            .map(|(target, profile)| (target, freeze_l1_walk_profile_from_direct(profile)))
+            .collect()
     }
         };
 
@@ -1880,14 +2744,15 @@ fn build_l1_terminal_dwa(
                 let indexed: Vec<(usize, &[(u32, u32)], u64, usize)> = results
                     .iter()
                     .map(|(sig_id, ranges)| {
+                        let ranges = ranges.as_ref();
                         let mut h: u64 = 0;
-                        for &(s, e) in ranges.as_slice() {
+                        for &(s, e) in ranges {
                             h = h.wrapping_add(range_hash_val(s, e));
                         }
                         let entry_hash = (ranges.len() as u64).wrapping_add(h);
                         (
                             *sig_id as usize,
-                            ranges.as_slice(),
+                            ranges,
                             entry_hash,
                             ranges.len(),
                         )
@@ -2155,7 +3020,7 @@ fn build_l1_terminal_dwa(
     let terminal_group_ms = terminal_group_started_at.elapsed().as_secs_f64() * 1000.0;
     let num_groups = unique_groups.len();
     let contribution_seed_started_at = Instant::now();
-    let (signature_group_masks, words_per_mask) = build_end_rep_group_masks(
+    let signature_groups = build_end_rep_groups(
         &unique_groups,
         &terminal_to_signatures,
         deferred_arced.len(),
@@ -2163,9 +3028,7 @@ fn build_l1_terminal_dwa(
     let mut tsid_group_contributions: Vec<Vec<(usize, Arc<RangeSetBlaze<u32>>)>> =
         (0..num_tsids).map(|_| Vec::new()).collect();
     for (sig_id, entries) in deferred_arced.iter().enumerate() {
-        let mask_offset = sig_id * words_per_mask;
-        let mask_slice = &signature_group_masks[mask_offset..mask_offset + words_per_mask];
-        if mask_slice.iter().all(|&w| w == 0) {
+        if signature_groups[sig_id].is_empty() {
             continue;
         }
         for &(tsid, ref arc) in entries {
@@ -2202,23 +3065,14 @@ fn build_l1_terminal_dwa(
                 touched_groups.clear();
 
                 for &(sig_id, ref arc) in contributions {
-                    let mask_offset = sig_id * words_per_mask;
-                    let mask_slice =
-                        &signature_group_masks[mask_offset..mask_offset + words_per_mask];
-                    for (word_idx, &word) in mask_slice.iter().enumerate() {
-                        let mut remaining = word;
-                        while remaining != 0 {
-                            let bit_idx = remaining.trailing_zeros() as usize;
-                            remaining &= remaining - 1;
-                            let group_idx = word_idx * 64 + bit_idx;
-                            if group_counts[group_idx] == 0 {
-                                touched_groups.push(group_idx);
-                            }
-                            group_counts[group_idx] += 1;
-                            group_ranges[group_idx].extend(
-                                arc.ranges().map(|range| (*range.start(), *range.end())),
-                            );
+                    for &group_idx in &signature_groups[sig_id] {
+                        if group_counts[group_idx] == 0 {
+                            touched_groups.push(group_idx);
                         }
+                        group_counts[group_idx] += 1;
+                        group_ranges[group_idx].extend(
+                            arc.ranges().map(|range| (*range.start(), *range.end())),
+                        );
                     }
                 }
 
@@ -2257,23 +3111,14 @@ fn build_l1_terminal_dwa(
                         let mut touched_groups: Vec<usize> = Vec::new();
 
                         for &(sig_id, ref arc) in contributions {
-                            let mask_offset = sig_id * words_per_mask;
-                            let mask_slice =
-                                &signature_group_masks[mask_offset..mask_offset + words_per_mask];
-                            for (word_idx, &word) in mask_slice.iter().enumerate() {
-                                let mut remaining = word;
-                                while remaining != 0 {
-                                    let bit_idx = remaining.trailing_zeros() as usize;
-                                    remaining &= remaining - 1;
-                                    let group_idx = word_idx * 64 + bit_idx;
-                                    if group_counts[group_idx] == 0 {
-                                        touched_groups.push(group_idx);
-                                    }
-                                    group_counts[group_idx] += 1;
-                                    for range in arc.ranges() {
-                                        group_ranges[group_idx]
-                                            .push((*range.start(), *range.end()));
-                                    }
+                            for &group_idx in &signature_groups[sig_id] {
+                                if group_counts[group_idx] == 0 {
+                                    touched_groups.push(group_idx);
+                                }
+                                group_counts[group_idx] += 1;
+                                for range in arc.ranges() {
+                                    group_ranges[group_idx]
+                                        .push((*range.start(), *range.end()));
                                 }
                             }
                         }
@@ -2539,24 +3384,18 @@ fn shared_rangeset_from_unsorted_pairs(ranges: &[(u32, u32)]) -> Option<Arc<Rang
     ))
 }
 
-fn build_end_rep_group_masks(
+fn build_end_rep_groups(
     unique_groups: &[Vec<usize>],
     terminal_to_active_states: &[Vec<u32>],
     num_end_reps: usize,
-) -> (Vec<u64>, usize) {
-    let num_groups = unique_groups.len();
-    let words_per_mask = num_groups.div_ceil(64);
-    let mut end_rep_group_masks = vec![0u64; num_end_reps * words_per_mask];
-
+) -> Vec<Vec<usize>> {
+    let mut groups_by_end_rep = vec![Vec::new(); num_end_reps];
     for (group_idx, tids) in unique_groups.iter().enumerate() {
-        let word = group_idx / 64;
-        let bit = 1u64 << (group_idx % 64);
         for &state in &terminal_to_active_states[tids[0]] {
-            end_rep_group_masks[state as usize * words_per_mask + word] |= bit;
+            groups_by_end_rep[state as usize].push(group_idx);
         }
     }
-
-    (end_rep_group_masks, words_per_mask)
+    groups_by_end_rep
 }
 
 fn merge_deferred_equivalent_tsids(
@@ -2726,4 +3565,206 @@ struct L1TerminalBuildProfile {
     tsid_profile_merge_after: usize,
     vocab_tree_traversal_ms: f64,
     direct_terminal_dwa_ms: f64,
+}
+
+#[cfg(test)]
+mod packed_suffix_product_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::automata::lexer::ast::Expr;
+    use crate::automata::lexer::compile::build_regex;
+
+    #[test]
+    fn packed_suffix_profiles_match_batched_profiles() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::Choice(vec![
+                Expr::U8Seq(b"ac".to_vec()),
+                Expr::U8Seq(b"ba".to_vec()),
+            ]),
+            Expr::U8Seq(b"cab".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let sorted_entries: Vec<(u32, Arc<[u8]>)> = vec![
+            (0, Arc::from(&b""[..])),
+            (1, Arc::from(&b"a"[..])),
+            (2, Arc::from(&b"ab"[..])),
+            (3, Arc::from(&b"abc"[..])),
+            (4, Arc::from(&b"abd"[..])),
+            (5, Arc::from(&b"ac"[..])),
+            (6, Arc::from(&b"b"[..])),
+            (7, Arc::from(&b"ba"[..])),
+            (8, Arc::from(&b"bb"[..])),
+            (9, Arc::from(&b"c"[..])),
+            (10, Arc::from(&b"cab"[..])),
+        ];
+        let buckets = build_l1_sorted_token_buckets(&sorted_entries);
+        let active_terminals = vec![true, false, true, true];
+        let (state_to_terminal_signature, _) =
+            build_l1_state_to_terminal_signatures(&tokenizer, &active_terminals);
+        let flat_trans = build_flat_transition_table(&tokenizer);
+        let targets: Vec<u32> = (0..tokenizer.num_states()).collect();
+
+        for first_byte in 0..256usize {
+            let token_ids = &buckets.token_indices_by_first_byte[first_byte];
+            if token_ids.is_empty() {
+                continue;
+            }
+            let mut expected = l1_bucket_suffix_signature_profiles_batched(
+                first_byte as u8,
+                &targets,
+                &sorted_entries,
+                token_ids,
+                &buckets.suffix_lcps_by_first_byte[first_byte],
+                &buckets.suffix_subtree_bytes[first_byte],
+                &buckets.suffix_first_bytes_by_bucket[first_byte],
+                buckets.has_empty_suffix_by_bucket[first_byte],
+                &state_to_terminal_signature,
+                &flat_trans,
+            );
+            let mut actual = l1_bucket_suffix_signature_profiles_packed(
+                first_byte as u8,
+                &targets,
+                &sorted_entries,
+                token_ids,
+                &buckets.suffix_lcps_by_first_byte[first_byte],
+                &buckets.suffix_subtree_bytes[first_byte],
+                &buckets.suffix_first_bytes_by_bucket[first_byte],
+                buckets.has_empty_suffix_by_bucket[first_byte],
+                &state_to_terminal_signature,
+                &flat_trans,
+            );
+            expected.sort_unstable_by_key(|(key, _)| *key);
+            actual.sort_unstable_by_key(|(key, _)| *key);
+            let actual: Vec<((u8, u32), Vec<(u32, u32, u32)>)> = actual
+                .into_iter()
+                .map(|(key, profile)| (key, profile.as_ref().to_vec()))
+                .collect();
+            assert_eq!(actual, expected, "first byte {first_byte}");
+        }
+    }
+
+    #[test]
+    fn suffix_trie_bottom_up_ranges_cover_prefix_and_siblings() {
+        let entries: Vec<(u32, Arc<[u8]>)> = vec![
+            (0, Arc::from(b"a".as_slice())),
+            (1, Arc::from(b"ab".as_slice())),
+            (2, Arc::from(b"ac".as_slice())),
+            (3, Arc::from(b"b".as_slice())),
+        ];
+        let trie = L1PackedSuffixTrie::build(&entries, &[0, 1, 2], &[0, 0, 0]);
+        assert_eq!((trie.nodes[0].subtree_start, trie.nodes[0].subtree_end), (0, 2));
+        let first_child = trie.nodes[0].first_child as usize;
+        let second_child = trie.nodes[first_child].next_sibling as usize;
+        assert_eq!((trie.nodes[first_child].subtree_start, trie.nodes[first_child].subtree_end), (1, 1));
+        assert_eq!((trie.nodes[second_child].subtree_start, trie.nodes[second_child].subtree_end), (2, 2));
+    }
+
+    #[test]
+    fn sparse_end_rep_groups_match_terminal_membership() {
+        let groups = vec![vec![0usize, 2usize], vec![1usize], vec![3usize]];
+        let terminal_to_end_reps = vec![vec![0u32, 2], vec![1], vec![0, 2], vec![3]];
+        assert_eq!(
+            build_end_rep_groups(&groups, &terminal_to_end_reps, 4),
+            vec![vec![0], vec![1], vec![0], vec![2]],
+        );
+    }
+
+    #[test]
+    fn frozen_walk_profiles_preserve_signature_ranges() {
+        let empty: Arc<[(u32, u32, u32)]> = Arc::from([]);
+        let profile_one: Arc<[(u32, u32, u32)]> = Arc::from([
+            (1, 2, 3),
+            (2, 4, 4),
+            (1, 7, 8),
+            (0, 9, 10),
+        ]);
+        let reuse = L1ExactProfileReuse {
+            target_to_profile_id: [((b'a', 17), 1u32)].into_iter().collect(),
+            walk_profiles_by_id: vec![
+                freeze_l1_walk_profile(&empty),
+                freeze_l1_walk_profile(&profile_one),
+            ],
+            direct_terminal_signatures: Arc::from([]),
+            direct_state_to_terminal_signature: Arc::from([]),
+        };
+        let cache = reuse.materialize_walk_cache();
+        let profile = cache.get(&(b'a', 17)).expect("profile present");
+        let grouped: Vec<(u32, Vec<(u32, u32)>)> = profile
+            .iter()
+            .map(|(signature, ranges)| (*signature, ranges.as_ref().to_vec()))
+            .collect();
+        assert_eq!(grouped, vec![(0, vec![(2, 3), (7, 8)]), (1, vec![(4, 4)])]);
+    }
+
+    #[test]
+    fn exact_state_hash_partition_matches_direct_token_profiles() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::Choice(vec![Expr::U8Seq(b"ac".to_vec()), Expr::U8Seq(b"ba".to_vec())]),
+            Expr::U8Seq(b"cab".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let vocab = Vocab::new(
+            vec![
+                (0, b"".to_vec()),
+                (1, b"a".to_vec()),
+                (2, b"ab".to_vec()),
+                (3, b"abc".to_vec()),
+                (4, b"abd".to_vec()),
+                (5, b"ac".to_vec()),
+                (6, b"b".to_vec()),
+                (7, b"ba".to_vec()),
+                (8, b"bb".to_vec()),
+                (9, b"c".to_vec()),
+                (10, b"cab".to_vec()),
+            ],
+            None,
+        );
+        let active_terminals = vec![true, false, true, true];
+        let order = l1_identity_vocab_order(&vocab);
+        let flat_trans = build_flat_transition_table(&tokenizer);
+        let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
+        let (mapping, _) = find_l1_exact_state_equivalence_by_token_signatures(
+            &tokenizer,
+            &order,
+            &states,
+            &active_terminals,
+            &flat_trans,
+        );
+        let (state_to_signature, _) =
+            build_l1_state_to_terminal_signatures(&tokenizer, &active_terminals);
+        let profiles: Vec<Vec<(u32, u32, u32)>> = states
+            .iter()
+            .map(|&state| {
+                l1_token_signature_profile_for_state(
+                    state as u32,
+                    order.token_entries_sorted.as_ref(),
+                    &order.token_buckets,
+                    &state_to_signature,
+                    &flat_trans,
+                )
+            })
+            .collect();
+
+        for left in 0..states.len() {
+            for right in 0..states.len() {
+                assert_eq!(
+                    mapping[left] == mapping[right],
+                    profiles[left] == profiles[right],
+                    "state pair ({left}, {right})"
+                );
+            }
+        }
+    }
+
 }
