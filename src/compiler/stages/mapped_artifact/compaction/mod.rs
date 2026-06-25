@@ -289,6 +289,14 @@ where
     F: FnOnce() -> R + Send,
     R: Send,
 {
+    // Compilation already runs inside a bounded Rayon pool. Installing a
+    // second pool from one of its workers oversubscribes the machine while
+    // partition compactions overlap. Nested Rayon work can use the enclosing
+    // pool directly; retain the dedicated pool for standalone callers.
+    if rayon::current_thread_index().is_some() {
+        return f();
+    }
+
     static COMPACTION_THREAD_POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> =
         std::sync::OnceLock::new();
     let pool = COMPACTION_THREAD_POOL.get_or_init(|| {
