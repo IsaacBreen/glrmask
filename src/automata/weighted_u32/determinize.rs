@@ -344,28 +344,34 @@ fn determinize_impl(
                         .is_some_and(|state| state.epsilons.is_empty())
                 });
             if direct_no_epsilon_targets {
-                if profile {
-                    if target_contributions.len() == 1 {
+                let (next_key, edge_weight) = if target_contributions.len() == 1 {
+                    if profile {
                         profile_direct_single_target_labels += 1;
-                    } else {
+                    }
+                    let (dst, edge_weight) = target_contributions.into_iter().next().unwrap();
+                    (vec![(dst, edge_weight.clone())], edge_weight)
+                } else {
+                    if profile {
                         profile_direct_multi_target_labels += 1;
                     }
-                }
-
-                let mut sorted_targets = target_contributions;
-                sorted_targets.sort_unstable_by_key(|(dst, _)| *dst);
-                let mut next_key: Vec<(u32, Weight)> = Vec::with_capacity(sorted_targets.len());
-                for (dst, weight) in sorted_targets {
-                    if let Some((last_dst, last_weight)) = next_key.last_mut() {
-                        if *last_dst == dst {
-                            *last_weight = last_weight.union(&weight);
-                            continue;
+                    let mut sorted_targets = target_contributions;
+                    sorted_targets.sort_unstable_by_key(|(dst, _)| *dst);
+                    let mut next_key: Vec<(u32, Weight)> =
+                        Vec::with_capacity(sorted_targets.len());
+                    for (dst, weight) in sorted_targets {
+                        if let Some((last_dst, last_weight)) = next_key.last_mut() {
+                            if *last_dst == dst {
+                                *last_weight = last_weight.union(&weight);
+                                continue;
+                            }
                         }
+                        next_key.push((dst, weight));
                     }
-                    next_key.push((dst, weight));
-                }
-                let edge_weight = Weight::union_all(next_key.iter().map(|(_, weight)| weight));
-                debug_assert!(!edge_weight.is_empty());
+                    let edge_weight =
+                        Weight::union_all(next_key.iter().map(|(_, weight)| weight));
+                    debug_assert!(!edge_weight.is_empty());
+                    (next_key, edge_weight)
+                };
 
                 let subset_lookup_started_at = profile.then(Instant::now);
                 let to_state = intern_determinized_subset(
