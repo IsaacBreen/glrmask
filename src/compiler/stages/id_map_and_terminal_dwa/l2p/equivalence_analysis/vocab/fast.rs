@@ -65,12 +65,17 @@ struct Dfa {
 /// Precomputed transition-only data that is identical across partitions.
 ///
 /// `filter_for_terminals` only changes finalizers and possible_future_group_ids,
-/// not transitions. So `trans_by_class`, `byte_to_class`, and `self_loop_bytes`
-/// can be computed once and shared across all partition vocab equivalence calls.
+/// not transitions. So the compressed transition layouts, `byte_to_class`, and
+/// `self_loop_bytes` can be computed once and shared across all partition
+/// equivalence calls.
 pub struct SharedVocabDfaBase {
     byte_to_class: [u8; 256],
     pub num_classes: usize,
     trans_by_class: Vec<u32>,
+    /// Row-major transition table: `trans_by_state_class[state * num_classes + class]`.
+    /// State equivalence walks one state through a token at a time, so it needs
+    /// this complementary locality. Both layouts share the same exact classes.
+    trans_by_state_class: Vec<u32>,
     self_loop_bytes: Vec<U8Set>,
     none_completion_hash: u64,
     transition_ptr: usize,
@@ -104,11 +109,13 @@ impl SharedVocabDfaBase {
         // Fused row-major construction: one pass over DFA states instead of
         // 51 column-major passes for trans_by_class + 1 pass for self_loop_bytes.
         let mut trans_by_class = vec![NONE; num_classes * num_dfa_states];
+        let mut trans_by_state_class = vec![NONE; num_classes * num_dfa_states];
         let mut self_loop_bytes = Vec::with_capacity(num_dfa_states);
         for s in 0..dfa.states.len() {
             for c in 0..num_classes {
-                trans_by_class[c * num_dfa_states + s] =
-                    dfa.trans(s, class_repr[c] as usize);
+                let target = dfa.trans(s, class_repr[c] as usize);
+                trans_by_class[c * num_dfa_states + s] = target;
+                trans_by_state_class[s * num_classes + c] = target;
             }
             let mut bits = U8Set::empty();
             for (byte_idx, &target) in dfa.transitions_for(s).iter().enumerate() {
@@ -139,6 +146,7 @@ impl SharedVocabDfaBase {
             byte_to_class,
             num_classes,
             trans_by_class,
+            trans_by_state_class,
             self_loop_bytes,
             none_completion_hash,
             transition_ptr: dfa.transitions.as_ptr() as usize,
@@ -152,12 +160,23 @@ impl SharedVocabDfaBase {
         self.byte_to_class
     }
 
+    /// Borrow the precomputed byte-to-class mapping for a compatible DFA.
+    pub fn byte_to_class_ref(&self) -> &[u8; 256] {
+        &self.byte_to_class
+    }
+
+    /// Borrow row-major compressed transitions for state-by-token walks.
+    pub fn transitions_by_state_class(&self) -> &[u32] {
+        &self.trans_by_state_class
+    }
+
     /// Check full compatibility: state count AND transition hash must match.
     /// Two DFAs with the same state count but different transitions (e.g. from
     /// different simplify_for_terminals outcomes) must not share the cache.
     pub fn is_compatible_with_dfa(&self, dfa: &super::super::compat::FlatDfa) -> bool {
         let num_dfa_states = dfa.states.len();
         if self.trans_by_class.len() != self.num_classes * num_dfa_states
+            || self.trans_by_state_class.len() != self.num_classes * num_dfa_states
             || self.self_loop_bytes.len() != num_dfa_states
             || self.transition_len != dfa.transitions.len()
         {
@@ -2453,4 +2472,54 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     }
 
     groups.into_iter().collect()
+}
+
+#[cfg(test)]
+mod shared_base_tests {
+    use super::*;
+    use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::{
+        FlatDfa, FlatDfaState,
+    };
+    use std::sync::Arc;
+
+    fn sample_dfa() -> FlatDfa {
+        let mut transitions = vec![u32::MAX; 3 * 256];
+        transitions[b'a' as usize] = 1;
+        transitions[b'b' as usize] = 2;
+        transitions[256 + b'a' as usize] = 1;
+        transitions[256 + b'b' as usize] = 2;
+        transitions[2 * 256 + b'a' as usize] = 2;
+        transitions[2 * 256 + b'b' as usize] = 1;
+        FlatDfa {
+            states: vec![
+                FlatDfaState {
+                    finalizers: vec![],
+                    possible_future_group_ids: vec![],
+                };
+                3
+            ],
+            start_state: 0,
+            transitions: Arc::from(transitions),
+        }
+    }
+
+    #[test]
+    fn shared_base_row_major_layout_matches_flat_dfa() {
+        let dfa = sample_dfa();
+        let base = SharedVocabDfaBase::build_from_dfa(&dfa);
+        let byte_to_class = base.byte_to_class_ref();
+        let row_major = base.transitions_by_state_class();
+
+        for state in 0..dfa.states.len() {
+            for byte in 0..=255usize {
+                let class = byte_to_class[byte] as usize;
+                assert_eq!(
+                    row_major[state * base.num_classes + class],
+                    dfa.trans(state, byte),
+                    "state={state}, byte={byte}"
+                );
+            }
+        }
+        assert!(base.is_compatible_with_dfa(&dfa));
+    }
 }

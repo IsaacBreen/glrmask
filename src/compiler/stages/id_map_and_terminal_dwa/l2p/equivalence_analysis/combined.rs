@@ -431,7 +431,7 @@ fn analyze_equivalences_impl(
         && vocab_representative_tokens.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
     let exact_started_at = Instant::now();
     let reduced_state_reps_for_pre_reduced = if exact_rep_confirmation_used {
-        state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed(
+        state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
             &tokenizer_view,
             &vocab_representative_tokens,
             &pre_reduced_states,
@@ -439,13 +439,15 @@ fn analyze_equivalences_impl(
             None,
             None,
             Some(true),
+            compatible_cache,
         )
     } else {
-        state_equivalence_analysis::find_state_equivalence_classes_with_disallowed(
+        state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
             &tokenizer_view,
             &vocab_representative_tokens,
             &pre_reduced_states,
             &normalized_disallowed_follows,
+            compatible_cache,
         )
     };
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;

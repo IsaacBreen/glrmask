@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rayon::prelude::*;
 
 use super::super::compat::TokenizerView;
+use super::super::vocab::fast::SharedVocabDfaBase;
 use crate::ds::bitset::BitSet;
 
 /// The result of state equivalence analysis: sets of state IDs that behave identically.
@@ -428,6 +429,22 @@ pub fn find_state_equivalence_classes_with_disallowed<S: AsRef<[u8]> + Sync>(
     states: &[usize],
     disallowed_follows: &[BitSet],
 ) -> Vec<usize> {
+    find_state_equivalence_classes_with_disallowed_and_shared_base(
+        tokenizer,
+        tokens,
+        states,
+        disallowed_follows,
+        None,
+    )
+}
+
+pub fn find_state_equivalence_classes_with_disallowed_and_shared_base<S: AsRef<[u8]> + Sync>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    disallowed_follows: &[BitSet],
+    shared_base: Option<&SharedVocabDfaBase>,
+) -> Vec<usize> {
     find_state_equivalence_classes_ex_inner(
         tokenizer,
         tokens,
@@ -438,6 +455,7 @@ pub fn find_state_equivalence_classes_with_disallowed<S: AsRef<[u8]> + Sync>(
         None,
         None,
         false,
+        shared_base,
     )
 }
 
@@ -452,6 +470,30 @@ pub fn find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed<
     batch_size: Option<usize>,
     early_stop_override: Option<bool>,
 ) -> Vec<usize> {
+    find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
+        tokenizer,
+        tokens,
+        states,
+        disallowed_follows,
+        max_batches,
+        batch_size,
+        early_stop_override,
+        None,
+    )
+}
+
+pub fn find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base<
+    S: AsRef<[u8]> + Sync,
+>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    disallowed_follows: &[BitSet],
+    max_batches: Option<usize>,
+    batch_size: Option<usize>,
+    early_stop_override: Option<bool>,
+    shared_base: Option<&SharedVocabDfaBase>,
+) -> Vec<usize> {
     find_state_equivalence_classes_ex_inner(
         tokenizer,
         tokens,
@@ -462,6 +504,7 @@ pub fn find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed<
         batch_size,
         early_stop_override,
         true,
+        shared_base,
     )
 }
 
@@ -475,6 +518,7 @@ fn find_state_equivalence_classes_ex_inner<S: AsRef<[u8]> + Sync>(
     batch_size: Option<usize>,
     early_stop_override: Option<bool>,
     rep_only_confirmation: bool,
+    shared_base: Option<&SharedVocabDfaBase>,
 ) -> Vec<usize> {
     if states.is_empty() {
         return Vec::new();
@@ -490,6 +534,7 @@ fn find_state_equivalence_classes_ex_inner<S: AsRef<[u8]> + Sync>(
         batch_size,
         early_stop_override,
         rep_only_confirmation,
+        shared_base,
     )
 }
 
@@ -503,6 +548,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     custom_batch_size: Option<usize>,
     early_stop_override: Option<bool>,
     rep_only_confirmation: bool,
+    shared_base: Option<&SharedVocabDfaBase>,
 ) -> Vec<usize> {
     use std::collections::{hash_map::Entry, HashMap};
 
@@ -520,35 +566,39 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     let num_dfa_states = dfa.states.len();
     let use_compact = num_dfa_states >= COMPACT_THRESHOLD_STATES;
     let identity_byte_class: [u8; 256] = std::array::from_fn(|i| i as u8);
-    let computed_byte_class: [u8; 256];
-    let byte_to_class: &[u8; 256];
-    let num_bc: usize;
-    let compact_transitions_owned: Vec<u32>;
-    let compact_transitions: &[u32];
-    if use_compact {
-        computed_byte_class = super::super::compat::compute_byte_classes(dfa);
-        byte_to_class = &computed_byte_class;
-        num_bc = *computed_byte_class.iter().max().unwrap_or(&0) as usize + 1;
-        compact_transitions_owned = {
-            let mut ct = vec![NONE_STATE; num_dfa_states * num_bc];
-            let raw = &dfa.transitions;
-            for s in 0..num_dfa_states {
-                let raw_base = s * 256;
-                let ct_base = s * num_bc;
-                for b in 0..256u16 {
-                    let cls = computed_byte_class[b as usize] as usize;
-                    ct[ct_base + cls] = raw[raw_base + b as usize];
-                }
+    let compatible_shared_base = use_compact
+        .then(|| shared_base.filter(|base| base.is_compatible_with_dfa(dfa)))
+        .flatten();
+    let computed_byte_class = (use_compact && compatible_shared_base.is_none())
+        .then(|| super::super::compat::compute_byte_classes(dfa));
+    let byte_to_class: &[u8; 256] = compatible_shared_base
+        .map(SharedVocabDfaBase::byte_to_class_ref)
+        .or_else(|| computed_byte_class.as_ref())
+        .unwrap_or(&identity_byte_class);
+    let num_bc = compatible_shared_base
+        .map(|base| base.num_classes)
+        .or_else(|| {
+            computed_byte_class
+                .as_ref()
+                .map(|classes| classes.iter().copied().max().map_or(0usize, |max| max as usize + 1))
+        })
+        .unwrap_or(256);
+    let compact_transitions: std::borrow::Cow<'_, [u32]> = if let Some(base) = compatible_shared_base {
+        std::borrow::Cow::Borrowed(base.transitions_by_state_class())
+    } else if let Some(classes) = computed_byte_class.as_ref() {
+        let mut transitions = vec![NONE_STATE; num_dfa_states * num_bc];
+        let raw = &dfa.transitions;
+        for state in 0..num_dfa_states {
+            let raw_base = state * 256;
+            let compact_base = state * num_bc;
+            for byte in 0..256u16 {
+                let class = classes[byte as usize] as usize;
+                transitions[compact_base + class] = raw[raw_base + byte as usize];
             }
-            ct
-        };
-        compact_transitions = &compact_transitions_owned;
+        }
+        std::borrow::Cow::Owned(transitions)
     } else {
-        byte_to_class = &identity_byte_class;
-        num_bc = 256;
-        compact_transitions_owned = Vec::new();
-        let _ = &compact_transitions_owned; // keep borrow alive
-        compact_transitions = &dfa.transitions;
+        std::borrow::Cow::Borrowed(&dfa.transitions)
     };
 
     let dfa_finalizers: Vec<Vec<usize>> = dfa
@@ -637,7 +687,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                     let nodes = build_start_state_suffix_nodes(
                         token,
                         tokenizer_start,
-                        compact_transitions,
+                        compact_transitions.as_ref(),
                         byte_to_class,
                         num_bc,
                         &dfa_finalizers,
