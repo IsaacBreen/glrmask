@@ -284,6 +284,7 @@ static TOKEN_INSERTS_SINCE_CLEANUP: AtomicUsize = AtomicUsize::new(0);
 static WEIGHT_INSERTS_SINCE_CLEANUP: AtomicUsize = AtomicUsize::new(0);
 static TOKEN_CLEANUP_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static WEIGHT_CLEANUP_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static INTERNER_CLEANUP_DEFERRAL_DEPTH: AtomicUsize = AtomicUsize::new(0);
 
 static EMPTY_RANGESET: Lazy<SharedTokenSet> = Lazy::new(|| Arc::new(RangeSetBlaze::new()));
 
@@ -297,6 +298,40 @@ static ALL_WEIGHT: Lazy<Weight> = Lazy::new(|| {
     )));
     finalize_weight_map(map)
 });
+
+/// Defers expensive global interner sweeps until the last active compiler
+/// exits. Fresh interning remains exact; only the timing of weak-entry removal
+/// changes.
+pub(crate) struct WeightInternerCleanupDeferral {
+    active: bool,
+}
+
+pub(crate) fn defer_weight_interner_cleanup() -> WeightInternerCleanupDeferral {
+    INTERNER_CLEANUP_DEFERRAL_DEPTH.fetch_add(1, Ordering::AcqRel);
+    WeightInternerCleanupDeferral { active: true }
+}
+
+impl WeightInternerCleanupDeferral {
+    pub(crate) fn finish(mut self) {
+        self.release();
+    }
+
+    fn release(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        if INTERNER_CLEANUP_DEFERRAL_DEPTH.fetch_sub(1, Ordering::AcqRel) == 1 {
+            interner_clear_stale();
+        }
+    }
+}
+
+impl Drop for WeightInternerCleanupDeferral {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
 
 fn prune_dead_token_sets() {
     GLOBAL_TOKEN_SETS.retain(|_, weak| weak.strong_count() > 0);
@@ -333,6 +368,9 @@ fn claim_interner_cleanup(counter: &AtomicUsize, in_progress: &AtomicBool) -> bo
 }
 
 fn maybe_cleanup_token_sets() {
+    if INTERNER_CLEANUP_DEFERRAL_DEPTH.load(Ordering::Acquire) != 0 {
+        return;
+    }
     if claim_interner_cleanup(&TOKEN_INSERTS_SINCE_CLEANUP, &TOKEN_CLEANUP_IN_PROGRESS) {
         prune_dead_token_sets();
         TOKEN_CLEANUP_IN_PROGRESS.store(false, Ordering::Release);
@@ -340,6 +378,9 @@ fn maybe_cleanup_token_sets() {
 }
 
 fn maybe_cleanup_weights() {
+    if INTERNER_CLEANUP_DEFERRAL_DEPTH.load(Ordering::Acquire) != 0 {
+        return;
+    }
     if claim_interner_cleanup(&WEIGHT_INSERTS_SINCE_CLEANUP, &WEIGHT_CLEANUP_IN_PROGRESS) {
         prune_dead_weights();
         WEIGHT_CLEANUP_IN_PROGRESS.store(false, Ordering::Release);
@@ -2455,6 +2496,24 @@ mod tests {
     fn weight_for_tsid(tsid: u32, ranges: &[(u32, u32)]) -> Weight {
         let token_set = rangeset_from_ranges(ranges.iter().map(|(start, end)| *start..=*end));
         Weight::from_token_set_for_tsid(tsid, token_set)
+    }
+
+    #[test]
+    fn interner_cleanup_deferral_releases_once() {
+        let initial = INTERNER_CLEANUP_DEFERRAL_DEPTH.load(Ordering::Acquire);
+        let first = defer_weight_interner_cleanup();
+        let second = defer_weight_interner_cleanup();
+        assert_eq!(
+            INTERNER_CLEANUP_DEFERRAL_DEPTH.load(Ordering::Acquire),
+            initial + 2,
+        );
+        second.finish();
+        assert_eq!(
+            INTERNER_CLEANUP_DEFERRAL_DEPTH.load(Ordering::Acquire),
+            initial + 1,
+        );
+        first.finish();
+        assert_eq!(INTERNER_CLEANUP_DEFERRAL_DEPTH.load(Ordering::Acquire), initial);
     }
 
     #[test]

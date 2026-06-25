@@ -455,7 +455,8 @@ fn compile_prepared_with_profile_and_table_construction(
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
 ) -> (Constraint, CompilePhaseProfile) {
-    run_with_compile_thread_pool(|| {
+    let interner_cleanup = crate::ds::weight::defer_weight_interner_cleanup();
+    let result = run_with_compile_thread_pool(|| {
         let compile_started_at = Instant::now();
         let mut profile = CompilePhaseProfile::default();
 
@@ -912,7 +913,11 @@ fn compile_prepared_with_profile_and_table_construction(
         profile.compile_ms = elapsed_ms(compile_started_at);
 
         (constraint, profile)
-    })
+    });
+    // Keep the output constraint alive while the final sweep removes only dead
+    // weak entries from the compile-time interners.
+    interner_cleanup.finish();
+    result
 }
 
 pub(crate) fn compile_prepared(prepared_grammar: GrammarDef, vocab: &Vocab) -> Constraint {
