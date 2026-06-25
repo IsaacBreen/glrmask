@@ -430,7 +430,7 @@ fn grammar_expr_to_lark_with_indent(
     }
 }
 
-struct Lowerer {
+struct Lowerer<'a> {
     rules: Vec<Rule>,
     terminal_map: BTreeMap<String, TerminalID>,
     terminals: Vec<Terminal>,
@@ -438,10 +438,10 @@ struct Lowerer {
     generated_nonterminal_counter: u32,
     terminal_names: BTreeMap<TerminalID, String>,
     internal_terminal_names: HashSet<String>,
-    named_rule_exprs: HashMap<String, GrammarExpr>,
+    named_rule_exprs: HashMap<String, &'a GrammarExpr>,
     named_rule_is_terminal: HashMap<String, bool>,
     rule_nullable: HashMap<String, bool>,
-    terminal_bodies: HashMap<String, GrammarExpr>,
+    terminal_bodies: HashMap<String, &'a GrammarExpr>,
     terminal_expr_cache: HashMap<String, Arc<Expr>>,
     nonnullable_named_rule_cache: HashMap<String, NonterminalID>,
     /// Shared cache for repeat-exact nonterminals, keyed by (symbol, count).
@@ -539,7 +539,7 @@ fn char_class_pattern(def: &str, negate: bool) -> String {
     }
 }
 
-impl Lowerer {
+impl<'a> Lowerer<'a> {
     fn new() -> Self {
         Self {
             rules: Vec::new(),
@@ -1926,7 +1926,7 @@ impl Lowerer {
 /// via the `terminal_bodies` map and caching results in `terminal_expr_cache`.
 fn grammar_expr_to_expr(
     expr: &GrammarExpr,
-    terminal_bodies: &HashMap<String, GrammarExpr>,
+    terminal_bodies: &HashMap<String, &GrammarExpr>,
     terminal_expr_cache: &mut HashMap<String, Arc<Expr>>,
     visiting: &mut HashSet<String>,
 ) -> Result<Expr, GlrMaskError> {
@@ -1993,13 +1993,13 @@ fn grammar_expr_to_expr(
                 return Ok(Expr::Shared(cached.clone()));
             }
             // Must be a terminal rule — look up its body and resolve it
-            if let Some(body) = terminal_bodies.get(name).cloned() {
+            if let Some(&body) = terminal_bodies.get(name) {
                 if !visiting.insert(name.clone()) {
                     return Err(GlrMaskError::GrammarParse(format!(
                         "cycle detected in terminal rule references: {name}"
                     )));
                 }
-                let expr = grammar_expr_to_expr(&body, terminal_bodies, terminal_expr_cache, visiting)?;
+                let expr = grammar_expr_to_expr(body, terminal_bodies, terminal_expr_cache, visiting)?;
                 let arc = Arc::new(expr);
                 terminal_expr_cache.insert(name.clone(), arc.clone());
                 visiting.remove(name);
@@ -2297,7 +2297,7 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     lowerer.named_rule_exprs = grammar
         .rules
         .iter()
-        .map(|rule| (rule.name.clone(), rule.expr.clone()))
+        .map(|rule| (rule.name.clone(), &rule.expr))
         .collect();
     lowerer.named_rule_is_terminal = grammar
         .rules
@@ -2326,7 +2326,7 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         .rules
         .iter()
         .filter(|r| r.is_terminal)
-        .map(|r| (r.name.clone(), r.expr.clone()))
+        .map(|r| (r.name.clone(), &r.expr))
         .collect();
 
     for rule in &grammar.rules {
