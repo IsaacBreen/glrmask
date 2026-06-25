@@ -1069,13 +1069,13 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
             flat_trans,
         )
     };
-    let target_profile_batches: Vec<Vec<((u8, u32), Vec<(u32, u32, u32)>)>> =
+    let target_profile_batches: Vec<Vec<((u8, u32), Arc<[(u32, u32, u32)]>)>> =
         if rayon::current_num_threads() == 1 {
             byte_target_groups.iter().map(build_byte_profiles).collect()
         } else {
             byte_target_groups.par_iter().map(build_byte_profiles).collect()
         };
-    let target_profiles: Vec<((u8, u32), Vec<(u32, u32, u32)>)> =
+    let target_profiles: Vec<((u8, u32), Arc<[(u32, u32, u32)]>)> =
         target_profile_batches.into_iter().flatten().collect();
     let target_profiles_ms = target_profiles_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
@@ -1089,7 +1089,6 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     let mut next_profile_id = 1u32;
     let mut target_to_profile_id = FxHashMap::<(u8, u32), u32>::default();
     for (target_key, profile) in target_profiles {
-        let profile: Arc<[(u32, u32, u32)]> = Arc::from(profile);
         let profile_id = if let Some(&profile_id) = profile_to_id.get(&profile) {
             profile_id
         } else {
@@ -1455,14 +1454,6 @@ impl L1PackedSuffixTrieNode {
             ..Self::root()
         }
     }
-
-    #[inline]
-    fn record_token(&mut self, token_id: u32) {
-        if self.subtree_start == L1_NONE {
-            self.subtree_start = token_id;
-        }
-        self.subtree_end = token_id;
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -1506,12 +1497,32 @@ impl L1PackedSuffixTrie {
             }
 
             let token_id = internal_token_id as u32;
-            for &node in &path {
-                nodes[node as usize].record_token(token_id);
-            }
             let terminal = *path.last().expect("suffix trie terminal path") as usize;
             debug_assert_eq!(nodes[terminal].terminal_token, L1_NONE);
             nodes[terminal].terminal_token = token_id;
+        }
+
+        // Token IDs follow the byte-sorted vocabulary order. Every suffix-trie
+        // subtree therefore spans one contiguous leaf-token interval. Computing
+        // that interval once bottom-up avoids rewriting it along each token path.
+        for node_index in (0..nodes.len()).rev() {
+            let mut subtree_start = nodes[node_index].terminal_token;
+            let mut subtree_end = nodes[node_index].terminal_token;
+            let mut child = nodes[node_index].first_child;
+            while child != L1_NONE {
+                let child_node = nodes[child as usize];
+                if subtree_start == L1_NONE || child_node.subtree_start < subtree_start {
+                    subtree_start = child_node.subtree_start;
+                }
+                if subtree_end == L1_NONE || child_node.subtree_end > subtree_end {
+                    subtree_end = child_node.subtree_end;
+                }
+                child = child_node.next_sibling;
+            }
+            debug_assert_ne!(subtree_start, L1_NONE);
+            debug_assert_ne!(subtree_end, L1_NONE);
+            nodes[node_index].subtree_start = subtree_start;
+            nodes[node_index].subtree_end = subtree_end;
         }
 
         let mut edges = Vec::with_capacity(nodes.len().saturating_sub(1));
@@ -1653,14 +1664,14 @@ fn l1_bucket_suffix_signature_profiles_packed(
     has_empty_suffix: bool,
     state_to_terminal_signature: &[u32],
     flat_trans: &[u32],
-) -> Vec<((u8, u32), Vec<(u32, u32, u32)>)> {
+) -> Vec<((u8, u32), Arc<[(u32, u32, u32)]>)> {
     let profiling = compile_profile_enabled();
     let total_started_at = profiling.then(Instant::now);
     let dead = u32::MAX;
-    let mut results = Vec::<((u8, u32), Vec<(u32, u32, u32)>)>::with_capacity(targets.len());
+    let mut results = Vec::<((u8, u32), Arc<[(u32, u32, u32)]>)>::with_capacity(targets.len());
     if token_ids.is_empty() {
         for &target in targets {
-            results.push(((first_byte, target), Vec::new()));
+            results.push(((first_byte, target), Arc::from([])));
         }
         return results;
     }
@@ -1673,7 +1684,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
             if sig_id != 0 {
                 profile.push((sig_id, token_ids[0] as u32, *token_ids.last().unwrap() as u32));
             }
-            results.push(((first_byte, target), profile));
+            results.push(((first_byte, target), Arc::from(profile)));
         } else {
             walk_targets.push(target);
         }
@@ -1707,7 +1718,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
             for (fp, group) in fp_groups {
                 if fp.iter().all(|&state| state == dead) {
                     for target in group {
-                        results.push(((first_byte, target), Vec::new()));
+                        results.push(((first_byte, target), Arc::from([])));
                     }
                     continue;
                 }
@@ -1787,6 +1798,8 @@ fn l1_bucket_suffix_signature_profiles_packed(
     // an allocation and rehash-table growth for every branching node while
     // preserving the node-local behavior IDs and collision chains.
     let mut behavior_hash_heads = FxHashMap::<u64, u32>::default();
+    let mut unary_behavior_ids = FxHashMap::<(u32, u32), u32>::default();
+    let mut binary_behavior_ids = FxHashMap::<(u32, u32, u32), u32>::default();
     let mut scratch_children = Vec::<u32>::new();
     for node_index in (0..trie.nodes.len()).rev() {
         let node = trie.nodes[node_index];
@@ -1815,6 +1828,141 @@ fn l1_bucket_suffix_signature_profiles_packed(
                 } else {
                     behavior_ids[child_behavior_start + child_state_index as usize]
                 });
+            }
+            continue;
+        }
+        if node.edge_len == 1 {
+            let edge_index = node.first_edge as usize;
+            let child = trie.edges[edge_index].child as usize;
+            let child_behavior_start = data[child].behaviors_start as usize;
+            let map_start = edge_data[edge_index].map_start as usize;
+            unary_behavior_ids.clear();
+            for state_offset in 0..state_len {
+                let state = states[state_start + state_offset];
+                let terminal_signature = state_to_terminal_signature[state as usize];
+                let child_state_index = transition_maps[map_start + state_offset];
+                let child_behavior = if child_state_index == L1_NONE {
+                    0
+                } else {
+                    behavior_ids[child_behavior_start + child_state_index as usize]
+                };
+                if terminal_signature == 0 && child_behavior == 0 {
+                    behavior_ids.push(0);
+                    continue;
+                }
+                let key = (terminal_signature, child_behavior);
+                let behavior_id = if let Some(&id) = unary_behavior_ids.get(&key) {
+                    id
+                } else {
+                    let child_behaviors_start = record_child_behaviors.len() as u32;
+                    record_child_behaviors.push(child_behavior);
+                    let child_uniform = l1_packed_uniform_signature(
+                        &trie,
+                        child,
+                        child_behavior,
+                        &data,
+                        &records,
+                    );
+                    let uniform_signature = if terminal_signature != 0
+                        && child_uniform == terminal_signature
+                    {
+                        terminal_signature
+                    } else {
+                        0
+                    };
+                    let id = records.len() as u32 - data[node_index].records_start + 1;
+                    records.push(L1PackedProductBehaviorRecord {
+                        terminal_signature,
+                        child_behaviors_start,
+                        uniform_signature,
+                        hash_next: L1_NONE,
+                    });
+                    unary_behavior_ids.insert(key, id);
+                    id
+                };
+                behavior_ids.push(behavior_id);
+            }
+            continue;
+        }
+        if node.edge_len == 2 {
+            let first_edge_index = node.first_edge as usize;
+            let second_edge_index = first_edge_index + 1;
+            let first_child = trie.edges[first_edge_index].child as usize;
+            let second_child = trie.edges[second_edge_index].child as usize;
+            let first_behavior_start = data[first_child].behaviors_start as usize;
+            let second_behavior_start = data[second_child].behaviors_start as usize;
+            let first_map_start = edge_data[first_edge_index].map_start as usize;
+            let second_map_start = edge_data[second_edge_index].map_start as usize;
+            binary_behavior_ids.clear();
+            for state_offset in 0..state_len {
+                let state = states[state_start + state_offset];
+                let terminal_signature = if node.terminal_token == L1_NONE {
+                    0
+                } else {
+                    state_to_terminal_signature[state as usize]
+                };
+                let first_state_index = transition_maps[first_map_start + state_offset];
+                let first_behavior = if first_state_index == L1_NONE {
+                    0
+                } else {
+                    behavior_ids[first_behavior_start + first_state_index as usize]
+                };
+                let second_state_index = transition_maps[second_map_start + state_offset];
+                let second_behavior = if second_state_index == L1_NONE {
+                    0
+                } else {
+                    behavior_ids[second_behavior_start + second_state_index as usize]
+                };
+                if terminal_signature == 0 && first_behavior == 0 && second_behavior == 0 {
+                    behavior_ids.push(0);
+                    continue;
+                }
+                let key = (terminal_signature, first_behavior, second_behavior);
+                let behavior_id = if let Some(&id) = binary_behavior_ids.get(&key) {
+                    id
+                } else {
+                    let child_behaviors_start = record_child_behaviors.len() as u32;
+                    record_child_behaviors.push(first_behavior);
+                    record_child_behaviors.push(second_behavior);
+                    let first_uniform = l1_packed_uniform_signature(
+                        &trie,
+                        first_child,
+                        first_behavior,
+                        &data,
+                        &records,
+                    );
+                    let second_uniform = l1_packed_uniform_signature(
+                        &trie,
+                        second_child,
+                        second_behavior,
+                        &data,
+                        &records,
+                    );
+                    let uniform_signature = if node.terminal_token == L1_NONE {
+                        if first_uniform != 0 && first_uniform == second_uniform {
+                            first_uniform
+                        } else {
+                            0
+                        }
+                    } else if terminal_signature != 0
+                        && first_uniform == terminal_signature
+                        && second_uniform == terminal_signature
+                    {
+                        terminal_signature
+                    } else {
+                        0
+                    };
+                    let id = records.len() as u32 - data[node_index].records_start + 1;
+                    records.push(L1PackedProductBehaviorRecord {
+                        terminal_signature,
+                        child_behaviors_start,
+                        uniform_signature,
+                        hash_next: L1_NONE,
+                    });
+                    binary_behavior_ids.insert(key, id);
+                    id
+                };
+                behavior_ids.push(behavior_id);
             }
             continue;
         }
@@ -1926,11 +2074,11 @@ fn l1_bucket_suffix_signature_profiles_packed(
     let behavior_ms = behavior_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let materialize_started_at = profiling.then(Instant::now);
     let root_behavior_start = data[0].behaviors_start as usize;
-    let mut profiles_by_behavior = FxHashMap::<u32, Vec<(u32, u32, u32)>>::default();
+    let mut profiles_by_behavior = FxHashMap::<u32, Arc<[(u32, u32, u32)]>>::default();
     for (target_index, &target) in walk_targets.iter().enumerate() {
         let behavior_id = behavior_ids[root_behavior_start + target_index];
         let profile = if let Some(profile) = profiles_by_behavior.get(&behavior_id) {
-            profile.clone()
+            Arc::clone(profile)
         } else {
             let mut profile = Vec::new();
             l1_packed_append_behavior(
@@ -1942,16 +2090,20 @@ fn l1_bucket_suffix_signature_profiles_packed(
                 &record_child_behaviors,
                 &mut profile,
             );
-            profiles_by_behavior.insert(behavior_id, profile.clone());
+            let profile: Arc<[(u32, u32, u32)]> = Arc::from(profile);
+            profiles_by_behavior.insert(behavior_id, Arc::clone(&profile));
             profile
         };
         if let Some(ref others) = dedup_others {
             for &other_target in &others[target_index] {
-                results.push(((first_byte, other_target), profile.clone()));
+                results.push(((first_byte, other_target), Arc::clone(&profile)));
             }
         }
         results.push(((first_byte, target), profile));
     }
+    let materialize_ms = materialize_started_at.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
     if let Some(total_started_at) = total_started_at {
         eprintln!(
             "[glrmask/profile][l1_packed_product] first_byte={} tokens={} targets={} trie_nodes={} states={} trie_ms={:.3} propagate_ms={:.3} behavior_ms={:.3} materialize_ms={:.3} total_ms={:.3}",
@@ -1963,7 +2115,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
             trie_ms,
             propagate_ms,
             behavior_ms,
-            materialize_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+            materialize_ms,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
@@ -3489,8 +3641,28 @@ mod packed_suffix_product_tests {
             );
             expected.sort_unstable_by_key(|(key, _)| *key);
             actual.sort_unstable_by_key(|(key, _)| *key);
+            let actual: Vec<((u8, u32), Vec<(u32, u32, u32)>)> = actual
+                .into_iter()
+                .map(|(key, profile)| (key, profile.as_ref().to_vec()))
+                .collect();
             assert_eq!(actual, expected, "first byte {first_byte}");
         }
+    }
+
+    #[test]
+    fn suffix_trie_bottom_up_ranges_cover_prefix_and_siblings() {
+        let entries: Vec<(u32, Arc<[u8]>)> = vec![
+            (0, Arc::from(b"a".as_slice())),
+            (1, Arc::from(b"ab".as_slice())),
+            (2, Arc::from(b"ac".as_slice())),
+            (3, Arc::from(b"b".as_slice())),
+        ];
+        let trie = L1PackedSuffixTrie::build(&entries, &[0, 1, 2], &[0, 0, 0]);
+        assert_eq!((trie.nodes[0].subtree_start, trie.nodes[0].subtree_end), (0, 2));
+        let first_child = trie.nodes[0].first_child as usize;
+        let second_child = trie.nodes[first_child].next_sibling as usize;
+        assert_eq!((trie.nodes[first_child].subtree_start, trie.nodes[first_child].subtree_end), (1, 1));
+        assert_eq!((trie.nodes[second_child].subtree_start, trie.nodes[second_child].subtree_end), (2, 2));
     }
 
     #[test]
