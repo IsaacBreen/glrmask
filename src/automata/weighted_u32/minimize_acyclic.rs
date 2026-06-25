@@ -1144,16 +1144,20 @@ struct PointwiseRegionBuildCache {
 
 #[derive(Default)]
 struct PointwiseRegionInterner {
-    regions: FxHashMap<Vec<TokenBehaviorRange>, Arc<Vec<TokenBehaviorRange>>>,
+    // Keep the immutable region itself as the hash key. `Arc<Vec<_>>` hashes
+    // and compares by its contents, so lookup can still borrow a fresh Vec,
+    // but newly interned regions no longer need a second full Vec clone solely
+    // for map ownership.
+    regions: FxHashMap<Arc<Vec<TokenBehaviorRange>>, ()>,
 }
 
 impl PointwiseRegionInterner {
     fn intern(&mut self, ranges: Vec<TokenBehaviorRange>) -> Arc<Vec<TokenBehaviorRange>> {
-        if let Some(existing) = self.regions.get(&ranges) {
+        if let Some((existing, _)) = self.regions.get_key_value(&ranges) {
             return Arc::clone(existing);
         }
         let ranges = Arc::new(ranges);
-        self.regions.insert((*ranges).clone(), Arc::clone(&ranges));
+        self.regions.insert(Arc::clone(&ranges), ());
         ranges
     }
 }
