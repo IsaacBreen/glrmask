@@ -7,7 +7,7 @@ use dashmap::DashMap;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 // STICKY NOTE: DO NOT REMOVE THIS COMMENT.
@@ -282,6 +282,8 @@ static GLOBAL_TOKEN_SETS: Lazy<DashMap<RangeSetBlaze<u32>, Weak<RangeSetBlaze<u3
 static GLOBAL_WEIGHTS: Lazy<DashMap<u64, Vec<Weak<WeightMap>>>> = Lazy::new(DashMap::new);
 static TOKEN_INSERTS_SINCE_CLEANUP: AtomicUsize = AtomicUsize::new(0);
 static WEIGHT_INSERTS_SINCE_CLEANUP: AtomicUsize = AtomicUsize::new(0);
+static TOKEN_CLEANUP_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static WEIGHT_CLEANUP_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 static EMPTY_RANGESET: Lazy<SharedTokenSet> = Lazy::new(|| Arc::new(RangeSetBlaze::new()));
 
@@ -307,37 +309,40 @@ fn prune_dead_weights() {
     });
 }
 
-/// Count a fresh interner insertion and claim the next global sweep exactly once.
+/// Count a fresh interner insertion and claim a global sweep exactly once.
 ///
-/// A plain `store(0)` after crossing the threshold lets every racing producer
-/// observe the stale high count and run an expensive `DashMap::retain`. The CAS
-/// makes the reset itself the cleanup claim; losing threads continue immediately.
+/// `DashMap::retain` scans every shard. A completed cleanup resets the counter,
+/// but producers may cross another interval while that scan is still running.
+/// The in-progress gate ensures those later producers never start an overlapping
+/// scan; after the owner releases the gate, the accumulated counter makes a
+/// subsequent insertion schedule the next sweep normally.
 #[inline]
-fn claim_interner_cleanup(counter: &AtomicUsize) -> bool {
+fn claim_interner_cleanup(counter: &AtomicUsize, in_progress: &AtomicBool) -> bool {
     let previous = counter.fetch_add(1, Ordering::Relaxed);
     if previous + 1 < INTERNER_CLEANUP_INTERVAL {
         return false;
     }
-
-    counter
-        .compare_exchange(
-            previous + 1,
-            0,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        )
-        .is_ok()
+    if in_progress
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return false;
+    }
+    counter.store(0, Ordering::Release);
+    true
 }
 
 fn maybe_cleanup_token_sets() {
-    if claim_interner_cleanup(&TOKEN_INSERTS_SINCE_CLEANUP) {
+    if claim_interner_cleanup(&TOKEN_INSERTS_SINCE_CLEANUP, &TOKEN_CLEANUP_IN_PROGRESS) {
         prune_dead_token_sets();
+        TOKEN_CLEANUP_IN_PROGRESS.store(false, Ordering::Release);
     }
 }
 
 fn maybe_cleanup_weights() {
-    if claim_interner_cleanup(&WEIGHT_INSERTS_SINCE_CLEANUP) {
+    if claim_interner_cleanup(&WEIGHT_INSERTS_SINCE_CLEANUP, &WEIGHT_CLEANUP_IN_PROGRESS) {
         prune_dead_weights();
+        WEIGHT_CLEANUP_IN_PROGRESS.store(false, Ordering::Release);
     }
 }
 
@@ -346,6 +351,8 @@ fn interner_clear_all() {
     GLOBAL_WEIGHTS.clear();
     TOKEN_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
     WEIGHT_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
+    TOKEN_CLEANUP_IN_PROGRESS.store(false, Ordering::Release);
+    WEIGHT_CLEANUP_IN_PROGRESS.store(false, Ordering::Release);
 }
 
 fn interner_clear_stale() {
@@ -353,6 +360,8 @@ fn interner_clear_stale() {
     prune_dead_weights();
     TOKEN_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
     WEIGHT_INSERTS_SINCE_CLEANUP.store(0, Ordering::Relaxed);
+    TOKEN_CLEANUP_IN_PROGRESS.store(false, Ordering::Release);
+    WEIGHT_CLEANUP_IN_PROGRESS.store(false, Ordering::Release);
 }
 
 
@@ -2453,21 +2462,31 @@ mod tests {
         use std::sync::{Arc, Barrier};
 
         let counter = Arc::new(AtomicUsize::new(INTERNER_CLEANUP_INTERVAL - 1));
+        let in_progress = Arc::new(AtomicBool::new(false));
         let barrier = Arc::new(Barrier::new(16));
         let workers: Vec<_> = (0..16)
             .map(|_| {
                 let counter = Arc::clone(&counter);
+                let in_progress = Arc::clone(&in_progress);
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    usize::from(claim_interner_cleanup(&counter))
+                    usize::from(claim_interner_cleanup(&counter, &in_progress))
                 })
             })
             .collect();
         let claims: usize = workers.into_iter().map(|worker| worker.join().unwrap()).sum();
 
         assert_eq!(claims, 1);
-        assert!(counter.load(Ordering::Relaxed) < 16);
+        assert!(in_progress.load(Ordering::Acquire));
+
+        // Crossing additional intervals while the first caller is still
+        // sweeping cannot claim another concurrent retain.
+        for _ in 0..(INTERNER_CLEANUP_INTERVAL * 2) {
+            assert!(!claim_interner_cleanup(&counter, &in_progress));
+        }
+        in_progress.store(false, Ordering::Release);
+        assert!(claim_interner_cleanup(&counter, &in_progress));
     }
 
     #[test]
