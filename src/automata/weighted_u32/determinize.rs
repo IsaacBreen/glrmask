@@ -33,6 +33,29 @@ fn union_state_weight(weights: &mut FxHashMap<u32, Weight>, state_id: u32, add: 
     }
 }
 
+fn combine_target_contributions(
+    target_contributions: SmallVec<[(u32, Weight); 1]>,
+) -> FxHashMap<u32, Weight> {
+    if target_contributions.len() == 1 {
+        let (dst, weight) = target_contributions.into_iter().next().unwrap();
+        return FxHashMap::from_iter([(dst, weight)]);
+    }
+
+    // Group every contribution for a destination before normalizing it. A
+    // determinized subset can contribute thousands of paths to a small number
+    // of destinations; repeated pairwise `Weight::union` rebuilds the same
+    // relation after every path, whereas `union_all` can deduplicate and use
+    // its multiway range merger once per destination.
+    let mut weights_by_target = FxHashMap::<u32, SmallVec<[Weight; 2]>>::default();
+    for (dst, weight) in target_contributions {
+        weights_by_target.entry(dst).or_default().push(weight);
+    }
+    weights_by_target
+        .into_iter()
+        .map(|(dst, weights)| (dst, Weight::union_all(weights.iter())))
+        .collect()
+}
+
 fn final_weight_intersection(
     path_weight: &Weight,
     state_final: &Weight,
@@ -273,15 +296,7 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
             }
 
             let combine_started_at = profile.then(Instant::now);
-            let mut target_subset: FxHashMap<u32, Weight> = FxHashMap::default();
-            if target_contributions.len() == 1 {
-                let (dst, weight) = target_contributions.into_iter().next().unwrap();
-                target_subset.insert(dst, weight);
-            } else {
-                for (dst, weight) in target_contributions {
-                    union_state_weight(&mut target_subset, dst, weight);
-                }
-            }
+            let target_subset = combine_target_contributions(target_contributions);
 
             if let Some(combine_started_at) = combine_started_at {
                 profile_combine_ms += combine_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -528,6 +543,25 @@ mod tests {
             0,
             RangeSetBlaze::from_iter(values.into_iter().map(|value| value..=value)),
         )))
+    }
+
+    #[test]
+    fn batched_target_contributions_match_incremental_union() {
+        let contributions = SmallVec::from_vec(vec![
+            (3, tokens([0, 1])),
+            (1, tokens([5])),
+            (3, tokens([1, 2])),
+            (3, tokens([2, 3])),
+            (1, tokens([5, 6])),
+            (7, tokens([9])),
+            (3, tokens([0, 3])),
+        ]);
+
+        let mut expected = FxHashMap::default();
+        for (dst, weight) in contributions.iter().cloned() {
+            union_state_weight(&mut expected, dst, weight);
+        }
+        assert_eq!(combine_target_contributions(contributions), expected);
     }
 
     #[test]
