@@ -280,6 +280,12 @@ struct Scratch {
     dirty_group_masks: Vec<u64>,
     /// Number of u64 words per state in `dirty_group_masks` (= ceil(num_groups/64)).
     dirty_words: usize,
+    num_groups: usize,
+    /// For the active DFS path, how many initial states have their latest
+    /// match for `(position, group)` at this slot.
+    trie_target_group_counts: Vec<u32>,
+    /// Number of live groups at each token position in the active DFS path.
+    trie_target_position_counts: Vec<u32>,
     targets: Vec<usize>,
     target_gids: HashMap<usize, SmallVec<[usize; 16]>>,
     single_target_pos: usize,
@@ -597,6 +603,9 @@ impl Scratch {
             dirty_state_flags: vec![0; num_states],
             dirty_group_masks: vec![0; num_states * dirty_words.max(1)],
             dirty_words,
+            num_groups,
+            trie_target_group_counts: Vec::new(),
+            trie_target_position_counts: Vec::new(),
             targets: Vec::new(),
             target_gids: HashMap::new(),
             single_target_pos: usize::MAX,
@@ -610,6 +619,95 @@ impl Scratch {
             single_target_hash: 0,
             suffix_match_positions: vec![NONE; num_groups],
             suffix_dirty_groups: SmallVec::new(),
+        }
+    }
+}
+
+fn reset_trie_target_aggregate(scratch: &mut Scratch, max_token_len: usize) {
+    let slots = (max_token_len + 1).saturating_mul(scratch.num_groups);
+    scratch.trie_target_group_counts.resize(slots, 0);
+    scratch.trie_target_group_counts[..slots].fill(0);
+    scratch.trie_target_position_counts.resize(max_token_len + 1, 0);
+    scratch.trie_target_position_counts[..=max_token_len].fill(0);
+}
+
+#[inline(always)]
+fn update_trie_target_aggregate(
+    scratch: &mut Scratch,
+    gid: usize,
+    previous_position: u32,
+    next_position: u32,
+) {
+    if previous_position == next_position || gid >= scratch.num_groups {
+        return;
+    }
+
+    let remove = |scratch: &mut Scratch, position: usize, gid: usize| {
+        if position == 0 {
+            return;
+        }
+        let index = position * scratch.num_groups + gid;
+        debug_assert!(scratch.trie_target_group_counts[index] > 0);
+        scratch.trie_target_group_counts[index] -= 1;
+        if scratch.trie_target_group_counts[index] == 0 {
+            debug_assert!(scratch.trie_target_position_counts[position] > 0);
+            scratch.trie_target_position_counts[position] -= 1;
+        }
+    };
+    let add = |scratch: &mut Scratch, position: usize, gid: usize| {
+        if position == 0 {
+            return;
+        }
+        let index = position * scratch.num_groups + gid;
+        if scratch.trie_target_group_counts[index] == 0 {
+            scratch.trie_target_position_counts[position] += 1;
+        }
+        scratch.trie_target_group_counts[index] += 1;
+    };
+
+    if previous_position != NONE {
+        remove(scratch, previous_position as usize, gid);
+    }
+    if next_position != NONE {
+        add(scratch, next_position as usize, gid);
+    }
+}
+
+/// Materialize the union of live `(position, group)` pairs maintained during a
+/// trie walk. This is exactly what `collect_targets` obtains by scanning every
+/// state-local dirty mask, but its work is proportional to live positions.
+fn collect_trie_targets(scratch: &mut Scratch, token_len: usize) {
+    scratch.targets.clear();
+    scratch.target_gids.clear();
+    scratch.single_target_pos = usize::MAX;
+    scratch.single_target_gids.clear();
+
+    let mut targets_with_gids: SmallVec<[(usize, SmallVec<[usize; 16]>); 4]> = SmallVec::new();
+    for position in 1..=token_len {
+        if scratch.trie_target_position_counts[position] == 0 {
+            continue;
+        }
+        let base = position * scratch.num_groups;
+        let mut gids = SmallVec::<[usize; 16]>::new();
+        for gid in 0..scratch.num_groups {
+            if scratch.trie_target_group_counts[base + gid] != 0 {
+                gids.push(gid);
+            }
+        }
+        debug_assert!(!gids.is_empty());
+        targets_with_gids.push((position, gids));
+    }
+
+    for (position, _) in &targets_with_gids {
+        scratch.targets.push(*position);
+    }
+    if targets_with_gids.len() == 1 {
+        let (position, gids) = targets_with_gids.pop().expect("single target exists");
+        scratch.single_target_pos = position;
+        scratch.single_target_gids = gids;
+    } else {
+        for (position, gids) in targets_with_gids {
+            scratch.target_gids.insert(position, gids);
         }
     }
 }
@@ -1686,6 +1784,7 @@ fn dfs_step(
                     scratch.dirty_group_masks[flat_idx] |= 1u64 << bit;
                 }
                 log.match_changes.push((ix, old_mp));
+                update_trie_target_aggregate(scratch, gid, old_mp, position);
                 scratch.match_positions[ix] = position;
             }
         }
@@ -1761,6 +1860,7 @@ fn dfs_step_profiled(
                     state_new_dirty_groups += 1;
                 }
                 log.match_changes.push((ix, old_mp));
+                update_trie_target_aggregate(scratch, gid, old_mp, position);
                 scratch.match_positions[ix] = position;
             }
         }
@@ -1780,6 +1880,9 @@ fn dfs_step_profiled(
 /// Undo all changes recorded at a single depth level.
 fn dfs_undo_depth(scratch: &mut Scratch, log: &DepthChangeLog) {
     for &(ix, old_mp) in log.match_changes.iter().rev() {
+        let current_mp = scratch.match_positions[ix];
+        let gid = ix % scratch.num_groups;
+        update_trie_target_aggregate(scratch, gid, current_mp, old_mp);
         scratch.match_positions[ix] = old_mp;
     }
     for &(flat_idx, old_dirty) in log.dirty_changes.iter().rev() {
@@ -1932,6 +2035,12 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
             scratch.current_states[i] = STATE_NONE;
         }
     }
+    let max_token_len = chunk
+        .iter()
+        .map(|&token_idx| strings[token_idx].as_ref().len())
+        .max()
+        .unwrap_or(0);
+    reset_trie_target_aggregate(scratch, max_token_len);
 
     let mut current_depth: usize = 0;
     let mut prev_token: &[u8] = &[];
@@ -1990,35 +2099,11 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
             if profile {
                 stats.dirty_tokens += 1;
             }
-            scratch.targets.clear();
-            scratch.target_gids.clear();
-            scratch.single_target_pos = usize::MAX;
-            scratch.single_target_gids.clear();
             scratch.single_target_hash_pos = usize::MAX;
             scratch.single_target_hash = 0;
 
             let collect_targets_started_at = profile.then(Instant::now);
-            if state_group_size >= batch_len {
-                collect_targets(
-                    scratch,
-                    num_groups,
-                    token_len,
-                    0,
-                    batch_len,
-                );
-            } else {
-                for state_offset in (0..batch_len).step_by(state_group_size) {
-                    let group_len =
-                        (state_offset + state_group_size).min(batch_len) - state_offset;
-                    collect_targets(
-                        scratch,
-                        num_groups,
-                        token_len,
-                        state_offset,
-                        group_len,
-                    );
-                }
-            }
+            collect_trie_targets(scratch, token_len);
             stats.collect_targets_ms += elapsed_ms(collect_targets_started_at);
 
             let target_count = scratch.targets.len();
@@ -2585,6 +2670,49 @@ mod shared_base_tests {
             ],
             start_state: 0,
             transitions: Arc::from(transitions),
+        }
+    }
+
+    #[test]
+    fn trie_target_aggregate_matches_dirty_mask_scan() {
+        let mut scratch = Scratch::new(2, 3);
+        reset_trie_target_aggregate(&mut scratch, 4);
+
+        let set_match = |scratch: &mut Scratch, state: usize, gid: usize, position: u32| {
+            let index = state * scratch.num_groups + gid;
+            let previous = scratch.match_positions[index];
+            if previous == NONE {
+                mark_dirty_group(scratch, state, gid);
+            }
+            update_trie_target_aggregate(scratch, gid, previous, position);
+            scratch.match_positions[index] = position;
+        };
+
+        set_match(&mut scratch, 0, 0, 1);
+        set_match(&mut scratch, 1, 0, 2);
+        set_match(&mut scratch, 0, 1, 3);
+        set_match(&mut scratch, 1, 2, 4);
+        // Replacing a state-local latest match must remove only its old pair.
+        set_match(&mut scratch, 0, 0, 4);
+
+        collect_targets(&mut scratch, 3, 4, 0, 2);
+        let mut expected_targets = scratch.targets.clone();
+        expected_targets.sort_unstable();
+        let expected_target_gids = scratch.target_gids.clone();
+        let expected_single_target_pos = scratch.single_target_pos;
+        let expected_single_target_gids = scratch.single_target_gids.clone();
+
+        collect_trie_targets(&mut scratch, 4);
+        assert_eq!(scratch.targets, expected_targets);
+        assert_eq!(scratch.target_gids, expected_target_gids);
+        if expected_targets.len() == 1 {
+            assert_eq!(scratch.single_target_pos, expected_single_target_pos);
+            assert_eq!(scratch.single_target_gids, expected_single_target_gids);
+        } else {
+            // The legacy scan leaves these stale after materializing the map;
+            // multi-target consumers use only `targets` and `target_gids`.
+            assert_eq!(scratch.single_target_pos, usize::MAX);
+            assert!(scratch.single_target_gids.is_empty());
         }
     }
 
