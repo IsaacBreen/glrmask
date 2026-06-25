@@ -343,10 +343,22 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
+    shared_base_setup_ms: f64,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
-    analyze_equivalences_impl(partition_label, tokenizer, vocab, disallowed_follows, ignore_terminal, active_groups, shared_vocab_dfa_cache, flat_trans, initial_state_map)
+    analyze_equivalences_impl(
+        partition_label,
+        tokenizer,
+        vocab,
+        disallowed_follows,
+        ignore_terminal,
+        active_groups,
+        shared_vocab_dfa_cache,
+        shared_base_setup_ms,
+        flat_trans,
+        initial_state_map,
+    )
 }
 
 /// Combined equivalence analysis over a flattened tokenizer DFA.
@@ -361,6 +373,7 @@ fn analyze_equivalences_impl(
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
+    shared_base_setup_ms: f64,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
@@ -397,7 +410,8 @@ fn analyze_equivalences_impl(
     let byte_to_class = compatible_cache
         .map(|base| base.byte_to_class())
         .unwrap_or_else(|| super::compat::compute_byte_classes(tokenizer_view.dfa()));
-    let byte_class_setup_ms = byte_class_setup_started_at.elapsed().as_secs_f64() * 1000.0;
+    let byte_class_setup_ms = shared_base_setup_ms
+        + byte_class_setup_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let token_dedup_started_at = Instant::now();
     let dedup = deduplicate_tokens_by_byte_class(&prepared.token_bytes, &byte_to_class);

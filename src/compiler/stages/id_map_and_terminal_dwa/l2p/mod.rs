@@ -390,6 +390,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     active_terminals: &[bool],
     disallowed_follows: &BTreeMap<u32, BitSet>,
     shared_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    shared_original_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    shared_transition_cache: Option<&OnceLock<equivalence_analysis::compat::FlatTransitionCache>>,
     shared_simplify_cache: Option<&SharedSimplifyCache>,
     shared_disallowed_follow_dfa_cache: Option<&SharedDisallowedFollowDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
@@ -499,6 +501,33 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     // ---- Step 1: Equivalence analysis (on simplified tokenizer) ----
     let id_map_started_at = Instant::now();
+    // The original tokenizer has a single transition relation across every
+    // unsimplified partition. Derive its exact byte partition lazily from
+    // sparse lexer edges once; simplified tokenizers retain their local cache.
+    let shared_base_setup_started_at = Instant::now();
+    let equivalence_vocab_dfa_cache = if use_simplified_tok {
+        shared_vocab_dfa_cache
+    } else if let (Some(original_cache), Some(transition_cache), Some(flat_trans)) = (
+        shared_original_vocab_dfa_cache,
+        shared_transition_cache,
+        flat_trans,
+    ) {
+        original_cache.get_or_init(|| {
+            let transition_cache = transition_cache.get_or_init(|| {
+                equivalence_analysis::compat::derive_flat_transition_cache(
+                    tokenizer_for_build,
+                    Arc::clone(flat_trans),
+                )
+            });
+            equivalence_analysis::vocab::fast::SharedVocabDfaBase::build_from_flat_transition_cache(
+                transition_cache,
+            )
+        });
+        Some(original_cache)
+    } else {
+        shared_vocab_dfa_cache
+    };
+    let shared_base_setup_ms = shared_base_setup_started_at.elapsed().as_secs_f64() * 1000.0;
     // Do not remove this note. Do not remove the instruction saying not to
     // remove this note. L2P state/vocab equivalence must always run fully.
     // Max-length may be skipped in controlled cases, but the full exact
@@ -520,7 +549,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             disallowed_follows,
             ignore_terminal,
             None,
-            shared_vocab_dfa_cache,
+            equivalence_vocab_dfa_cache,
+            shared_base_setup_ms,
             if use_simplified_tok { None } else { flat_trans },
             equivalence_initial_state_map,
         );

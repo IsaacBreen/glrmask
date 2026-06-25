@@ -3,7 +3,7 @@
 //! Each token is classified by its match positions, suffix structure, and end
 //! states across all tokenizer starts.
 
-use super::super::compat::{compute_byte_classes, TokenizerView};
+use super::super::compat::{compute_byte_classes, FlatTransitionCache, TokenizerView};
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
@@ -144,6 +144,55 @@ fn compute_byte_classes_and_self_loops(
 }
 
 impl SharedVocabDfaBase {
+    /// Build from transition data derived from sparse lexer rows. The cache
+    /// already proved the byte partition against the dense transition table;
+    /// this function only materializes the two compressed layouts.
+    pub fn build_from_flat_transition_cache(cache: &FlatTransitionCache) -> Self {
+        let num_dfa_states = cache.transitions.len() / 256;
+        let byte_to_class = cache.byte_to_class;
+        let num_classes = byte_to_class
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |max_class| max_class as usize + 1);
+
+        let mut class_repr = vec![0u8; num_classes];
+        let mut class_seen = vec![false; num_classes];
+        for byte in 0..=255u8 {
+            let class = byte_to_class[byte as usize] as usize;
+            if !class_seen[class] {
+                class_seen[class] = true;
+                class_repr[class] = byte;
+            }
+        }
+
+        let mut trans_by_class = vec![NONE; num_classes * num_dfa_states];
+        let mut trans_by_state_class = vec![NONE; num_classes * num_dfa_states];
+        for state in 0..num_dfa_states {
+            let source_base = state * 256;
+            for class in 0..num_classes {
+                let target = cache.transitions[source_base + class_repr[class] as usize];
+                trans_by_class[class * num_dfa_states + state] = target;
+                trans_by_state_class[state * num_classes + class] = target;
+            }
+        }
+
+        let none_completion_hash = {
+            let mut h = new_hasher();
+            h.write_u8(0);
+            h.finish()
+        };
+        SharedVocabDfaBase {
+            byte_to_class,
+            num_classes,
+            trans_by_class: Arc::from(trans_by_class),
+            trans_by_state_class: Arc::from(trans_by_state_class),
+            self_loop_bytes: Arc::clone(&cache.self_loop_bytes),
+            none_completion_hash,
+            source_transitions: Arc::clone(&cache.transitions),
+        }
+    }
+
     /// Build from a FlatDfa. Called lazily via OnceLock on first use.
     pub fn build_from_dfa(dfa: &super::super::compat::FlatDfa) -> Self {
         let num_dfa_states = dfa.states.len();

@@ -1,6 +1,7 @@
 //! Flattened tokenizer-DFA views for the equivalence-analysis passes.
 
 use crate::automata::lexer::Lexer;
+use crate::ds::u8set::U8Set;
 use std::sync::Arc;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -51,59 +52,125 @@ pub struct FlatDfa {
     pub transitions: Arc<[u32]>,
 }
 
-pub(crate) fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
-    // Hash each byte's transition column using row-major access for cache efficiency.
-    let mut column_hashes = [0u64; 256];
-    let num_states = dfa.states.len();
-    for s in 0..num_states {
-        let base = s * 256;
-        for b in 0..256 {
-            column_hashes[b] = column_hashes[b]
-                .wrapping_mul(0x517cc1b727220a95)
-                .wrapping_add(dfa.transitions[base + b] as u64);
-        }
-    }
+const BYTE_COLUMN_HASH_MULTIPLIER: u64 = 0x517c_c1b7_2722_0a95;
 
-    // Sort bytes by hash to find equivalence classes.
+/// Transition-only data needed to construct the shared equivalence base.
+///
+/// This is created lazily only when an unsimplified L2P partition is built.
+/// The dense transition table already exists for terminal construction; we
+/// derive byte-column hashes and self-loop masks from the tokenizer's sparse
+/// edge rows, then retain exact full-column checks for hash collisions.
+pub(crate) struct FlatTransitionCache {
+    pub(crate) transitions: Arc<[u32]>,
+    pub(crate) byte_to_class: [u8; 256],
+    pub(crate) self_loop_bytes: Arc<[U8Set]>,
+}
+
+fn byte_classes_from_column_hashes(
+    transitions: &[u32],
+    num_states: usize,
+    column_hashes: &[u64; 256],
+) -> [u8; 256] {
     let mut sorted_indices: [u8; 256] = std::array::from_fn(|i| i as u8);
-    sorted_indices.sort_unstable_by_key(|&b| column_hashes[b as usize]);
+    sorted_indices.sort_unstable_by_key(|&byte| column_hashes[byte as usize]);
 
     let mut byte_to_class = [0u8; 256];
     let mut next_class = 0u8;
     byte_to_class[sorted_indices[0] as usize] = 0;
-
     for i in 1..256 {
-        let curr = sorted_indices[i];
-        let h = column_hashes[curr as usize];
-
-        if h != column_hashes[sorted_indices[i - 1] as usize] {
+        let current = sorted_indices[i];
+        let hash = column_hashes[current as usize];
+        if hash != column_hashes[sorted_indices[i - 1] as usize] {
             next_class += 1;
-            byte_to_class[curr as usize] = next_class;
-        } else {
-            let mut assigned = false;
-            for j in (0..i).rev() {
-                let prev = sorted_indices[j];
-                if column_hashes[prev as usize] != h {
-                    break;
-                }
-                let same = (0..num_states).all(|s| {
-                    let base = s * 256;
-                    dfa.transitions[base + curr as usize] == dfa.transitions[base + prev as usize]
-                });
-                if same {
-                    byte_to_class[curr as usize] = byte_to_class[prev as usize];
-                    assigned = true;
-                    break;
-                }
+            byte_to_class[current as usize] = next_class;
+            continue;
+        }
+
+        // A hash match is only a candidate. The final relation remains the
+        // exact equality of the 256-byte transition columns.
+        let mut assigned = false;
+        for j in (0..i).rev() {
+            let previous = sorted_indices[j];
+            if column_hashes[previous as usize] != hash {
+                break;
             }
-            if !assigned {
-                next_class += 1;
-                byte_to_class[curr as usize] = next_class;
+            let same = (0..num_states).all(|state| {
+                let base = state * 256;
+                transitions[base + current as usize] == transitions[base + previous as usize]
+            });
+            if same {
+                byte_to_class[current as usize] = byte_to_class[previous as usize];
+                assigned = true;
+                break;
             }
         }
+        if !assigned {
+            next_class += 1;
+            byte_to_class[current as usize] = next_class;
+        }
+    }
+    byte_to_class
+}
+
+pub(crate) fn derive_flat_transition_cache(
+    tokenizer: &Tokenizer,
+    transitions: Arc<[u32]>,
+) -> FlatTransitionCache {
+    let num_states = tokenizer.num_states() as usize;
+    let dead = u32::MAX;
+    assert_eq!(transitions.len(), num_states * 256);
+
+    // h(v_0..v_n) = Σ v_i M^(n-1-i). Starting from the all-dead
+    // column, each sparse edge changes just one term in that sum.
+    let mut row_weight = vec![0u64; num_states];
+    let mut power = 1u64;
+    for state in (0..num_states).rev() {
+        row_weight[state] = power;
+        power = power.wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER);
+    }
+    let mut all_dead_hash = 0u64;
+    for _ in 0..num_states {
+        all_dead_hash = all_dead_hash
+            .wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
+            .wrapping_add(dead as u64);
+    }
+    let mut column_hashes = [all_dead_hash; 256];
+    let mut self_loop_bytes = Vec::with_capacity(num_states);
+
+    for state in 0..num_states {
+        let mut self_loops = U8Set::empty();
+        let base = state * 256;
+        for (byte, target) in tokenizer.transitions_from(state as u32) {
+            let actual = transitions[base + byte as usize];
+            debug_assert_eq!(actual, target);
+            let delta = (target as u64).wrapping_sub(dead as u64);
+            column_hashes[byte as usize] = column_hashes[byte as usize]
+                .wrapping_add(delta.wrapping_mul(row_weight[state]));
+            if target == state as u32 {
+                self_loops.insert(byte);
+            }
+        }
+        self_loop_bytes.push(self_loops);
     }
 
-    byte_to_class
+    FlatTransitionCache {
+        byte_to_class: byte_classes_from_column_hashes(&transitions, num_states, &column_hashes),
+        transitions,
+        self_loop_bytes: Arc::from(self_loop_bytes),
+    }
+}
+
+
+pub(crate) fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
+    let mut column_hashes = [0u64; 256];
+    for row in dfa.transitions.chunks_exact(256) {
+        for (hash, &target) in column_hashes.iter_mut().zip(row) {
+            *hash = hash
+                .wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
+                .wrapping_add(target as u64);
+        }
+    }
+    byte_classes_from_column_hashes(&dfa.transitions, dfa.states.len(), &column_hashes)
 }
 
 impl FlatDfa {
@@ -285,4 +352,60 @@ impl TokenizerView {
         self.flat_dfa.start_state
     }
 
+}
+
+
+#[cfg(test)]
+mod sparse_transition_cache_tests {
+    use super::*;
+
+    #[test]
+    fn sparse_column_hashes_preserve_exact_byte_classes() {
+        let num_states = 4usize;
+        let dead = u32::MAX;
+        let mut transitions = vec![dead; num_states * 256];
+        let rows = [
+            vec![(b'a', 1), (b'b', 1), (b'c', 2)],
+            vec![(b'a', 2), (b'b', 2), (b'd', 3)],
+            vec![(b'a', 3), (b'b', 3), (b'c', 1)],
+            vec![(b'a', 3), (b'b', 3), (b'd', 1)],
+        ];
+        let mut row_weight = vec![0u64; num_states];
+        let mut power = 1u64;
+        for state in (0..num_states).rev() {
+            row_weight[state] = power;
+            power = power.wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER);
+        }
+        let mut all_dead_hash = 0u64;
+        for _ in 0..num_states {
+            all_dead_hash = all_dead_hash
+                .wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
+                .wrapping_add(dead as u64);
+        }
+        let mut sparse_hashes = [all_dead_hash; 256];
+        for (state, row) in rows.iter().enumerate() {
+            for &(byte, target) in row {
+                transitions[state * 256 + byte as usize] = target;
+                sparse_hashes[byte as usize] = sparse_hashes[byte as usize].wrapping_add(
+                    (target as u64)
+                        .wrapping_sub(dead as u64)
+                        .wrapping_mul(row_weight[state]),
+                );
+            }
+        }
+        let dfa = FlatDfa {
+            states: (0..num_states)
+                .map(|_| FlatDfaState {
+                    finalizers: Vec::new(),
+                    possible_future_group_ids: Vec::new(),
+                })
+                .collect(),
+            start_state: 0,
+            transitions: Arc::from(transitions),
+        };
+        assert_eq!(
+            byte_classes_from_column_hashes(&dfa.transitions, num_states, &sparse_hashes),
+            compute_byte_classes(&dfa),
+        );
+    }
 }

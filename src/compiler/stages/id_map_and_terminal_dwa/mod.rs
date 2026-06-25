@@ -14,7 +14,7 @@ pub(crate) mod partition;
 pub(crate) mod types;
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -499,6 +499,11 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     // changes the DFA (reducing state count via minimization).
     let shared_cache_setup_started_at = Instant::now();
     let shared_vocab_dfa_cache = l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
+    // A dedicated original-tokenizer cache prevents a simplified partition
+    // from occupying the transition base needed by unsimplified L2P work.
+    let shared_original_vocab_dfa_cache =
+        l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
+    let shared_transition_cache = OnceLock::new();
     let shared_simplify_cache = l2p::SharedSimplifyCache::default();
     let shared_disallowed_follow_dfa_cache = l2p::postprocess::SharedDisallowedFollowDfaCache::new();
     let shared_cache_setup_ms =
@@ -522,6 +527,8 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             &flat_trans,
             Some(global_max_length_state_map),
             Some(&shared_vocab_dfa_cache),
+            Some(&shared_original_vocab_dfa_cache),
+            Some(&shared_transition_cache),
             Some(&shared_simplify_cache),
             Some(&shared_disallowed_follow_dfa_cache),
             Some(&shared_classify_cache),
