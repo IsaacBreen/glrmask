@@ -26,6 +26,7 @@ pub struct SharedClassifyBytesets {
     reverse_transitions_by_byte: Vec<ReverseByteTransitions>,
     matched_states_by_terminal: Vec<Vec<u32>>,
     future_by_state_words: Vec<u64>,
+    representative_future_terminal_by_state: Vec<u32>,
     words_per_terminal_set: usize,
     active_route_setup_cache: Mutex<HashMap<(BitSet, usize), Arc<ActiveL2pRouteSetup>>>,
 }
@@ -281,6 +282,7 @@ impl SharedClassifyBytesets {
         let mut sparse_transitions_by_byte = vec![Vec::<(u32, u32)>::new(); 256];
         let mut matched_states_by_terminal = vec![Vec::<u32>::new(); nt];
         let mut future_by_state_words = vec![0u64; num_states * words_per_terminal_set];
+        let mut representative_future_terminal_by_state = vec![u32::MAX; num_states];
         let mut transition_count = 0usize;
 
         for state in 0..tokenizer.num_states() {
@@ -293,6 +295,15 @@ impl SharedClassifyBytesets {
             future_by_state_words[state as usize * words_per_terminal_set
                 ..(state as usize + 1) * words_per_terminal_set]
                 .copy_from_slice(future_words);
+            if let Some((word_index, &word)) = future_words
+                .iter()
+                .take(words_per_terminal_set)
+                .enumerate()
+                .find(|(_, word)| **word != 0)
+            {
+                representative_future_terminal_by_state[state as usize] =
+                    (word_index * 64 + word.trailing_zeros() as usize) as u32;
+            }
             for (byte, target) in tokenizer.transitions_from(state) {
                 transition_count += 1;
                 transitions_by_byte[byte as usize * num_states + state as usize] = target;
@@ -382,6 +393,7 @@ impl SharedClassifyBytesets {
             reverse_transitions_by_byte,
             matched_states_by_terminal,
             future_by_state_words,
+            representative_future_terminal_by_state,
             words_per_terminal_set,
             active_route_setup_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
@@ -826,10 +838,23 @@ fn active_l2p_route_setup(
 
     let setup_started_at = std::time::Instant::now();
     let active_words = active_bitset.words();
+    let active_count = active_bitset.count_ones();
+    let use_representative_fast_path = active_count >= active_bitset.len().div_ceil(2);
     let mut active_start_states = Vec::new();
+    let mut start_full_checks = 0usize;
     for state in 0..tokenizer.num_states() {
-        if state_future_intersects_words(bytesets, state, active_words) {
-            active_start_states.push(state);
+        if use_representative_fast_path {
+            let representative = bytesets.representative_future_terminal_by_state[state as usize];
+            if representative != u32::MAX && active_bitset.contains(representative as usize) {
+                active_start_states.push(state);
+                continue;
+            }
+        }
+        {
+            start_full_checks += 1;
+            if state_future_intersects_words(bytesets, state, active_words) {
+                active_start_states.push(state);
+            }
         }
     }
     let start_states_ms = setup_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -890,9 +915,10 @@ fn active_l2p_route_setup(
     });
     if super::types::compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l2p_route_setup] active={} starts={} start_states_ms={:.3} boundary_pairs_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l2p_route_setup] active={} starts={} start_full_checks={} start_states_ms={:.3} boundary_pairs_ms={:.3} total_ms={:.3}",
             active_bitset.count_ones(),
             setup.active_start_states.len(),
+            start_full_checks,
             start_states_ms,
             boundary_pairs_started_at.elapsed().as_secs_f64() * 1000.0,
             setup_started_at.elapsed().as_secs_f64() * 1000.0,
@@ -1901,13 +1927,14 @@ mod tests {
     use super::build_reverse_transitions_by_byte;
     use super::{
         parse_exact_l2p_boundary_filter_mode, ExactL2pBoundaryFilterMode,
-        token_has_active_l2p_boundary_words, token_l2p_route_hint, SharedClassifyBytesets,
-        TokenL2pRouteHint,
+        state_future_intersects_words, token_has_active_l2p_boundary_words,
+        token_l2p_route_hint, SharedClassifyBytesets, TokenL2pRouteHint,
     };
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::compile::build_regex;
     use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::automata::lexer::Lexer;
+    use crate::ds::bitset::BitSet;
     use crate::ds::u8set::U8Set;
 
     fn reference_bytesets(tokenizer: &Tokenizer, num_terminals: u32) -> SharedClassifyBytesets {
@@ -1955,6 +1982,7 @@ mod tests {
             reverse_transitions_by_byte: Vec::new(),
             matched_states_by_terminal: Vec::new(),
             future_by_state_words: Vec::new(),
+            representative_future_terminal_by_state: Vec::new(),
             words_per_terminal_set: 0,
             active_route_setup_cache: Mutex::new(HashMap::new()),
         }
@@ -2052,5 +2080,30 @@ mod tests {
         assert_eq!(actual.reachable_bytes, expected.reachable_bytes);
         assert_eq!(actual.first_bytes, expected.first_bytes);
         assert_eq!(actual.last_bytes, expected.last_bytes);
+
+        let mut active_sets = vec![BitSet::new(tokenizer.num_terminals() as usize)];
+        let mut all_active = BitSet::new(tokenizer.num_terminals() as usize);
+        for terminal in 0..tokenizer.num_terminals() as usize {
+            all_active.set(terminal);
+            let mut single = BitSet::new(tokenizer.num_terminals() as usize);
+            single.set(terminal);
+            active_sets.push(single);
+        }
+        active_sets.push(all_active);
+        for active in &active_sets {
+            for state in 0..tokenizer.num_states() {
+                let representative = actual.representative_future_terminal_by_state[state as usize];
+                let future = tokenizer.possible_future_terminals(state);
+                assert_eq!(representative == u32::MAX, future.is_empty());
+                if representative != u32::MAX {
+                    assert!(future.contains(representative as usize));
+                }
+                let full = state_future_intersects_words(&actual, state, active.words());
+                let fast = representative != u32::MAX && active.contains(representative as usize)
+                    || (representative == u32::MAX || !active.contains(representative as usize))
+                        && full;
+                assert_eq!(fast, full, "state={state}");
+            }
+        }
     }
 }
