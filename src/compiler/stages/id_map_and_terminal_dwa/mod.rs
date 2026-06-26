@@ -328,8 +328,9 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     let owned_classify_cache = classify::SharedClassifyCache::new();
     let shared_classify_cache: &classify::SharedClassifyCache =
         external_classify_cache.unwrap_or(&owned_classify_cache);
-    let token_path_disallowed_follows =
-        ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal);
+    let token_path_disallowed_follows = Arc::new(
+        ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal),
+    );
     let stage_setup_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let partition_vocab_started_at = Instant::now();
@@ -526,6 +527,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             ignore_terminal,
             grammar,
             disallowed_follows,
+            &token_path_disallowed_follows,
             &flat_trans,
             Some(global_max_length_state_map),
             Some(&shared_vocab_dfa_cache),

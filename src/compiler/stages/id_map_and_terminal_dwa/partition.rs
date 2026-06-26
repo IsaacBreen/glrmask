@@ -15,7 +15,6 @@ use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     classify_terminal_path_lengths, split_vocab_for_active_l2p_terminals,
 };
-use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::ignore_transparent_disallowed_follows;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::{
     LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaPhaseProfile, TerminalPathLength,
     compile_profile_enabled, compile_profile_join,
@@ -54,6 +53,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
+    token_path_disallowed_follows: &Arc<BTreeMap<u32, BitSet>>,
     flat_trans: &Arc<[u32]>,
     initial_state_map: Option<&ManyToOneIdMap>,
     shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
@@ -75,8 +75,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     // Set GLRMASK_FORCE_ALL_L2P=1 to skip L1 and route everything through L2P.
     let force_all_l2p = std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
 
-    let token_path_disallowed_follows =
-        ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal);
     let pre_classify_setup_ms =
         pre_classify_setup_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -87,7 +85,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         classify_terminal_path_lengths(
             tokenizer,
             vocab,
-            &token_path_disallowed_follows,
+            token_path_disallowed_follows.as_ref(),
             num_terminals,
             shared_classify_cache,
         )
@@ -124,8 +122,9 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     let l2p_vocab_split = use_l2p_vocab_split.then(|| {
         split_vocab_for_active_l2p_terminals(
             tokenizer,
+            flat_trans,
             vocab,
-            &token_path_disallowed_follows,
+            token_path_disallowed_follows,
             num_terminals,
             &l2p_mask,
             shared_classify_cache,
@@ -134,7 +133,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     let combine_no_boundary_l2p_single_with_l1 = has_l1
         && l2p_vocab_split
             .as_ref()
-            .is_some_and(|split| split.boundary_vocab.is_empty() && !split.single_vocab.is_empty());
+            .is_some_and(|split| split.boundary_tokens == 0 && split.single_tokens != 0);
     let l1_build_mask: Vec<bool> = if combine_no_boundary_l2p_single_with_l1 {
         l1_mask
             .iter()
@@ -154,8 +153,8 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         None => usize::from(has_l2p),
         Some(split) if combine_no_boundary_l2p_single_with_l1 => 0,
         Some(split) => {
-            usize::from(!split.boundary_vocab.is_empty())
-                + usize::from(!split.single_vocab.is_empty())
+            usize::from(split.boundary_tokens != 0)
+                + usize::from(split.single_tokens != 0)
         }
     };
     let defer_l2p_minimization_to_local_merge =
@@ -238,14 +237,15 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                 }
                 let ((boundary_result, boundary_ms), (single_result, single_ms)) = compile_profile_join(
                     || {
-                        if split.boundary_vocab.is_empty() {
+                        if split.boundary_tokens == 0 {
                             (None, 0.0)
                         } else {
                             let started_at = Instant::now();
+                            let boundary_vocab = split.boundary_vocab(vocab);
                             let result = super::l2p::build_l2p_id_map_and_terminal_dwa(
                                 partition_label,
                                 tokenizer,
-                                &split.boundary_vocab,
+                                &boundary_vocab,
                                 terminal_coloring,
                                 use_terminal_coloring,
                                 ignore_terminal,
@@ -268,14 +268,15 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                         }
                     },
                     || {
-                        if split.single_vocab.is_empty() {
+                        if split.single_tokens == 0 {
                             (None, 0.0)
                         } else {
                             let started_at = Instant::now();
+                            let single_vocab = split.single_vocab(vocab);
                             let result = super::l1::build_l1_id_map_and_terminal_dwa(
                                 partition_label,
                                 tokenizer,
-                                &split.single_vocab,
+                                &single_vocab,
                                 terminal_coloring,
                                 use_terminal_coloring,
                                 ignore_terminal,
