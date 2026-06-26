@@ -552,20 +552,247 @@ fn exact_l2p_boundary_filter_work_limit() -> usize {
     })
 }
 
-fn suffix_has_allowed_l2p_follow(
-    tokenizer: &Tokenizer,
-    terminal_1: usize,
-    suffix: &[u8],
-    active_bitset: &BitSet,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-) -> bool {
-    let allowed_after = disallowed_follows
-        .get(&(terminal_1 as u32))
-        .map_or_else(|| active_bitset.clone(), |blocked| active_bitset.difference(blocked));
-    if allowed_after.is_empty() {
-        return false;
+struct ExactPrefixStates {
+    states: std::sync::Arc<Vec<u32>>,
+    matched: BitSet,
+}
+
+struct ExactL2pBoundaryFilter {
+    profile_enabled: bool,
+    active_terminals: BitSet,
+    allowed_after: Vec<Option<BitSet>>,
+    predecessor_terminals_by_follow: Vec<BitSet>,
+    active_start_states: Vec<u32>,
+    first_byte_states: [Option<std::sync::Arc<ExactPrefixStates>>; 256],
+    seen: Vec<u32>,
+    seen_stamp: u32,
+    suffix_predecessors: HashMap<Vec<u8>, BitSet>,
+    first_byte_cache_hits: usize,
+    first_byte_cache_misses: usize,
+    suffix_cache_hits: usize,
+    suffix_cache_misses: usize,
+    prefix_state_reuses: usize,
+    prefix_state_builds: usize,
+    prefix_state_visits: usize,
+    prefix_transition_ms: f64,
+    prefix_matched_ms: f64,
+    suffix_follow_ms: f64,
+    suffix_predecessor_union_ms: f64,
+}
+
+impl ExactL2pBoundaryFilter {
+    fn new(
+        tokenizer: &Tokenizer,
+        active_terminals: BitSet,
+        disallowed_follows: &BTreeMap<u32, BitSet>,
+        active_start_states: Vec<u32>,
+        profile_enabled: bool,
+    ) -> Self {
+        let mut allowed_after = vec![None; active_terminals.len()];
+        for terminal in active_terminals.iter() {
+            let allowed = disallowed_follows
+                .get(&(terminal as u32))
+                .map_or_else(|| active_terminals.clone(), |blocked| active_terminals.difference(blocked));
+            if !allowed.is_empty() {
+                allowed_after[terminal] = Some(allowed);
+            }
+        }
+        let mut predecessor_terminals_by_follow =
+            (0..active_terminals.len()).map(|_| BitSet::new(active_terminals.len())).collect::<Vec<_>>();
+        for predecessor in active_terminals.iter() {
+            let Some(allowed) = allowed_after[predecessor].as_ref() else {
+                continue;
+            };
+            for follow in allowed.iter() {
+                predecessor_terminals_by_follow[follow].set(predecessor);
+            }
+        }
+        Self {
+            profile_enabled,
+            active_terminals,
+            allowed_after,
+            predecessor_terminals_by_follow,
+            active_start_states,
+            first_byte_states: std::array::from_fn(|_| None),
+            seen: vec![0; tokenizer.num_states() as usize],
+            seen_stamp: 0,
+            suffix_predecessors: HashMap::new(),
+            first_byte_cache_hits: 0,
+            first_byte_cache_misses: 0,
+            suffix_cache_hits: 0,
+            suffix_cache_misses: 0,
+            prefix_state_reuses: 0,
+            prefix_state_builds: 0,
+            prefix_state_visits: 0,
+            prefix_transition_ms: 0.0,
+            prefix_matched_ms: 0.0,
+            suffix_follow_ms: 0.0,
+            suffix_predecessor_union_ms: 0.0,
+        }
     }
 
+    fn next_stamp(&mut self) -> u32 {
+        self.seen_stamp = self.seen_stamp.wrapping_add(1);
+        if self.seen_stamp == 0 {
+            self.seen.fill(0);
+            self.seen_stamp = 1;
+        }
+        self.seen_stamp
+    }
+
+    fn prefix_states(&self, tokenizer: &Tokenizer, states: Vec<u32>) -> ExactPrefixStates {
+        let mut matched = BitSet::new(self.active_terminals.len());
+        for &state in &states {
+            matched.union_with(tokenizer.matched_terminal_bitset(state));
+        }
+        matched.intersect_with(&self.active_terminals);
+        ExactPrefixStates {
+            states: std::sync::Arc::new(states),
+            matched,
+        }
+    }
+
+    fn advance_states(&mut self, tokenizer: &Tokenizer, states: &[u32], byte: u8) -> ExactPrefixStates {
+        let transition_started_at = self.profile_enabled.then(std::time::Instant::now);
+        self.prefix_state_visits += states.len();
+        let stamp = self.next_stamp();
+        let mut next_states = Vec::new();
+        for &state in states {
+            let Some(next) = tokenizer.step(state, byte) else {
+                continue;
+            };
+            let slot = &mut self.seen[next as usize];
+            if *slot == stamp {
+                continue;
+            }
+            *slot = stamp;
+            next_states.push(next);
+        }
+        if let Some(transition_started_at) = transition_started_at {
+            self.prefix_transition_ms += transition_started_at.elapsed().as_secs_f64() * 1000.0;
+        }
+        let matched_started_at = self.profile_enabled.then(std::time::Instant::now);
+        let result = self.prefix_states(tokenizer, next_states);
+        if let Some(matched_started_at) = matched_started_at {
+            self.prefix_matched_ms += matched_started_at.elapsed().as_secs_f64() * 1000.0;
+        }
+        result
+    }
+
+    fn states_after_first_byte(
+        &mut self,
+        tokenizer: &Tokenizer,
+        byte: u8,
+    ) -> std::sync::Arc<ExactPrefixStates> {
+        let index = byte as usize;
+        if let Some(states) = &self.first_byte_states[index] {
+            self.first_byte_cache_hits += 1;
+            return std::sync::Arc::clone(states);
+        }
+        self.first_byte_cache_misses += 1;
+        let transition_started_at = self.profile_enabled.then(std::time::Instant::now);
+        self.prefix_state_visits += self.active_start_states.len();
+        let stamp = self.next_stamp();
+        let mut states = Vec::new();
+        for index in 0..self.active_start_states.len() {
+            let state = self.active_start_states[index];
+            let Some(next) = tokenizer.step(state, byte) else {
+                continue;
+            };
+            let slot = &mut self.seen[next as usize];
+            if *slot == stamp {
+                continue;
+            }
+            *slot = stamp;
+            states.push(next);
+        }
+        if let Some(transition_started_at) = transition_started_at {
+            self.prefix_transition_ms += transition_started_at.elapsed().as_secs_f64() * 1000.0;
+        }
+        let matched_started_at = self.profile_enabled.then(std::time::Instant::now);
+        let states = std::sync::Arc::new(self.prefix_states(tokenizer, states));
+        if let Some(matched_started_at) = matched_started_at {
+            self.prefix_matched_ms += matched_started_at.elapsed().as_secs_f64() * 1000.0;
+        }
+        self.first_byte_states[index] = Some(std::sync::Arc::clone(&states));
+        states
+    }
+
+    fn matched_terminals_can_precede_suffix(
+        &mut self,
+        tokenizer: &Tokenizer,
+        matched: &BitSet,
+        suffix: &[u8],
+    ) -> bool {
+        let predecessors = if let Some(cached) = self.suffix_predecessors.get(suffix) {
+            self.suffix_cache_hits += 1;
+            cached
+        } else {
+            self.suffix_cache_misses += 1;
+            let suffix_follow_started_at = self.profile_enabled.then(std::time::Instant::now);
+            let follows = suffix_follow_terminals(tokenizer, suffix, self.active_terminals.len());
+            if let Some(suffix_follow_started_at) = suffix_follow_started_at {
+                self.suffix_follow_ms += suffix_follow_started_at.elapsed().as_secs_f64() * 1000.0;
+            }
+            let predecessor_union_started_at = self.profile_enabled.then(std::time::Instant::now);
+            let mut computed = BitSet::new(self.active_terminals.len());
+            for follow in follows.iter() {
+                computed.union_with(&self.predecessor_terminals_by_follow[follow]);
+            }
+            if let Some(predecessor_union_started_at) = predecessor_union_started_at {
+                self.suffix_predecessor_union_ms += predecessor_union_started_at.elapsed().as_secs_f64() * 1000.0;
+            }
+            self.suffix_predecessors.insert(suffix.to_vec(), computed);
+            self.suffix_predecessors
+                .get(suffix)
+                .expect("inserted suffix predecessor set is present")
+        };
+        let result = !matched.is_disjoint(predecessors);
+        #[cfg(debug_assertions)]
+        {
+            let mut reference = false;
+            for predecessor in matched.iter() {
+                if let Some(allowed_after) = self.allowed_after[predecessor].as_ref()
+                    && suffix_has_allowed_l2p_follow_reference(tokenizer, suffix, allowed_after)
+                {
+                    reference = true;
+                    break;
+                }
+            }
+            debug_assert_eq!(
+                result,
+                reference,
+                "suffix terminal-set cache must preserve exact follow semantics",
+            );
+        }
+        result
+    }
+}
+
+/// The old per-terminal predicate is true precisely when an allowed terminal
+/// is accepted after some non-empty prefix of `suffix`, or remains live after
+/// the entire suffix.  Materializing that terminal set once lets all candidate
+/// predecessor terminals share the same lexer traversal.
+fn suffix_follow_terminals(tokenizer: &Tokenizer, suffix: &[u8], num_terminals: usize) -> BitSet {
+    let mut terminals = BitSet::new(num_terminals);
+    let mut state = tokenizer.initial_state_id();
+    for &byte in suffix {
+        let Some(next) = tokenizer.step(state, byte) else {
+            return terminals;
+        };
+        state = next;
+        terminals.union_with(tokenizer.matched_terminal_bitset(state));
+    }
+    terminals.union_with(tokenizer.possible_future_terminals(state));
+    terminals
+}
+
+#[cfg(debug_assertions)]
+fn suffix_has_allowed_l2p_follow_reference(
+    tokenizer: &Tokenizer,
+    suffix: &[u8],
+    allowed_after: &BitSet,
+) -> bool {
     let mut state = tokenizer.initial_state_id();
     for &byte in suffix {
         if tokenizer
@@ -590,73 +817,79 @@ fn suffix_has_allowed_l2p_follow(
         .is_disjoint(&allowed_after)
 }
 
-fn token_has_exact_active_l2p_boundary(
+#[inline]
+fn common_byte_prefix_len(left: &[u8], right: &[u8]) -> usize {
+    left.iter()
+        .zip(right)
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
+/// Evaluate exact L2P boundary membership for all candidate tokens in
+/// lexicographic byte order. Consecutive BPE tokens often share long prefixes;
+/// retaining the corresponding lexer-state subsets avoids both hash-key
+/// allocation and repeated subset propagation.
+fn classify_exact_l2p_boundary_candidates(
     tokenizer: &Tokenizer,
-    bytes: &[u8],
-    active_bitset: &BitSet,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-    active_start_states: &[u32],
-) -> bool {
-    if bytes.len() < 2 {
-        return false;
-    }
+    candidates: &[(u32, &[u8])],
+    filter: &mut ExactL2pBoundaryFilter,
+) -> HashMap<u32, bool> {
+    let mut sorted = candidates.to_vec();
+    sorted.sort_unstable_by(|(left_id, left), (right_id, right)| {
+        left.cmp(right).then_with(|| left_id.cmp(right_id))
+    });
 
-    let mut current_states = active_start_states.to_vec();
-    let mut next_states = Vec::<u32>::new();
-    let mut seen = vec![0u32; tokenizer.num_states() as usize];
-    let mut seen_stamp = 0u32;
-    let mut suffix_cache = HashMap::<(usize, usize), bool>::new();
+    let mut results = HashMap::with_capacity(sorted.len());
+    let mut previous: Option<&[u8]> = None;
+    let mut prefix_states = Vec::<std::sync::Arc<ExactPrefixStates>>::new();
 
-    for split_after in 0..bytes.len() - 1 {
-        seen_stamp = seen_stamp.wrapping_add(1);
-        if seen_stamp == 0 {
-            seen.fill(0);
-            seen_stamp = 1;
+    for (token_id, bytes) in sorted {
+        if bytes.len() < 2 {
+            results.insert(token_id, false);
+            previous = Some(bytes);
+            prefix_states.clear();
+            continue;
         }
-        next_states.clear();
 
-        for &state in &current_states {
-            let Some(next) = tokenizer.step(state, bytes[split_after]) else {
-                continue;
+        let common = previous.map_or(0, |previous| common_byte_prefix_len(previous, bytes));
+        prefix_states.truncate(common.min(prefix_states.len()));
+        filter.prefix_state_reuses += prefix_states.len();
+
+        while prefix_states.len() < bytes.len() - 1 {
+            let prefix_len = prefix_states.len() + 1;
+            let states = if prefix_len == 1 {
+                filter.states_after_first_byte(tokenizer, bytes[0])
+            } else {
+                let parent = &prefix_states[prefix_len - 2];
+                std::sync::Arc::new(filter.advance_states(
+                    tokenizer,
+                    parent.states.as_ref(),
+                    bytes[prefix_len - 1],
+                ))
             };
-            let slot = &mut seen[next as usize];
-            if *slot == seen_stamp {
-                continue;
+            filter.prefix_state_builds += 1;
+            prefix_states.push(states);
+        }
+
+        let mut crosses = false;
+        for (split_after, prefix) in prefix_states.iter().enumerate() {
+            if prefix.states.is_empty() {
+                break;
             }
-            *slot = seen_stamp;
-            next_states.push(next);
-        }
-
-        if next_states.is_empty() {
-            return false;
-        }
-
-        for &state in &next_states {
-            for terminal_1 in tokenizer.matched_terminals_iter(state) {
-                let terminal_1 = terminal_1 as usize;
-                if !active_bitset.contains(terminal_1) {
-                    continue;
-                }
-                let suffix_start = split_after + 1;
-                let has_follow = *suffix_cache.entry((terminal_1, suffix_start)).or_insert_with(|| {
-                    suffix_has_allowed_l2p_follow(
-                        tokenizer,
-                        terminal_1,
-                        &bytes[suffix_start..],
-                        active_bitset,
-                        disallowed_follows,
-                    )
-                });
-                if has_follow {
-                    return true;
-                }
+            if filter.matched_terminals_can_precede_suffix(
+                tokenizer,
+                &prefix.matched,
+                &bytes[split_after + 1..],
+            ) {
+                crosses = true;
+                break;
             }
         }
-
-        std::mem::swap(&mut current_states, &mut next_states);
+        results.insert(token_id, crosses);
+        previous = Some(bytes);
     }
 
-    false
+    results
 }
 
 pub(crate) fn split_vocab_for_active_l2p_terminals(
@@ -667,6 +900,10 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
     active_terminals: &[bool],
     shared_classify_cache: Option<&SharedClassifyCache>,
 ) -> L2pVocabBoundarySplit {
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let total_started_at = profile_enabled.then(std::time::Instant::now);
+    let setup_started_at = profile_enabled.then(std::time::Instant::now);
     let owned_bytesets: Option<SharedClassifyBytesets>;
     let bytesets = if let Some(cache) = shared_classify_cache {
         cache.get_or_init(|| SharedClassifyBytesets::build(tokenizer, num_terminals))
@@ -697,7 +934,11 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
     for &terminal in &active {
         active_reachable = active_reachable.union(&bytesets.reachable_bytes[terminal]);
     }
+    let setup_ms = setup_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
+    let boundary_pairs_started_at = profile_enabled.then(std::time::Instant::now);
     for &terminal_1 in &active {
         let last_bytes = bytesets.last_bytes[terminal_1];
         if last_bytes.is_empty() {
@@ -719,16 +960,27 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
             }
         }
     }
+    let boundary_pairs_ms = boundary_pairs_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
     let mut boundary_entries = Vec::<(u32, Vec<u8>)>::new();
     let mut single_entries = Vec::<(u32, Vec<u8>)>::new();
     let mut adjacent_tokens = 0usize;
     let mut irrelevant_tokens = 0usize;
-    let adjacent_candidate_count = vocab
+    let candidate_scan_started_at = profile_enabled.then(std::time::Instant::now);
+    let adjacent_candidates = vocab
         .entries
-        .values()
-        .filter(|bytes| token_has_active_l2p_boundary(bytes, &allowed_boundary_pairs))
-        .count();
+        .iter()
+        .filter_map(|(&token_id, bytes)| {
+            token_has_active_l2p_boundary(bytes, &allowed_boundary_pairs)
+                .then_some((token_id, bytes.as_slice()))
+        })
+        .collect::<Vec<_>>();
+    let adjacent_candidate_count = adjacent_candidates.len();
+    let candidate_scan_ms = candidate_scan_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
     let estimated_exact_work = active_start_states
         .len()
         .saturating_mul(adjacent_candidate_count);
@@ -738,6 +990,21 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
             estimated_exact_work <= exact_l2p_boundary_filter_work_limit()
         }
     };
+
+    let exact_filter_started_at = (use_exact_boundary_filter && profile_enabled)
+        .then(std::time::Instant::now);
+    let mut exact_filter = use_exact_boundary_filter.then(|| {
+        ExactL2pBoundaryFilter::new(
+            tokenizer,
+            active_bitset.clone(),
+            disallowed_follows,
+            active_start_states.clone(),
+            profile_enabled,
+        )
+    });
+    let exact_filter_setup_ms = exact_filter_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
     if std::env::var_os("GLRMASK_PROFILE_EXACT_L2P_BOUNDARY_FILTER").is_some() {
         eprintln!(
@@ -751,17 +1018,30 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
         );
     }
 
+    let exact_batch_started_at = (use_exact_boundary_filter && profile_enabled)
+        .then(std::time::Instant::now);
+    let exact_boundary_results = exact_filter.as_mut().map(|filter| {
+        classify_exact_l2p_boundary_candidates(tokenizer, &adjacent_candidates, filter)
+    });
+    let exact_boundary_ms = exact_batch_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    let classify_tokens_started_at = profile_enabled.then(std::time::Instant::now);
+    let mut exact_boundary_calls = 0usize;
     for (&token_id, bytes) in vocab.entries.iter() {
         if token_has_active_l2p_boundary(bytes, &allowed_boundary_pairs) {
             adjacent_tokens += 1;
-            if !use_exact_boundary_filter
-                || token_has_exact_active_l2p_boundary(
-                tokenizer,
-                bytes,
-                &active_bitset,
-                disallowed_follows,
-                &active_start_states,
-            ) {
+            let crosses_active_boundary = !use_exact_boundary_filter
+                || exact_boundary_results
+                    .as_ref()
+                    .and_then(|results| results.get(&token_id))
+                    .copied()
+                    .expect("exact L2P result exists for every adjacent candidate");
+            if use_exact_boundary_filter {
+                exact_boundary_calls += 1;
+            }
+            if crosses_active_boundary {
                 boundary_entries.push((token_id, bytes.clone()));
             } else if bytes.iter().any(|&byte| active_reachable.contains(byte)) {
                 single_entries.push((token_id, bytes.clone()));
@@ -777,9 +1057,46 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
             irrelevant_tokens += 1;
         }
     }
+    let classify_tokens_ms = classify_tokens_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
     let boundary_tokens = boundary_entries.len();
     let single_tokens = single_entries.len();
+    if let Some(total_started_at) = total_started_at {
+        let exact_filter = exact_filter.as_ref();
+        eprintln!(
+            "[glrmask/profile][l2p_vocab_routing] vocab_tokens={} active_terminals={} active_start_states={} setup_ms={:.3} boundary_pairs_ms={:.3} adjacent_candidate_scan_ms={:.3} exact_filter_setup_ms={:.3} classify_tokens_ms={:.3} exact_calls={} exact_ms={:.3} first_cache_hits={} first_cache_misses={} prefix_state_reuses={} prefix_state_builds={} prefix_state_visits={} prefix_transition_ms={:.3} prefix_matched_ms={:.3} suffix_follow_ms={:.3} suffix_predecessor_union_ms={:.3} suffix_cache_hits={} suffix_cache_misses={} suffix_cache_entries={} adjacent_candidates={} boundary_tokens={} single_tokens={} irrelevant_tokens={} total_ms={:.3}",
+            vocab.entries.len(),
+            active.len(),
+            active_start_states.len(),
+            setup_ms,
+            boundary_pairs_ms,
+            candidate_scan_ms,
+            exact_filter_setup_ms,
+            classify_tokens_ms,
+            exact_boundary_calls,
+            exact_boundary_ms,
+            exact_filter.map_or(0, |filter| filter.first_byte_cache_hits),
+            exact_filter.map_or(0, |filter| filter.first_byte_cache_misses),
+            exact_filter.map_or(0, |filter| filter.prefix_state_reuses),
+            exact_filter.map_or(0, |filter| filter.prefix_state_builds),
+            exact_filter.map_or(0, |filter| filter.prefix_state_visits),
+            exact_filter.map_or(0.0, |filter| filter.prefix_transition_ms),
+            exact_filter.map_or(0.0, |filter| filter.prefix_matched_ms),
+            exact_filter.map_or(0.0, |filter| filter.suffix_follow_ms),
+            exact_filter.map_or(0.0, |filter| filter.suffix_predecessor_union_ms),
+            exact_filter.map_or(0, |filter| filter.suffix_cache_hits),
+            exact_filter.map_or(0, |filter| filter.suffix_cache_misses),
+            exact_filter.map_or(0, |filter| filter.suffix_predecessors.len()),
+            adjacent_candidate_count,
+            boundary_tokens,
+            single_tokens,
+            irrelevant_tokens,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
     L2pVocabBoundarySplit {
         boundary_vocab: Vocab::new(boundary_entries, None),
         single_vocab: Vocab::new(single_entries, None),
