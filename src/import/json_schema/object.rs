@@ -56,6 +56,13 @@ struct AnyOfFixedObjectVariant {
     items: Vec<AnyOfFixedObjectItem>,
 }
 
+#[derive(Default)]
+struct ClosedAnyOfCollectionProfile {
+    lower_property_ms: f64,
+    identity_ms: f64,
+    schema_clone_ms: f64,
+}
+
 struct AnyOfObjectVariant {
     items: Vec<AnyOfFixedObjectItem>,
     fixed_keys: BTreeSet<String>,
@@ -278,6 +285,10 @@ impl<'a> Lowerer<'a> {
         branches: &[Schema],
         suppress_untyped_non_object_alts: bool,
     ) -> ImportResult<Option<GrammarExpr>> {
+        let profile_enabled = branches.len() >= 32
+            && (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some());
+        let profile_started_at = profile_enabled.then(std::time::Instant::now);
         if branches.len() < 2 {
             return Ok(None);
         }
@@ -290,11 +301,17 @@ impl<'a> Lowerer<'a> {
             return Ok(None);
         }
 
+        if let Some(expr) = self.try_lower_ordered_string_discriminator_closed_anyof(branches)? {
+            return Ok(Some(expr));
+        }
+
+        let collect_started_at = profile_enabled.then(std::time::Instant::now);
         let mut variants = Vec::with_capacity(branches.len());
+        let mut collection_profile = profile_enabled.then(ClosedAnyOfCollectionProfile::default);
         let mut include_untyped_non_object_alts = false;
         for branch in branches {
             let Some((variant, branch_requires_untyped_non_object_alts)) =
-                self.collect_closed_any_of_object_variant(branch)?
+                self.collect_closed_any_of_object_variant(branch, collection_profile.as_mut())?
             else {
                 return Ok(None);
             };
@@ -303,10 +320,205 @@ impl<'a> Lowerer<'a> {
             variants.push(variant);
         }
 
-        self.lower_closed_any_of_object_variants_expr_nfa(
+        let collect_ms = collect_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+        let build_started_at = profile_enabled.then(std::time::Instant::now);
+        let result = self.lower_closed_any_of_object_variants_expr_nfa(
             &variants,
             include_untyped_non_object_alts,
-        )
+        )?;
+        if let (Some(profile_started_at), Some(collect_ms), Some(build_started_at), Some(collection_profile)) =
+            (profile_started_at, collect_ms, build_started_at, collection_profile)
+        {
+            eprintln!(
+                "[glrmask/profile][json_schema_closed_anyof] branches={} variants={} outcome={} collect_ms={:.3} property_lower_ms={:.3} identity_ms={:.3} schema_clone_ms={:.3} nfa_build_ms={:.3} elapsed_ms={:.3}",
+                branches.len(),
+                variants.len(),
+                result.is_some(),
+                collect_ms,
+                collection_profile.lower_property_ms,
+                collection_profile.identity_ms,
+                collection_profile.schema_clone_ms,
+                build_started_at.elapsed().as_secs_f64() * 1000.0,
+                profile_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        Ok(result)
+    }
+
+    /// Fast path for a closed object union whose first, required property is a
+    /// unique singleton string discriminator in every branch.  The generic
+    /// closed-union builder initially creates one NFA state per branch and
+    /// discovers this shared key only during determinization.  Here the shared
+    /// key is represented directly, while the discriminator value selects the
+    /// branch-specific remainder.  This is the same language, including the
+    /// declaration-order restriction used by the ordinary closed-object path.
+    fn try_lower_ordered_string_discriminator_closed_anyof(
+        &mut self,
+        branches: &[Schema],
+    ) -> ImportResult<Option<GrammarExpr>> {
+        let profile_enabled = branches.len() >= 32
+            && (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some());
+        let profile_started_at = profile_enabled.then(std::time::Instant::now);
+        if branches.len() < 2 {
+            return Ok(None);
+        }
+
+        let mut discriminator_key: Option<&str> = None;
+        let mut payload_key: Option<&str> = None;
+        let mut cases: Vec<(String, &Schema)> = Vec::with_capacity(branches.len());
+        let mut seen_values = BTreeSet::new();
+
+        for branch in branches {
+            let SchemaKind::Assertions(assertions) = &branch.kind else {
+                return Ok(None);
+            };
+            if assertions.const_value.is_some()
+                || assertions.enum_values.is_some()
+                || assertions.array.is_some()
+                || assertions.string.is_some()
+                || assertions.number.is_some()
+                || !assertions.any_of.is_empty()
+                || !assertions.one_of.is_empty()
+                || !assertions.all_of.is_empty()
+                || assertions.not.is_some()
+            {
+                return Ok(None);
+            }
+            let Some(types) = assertions.types.as_ref() else {
+                return Ok(None);
+            };
+            if types.is_empty() || !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
+                return Ok(None);
+            }
+            let Some(object) = assertions.object.as_ref() else {
+                return Ok(None);
+            };
+            if !matches!(object.additional_properties, AdditionalProperties::Deny)
+                || !object.pattern_properties.is_empty()
+                || object.property_names.is_some()
+                || !object.property_dependencies.is_empty()
+                || object.min_properties != 0
+                || object.max_properties.is_some()
+                || object.properties.len() != 2
+                || object.required.len() != 2
+            {
+                return Ok(None);
+            }
+
+            let discriminator = &object.properties[0];
+            let payload = &object.properties[1];
+            if !object.required.contains(&discriminator.name)
+                || !object.required.contains(&payload.name)
+            {
+                return Ok(None);
+            }
+            let Some(discriminator_value) = plain_singleton_string_enum_value(&discriminator.schema) else {
+                return Ok(None);
+            };
+            match discriminator_key {
+                Some(key) if key != discriminator.name => return Ok(None),
+                None => discriminator_key = Some(&discriminator.name),
+                _ => {}
+            }
+            match payload_key {
+                Some(key) if key != payload.name => return Ok(None),
+                None => payload_key = Some(&payload.name),
+                _ => {}
+            }
+            if !seen_values.insert(discriminator_value.clone()) {
+                return Ok(None);
+            }
+            cases.push((discriminator_value, &payload.schema));
+        }
+
+        let discriminator_key = discriminator_key.expect("nonempty branch set has a discriminator key");
+        let payload_key = payload_key.expect("nonempty branch set has a payload key");
+        let validation_ms = profile_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+        let mut builder = ExprNfaBuilder::new();
+        let accept = builder.add_state();
+        builder.set_accepting(accept);
+        let after_discriminator_key = builder.add_state();
+        builder.add_transition(
+            builder.start_state(),
+            self.lower_literal_key_colon(discriminator_key),
+            after_discriminator_key,
+        );
+        let payload_key_prefix = self.lower_literal_key_colon_with_prefix(b", ", payload_key);
+        let payload_lower_started_at = profile_enabled.then(std::time::Instant::now);
+        let mut slow_payloads = profile_enabled.then(Vec::new);
+
+        for (discriminator_value, payload_schema) in cases {
+            let after_discriminator_value = builder.add_state();
+            builder.add_transition(
+                after_discriminator_key,
+                self.lower_string_literal(&discriminator_value),
+                after_discriminator_value,
+            );
+            let payload_started_at = profile_enabled.then(std::time::Instant::now);
+            let payload_expr = self.lower_schema(payload_schema)?;
+            if let (Some(payload_started_at), Some(slow_payloads)) =
+                (payload_started_at, slow_payloads.as_mut())
+            {
+                let shape = match &payload_schema.kind {
+                    SchemaKind::Assertions(assertions) => assertions.object.as_ref().map(|object| {
+                        (object.properties.len(), object.required.len())
+                    }),
+                    _ => None,
+                };
+                slow_payloads.push((
+                    payload_started_at.elapsed().as_secs_f64() * 1000.0,
+                    discriminator_value.clone(),
+                    shape,
+                ));
+            }
+            Self::add_expr_nfa_symbol_path(
+                &mut builder,
+                after_discriminator_value,
+                vec![
+                    payload_key_prefix.clone(),
+                    payload_expr,
+                ],
+                accept,
+            );
+        }
+
+        let payload_lower_ms = payload_lower_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+        let nfa_finalize_started_at = profile_enabled.then(std::time::Instant::now);
+        let rule_name = self.fresh_rule_name("json_anyof_object_body");
+        self.add_nonterminal_rule(
+            &rule_name,
+            GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized())),
+        );
+        if let (Some(profile_started_at), Some(validation_ms), Some(payload_lower_ms), Some(nfa_finalize_started_at)) =
+            (
+                profile_started_at,
+                validation_ms,
+                payload_lower_ms,
+                nfa_finalize_started_at,
+            )
+        {
+            eprintln!(
+                "[glrmask/profile][ordered_discriminator] branches={} validation_ms={:.3} payload_lower_ms={:.3} nfa_finalize_ms={:.3} elapsed_ms={:.3}",
+                branches.len(),
+                validation_ms,
+                payload_lower_ms,
+                nfa_finalize_started_at.elapsed().as_secs_f64() * 1000.0,
+                profile_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        if let Some(slow_payloads) = &mut slow_payloads {
+            slow_payloads.sort_unstable_by(|left, right| right.0.total_cmp(&left.0));
+            slow_payloads.truncate(20);
+            eprintln!(
+                "[glrmask/profile][ordered_discriminator_slowest_payloads] payloads={:?}",
+                slow_payloads,
+            );
+        }
+        Ok(Some(seq(vec![lit("{"), r(&rule_name), lit("}")])) )
     }
 
     pub(crate) fn try_lower_open_object_any_of_variants(
@@ -1142,21 +1354,24 @@ impl<'a> Lowerer<'a> {
     fn collect_closed_any_of_object_variant(
         &mut self,
         branch: &Schema,
+        profile: Option<&mut ClosedAnyOfCollectionProfile>,
     ) -> ImportResult<Option<(AnyOfFixedObjectVariant, bool)>> {
-        self.collect_closed_any_of_object_variant_inner(branch, 0)
+        self.collect_closed_any_of_object_variant_inner(branch, 0, profile)
     }
 
     fn collect_closed_any_of_object_variant_inner(
         &mut self,
         branch: &Schema,
         ref_depth: usize,
+        profile: Option<&mut ClosedAnyOfCollectionProfile>,
     ) -> ImportResult<Option<(AnyOfFixedObjectVariant, bool)>> {
+        let mut profile = profile;
         if let SchemaKind::Ref(pointer) = &branch.kind {
             if ref_depth >= 4 {
                 return Ok(None);
             }
             let target = self.resolve_ref_target(pointer)?.clone();
-            return self.collect_closed_any_of_object_variant_inner(&target, ref_depth + 1);
+            return self.collect_closed_any_of_object_variant_inner(&target, ref_depth + 1, profile);
         }
 
         let SchemaKind::Assertions(assertions) = &branch.kind else {
@@ -1222,11 +1437,26 @@ impl<'a> Lowerer<'a> {
 
         let mut items = Vec::with_capacity(object.properties.len());
         for property in &object.properties {
+            let lower_started_at = profile.as_ref().map(|_| std::time::Instant::now());
+            let value_expr = self.lower_schema(&property.schema)?;
+            if let (Some(lower_started_at), Some(profile)) = (lower_started_at, profile.as_deref_mut()) {
+                profile.lower_property_ms += lower_started_at.elapsed().as_secs_f64() * 1000.0;
+            }
+            let identity_started_at = profile.as_ref().map(|_| std::time::Instant::now());
+            let value_identity = exact_property_value_identity(&property.schema);
+            if let (Some(identity_started_at), Some(profile)) = (identity_started_at, profile.as_deref_mut()) {
+                profile.identity_ms += identity_started_at.elapsed().as_secs_f64() * 1000.0;
+            }
+            let clone_started_at = profile.as_ref().map(|_| std::time::Instant::now());
+            let item_schema = property.schema.clone();
+            if let (Some(clone_started_at), Some(profile)) = (clone_started_at, profile.as_deref_mut()) {
+                profile.schema_clone_ms += clone_started_at.elapsed().as_secs_f64() * 1000.0;
+            }
             items.push(AnyOfFixedObjectItem {
                 key: property.name.clone(),
-                value_expr: self.lower_schema(&property.schema)?,
-                value_identity: exact_property_value_identity(&property.schema),
-                schema: property.schema.clone(),
+                value_expr,
+                value_identity,
+                schema: item_schema,
                 required: object.required.contains(&property.name),
             });
         }
@@ -2342,6 +2572,11 @@ impl<'a> Lowerer<'a> {
         items: &[ObjectItem],
         tail_pair: Option<GrammarExpr>,
     ) -> ImportResult<GrammarExpr> {
+        let profile_started_at = self
+            .fixed_object_profile
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        let required_count = items.iter().filter(|item| item.required).count();
         let mut builder = ExprNfaBuilder::new();
         let mut states = vec![[0u32; 2]; items.len() + 1];
         states[0][0] = builder.start_state();
@@ -2357,10 +2592,15 @@ impl<'a> Lowerer<'a> {
         } else {
             None
         };
+        let item_symbols_started_at = profile_started_at.map(|_| std::time::Instant::now());
         let mut item_symbols = Vec::with_capacity(items.len());
         for item in items {
             item_symbols.push(Self::split_object_pair_symbols(&item.pair)?);
         }
+        let item_symbol_ms = item_symbols_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let graph_build_started_at = profile_started_at.map(|_| std::time::Instant::now());
         let tail_symbols = tail_pair
             .as_ref()
             .map(Self::split_object_pair_symbols)
@@ -2471,9 +2711,47 @@ impl<'a> Lowerer<'a> {
             }
         }
 
+        let graph_build_ms = graph_build_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let determinize_minimize_started_at =
+            profile_started_at.map(|_| std::time::Instant::now());
         let rule_name = self.fresh_rule_name("json_closed_object_body");
         let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
         self.add_nonterminal_rule(&rule_name, body);
+
+        let determinize_minimize_ms = determinize_minimize_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let total_ms = profile_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        if std::env::var("GLRMASK_PROFILE_FIXED_OBJECT_DETAIL")
+            .map(|value| value == "1")
+            .unwrap_or(false)
+            && total_ms >= 0.5
+        {
+            eprintln!(
+                "[glrmask/profile][fixed_object_slow] properties={} required={} keys={:?} symbols_ms={:.3} graph_ms={:.3} detmin_ms={:.3} total_ms={:.3}",
+                items.len(),
+                required_count,
+                items.iter().map(|item| item.key.as_str()).collect::<Vec<_>>(),
+                item_symbol_ms,
+                graph_build_ms,
+                determinize_minimize_ms,
+                total_ms,
+            );
+        }
+        if let Some(profile) = self.fixed_object_profile.as_mut() {
+            let shape = profile.shapes.entry((items.len(), required_count)).or_default();
+            profile.calls += 1;
+            profile.total_items += items.len();
+            shape.calls += 1;
+            shape.item_symbol_ms += item_symbol_ms;
+            shape.graph_build_ms += graph_build_ms;
+            shape.determinize_minimize_ms += determinize_minimize_ms;
+            shape.total_ms += total_ms;
+        }
 
         Ok(seq(vec![lit("{"), r(&rule_name), lit("}")]))
     }
@@ -3517,6 +3795,42 @@ fn singleton_string_enum_value(schema: &Schema) -> Option<String> {
     match assertions.enum_values.as_deref() {
         Some([serde_json::Value::String(value)]) => Some(value.clone()),
         _ => None,
+    }
+}
+
+/// A singleton string enum with no sibling assertion that can narrow or widen
+/// its language.  Unlike `singleton_string_enum_value`, this is suitable for a
+/// direct language-preserving discriminator construction.
+fn plain_singleton_string_enum_value(schema: &Schema) -> Option<String> {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return None;
+    };
+    let value = match assertions.enum_values.as_deref() {
+        Some([serde_json::Value::String(value)]) => value,
+        _ => return None,
+    };
+    if assertions.const_value.is_none()
+        && assertions.object.is_none()
+        && assertions.array.is_none()
+        && assertions.string.as_ref().is_none_or(|string| {
+            string.min_length == 0
+                && string.max_length.is_none()
+                && string.pattern.is_none()
+                && string.format.is_none()
+        })
+        && assertions.number.is_none()
+        && assertions.not.is_none()
+        && assertions.any_of.is_empty()
+        && assertions.one_of.is_empty()
+        && assertions.all_of.is_empty()
+        && assertions.types.as_ref().is_some_and(|types| {
+            !types.is_empty()
+                && types.iter().all(|schema_type| *schema_type == SchemaType::String)
+        })
+    {
+        Some(value.clone())
+    } else {
+        None
     }
 }
 

@@ -168,8 +168,8 @@ fn epsilon_closure(nfa: &NFA, seeds: &[u32]) -> BTreeSet<u32> {
     closed
 }
 
-fn gather_label_targets(nfa: &NFA, subset: &[u32]) -> BTreeMap<Label, BTreeSet<u32>> {
-    let mut label_targets = BTreeMap::<Label, BTreeSet<u32>>::new();
+fn gather_label_targets(nfa: &NFA, subset: &[u32]) -> BTreeMap<Label, Vec<u32>> {
+    let mut label_targets = BTreeMap::<Label, Vec<u32>>::new();
     for &state in subset {
         let Some(nfa_state) = nfa.states.get(state as usize) else {
             continue;
@@ -182,6 +182,70 @@ fn gather_label_targets(nfa: &NFA, subset: &[u32]) -> BTreeMap<Label, BTreeSet<u
         }
     }
     label_targets
+}
+
+/// Lazily cache single-state epsilon closures.  Determinization repeatedly
+/// computes closures of unions of NFA targets; expanding the constituent
+/// closures once and deduplicating through a generation-mark array avoids a
+/// B-tree allocation for every labeled edge while retaining sorted subset keys.
+struct EpsilonClosureCache<'a> {
+    nfa: &'a NFA,
+    closures: Vec<Option<Vec<u32>>>,
+    marks: Vec<u32>,
+    generation: u32,
+}
+
+impl<'a> EpsilonClosureCache<'a> {
+    fn new(nfa: &'a NFA) -> Self {
+        Self {
+            nfa,
+            closures: vec![None; nfa.states.len()],
+            marks: vec![0; nfa.states.len()],
+            generation: 0,
+        }
+    }
+
+    fn ensure_closure_for_state(&mut self, state: u32) -> Option<usize> {
+        let index = state as usize;
+        if index >= self.closures.len() {
+            return None;
+        }
+        if self.closures[index].is_none() {
+            self.closures[index] = Some(epsilon_closure(self.nfa, &[state]).into_iter().collect());
+        }
+        Some(index)
+    }
+
+    fn union<I>(&mut self, states: I) -> Vec<u32>
+    where
+        I: IntoIterator<Item = u32>,
+    {
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.marks.fill(0);
+            self.generation = 1;
+        }
+        let generation = self.generation;
+        let mut result = Vec::new();
+        for state in states {
+            let Some(closure_index) = self.ensure_closure_for_state(state) else {
+                continue;
+            };
+            let (closures, marks) = (&self.closures, &mut self.marks);
+            let closure = closures[closure_index]
+                .as_deref()
+                .expect("ensured epsilon closure is present");
+            for &target in closure {
+                let mark = &mut marks[target as usize];
+                if *mark != generation {
+                    *mark = generation;
+                    result.push(target);
+                }
+            }
+        }
+        result.sort_unstable();
+        result
+    }
 }
 
 fn get_or_create_subset_state(
@@ -200,6 +264,74 @@ fn get_or_create_subset_state(
 }
 
 pub fn determinize_nfa(nfa: &NFA) -> DFA {
+    if nfa.start_states.len() == 1
+        && nfa.states.iter().all(|state| {
+            state.epsilons.is_empty() && state.transitions.values().all(|targets| targets.len() <= 1)
+        })
+    {
+        return determinize_already_deterministic_nfa(nfa);
+    }
+
+    determinize_general_nfa(nfa)
+}
+
+/// Preserve the ordinary subset construction's breadth-first state numbering
+/// when the input is already a deterministic epsilon-free automaton.  This is
+/// common for schema-generated discriminator automata and avoids allocating a
+/// sorted subset, closure, and target set for every edge.
+fn determinize_already_deterministic_nfa(nfa: &NFA) -> DFA {
+    if nfa.states.is_empty() || nfa.start_states.is_empty() {
+        return DFA::new();
+    }
+
+    let start = nfa.start_states[0] as usize;
+    if start >= nfa.states.len() {
+        return determinize_general_nfa(nfa);
+    }
+
+    let mut dfa = DFA {
+        states: Vec::new(),
+        start_state: 0,
+    };
+    let mut state_map = vec![None; nfa.states.len()];
+    let mut worklist = VecDeque::new();
+
+    let start_id = dfa.add_state();
+    dfa.start_state = start_id;
+    state_map[start] = Some(start_id);
+    worklist.push_back(start);
+
+    while let Some(nfa_state_id) = worklist.pop_front() {
+        let dfa_state_id = state_map[nfa_state_id].expect("queued deterministic state has a DFA id");
+        let nfa_state = &nfa.states[nfa_state_id];
+        if nfa_state.is_accepting {
+            dfa.set_accepting(dfa_state_id, true);
+        }
+
+        for (&label, targets) in &nfa_state.transitions {
+            let Some(&target) = targets.first() else {
+                continue;
+            };
+            let target = target as usize;
+            if target >= nfa.states.len() {
+                continue;
+            }
+            let target_id = if let Some(target_id) = state_map[target] {
+                target_id
+            } else {
+                let target_id = dfa.add_state();
+                state_map[target] = Some(target_id);
+                worklist.push_back(target);
+                target_id
+            };
+            dfa.add_transition(dfa_state_id, label, target_id);
+        }
+    }
+
+    dfa
+}
+
+fn determinize_general_nfa(nfa: &NFA) -> DFA {
     if nfa.states.is_empty() || nfa.start_states.is_empty() {
         return DFA::new();
     }
@@ -210,9 +342,9 @@ pub fn determinize_nfa(nfa: &NFA) -> DFA {
     };
     let mut subset_map = HashMap::<Vec<u32>, u32>::new();
     let mut worklist = VecDeque::<Vec<u32>>::new();
+    let mut epsilon_closures = EpsilonClosureCache::new(nfa);
 
-    let start_closure = epsilon_closure(nfa, &nfa.start_states);
-    let start_key = start_closure.iter().copied().collect::<Vec<_>>();
+    let start_key = epsilon_closures.union(nfa.start_states.iter().copied());
     let start_id = dfa.add_state();
     dfa.start_state = start_id;
     subset_map.insert(start_key.clone(), start_id);
@@ -225,8 +357,7 @@ pub fn determinize_nfa(nfa: &NFA) -> DFA {
         }
 
         for (label, raw_targets) in gather_label_targets(nfa, &subset_key) {
-            let seeds = raw_targets.iter().copied().collect::<Vec<_>>();
-            let next_key = epsilon_closure(nfa, &seeds).into_iter().collect::<Vec<_>>();
+            let next_key = epsilon_closures.union(raw_targets.into_iter());
             if next_key.is_empty() {
                 continue;
             }
@@ -304,5 +435,20 @@ mod tests {
             .states
             .iter()
             .all(|state| state.epsilons.is_empty()));
+    }
+
+    #[test]
+    fn deterministic_fast_path_matches_general_subset_construction() {
+        let mut nfa = NFA::new();
+        let first = nfa.add_state();
+        let second = nfa.add_state();
+        let accept = nfa.add_state();
+        nfa.add_transition(0, 2, second);
+        nfa.add_transition(0, 1, first);
+        nfa.add_transition(first, 3, accept);
+        nfa.add_transition(second, 4, accept);
+        nfa.set_accepting(accept);
+
+        assert_eq!(determinize_nfa(&nfa), determinize_general_nfa(&nfa));
     }
 }

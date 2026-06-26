@@ -1436,6 +1436,9 @@ impl<'a> Lowerer<'a> {
         expr_nfa: &ExprNFA,
         dfa: &DFA,
     ) -> Result<(), GlrMaskError> {
+        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+        let rules_before = self.rules.len();
         let state_count = dfa.states.len();
         let start = dfa.start_state as usize;
         let nts = self.expr_nfa_state_nonterminals(state_count, start, "expr_nfa_prefix", None)?;
@@ -1445,8 +1448,17 @@ impl<'a> Lowerer<'a> {
             rhs: Vec::new(),
         });
 
+        // A transition label can occur on many DFA edges. Re-lowering simple
+        // labels repeats terminal-map work and, for literals, reconstructs the
+        // regex spelling. Cache only labels whose lowering is already a pure
+        // symbol lookup/registration; compound expressions deliberately keep
+        // their existing fresh-nonterminal behavior.
+        let mut reusable_symbols: Vec<Option<Symbol>> = vec![None; expr_nfa.symbols.len()];
+        let mut reusable_symbol_cache_hits = 0usize;
+        let mut transition_count = 0usize;
         for (state_index, state) in dfa.states.iter().enumerate() {
             for (label, target) in &state.transitions {
+                transition_count += 1;
                 let target = *target as usize;
                 if target >= state_count {
                     return Err(GlrMaskError::GrammarParse(format!(
@@ -1458,7 +1470,31 @@ impl<'a> Lowerer<'a> {
                         "ExprNFA transition label {label} is not a valid symbol index"
                     ))
                 })?;
-                let symbol = self.lower_expr_terminalish(symbol_expr)?;
+                let cacheable = matches!(
+                    symbol_expr,
+                    GrammarExpr::Ref(_)
+                        | GrammarExpr::Literal(_)
+                        | GrammarExpr::CharClass { .. }
+                        | GrammarExpr::RawRegex(_)
+                        | GrammarExpr::AnyByte
+                );
+                let symbol = if cacheable {
+                    let cache_slot = reusable_symbols.get_mut(*label as usize).ok_or_else(|| {
+                        GlrMaskError::GrammarParse(format!(
+                            "ExprNFA transition label {label} is not a valid symbol index"
+                        ))
+                    })?;
+                    if let Some(symbol) = cache_slot {
+                        reusable_symbol_cache_hits += 1;
+                        symbol.clone()
+                    } else {
+                        let symbol = self.lower_expr_terminalish(symbol_expr)?;
+                        *cache_slot = Some(symbol.clone());
+                        symbol
+                    }
+                } else {
+                    self.lower_expr_terminalish(symbol_expr)?
+                };
                 self.rules.push(Rule {
                     lhs: nts[target],
                     rhs: vec![Symbol::Nonterminal(nts[state_index]), symbol],
@@ -1473,6 +1509,17 @@ impl<'a> Lowerer<'a> {
                     rhs: vec![Symbol::Nonterminal(nts[state_index])],
                 });
             }
+        }
+
+        if profile_enabled && transition_count >= 64 {
+            eprintln!(
+                "[glrmask/profile][expr_nfa_emit] dfa_states={} transitions={} symbols={} reusable_cache_hits={} emitted_rules={}",
+                state_count,
+                transition_count,
+                expr_nfa.symbols.len(),
+                reusable_symbol_cache_hits,
+                self.rules.len() - rules_before,
+            );
         }
 
         Ok(())
@@ -2291,8 +2338,14 @@ fn dedup_rules_preserving_first_occurrence(rules: &mut Vec<Rule>) {
 }
 
 pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let validate_started_at = profile_enabled.then(std::time::Instant::now);
     validate_expr_nfa_placement(grammar)?;
+    let validate_ms = validate_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
 
+    let setup_started_at = profile_enabled.then(std::time::Instant::now);
     let mut lowerer = Lowerer::new();
     lowerer.named_rule_exprs = grammar
         .rules
@@ -2328,7 +2381,10 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         .filter(|r| r.is_terminal)
         .map(|r| (r.name.clone(), &r.expr))
         .collect();
+    let setup_ms = setup_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
 
+    let rule_lowering_started_at = profile_enabled.then(std::time::Instant::now);
     for rule in &grammar.rules {
         // Terminal rules: convert the entire body to a single Terminal::Expr.
         // Refs to other terminal rules are resolved via Expr::Shared.
@@ -2400,7 +2456,10 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
             }
         }
     }
+    let rule_lowering_ms = rule_lowering_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
 
+    let finish_started_at = profile_enabled.then(std::time::Instant::now);
     let start = lowerer
         .nonterminal_ids
         .get(&grammar.start)
@@ -2423,6 +2482,20 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     });
 
     dedup_rules_preserving_first_occurrence(&mut lowerer.rules);
+    if let (Some(validate_ms), Some(setup_ms), Some(rule_lowering_ms), Some(finish_started_at)) =
+        (validate_ms, setup_ms, rule_lowering_ms, finish_started_at)
+    {
+        eprintln!(
+            "[glrmask/profile][grammar_ast_lower] named_rules={} terminals={} generated_rules={} validate_ms={:.3} setup_ms={:.3} rule_lowering_ms={:.3} finish_ms={:.3}",
+            grammar.rules.len(),
+            grammar.rules.iter().filter(|rule| rule.is_terminal).count(),
+            lowerer.rules.len(),
+            validate_ms,
+            setup_ms,
+            rule_lowering_ms,
+            finish_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
 
     Ok(GrammarDef {
         rules: lowerer.rules,

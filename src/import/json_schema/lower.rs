@@ -43,6 +43,22 @@ pub(crate) const MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS: usize = 256;
 const STRING_ENUM_REGEX_MIN_VALUES: usize = 64;
 const STRING_ENUM_REGEX_MIN_ENCODED_BYTES: usize = 1024;
 
+#[derive(Default)]
+pub(crate) struct FixedObjectShapeProfile {
+    pub(crate) calls: usize,
+    pub(crate) item_symbol_ms: f64,
+    pub(crate) graph_build_ms: f64,
+    pub(crate) determinize_minimize_ms: f64,
+    pub(crate) total_ms: f64,
+}
+
+#[derive(Default)]
+pub(crate) struct FixedObjectLowerProfile {
+    pub(crate) calls: usize,
+    pub(crate) total_items: usize,
+    pub(crate) shapes: BTreeMap<(usize, usize), FixedObjectShapeProfile>,
+}
+
 pub(crate) fn lower_document(
     document: &SchemaDocument,
     config: JsonSchemaConfig,
@@ -69,6 +85,7 @@ pub(crate) struct Lowerer<'a> {
     pub(crate) shared_pattern_overlap_keys: BTreeMap<String, Vec<String>>,
     pub(crate) shared_pattern_overlap_literal_rules: BTreeMap<String, String>,
     pub(crate) shared_pattern_appearance_rules: BTreeMap<(String, Vec<String>), String>,
+    pub(crate) fixed_object_profile: Option<FixedObjectLowerProfile>,
     definition_rules: BTreeMap<String, String>,
     definition_by_pointer: BTreeMap<String, &'a Schema>,
     used_rule_names: BTreeSet<String>,
@@ -117,6 +134,9 @@ impl<'a> Lowerer<'a> {
             shared_pattern_overlap_keys: BTreeMap::new(),
             shared_pattern_overlap_literal_rules: BTreeMap::new(),
             shared_pattern_appearance_rules: BTreeMap::new(),
+            fixed_object_profile: (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some())
+            .then(FixedObjectLowerProfile::default),
             definition_rules: BTreeMap::new(),
             definition_by_pointer,
             used_rule_names: BTreeSet::new(),
@@ -132,6 +152,31 @@ impl<'a> Lowerer<'a> {
         let root_expr = self.lower_schema(&self.document.root)?;
         self.add_nonterminal_rule(&root_rule, root_expr);
         self.add_nonterminal_rule("start", r(&root_rule));
+        if let Some(profile) = self.fixed_object_profile.take() {
+            let shapes = profile
+                .shapes
+                .iter()
+                .map(|(&(items, required), profile)| {
+                    format!(
+                        "{}p/{}r:calls={} symbols_ms={:.3} graph_ms={:.3} detmin_ms={:.3} total_ms={:.3}",
+                        items,
+                        required,
+                        profile.calls,
+                        profile.item_symbol_ms,
+                        profile.graph_build_ms,
+                        profile.determinize_minimize_ms,
+                        profile.total_ms,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            eprintln!(
+                "[glrmask/profile][fixed_object_lower] calls={} total_items={} shapes=[{}]",
+                profile.calls,
+                profile.total_items,
+                shapes,
+            );
+        }
         simplify_terminal_rules(&mut self.rules);
         let mut grammar = NamedGrammar {
             rules: self.rules,
@@ -414,20 +459,20 @@ impl<'a> Lowerer<'a> {
             SchemaType::Null => Ok(r(JSON_NULL_RULE)),
             SchemaType::Boolean => Ok(r(JSON_BOOL_RULE)),
             SchemaType::Object => {
-                let object = assertions.object.clone().unwrap_or_default();
-                self.lower_object(&object)
+                let default = ObjectSchema::default();
+                self.lower_object(assertions.object.as_ref().unwrap_or(&default))
             }
             SchemaType::Array => {
-                let array = assertions.array.clone().unwrap_or_default();
-                self.lower_array(&array)
+                let default = ArraySchema::default();
+                self.lower_array(assertions.array.as_ref().unwrap_or(&default))
             }
             SchemaType::String => {
-                let string = assertions.string.clone().unwrap_or_default();
-                self.lower_string(&string)
+                let default = super::ast::StringSchema::default();
+                self.lower_string(assertions.string.as_ref().unwrap_or(&default))
             }
             SchemaType::Number => {
-                let number = assertions.number.clone().unwrap_or_default();
-                self.lower_number(&number)
+                let default = NumberSchema::default();
+                self.lower_number(assertions.number.as_ref().unwrap_or(&default))
             }
             SchemaType::Integer => {
                 let mut number = assertions.number.clone().unwrap_or_default();
