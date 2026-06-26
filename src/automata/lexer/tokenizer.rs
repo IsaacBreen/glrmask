@@ -139,35 +139,6 @@ struct TerminalFilteredDfa {
     transitions_pruned: bool,
 }
 
-/// A terminal-restricted view of the joint lexer DFA. States retain their joint
-/// IDs; states where this terminal is neither accepted nor can become accepted
-/// are marked absent in `joint_state_to_group_state`.
-pub(crate) struct TerminalGroupDfa<'a> {
-    tokenizer: &'a Tokenizer,
-    terminal: TerminalID,
-    pub(crate) joint_state_to_group_state: Vec<u32>,
-}
-
-impl TerminalGroupDfa<'_> {
-    pub(crate) fn num_states(&self) -> usize {
-        self.joint_state_to_group_state.len()
-    }
-
-    pub(crate) fn is_match(&self, state: u32) -> bool {
-        self.tokenizer.matched_terminal_bitset(state).contains(self.terminal as usize)
-    }
-
-    pub(crate) fn can_continue(&self, state: u32) -> bool {
-        self.tokenizer
-            .possible_future_terminals(state)
-            .contains(self.terminal as usize)
-    }
-
-    pub(crate) fn get_transition(&self, state: u32, byte: u8) -> u32 {
-        self.tokenizer.get_transition(state, byte)
-    }
-}
-
 impl Tokenizer {
     pub(super) fn from_parts(
         dfa: DFA,
@@ -270,21 +241,6 @@ impl Tokenizer {
 
     pub fn matched_terminals(&self, state: u32) -> BTreeSet<TerminalID> {
         self.matched_terminals_iter(state).collect()
-    }
-
-    pub(crate) fn group_dfa(&self, terminal: TerminalID) -> TerminalGroupDfa<'_> {
-        let joint_state_to_group_state = (0..self.num_states())
-            .map(|state| {
-                let live = self.matched_terminal_bitset(state).contains(terminal as usize)
-                    || self.possible_future_terminals(state).contains(terminal as usize);
-                if live { state } else { u32::MAX }
-            })
-            .collect();
-        TerminalGroupDfa {
-            tokenizer: self,
-            terminal,
-            joint_state_to_group_state,
-        }
     }
 
     fn matched_terminals_iter(

@@ -152,38 +152,19 @@ impl SparseTerminalResiduals {
 
         let blocks = minimize_sparse_terminal_residuals(&outputs, &transitions, width);
         let block_count = blocks.iter().copied().max().unwrap_or(DEAD_RESIDUAL_BLOCK) as usize + 1;
-        let mut local_blocks_by_terminal = vec![Vec::<u32>::new(); terminal_count];
-        for pair in 0..pair_terminals.len() {
-            let terminal = pair_terminals[pair] as usize;
-            let local_state = pair_states[pair] as usize;
-            let local_blocks = &mut local_blocks_by_terminal[terminal];
-            if local_blocks.len() <= local_state {
-                local_blocks.resize(local_state + 1, DEAD_RESIDUAL_BLOCK);
-            }
-            local_blocks[local_state] = blocks[pair];
-        }
-
         let mut state_blocks_by_terminal = vec![Vec::<(u32, u32)>::new(); terminal_count];
         let mut rows_by_state = vec![Vec::<(TerminalID, u32)>::new(); state_count];
         let mut inventories_by_terminal = vec![Vec::<u32>::new(); terminal_count];
-        for terminal in 0..terminal_count as TerminalID {
-            let group = tokenizer.group_dfa(terminal);
-            let local_blocks = &local_blocks_by_terminal[terminal as usize];
-            for (joint_state, &local_state) in group.joint_state_to_group_state.iter().enumerate() {
-                if local_state == NO_STATE {
-                    continue;
-                }
-                let block = local_blocks
-                    .get(local_state as usize)
-                    .copied()
-                    .unwrap_or(DEAD_RESIDUAL_BLOCK);
-                if block == DEAD_RESIDUAL_BLOCK {
-                    continue;
-                }
-                state_blocks_by_terminal[terminal as usize].push((joint_state as u32, block));
-                rows_by_state[joint_state].push((terminal, block));
-                inventories_by_terminal[terminal as usize].push(block);
+        for pair in 0..pair_terminals.len() {
+            let terminal = pair_terminals[pair];
+            let state = pair_states[pair];
+            let block = blocks[pair];
+            if block == DEAD_RESIDUAL_BLOCK {
+                continue;
             }
+            state_blocks_by_terminal[terminal as usize].push((state, block));
+            rows_by_state[state as usize].push((terminal, block));
+            inventories_by_terminal[terminal as usize].push(block);
         }
         for inventory in &mut inventories_by_terminal {
             inventory.sort_unstable();
@@ -229,6 +210,111 @@ impl SparseTerminalResiduals {
         }
         true
     }
+
+    /// Exact directed set-of-correlated-rows test. It checks
+    /// `Sig(Q, T\{representative}, [member→representative]) ⊆
+    ///  Sig(Q, T\{member})` using sparse canonical residual signatures.
+    fn subsumption_transport(
+        &self,
+        member: TerminalID,
+        representative: TerminalID,
+    ) -> Option<SubsumptionTransport> {
+        if member == representative || !self.inventory_is_subset_of(member, representative) {
+            return None;
+        }
+
+        let mut rhs_by_hash = FxHashMap::<u64, Vec<u32>>::default();
+        for state in 0..self.state_count as u32 {
+            let row = &self.rows_by_state[state as usize];
+            rhs_by_hash
+                .entry(sparse_rhs_row_hash(row, member))
+                .or_default()
+                .push(state);
+        }
+
+        let mut representative_state_to_members = vec![Vec::<u32>::new(); self.state_count];
+        for source_state in 0..self.state_count as u32 {
+            let source_row = &self.rows_by_state[source_state as usize];
+            let hash = sparse_member_to_representative_row_hash(
+                source_row,
+                member,
+                representative,
+            );
+            let candidates = rhs_by_hash.get(&hash)?;
+            let mut matched = false;
+            for &target_state in candidates {
+                let target_row = &self.rows_by_state[target_state as usize];
+                if !sparse_row_member_subsumed_by(
+                    source_row,
+                    target_row,
+                    member,
+                    representative,
+                ) {
+                    continue;
+                }
+                representative_state_to_members[target_state as usize].push(source_state);
+                matched = true;
+            }
+            if !matched {
+                return None;
+            }
+        }
+        for members in &mut representative_state_to_members {
+            members.sort_unstable();
+            members.dedup();
+        }
+        Some(SubsumptionTransport { representative_state_to_members })
+    }
+}
+
+fn sparse_row_item_hash(terminal: TerminalID, block: u32) -> u64 {
+    sigma_mix(terminal as usize, block)
+}
+
+fn sparse_rhs_row_hash(row: &[(TerminalID, u32)], member: TerminalID) -> u64 {
+    row.iter().fold(0u64, |hash, &(terminal, block)| {
+        if terminal == member { hash } else { hash ^ sparse_row_item_hash(terminal, block) }
+    })
+}
+
+fn sparse_member_to_representative_row_hash(
+    row: &[(TerminalID, u32)],
+    member: TerminalID,
+    representative: TerminalID,
+) -> u64 {
+    row.iter().fold(0u64, |hash, &(terminal, block)| {
+        if terminal == representative {
+            hash
+        } else if terminal == member {
+            hash ^ sparse_row_item_hash(representative, block)
+        } else {
+            hash ^ sparse_row_item_hash(terminal, block)
+        }
+    })
+}
+
+fn sparse_row_member_subsumed_by(
+    member_row: &[(TerminalID, u32)],
+    representative_row: &[(TerminalID, u32)],
+    member: TerminalID,
+    representative: TerminalID,
+) -> bool {
+    let mut transformed = Vec::with_capacity(member_row.len());
+    for &(terminal, block) in member_row {
+        if terminal == representative {
+            continue;
+        }
+        transformed.push((if terminal == member { representative } else { terminal }, block));
+    }
+    transformed.sort_unstable_by_key(|&(terminal, _)| terminal);
+    let mut rhs = Vec::with_capacity(representative_row.len());
+    rhs.extend(
+        representative_row
+            .iter()
+            .copied()
+            .filter(|&(terminal, _)| terminal != member),
+    );
+    transformed == rhs
 }
 
 fn minimize_sparse_terminal_residuals(
@@ -330,10 +416,11 @@ struct SwapTransport { class_map: Vec<u32> }
 
 #[derive(Clone, Debug)]
 struct SubsumptionTransport {
-    /// For each representative-row class, the member-row classes whose
-    /// projected rows it represents. A representative class may cover none,
-    /// one, or many member classes.
-    representative_to_members: Vec<Vec<u32>>,
+    /// Concrete representative lexer state → concrete member lexer states.
+    /// Extra representative behaviours are allowed and therefore map to an
+    /// empty set. This is the direct TSID transport used after weights are
+    /// lifted back to original lexer-state IDs.
+    representative_state_to_members: Vec<Vec<u32>>,
 }
 
 #[derive(Clone, Debug)]
@@ -486,13 +573,43 @@ impl TerminalInterchangeability {
                 .iter()
                 .filter(|row| !row.is_empty())
                 .count();
+            let active_ids = active
+                .iter()
+                .enumerate()
+                .filter_map(|(terminal, &is_active)| is_active.then_some(terminal as TerminalID))
+                .filter(|&terminal| Some(terminal) != ignore_terminal)
+                .collect::<Vec<_>>();
+            let mut inventory_candidates = 0usize;
+            let mut exact_subsumption_edges = 0usize;
+            let mut members_by_representative = vec![1usize; sparse.terminal_count];
+            for &member in &active_ids {
+                for &representative in &active_ids {
+                    if member != representative
+                        && sparse.inventory_is_subset_of(member, representative)
+                    {
+                        inventory_candidates += 1;
+                        if std::env::var_os("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_SPARSE_EXACT_ONLY")
+                            .is_some()
+                            && sparse.subsumption_transport(member, representative).is_some()
+                        {
+                            exact_subsumption_edges += 1;
+                            members_by_representative[representative as usize] += 1;
+                        }
+                    }
+                }
+            }
+            let max_members_for_representative = members_by_representative.into_iter().max().unwrap_or(1);
             eprintln!(
-                "[glrmask/profile][l2p_terminal_sparse_residuals] terminals={} raw_states={} residual_pairs={} residual_blocks={} nonempty_rows={} total_ms={:.3}",
+                "[glrmask/profile][l2p_terminal_sparse_residuals] terminals={} raw_states={} residual_pairs={} residual_blocks={} nonempty_rows={} inventory_candidates={} exact_checked={} exact_subsumption_edges={} max_members_for_representative={} total_ms={:.3}",
                 sparse.terminal_count,
                 sparse.state_count,
                 sparse.pair_count,
                 sparse.block_count,
                 nonempty_rows,
+                inventory_candidates,
+                std::env::var_os("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_SPARSE_EXACT_ONLY").is_some(),
+                exact_subsumption_edges,
+                max_members_for_representative,
                 sparse_started_at.elapsed().as_secs_f64() * 1000.0,
             );
             return Self::identity(active);
@@ -1017,13 +1134,11 @@ impl TerminalSigmaRows {
             return None;
         }
         if member == representative {
-            let mut identity = vec![Vec::new(); machine.class_count()];
-            for class in 0..machine.class_count() {
-                if machine.class_has_real_state[class] {
-                    identity[class].push(class as u32);
-                }
+            let mut identity = vec![Vec::new(); machine.real_state_count];
+            for state in 0..machine.real_state_count {
+                identity[state].push(state as u32);
             }
-            return Some(SubsumptionTransport { representative_to_members: identity });
+            return Some(SubsumptionTransport { representative_state_to_members: identity });
         }
 
         // RHS rows omit the member column.  Index them once for this ordered
@@ -1036,7 +1151,7 @@ impl TerminalSigmaRows {
                 .push(row_id);
         }
 
-        let mut representative_to_members = vec![Vec::<u32>::new(); machine.class_count()];
+        let mut representative_state_to_members = vec![Vec::<u32>::new(); machine.real_state_count];
         for (source_row_id, source) in self.rows.iter().enumerate() {
             let lhs_hash = sigma_member_to_representative_hash(source, member, representative);
             let candidates = rhs_by_hash.get(&lhs_hash)?;
@@ -1046,19 +1161,23 @@ impl TerminalSigmaRows {
                 if !sigma_row_member_subsumed_by(source, target, member, representative) {
                     continue;
                 }
-                representative_to_members[self.representative_class[target_row_id] as usize]
-                    .push(self.representative_class[source_row_id]);
+                let target_class = self.representative_class[target_row_id] as usize;
+                let source_class = self.representative_class[source_row_id] as usize;
+                for &target_state in &machine.class_original_states[target_class] {
+                    representative_state_to_members[target_state as usize]
+                        .extend(machine.class_original_states[source_class].iter().copied());
+                }
                 matched = true;
             }
             if !matched {
                 return None;
             }
         }
-        for members in &mut representative_to_members {
+        for members in &mut representative_state_to_members {
             members.sort_unstable();
             members.dedup();
         }
-        Some(SubsumptionTransport { representative_to_members })
+        Some(SubsumptionTransport { representative_state_to_members })
     }
 }
 
@@ -1564,19 +1683,32 @@ fn subsumption_transport_pairwise(
         }
     }
     let blocks = minimize_moore(&outputs, &transitions, machine.width);
-    let mut members_by_block = FxHashMap::<u32, Vec<u32>>::default();
+    let mut representatives_by_block = FxHashMap::<u32, Vec<u32>>::default();
     for class in 0..classes {
         if machine.class_has_real_state[class] {
-            members_by_block.entry(blocks[class]).or_default().push(class as u32);
+            representatives_by_block
+                .entry(blocks[classes + class])
+                .or_default()
+                .push(class as u32);
         }
     }
-    let mut representative_to_members = vec![Vec::new(); classes];
+    let mut representative_state_to_members = vec![Vec::new(); machine.real_state_count];
     for class in 0..classes {
         if !machine.class_has_real_state[class] { continue; }
-        let block = blocks[classes + class];
-        representative_to_members[class] = members_by_block.get(&block)?.clone();
+        let block = blocks[class];
+        let witnesses = representatives_by_block.get(&block)?;
+        for &representative_class in witnesses {
+            for &representative_state in &machine.class_original_states[representative_class as usize] {
+                representative_state_to_members[representative_state as usize]
+                    .extend(machine.class_original_states[class].iter().copied());
+            }
+        }
     }
-    Some(SubsumptionTransport { representative_to_members })
+    for members in &mut representative_state_to_members {
+        members.sort_unstable();
+        members.dedup();
+    }
+    Some(SubsumptionTransport { representative_state_to_members })
 }
 
 fn terminal_swap_map(n: usize, left: TerminalID, right: TerminalID) -> Vec<TerminalID> {
@@ -1658,18 +1790,16 @@ fn remap_weight_by_class_transport(
 
 fn remap_weight_by_subsumption_transport(
     weight: &Weight,
-    representative_to_members: &[Vec<u32>],
-    machine: &RowMachine,
+    representative_state_to_members: &[Vec<u32>],
 ) -> Weight {
     if weight.is_empty() || weight.is_full() { return weight.clone(); }
     let mut entries = Vec::<(u32, SharedTokenSet)>::new();
     for (start, end, tokens) in weight.compact_entries().expect("non-full weight must expose entries") {
         for source in start..=end {
-            let representative_class = machine.class_for_state[source as usize] as usize;
-            for &member_class in &representative_to_members[representative_class] {
-                entries.extend(machine.class_original_states[member_class as usize].iter().copied()
-                    .map(|member_state| (member_state, tokens.clone())));
-            }
+            entries.extend(representative_state_to_members[source as usize]
+                .iter()
+                .copied()
+                .map(|member_state| (member_state, tokens.clone())));
         }
     }
     entries.sort_unstable_by_key(|(tsid, _)| *tsid);
@@ -1713,7 +1843,6 @@ fn subsumption_dwa_view(
     representative: TerminalID,
     member: TerminalID,
     transport: &SubsumptionTransport,
-    machine: &RowMachine,
     profile: &mut TerminalInterchangeabilityProfile,
 ) -> DWA {
     let mut states = Vec::with_capacity(original.states().len());
@@ -1722,8 +1851,7 @@ fn subsumption_dwa_view(
         for (&label, &(target, ref weight)) in &state.transitions {
             let mapped_weight = remap_weight_by_subsumption_transport(
                 weight,
-                &transport.representative_to_members,
-                machine,
+                &transport.representative_state_to_members,
             );
             if mapped_weight.is_empty() { continue; }
             let mapped_label = if label == representative as i32 {
@@ -1737,8 +1865,7 @@ fn subsumption_dwa_view(
         let final_weight = state.final_weight.as_ref().map(|weight| {
             remap_weight_by_subsumption_transport(
                 weight,
-                &transport.representative_to_members,
-                machine,
+                &transport.representative_state_to_members,
             )
         });
         states.push(DWAState { transitions, final_weight });
@@ -1955,6 +2082,37 @@ mod tests {
     }
 
     #[test]
+    fn sparse_subsumption_matches_pairwise_oracle() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::make_choice(vec![Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"b".to_vec())]),
+            Expr::U8Seq(b"b".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let bytes = [true; 256];
+        let sparse = SparseTerminalResiduals::build(&tokenizer, &bytes);
+        let machine = RowMachine::build(&tokenizer, &bytes);
+        for member in 0..tokenizer.num_terminals() {
+            for representative in 0..tokenizer.num_terminals() {
+                if member == representative {
+                    continue;
+                }
+                assert_eq!(
+                    sparse
+                        .subsumption_transport(member, representative)
+                        .is_some(),
+                    subsumption_transport_pairwise(&machine, member, representative).is_some(),
+                    "member={member}, representative={representative}",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn directed_subsumption_keeps_extra_representative_behaviour() {
         // x has residuals {a*, ∅}; y has {a*, {ε}, ∅}. Hence x ⪯ y,
         // but not conversely. With only x/y columns, this is exactly the
@@ -1965,11 +2123,24 @@ mod tests {
             .subsumption_transport(&machine, 0, 1)
             .expect("x should be subsumed by y");
         assert!(transport
-            .representative_to_members
+            .representative_state_to_members
             .iter()
             .flatten()
-            .any(|&class| class == machine.class_for_state[0]));
+            .any(|&state| state == 0));
         assert!(rows.subsumption_transport(&machine, 1, 0).is_none());
+    }
+
+    #[test]
+    fn pairwise_subsumption_transport_has_the_same_direction() {
+        let machine = tiny_machine(&[0b11, 0b00, 0b10], &[0, 1, 1], 1);
+        let transport = subsumption_transport_pairwise(&machine, 0, 1)
+            .expect("x should be subsumed by y");
+        assert!(transport
+            .representative_state_to_members
+            .iter()
+            .flatten()
+            .any(|&state| state == 0));
+        assert!(subsumption_transport_pairwise(&machine, 1, 0).is_none());
     }
 
     #[test]
