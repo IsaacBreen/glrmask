@@ -95,7 +95,22 @@ impl RowMachine {
     }
 }
 
-impl SparseTerminalResiduals {
+#[derive(Clone, Debug)]
+struct SparseTerminalResidualProduct {
+    state_count: usize,
+    terminal_count: usize,
+    pair_terminals: Vec<TerminalID>,
+    pair_states: Vec<u32>,
+    outputs: Vec<bool>,
+    transitions: Vec<u32>,
+    raw_width: usize,
+    width: usize,
+    live_states_ms: f64,
+    transition_build_ms: f64,
+    column_quotient_ms: f64,
+}
+
+impl SparseTerminalResidualProduct {
     fn build(tokenizer: &Tokenizer, relevant_bytes: &[bool; 256]) -> Self {
         let started_at = Instant::now();
         let terminal_count = tokenizer.num_terminals() as usize;
@@ -103,7 +118,7 @@ impl SparseTerminalResiduals {
         let active_bytes = (0..=255u8)
             .filter(|&byte| relevant_bytes[byte as usize])
             .collect::<Vec<_>>();
-        let width = active_bytes.len();
+        let raw_width = active_bytes.len();
 
         let mut live_states_by_terminal = vec![Vec::<u32>::new(); terminal_count];
         for state in 0..state_count as u32 {
@@ -124,7 +139,6 @@ impl SparseTerminalResiduals {
         let mut pair_terminals = Vec::<TerminalID>::new();
         let mut pair_states = Vec::<u32>::new();
         let mut outputs = Vec::<bool>::new();
-
         for terminal in 0..terminal_count as TerminalID {
             let pair_ids = &mut pair_ids_by_terminal[terminal as usize];
             for &state in &live_states_by_terminal[terminal as usize] {
@@ -136,7 +150,7 @@ impl SparseTerminalResiduals {
             }
         }
 
-        let mut transitions = vec![NO_RESIDUAL_PAIR; pair_terminals.len() * width];
+        let mut transitions = vec![NO_RESIDUAL_PAIR; pair_terminals.len() * raw_width];
         for pair in 0..pair_terminals.len() {
             let terminal = pair_terminals[pair] as usize;
             let state = pair_states[pair];
@@ -146,28 +160,72 @@ impl SparseTerminalResiduals {
                     if let Ok(index) = pair_ids_by_terminal[terminal]
                         .binary_search_by_key(&next, |(candidate, _)| *candidate)
                     {
-                        transitions[pair * width + slot] = pair_ids_by_terminal[terminal][index].1;
+                        transitions[pair * raw_width + slot] = pair_ids_by_terminal[terminal][index].1;
                     }
                 }
             }
         }
         let transition_build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-        let (transitions, minimized_width) = quotient_sparse_transition_columns(
-            transitions,
-            pair_terminals.len(),
-            width,
-        );
+        let (transitions, width) =
+            quotient_sparse_transition_columns(transitions, pair_terminals.len(), raw_width);
         let column_quotient_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        Self {
+            state_count,
+            terminal_count,
+            pair_terminals,
+            pair_states,
+            outputs,
+            transitions,
+            raw_width,
+            width,
+            live_states_ms,
+            transition_build_ms,
+            column_quotient_ms,
+        }
+    }
+}
 
-        let blocks = minimize_sparse_terminal_residuals(&outputs, &transitions, minimized_width);
-        let residual_minimize_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+impl SparseTerminalResiduals {
+    fn build(tokenizer: &Tokenizer, relevant_bytes: &[bool; 256]) -> Self {
+        let started_at = Instant::now();
+        let product = SparseTerminalResidualProduct::build(tokenizer, relevant_bytes);
+        let minimize_started_at = Instant::now();
+        let (blocks, refinement_steps) =
+            minimize_sparse_terminal_residuals(&product.outputs, &product.transitions, product.width);
+        let residual_minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+        let raw_width = product.raw_width;
+        let width = product.width;
+        let live_states_ms = product.live_states_ms;
+        let transition_build_ms = product.transition_build_ms;
+        let column_quotient_ms = product.column_quotient_ms;
+        let result = Self::from_product(&product, &blocks);
+        if std::env::var_os("GLRMASK_PROFILE_L2P_SPARSE_RESIDUALS").is_some() {
+            eprintln!(
+                "[glrmask/profile][l2p_sparse_residual_build] terminals={} states={} pairs={} raw_bytes={} residual_bytes={} steps={} live_ms={:.3} transitions_ms={:.3} column_quotient_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+                result.terminal_count,
+                result.state_count,
+                result.pair_count,
+                raw_width,
+                width,
+                refinement_steps,
+                live_states_ms,
+                transition_build_ms,
+                column_quotient_ms,
+                residual_minimize_ms,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        result
+    }
+
+    fn from_product(product: &SparseTerminalResidualProduct, blocks: &[u32]) -> Self {
         let block_count = blocks.iter().copied().max().unwrap_or(DEAD_RESIDUAL_BLOCK) as usize + 1;
-        let mut state_blocks_by_terminal = vec![Vec::<(u32, u32)>::new(); terminal_count];
-        let mut rows_by_state = vec![Vec::<(TerminalID, u32)>::new(); state_count];
-        let mut inventories_by_terminal = vec![Vec::<u32>::new(); terminal_count];
-        for pair in 0..pair_terminals.len() {
-            let terminal = pair_terminals[pair];
-            let state = pair_states[pair];
+        let mut state_blocks_by_terminal = vec![Vec::<(u32, u32)>::new(); product.terminal_count];
+        let mut rows_by_state = vec![Vec::<(TerminalID, u32)>::new(); product.state_count];
+        let mut inventories_by_terminal = vec![Vec::<u32>::new(); product.terminal_count];
+        for pair in 0..product.pair_terminals.len() {
+            let terminal = product.pair_terminals[pair];
+            let state = product.pair_states[pair];
             let block = blocks[pair];
             if block == DEAD_RESIDUAL_BLOCK {
                 continue;
@@ -188,31 +246,15 @@ impl SparseTerminalResiduals {
         for (state, &hash) in full_row_hashes.iter().enumerate() {
             states_by_full_row_hash.entry(hash).or_default().push(state as u32);
         }
-        if std::env::var_os("GLRMASK_PROFILE_L2P_SPARSE_RESIDUALS").is_some() {
-            eprintln!(
-                "[glrmask/profile][l2p_sparse_residual_build] terminals={} states={} pairs={} raw_bytes={} residual_bytes={} live_ms={:.3} transitions_ms={:.3} column_quotient_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
-                terminal_count,
-                state_count,
-                pair_terminals.len(),
-                width,
-                minimized_width,
-                live_states_ms,
-                transition_build_ms,
-                column_quotient_ms,
-                residual_minimize_ms,
-                started_at.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-
         Self {
-            state_count,
-            terminal_count,
+            state_count: product.state_count,
+            terminal_count: product.terminal_count,
             state_blocks_by_terminal,
             rows_by_state,
             full_row_hashes,
             states_by_full_row_hash,
             inventories_by_terminal,
-            pair_count: pair_terminals.len(),
+            pair_count: product.pair_terminals.len(),
             block_count,
         }
     }
@@ -356,6 +398,83 @@ impl SparseTerminalResiduals {
         matches
     }
 
+    fn row_hash_index(&self) -> SparseRowHashIndex {
+        let mut full_counts = FxHashMap::default();
+        for &hash in &self.full_row_hashes {
+            *full_counts.entry(hash).or_insert(0) += 1;
+        }
+        SparseRowHashIndex { full_counts }
+    }
+
+    fn member_rhs_row_hashes(&self, member: TerminalID) -> MemberRhsRowHashes {
+        let mut removed_full_counts = FxHashMap::default();
+        let mut relabelled_member_hashes = FxHashSet::default();
+        for &(state, block) in &self.state_blocks_by_terminal[member as usize] {
+            let full_hash = self.full_row_hashes[state as usize];
+            *removed_full_counts.entry(full_hash).or_insert(0) += 1;
+            relabelled_member_hashes.insert(full_hash ^ sparse_row_item_hash(member, block));
+        }
+        MemberRhsRowHashes {
+            removed_full_counts,
+            relabelled_member_hashes,
+        }
+    }
+
+    fn hash_subsumption_possible(
+        &self,
+        index: &SparseRowHashIndex,
+        member: TerminalID,
+        representative: TerminalID,
+        rhs: &MemberRhsRowHashes,
+    ) -> bool {
+        let member_states = &self.state_blocks_by_terminal[member as usize];
+        let representative_states = &self.state_blocks_by_terminal[representative as usize];
+        let mut member_index = 0usize;
+        let mut representative_index = 0usize;
+        while member_index < member_states.len() || representative_index < representative_states.len() {
+            let next_member = member_states.get(member_index).map(|&(state, _)| state);
+            let next_representative = representative_states
+                .get(representative_index)
+                .map(|&(state, _)| state);
+            let state = match (next_member, next_representative) {
+                (Some(left), Some(right)) => left.min(right),
+                (Some(left), None) => left,
+                (None, Some(right)) => right,
+                (None, None) => break,
+            };
+            let member_block = if next_member == Some(state) {
+                let block = member_states[member_index].1;
+                member_index += 1;
+                block
+            } else {
+                DEAD_RESIDUAL_BLOCK
+            };
+            let representative_block = if next_representative == Some(state) {
+                let block = representative_states[representative_index].1;
+                representative_index += 1;
+                block
+            } else {
+                DEAD_RESIDUAL_BLOCK
+            };
+            let mut transformed_hash = self.full_row_hashes[state as usize];
+            if member_block != DEAD_RESIDUAL_BLOCK {
+                transformed_hash ^= sparse_row_item_hash(member, member_block);
+                transformed_hash ^= sparse_row_item_hash(representative, member_block);
+            }
+            if representative_block != DEAD_RESIDUAL_BLOCK {
+                transformed_hash ^= sparse_row_item_hash(representative, representative_block);
+            }
+            let unchanged_count = index.full_counts.get(&transformed_hash).copied().unwrap_or(0);
+            let removed_count = rhs.removed_full_counts.get(&transformed_hash).copied().unwrap_or(0);
+            if unchanged_count <= removed_count
+                && !rhs.relabelled_member_hashes.contains(&transformed_hash)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
     fn subsumption_transports(
         &self,
         candidates: &[(TerminalID, TerminalID)],
@@ -408,22 +527,34 @@ fn sparse_row_member_subsumed_by(
     member: TerminalID,
     representative: TerminalID,
 ) -> bool {
-    let mut transformed = Vec::with_capacity(member_row.len());
+    // Removing `representative` on the LHS and `member` on the RHS gives a
+    // bijection of terminal labels, with `member` relabelled to
+    // `representative`. Equal cardinality plus one exact lookup per LHS item
+    // is therefore sufficient; no temporary sorted row is needed.
+    let lhs_len = member_row.len()
+        - usize::from(sparse_row_block(member_row, representative).is_some());
+    let rhs_len = representative_row.len()
+        - usize::from(sparse_row_block(representative_row, member).is_some());
+    if lhs_len != rhs_len {
+        return false;
+    }
     for &(terminal, block) in member_row {
         if terminal == representative {
             continue;
         }
-        transformed.push((if terminal == member { representative } else { terminal }, block));
+        let mapped_terminal = if terminal == member { representative } else { terminal };
+        if sparse_row_block(representative_row, mapped_terminal) != Some(block) {
+            return false;
+        }
     }
-    transformed.sort_unstable_by_key(|&(terminal, _)| terminal);
-    let mut rhs = Vec::with_capacity(representative_row.len());
-    rhs.extend(
-        representative_row
-            .iter()
-            .copied()
-            .filter(|&(terminal, _)| terminal != member),
-    );
-    transformed == rhs
+    true
+}
+
+#[inline]
+fn sparse_row_block(row: &[(TerminalID, u32)], terminal: TerminalID) -> Option<u32> {
+    row.binary_search_by_key(&terminal, |&(candidate, _)| candidate)
+        .ok()
+        .map(|index| row[index].1)
 }
 
 /// Merge active byte columns only when their transition functions agree for
@@ -468,86 +599,452 @@ fn quotient_sparse_transition_columns(
     (reduced, retained.len())
 }
 
-fn minimize_sparse_terminal_residuals(
-    outputs: &[bool],
-    transitions: &[u32],
-    width: usize,
-) -> Vec<u32> {
-    let mut blocks = outputs
-        .iter()
-        .map(|&accepting| u32::from(accepting))
-        .collect::<Vec<_>>();
+#[derive(Clone, Debug)]
+struct SparseInventoryPrune {
+    candidate_counts: Vec<usize>,
+    hash_candidate_counts: Vec<Option<usize>>,
+    converged: bool,
+}
+
+impl SparseInventoryPrune {
+    fn eliminated_all(&self) -> bool {
+        self.candidate_counts.last().copied() == Some(0)
+            || self.hash_candidate_counts.last().copied() == Some(Some(0))
+    }
+}
+
+/// A necessary-condition filter for directed subsumption. At any finite residual
+/// depth, every member residual signature must already occur for its proposed
+/// representative. Once the candidate count reaches zero, exact subsumption is
+/// impossible and no deeper refinement can restore it.
+fn sparse_inventory_prune(
+    product: &SparseTerminalResidualProduct,
+    active_ids: &[TerminalID],
+) -> SparseInventoryPrune {
+    let mut blocks = initial_sparse_terminal_blocks(&product.outputs);
+    let mut candidate_counts = Vec::new();
+    let mut hash_candidate_counts = Vec::new();
     loop {
-        let mut buckets = FxHashMap::<u64, Vec<(usize, u32)>>::default();
-        let mut next = vec![DEAD_RESIDUAL_BLOCK; outputs.len()];
-        let mut next_block = DEAD_RESIDUAL_BLOCK;
-        for pair in 0..outputs.len() {
-            if !outputs[pair]
-                && (0..width).all(|slot| {
-                    sparse_residual_successor_block(pair, slot, transitions, width, &blocks)
-                        == DEAD_RESIDUAL_BLOCK
-                })
-            {
-                next[pair] = DEAD_RESIDUAL_BLOCK;
-                continue;
-            }
-            let hash = sparse_residual_signature_hash(pair, outputs, transitions, width, &blocks);
-            let candidates = buckets.entry(hash).or_default();
-            if let Some(&(_, block)) = candidates.iter().find(|&&(candidate, _)| {
-                sparse_residual_signatures_equal(
-                    pair,
-                    candidate,
-                    outputs,
-                    transitions,
-                    width,
-                    &blocks,
-                )
-            }) {
-                next[pair] = block;
-            } else {
-                next_block += 1;
-                candidates.push((pair, next_block));
-                next[pair] = next_block;
-            }
+        let count = sparse_inventory_candidate_count(product, &blocks, active_ids);
+        candidate_counts.push(count);
+        if count == 0 {
+            return SparseInventoryPrune {
+                candidate_counts,
+                hash_candidate_counts,
+                converged: false,
+            };
         }
+        if count <= product.pair_terminals.len() {
+            let candidates = sparse_inventory_candidate_pairs(product, &blocks, active_ids);
+            let rows = SparseTerminalResiduals::from_product(product, &blocks);
+            let survivors = sparse_row_hash_candidates(&rows, &candidates.pairs);
+            hash_candidate_counts.push(Some(survivors.len()));
+            if survivors.is_empty() {
+                return SparseInventoryPrune {
+                    candidate_counts,
+                    hash_candidate_counts,
+                    converged: false,
+                };
+            }
+        } else {
+            hash_candidate_counts.push(None);
+        }
+        let next = refine_sparse_terminal_blocks(
+            &product.outputs,
+            &product.transitions,
+            product.width,
+            &blocks,
+        );
         if next == blocks {
-            return blocks;
+            return SparseInventoryPrune {
+                candidate_counts,
+                hash_candidate_counts,
+                converged: true,
+            };
         }
         blocks = next;
     }
 }
 
-fn sparse_residual_successor_block(
-    pair: usize,
-    slot: usize,
+#[derive(Clone, Debug)]
+struct SparseInventoryCandidates {
+    count: usize,
+    pairs: Vec<(TerminalID, TerminalID)>,
+}
+
+#[derive(Clone, Debug)]
+struct SparseRowHashIndex {
+    full_counts: FxHashMap<u64, usize>,
+}
+
+#[derive(Clone, Debug)]
+struct MemberRhsRowHashes {
+    removed_full_counts: FxHashMap<u64, usize>,
+    relabelled_member_hashes: FxHashSet<u64>,
+}
+
+fn sparse_inventory_candidate_count(
+    product: &SparseTerminalResidualProduct,
+    blocks: &[u32],
+    active_ids: &[TerminalID],
+) -> usize {
+    sparse_inventory_candidates(product, blocks, active_ids, false).count
+}
+
+fn sparse_inventory_candidate_pairs(
+    product: &SparseTerminalResidualProduct,
+    blocks: &[u32],
+    active_ids: &[TerminalID],
+) -> SparseInventoryCandidates {
+    sparse_inventory_candidates(product, blocks, active_ids, true)
+}
+
+fn sparse_inventory_candidates(
+    product: &SparseTerminalResidualProduct,
+    blocks: &[u32],
+    active_ids: &[TerminalID],
+    materialize: bool,
+) -> SparseInventoryCandidates {
+    if active_ids.len() < 2 {
+        return SparseInventoryCandidates { count: 0, pairs: Vec::new() };
+    }
+    let words = product.terminal_count.div_ceil(64);
+    let mut is_active = vec![false; product.terminal_count];
+    let mut active_mask = vec![0u64; words];
+    for &terminal in active_ids {
+        let terminal = terminal as usize;
+        is_active[terminal] = true;
+        active_mask[terminal / 64] |= 1u64 << (terminal % 64);
+    }
+    let max_block = blocks.iter().copied().max().unwrap_or(DEAD_RESIDUAL_BLOCK) as usize;
+    let mut terminal_blocks = vec![Vec::<u32>::new(); product.terminal_count];
+    for pair in 0..product.pair_terminals.len() {
+        let terminal = product.pair_terminals[pair] as usize;
+        let block = blocks[pair];
+        if block != DEAD_RESIDUAL_BLOCK && is_active[terminal] {
+            terminal_blocks[terminal].push(block);
+        }
+    }
+    let mut block_terminals = vec![0u64; (max_block + 1) * words];
+    for &terminal in active_ids {
+        let terminal = terminal as usize;
+        let inventory = &mut terminal_blocks[terminal];
+        inventory.sort_unstable();
+        inventory.dedup();
+        for &block in inventory.iter() {
+            block_terminals[block as usize * words + terminal / 64] |= 1u64 << (terminal % 64);
+        }
+    }
+
+    let mut count = 0usize;
+    let mut pairs = Vec::new();
+    for &member in active_ids {
+        let member = member as usize;
+        let mut possible = active_mask.clone();
+        possible[member / 64] &= !(1u64 << (member % 64));
+        for &block in &terminal_blocks[member] {
+            let membership = &block_terminals[block as usize * words..(block as usize + 1) * words];
+            for (candidate_word, &members) in possible.iter_mut().zip(membership) {
+                *candidate_word &= members;
+            }
+        }
+        count += possible.iter().map(|word| word.count_ones() as usize).sum::<usize>();
+        if materialize {
+            for (word_index, word) in possible.iter().copied().enumerate() {
+                let mut bits = word;
+                while bits != 0 {
+                    let offset = bits.trailing_zeros() as usize;
+                    pairs.push((member as TerminalID, (word_index * 64 + offset) as TerminalID));
+                    bits &= bits - 1;
+                }
+            }
+        }
+    }
+    SparseInventoryCandidates { count, pairs }
+}
+
+
+fn sparse_row_hash_candidates(
+    rows: &SparseTerminalResiduals,
+    candidates: &[(TerminalID, TerminalID)],
+) -> Vec<(TerminalID, TerminalID)> {
+    let index = rows.row_hash_index();
+    let mut by_member = BTreeMap::<TerminalID, Vec<TerminalID>>::new();
+    for &(member, representative) in candidates {
+        by_member.entry(member).or_default().push(representative);
+    }
+    let mut result = Vec::new();
+    for (member, representatives) in by_member {
+        let rhs = rows.member_rhs_row_hashes(member);
+        for representative in representatives {
+            if rows.hash_subsumption_possible(&index, member, representative, &rhs) {
+                result.push((member, representative));
+            }
+        }
+    }
+    result
+}
+
+/// Exact DFA minimization for the sparse terminal-residual product.  This is
+/// Hopcroft partition refinement over the live pairs plus one shared dead state.
+/// The byte alphabet has already been quotient-ed exactly above.
+fn minimize_sparse_terminal_residuals(
+    outputs: &[bool],
     transitions: &[u32],
     width: usize,
-    blocks: &[u32],
-) -> u32 {
-    let target = transitions[pair * width + slot];
-    if target == NO_RESIDUAL_PAIR {
-        DEAD_RESIDUAL_BLOCK
+) -> (Vec<u32>, usize) {
+    let pairs = outputs.len();
+    let dead = pairs;
+    let states = pairs + 1;
+
+    // For every byte, materialize reverse edges as a target-indexed contiguous
+    // range. There is one outgoing edge per state/byte, including dead's loop.
+    let mut offsets = vec![0usize; width * (states + 1)];
+    for source in 0..states {
+        for slot in 0..width {
+            let target = if source == dead {
+                dead
+            } else {
+                let target = transitions[source * width + slot];
+                if target == NO_RESIDUAL_PAIR { dead } else { target as usize }
+            };
+            offsets[slot * (states + 1) + target + 1] += 1;
+        }
+    }
+    for slot in 0..width {
+        let base = slot * (states + 1);
+        for target in 0..states {
+            offsets[base + target + 1] += offsets[base + target];
+        }
+    }
+    let mut cursors = offsets.clone();
+    let mut reverse_sources = vec![0u32; width * states];
+    for source in 0..states {
+        for slot in 0..width {
+            let target = if source == dead {
+                dead
+            } else {
+                let target = transitions[source * width + slot];
+                if target == NO_RESIDUAL_PAIR { dead } else { target as usize }
+            };
+            let base = slot * (states + 1);
+            let position = cursors[base + target];
+            reverse_sources[slot * states + position] = source as u32;
+            cursors[base + target] += 1;
+        }
+    }
+    drop(cursors);
+
+    let mut nonaccepting = Vec::with_capacity(states);
+    let mut accepting = Vec::new();
+    for state in 0..states {
+        if state < pairs && outputs[state] {
+            accepting.push(state as u32);
+        } else {
+            nonaccepting.push(state as u32);
+        }
+    }
+    let mut blocks = Vec::<Vec<u32>>::new();
+    if !nonaccepting.is_empty() {
+        blocks.push(nonaccepting);
+    }
+    if !accepting.is_empty() {
+        blocks.push(accepting);
+    }
+    let mut block_of = vec![0usize; states];
+    for (block, members) in blocks.iter().enumerate() {
+        for &state in members {
+            block_of[state as usize] = block;
+        }
+    }
+
+    let mut in_work = vec![vec![false; width]; blocks.len()];
+    let mut worklist = VecDeque::<(usize, usize)>::new();
+    let seed = if blocks.len() == 2 && blocks[1].len() < blocks[0].len() {
+        1
     } else {
-        blocks[target as usize]
+        0
+    };
+    for slot in 0..width {
+        enqueue_sparse_splitter(&mut worklist, &mut in_work, seed, slot);
+    }
+
+    let mut marked = vec![0usize; states];
+    let mut touched_epoch = vec![0usize; blocks.len()];
+    let mut epoch = 0usize;
+    let mut processed_splitters = 0usize;
+    while let Some((splitter, slot)) = worklist.pop_front() {
+        if splitter >= blocks.len() || blocks[splitter].is_empty() {
+            continue;
+        }
+        in_work[splitter][slot] = false;
+        processed_splitters += 1;
+        epoch += 1;
+        if epoch == usize::MAX {
+            marked.fill(0);
+            touched_epoch.fill(0);
+            epoch = 1;
+        }
+        let mut touched = Vec::new();
+        let offset_base = slot * (states + 1);
+        for &target in &blocks[splitter] {
+            let start = offsets[offset_base + target as usize];
+            let end = offsets[offset_base + target as usize + 1];
+            for edge in start..end {
+                let source = reverse_sources[slot * states + edge] as usize;
+                if marked[source] == epoch {
+                    continue;
+                }
+                marked[source] = epoch;
+                let block = block_of[source];
+                if touched_epoch[block] != epoch {
+                    touched_epoch[block] = epoch;
+                    touched.push(block);
+                }
+            }
+        }
+
+        for block in touched {
+            let old = std::mem::take(&mut blocks[block]);
+            let mut inside = Vec::new();
+            let mut outside = Vec::new();
+            for state in old {
+                if marked[state as usize] == epoch {
+                    inside.push(state);
+                } else {
+                    outside.push(state);
+                }
+            }
+            if inside.is_empty() || outside.is_empty() {
+                blocks[block] = if inside.is_empty() { outside } else { inside };
+                continue;
+            }
+            // Keep the larger half under its old ID. This minimizes block_of
+            // writes; the smaller half receives the fresh ID.
+            let (keep, split) = if inside.len() >= outside.len() {
+                (inside, outside)
+            } else {
+                (outside, inside)
+            };
+            blocks[block] = keep;
+            let split_id = blocks.len();
+            for &state in &split {
+                block_of[state as usize] = split_id;
+            }
+            blocks.push(split);
+            in_work.push(vec![false; width]);
+            touched_epoch.push(0);
+            for transition in 0..width {
+                if in_work[block][transition] {
+                    enqueue_sparse_splitter(&mut worklist, &mut in_work, split_id, transition);
+                } else {
+                    let smaller = if blocks[block].len() <= blocks[split_id].len() {
+                        block
+                    } else {
+                        split_id
+                    };
+                    enqueue_sparse_splitter(&mut worklist, &mut in_work, smaller, transition);
+                }
+            }
+        }
+    }
+
+    let dead_block = block_of[dead];
+    let mut remap = vec![u32::MAX; blocks.len()];
+    remap[dead_block] = DEAD_RESIDUAL_BLOCK;
+    let mut next_block = DEAD_RESIDUAL_BLOCK + 1;
+    for block in 0..blocks.len() {
+        if block != dead_block {
+            remap[block] = next_block;
+            next_block += 1;
+        }
+    }
+    (
+        (0..pairs)
+            .map(|pair| remap[block_of[pair]])
+            .collect(),
+        processed_splitters,
+    )
+}
+
+fn enqueue_sparse_splitter(
+    worklist: &mut VecDeque<(usize, usize)>,
+    in_work: &mut [Vec<bool>],
+    block: usize,
+    slot: usize,
+) {
+    if !in_work[block][slot] {
+        in_work[block][slot] = true;
+        worklist.push_back((block, slot));
     }
 }
 
-fn sparse_residual_signature_hash(
-    pair: usize,
+fn initial_sparse_terminal_blocks(outputs: &[bool]) -> Vec<u32> {
+    outputs.iter().map(|&accepting| u32::from(accepting)).collect()
+}
+
+/// One exact finite-depth residual refinement. Equal block IDs mean that the
+/// terminal-restricted residuals agree through the current byte depth.
+fn refine_sparse_terminal_blocks(
     outputs: &[bool],
     transitions: &[u32],
     width: usize,
     blocks: &[u32],
-) -> u64 {
-    let mut hasher = FxHasher::default();
-    outputs[pair].hash(&mut hasher);
-    for slot in 0..width {
-        sparse_residual_successor_block(pair, slot, transitions, width, blocks).hash(&mut hasher);
+) -> Vec<u32> {
+    let mut buckets = FxHashMap::<u64, Vec<(usize, u32)>>::default();
+    let mut next = vec![DEAD_RESIDUAL_BLOCK; outputs.len()];
+    let mut next_block = DEAD_RESIDUAL_BLOCK;
+    for pair in 0..outputs.len() {
+        let base = pair * width;
+        let mut is_dead = !outputs[pair];
+        let mut hash = if outputs[pair] {
+            0x517c_c1b7_2722_0a95u64
+        } else {
+            0x6d0f_27bd_a2f3_11e9u64
+        };
+        for slot in 0..width {
+            let target = transitions[base + slot];
+            let successor = if target == NO_RESIDUAL_PAIR {
+                DEAD_RESIDUAL_BLOCK
+            } else {
+                blocks[target as usize]
+            };
+            is_dead &= successor == DEAD_RESIDUAL_BLOCK;
+            hash = hash
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                .rotate_left(7)
+                ^ (successor as u64).wrapping_add(0x94d0_49bb_1331_11eb);
+        }
+        if is_dead {
+            next[pair] = DEAD_RESIDUAL_BLOCK;
+            continue;
+        }
+        let candidates = buckets.entry(hash).or_default();
+        let mut found = None;
+        for &(candidate, block) in candidates.iter() {
+            if sparse_residual_blocks_equal(
+                pair,
+                candidate,
+                outputs,
+                transitions,
+                width,
+                blocks,
+            ) {
+                found = Some(block);
+                break;
+            }
+        }
+        let block = found.unwrap_or_else(|| {
+            next_block += 1;
+            candidates.push((pair, next_block));
+            next_block
+        });
+        next[pair] = block;
     }
-    hasher.finish()
+    next
 }
 
-fn sparse_residual_signatures_equal(
+fn sparse_residual_blocks_equal(
     left: usize,
     right: usize,
     outputs: &[bool],
@@ -555,11 +1052,47 @@ fn sparse_residual_signatures_equal(
     width: usize,
     blocks: &[u32],
 ) -> bool {
-    outputs[left] == outputs[right]
-        && (0..width).all(|slot| {
-            sparse_residual_successor_block(left, slot, transitions, width, blocks)
-                == sparse_residual_successor_block(right, slot, transitions, width, blocks)
-        })
+    if outputs[left] != outputs[right] {
+        return false;
+    }
+    let left_base = left * width;
+    let right_base = right * width;
+    for slot in 0..width {
+        let left_target = transitions[left_base + slot];
+        let right_target = transitions[right_base + slot];
+        let left_block = if left_target == NO_RESIDUAL_PAIR {
+            DEAD_RESIDUAL_BLOCK
+        } else {
+            blocks[left_target as usize]
+        };
+        let right_block = if right_target == NO_RESIDUAL_PAIR {
+            DEAD_RESIDUAL_BLOCK
+        } else {
+            blocks[right_target as usize]
+        };
+        if left_block != right_block {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+fn minimize_sparse_terminal_residuals_iterative(
+    outputs: &[bool],
+    transitions: &[u32],
+    width: usize,
+) -> (Vec<u32>, usize) {
+    let mut blocks = initial_sparse_terminal_blocks(outputs);
+    let mut rounds = 0usize;
+    loop {
+        rounds += 1;
+        let next = refine_sparse_terminal_blocks(outputs, transitions, width, &blocks);
+        if next == blocks {
+            return (blocks, rounds);
+        }
+        blocks = next;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1019,8 +1552,46 @@ impl TerminalInterchangeability {
         }
 
         let started_at = Instant::now();
-        let sparse = SparseTerminalResiduals::build(tokenizer, relevant_bytes);
+        let product = SparseTerminalResidualProduct::build(tokenizer, relevant_bytes);
+        let prune_started_at = Instant::now();
+        let prune = sparse_inventory_prune(&product, &active_ids);
+        let prune_ms = prune_started_at.elapsed().as_secs_f64() * 1000.0;
+        if std::env::var_os("GLRMASK_L2P_SUBSUMPTION_INVENTORY_PROBE_ONLY").is_some() {
+            eprintln!(
+                "[glrmask/profile][l2p_subsumption_inventory_probe] active_terminals={} pairs={} residual_bytes={} candidate_counts={:?} hash_candidate_counts={:?} converged={} product_ms={:.3} probe_ms={:.3}",
+                active_ids.len(),
+                product.pair_terminals.len(),
+                product.width,
+                prune.candidate_counts,
+                prune.hash_candidate_counts,
+                prune.converged,
+                product.column_quotient_ms,
+                prune_ms,
+            );
+            return Self::identity(active);
+        }
+        if prune.eliminated_all() {
+            if std::env::var_os("GLRMASK_PROFILE_L2P_SUBSUMPTION_PLAN").is_some() {
+                eprintln!(
+                    "[glrmask/profile][l2p_subsumption_plan] active_terminals={} sparse_pairs={} early_pruned=true candidate_counts={:?} hash_candidate_counts={:?} product_ms={:.3} prune_ms={:.3} total_ms={:.3}",
+                    active_ids.len(),
+                    product.pair_terminals.len(),
+                    prune.candidate_counts,
+                    prune.hash_candidate_counts,
+                    product.column_quotient_ms,
+                    prune_ms,
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            return Self::identity(active);
+        }
+        let (blocks, _) = minimize_sparse_terminal_residuals(
+            &product.outputs,
+            &product.transitions,
+            product.width,
+        );
         let sparse_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        let sparse = SparseTerminalResiduals::from_product(&product, &blocks);
         let candidates_started_at = Instant::now();
         let mut candidates = Vec::new();
         for &member in &active_ids {
@@ -2364,6 +2935,42 @@ mod tests {
     }
 
     #[test]
+    fn hopcroft_sparse_minimizer_matches_fixed_point_oracle() {
+        for seed in 0u32..64 {
+            let states = 9usize;
+            let width = 5usize;
+            let outputs = (0..states)
+                .map(|state| ((seed.wrapping_mul(17) + state as u32 * 13) & 3) == 0)
+                .collect::<Vec<_>>();
+            let transitions = (0..states * width)
+                .map(|index| {
+                    let value = seed
+                        .wrapping_mul(37)
+                        .wrapping_add(index as u32 * 19)
+                        .wrapping_add((index / width) as u32 * 7);
+                    if value % 7 == 0 {
+                        NO_RESIDUAL_PAIR
+                    } else {
+                        value % states as u32
+                    }
+                })
+                .collect::<Vec<_>>();
+            let (hopcroft, _) = minimize_sparse_terminal_residuals(&outputs, &transitions, width);
+            let (iterative, _) =
+                minimize_sparse_terminal_residuals_iterative(&outputs, &transitions, width);
+            for left in 0..states {
+                for right in 0..states {
+                    assert_eq!(
+                        hopcroft[left] == hopcroft[right],
+                        iterative[left] == iterative[right],
+                        "seed={seed}, states=({left}, {right})",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn sparse_terminal_residuals_match_dense_joint_product() {
         let expressions = vec![
             Expr::U8Seq(b"ab".to_vec()),
@@ -2426,6 +3033,39 @@ mod tests {
                     subsumption_transport_pairwise(&machine, member, representative).is_some(),
                     "member={member}, representative={representative}",
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_row_hash_filter_keeps_exact_subsumption() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ba".to_vec()),
+            Expr::U8Seq(b"b".to_vec()),
+            Expr::make_choice(vec![Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"b".to_vec())]),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let sparse = SparseTerminalResiduals::build(&tokenizer, &[true; 256]);
+        let candidates = (0..tokenizer.num_terminals())
+            .flat_map(|member| {
+                (0..tokenizer.num_terminals())
+                    .filter(move |&representative| representative != member)
+                    .map(move |representative| (member, representative))
+            })
+            .collect::<Vec<_>>();
+        let retained = sparse_row_hash_candidates(&sparse, &candidates)
+            .into_iter()
+            .collect::<FxHashSet<_>>();
+        for candidate in candidates {
+            if sparse
+                .subsumption_transport(candidate.0, candidate.1)
+                .is_some()
+            {
+                assert!(retained.contains(&candidate), "hash filter rejected {candidate:?}");
             }
         }
     }
