@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use range_set_blaze::RangeSetBlaze;
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
@@ -17,6 +18,12 @@ type QueryWeights = Vec<Option<FxHashMap<QueryKey, Weight>>>;
 type QueuedQueries = Vec<SmallQueuedQueries>;
 type DerivedEpsilons = Vec<Option<FxHashMap<u32, Weight>>>;
 type SubsetMemo = FxHashMap<(usize, usize), bool>;
+
+/// Wave scheduling pays two parallel-iterator setup costs per DAG layer.  This
+/// many predecessor edges per Rayon worker is enough to amortize that work on
+/// the small and large BFCL catalogs while leaving genuinely small parsers on
+/// the lower-overhead serial solver.
+const MIN_PARALLEL_FINALITY_EDGES_PER_WORKER: usize = 512;
 
 #[derive(Clone, Default)]
 enum SmallQueuedQueries {
@@ -770,28 +777,313 @@ fn apply_finality_fixpoint_acyclic(
     }
 }
 
+/// Group a reverse topological traversal into dependency-free waves.  Every
+/// edge goes from a later wave to an earlier wave, so all states in one wave
+/// can propagate their already-complete final weights concurrently.
+fn finality_reverse_topo_waves(
+    preds: &[Vec<PredEdge<'_>>],
+    reverse_topo_order: &[usize],
+) -> Vec<Vec<usize>> {
+    let mut wave_by_state = vec![0usize; preds.len()];
+    let mut max_wave = 0usize;
+    for &state_id in reverse_topo_order {
+        let predecessor_wave = wave_by_state[state_id] + 1;
+        for edge in &preds[state_id] {
+            let wave = &mut wave_by_state[edge.from];
+            if *wave < predecessor_wave {
+                *wave = predecessor_wave;
+                max_wave = max_wave.max(predecessor_wave);
+            }
+        }
+    }
+
+    let mut waves = (0..=max_wave).map(|_| Vec::new()).collect::<Vec<_>>();
+    for &state_id in reverse_topo_order {
+        waves[wave_by_state[state_id]].push(state_id);
+    }
+    waves
+}
+
+/// A wave normally has enough independent states to saturate the Rayon pool.
+/// However, a single state can still own most of the wave's predecessor edges.
+/// First compute each state's final weight, then split only states whose edge
+/// count exceeds the wave mean into contiguous edge chunks.  Results are merged
+/// in state/chunk/edge order, exactly matching the unsplit propagation order.
+fn apply_finality_fixpoint_acyclic_parallel_waves_chunked(
+    preds: &[Vec<PredEdge<'_>>],
+    reachable_final_weights: &mut [Option<GuardedFinalWeight>],
+    reverse_topo_order: &[usize],
+) {
+    let profile_detail = std::env::var("GLRMASK_PROFILE_FINALITY_WAVES_DETAIL")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    let worker_count = rayon::current_num_threads().max(1);
+    let mut pending_by_state: Vec<SmallVec<[GuardedFinalWeight; 4]>> =
+        (0..preds.len()).map(|_| SmallVec::new()).collect();
+
+    for (state_id, final_weight) in reachable_final_weights.iter_mut().enumerate() {
+        if let Some(final_weight) = final_weight.take() {
+            pending_by_state[state_id].push(final_weight);
+        }
+    }
+
+    for (wave_index, wave) in finality_reverse_topo_waves(preds, reverse_topo_order)
+        .into_iter()
+        .enumerate()
+    {
+        let state_jobs = wave
+            .into_iter()
+            .map(|state_id| (state_id, std::mem::take(&mut pending_by_state[state_id])))
+            .collect::<Vec<_>>();
+        let state_results = state_jobs
+            .into_par_iter()
+            .map_init(ScopedWeightOpCache::default, |weight_ops, (state_id, pending)| {
+                (state_id, union_guarded_pending(pending, weight_ops))
+            })
+            .collect::<Vec<_>>();
+
+        let mut live_states = 0usize;
+        let mut total_live_edges = 0usize;
+        for (state_id, reachable_final) in &state_results {
+            if reachable_final.is_some() {
+                live_states += 1;
+                total_live_edges += preds[*state_id].len();
+            }
+        }
+        if live_states == 0 {
+            continue;
+        }
+        let mean_live_edges = total_live_edges.div_ceil(live_states).max(1);
+
+        // (state-result index, inclusive start, exclusive end).  The vector is
+        // built in state order and each state's chunks are contiguous, so the
+        // later serial merge has the same pending insertion order as one
+        // unsplit state job.
+        let mut tasks = Vec::<(usize, usize, usize)>::new();
+        let mut split_states = 0usize;
+        let mut max_chunk_edges = 0usize;
+        for (result_index, (state_id, reachable_final)) in state_results.iter().enumerate() {
+            if reachable_final.is_none() {
+                continue;
+            }
+            let edge_count = preds[*state_id].len();
+            if edge_count == 0 {
+                continue;
+            }
+            let chunks = edge_count.div_ceil(mean_live_edges).min(worker_count).max(1);
+            split_states += usize::from(chunks > 1);
+            let chunk_len = edge_count.div_ceil(chunks);
+            for start in (0..edge_count).step_by(chunk_len) {
+                let end = (start + chunk_len).min(edge_count);
+                max_chunk_edges = max_chunk_edges.max(end - start);
+                tasks.push((result_index, start, end));
+            }
+        }
+
+        let propagation_results = tasks
+            .into_par_iter()
+            .map(|(result_index, start, end)| {
+                let (state_id, reachable_final) = &state_results[result_index];
+                let reachable_final = reachable_final
+                    .as_ref()
+                    .expect("propagation task only exists for live finality state");
+                let mut propagated = SmallVec::<[(usize, GuardedFinalWeight); 4]>::new();
+                for edge in &preds[*state_id][start..end] {
+                    if let Some(weight) = reachable_final.intersection_with_edge(edge.weight) {
+                        propagated.push((edge.from, weight));
+                    }
+                }
+                propagated
+            })
+            .collect::<Vec<_>>();
+        let state_result_count = state_results.len();
+        let propagation_task_count = propagation_results.len();
+
+        for (state_id, reachable_final) in state_results {
+            if let Some(reachable_final) = reachable_final {
+                reachable_final_weights[state_id] = Some(reachable_final);
+            }
+        }
+        let mut propagated_edges = 0usize;
+        for propagated in propagation_results {
+            propagated_edges += propagated.len();
+            for (predecessor, weight) in propagated {
+                pending_by_state[predecessor].push(weight);
+            }
+        }
+
+        if profile_detail {
+            eprintln!(
+                "[glrmask/profile][finality_chunked_wave] wave={} states={} live_states={} total_live_edges={} mean_live_edges={} split_states={} tasks={} max_chunk_edges={} propagated_edges={}",
+                wave_index,
+                state_result_count,
+                live_states,
+                total_live_edges,
+                mean_live_edges,
+                split_states,
+                propagation_task_count,
+                max_chunk_edges,
+                propagated_edges,
+            );
+        }
+    }
+}
+
 pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
     let n = nwa.states().len();
     if n == 0 {
         return;
     }
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let preds_started_at = profile_enabled.then(std::time::Instant::now);
     let (preds, outdegree) = build_finality_preds_and_outdegree(nwa);
+    let finality_edge_count = preds.iter().map(Vec::len).sum::<usize>();
+    let preds_ms = preds_started_at.map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+    let edge_profile = profile_enabled.then(|| {
+        let mut unique_weight_ptrs = FxHashSet::default();
+        let mut full_weights = 0usize;
+        let mut single_entry_weights = 0usize;
+        let mut wide_weight_ptrs = FxHashSet::default();
+        let mut wide_edge_count = 0usize;
+        let mut total_ranges = 0usize;
+        let mut edge_count = 0usize;
+        for edges in &preds {
+            for edge in edges {
+                edge_count += 1;
+                unique_weight_ptrs.insert(edge.weight.ptr_key());
+                full_weights += usize::from(edge.weight.is_full());
+                single_entry_weights += usize::from(edge.weight.single_compact_entry_parts().is_some());
+                let range_count = edge.weight.num_ranges();
+                total_ranges += range_count;
+                if range_count >= 32 {
+                    wide_edge_count += 1;
+                    wide_weight_ptrs.insert(edge.weight.ptr_key());
+                }
+            }
+        }
+        (
+            edge_count,
+            unique_weight_ptrs.len(),
+            full_weights,
+            single_entry_weights,
+            total_ranges,
+            wide_edge_count,
+            wide_weight_ptrs.len(),
+        )
+    });
+    let topo_started_at = profile_enabled.then(std::time::Instant::now);
     let reverse_topo_order = build_finality_reverse_topo_order(&preds, outdegree);
+    let topo_ms = topo_started_at.map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+    let acyclic = reverse_topo_order.is_some();
+    if profile_enabled {
+        if let Some(reverse_topo_order) = reverse_topo_order.as_deref() {
+            let mut layer_by_state = vec![0usize; n];
+            let mut max_layer = 0usize;
+            for &state_id in reverse_topo_order {
+                let next_layer = layer_by_state[state_id] + 1;
+                for edge in &preds[state_id] {
+                    let layer = &mut layer_by_state[edge.from];
+                    if *layer < next_layer {
+                        *layer = next_layer;
+                        max_layer = max_layer.max(next_layer);
+                    }
+                }
+            }
+            let mut counts = vec![0usize; max_layer + 1];
+            for layer in layer_by_state {
+                counts[layer] += 1;
+            }
+            eprintln!(
+                "[glrmask/profile][finality_layers] layers={} max_width={} singleton_layers={} first_widths={:?}",
+                counts.len(),
+                counts.iter().copied().max().unwrap_or(0),
+                counts.iter().filter(|&&count| count == 1).count(),
+                &counts[..counts.len().min(16)],
+            );
+        }
+    }
+    let initial_started_at = profile_enabled.then(std::time::Instant::now);
     let mut reachable_final_weights = collect_initial_final_weights(nwa);
+    let initial_ms = initial_started_at.map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
     let mut weight_ops = ScopedWeightOpCache::default();
+    let rayon_workers = rayon::current_num_threads();
+    let use_chunked_parallel_waves = acyclic
+        && rayon_workers > 1
+        && finality_edge_count >= MIN_PARALLEL_FINALITY_EDGES_PER_WORKER * rayon_workers;
 
+    let solve_started_at = profile_enabled.then(std::time::Instant::now);
     if let Some(reverse_topo_order) = reverse_topo_order.as_deref() {
-        apply_finality_fixpoint_acyclic(
+        if use_chunked_parallel_waves {
+            apply_finality_fixpoint_acyclic_parallel_waves_chunked(
+                &preds,
+                &mut reachable_final_weights,
+                reverse_topo_order,
+            );
+        } else {
+            apply_finality_fixpoint_acyclic(
+                &preds,
+                &mut reachable_final_weights,
+                reverse_topo_order,
+                &mut weight_ops,
+            );
+        }
+    } else {
+        apply_finality_fixpoint_worklist(
+            nwa,
             &preds,
             &mut reachable_final_weights,
-            reverse_topo_order,
             &mut weight_ops,
         );
-    } else {
-        apply_finality_fixpoint_worklist(nwa, &preds, &mut reachable_final_weights, &mut weight_ops);
     }
+    let solve_ms = solve_started_at.map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
 
+    let write_started_at = profile_enabled.then(std::time::Instant::now);
     write_final_weights(nwa, reachable_final_weights);
+    if let (
+        Some(preds_ms),
+        Some((
+            edge_count,
+            unique_edge_weights,
+            full_weights,
+            single_entry_weights,
+            total_ranges,
+            wide_edge_count,
+            unique_wide_edge_weights,
+        )),
+        Some(topo_ms),
+        Some(initial_ms),
+        Some(solve_ms),
+        Some(write_started_at),
+    ) = (
+        preds_ms,
+        edge_profile,
+        topo_ms,
+        initial_ms,
+        solve_ms,
+        write_started_at,
+    )
+    {
+        eprintln!(
+            "[glrmask/profile][finality_fixpoint] states={} edges={} unique_edge_weights={} full_weights={} single_entry_weights={} total_weight_ranges={} wide_edges={} unique_wide_edge_weights={} acyclic={} rayon_workers={} chunked_parallel_waves={} preds_ms={:.3} topo_ms={:.3} initial_ms={:.3} solve_ms={:.3} write_ms={:.3}",
+            n,
+            edge_count,
+            unique_edge_weights,
+            full_weights,
+            single_entry_weights,
+            total_ranges,
+            wide_edge_count,
+            unique_wide_edge_weights,
+            acyclic,
+            rayon_workers,
+            use_chunked_parallel_waves,
+            preds_ms,
+            topo_ms,
+            initial_ms,
+            solve_ms,
+            write_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
 }
 
 pub(crate) fn remove_negative_transitions(nwa: &mut NWA) {
@@ -833,7 +1125,8 @@ fn default_targets_are_terminal_and_redundant(state: &NWAState, terminal_states:
     }
 }
 
-fn grow_terminal_state_set(nwa: &NWA, terminal_states: &mut [bool]) {
+#[cfg(test)]
+fn grow_terminal_state_set_reference(nwa: &NWA, terminal_states: &mut [bool]) {
     loop {
         let mut changed = false;
         for (state_id, state) in nwa.states().iter().enumerate() {
@@ -849,6 +1142,77 @@ fn grow_terminal_state_set(nwa: &NWA, terminal_states: &mut [bool]) {
 
         if !changed {
             break;
+        }
+    }
+}
+
+/// Compute the same monotone terminal-state closure as the scan-based version,
+/// but visit a candidate only when one of its default successors becomes
+/// terminal. This is linear in eligible default edges rather than in
+/// (states × fixed-point rounds).
+fn grow_terminal_state_set(nwa: &NWA, terminal_states: &mut [bool]) {
+    let state_count = nwa.states().len();
+    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); state_count];
+    let mut remaining_nonterminal_targets = vec![usize::MAX; state_count];
+    let mut worklist = VecDeque::new();
+
+    for (state_id, &is_terminal) in terminal_states.iter().enumerate() {
+        if is_terminal {
+            worklist.push_back(state_id);
+        }
+    }
+
+    for (state_id, state) in nwa.states().iter().enumerate() {
+        if terminal_states[state_id] || !is_terminal_shape_candidate(state) {
+            continue;
+        }
+        let Some(final_weight) = state.final_weight.as_ref().filter(|weight| !weight.is_empty()) else {
+            continue;
+        };
+        let Some(targets) = state.transitions.get(&DEFAULT_LABEL) else {
+            terminal_states[state_id] = true;
+            worklist.push_back(state_id);
+            continue;
+        };
+        if targets.iter().any(|(_, edge_weight)| !edge_weight.is_subset(final_weight)) {
+            continue;
+        }
+
+        let mut remaining = 0usize;
+        for (target, _) in targets {
+            let target = *target as usize;
+            // Keep the scan implementation's behavior for malformed edges:
+            // an out-of-range target is never terminal, so this state cannot
+            // enter the terminal closure.
+            if target >= state_count {
+                remaining += 1;
+                continue;
+            }
+            if !terminal_states[target] {
+                dependents[target].push(state_id);
+                remaining += 1;
+            }
+        }
+        remaining_nonterminal_targets[state_id] = remaining;
+        if remaining == 0 {
+            terminal_states[state_id] = true;
+            worklist.push_back(state_id);
+        }
+    }
+
+    while let Some(terminal_state) = worklist.pop_front() {
+        for &dependent in &dependents[terminal_state] {
+            if terminal_states[dependent] {
+                continue;
+            }
+            let remaining = &mut remaining_nonterminal_targets[dependent];
+            debug_assert_ne!(*remaining, usize::MAX);
+            debug_assert!(*remaining > 0);
+            *remaining -= 1;
+            if *remaining == 0 {
+                terminal_states[dependent] = true;
+                worklist.push_back(dependent);
+            }
         }
     }
 }
@@ -883,10 +1247,150 @@ pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
 }
 
 pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let cancellation_started_at = profile_enabled.then(std::time::Instant::now);
     if !nwa.states().is_empty() {
         apply_cancellations_range(nwa, 0..nwa.states().len() as u32);
     }
+    let cancellation_ms = cancellation_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+    let finality_started_at = profile_enabled.then(std::time::Instant::now);
     apply_finality_fixpoint(nwa);
+    let finality_ms = finality_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+    let remove_negative_started_at = profile_enabled.then(std::time::Instant::now);
     remove_negative_transitions(nwa);
+    let remove_negative_ms = remove_negative_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+    let prune_defaults_started_at = profile_enabled.then(std::time::Instant::now);
     remove_redundant_default_transitions(nwa);
+    if let (Some(cancellation_ms), Some(finality_ms), Some(remove_negative_ms), Some(prune_defaults_started_at)) = (
+        cancellation_ms,
+        finality_ms,
+        remove_negative_ms,
+        prune_defaults_started_at,
+    ) {
+        eprintln!(
+            "[glrmask/profile][resolve_negatives] states={} cancellation_ms={:.3} finality_ms={:.3} remove_negative_ms={:.3} prune_defaults_ms={:.3}",
+            nwa.states().len(),
+            cancellation_ms,
+            finality_ms,
+            remove_negative_ms,
+            prune_defaults_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+}
+
+
+#[cfg(test)]
+mod terminal_default_tests {
+    use range_set_blaze::RangeSetBlaze;
+
+    use super::*;
+
+    fn weight(tokens: std::ops::RangeInclusive<u32>) -> Weight {
+        Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter([tokens]))
+    }
+
+    #[test]
+    fn terminal_default_worklist_matches_scan_fixed_point() {
+        let mut nwa = NWA::new(1, 7);
+        for _ in 0..5 {
+            nwa.add_state();
+        }
+        let all = weight(0..=7);
+        // 4 is terminal initially; 3 -> 4 -> 2 -> 1 become terminal in a
+        // dependency chain. State 0 has a non-default edge and must remain out.
+        for state in 1..=4 {
+            nwa.set_final_weight(state, all.clone());
+        }
+        nwa.add_transition(3, DEFAULT_LABEL, 4, all.clone());
+        nwa.add_transition(2, DEFAULT_LABEL, 3, all.clone());
+        nwa.add_transition(1, DEFAULT_LABEL, 2, all.clone());
+        nwa.add_transition(0, 0, 1, all.clone());
+        nwa.set_final_weight(0, all);
+
+        let initial = nwa
+            .states()
+            .iter()
+            .map(|state| is_terminal_shape_candidate(state) && !state.transitions.contains_key(&DEFAULT_LABEL))
+            .collect::<Vec<_>>();
+        let mut expected = initial.clone();
+        let mut actual = initial;
+        grow_terminal_state_set_reference(&nwa, &mut expected);
+        grow_terminal_state_set(&nwa, &mut actual);
+        assert_eq!(actual, expected);
+        assert_eq!(actual, vec![false, true, true, true, true]);
+    }
+
+    #[test]
+    fn terminal_default_worklist_rejects_non_subset_default_edge() {
+        let mut nwa = NWA::new(1, 7);
+        for _ in 0..2 {
+            nwa.add_state();
+        }
+        nwa.set_final_weight(1, weight(0..=7));
+        nwa.set_final_weight(0, weight(0..=3));
+        nwa.add_transition(0, DEFAULT_LABEL, 1, weight(0..=7));
+        let mut terminal_states = nwa
+            .states()
+            .iter()
+            .map(|state| is_terminal_shape_candidate(state) && !state.transitions.contains_key(&DEFAULT_LABEL))
+            .collect::<Vec<_>>();
+        grow_terminal_state_set(&nwa, &mut terminal_states);
+        assert_eq!(terminal_states, vec![false, true]);
+    }
+
+    #[test]
+    fn chunked_parallel_finality_waves_match_serial_dag_propagation() {
+        let mut nwa = NWA::new(1, 7);
+        for _ in 0..6 {
+            nwa.add_state();
+        }
+        let all = weight(0..=7);
+        nwa.set_final_weight(4, weight(0..=3));
+        nwa.set_final_weight(5, weight(4..=7));
+        nwa.add_epsilon(3, 4, all.clone());
+        nwa.add_transition(3, DEFAULT_LABEL, 5, all.clone());
+        nwa.add_epsilon(2, 3, all.clone());
+        nwa.add_transition(1, DEFAULT_LABEL, 3, all.clone());
+        nwa.add_epsilon(0, 1, all);
+
+        let (preds, outdegree) = build_finality_preds_and_outdegree(&nwa);
+        let reverse_topo_order =
+            build_finality_reverse_topo_order(&preds, outdegree).expect("test graph is acyclic");
+        let mut serial = collect_initial_final_weights(&nwa);
+        let mut chunked_parallel = serial.clone();
+        let mut weight_ops = ScopedWeightOpCache::default();
+
+        apply_finality_fixpoint_acyclic(
+            &preds,
+            &mut serial,
+            &reverse_topo_order,
+            &mut weight_ops,
+        );
+        apply_finality_fixpoint_acyclic_parallel_waves_chunked(
+            &preds,
+            &mut chunked_parallel,
+            &reverse_topo_order,
+        );
+
+        for (serial_weight, chunked_weight) in serial.iter().zip(&chunked_parallel) {
+            let serial_weight = serial_weight
+                .as_ref()
+                .map(|weight| weight.weight.clone())
+                .unwrap_or_else(Weight::empty);
+            let chunked_weight = chunked_weight
+                .as_ref()
+                .map(|weight| weight.weight.clone())
+                .unwrap_or_else(Weight::empty);
+            for tsid in 0..=7 {
+                assert_eq!(
+                    serial_weight.tokens_for_tsid(tsid),
+                    chunked_weight.tokens_for_tsid(tsid),
+                );
+            }
+        }
+    }
 }
