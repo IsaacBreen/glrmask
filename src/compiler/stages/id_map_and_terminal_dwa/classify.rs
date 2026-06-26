@@ -35,7 +35,7 @@ struct ActiveL2pRouteSetup {
     active_start_states: Arc<[u32]>,
     allowed_boundary_pairs: Box<[U8Set; 256]>,
     allowed_boundary_pair_words: Box<[u64; 1024]>,
-    active_reachable: U8Set,
+    active_reachable_by_byte: Box<[u8; 256]>,
 }
 
 #[derive(Default)]
@@ -705,13 +705,13 @@ enum TokenL2pRouteHint {
 fn token_l2p_route_hint(
     bytes: &[u8],
     allowed_boundary_pair_words: &[u64; 1024],
-    active_reachable: U8Set,
+    active_reachable_by_byte: &[u8; 256],
 ) -> TokenL2pRouteHint {
     let Some((&first, rest)) = bytes.split_first() else {
         return TokenL2pRouteHint::Irrelevant;
     };
     let mut previous = first;
-    let mut reaches_active = active_reachable.contains(first);
+    let mut reaches_active = active_reachable_by_byte[first as usize] != 0;
     for &byte in rest {
         let pair_index = ((previous as usize) << 8) | byte as usize;
         if (allowed_boundary_pair_words[pair_index >> 6] & (1u64 << (pair_index & 63)))
@@ -719,7 +719,7 @@ fn token_l2p_route_hint(
         {
             return TokenL2pRouteHint::Adjacent;
         }
-        reaches_active |= active_reachable.contains(byte);
+        reaches_active |= active_reachable_by_byte[byte as usize] != 0;
         previous = byte;
     }
     if reaches_active {
@@ -869,6 +869,10 @@ fn active_l2p_route_setup(
         active_reachable = active_reachable.union(&bytesets.reachable_bytes[terminal]);
         active_first_bytes = active_first_bytes.union(&bytesets.first_bytes[terminal]);
     }
+    let mut active_reachable_by_byte = Box::new([0u8; 256]);
+    for byte in active_reachable.iter() {
+        active_reachable_by_byte[byte as usize] = 1;
+    }
     for terminal_1 in active_bitset.iter() {
         let last_bytes = bytesets.last_bytes[terminal_1];
         if last_bytes.is_empty() {
@@ -911,7 +915,7 @@ fn active_l2p_route_setup(
         active_start_states: active_start_states.into(),
         allowed_boundary_pairs,
         allowed_boundary_pair_words,
-        active_reachable,
+        active_reachable_by_byte,
     });
     if super::types::compile_profile_enabled() {
         eprintln!(
@@ -1501,7 +1505,7 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
         match token_l2p_route_hint(
             bytes,
             &route_setup.allowed_boundary_pair_words,
-            route_setup.active_reachable,
+            &route_setup.active_reachable_by_byte,
         ) {
             TokenL2pRouteHint::Adjacent => adjacent_entries.push((token_id, bytes.as_slice())),
             TokenL2pRouteHint::Single => single_token_ids.push(token_id),
@@ -1593,7 +1597,7 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
             boundary_token_ids.push(token_id);
         } else if bytes
             .iter()
-            .any(|&byte| route_setup.active_reachable.contains(byte))
+            .any(|&byte| route_setup.active_reachable_by_byte[byte as usize] != 0)
         {
             adjacent_single_token_ids.push(token_id);
         } else {
@@ -2005,6 +2009,10 @@ mod tests {
         let mut active_reachable = U8Set::empty();
         active_reachable.insert(b'a');
         active_reachable.insert(b'z');
+        let mut active_reachable_by_byte = [0u8; 256];
+        for byte in active_reachable.iter() {
+            active_reachable_by_byte[byte as usize] = 1;
+        }
         let mut pairs = [0u64; 1024];
         let pair_index = ((b'x' as usize) << 8) | b'y' as usize;
         pairs[pair_index >> 6] |= 1u64 << (pair_index & 63);
@@ -2018,7 +2026,7 @@ mod tests {
                 TokenL2pRouteHint::Irrelevant
             };
             assert_eq!(
-                token_l2p_route_hint(bytes, &pairs, active_reachable),
+                token_l2p_route_hint(bytes, &pairs, &active_reachable_by_byte),
                 expected,
                 "bytes={bytes:?}"
             );
