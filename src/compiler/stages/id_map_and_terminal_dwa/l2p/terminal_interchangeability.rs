@@ -467,6 +467,13 @@ struct SwapGenerator {
 }
 
 #[derive(Clone, Debug)]
+struct SubsumptionGenerator {
+    representative: TerminalID,
+    member: TerminalID,
+    transport: SubsumptionTransport,
+}
+
+#[derive(Clone, Debug)]
 struct GroupElement { terminal_map: Vec<TerminalID>, class_map: Vec<u32> }
 
 impl GroupElement {
@@ -492,6 +499,7 @@ pub(crate) struct TerminalInterchangeabilityProfile {
     pub(crate) inactive_members: usize,
     pub(crate) row_classes: usize,
     pub(crate) swap_generators: usize,
+    pub(crate) subsumption_generators: usize,
     pub(crate) group_elements: usize,
     pub(crate) concrete_tsids_before: usize,
     pub(crate) concrete_tsids_after: usize,
@@ -515,6 +523,8 @@ pub(crate) struct TerminalInterchangeability {
     members_by_representative: Vec<Vec<TerminalID>>,
     row_machine: Option<RowMachine>,
     generators: Vec<SwapGenerator>,
+    subsumption_generators: Vec<SubsumptionGenerator>,
+    original_state_count: usize,
     debug_target_state: Option<u32>,
     debug_token_id: Option<u32>,
     profile: TerminalInterchangeabilityProfile,
@@ -530,6 +540,8 @@ impl TerminalInterchangeability {
             members_by_representative: (0..n as u32).map(|t| vec![t]).collect(),
             row_machine: None,
             generators: Vec::new(),
+            subsumption_generators: Vec::new(),
+            original_state_count: 0,
             debug_target_state: None,
             debug_token_id: None,
             profile: TerminalInterchangeabilityProfile {
@@ -541,7 +553,9 @@ impl TerminalInterchangeability {
     }
 
     pub(crate) fn active_representatives(&self) -> &[bool] { &self.active_representatives }
-    pub(crate) fn is_identity(&self) -> bool { self.generators.is_empty() }
+    pub(crate) fn is_identity(&self) -> bool {
+        self.generators.is_empty() && self.subsumption_generators.is_empty()
+    }
     pub(crate) fn profile(&self) -> TerminalInterchangeabilityProfile { self.profile.clone() }
 
     pub(crate) fn nontrivial_classes(&self) -> Vec<Vec<TerminalID>> {
@@ -558,6 +572,9 @@ impl TerminalInterchangeability {
         ignore_terminal: Option<TerminalID>,
         relevant_bytes: &[bool; 256],
     ) -> Self {
+        if std::env::var_os("GLRMASK_L2P_TERMINAL_SUBSUMPTION").is_some() {
+            return Self::build_subsumption(tokenizer, active, ignore_terminal, relevant_bytes);
+        }
         let active_ids: Vec<TerminalID> = active.iter().enumerate()
             .filter_map(|(t, &yes)| yes.then_some(t as TerminalID))
             .collect();
@@ -811,6 +828,8 @@ impl TerminalInterchangeability {
             members_by_representative: members,
             row_machine: Some(machine.clone()),
             generators,
+            subsumption_generators: Vec::new(),
+            original_state_count: tokenizer.num_states() as usize,
             debug_target_state,
             debug_token_id,
             profile: TerminalInterchangeabilityProfile {
@@ -830,8 +849,125 @@ impl TerminalInterchangeability {
         }.with_generator_count()
     }
 
+    fn build_subsumption(
+        tokenizer: &Tokenizer,
+        active: &[bool],
+        ignore_terminal: Option<TerminalID>,
+        relevant_bytes: &[bool; 256],
+    ) -> Self {
+        let active_ids = active
+            .iter()
+            .enumerate()
+            .filter_map(|(terminal, &is_active)| is_active.then_some(terminal as TerminalID))
+            .filter(|&terminal| Some(terminal) != ignore_terminal)
+            .collect::<Vec<_>>();
+        if active_ids.len() < 2 {
+            return Self::identity(active);
+        }
+
+        let started_at = Instant::now();
+        let sparse = SparseTerminalResiduals::build(tokenizer, relevant_bytes);
+        let sparse_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        let mut transports = FxHashMap::<(TerminalID, TerminalID), SubsumptionTransport>::default();
+        for &member in &active_ids {
+            for &representative in &active_ids {
+                if member == representative
+                    || !sparse.inventory_is_subset_of(member, representative)
+                {
+                    continue;
+                }
+                if let Some(transport) = sparse.subsumption_transport(member, representative) {
+                    transports.insert((member, representative), transport);
+                }
+            }
+        }
+
+        let mut unassigned = vec![false; active.len()];
+        for &terminal in &active_ids {
+            unassigned[terminal as usize] = true;
+        }
+        let mut active_representatives = active.to_vec();
+        for &terminal in &active_ids {
+            active_representatives[terminal as usize] = false;
+        }
+        let mut members_by_representative = (0..active.len() as u32)
+            .map(|terminal| vec![terminal])
+            .collect::<Vec<_>>();
+        let mut generators = Vec::new();
+
+        while unassigned.iter().any(|&value| value) {
+            let mut best = None::<(usize, TerminalID, Vec<TerminalID>)>;
+            for &representative in &active_ids {
+                if !unassigned[representative as usize] {
+                    continue;
+                }
+                let mut covered = vec![representative];
+                for &member in &active_ids {
+                    if member != representative
+                        && unassigned[member as usize]
+                        && transports.contains_key(&(member, representative))
+                    {
+                        covered.push(member);
+                    }
+                }
+                covered.sort_unstable();
+                let candidate = (covered.len(), representative, covered);
+                if best.as_ref().is_none_or(|best| {
+                    candidate.0 > best.0 || (candidate.0 == best.0 && candidate.1 < best.1)
+                }) {
+                    best = Some(candidate);
+                }
+            }
+            let (_, representative, covered) = best.expect("unassigned active terminal lacks self cover");
+            active_representatives[representative as usize] = true;
+            members_by_representative[representative as usize] = covered.clone();
+            for member in covered {
+                unassigned[member as usize] = false;
+                if member != representative {
+                    generators.push(SubsumptionGenerator {
+                        representative,
+                        member,
+                        transport: transports
+                            .remove(&(member, representative))
+                            .expect("chosen subsumption edge lacks transport"),
+                    });
+                }
+            }
+        }
+        if let Some(ignore) = ignore_terminal {
+            if active.get(ignore as usize).copied().unwrap_or(false) {
+                active_representatives[ignore as usize] = true;
+                members_by_representative[ignore as usize] = vec![ignore];
+            }
+        }
+
+        let active_count = active.iter().filter(|&&value| value).count();
+        let representative_count = active_representatives.iter().filter(|&&value| value).count();
+        Self {
+            original_active: active.to_vec(),
+            active_representatives,
+            members_by_representative,
+            row_machine: None,
+            generators: Vec::new(),
+            subsumption_generators: generators,
+            original_state_count: tokenizer.num_states() as usize,
+            debug_target_state: None,
+            debug_token_id: None,
+            profile: TerminalInterchangeabilityProfile {
+                active_terminals: active_count,
+                equivalence_classes: representative_count,
+                inactive_members: active_count.saturating_sub(representative_count),
+                row_classes: sparse.block_count,
+                terminal_sigma_ms: sparse_ms,
+                ..TerminalInterchangeabilityProfile::default()
+            },
+        }
+        .with_generator_count()
+    }
+
     fn with_generator_count(mut self) -> Self {
         self.profile.swap_generators = self.generators.len();
+        self.profile.subsumption_generators = self.subsumption_generators.len();
         self
     }
     /// Lift the representative-only DWA to concrete states and return one
@@ -850,19 +986,18 @@ impl TerminalInterchangeability {
         if self.is_identity() {
             return (vec![dwa.clone()], profile);
         }
-        let machine = self.row_machine.as_ref().expect("missing row machine");
-        assert_eq!(state_map.original_to_internal.len(), machine.real_state_count);
+        assert_eq!(state_map.original_to_internal.len(), self.original_state_count);
         profile.concrete_tsids_before = state_map.num_internal_ids() as usize;
         let remap_started = Instant::now();
         lift_dwa_weights_to_concrete_states(dwa, state_map);
-        *state_map = concrete_state_map(machine.real_state_count);
+        *state_map = concrete_state_map(self.original_state_count);
         profile.concrete_tsids_after = state_map.num_internal_ids() as usize;
         profile.weight_remap_ms = remap_started.elapsed().as_secs_f64() * 1000.0;
 
         // Direct semantic oracle: the identity DWA plus one full swapped view
         // per representative/member pair. The optional initial-only path is a
         // candidate shortcut and is not used by default while validating this.
-        profile.group_elements = 1 + self.generators.len();
+        profile.group_elements = 1 + self.generators.len() + self.subsumption_generators.len();
         let original = dwa.clone();
         let full_swap_reference = std::env::var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_REFERENCE_MODE")
             .map(|value| value.trim().eq_ignore_ascii_case("full_swap"))
@@ -880,7 +1015,12 @@ impl TerminalInterchangeability {
                 class_map: generator.class_map.clone(),
             };
             if full_swap_reference {
-                views.push(transformed_dwa_view(&original, &element, machine, &mut profile));
+                views.push(transformed_dwa_view(
+                    &original,
+                    &element,
+                    self.row_machine.as_ref().expect("swap expansion needs a row machine"),
+                    &mut profile,
+                ));
             } else {
                 let base_view = expand_noninitial_terminal_labels(
                     &original,
@@ -892,10 +1032,19 @@ impl TerminalInterchangeability {
                     generator.representative,
                     generator.member,
                     &generator.class_map,
-                    machine,
+                    self.row_machine.as_ref().expect("swap expansion needs a row machine"),
                     &mut profile,
                 ));
             }
+        }
+        for generator in &self.subsumption_generators {
+            views.push(subsumption_dwa_view(
+                &original,
+                generator.representative,
+                generator.member,
+                &generator.transport,
+                &mut profile,
+            ));
         }
         *dwa = original;
         profile.expansion_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -2110,6 +2259,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn sparse_subsumption_finds_prefix_embedded_terminal() {
+        let expressions = vec![Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"ba".to_vec())];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let bytes = [true; 256];
+        let sparse = SparseTerminalResiduals::build(&tokenizer, &bytes);
+        let transport = sparse
+            .subsumption_transport(0, 1)
+            .expect("'a' should be subsumed by 'ba'");
+        assert!(transport.representative_state_to_members.iter().any(|members| !members.is_empty()));
+        assert!(sparse.subsumption_transport(1, 0).is_none());
+    }
+
+    #[test]
+    fn subsumption_planner_chooses_the_covering_representative() {
+        let expressions = vec![Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"ba".to_vec())];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let plan = TerminalInterchangeability::build_subsumption(
+            &tokenizer,
+            &[true, true],
+            None,
+            &[true; 256],
+        );
+        assert_eq!(plan.active_representatives, vec![false, true]);
+        assert_eq!(plan.members_by_representative[1], vec![0, 1]);
+        assert_eq!(plan.subsumption_generators.len(), 1);
+        assert_eq!(plan.subsumption_generators[0].representative, 1);
+        assert_eq!(plan.subsumption_generators[0].member, 0);
     }
 
     #[test]
