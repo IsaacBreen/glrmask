@@ -37,6 +37,7 @@ struct ActiveL2pRouteSetup {
     allowed_boundary_pairs: Box<[U8Set; 256]>,
     allowed_boundary_pair_words: Box<[u64; 1024]>,
     active_reachable_by_byte: Box<[u8; 256]>,
+    active_suffix_start_by_byte: Box<[u8; 256]>,
 }
 
 #[derive(Default)]
@@ -771,6 +772,31 @@ fn build_active_matched_by_state(
     matched.into()
 }
 
+fn build_active_suffix_start_by_byte(
+    tokenizer: &Tokenizer,
+    bytesets: &SharedClassifyBytesets,
+    active_words: &[u64],
+) -> Box<[u8; 256]> {
+    let mut can_start = Box::new([0u8; 256]);
+    let initial = tokenizer.initial_state_id();
+    if !state_future_intersects_words(bytesets, initial, active_words) {
+        return can_start;
+    }
+    for byte in 0u8..=u8::MAX {
+        let next = bytesets.transitions_by_byte
+            [byte as usize * tokenizer.num_states() as usize + initial as usize];
+        if next == u32::MAX {
+            continue;
+        }
+        if state_future_intersects_words(bytesets, next, active_words)
+            || bitset_intersects_words(tokenizer.matched_terminal_bitset(next), active_words)
+        {
+            can_start[byte as usize] = 1;
+        }
+    }
+    can_start
+}
+
 #[inline]
 fn suffix_can_reach_active_terminal(
     tokenizer: &Tokenizer,
@@ -807,8 +833,11 @@ fn token_has_active_terminal_suffix(
     bytes: &[u8],
     active_words: &[u64],
     active_matched_by_state: Option<&[u8]>,
+    active_suffix_start_by_byte: &[u8; 256],
 ) -> bool {
     (1..bytes.len()).any(|suffix_start| {
+        active_suffix_start_by_byte[bytes[suffix_start] as usize] != 0
+            &&
         suffix_can_reach_active_terminal(
             tokenizer,
             bytesets,
@@ -877,6 +906,8 @@ fn active_l2p_route_setup(
     for byte in active_reachable.iter() {
         active_reachable_by_byte[byte as usize] = 1;
     }
+    let active_suffix_start_by_byte =
+        build_active_suffix_start_by_byte(tokenizer, bytesets, active_words);
     for terminal_1 in active_bitset.iter() {
         let last_bytes = bytesets.last_bytes[terminal_1];
         if last_bytes.is_empty() {
@@ -920,6 +951,7 @@ fn active_l2p_route_setup(
         allowed_boundary_pairs,
         allowed_boundary_pair_words,
         active_reachable_by_byte,
+        active_suffix_start_by_byte,
     });
     if super::types::compile_profile_enabled() {
         eprintln!(
@@ -1568,6 +1600,7 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
                     bytes,
                     active_words,
                     active_matched_by_state.as_deref(),
+                    &route_setup.active_suffix_start_by_byte,
                 )
                 .then_some(index)
             })
@@ -1938,7 +1971,10 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
     use std::sync::{Arc, Mutex};
 
-    use super::build_reverse_transitions_by_byte;
+    use super::{
+        build_active_suffix_start_by_byte, build_reverse_transitions_by_byte,
+        token_has_active_terminal_suffix,
+    };
     use super::{
         parse_exact_l2p_boundary_filter_mode, ExactL2pBoundaryFilterMode,
         state_future_intersects_words, token_has_active_l2p_boundary_words,
@@ -1948,6 +1984,7 @@ mod tests {
     use crate::automata::lexer::compile::build_regex;
     use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::automata::lexer::Lexer;
+    use crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table;
     use crate::ds::bitset::BitSet;
     use crate::ds::u8set::U8Set;
 
@@ -2118,7 +2155,43 @@ mod tests {
             active_sets.push(single);
         }
         active_sets.push(all_active);
+        let flat_trans = build_flat_transition_table(&tokenizer);
+        let unrestricted_suffix_start = [1u8; 256];
         for active in &active_sets {
+            let active_suffix_start =
+                build_active_suffix_start_by_byte(&tokenizer, &actual, active.words());
+            for bytes in [
+                b"".as_slice(),
+                b"a",
+                b"ab",
+                b"ac",
+                b"xy",
+                b"xyz",
+                b"zz",
+                b"bxyz",
+            ] {
+                assert_eq!(
+                    token_has_active_terminal_suffix(
+                        &tokenizer,
+                        &actual,
+                        &flat_trans,
+                        bytes,
+                        active.words(),
+                        None,
+                        &active_suffix_start,
+                    ),
+                    token_has_active_terminal_suffix(
+                        &tokenizer,
+                        &actual,
+                        &flat_trans,
+                        bytes,
+                        active.words(),
+                        None,
+                        &unrestricted_suffix_start,
+                    ),
+                    "active={active:?} bytes={bytes:?}"
+                );
+            }
             for state in 0..tokenizer.num_states() {
                 let representative = actual.representative_future_terminal_by_state[state as usize];
                 let future = tokenizer.possible_future_terminals(state);
