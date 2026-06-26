@@ -267,6 +267,25 @@ impl SparseTerminalResiduals {
             .unwrap_or(DEAD_RESIDUAL_BLOCK)
     }
 
+    /// A terminal that may appear after another terminal within one token
+    /// restarts at the lexer's fixed initial state. Its continuation label can
+    /// therefore be expanded only when its complete row agrees there after the
+    /// member→representative relabeling; unrooted subsumption alone is not
+    /// enough.
+    fn continuation_compatible(
+        &self,
+        initial_state: u32,
+        member: TerminalID,
+        representative: TerminalID,
+    ) -> bool {
+        sparse_row_member_subsumed_by(
+            &self.rows_by_state[initial_state as usize],
+            &self.rows_by_state[initial_state as usize],
+            member,
+            representative,
+        )
+    }
+
     fn inventory_is_subset_of(&self, member: TerminalID, representative: TerminalID) -> bool {
         let member_inventory = &self.inventories_by_terminal[member as usize];
         let representative_inventory = &self.inventories_by_terminal[representative as usize];
@@ -1594,10 +1613,12 @@ impl TerminalInterchangeability {
         let sparse = SparseTerminalResiduals::from_product(&product, &blocks);
         let candidates_started_at = Instant::now();
         let mut candidates = Vec::new();
+        let initial_state = tokenizer.initial_state_id();
         for &member in &active_ids {
             for &representative in &active_ids {
                 if member == representative
                     || !sparse.inventory_is_subset_of(member, representative)
+                    || !sparse.continuation_compatible(initial_state, member, representative)
                 {
                     continue;
                 }
@@ -1739,13 +1760,31 @@ impl TerminalInterchangeability {
         // candidate shortcut and is not used by default while validating this.
         profile.group_elements = 1 + self.generators.len() + self.subsumption_generators.len();
         let original = dwa.clone();
+        if std::env::var_os("GLRMASK_DEBUG_TERMINAL_SUBSUMPTION_DWA").is_some() {
+            eprintln!("[glrmask/debug][terminal_subsumption_dwa] start={} states={}", original.start_state(), original.states().len());
+            for (state_id, state) in original.states().iter().enumerate() {
+                let labels = state.transitions.keys().copied().collect::<Vec<_>>();
+                eprintln!("[glrmask/debug][terminal_subsumption_dwa_state] state={} labels={:?}", state_id, labels);
+            }
+        }
         let full_swap_reference = std::env::var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_REFERENCE_MODE")
             .map(|value| value.trim().eq_ignore_ascii_case("full_swap"))
             .unwrap_or(true);
         let only_member = std::env::var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_ONLY_MEMBER")
             .ok()
             .and_then(|value| value.trim().parse::<TerminalID>().ok());
-        let mut views = vec![original.clone()];
+        debug_assert!(
+            self.generators.is_empty() || self.subsumption_generators.is_empty(),
+            "swap and directed-subsumption reference expansion are distinct modes",
+        );
+        let subsumption_base = (!self.subsumption_generators.is_empty()).then(|| {
+            expand_noninitial_terminal_labels(
+                &original,
+                &self.members_by_representative,
+                &mut profile,
+            )
+        });
+        let mut views = vec![subsumption_base.clone().unwrap_or_else(|| original.clone())];
         for generator in &self.generators {
             if only_member.is_some_and(|member| member != generator.member) {
                 continue;
@@ -1777,14 +1816,16 @@ impl TerminalInterchangeability {
                 ));
             }
         }
-        for generator in &self.subsumption_generators {
-            views.push(subsumption_dwa_view(
-                &original,
-                generator.representative,
-                generator.member,
-                &generator.transport,
-                &mut profile,
-            ));
+        if let Some(base) = &subsumption_base {
+            for generator in &self.subsumption_generators {
+                views.push(subsumption_dwa_view(
+                    base,
+                    generator.representative,
+                    generator.member,
+                    &generator.transport,
+                    &mut profile,
+                ));
+            }
         }
         *dwa = original;
         profile.expansion_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -2734,16 +2775,26 @@ fn subsumption_dwa_view(
     transport: &SubsumptionTransport,
     profile: &mut TerminalInterchangeabilityProfile,
 ) -> DWA {
+    let start = original.start_state();
     let mut states = Vec::with_capacity(original.states().len());
-    for state in original.states() {
+    for (state_id, state) in original.states().iter().enumerate() {
         let mut transitions = BTreeMap::new();
         for (&label, &(target, ref weight)) in &state.transitions {
+            // A copied member view owns exactly the first-terminal choice
+            // `representative -> member`. All other first-terminal choices are
+            // covered by the identity view or their own member view. Later
+            // terminal labels have already been expanded independently.
+            if state_id as u32 == start && label != representative as i32 {
+                continue;
+            }
             let mapped_weight = remap_weight_by_subsumption_transport(
                 weight,
                 &transport.representative_state_to_members,
             );
-            if mapped_weight.is_empty() { continue; }
-            let mapped_label = if label == representative as i32 {
+            if mapped_weight.is_empty() {
+                continue;
+            }
+            let mapped_label = if state_id as u32 == start {
                 member as i32
             } else {
                 label
@@ -2759,7 +2810,7 @@ fn subsumption_dwa_view(
         });
         states.push(DWAState { transitions, final_weight });
     }
-    DWA::from_parts(states, original.start_state())
+    DWA::from_parts(states, start)
 }
 
 fn expand_noninitial_terminal_labels(
@@ -3087,7 +3138,7 @@ mod tests {
     }
 
     #[test]
-    fn subsumption_planner_chooses_the_covering_representative() {
+    fn subsumption_planner_splits_initially_incompatible_members() {
         let expressions = vec![Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"ba".to_vec())];
         let tokenizer = build_regex(&expressions).into_tokenizer(
             expressions.len() as u32,
@@ -3099,11 +3150,30 @@ mod tests {
             None,
             &[true; 256],
         );
-        assert_eq!(plan.active_representatives, vec![false, true]);
-        assert_eq!(plan.members_by_representative[1], vec![0, 1]);
+        // `a ⪯ ba` unrootedly, but a continuation always restarts at the
+        // fixed lexer initial state, where their complete rows differ.
+        assert_eq!(plan.active_representatives, vec![true, true]);
+        assert!(plan.subsumption_generators.is_empty());
+    }
+
+    #[test]
+    fn subsumption_planner_chooses_the_covering_representative() {
+        let expressions = vec![Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"a".to_vec())];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let plan = TerminalInterchangeability::build_subsumption(
+            &tokenizer,
+            &[true, true],
+            None,
+            &[true; 256],
+        );
+        assert_eq!(plan.active_representatives, vec![true, false]);
+        assert_eq!(plan.members_by_representative[0], vec![0, 1]);
         assert_eq!(plan.subsumption_generators.len(), 1);
-        assert_eq!(plan.subsumption_generators[0].representative, 1);
-        assert_eq!(plan.subsumption_generators[0].member, 0);
+        assert_eq!(plan.subsumption_generators[0].representative, 0);
+        assert_eq!(plan.subsumption_generators[0].member, 1);
     }
 
     #[test]
