@@ -97,6 +97,7 @@ impl RowMachine {
 
 impl SparseTerminalResiduals {
     fn build(tokenizer: &Tokenizer, relevant_bytes: &[bool; 256]) -> Self {
+        let started_at = Instant::now();
         let terminal_count = tokenizer.num_terminals() as usize;
         let state_count = tokenizer.num_states() as usize;
         let active_bytes = (0..=255u8)
@@ -117,6 +118,7 @@ impl SparseTerminalResiduals {
             states.sort_unstable();
             states.dedup();
         }
+        let live_states_ms = started_at.elapsed().as_secs_f64() * 1000.0;
 
         let mut pair_ids_by_terminal = vec![Vec::<(u32, u32)>::new(); terminal_count];
         let mut pair_terminals = Vec::<TerminalID>::new();
@@ -149,8 +151,16 @@ impl SparseTerminalResiduals {
                 }
             }
         }
+        let transition_build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        let (transitions, minimized_width) = quotient_sparse_transition_columns(
+            transitions,
+            pair_terminals.len(),
+            width,
+        );
+        let column_quotient_ms = started_at.elapsed().as_secs_f64() * 1000.0;
 
-        let blocks = minimize_sparse_terminal_residuals(&outputs, &transitions, width);
+        let blocks = minimize_sparse_terminal_residuals(&outputs, &transitions, minimized_width);
+        let residual_minimize_ms = started_at.elapsed().as_secs_f64() * 1000.0;
         let block_count = blocks.iter().copied().max().unwrap_or(DEAD_RESIDUAL_BLOCK) as usize + 1;
         let mut state_blocks_by_terminal = vec![Vec::<(u32, u32)>::new(); terminal_count];
         let mut rows_by_state = vec![Vec::<(TerminalID, u32)>::new(); state_count];
@@ -170,12 +180,37 @@ impl SparseTerminalResiduals {
             inventory.sort_unstable();
             inventory.dedup();
         }
+        let full_row_hashes = rows_by_state
+            .iter()
+            .map(|row| sparse_full_row_hash(row))
+            .collect::<Vec<_>>();
+        let mut states_by_full_row_hash = FxHashMap::<u64, Vec<u32>>::default();
+        for (state, &hash) in full_row_hashes.iter().enumerate() {
+            states_by_full_row_hash.entry(hash).or_default().push(state as u32);
+        }
+        if std::env::var_os("GLRMASK_PROFILE_L2P_SPARSE_RESIDUALS").is_some() {
+            eprintln!(
+                "[glrmask/profile][l2p_sparse_residual_build] terminals={} states={} pairs={} raw_bytes={} residual_bytes={} live_ms={:.3} transitions_ms={:.3} column_quotient_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+                terminal_count,
+                state_count,
+                pair_terminals.len(),
+                width,
+                minimized_width,
+                live_states_ms,
+                transition_build_ms,
+                column_quotient_ms,
+                residual_minimize_ms,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
         Self {
             state_count,
             terminal_count,
             state_blocks_by_terminal,
             rows_by_state,
+            full_row_hashes,
+            states_by_full_row_hash,
             inventories_by_terminal,
             pair_count: pair_terminals.len(),
             block_count,
@@ -223,40 +258,46 @@ impl SparseTerminalResiduals {
             return None;
         }
 
-        let mut rhs_by_hash = FxHashMap::<u64, Vec<u32>>::default();
-        for state in 0..self.state_count as u32 {
-            let row = &self.rows_by_state[state as usize];
-            rhs_by_hash
-                .entry(sparse_rhs_row_hash(row, member))
-                .or_default()
-                .push(state);
+        let mut relevant_sources = self.state_blocks_by_terminal[member as usize]
+            .iter()
+            .map(|&(state, _)| state)
+            .chain(
+                self.state_blocks_by_terminal[representative as usize]
+                    .iter()
+                    .map(|&(state, _)| state),
+            )
+            .collect::<Vec<_>>();
+        relevant_sources.sort_unstable();
+        relevant_sources.dedup();
+        // First decide inclusion. On the overwhelmingly common failing pair we
+        // need only one RHS witness per source row, not every duplicate state
+        // carrying that row.
+        for source_state in relevant_sources.iter().copied() {
+            let source_row = &self.rows_by_state[source_state as usize];
+            if self
+                .matching_rhs_states(source_row, member, representative, true)
+                .is_empty()
+            {
+                return None;
+            }
         }
 
+        // States outside the member/representative support have identical
+        // projected rows on both sides and therefore witness themselves.
+        let mut is_relevant = vec![false; self.state_count];
+        for &state in &relevant_sources {
+            is_relevant[state as usize] = true;
+        }
         let mut representative_state_to_members = vec![Vec::<u32>::new(); self.state_count];
-        for source_state in 0..self.state_count as u32 {
-            let source_row = &self.rows_by_state[source_state as usize];
-            let hash = sparse_member_to_representative_row_hash(
-                source_row,
-                member,
-                representative,
-            );
-            let candidates = rhs_by_hash.get(&hash)?;
-            let mut matched = false;
-            for &target_state in candidates {
-                let target_row = &self.rows_by_state[target_state as usize];
-                if !sparse_row_member_subsumed_by(
-                    source_row,
-                    target_row,
-                    member,
-                    representative,
-                ) {
-                    continue;
-                }
-                representative_state_to_members[target_state as usize].push(source_state);
-                matched = true;
+        for state in 0..self.state_count as u32 {
+            if !is_relevant[state as usize] {
+                representative_state_to_members[state as usize].push(state);
             }
-            if !matched {
-                return None;
+        }
+        for source_state in relevant_sources {
+            let source_row = &self.rows_by_state[source_state as usize];
+            for target_state in self.matching_rhs_states(source_row, member, representative, false) {
+                representative_state_to_members[target_state as usize].push(source_state);
             }
         }
         for members in &mut representative_state_to_members {
@@ -265,10 +306,78 @@ impl SparseTerminalResiduals {
         }
         Some(SubsumptionTransport { representative_state_to_members })
     }
+
+    fn matching_rhs_states(
+        &self,
+        source_row: &[(TerminalID, u32)],
+        member: TerminalID,
+        representative: TerminalID,
+        stop_after_first: bool,
+    ) -> Vec<u32> {
+        let hash = sparse_member_to_representative_row_hash(source_row, member, representative);
+        let mut matches = Vec::new();
+        if let Some(candidates) = self.states_by_full_row_hash.get(&hash) {
+            for &target_state in candidates {
+                if self.block_for(member, target_state) != DEAD_RESIDUAL_BLOCK {
+                    continue;
+                }
+                if sparse_row_member_subsumed_by(
+                    source_row,
+                    &self.rows_by_state[target_state as usize],
+                    member,
+                    representative,
+                ) {
+                    matches.push(target_state);
+                    if stop_after_first {
+                        return matches;
+                    }
+                }
+            }
+        }
+        for &(target_state, member_block) in &self.state_blocks_by_terminal[member as usize] {
+            if self.full_row_hashes[target_state as usize]
+                ^ sparse_row_item_hash(member, member_block)
+                != hash
+            {
+                continue;
+            }
+            if sparse_row_member_subsumed_by(
+                source_row,
+                &self.rows_by_state[target_state as usize],
+                member,
+                representative,
+            ) {
+                matches.push(target_state);
+                if stop_after_first {
+                    return matches;
+                }
+            }
+        }
+        matches
+    }
+
+    fn subsumption_transports(
+        &self,
+        candidates: &[(TerminalID, TerminalID)],
+    ) -> FxHashMap<(TerminalID, TerminalID), SubsumptionTransport> {
+        candidates
+            .iter()
+            .filter_map(|&(member, representative)| {
+                self.subsumption_transport(member, representative)
+                    .map(|transport| ((member, representative), transport))
+            })
+            .collect()
+    }
 }
 
 fn sparse_row_item_hash(terminal: TerminalID, block: u32) -> u64 {
     sigma_mix(terminal as usize, block)
+}
+
+fn sparse_full_row_hash(row: &[(TerminalID, u32)]) -> u64 {
+    row.iter().fold(0u64, |hash, &(terminal, block)| {
+        hash ^ sparse_row_item_hash(terminal, block)
+    })
 }
 
 fn sparse_rhs_row_hash(row: &[(TerminalID, u32)], member: TerminalID) -> u64 {
@@ -315,6 +424,48 @@ fn sparse_row_member_subsumed_by(
             .filter(|&(terminal, _)| terminal != member),
     );
     transformed == rhs
+}
+
+/// Merge active byte columns only when their transition functions agree for
+/// every live `(terminal, lexer-state)` pair. This is an exact alphabet quotient:
+/// the residual DFA observes no distinction between the retained copies.
+fn quotient_sparse_transition_columns(
+    transitions: Vec<u32>,
+    pairs: usize,
+    width: usize,
+) -> (Vec<u32>, usize) {
+    if width <= 1 || pairs == 0 {
+        return (transitions, width);
+    }
+    let mut buckets = FxHashMap::<u64, Vec<usize>>::default();
+    let mut retained = Vec::<usize>::new();
+    for slot in 0..width {
+        let mut hasher = FxHasher::default();
+        for pair in 0..pairs {
+            transitions[pair * width + slot].hash(&mut hasher);
+        }
+        let hash = hasher.finish();
+        let candidates = buckets.entry(hash).or_default();
+        let duplicate = candidates.iter().copied().any(|other| {
+            (0..pairs).all(|pair| {
+                transitions[pair * width + slot] == transitions[pair * width + other]
+            })
+        });
+        if !duplicate {
+            candidates.push(slot);
+            retained.push(slot);
+        }
+    }
+    if retained.len() == width {
+        return (transitions, width);
+    }
+    let mut reduced = vec![NO_RESIDUAL_PAIR; pairs * retained.len()];
+    for pair in 0..pairs {
+        for (reduced_slot, &slot) in retained.iter().enumerate() {
+            reduced[pair * retained.len() + reduced_slot] = transitions[pair * width + slot];
+        }
+    }
+    (reduced, retained.len())
 }
 
 fn minimize_sparse_terminal_residuals(
@@ -453,6 +604,8 @@ struct SparseTerminalResiduals {
     terminal_count: usize,
     state_blocks_by_terminal: Vec<Vec<(u32, u32)>>,
     rows_by_state: Vec<Vec<(TerminalID, u32)>>,
+    full_row_hashes: Vec<u64>,
+    states_by_full_row_hash: FxHashMap<u64, Vec<u32>>,
     inventories_by_terminal: Vec<Vec<u32>>,
     pair_count: usize,
     block_count: usize,
@@ -868,7 +1021,8 @@ impl TerminalInterchangeability {
         let started_at = Instant::now();
         let sparse = SparseTerminalResiduals::build(tokenizer, relevant_bytes);
         let sparse_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-        let mut transports = FxHashMap::<(TerminalID, TerminalID), SubsumptionTransport>::default();
+        let candidates_started_at = Instant::now();
+        let mut candidates = Vec::new();
         for &member in &active_ids {
             for &representative in &active_ids {
                 if member == representative
@@ -876,10 +1030,25 @@ impl TerminalInterchangeability {
                 {
                     continue;
                 }
-                if let Some(transport) = sparse.subsumption_transport(member, representative) {
-                    transports.insert((member, representative), transport);
-                }
+                candidates.push((member, representative));
             }
+        }
+        let candidate_ms = candidates_started_at.elapsed().as_secs_f64() * 1000.0;
+        let exact_started_at = Instant::now();
+        let mut transports = sparse.subsumption_transports(&candidates);
+        let exact_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
+        if std::env::var_os("GLRMASK_PROFILE_L2P_SUBSUMPTION_PLAN").is_some() {
+            eprintln!(
+                "[glrmask/profile][l2p_subsumption_plan] active_terminals={} sparse_pairs={} candidates={} accepted={} sparse_ms={:.3} candidate_ms={:.3} exact_ms={:.3} total_ms={:.3}",
+                active_ids.len(),
+                sparse.pair_count,
+                candidates.len(),
+                transports.len(),
+                sparse_ms,
+                candidate_ms,
+                exact_ms,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
         }
 
         let mut unassigned = vec![false; active.len()];
