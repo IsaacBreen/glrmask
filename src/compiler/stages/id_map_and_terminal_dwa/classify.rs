@@ -676,6 +676,47 @@ fn token_has_active_l2p_boundary_words(
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenL2pRouteHint {
+    Adjacent,
+    Single,
+    Irrelevant,
+}
+
+/// Classify the cheap, byte-level L2P route hint in one token pass.
+///
+/// The route scan formerly searched every token once for an allowed adjacent
+/// pair and, when none was found, searched it again for an active reachable
+/// byte. The adjacency result has precedence, so retaining the first byte while
+/// tracking reachability produces exactly the same split with one traversal.
+#[inline]
+fn token_l2p_route_hint(
+    bytes: &[u8],
+    allowed_boundary_pair_words: &[u64; 1024],
+    active_reachable: U8Set,
+) -> TokenL2pRouteHint {
+    let Some((&first, rest)) = bytes.split_first() else {
+        return TokenL2pRouteHint::Irrelevant;
+    };
+    let mut previous = first;
+    let mut reaches_active = active_reachable.contains(first);
+    for &byte in rest {
+        let pair_index = ((previous as usize) << 8) | byte as usize;
+        if (allowed_boundary_pair_words[pair_index >> 6] & (1u64 << (pair_index & 63)))
+            != 0
+        {
+            return TokenL2pRouteHint::Adjacent;
+        }
+        reaches_active |= active_reachable.contains(byte);
+        previous = byte;
+    }
+    if reaches_active {
+        TokenL2pRouteHint::Single
+    } else {
+        TokenL2pRouteHint::Irrelevant
+    }
+}
+
 #[inline]
 fn bitset_intersects_words(bitset: &BitSet, words: &[u64]) -> bool {
     bitset
@@ -1427,19 +1468,18 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
 
     let vocab_scan_started_at = std::time::Instant::now();
     let mut boundary_token_ids = Vec::<u32>::new();
-    let mut single_token_ids = Vec::<u32>::new();
+    let mut single_token_ids = Vec::<u32>::with_capacity(vocab.entries.len());
     let mut irrelevant_tokens = 0usize;
     let mut adjacent_entries = Vec::new();
     for (&token_id, bytes) in vocab.entries.iter() {
-        if token_has_active_l2p_boundary_words(bytes, &route_setup.allowed_boundary_pair_words) {
-            adjacent_entries.push((token_id, bytes.as_slice()));
-        } else if bytes
-            .iter()
-            .any(|&byte| route_setup.active_reachable.contains(byte))
-        {
-            single_token_ids.push(token_id);
-        } else {
-            irrelevant_tokens += 1;
+        match token_l2p_route_hint(
+            bytes,
+            &route_setup.allowed_boundary_pair_words,
+            route_setup.active_reachable,
+        ) {
+            TokenL2pRouteHint::Adjacent => adjacent_entries.push((token_id, bytes.as_slice())),
+            TokenL2pRouteHint::Single => single_token_ids.push(token_id),
+            TokenL2pRouteHint::Irrelevant => irrelevant_tokens += 1,
         }
     }
     let vocab_scan_ms = vocab_scan_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1861,7 +1901,8 @@ mod tests {
     use super::build_reverse_transitions_by_byte;
     use super::{
         parse_exact_l2p_boundary_filter_mode, ExactL2pBoundaryFilterMode,
-        SharedClassifyBytesets,
+        token_has_active_l2p_boundary_words, token_l2p_route_hint, SharedClassifyBytesets,
+        TokenL2pRouteHint,
     };
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::compile::build_regex;
@@ -1929,6 +1970,31 @@ mod tests {
         assert!(matches!(parse_exact_l2p_boundary_filter_mode("0"), ExactL2pBoundaryFilterMode::Force(false)));
         assert!(matches!(parse_exact_l2p_boundary_filter_mode("false"), ExactL2pBoundaryFilterMode::Force(false)));
         assert!(matches!(parse_exact_l2p_boundary_filter_mode("off"), ExactL2pBoundaryFilterMode::Force(false)));
+    }
+
+    #[test]
+    fn combined_l2p_route_hint_matches_two_pass_route_scan() {
+        let mut active_reachable = U8Set::empty();
+        active_reachable.insert(b'a');
+        active_reachable.insert(b'z');
+        let mut pairs = [0u64; 1024];
+        let pair_index = ((b'x' as usize) << 8) | b'y' as usize;
+        pairs[pair_index >> 6] |= 1u64 << (pair_index & 63);
+
+        for bytes in [b"".as_slice(), b"a", b"q", b"xy", b"xya", b"qz", b"ax"] {
+            let expected = if token_has_active_l2p_boundary_words(bytes, &pairs) {
+                TokenL2pRouteHint::Adjacent
+            } else if bytes.iter().any(|&byte| active_reachable.contains(byte)) {
+                TokenL2pRouteHint::Single
+            } else {
+                TokenL2pRouteHint::Irrelevant
+            };
+            assert_eq!(
+                token_l2p_route_hint(bytes, &pairs, active_reachable),
+                expected,
+                "bytes={bytes:?}"
+            );
+        }
     }
 
     #[test]
