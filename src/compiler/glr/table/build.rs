@@ -1,6 +1,8 @@
 use super::*;
+use std::sync::Arc;
 
 use crate::ds::bitset::BitSet;
+use rayon::prelude::*;
 
 const DISABLE_UNIT_REDUCTION_INLINING_ENV: &str = "GLRMASK_DISABLE_UNIT_REDUCTION_INLINING";
 const GLR_TABLE_CONSTRUCTION_ENV: &str = "GLRMASK_GLR_TABLE_CONSTRUCTION";
@@ -768,10 +770,6 @@ fn lr1_closure(
     result
 }
 
-fn item_set_key(items: &LR1ItemSet) -> Vec<(LR1ItemCore, BitSet)> {
-    items.iter().map(|(core, lookaheads)| (*core, lookaheads.clone())).collect()
-}
-
 /// Compute transferred items for the local-forward replace optimisation.
 ///
 /// For each dot-1 item `[A → X . rest, la]` in `kernel`, find "foo items" in
@@ -867,86 +865,46 @@ fn compute_transfer_items(
     Some(transferred)
 }
 
-fn build_lr1_item_sets(
+type LR1Successor = (Symbol, bool, bool, Arc<LR1ItemSet>);
+
+fn expand_lr1_state(
+    source_items: &LR1ItemSet,
     grammar: &AnalyzedGrammar,
-) -> (Vec<LR1ItemSet>, Vec<BTreeMap<Symbol, (u32, bool, bool)>>) {
+    first: &[BitSet],
+) -> Vec<LR1Successor> {
     let rules = &grammar.rules;
-    let lookahead_len = grammar.num_terminals as usize + 1;
-    let first = first_bitsets(grammar);
-
-    let initial = {
-        let mut s = LR1ItemSet::new();
-        let sd = rules[0].rhs.len() as u32;
-        let mut lookaheads = BitSet::new(lookahead_len);
-        lookaheads.set(lookahead_bit(EOF, grammar.num_terminals));
-        s.insert(LR1ItemCore::new(0, 0, sd), lookaheads);
-        lr1_closure(&s, grammar, &first)
-    };
-
-    let mut item_sets = vec![initial.clone()];
-    let mut transitions: Vec<BTreeMap<Symbol, (u32, bool, bool)>> = vec![BTreeMap::new()];
-    let mut set_to_id: FxHashMap<Vec<(LR1ItemCore, BitSet)>, u32> = FxHashMap::default();
-    set_to_id.insert(item_set_key(&initial), 0);
-
-    // Grouped lookaheads keep ordinary LR(1) correctness, but the older
-    // local-forward transfer logic is written for scalar LR1 items.
-    // Keep replace flags conservative on this path.
-    let transfer_safe = false;
-
-    let mut queue = VecDeque::from([0u32]);
-    while let Some(state_id) = queue.pop_front() {
-        let source_items = item_sets[state_id as usize].clone();
-
-        // Build all goto kernels in a single pass over items.
-        let mut kernels: BTreeMap<Symbol, LR1ItemSet> = BTreeMap::new();
-        for (item, lookaheads) in &source_items {
-            // Transferred items only advance through nonterminal gotos.
-            if item.transferred {
-                if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
-                    let advanced = LR1ItemCore {
-                        rule: item.rule,
-                        dot: item.dot + 1,
-                        stack_depth: item.stack_depth,
-                        transferred: false,
-                    };
-                    union_lookaheads(
-                        kernels.entry(Symbol::Nonterminal(*nt)).or_default(),
-                        advanced,
-                        lookaheads,
-                    );
-                }
-                continue;
+    let mut kernels: BTreeMap<Symbol, LR1ItemSet> = BTreeMap::new();
+    for (item, lookaheads) in source_items {
+        if item.transferred {
+            if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
+                let advanced = LR1ItemCore {
+                    rule: item.rule,
+                    dot: item.dot + 1,
+                    stack_depth: item.stack_depth,
+                    transferred: false,
+                };
+                union_lookaheads(
+                    kernels.entry(Symbol::Nonterminal(*nt)).or_default(),
+                    advanced,
+                    lookaheads,
+                );
             }
-            if let Some(sym) = item.next_symbol(rules) {
-                let advanced = LR1ItemCore::new(item.rule, item.dot + 1, item.stack_depth);
-                union_lookaheads(kernels.entry(sym.clone()).or_default(), advanced, lookaheads);
-            }
+            continue;
         }
+        if let Some(symbol) = item.next_symbol(rules) {
+            let advanced = LR1ItemCore::new(item.rule, item.dot + 1, item.stack_depth);
+            union_lookaheads(kernels.entry(symbol.clone()).or_default(), advanced, lookaheads);
+        }
+    }
 
-        for (symbol, mut kernel) in kernels {
-            let base_kernel = kernel.clone();
-            // Check replace condition: is_replace iff no item in the kernel
-            // has dot at position 1 (i.e., all items came from items that
-            // already had dot > 0).
+    kernels
+        .into_iter()
+        .filter_map(|(symbol, kernel)| {
             let has_dot_1 = kernel.keys().any(|item| item.dot == 1);
-            let mut is_replace = match &symbol {
+            let is_replace = match &symbol {
                 Symbol::Terminal(_) => !has_dot_1 && replace_shifts_enabled(),
                 Symbol::Nonterminal(_) => !has_dot_1 && replace_gotos_enabled(),
             };
-            let used_transfer = false;
-
-            // Local-forward transfer: when has_dot_1 but transfer is enabled,
-            // try to transfer foo items from the source state into the kernel
-            // so the transition can still be marked as replace.
-            let _ = transfer_safe;
-
-            let kernel_has_transferred = used_transfer && kernel.keys().any(|item| item.transferred);
-
-            // If replace, decrement stack_depth for non-transferred kernel
-            // items — the replace absorbs one stack level for items that
-            // went through the shift. Transferred items didn't go through
-            // the shift; they were copied from the source state and await
-            // nonterminal gotos, so their sd is already correct.
             let adjusted_kernel: LR1ItemSet = if is_replace {
                 kernel
                     .iter()
@@ -967,48 +925,71 @@ fn build_lr1_item_sets(
             } else {
                 kernel
             };
+            let target_items = Arc::new(lr1_closure(&adjusted_kernel, grammar, first));
+            (!target_items.is_empty()).then_some((symbol, is_replace, false, target_items))
+        })
+        .collect()
+}
 
-            let mut target_items = lr1_closure(&adjusted_kernel, grammar, &first);
-            if used_transfer && matches!(symbol, Symbol::Terminal(_)) {
-                let base_target_items = lr1_closure(&base_kernel, grammar, &first);
-                let base_has_zero_pop_completed = base_target_items.iter().any(|(item, _)| {
-                    let rule = &rules[item.rule as usize];
-                    (item.dot as usize) == rule.rhs.len() && item.stack_depth == 0
-                });
-                let transferred_has_zero_pop_completed = target_items.iter().any(|(item, _)| {
-                    let rule = &rules[item.rule as usize];
-                    (item.dot as usize) == rule.rhs.len() && item.stack_depth == 0
-                });
-                if transferred_has_zero_pop_completed && !base_has_zero_pop_completed {
-                    kernel = base_kernel;
-                    is_replace = false;
-                    target_items = lr1_closure(&kernel, grammar, &first);
-                }
+fn build_lr1_item_sets(
+    grammar: &AnalyzedGrammar,
+) -> (Vec<LR1ItemSet>, Vec<BTreeMap<Symbol, (u32, bool, bool)>>) {
+    let rules = &grammar.rules;
+    let lookahead_len = grammar.num_terminals as usize + 1;
+    let first = first_bitsets(grammar);
+
+    let initial = Arc::new({
+        let mut s = LR1ItemSet::new();
+        let sd = rules[0].rhs.len() as u32;
+        let mut lookaheads = BitSet::new(lookahead_len);
+        lookaheads.set(lookahead_bit(EOF, grammar.num_terminals));
+        s.insert(LR1ItemCore::new(0, 0, sd), lookaheads);
+        lr1_closure(&s, grammar, &first)
+    });
+
+    let mut item_sets = vec![initial.clone()];
+    let mut transitions: Vec<BTreeMap<Symbol, (u32, bool, bool)>> = vec![BTreeMap::new()];
+    let mut set_to_id: FxHashMap<Arc<LR1ItemSet>, u32> = FxHashMap::default();
+    set_to_id.insert(initial.clone(), 0);
+    drop(initial);
+
+    let mut frontier = vec![0u32];
+    while !frontier.is_empty() {
+        // State expansion is independent within a BFS frontier. Interning
+        // remains serial below in the old source/symbol order, preserving
+        // canonical state numbering and artifact layout.
+        let expanded = frontier
+            .par_iter()
+            .map(|&state_id| {
+                let successors = expand_lr1_state(&item_sets[state_id as usize], grammar, &first);
+                (state_id, successors)
+            })
+            .collect::<Vec<_>>();
+
+        let mut next_frontier = Vec::new();
+        for (state_id, successors) in expanded {
+            for (symbol, is_replace, is_forwarded, target_items) in successors {
+                let target_id = if let Some(&existing_id) = set_to_id.get(&target_items) {
+                    existing_id
+                } else {
+                    let new_id = item_sets.len() as u32;
+                    set_to_id.insert(target_items.clone(), new_id);
+                    item_sets.push(target_items);
+                    transitions.push(BTreeMap::new());
+                    next_frontier.push(new_id);
+                    new_id
+                };
+                transitions[state_id as usize].insert(symbol, (target_id, is_replace, is_forwarded));
             }
-
-            // Track whether this replace was created by the transfer mechanism.
-            let is_forwarded = is_replace && kernel_has_transferred;
-
-            if target_items.is_empty() {
-                continue;
-            }
-
-            let key = item_set_key(&target_items);
-            let target_id = if let Some(&existing_id) = set_to_id.get(&key) {
-                existing_id
-            } else {
-                let new_id = item_sets.len() as u32;
-                set_to_id.insert(key, new_id);
-                item_sets.push(target_items);
-                transitions.push(BTreeMap::new());
-                queue.push_back(new_id);
-                new_id
-            };
-
-            transitions[state_id as usize].insert(symbol, (target_id, is_replace, is_forwarded));
         }
+        frontier = next_frontier;
     }
 
+    drop(set_to_id);
+    let item_sets = item_sets
+        .into_iter()
+        .map(|items| Arc::try_unwrap(items).expect("canonical item set still shared"))
+        .collect();
     (item_sets, transitions)
 }
 
@@ -1561,9 +1542,31 @@ fn build_legacy_row_bisim_table(
     item_sets: &[LR1ItemSet],
     transitions: &[BTreeMap<Symbol, (u32, bool, bool)>],
 ) -> GLRTable {
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let canonical_started_at = profile_enabled.then(std::time::Instant::now);
     let canonical = build_lr1_table(grammar, item_sets, transitions);
+    let canonical_ms = canonical_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+    let core_keys_started_at = profile_enabled.then(std::time::Instant::now);
     let core_keys = item_sets.iter().map(lr1_core_key).collect::<Vec<_>>();
-    merge_same_core_lr1_states(canonical, &core_keys)
+    let core_keys_ms = core_keys_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+    let merge_started_at = profile_enabled.then(std::time::Instant::now);
+    let table = merge_same_core_lr1_states(canonical, &core_keys);
+    if let (Some(canonical_ms), Some(core_keys_ms), Some(merge_started_at)) =
+        (canonical_ms, core_keys_ms, merge_started_at)
+    {
+        eprintln!(
+            "[glrmask/profile][glr_legacy_build] canonical_table_ms={:.3} core_keys_ms={:.3} same_core_merge_ms={:.3} pre_merge_states={} post_core_states={}",
+            canonical_ms,
+            core_keys_ms,
+            merge_started_at.elapsed().as_secs_f64() * 1000.0,
+            item_sets.len(),
+            table.num_states,
+        );
+    }
+    table
 }
 
 #[cfg(test)]
