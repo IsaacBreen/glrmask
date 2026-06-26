@@ -262,6 +262,11 @@ impl L2pPartitionBucket {
 }
 
 impl SharedClassifyBytesets {
+    #[inline]
+    pub(crate) fn transitions_by_byte(&self) -> &[u32] {
+        &self.transitions_by_byte
+    }
+
     /// Scan the DFA to compute per-terminal byte sets.
     pub fn build(tokenizer: &Tokenizer, num_terminals: u32) -> Self {
         let nt = num_terminals as usize;

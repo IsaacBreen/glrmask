@@ -143,6 +143,14 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     } else {
         l1_mask.clone()
     };
+    // Classification already initializes this shared byte-major DFA table.
+    // L1 exact equivalence walks many states at a fixed token byte, for which
+    // the transposed layout avoids a 256-word stride through the row-major table.
+    let l1_transitions_by_byte = has_l1.then(|| {
+        shared_classify_cache
+            .and_then(|cache| cache.get())
+            .map(|bytesets| bytesets.transitions_by_byte())
+    }).flatten();
 
     // An L2P branch that is about to be combined with another local branch is
     // determinized and minimized again by `merge_local_id_maps_and_terminal_dwas`.
@@ -181,6 +189,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     grammar,
                     &l1_build_mask,
                     flat_trans,
+                    l1_transitions_by_byte,
                     initial_state_map,
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
@@ -283,6 +292,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                 grammar,
                                 &l2p_mask,
                                 flat_trans,
+                                l1_transitions_by_byte,
                                 initial_state_map,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
