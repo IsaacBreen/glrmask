@@ -1679,33 +1679,54 @@ fn reduce_suffix_frame(
     Ok(out)
 }
 
+#[inline]
+fn unordered_entry_hash<T: Hash>(entry: &T) -> u64 {
+    let mut hasher = FxHasher::default();
+    entry.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Stable, order-independent bucket hash for a sparse row.
+///
+/// `SparseRow` can iterate inline entries or an `FxHashMap`; neither iteration
+/// order is a semantic property. We therefore combine independently hashed
+/// entries commutatively instead of allocating and sorting every row. This hash
+/// only selects equality candidates: `rows_equal` remains the exact criterion.
+#[inline]
+fn unordered_row_hash<K: Hash, V: Hash>(entries: impl Iterator<Item = (K, V)>, len: usize) -> (u64, u64) {
+    let mut sum = 0u64;
+    let mut mixed_xor = 0u64;
+    for (key, value) in entries {
+        let entry_hash = unordered_entry_hash(&(key, value));
+        sum = sum.wrapping_add(entry_hash);
+        mixed_xor ^= entry_hash.rotate_left((entry_hash >> 58) as u32);
+    }
+    (sum, mixed_xor ^ (len as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
 fn row_fingerprint(
     action_row: &ActionRow,
     goto_row: &GotoRow,
     advance_row: Option<&BitSet>,
 ) -> u64 {
+    let (action_sum, action_xor) = unordered_row_hash(
+        action_row.iter().map(|(terminal, action)| (terminal, action)),
+        action_row.len(),
+    );
+    let (goto_sum, goto_xor) = unordered_row_hash(
+        goto_row.iter().map(|(nonterminal, target)| (*nonterminal, target)),
+        goto_row.len(),
+    );
     let mut hasher = FxHasher::default();
-
-    let mut action = action_row.iter().collect::<Vec<_>>();
-    action.sort_unstable_by_key(|(terminal, _)| *terminal);
-    action.len().hash(&mut hasher);
-    for (terminal, action) in action {
-        terminal.hash(&mut hasher);
-        action.hash(&mut hasher);
-    }
-
-    let mut goto = goto_row.iter().collect::<Vec<_>>();
-    goto.sort_unstable_by_key(|(nonterminal, _)| **nonterminal);
-    goto.len().hash(&mut hasher);
-    for (nonterminal, target) in goto {
-        nonterminal.hash(&mut hasher);
-        target.hash(&mut hasher);
-    }
-
+    action_row.len().hash(&mut hasher);
+    action_sum.hash(&mut hasher);
+    action_xor.hash(&mut hasher);
+    goto_row.len().hash(&mut hasher);
+    goto_sum.hash(&mut hasher);
+    goto_xor.hash(&mut hasher);
     if let Some(advance_row) = advance_row {
         advance_row.hash(&mut hasher);
     }
-
     hasher.finish()
 }
 
@@ -2867,6 +2888,38 @@ mod tests {
             Action::StackShifts(shifts) => shifts.clone(),
             action => panic!("expected stack shifts, got {action:?}"),
         }
+    }
+
+    #[test]
+    fn row_fingerprint_is_independent_of_sparse_row_insertion_order() {
+        let mut action_left = ActionRow::default();
+        action_left.insert(3, Action::Reduce(7, 1));
+        action_left.insert(1, Action::Shift(4, false));
+        action_left.insert(9, Action::Accept);
+        let mut action_right = ActionRow::default();
+        action_right.insert(9, Action::Accept);
+        action_right.insert(1, Action::Shift(4, false));
+        action_right.insert(3, Action::Reduce(7, 1));
+
+        let mut goto_left = GotoRow::default();
+        goto_left.insert(5, (2, false));
+        goto_left.insert(1, (6, true));
+        let mut goto_right = GotoRow::default();
+        goto_right.insert(1, (6, true));
+        goto_right.insert(5, (2, false));
+
+        assert!(rows_equal(
+            &action_left,
+            &goto_left,
+            None,
+            &action_right,
+            &goto_right,
+            None,
+        ));
+        assert_eq!(
+            row_fingerprint(&action_left, &goto_left, None),
+            row_fingerprint(&action_right, &goto_right, None),
+        );
     }
 
     #[test]
