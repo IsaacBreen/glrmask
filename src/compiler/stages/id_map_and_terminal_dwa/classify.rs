@@ -25,6 +25,7 @@ pub struct SharedClassifyBytesets {
     sparse_transitions_by_byte: Vec<Vec<(u32, u32)>>,
     reverse_transitions_by_byte: Vec<ReverseByteTransitions>,
     matched_states_by_terminal: Vec<Vec<u32>>,
+    has_matched_terminal_by_state: Vec<u8>,
     future_by_state_words: Vec<u64>,
     representative_future_terminal_by_state: Vec<u32>,
     words_per_terminal_set: usize,
@@ -281,6 +282,7 @@ impl SharedClassifyBytesets {
         let mut transitions_by_byte = vec![u32::MAX; 256 * num_states];
         let mut sparse_transitions_by_byte = vec![Vec::<(u32, u32)>::new(); 256];
         let mut matched_states_by_terminal = vec![Vec::<u32>::new(); nt];
+        let mut has_matched_terminal_by_state = vec![0u8; num_states];
         let mut future_by_state_words = vec![0u64; num_states * words_per_terminal_set];
         let mut representative_future_terminal_by_state = vec![u32::MAX; num_states];
         let mut transition_count = 0usize;
@@ -289,6 +291,7 @@ impl SharedClassifyBytesets {
             for terminal in tokenizer.matched_terminals_iter(state) {
                 if (terminal as usize) < nt {
                     matched_states_by_terminal[terminal as usize].push(state);
+                    has_matched_terminal_by_state[state as usize] = 1;
                 }
             }
             let future_words = tokenizer.possible_future_terminals(state).words();
@@ -392,6 +395,7 @@ impl SharedClassifyBytesets {
             sparse_transitions_by_byte,
             reverse_transitions_by_byte,
             matched_states_by_terminal,
+            has_matched_terminal_by_state,
             future_by_state_words,
             representative_future_terminal_by_state,
             words_per_terminal_set,
@@ -1120,6 +1124,7 @@ fn populate_exact_boundary_prefixes(
     states_scanned: &mut usize,
     reached_states: &mut usize,
     finalizer_terminals_scanned: &mut usize,
+    has_matched_terminal_by_state: &[u8],
     allowed_class_by_terminal: &[Option<usize>],
     allowed_follow_classes: &[BitSet],
     matched_classes: &mut Vec<usize>,
@@ -1242,6 +1247,9 @@ fn populate_exact_boundary_prefixes(
         }
         matched_classes.clear();
         for &state in &next_states {
+            if has_matched_terminal_by_state[state as usize] == 0 {
+                continue;
+            }
             for terminal in tokenizer.matched_terminals_iter(state) {
                 *finalizer_terminals_scanned += 1;
                 let terminal = terminal as usize;
@@ -1287,6 +1295,7 @@ fn populate_exact_boundary_prefixes(
                 states_scanned,
                 reached_states,
                 finalizer_terminals_scanned,
+                has_matched_terminal_by_state,
                 allowed_class_by_terminal,
                 allowed_follow_classes,
                 matched_classes,
@@ -1383,6 +1392,7 @@ fn tokens_have_exact_active_l2p_boundary(
         &mut states_scanned,
         &mut reached_states,
         &mut finalizer_terminals_scanned,
+        &bytesets.has_matched_terminal_by_state,
         &allowed_class_by_terminal,
         &allowed_follow_classes,
         &mut matched_classes,
@@ -1985,6 +1995,7 @@ mod tests {
             sparse_transitions_by_byte: Vec::new(),
             reverse_transitions_by_byte: Vec::new(),
             matched_states_by_terminal: Vec::new(),
+            has_matched_terminal_by_state: Vec::new(),
             future_by_state_words: Vec::new(),
             representative_future_terminal_by_state: Vec::new(),
             words_per_terminal_set: 0,
@@ -2088,6 +2099,15 @@ mod tests {
         assert_eq!(actual.reachable_bytes, expected.reachable_bytes);
         assert_eq!(actual.first_bytes, expected.first_bytes);
         assert_eq!(actual.last_bytes, expected.last_bytes);
+        for state in 0..tokenizer.num_states() {
+            assert_eq!(
+                actual.has_matched_terminal_by_state[state as usize] != 0,
+                tokenizer
+                    .matched_terminals_iter(state)
+                    .any(|terminal| terminal < tokenizer.num_terminals()),
+                "state={state}"
+            );
+        }
 
         let mut active_sets = vec![BitSet::new(tokenizer.num_terminals() as usize)];
         let mut all_active = BitSet::new(tokenizer.num_terminals() as usize);
