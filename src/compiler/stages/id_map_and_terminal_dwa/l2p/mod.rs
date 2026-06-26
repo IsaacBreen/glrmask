@@ -12,6 +12,7 @@ use crate::automata::lexer::Lexer;
 pub(crate) mod equivalence_analysis;
 pub(crate) mod nwa_builder;
 pub(crate) mod postprocess;
+mod terminal_interchangeability;
 
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
@@ -36,8 +37,10 @@ use rustc_hash::FxHashMap;
 use super::grammar_helpers::compute_always_allowed_follows;
 use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhaseProfile};
 use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
+use terminal_interchangeability::TerminalInterchangeability;
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
+    dwa_to_nwa_with_ignore_as_epsilon,
     prune_non_coreachable_states, SharedDisallowedFollowDfaCache,
 };
 
@@ -168,6 +171,51 @@ fn l2p_tokenizer_simplify_disabled() -> bool {
             .unwrap_or(true)
     })
 }
+
+/// Enable the deliberately slow generated-swap reference construction.
+/// It is opt-in until it has been validated against full-terminal builds.
+fn l2p_terminal_interchangeability_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY")
+            .map(|value| {
+                let trimmed = value.trim();
+                !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn l2p_terminal_interchangeability_enabled_for_partition(partition: &str) -> bool {
+    if !l2p_terminal_interchangeability_enabled() {
+        return false;
+    }
+    match std::env::var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_PARTITIONS") {
+        Ok(value) if !value.trim().is_empty() => value.split(',').any(|entry| entry.trim() == partition),
+        _ => true,
+    }
+}
+
+/// Reference-only: expand the local vocabulary map to singleton original
+/// tokens before building the representative-terminal NWA. This deliberately
+/// removes the token quotient while validating terminal expansion semantics.
+fn singleton_vocab_map(existing: &ManyToOneIdMap) -> ManyToOneIdMap {
+    let mut original_to_internal = vec![u32::MAX; existing.original_to_internal.len()];
+    let mut representatives = Vec::new();
+    for (original, &old_internal) in existing.original_to_internal.iter().enumerate() {
+        if old_internal == u32::MAX {
+            continue;
+        }
+        let internal = representatives.len() as u32;
+        original_to_internal[original] = internal;
+        representatives.push(original as u32);
+    }
+    ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+        original_to_internal,
+        representatives,
+    )
+}
+
 
 #[derive(Clone, Copy)]
 struct L2PTokenLengthStats {
@@ -387,6 +435,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
+    terminal_interchangeability_bytes: &[bool; 256],
     terminal_coloring: &TerminalColoring,
     use_terminal_coloring: bool,
     ignore_terminal: Option<TerminalID>,
@@ -418,6 +467,36 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         }
     }
 
+    let terminal_interchangeability = if l2p_terminal_interchangeability_enabled_for_partition(partition_label) {
+        TerminalInterchangeability::build(
+            tokenizer,
+            active_terminals,
+            ignore_terminal,
+            terminal_interchangeability_bytes,
+        )
+    } else {
+        TerminalInterchangeability::identity(active_terminals)
+    };
+    let reference_terminal_expansion = !terminal_interchangeability.is_identity();
+    if reference_terminal_expansion && std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY").is_some() {
+        for members in terminal_interchangeability.nontrivial_classes() {
+            let labels = members
+                .iter()
+                .map(|&terminal| format!("{}:{}", terminal, grammar.terminal_display_name(terminal)))
+                .collect::<Vec<_>>();
+            eprintln!(
+                "[glrmask/debug][terminal_interchangeability_class] partition={} members={}",
+                partition_label,
+                labels.join(" | "),
+            );
+        }
+    }
+    let analysis_active_terminals = terminal_interchangeability.active_representatives();
+    let num_analysis_active_terminals = analysis_active_terminals
+        .iter()
+        .filter(|&&active| active)
+        .count();
+
     // Strip non-active terminal bits from DFA finalizers and minimize.
     // When every terminal remains active, reuse the original tokenizer.
     // Otherwise simplify to the smaller partition-local DFA.
@@ -427,15 +506,15 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // `fill_unmapped_with_new_class` after composition, so we always
     // use the simplified tokenizer.
     let simplify_started_at = Instant::now();
-    let can_skip_simplify = l2p_tokenizer_simplify_disabled() || num_active_terminals == active_terminals.len();
+    let can_skip_simplify = l2p_tokenizer_simplify_disabled() || num_analysis_active_terminals == analysis_active_terminals.len();
     let (simplified_tok_storage, simplify_state_map, simplify_cache_hit) = if can_skip_simplify {
         (None, None, false)
     } else if let Some(cache) = shared_simplify_cache {
         let (tok, map, cache_hit) =
-            cache.simplify_for_terminals(tokenizer, active_terminals, &relevant_bytes);
+            cache.simplify_for_terminals(tokenizer, analysis_active_terminals, &relevant_bytes);
         (Some(tok), Some(map), cache_hit)
     } else {
-        let (tok, map) = tokenizer.simplify_for_terminals(active_terminals, Some(&relevant_bytes));
+        let (tok, map) = tokenizer.simplify_for_terminals(analysis_active_terminals, Some(&relevant_bytes));
         (Some(tok), Some(map), false)
     };
     let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -563,6 +642,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             if use_simplified_tok { None } else { flat_trans },
             equivalence_initial_state_map,
         );
+    let mut simplified_id_map = simplified_id_map;
+    if reference_terminal_expansion {
+        simplified_id_map.vocab_tokens = singleton_vocab_map(&simplified_id_map.vocab_tokens);
+    }
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // tsid_fallback is independent of the NWA build / postprocess /
@@ -655,45 +738,56 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let _build_profile = build_nwa_via_trie_walk(
                 tokenizer_for_build,
                 terminal_coloring,
-                use_terminal_coloring,
+                use_terminal_coloring && !reference_terminal_expansion,
                 ignore_terminal,
+                reference_terminal_expansion,
                 &mut nwa,
                 leaf_state,
                 simplified_id_map.num_tsids(),
                 &full_tree.root,
                 &roots,
                 &mut pm_computer,
-                None,
+                Some(analysis_active_terminals),
             );
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let always_allowed_started_at = Instant::now();
-            let always_allowed = compute_always_allowed_follows(grammar);
+            let always_allowed = (!reference_terminal_expansion)
+                .then(|| compute_always_allowed_follows(grammar))
+                .unwrap_or_default();
             let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_build = nwa.states().len();
 
             let collapse_started_at = Instant::now();
-            collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
+            if !reference_terminal_expansion {
+                collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
+            }
             let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_collapse = nwa.states().len();
 
             let disallowed_started_at = Instant::now();
-            apply_disallowed_follow_constraints(
-                &mut nwa,
-                disallowed_follows,
-                grammar.num_terminals as usize,
-                shared_disallowed_follow_dfa_cache,
-            );
+            if !reference_terminal_expansion {
+                apply_disallowed_follow_constraints(
+                    &mut nwa,
+                    disallowed_follows,
+                    grammar.num_terminals as usize,
+                    shared_disallowed_follow_dfa_cache,
+                );
+            }
             let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_disallowed = nwa.states().len();
 
             let prune_started_at = Instant::now();
-            prune_non_coreachable_states(&mut nwa);
+            if !reference_terminal_expansion {
+                prune_non_coreachable_states(&mut nwa);
+            }
             let prune_ms = prune_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_prune = nwa.states().len();
 
             let canonicalize_started_at = Instant::now();
-            canonicalize_acyclic_nwa(&mut nwa);
+            if !reference_terminal_expansion {
+                canonicalize_acyclic_nwa(&mut nwa);
+            }
             let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_canonicalize = nwa.states().len();
 
@@ -702,7 +796,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let minimize_started_at = Instant::now();
-            let skip_minimize = defer_minimization_to_local_merge
+            let skip_minimize = reference_terminal_expansion
+                || defer_minimization_to_local_merge
                 || std::env::var("GLRMASK_SKIP_L2P_MINIMIZE")
                 .map(|value| {
                     let trimmed = value.trim();
@@ -742,7 +837,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     if early_none {
         return None;
     }
-    let composed_id_map = if use_simplified_tok {
+    let mut dwa = dwa;
+    let mut determinize_ms = determinize_ms;
+    let mut minimize_ms = minimize_ms;
+    let mut reference_postprocess_ms = 0.0;
+    let mut reference_expand_profile = None;
+    let mut composed_id_map = if use_simplified_tok {
         InternalIdMap {
             tokenizer_states: simplify_state_map
                 .as_ref()
@@ -754,8 +854,72 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     } else {
         simplified_id_map.clone()
     };
-    let postprocess_ms =
-        always_allowed_ms + collapse_ms + disallowed_ms + prune_ms + canonicalize_ms;
+
+    if reference_terminal_expansion {
+        let (views, expansion_profile) = terminal_interchangeability
+            .expand_reference_dwa_views(&mut dwa, &mut composed_id_map.tokenizer_states);
+        let reference_postprocess_started_at = Instant::now();
+        let mut views = views.into_iter();
+        let first_view = views
+            .next()
+            .expect("reference terminal interchangeability requires an identity view");
+        let mut expanded_nwa = dwa_to_nwa_with_ignore_as_epsilon(&first_view, ignore_terminal);
+        let mut expanded_body = expanded_nwa.body();
+        for view in views {
+            let branch = dwa_to_nwa_with_ignore_as_epsilon(&view, ignore_terminal);
+            expanded_body = expanded_nwa.union_in_place(&branch, &expanded_body);
+        }
+        expanded_nwa.set_start_states(expanded_body.start_states);
+        apply_disallowed_follow_constraints(
+            &mut expanded_nwa,
+            disallowed_follows,
+            grammar.num_terminals as usize,
+            shared_disallowed_follow_dfa_cache,
+        );
+        prune_non_coreachable_states(&mut expanded_nwa);
+        canonicalize_acyclic_nwa(&mut expanded_nwa);
+        let final_determinize_started_at = Instant::now();
+        let final_det = determinize(&expanded_nwa)
+            .expect("terminal interchangeability post-expansion determinization failed");
+        determinize_ms += final_determinize_started_at.elapsed().as_secs_f64() * 1000.0;
+        let final_minimize_started_at = Instant::now();
+        dwa = minimize_owned(final_det);
+        minimize_ms += final_minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+        reference_postprocess_ms = reference_postprocess_started_at.elapsed().as_secs_f64() * 1000.0;
+        reference_expand_profile = Some(expansion_profile);
+    }
+
+    let dwa_stats_before_compact = dwa.stats();
+    let dwa_stats_after_compact = dwa.stats();
+    let postprocess_ms = always_allowed_ms
+        + collapse_ms
+        + disallowed_ms
+        + prune_ms
+        + canonicalize_ms
+        + reference_postprocess_ms;
+    if let Some(profile) = &reference_expand_profile {
+        if l2p_timing_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][l2p_terminal_interchangeability] partition={} active_terminals={} equivalence_classes={} inactive_members={} row_classes={} swap_generators={} group_elements={} concrete_tsids_before={} concrete_tsids_after={} expanded_transition_copies={} initial_substitutions_applied={} initial_substitutions_missing={} continuation_initial_moved={} weight_remap_ms={:.3} expansion_ms={:.3}",
+                partition_label,
+                profile.active_terminals,
+                profile.equivalence_classes,
+                profile.inactive_members,
+                profile.row_classes,
+                profile.swap_generators,
+                profile.group_elements,
+                profile.concrete_tsids_before,
+                profile.concrete_tsids_after,
+                profile.expanded_transition_copies,
+                profile.initial_substitutions_applied,
+                profile.initial_substitutions_missing,
+                profile.continuation_initial_moved,
+                profile.weight_remap_ms,
+                profile.expansion_ms,
+            );
+        }
+    }
+
     let max_length_reduction_pct = if equiv_profile.initial_states_considered == 0 {
         0.0
     } else {

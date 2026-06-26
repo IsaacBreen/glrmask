@@ -94,6 +94,7 @@ pub(crate) struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     num_tsids: u32,
     leaf_state: u32,
     ignore_terminal: Option<TerminalID>,
+    retain_ignore_transitions: bool,
     use_terminal_coloring: bool,
     terminal_path_lengths: Option<Vec<TerminalPathLength>>,
     active_terminals: Option<Vec<bool>>,
@@ -124,6 +125,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         num_tsids: u32,
         leaf_state: u32,
         ignore_terminal: Option<TerminalID>,
+        retain_ignore_transitions: bool,
         use_terminal_coloring: bool,
         terminal_path_lengths: Option<Vec<TerminalPathLength>>,
         active_terminals: Option<Vec<bool>>,
@@ -141,6 +143,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             num_tsids,
             leaf_state,
             ignore_terminal,
+            retain_ignore_transitions,
             use_terminal_coloring,
             terminal_path_lengths,
             active_terminals,
@@ -193,6 +196,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             .or_insert_with(|| {
                 self.tokenizer
                     .possible_future_terminals_iter(tokenizer_state)
+                    .filter(|&terminal| {
+                        self.active_terminals.as_ref().map_or(true, |active| {
+                            active.get(terminal as usize).copied().unwrap_or(false)
+                        })
+                    })
                     .collect()
             })
             .clone()
@@ -208,6 +216,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let mut ignore_present = false;
 
         for terminal_id in self.tokenizer.possible_future_terminals_iter(tokenizer_state) {
+            if !self.active_terminals.as_ref().map_or(true, |active| {
+                active.get(terminal_id as usize).copied().unwrap_or(false)
+            }) {
+                continue;
+            }
             if Some(terminal_id) == self.ignore_terminal {
                 ignore_present = true;
                 continue;
@@ -492,7 +505,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         target: u32,
         weight: &Weight,
     ) {
-        if self.ignore_terminal == Some(label) {
+        if self.ignore_terminal == Some(label) && !self.retain_ignore_transitions {
             for &source in sources {
                 self.epsilon_buffer
                     .entry((source, target))
@@ -971,6 +984,7 @@ pub(crate) fn build_nwa_via_trie_walk<'a>(
     terminal_coloring: &TerminalColoring,
     use_terminal_coloring: bool,
     ignore_terminal: Option<TerminalID>,
+    retain_ignore_transitions: bool,
     nwa: &mut NWA,
     leaf_state: u32,
     num_tsids: u32,
@@ -988,6 +1002,7 @@ pub(crate) fn build_nwa_via_trie_walk<'a>(
         num_tsids,
         leaf_state,
         ignore_terminal,
+        retain_ignore_transitions,
         use_terminal_coloring,
         None,
         active_terminals.map(|a| a.to_vec()),

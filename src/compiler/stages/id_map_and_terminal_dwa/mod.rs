@@ -330,6 +330,14 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
         external_classify_cache.unwrap_or(&owned_classify_cache);
     let token_path_disallowed_follows =
         ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal);
+    // Terminal interchangeability is evaluated over every byte that can occur
+    // in any model token, not just the current partition's local vocabulary.
+    let mut terminal_interchangeability_bytes = [false; 256];
+    for token_bytes in vocab.entries.values() {
+        for &byte in token_bytes {
+            terminal_interchangeability_bytes[byte as usize] = true;
+        }
+    }
     let stage_setup_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let partition_vocab_started_at = Instant::now();
@@ -521,6 +529,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             &label,
             tokenizer,
             sub_vocab,
+            &terminal_interchangeability_bytes,
             terminal_coloring,
             use_terminal_coloring,
             ignore_terminal,

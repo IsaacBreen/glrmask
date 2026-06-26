@@ -8,6 +8,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
 use crate::automata::weighted::nwa::{NWA, NWAState as NWAStateType};
+use crate::automata::weighted::dwa::DWA;
 use crate::grammar::flat::TerminalID;
 use super::equivalence_analysis::disallowed_follows::normalize_disallowed_follows;
 use crate::ds::bitset::BitSet;
@@ -706,4 +707,37 @@ fn subtract_disallowed_follows_direct(nwa: &NWA, disallowed_follows: &[BitSet]) 
     }
 
     result
+}
+
+
+/// Convert a deterministic terminal DWA back into an NWA while changing one
+/// terminal label into epsilon.  This is used only by the deliberately slow
+/// terminal-interchangeability reference path: ignore matches must remain
+/// visible through the first determinization and swap/merge, then become
+/// epsilon before the exact grammar-follow product is built.
+pub(crate) fn dwa_to_nwa_with_ignore_as_epsilon(
+    dwa: &DWA,
+    ignore_terminal: Option<TerminalID>,
+) -> NWA {
+    let mut states = Vec::with_capacity(dwa.states().len());
+    for state in dwa.states() {
+        let mut converted = NWAStateType {
+            final_weight: state.final_weight.clone(),
+            transitions: BTreeMap::new(),
+            epsilons: Vec::new(),
+        };
+        for (&label, &(target, ref weight)) in &state.transitions {
+            if ignore_terminal.is_some_and(|ignore| label == ignore as i32) {
+                converted.epsilons.push((target, weight.clone()));
+            } else {
+                converted
+                    .transitions
+                    .entry(label)
+                    .or_default()
+                    .push((target, weight.clone()));
+            }
+        }
+        states.push(converted);
+    }
+    NWA::from_parts(states, vec![dwa.start_state()])
 }
