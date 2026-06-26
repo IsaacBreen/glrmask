@@ -4151,15 +4151,27 @@ fn core_classes(core_keys: &[Vec<Item>]) -> Vec<u32> {
 }
 
 fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<u32> {
+    let profile_detail = std::env::var("GLRMASK_PROFILE_GLR_CORE_MERGE_DETAIL")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    let core_classes_started_at = profile_detail.then(std::time::Instant::now);
     let nstates = table.num_states as usize;
     let has_advance_rows = table.advance.len() == nstates;
     let core_class_of = core_classes(core_keys);
+    let core_classes_ms = core_classes_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
     let mut partition = core_class_of.clone();
+    let mut iteration = 0usize;
 
     loop {
+        iteration += 1;
+        let iteration_started_at = profile_detail.then(std::time::Instant::now);
         let mut sig_to_part: FxHashMap<RowSignature, u32> = FxHashMap::default();
         let mut next_partition = vec![0u32; nstates];
         let mut next_id = 0u32;
+        let mut action_entries = 0usize;
+        let mut goto_entries = 0usize;
 
         for state in 0..nstates {
             let action = table.action[state]
@@ -4168,10 +4180,12 @@ fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<
                     (terminal, remap_action_to_partition(action, &partition))
                 })
                 .collect();
+            action_entries += table.action[state].len();
             let goto = table.goto[state]
                 .iter()
                 .map(|(&nt, &(target, replace))| (nt, (partition[target as usize], replace)))
                 .collect();
+            goto_entries += table.goto[state].len();
             let signature = RowSignature {
                 core_class: core_class_of[state],
                 action,
@@ -4187,7 +4201,27 @@ fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<
             next_partition[state] = class;
         }
 
-        if next_partition == partition {
+        let changed = next_partition != partition;
+        if let Some(iteration_started_at) = iteration_started_at {
+            eprintln!(
+                "[glrmask/profile][same_core_refine] iteration={} states={} core_classes_ms={:.3} unique_partitions={} action_entries={} goto_entries={} changed={} elapsed_ms={:.3}",
+                iteration,
+                nstates,
+                core_classes_ms,
+                next_id,
+                action_entries,
+                goto_entries,
+                changed,
+                iteration_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        // Refinement only splits classes. Once every state has its own class,
+        // no later pass can change the partition; because classes are assigned
+        // in source-state order, this is also the identity partition.
+        if next_id as usize == nstates {
+            return next_partition;
+        }
+        if !changed {
             return partition;
         }
         partition = next_partition;
@@ -4197,6 +4231,13 @@ fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<
 pub(super) fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>]) -> GLRTable {
     let partition = refine_same_core_partition(&table, core_keys);
     let nstates = table.num_states as usize;
+    let has_merge = partition
+        .iter()
+        .enumerate()
+        .any(|(state, &group)| group != state as u32);
+    if !has_merge {
+        return table;
+    }
     let ngroups = partition.iter().copied().max().map(|x| x + 1).unwrap_or(0) as usize;
 
     let mut representatives = vec![u32::MAX; ngroups];
