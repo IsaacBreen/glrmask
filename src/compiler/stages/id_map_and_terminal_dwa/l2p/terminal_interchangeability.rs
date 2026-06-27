@@ -1738,7 +1738,7 @@ impl TerminalInterchangeability {
         }
 
         let (mut active_representatives, mut members_by_representative, generators) =
-            Self::select_disjoint_directed_subsumption_pairs(active, &active_ids, transports);
+            Self::select_one_directed_subsumption_pair(active, &active_ids, transports);
         if let Some(ignore) = ignore_terminal {
             if active.get(ignore as usize).copied().unwrap_or(false) {
                 active_representatives[ignore as usize] = true;
@@ -1770,71 +1770,51 @@ impl TerminalInterchangeability {
         .with_generator_count()
     }
 
-/// Select a conservative family of directed terminal merges.
+/// Select one conservative directed terminal merge.
 ///
-/// A witness for one `member ≼ representative` replacement does not yet prove
-/// that two members can be relabelled to the same representative at once: the
-/// quotient representative then denotes the union of both member residuals.
-/// Until a family-level residual condition and its composed TSID transport are
-/// implemented, keep every selected directed quotient to one member.
-fn select_disjoint_directed_subsumption_pairs(
+/// A pairwise witness proves only one replacement against the original full
+/// row context. It does not compose either with a second member of the same
+/// representative or with an otherwise disjoint replacement: both alter the
+/// rows assumed by the other proof. Until a family-level condition and composed
+/// TSID transports are implemented, select at most one directed pair per
+/// vocabulary partition.
+fn select_one_directed_subsumption_pair(
     active: &[bool],
     active_ids: &[TerminalID],
-    mut transports: FxHashMap<(TerminalID, TerminalID), SubsumptionTransport>,
+    transports: FxHashMap<(TerminalID, TerminalID), SubsumptionTransport>,
 ) -> (Vec<bool>, Vec<Vec<TerminalID>>, Vec<SubsumptionGenerator>) {
-    let mut unassigned = vec![false; active.len()];
-    for &terminal in active_ids {
-        unassigned[terminal as usize] = true;
-    }
     let mut active_representatives = active.to_vec();
-    for &terminal in active_ids {
-        active_representatives[terminal as usize] = false;
-    }
     let mut members_by_representative = (0..active.len() as u32)
         .map(|terminal| vec![terminal])
         .collect::<Vec<_>>();
-    let mut generators = Vec::new();
+    let Some((member, representative)) = active_ids
+        .iter()
+        .copied()
+        .flat_map(|representative| {
+            active_ids
+                .iter()
+                .copied()
+                .filter(move |&member| member != representative)
+                .map(move |member| (member, representative))
+        })
+        .filter(|edge| transports.contains_key(edge))
+        .min_by_key(|&(member, representative)| (representative, member))
+    else {
+        return (active_representatives, members_by_representative, Vec::new());
+    };
 
-    while unassigned.iter().any(|&value| value) {
-        let mut best = None::<(usize, TerminalID, Option<TerminalID>)>;
-        for &representative in active_ids {
-            if !unassigned[representative as usize] {
-                continue;
-            }
-            let member = active_ids.iter().copied().find(|&member| {
-                member != representative
-                    && unassigned[member as usize]
-                    && transports.contains_key(&(member, representative))
-            });
-            let candidate = (1 + usize::from(member.is_some()), representative, member);
-            if best.as_ref().is_none_or(|best| {
-                candidate.0 > best.0
-                    || (candidate.0 == best.0
-                        && (candidate.1 < best.1
-                            || (candidate.1 == best.1 && candidate.2 < best.2)))
-            }) {
-                best = Some(candidate);
-            }
-        }
-        let (_, representative, member) =
-            best.expect("unassigned active terminal lacks self cover");
-        active_representatives[representative as usize] = true;
-        unassigned[representative as usize] = false;
-        if let Some(member) = member {
-            unassigned[member as usize] = false;
-            members_by_representative[representative as usize].push(member);
-            members_by_representative[representative as usize].sort_unstable();
-            generators.push(SubsumptionGenerator {
-                representative,
-                member,
-                transport: transports
-                    .remove(&(member, representative))
-                    .expect("chosen subsumption edge lacks transport"),
-            });
-        }
-    }
-
-    (active_representatives, members_by_representative, generators)
+    active_representatives[member as usize] = false;
+    members_by_representative[representative as usize].push(member);
+    members_by_representative[representative as usize].sort_unstable();
+    let generator = SubsumptionGenerator {
+        representative,
+        member,
+        transport: transports
+            .get(&(member, representative))
+            .expect("chosen subsumption edge lacks transport")
+            .clone(),
+    };
+    (active_representatives, members_by_representative, vec![generator])
 }
 
     fn with_generator_count(mut self) -> Self {
@@ -3346,7 +3326,7 @@ mod tests {
     }
 
     #[test]
-    fn directed_subsumption_selection_does_not_coalesce_multiple_pairwise_members() {
+    fn directed_subsumption_selection_uses_only_one_pairwise_witness() {
         // A pairwise witness only supports a single replacement. In particular,
         // edges `0 ≼ 2` and `1 ≼ 2` do not certify the quotient that maps both
         // members to 2, because that quotient makes terminal 2 denote their
@@ -3359,21 +3339,24 @@ mod tests {
         };
         transports.insert((0, 2), transport());
         transports.insert((1, 2), transport());
+        // A second disjoint edge must not be composed with the first either:
+        // each pairwise witness was computed in the original full context.
+        transports.insert((1, 3), transport());
 
         let (representatives, members, generators) =
-            TerminalInterchangeability::select_disjoint_directed_subsumption_pairs(
-                &active,
-                &active_ids,
+            TerminalInterchangeability::select_one_directed_subsumption_pair(
+                &[true, true, true, true],
+                &[0, 1, 2, 3],
                 transports,
             );
 
-        assert_eq!(representatives, vec![false, true, true]);
+        assert_eq!(representatives, vec![false, true, true, true]);
         assert_eq!(members[2], vec![0, 2]);
         assert_eq!(members[1], vec![1]);
+        assert_eq!(members[3], vec![3]);
         assert_eq!(generators.len(), 1);
         assert_eq!(generators[0].representative, 2);
         assert_eq!(generators[0].member, 0);
-        assert!(members.iter().all(|members| members.len() <= 2));
     }
 
     #[test]
