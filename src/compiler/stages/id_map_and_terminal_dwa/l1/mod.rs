@@ -1814,32 +1814,80 @@ fn l1_bucket_suffix_signature_profiles_packed(
             let edge_index = node.first_edge as usize + edge_offset;
             let edge = trie.edges[edge_index];
             let child = edge.child as usize;
-            stamp = stamp.wrapping_add(1);
-            if stamp == 0 {
-                seen_stamp.fill(0);
-                stamp = 1;
-            }
             edge_data[edge_index].map_start = transition_maps.len() as u32;
             let child_start = states.len() as u32;
-            for state_offset in 0..parent_len {
-                let state = states[parent_start + state_offset];
+            if parent_len == 1 {
                 let next = l1_transition(
                     flat_trans,
                     transitions_by_byte,
                     num_lexer_states,
-                    state,
+                    states[parent_start],
                     edge.byte as usize,
                 );
                 if next == dead {
                     transition_maps.push(L1_NONE);
-                } else if seen_stamp[next as usize] == stamp {
-                    transition_maps.push(seen_index[next as usize]);
                 } else {
-                    let child_index = states.len() as u32 - child_start;
-                    seen_stamp[next as usize] = stamp;
-                    seen_index[next as usize] = child_index;
                     states.push(next);
-                    transition_maps.push(child_index);
+                    transition_maps.push(0);
+                }
+            } else if parent_len == 2 {
+                let first = l1_transition(
+                    flat_trans,
+                    transitions_by_byte,
+                    num_lexer_states,
+                    states[parent_start],
+                    edge.byte as usize,
+                );
+                let second = l1_transition(
+                    flat_trans,
+                    transitions_by_byte,
+                    num_lexer_states,
+                    states[parent_start + 1],
+                    edge.byte as usize,
+                );
+                let first_index = if first == dead {
+                    L1_NONE
+                } else {
+                    states.push(first);
+                    0
+                };
+                let second_index = if second == dead {
+                    L1_NONE
+                } else if second == first && first != dead {
+                    0
+                } else {
+                    let index = states.len() as u32 - child_start;
+                    states.push(second);
+                    index
+                };
+                transition_maps.push(first_index);
+                transition_maps.push(second_index);
+            } else {
+                stamp = stamp.wrapping_add(1);
+                if stamp == 0 {
+                    seen_stamp.fill(0);
+                    stamp = 1;
+                }
+                for state_offset in 0..parent_len {
+                    let state = states[parent_start + state_offset];
+                    let next = l1_transition(
+                        flat_trans,
+                        transitions_by_byte,
+                        num_lexer_states,
+                        state,
+                        edge.byte as usize,
+                    );
+                    if next == dead {
+                        transition_maps.push(L1_NONE);
+                    } else if seen_stamp[next as usize] == stamp {
+                        transition_maps.push(seen_index[next as usize]);
+                    } else {
+                        let child_index = states.len() as u32 - child_start;
+                        seen_stamp[next as usize] = stamp;
+                        seen_index[next as usize] = child_index;
+                        states.push(next);
+                        transition_maps.push(child_index);
+                    }
                 }
             }
             data[child].states_start = child_start;
