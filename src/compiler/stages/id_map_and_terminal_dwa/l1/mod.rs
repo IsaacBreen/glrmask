@@ -3157,6 +3157,12 @@ fn build_l1_terminal_dwa(
             let mut group_counts = vec![0usize; num_groups];
             let mut group_ranges: Vec<Vec<(u32, u32)>> =
                 (0..num_groups).map(|_| Vec::new()).collect();
+            // Most TSIDs contribute one signature, or have a terminal group
+            // that sees only one of their few signatures. In that case the
+            // group weight is exactly the existing shared range set: preserve
+            // that Arc instead of copying, sorting, and rebuilding it.
+            let mut group_single_arc: Vec<Option<Arc<RangeSetBlaze<u32>>>> =
+                (0..num_groups).map(|_| None).collect();
             let mut touched_groups = Vec::<usize>::new();
 
             for (tsid, contributions) in tsid_group_contributions.iter().enumerate() {
@@ -3167,6 +3173,7 @@ fn build_l1_terminal_dwa(
                 for &group_idx in &touched_groups {
                     group_counts[group_idx] = 0;
                     group_ranges[group_idx].clear();
+                    group_single_arc[group_idx] = None;
                 }
                 touched_groups.clear();
 
@@ -3174,16 +3181,39 @@ fn build_l1_terminal_dwa(
                     for &group_idx in &signature_groups[sig_id] {
                         if group_counts[group_idx] == 0 {
                             touched_groups.push(group_idx);
+                            group_counts[group_idx] = 1;
+                            group_single_arc[group_idx] = Some(Arc::clone(arc));
+                            continue;
                         }
+                        if group_counts[group_idx] == 1
+                            && tsid_total_rep_counts[tsid] != 2
+                        {
+                            group_ranges[group_idx].extend(
+                                group_single_arc[group_idx]
+                                    .as_ref()
+                                    .expect("single group contribution")
+                                    .ranges()
+                                    .map(|range| (*range.start(), *range.end())),
+                            );
+                        }
+                        group_single_arc[group_idx] = None;
                         group_counts[group_idx] += 1;
-                        group_ranges[group_idx].extend(
-                            arc.ranges().map(|range| (*range.start(), *range.end())),
-                        );
+                        if tsid_total_rep_counts[tsid] != 2 {
+                            group_ranges[group_idx].extend(
+                                arc.ranges().map(|range| (*range.start(), *range.end())),
+                            );
+                        }
                     }
                 }
 
                 for &group_idx in &touched_groups {
-                    let shared = if group_counts[group_idx] == tsid_total_rep_counts[tsid] {
+                    let shared = if group_counts[group_idx] == 1 {
+                        Some(Arc::clone(
+                            group_single_arc[group_idx]
+                                .as_ref()
+                                .expect("single group contribution"),
+                        ))
+                    } else if group_counts[group_idx] == tsid_total_rep_counts[tsid] {
                         tsid_full_arc_cache[tsid]
                             .get_or_init(|| {
                                 shared_rangeset_from_unsorted_pairs(
