@@ -703,16 +703,24 @@ impl<'a> Lowerer<'a> {
             // constraints and ignore unsupported minProperties shapes.
             false
         };
-        let fixed_names = normalized
-            .properties
-            .iter()
-            .map(|property| property.name.clone())
-            .collect::<BTreeSet<_>>();
+        let fixed_names = (property_name_pattern.is_some()
+            || !normalized.pattern_properties.is_empty()
+            || !matches!(normalized.additional_properties, AdditionalProperties::Deny))
+        .then(|| {
+            normalized
+                .properties
+                .iter()
+                .map(|property| property.name.clone())
+                .collect::<BTreeSet<_>>()
+        });
         let implicit_ap_default_false = self.llguidance_compat_enabled()
             && normalized.required.len() > normalized.properties.len()
             && matches!(normalized.additional_properties, AdditionalProperties::AllowAny);
         if let Some(pattern) = &property_name_pattern {
-            for key in &fixed_names {
+            for key in fixed_names
+                .as_ref()
+                .expect("propertyNames requires fixed property names")
+            {
                 if !property_name_matches_pattern(pattern, key)? {
                     return Err(SchemaImportError::new(format!(
                         "propertyNames pattern {pattern:?} does not allow fixed property {key:?}"
@@ -771,7 +779,9 @@ impl<'a> Lowerer<'a> {
                 AdditionalProperties::AllowAny if implicit_ap_default_false || max_properties_filled_by_required => None,
                 AdditionalProperties::AllowAny => Some(seq(vec![
                     self.lower_object_additional_key_colon(
-                        &fixed_names,
+                        fixed_names
+                            .as_ref()
+                            .expect("open objects require fixed property names"),
                         &[],
                         property_name_pattern.as_deref(),
                     )?,
@@ -781,7 +791,9 @@ impl<'a> Lowerer<'a> {
                     let value = self.lower_schema(value_schema)?;
                     Some(seq(vec![
                         self.lower_object_additional_key_colon(
-                            &fixed_names,
+                            fixed_names
+                                .as_ref()
+                                .expect("open objects require fixed property names"),
                             &[],
                             property_name_pattern.as_deref(),
                         )?,
@@ -855,7 +867,12 @@ impl<'a> Lowerer<'a> {
 
         let mut tail_pairs = Vec::new();
         for pattern_property in &normalized.pattern_properties {
-            let key = self.lower_pattern_key_colon_appearance(&pattern_property.pattern, &fixed_names)?;
+            let key = self.lower_pattern_key_colon_appearance(
+                &pattern_property.pattern,
+                fixed_names
+                    .as_ref()
+                    .expect("pattern properties require fixed property names"),
+            )?;
             let value = self.lower_schema(&pattern_property.schema)?;
             tail_pairs.push(seq(vec![key, value]));
         }
@@ -863,7 +880,10 @@ impl<'a> Lowerer<'a> {
         match &normalized.additional_properties {
             AdditionalProperties::AllowAny if implicit_ap_default_false || max_properties_filled_by_required => {}
             AdditionalProperties::AllowAny => {
-                let key_colon = if fixed_names.is_empty()
+                let key_colon = if fixed_names
+                    .as_ref()
+                    .expect("pattern properties require fixed property names")
+                    .is_empty()
                     && pattern_keys.is_empty()
                     && property_name_pattern.is_none()
                     && super::string::json_string_compat_mode()
@@ -872,7 +892,9 @@ impl<'a> Lowerer<'a> {
                     seq(vec![r(json_key_string_rule()), r(JSON_KEY_SEPARATOR_RULE)])
                 } else {
                     self.lower_object_additional_key_colon(
-                        &fixed_names,
+                        fixed_names
+                            .as_ref()
+                            .expect("open objects require fixed property names"),
                         &pattern_keys,
                         property_name_pattern.as_deref(),
                     )?
@@ -883,7 +905,10 @@ impl<'a> Lowerer<'a> {
             AdditionalProperties::Schema(_) if max_properties_filled_by_required => {}
             AdditionalProperties::Schema(value_schema) => {
                 let value = self.lower_schema(value_schema)?;
-                let key_colon = if fixed_names.is_empty()
+                let key_colon = if fixed_names
+                    .as_ref()
+                    .expect("pattern properties require fixed property names")
+                    .is_empty()
                     && pattern_keys.is_empty()
                     && property_name_pattern.is_none()
                     && super::string::json_string_compat_mode()
@@ -894,7 +919,9 @@ impl<'a> Lowerer<'a> {
                     seq(vec![r(json_key_string_rule()), r(JSON_KEY_SEPARATOR_RULE)])
                 } else {
                     self.lower_object_additional_key_colon(
-                        &fixed_names,
+                        fixed_names
+                            .as_ref()
+                            .expect("open objects require fixed property names"),
                         &pattern_keys,
                         property_name_pattern.as_deref(),
                     )?
