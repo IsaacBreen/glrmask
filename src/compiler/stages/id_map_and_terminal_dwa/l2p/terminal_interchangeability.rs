@@ -1596,12 +1596,10 @@ impl TerminalInterchangeability {
         let sparse = SparseTerminalResiduals::from_product(&product, &blocks);
         let candidates_started_at = Instant::now();
         let mut candidates = Vec::new();
-        let initial_state = tokenizer.initial_state_id();
         for &member in &active_ids {
             for &representative in &active_ids {
                 if member == representative
                     || !sparse.inventory_is_subset_of(member, representative)
-                    || !sparse.continuation_compatible(initial_state, member, representative)
                 {
                     continue;
                 }
@@ -2759,40 +2757,31 @@ fn subsumption_dwa_view(
     profile: &mut TerminalInterchangeabilityProfile,
 ) -> DWA {
     let start = original.start_state();
-    let mut states = Vec::with_capacity(original.states().len());
-    for (state_id, state) in original.states().iter().enumerate() {
-        let mut transitions = BTreeMap::new();
-        for (&label, &(target, ref weight)) in &state.transitions {
-            // A copied member view owns exactly the first-terminal choice
-            // `representative -> member`. All other first-terminal choices are
-            // covered by the identity view or their own member view. Later
-            // terminal labels have already been expanded independently.
-            if state_id as u32 == start && label != representative as i32 {
-                continue;
-            }
+    let mut states = original.states().to_vec();
+    let initial = &mut states[start as usize];
+    let mut transitions = BTreeMap::new();
+    for (&label, &(target, ref weight)) in &initial.transitions {
+        if label == representative as i32 {
+            // This is the only terminal occurrence whose lexer-state coordinate
+            // is part of the DWA weight. Select the member's initial occurrence
+            // by transporting that support; later terminal edges were expanded
+            // independently in `expand_noninitial_terminal_labels`.
             let mapped_weight = remap_weight_by_subsumption_transport(
                 weight,
                 &transport.representative_state_to_members,
             );
-            if mapped_weight.is_empty() {
-                continue;
+            if !mapped_weight.is_empty() {
+                assert!(
+                    transitions.insert(member as i32, (target, mapped_weight)).is_none(),
+                    "inactive terminal unexpectedly present on DWA start edge",
+                );
+                profile.expanded_transition_copies += 1;
             }
-            let mapped_label = if state_id as u32 == start {
-                member as i32
-            } else {
-                label
-            };
-            transitions.insert(mapped_label, (target, mapped_weight));
-            profile.expanded_transition_copies += 1;
+        } else {
+            transitions.insert(label, (target, weight.clone()));
         }
-        let final_weight = state.final_weight.as_ref().map(|weight| {
-            remap_weight_by_subsumption_transport(
-                weight,
-                &transport.representative_state_to_members,
-            )
-        });
-        states.push(DWAState { transitions, final_weight });
     }
+    initial.transitions = transitions;
     DWA::from_parts(states, start)
 }
 
@@ -3121,7 +3110,7 @@ mod tests {
     }
 
     #[test]
-    fn subsumption_planner_splits_initially_incompatible_members() {
+    fn subsumption_planner_accepts_prefix_embedded_member() {
         let expressions = vec![Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"ba".to_vec())];
         let tokenizer = build_regex(&expressions).into_tokenizer(
             expressions.len() as u32,
@@ -3133,10 +3122,11 @@ mod tests {
             None,
             &[true; 256],
         );
-        // `a ⪯ ba` unrootedly, but a continuation always restarts at the
-        // fixed lexer initial state, where their complete rows differ.
-        assert_eq!(plan.active_representatives, vec![true, true]);
-        assert!(plan.subsumption_generators.is_empty());
+        assert_eq!(plan.active_representatives, vec![false, true]);
+        assert_eq!(plan.members_by_representative[1], vec![0, 1]);
+        assert_eq!(plan.subsumption_generators.len(), 1);
+        assert_eq!(plan.subsumption_generators[0].representative, 1);
+        assert_eq!(plan.subsumption_generators[0].member, 0);
     }
 
     #[test]

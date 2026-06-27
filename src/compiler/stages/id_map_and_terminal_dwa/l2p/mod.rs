@@ -477,7 +477,15 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     } else {
         TerminalInterchangeability::identity(active_terminals)
     };
-    let reference_terminal_expansion = !terminal_interchangeability.is_identity();
+    // Directed subsumption is used to reduce the expensive equivalence
+    // analysis. Restore its concrete terminal labels before terminal-NWA
+    // construction: a post-determinization edge rewrite cannot in general
+    // retarget a partial-token residual to a completed member terminal.
+    let concrete_terminal_nwa_rebuild = std::env::var_os("GLRMASK_L2P_TERMINAL_SUBSUMPTION")
+        .is_some()
+        && !terminal_interchangeability.is_identity();
+    let reference_terminal_expansion =
+        !terminal_interchangeability.is_identity() && !concrete_terminal_nwa_rebuild;
     if reference_terminal_expansion && std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY").is_some() {
         for members in terminal_interchangeability.nontrivial_classes() {
             let labels = members
@@ -646,6 +654,28 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     if reference_terminal_expansion {
         simplified_id_map.vocab_tokens = singleton_vocab_map(&simplified_id_map.vocab_tokens);
     }
+    let nwa_build_id_map = if concrete_terminal_nwa_rebuild && use_simplified_tok {
+        InternalIdMap {
+            tokenizer_states: simplify_state_map
+                .as_ref()
+                .expect("simplified tokenizer needs a state map")
+                .compose(&simplified_id_map.tokenizer_states)
+                .fill_unmapped_with_new_class(),
+            vocab_tokens: simplified_id_map.vocab_tokens.clone(),
+        }
+    } else {
+        simplified_id_map.clone()
+    };
+    let tokenizer_for_nwa_build = if concrete_terminal_nwa_rebuild {
+        tokenizer
+    } else {
+        tokenizer_for_build
+    };
+    let terminals_for_nwa_build = if concrete_terminal_nwa_rebuild {
+        active_terminals
+    } else {
+        analysis_active_terminals
+    };
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // tsid_fallback is independent of the NWA build / postprocess /
@@ -678,7 +708,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     ) = {
         // ---- Step 2-3: Internal vocab + prefix tree ----
         let vocab_tree_started_at = Instant::now();
-        let internal_vocab = internal_vocab_entries(vocab, &simplified_id_map);
+        let internal_vocab = internal_vocab_entries(vocab, &nwa_build_id_map);
         let internal_vocab_count = internal_vocab.len();
         if internal_vocab.is_empty() {
             // Signal early-None via a sentinel. Build a dummy DWA;
@@ -716,38 +746,38 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let vocab_tree_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
 
             // ---- Step 4: Possible matches (lazy via computer) ----
-            let mut pm_computer = PossibleMatchesComputer::new(tokenizer_for_build);
+            let mut pm_computer = PossibleMatchesComputer::new(tokenizer_for_nwa_build);
             let possible_matches_ms = 0.0;
 
             // ---- Step 5: Create NWA and seed root nodes ----
             let seed_started_at = Instant::now();
             let mut nwa = NWA::new(
-                simplified_id_map.num_tsids(),
-                simplified_id_map.max_internal_token_id(),
+                nwa_build_id_map.num_tsids(),
+                nwa_build_id_map.max_internal_token_id(),
             );
             let leaf_state = nwa.add_state();
             nwa.set_final_weight(leaf_state, Weight::all());
             let start_state = nwa.add_state();
             nwa.start_states_mut().push(start_state);
 
-            let roots = seed_root_nodes(&mut nwa, start_state, &simplified_id_map);
+            let roots = seed_root_nodes(&mut nwa, start_state, &nwa_build_id_map);
             let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
 
             // ---- Step 6: Trie-walk NWA build ----
             let trie_build_started_at = Instant::now();
             let _build_profile = build_nwa_via_trie_walk(
-                tokenizer_for_build,
+                tokenizer_for_nwa_build,
                 terminal_coloring,
                 use_terminal_coloring && !reference_terminal_expansion,
                 ignore_terminal,
                 reference_terminal_expansion,
                 &mut nwa,
                 leaf_state,
-                simplified_id_map.num_tsids(),
+                nwa_build_id_map.num_tsids(),
                 &full_tree.root,
                 &roots,
                 &mut pm_computer,
-                Some(analysis_active_terminals),
+                Some(terminals_for_nwa_build),
             );
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -842,7 +872,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let mut minimize_ms = minimize_ms;
     let mut reference_postprocess_ms = 0.0;
     let mut reference_expand_profile = None;
-    let mut composed_id_map = if use_simplified_tok {
+    let mut composed_id_map = if concrete_terminal_nwa_rebuild {
+        nwa_build_id_map.clone()
+    } else if use_simplified_tok {
         InternalIdMap {
             tokenizer_states: simplify_state_map
                 .as_ref()

@@ -200,7 +200,7 @@ fn lark_literals_choices_and_terminals() {
 }
 
 #[test]
-fn terminal_subsumption_splits_initially_incompatible_continuations() {
+fn terminal_subsumption_rebuild_preserves_partial_continuations() {
     let _lock = TERMINAL_SUBSUMPTION_ENV_LOCK.lock().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
     let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
@@ -236,7 +236,7 @@ fn terminal_subsumption_splits_initially_incompatible_continuations() {
                 assert_eq!(
                     observe(&baseline),
                     observe(&expanded),
-                    "subsumption changed token prefix {sequence:?}",
+                    "subsumption rebuild changed token prefix {sequence:?}",
                 );
             }
         }
