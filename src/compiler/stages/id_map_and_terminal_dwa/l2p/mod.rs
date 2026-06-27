@@ -477,15 +477,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     } else {
         TerminalInterchangeability::identity(active_terminals)
     };
-    // Directed subsumption is used to reduce the expensive equivalence
-    // analysis. Restore its concrete terminal labels before terminal-NWA
-    // construction: a post-determinization edge rewrite cannot in general
-    // retarget a partial-token residual to a completed member terminal.
-    let concrete_terminal_nwa_rebuild = std::env::var_os("GLRMASK_L2P_TERMINAL_SUBSUMPTION")
-        .is_some()
-        && !terminal_interchangeability.is_identity();
-    let reference_terminal_expansion =
-        !terminal_interchangeability.is_identity() && !concrete_terminal_nwa_rebuild;
+    // Keep representatives through raw terminal-NWA/DWA construction. Concrete
+    // terminal labels are restored only by the post-DWA reference expansion.
+    // Do not replace this with the concrete-NWA rebuild detour: that is a
+    // diagnostic fallback, not the intended terminal-partition architecture.
+    let concrete_terminal_nwa_rebuild = false;
+    let reference_terminal_expansion = !terminal_interchangeability.is_identity();
     if reference_terminal_expansion && std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY").is_some() {
         for members in terminal_interchangeability.nontrivial_classes() {
             let labels = members

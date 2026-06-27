@@ -2749,40 +2749,51 @@ fn transformed_dwa_view(
     DWA::from_parts(states, original.start_state())
 }
 
+/// Literal reference construction for one directed member substitution.
+///
+/// `base_view` has already expanded every continuation label.  This copy
+/// transports the initial lexer-state coordinate in *every* transition/final
+/// weight, replaces the representative's start label with the member label,
+/// and is later unioned disjointly with the identity and other member copies
+/// before a fresh determinization/minimization.
 fn subsumption_dwa_view(
-    original: &DWA,
+    base_view: &DWA,
     representative: TerminalID,
     member: TerminalID,
     transport: &SubsumptionTransport,
     profile: &mut TerminalInterchangeabilityProfile,
 ) -> DWA {
-    let start = original.start_state();
-    let mut states = original.states().to_vec();
-    let initial = &mut states[start as usize];
-    let mut transitions = BTreeMap::new();
-    for (&label, &(target, ref weight)) in &initial.transitions {
-        if label == representative as i32 {
-            // This is the only terminal occurrence whose lexer-state coordinate
-            // is part of the DWA weight. Select the member's initial occurrence
-            // by transporting that support; later terminal edges were expanded
-            // independently in `expand_noninitial_terminal_labels`.
-            let mapped_weight = remap_weight_by_subsumption_transport(
+    let mut result = base_view.clone();
+    for state in result.states_mut() {
+        state.final_weight = state.final_weight.as_ref().map(|weight| {
+            remap_weight_by_subsumption_transport(
+                weight,
+                &transport.representative_state_to_members,
+            )
+        });
+        for (_, weight) in state.transitions.values_mut() {
+            *weight = remap_weight_by_subsumption_transport(
                 weight,
                 &transport.representative_state_to_members,
             );
-            if !mapped_weight.is_empty() {
-                assert!(
-                    transitions.insert(member as i32, (target, mapped_weight)).is_none(),
-                    "inactive terminal unexpectedly present on DWA start edge",
-                );
-                profile.expanded_transition_copies += 1;
-            }
-        } else {
-            transitions.insert(label, (target, weight.clone()));
         }
     }
-    initial.transitions = transitions;
-    DWA::from_parts(states, start)
+
+    let start = result.start_state() as usize;
+    let transitions = &mut result.states_mut()[start].transitions;
+    let Some((target, weight)) = transitions.remove(&(representative as i32)) else {
+        profile.initial_substitutions_missing += 1;
+        return result;
+    };
+    if !weight.is_empty() {
+        assert!(
+            transitions.insert(member as i32, (target, weight)).is_none(),
+            "inactive subsumption member unexpectedly already present at DWA start",
+        );
+        profile.expanded_transition_copies += 1;
+        profile.initial_substitutions_applied += 1;
+    }
+    result
 }
 
 fn expand_noninitial_terminal_labels(
