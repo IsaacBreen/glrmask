@@ -267,25 +267,6 @@ impl SparseTerminalResiduals {
             .unwrap_or(DEAD_RESIDUAL_BLOCK)
     }
 
-    /// A terminal that may appear after another terminal within one token
-    /// restarts at the lexer's fixed initial state. Its continuation label can
-    /// therefore be expanded only when its complete row agrees there after the
-    /// member→representative relabeling; unrooted subsumption alone is not
-    /// enough.
-    fn continuation_compatible(
-        &self,
-        initial_state: u32,
-        member: TerminalID,
-        representative: TerminalID,
-    ) -> bool {
-        sparse_row_member_subsumed_by(
-            &self.rows_by_state[initial_state as usize],
-            &self.rows_by_state[initial_state as usize],
-            member,
-            representative,
-        )
-    }
-
     fn inventory_is_subset_of(&self, member: TerminalID, representative: TerminalID) -> bool {
         let member_inventory = &self.inventories_by_terminal[member as usize];
         let representative_inventory = &self.inventories_by_terminal[representative as usize];
@@ -3103,6 +3084,30 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn subsumption_planner_rejects_changed_unrelated_terminal_context() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ba".to_vec()),
+            Expr::U8Seq(b"c".to_vec()),
+            Expr::U8Seq(b"d".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let plan = TerminalInterchangeability::build_subsumption(
+            &tokenizer,
+            &[true, true, true, true],
+            None,
+            &[true; 256],
+        );
+        // These terminals alter complete rows that contain `a`/`ba`, so the
+        // exact directional relation correctly refuses the merge.
+        assert_eq!(plan.active_representatives, vec![true, true, true, true]);
+        assert!(plan.subsumption_generators.is_empty());
+    }
 
     #[test]
     fn sparse_subsumption_finds_prefix_embedded_terminal() {
