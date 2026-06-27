@@ -210,7 +210,7 @@ fn terminal_subsumption_post_dwa_expansion_preserves_partial_continuations() {
 
     let entries = ["a", "b", "ba", "aa", "aba", "baa", "baba", "x"];
     let grammar = r#"
-        start: choice choice
+        start: choice choice choice choice
         choice: "a" | "ba"
     "#;
     let baseline = Constraint::from_lark(grammar, &vocab(&entries)).unwrap();
@@ -223,21 +223,31 @@ fn terminal_subsumption_post_dwa_expansion_preserves_partial_continuations() {
 
     for first in 0..entries.len() as u32 {
         for second in 0..entries.len() as u32 {
-            for sequence in [Vec::new(), vec![first], vec![first, second]] {
-                let observe = |constraint: &Constraint| {
-                    let mut state = constraint.start();
-                    for &token in &sequence {
-                        if state.commit_token(token).is_err() {
-                            return None;
-                        }
+            for third in 0..entries.len() as u32 {
+                for fourth in 0..entries.len() as u32 {
+                    for sequence in [
+                        Vec::new(),
+                        vec![first],
+                        vec![first, second],
+                        vec![first, second, third],
+                        vec![first, second, third, fourth],
+                    ] {
+                        let observe = |constraint: &Constraint| {
+                            let mut state = constraint.start();
+                            for &token in &sequence {
+                                if state.commit_token(token).is_err() {
+                                    return None;
+                                }
+                            }
+                            Some((state.is_finished(), allowed(&state.mask())))
+                        };
+                        assert_eq!(
+                            observe(&baseline),
+                            observe(&expanded),
+                            "four-position subsumption expansion changed token prefix {sequence:?}",
+                        );
                     }
-                    Some((state.is_finished(), allowed(&state.mask())))
-                };
-                assert_eq!(
-                    observe(&baseline),
-                    observe(&expanded),
-                    "subsumption post-DWA expansion changed token prefix {sequence:?}",
-                );
+                }
             }
         }
     }
