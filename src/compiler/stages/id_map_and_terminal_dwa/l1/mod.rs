@@ -1112,28 +1112,56 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
 
     let profile_intern_started_at = profile_enabled.then(Instant::now);
     let empty_profile: Arc<[(u32, u32, u32)]> = Arc::from([]);
-    let mut profile_to_id = FxHashMap::<Arc<[(u32, u32, u32)]>, u32>::default();
-    profile_to_id.insert(Arc::clone(&empty_profile), 0);
     let mut profiles_by_id = vec![empty_profile];
     let mut next_profile_id = 1u32;
+    let mut profile_id_by_bucket_and_ptr = FxHashMap::<(u8, usize), u32>::default();
+    let assert_profile_pointer_partition =
+        std::env::var_os("GLRMASK_ASSERT_L1_PROFILE_POINTER_PARTITION").is_some();
+    let mut profile_content_to_bucket_and_ptr = assert_profile_pointer_partition
+        .then(FxHashMap::<Arc<[(u32, u32, u32)]>, (u8, usize)>::default);
     let mut target_to_profile_id = FxHashMap::<(u8, u32), u32>::default();
     for (target_key, profile) in target_profiles {
-        let profile_id = if let Some(&profile_id) = profile_to_id.get(&profile) {
-            profile_id
+        if !profile.is_empty() {
+            if let Some(content_to_pointer) = profile_content_to_bucket_and_ptr.as_mut() {
+                let pointer_key = (target_key.0, profile.as_ptr() as usize);
+                if let Some(&existing) = content_to_pointer.get(&profile) {
+                    assert_eq!(
+                        existing, pointer_key,
+                        "equal L1 profiles must share their first-byte behavior identity",
+                    );
+                } else {
+                    content_to_pointer.insert(Arc::clone(&profile), pointer_key);
+                }
+            }
+        }
+        let profile_id = if profile.is_empty() {
+            0
         } else {
-            let profile_id = next_profile_id;
-            next_profile_id += 1;
-            profile_to_id.insert(Arc::clone(&profile), profile_id);
-            profiles_by_id.push(profile);
-            profile_id
+            let pointer_key = (target_key.0, profile.as_ptr() as usize);
+            if let Some(&profile_id) = profile_id_by_bucket_and_ptr.get(&pointer_key) {
+                profile_id
+            } else {
+                let profile_id = next_profile_id;
+                next_profile_id += 1;
+                profile_id_by_bucket_and_ptr.insert(pointer_key, profile_id);
+                profiles_by_id.push(profile);
+                profile_id
+            }
         };
         target_to_profile_id.insert(target_key, profile_id);
     }
     let profile_ids_len = next_profile_id as usize;
+    let profile_id_intern_ms = profile_intern_started_at.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
+    let profile_freeze_started_at = profile_enabled.then(Instant::now);
     let walk_profiles_by_id: Vec<L1WalkProfile> = profiles_by_id
         .iter()
         .map(|profile| freeze_l1_walk_profile(profile.as_ref()))
         .collect();
+    let profile_freeze_ms = profile_freeze_started_at.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
     let profile_intern_ms = profile_intern_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
@@ -1265,7 +1293,7 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
 
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][l1_exact_equiv_detail] states={} first_bytes={} unique_targets={} profile_ids={} groups={} terminal_signature_ms={:.3} unique_targets_ms={:.3} target_profiles_ms={:.3} profile_intern_ms={:.3} state_keys_ms={:.3} group_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_exact_equiv_detail] states={} first_bytes={} unique_targets={} profile_ids={} groups={} terminal_signature_ms={:.3} unique_targets_ms={:.3} target_profiles_ms={:.3} profile_id_intern_ms={:.3} profile_freeze_ms={:.3} profile_intern_ms={:.3} state_keys_ms={:.3} group_ms={:.3} total_ms={:.3}",
             states.len(),
             nonempty_first_bytes.len(),
             unique_targets_len,
@@ -1274,6 +1302,8 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
             terminal_signature_ms,
             unique_targets_ms,
             target_profiles_ms,
+            profile_id_intern_ms,
+            profile_freeze_ms,
             profile_intern_ms,
             state_keys_ms,
             group_ms,
@@ -1696,6 +1726,19 @@ fn l1_packed_append_behavior(
     }
 }
 
+fn l1_uniform_bucket_profile(
+    profiles_by_signature: &mut FxHashMap<u32, Arc<[(u32, u32, u32)]>>,
+    signature_id: u32,
+    token_start: u32,
+    token_end: u32,
+) -> Arc<[(u32, u32, u32)]> {
+    Arc::clone(
+        profiles_by_signature
+            .entry(signature_id)
+            .or_insert_with(|| Arc::from(vec![(signature_id, token_start, token_end)])),
+    )
+}
+
 fn l1_bucket_suffix_signature_profiles_packed(
     first_byte: u8,
     targets: &[u32],
@@ -1720,16 +1763,26 @@ fn l1_bucket_suffix_signature_profiles_packed(
         }
         return results;
     }
+    let token_start = token_ids[0] as u32;
+    let token_end = *token_ids.last().expect("non-empty suffix bucket") as u32;
+    let mut uniform_profiles_by_signature =
+        FxHashMap::<u32, Arc<[(u32, u32, u32)]>>::default();
 
     let mut walk_targets = Vec::<u32>::new();
     for &target in targets {
         if l1_target_self_loop_covers_suffix_subtree(target, suffix_subtree, flat_trans) {
-            let mut profile = Vec::<(u32, u32, u32)>::new();
             let sig_id = state_to_terminal_signature[target as usize];
-            if sig_id != 0 {
-                profile.push((sig_id, token_ids[0] as u32, *token_ids.last().unwrap() as u32));
-            }
-            results.push(((first_byte, target), Arc::from(profile)));
+            let profile = if sig_id == 0 {
+                Arc::from([])
+            } else {
+                l1_uniform_bucket_profile(
+                    &mut uniform_profiles_by_signature,
+                    sig_id,
+                    token_start,
+                    token_end,
+                )
+            };
+            results.push(((first_byte, target), profile));
         } else {
             walk_targets.push(target);
         }
@@ -2186,17 +2239,33 @@ fn l1_bucket_suffix_signature_profiles_packed(
         let profile = if let Some(profile) = profiles_by_behavior.get(&behavior_id) {
             Arc::clone(profile)
         } else {
-            let mut profile = Vec::new();
-            l1_packed_append_behavior(
+            let uniform_signature = l1_packed_uniform_signature(
                 &trie,
                 0,
                 behavior_id,
                 &data,
                 &records,
-                &record_child_behaviors,
-                &mut profile,
             );
-            let profile: Arc<[(u32, u32, u32)]> = Arc::from(profile);
+            let profile = if uniform_signature != 0 {
+                l1_uniform_bucket_profile(
+                    &mut uniform_profiles_by_signature,
+                    uniform_signature,
+                    token_start,
+                    token_end,
+                )
+            } else {
+                let mut profile = Vec::new();
+                l1_packed_append_behavior(
+                    &trie,
+                    0,
+                    behavior_id,
+                    &data,
+                    &records,
+                    &record_child_behaviors,
+                    &mut profile,
+                );
+                Arc::from(profile)
+            };
             profiles_by_behavior.insert(behavior_id, Arc::clone(&profile));
             profile
         };
