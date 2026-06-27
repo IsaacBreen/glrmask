@@ -1724,13 +1724,21 @@ impl TerminalInterchangeability {
         let transports = sparse.subsumption_transports(&candidates);
         let exact_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
         if std::env::var_os("GLRMASK_PROFILE_L2P_SUBSUMPTION_PLAN").is_some() {
+            let live_ms = product.live_states_ms;
+            let transition_ms = product.transition_build_ms - product.live_states_ms;
+            let column_quotient_ms = product.column_quotient_ms - product.transition_build_ms;
+            let minimize_ms = sparse_ms - product.column_quotient_ms;
             eprintln!(
-                "[glrmask/profile][l2p_subsumption_plan] active_terminals={} sparse_pairs={} candidates={} accepted={} sparse_ms={:.3} candidate_ms={:.3} exact_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][l2p_subsumption_plan] active_terminals={} sparse_pairs={} candidates={} accepted={} sparse_ms={:.3} live_ms={:.3} transition_ms={:.3} column_quotient_ms={:.3} minimize_ms={:.3} candidate_ms={:.3} exact_ms={:.3} total_ms={:.3}",
                 active_ids.len(),
                 sparse.pair_count,
                 candidates.len(),
                 transports.len(),
                 sparse_ms,
+                live_ms,
+                transition_ms,
+                column_quotient_ms,
+                minimize_ms,
                 candidate_ms,
                 exact_ms,
                 started_at.elapsed().as_secs_f64() * 1000.0,
