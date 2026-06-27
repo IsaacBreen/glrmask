@@ -478,10 +478,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         TerminalInterchangeability::identity(active_terminals)
     };
     // Keep representatives through raw terminal-NWA/DWA construction. Concrete
-    // terminal labels are restored only by the post-DWA reference expansion.
-    // Do not replace this with the concrete-NWA rebuild detour: that is a
-    // diagnostic fallback, not the intended terminal-partition architecture.
-    let concrete_terminal_nwa_rebuild = false;
+    // terminal labels are restored by the post-DWA copy/union/determinize path.
     let reference_terminal_expansion = !terminal_interchangeability.is_identity();
     if reference_terminal_expansion && std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY").is_some() {
         for members in terminal_interchangeability.nontrivial_classes() {
@@ -677,28 +674,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     if reference_terminal_expansion {
         simplified_id_map.vocab_tokens = singleton_vocab_map(&simplified_id_map.vocab_tokens);
     }
-    let nwa_build_id_map = if concrete_terminal_nwa_rebuild && use_simplified_tok {
-        InternalIdMap {
-            tokenizer_states: simplify_state_map
-                .as_ref()
-                .expect("simplified tokenizer needs a state map")
-                .compose(&simplified_id_map.tokenizer_states)
-                .fill_unmapped_with_new_class(),
-            vocab_tokens: simplified_id_map.vocab_tokens.clone(),
-        }
-    } else {
-        simplified_id_map.clone()
-    };
-    let tokenizer_for_nwa_build = if concrete_terminal_nwa_rebuild {
-        tokenizer
-    } else {
-        tokenizer_for_build
-    };
-    let terminals_for_nwa_build = if concrete_terminal_nwa_rebuild {
-        active_terminals
-    } else {
-        analysis_active_terminals
-    };
+    let nwa_build_id_map = simplified_id_map.clone();
+    let tokenizer_for_nwa_build = tokenizer_for_build;
+    let terminals_for_nwa_build = analysis_active_terminals;
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // tsid_fallback is independent of the NWA build / postprocess /
@@ -895,9 +873,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let mut minimize_ms = minimize_ms;
     let mut reference_postprocess_ms = 0.0;
     let mut reference_expand_profile = None;
-    let mut composed_id_map = if concrete_terminal_nwa_rebuild {
-        nwa_build_id_map.clone()
-    } else if use_simplified_tok {
+    let mut composed_id_map = if use_simplified_tok {
         InternalIdMap {
             tokenizer_states: simplify_state_map
                 .as_ref()

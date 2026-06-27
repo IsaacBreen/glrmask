@@ -3114,6 +3114,7 @@ mod tests {
         }
     }
 
+
     #[test]
     fn sparse_subsumption_finds_prefix_embedded_terminal() {
         let expressions = vec![Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"ba".to_vec())];
