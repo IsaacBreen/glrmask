@@ -361,6 +361,12 @@ fn load_schema_at(value: &Value, location: &str) -> ImportResult<Schema> {
 }
 
 fn load_object_schema(object: &Map<String, Value>, location: &str) -> ImportResult<Schema> {
+    if let Some(schema) = load_trivial_single_type_schema(object, location) {
+        return Ok(schema);
+    }
+    if let Some(schema) = load_trivial_homogeneous_array_schema(object, location)? {
+        return Ok(schema);
+    }
     validate_supported_keys(object, location)?;
 
     if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
@@ -386,6 +392,75 @@ fn load_object_schema(object: &Map<String, Value>, location: &str) -> ImportResu
     }
 
     Ok(Schema::assertions(location, assertions))
+}
+
+/// Fast path for the overwhelmingly common leaf form `{ "type": "…" }`.
+///
+/// The generic loader constructs precisely these default family assertions, but
+/// first probes every other JSON Schema keyword. Keep this path deliberately
+/// narrow: anything with another member, a type array, or an unknown type falls
+/// through to the full validating loader.
+fn load_trivial_single_type_schema(object: &Map<String, Value>, location: &str) -> Option<Schema> {
+    if object.len() != 1 {
+        return None;
+    }
+    let Value::String(name) = object.get("type")? else {
+        return None;
+    };
+    let schema_type = match name.as_str() {
+        "null" => SchemaType::Null,
+        "boolean" => SchemaType::Boolean,
+        "object" => SchemaType::Object,
+        "array" => SchemaType::Array,
+        "string" => SchemaType::String,
+        "number" => SchemaType::Number,
+        "integer" => SchemaType::Integer,
+        _ => return None,
+    };
+
+    let mut assertions = SchemaAssertions {
+        types: Some(vec![schema_type]),
+        ..SchemaAssertions::default()
+    };
+    match schema_type {
+        SchemaType::Object => assertions.object = Some(ObjectSchema::default()),
+        SchemaType::Array => assertions.array = Some(ArraySchema::default()),
+        SchemaType::String => assertions.string = Some(StringSchema::default()),
+        SchemaType::Number | SchemaType::Integer => {
+            assertions.number = Some(NumberSchema::default())
+        }
+        SchemaType::Null | SchemaType::Boolean => {}
+    }
+    Some(Schema::assertions(location, assertions))
+}
+
+/// Fast path for `{ "type": "array", "items": <schema> }` with no other
+/// keywords. The ordinary loader produces this same default ArraySchema but
+/// probes every unrelated assertion family first.
+fn load_trivial_homogeneous_array_schema(
+    object: &Map<String, Value>,
+    location: &str,
+) -> ImportResult<Option<Schema>> {
+    if object.len() != 2
+        || object.get("type").and_then(Value::as_str) != Some("array")
+    {
+        return Ok(None);
+    }
+    let Some(items) = object.get("items") else {
+        return Ok(None);
+    };
+    let item = load_schema_at(items, &format!("{location}/items"))?;
+    Ok(Some(Schema::assertions(
+        location,
+        SchemaAssertions {
+            types: Some(vec![SchemaType::Array]),
+            array: Some(ArraySchema {
+                items: Box::new(item),
+                ..ArraySchema::default()
+            }),
+            ..SchemaAssertions::default()
+        },
+    )))
 }
 
 fn load_assertions(object: &Map<String, Value>, location: &str) -> ImportResult<SchemaAssertions> {

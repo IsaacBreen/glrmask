@@ -2615,21 +2615,6 @@ impl<'a> Lowerer<'a> {
             .as_ref()
             .map(|_| std::time::Instant::now());
         let required_count = items.iter().filter(|item| item.required).count();
-        let mut builder = ExprNfaBuilder::new();
-        let mut states = vec![[0u32; 2]; items.len() + 1];
-        states[0][0] = builder.start_state();
-        states[0][1] = builder.add_state();
-        for state_pair in states.iter_mut().skip(1) {
-            state_pair[0] = builder.add_state();
-            state_pair[1] = builder.add_state();
-        }
-
-        let use_separator_states = tail_pair.is_some() && items.iter().any(|item| !item.required);
-        let post_separator_states = if use_separator_states {
-            Some((0..=items.len()).map(|_| builder.add_state()).collect::<Vec<_>>())
-        } else {
-            None
-        };
         let item_symbols_started_at = profile_started_at.map(|_| std::time::Instant::now());
         let mut item_symbols = Vec::with_capacity(items.len());
         for item in items {
@@ -2673,6 +2658,21 @@ impl<'a> Lowerer<'a> {
             return Ok(seq(vec![lit("{"), r(&rule_name), lit("}")]));
         }
         let graph_build_started_at = profile_started_at.map(|_| std::time::Instant::now());
+        let mut builder = ExprNfaBuilder::new();
+        let mut states = vec![[0u32; 2]; items.len() + 1];
+        states[0][0] = builder.start_state();
+        states[0][1] = builder.add_state();
+        for state_pair in states.iter_mut().skip(1) {
+            state_pair[0] = builder.add_state();
+            state_pair[1] = builder.add_state();
+        }
+
+        let use_separator_states = tail_pair.is_some() && items.iter().any(|item| !item.required);
+        let post_separator_states = if use_separator_states {
+            Some((0..=items.len()).map(|_| builder.add_state()).collect::<Vec<_>>())
+        } else {
+            None
+        };
         let tail_symbols = tail_pair
             .as_ref()
             .map(Self::split_object_pair_symbols)
