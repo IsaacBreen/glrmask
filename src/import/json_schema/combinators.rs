@@ -27,6 +27,10 @@ impl<'a> Lowerer<'a> {
         schema: &Schema,
         assertions: &SchemaAssertions,
     ) -> ImportResult<GrammarExpr> {
+        let profile_enabled = assertions.any_of.len() >= 32
+            && (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some());
+        let profile_started_at = profile_enabled.then(std::time::Instant::now);
         if schema.location.ends_with("/additionalProperties")
             && self.any_of_has_self_recursive_ref_branch(&assertions.any_of)?
         {
@@ -80,6 +84,13 @@ impl<'a> Lowerer<'a> {
                 suppress_untyped_non_object_alts,
             )?
         {
+            if let Some(profile_started_at) = profile_started_at {
+                eprintln!(
+                    "[glrmask/profile][json_schema_anyof] branches={} path=closed_object_variants elapsed_ms={:.3}",
+                    assertions.any_of.len(),
+                    profile_started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
             return Ok(expr);
         }
         if let Some(expr) = self.try_lower_mixed_closed_object_any_of_variants(
@@ -112,6 +123,13 @@ impl<'a> Lowerer<'a> {
             .iter()
             .map(|branch| self.lower_schema(branch))
             .collect::<ImportResult<Vec<_>>>()?;
+        if let Some(profile_started_at) = profile_started_at {
+            eprintln!(
+                "[glrmask/profile][json_schema_anyof] branches={} path=fallback elapsed_ms={:.3}",
+                assertions.any_of.len(),
+                profile_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         Ok(choice(alternatives))
     }
 
@@ -1181,6 +1199,11 @@ impl<'a> Lowerer<'a> {
         &self,
         branches: Vec<Schema>,
     ) -> ImportResult<Vec<Schema>> {
+        let branch_count = branches.len();
+        let profile_enabled = branches.len() >= 32
+            && (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some());
+        let profile_started_at = profile_enabled.then(std::time::Instant::now);
         let keep = branches
             .iter()
             .enumerate()
@@ -1220,11 +1243,20 @@ impl<'a> Lowerer<'a> {
             })
             .collect::<ImportResult<Vec<_>>>()?;
 
-        Ok(branches
+        let result = branches
             .into_iter()
             .zip(keep)
             .filter_map(|(branch, keep)| keep.then_some(branch))
-            .collect())
+            .collect::<Vec<_>>();
+        if let Some(profile_started_at) = profile_started_at {
+            eprintln!(
+                "[glrmask/profile][json_schema_anyof_subsumption] branches_before={} branches_after={} elapsed_ms={:.3}",
+                branch_count,
+                result.len(),
+                profile_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        Ok(result)
     }
 
     fn object_branch_resolved<'schema>(
