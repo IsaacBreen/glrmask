@@ -296,7 +296,7 @@ fn terminal_interchangeability_post_dwa_swap_preserves_masks() {
 }
 
 #[test]
-fn terminal_subsumption_post_dwa_three_member_partition_preserves_masks() {
+fn terminal_subsumption_post_dwa_three_duplicate_terminals_preserves_masks() {
     let _lock = TERMINAL_SUBSUMPTION_ENV_LOCK.lock().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
     let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
@@ -336,7 +336,7 @@ fn terminal_subsumption_post_dwa_three_member_partition_preserves_masks() {
                 assert_eq!(
                     observe(&baseline),
                     observe(&expanded),
-                    "three-member directed partition changed token prefix {sequence:?}",
+                    "three duplicate terminals changed token prefix {sequence:?}",
                 );
             }
         }

@@ -1721,7 +1721,7 @@ impl TerminalInterchangeability {
         }
         let candidate_ms = candidates_started_at.elapsed().as_secs_f64() * 1000.0;
         let exact_started_at = Instant::now();
-        let mut transports = sparse.subsumption_transports(&candidates);
+        let transports = sparse.subsumption_transports(&candidates);
         let exact_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
         if std::env::var_os("GLRMASK_PROFILE_L2P_SUBSUMPTION_PLAN").is_some() {
             eprintln!(
@@ -1737,58 +1737,8 @@ impl TerminalInterchangeability {
             );
         }
 
-        let mut unassigned = vec![false; active.len()];
-        for &terminal in &active_ids {
-            unassigned[terminal as usize] = true;
-        }
-        let mut active_representatives = active.to_vec();
-        for &terminal in &active_ids {
-            active_representatives[terminal as usize] = false;
-        }
-        let mut members_by_representative = (0..active.len() as u32)
-            .map(|terminal| vec![terminal])
-            .collect::<Vec<_>>();
-        let mut generators = Vec::new();
-
-        while unassigned.iter().any(|&value| value) {
-            let mut best = None::<(usize, TerminalID, Vec<TerminalID>)>;
-            for &representative in &active_ids {
-                if !unassigned[representative as usize] {
-                    continue;
-                }
-                let mut covered = vec![representative];
-                for &member in &active_ids {
-                    if member != representative
-                        && unassigned[member as usize]
-                        && transports.contains_key(&(member, representative))
-                    {
-                        covered.push(member);
-                    }
-                }
-                covered.sort_unstable();
-                let candidate = (covered.len(), representative, covered);
-                if best.as_ref().is_none_or(|best| {
-                    candidate.0 > best.0 || (candidate.0 == best.0 && candidate.1 < best.1)
-                }) {
-                    best = Some(candidate);
-                }
-            }
-            let (_, representative, covered) = best.expect("unassigned active terminal lacks self cover");
-            active_representatives[representative as usize] = true;
-            members_by_representative[representative as usize] = covered.clone();
-            for member in covered {
-                unassigned[member as usize] = false;
-                if member != representative {
-                    generators.push(SubsumptionGenerator {
-                        representative,
-                        member,
-                        transport: transports
-                            .remove(&(member, representative))
-                            .expect("chosen subsumption edge lacks transport"),
-                    });
-                }
-            }
-        }
+        let (mut active_representatives, mut members_by_representative, generators) =
+            Self::select_disjoint_directed_subsumption_pairs(active, &active_ids, transports);
         if let Some(ignore) = ignore_terminal {
             if active.get(ignore as usize).copied().unwrap_or(false) {
                 active_representatives[ignore as usize] = true;
@@ -1819,6 +1769,73 @@ impl TerminalInterchangeability {
         }
         .with_generator_count()
     }
+
+/// Select a conservative family of directed terminal merges.
+///
+/// A witness for one `member ≼ representative` replacement does not yet prove
+/// that two members can be relabelled to the same representative at once: the
+/// quotient representative then denotes the union of both member residuals.
+/// Until a family-level residual condition and its composed TSID transport are
+/// implemented, keep every selected directed quotient to one member.
+fn select_disjoint_directed_subsumption_pairs(
+    active: &[bool],
+    active_ids: &[TerminalID],
+    mut transports: FxHashMap<(TerminalID, TerminalID), SubsumptionTransport>,
+) -> (Vec<bool>, Vec<Vec<TerminalID>>, Vec<SubsumptionGenerator>) {
+    let mut unassigned = vec![false; active.len()];
+    for &terminal in active_ids {
+        unassigned[terminal as usize] = true;
+    }
+    let mut active_representatives = active.to_vec();
+    for &terminal in active_ids {
+        active_representatives[terminal as usize] = false;
+    }
+    let mut members_by_representative = (0..active.len() as u32)
+        .map(|terminal| vec![terminal])
+        .collect::<Vec<_>>();
+    let mut generators = Vec::new();
+
+    while unassigned.iter().any(|&value| value) {
+        let mut best = None::<(usize, TerminalID, Option<TerminalID>)>;
+        for &representative in active_ids {
+            if !unassigned[representative as usize] {
+                continue;
+            }
+            let member = active_ids.iter().copied().find(|&member| {
+                member != representative
+                    && unassigned[member as usize]
+                    && transports.contains_key(&(member, representative))
+            });
+            let candidate = (1 + usize::from(member.is_some()), representative, member);
+            if best.as_ref().is_none_or(|best| {
+                candidate.0 > best.0
+                    || (candidate.0 == best.0
+                        && (candidate.1 < best.1
+                            || (candidate.1 == best.1 && candidate.2 < best.2)))
+            }) {
+                best = Some(candidate);
+            }
+        }
+        let (_, representative, member) =
+            best.expect("unassigned active terminal lacks self cover");
+        active_representatives[representative as usize] = true;
+        unassigned[representative as usize] = false;
+        if let Some(member) = member {
+            unassigned[member as usize] = false;
+            members_by_representative[representative as usize].push(member);
+            members_by_representative[representative as usize].sort_unstable();
+            generators.push(SubsumptionGenerator {
+                representative,
+                member,
+                transport: transports
+                    .remove(&(member, representative))
+                    .expect("chosen subsumption edge lacks transport"),
+            });
+        }
+    }
+
+    (active_representatives, members_by_representative, generators)
+}
 
     fn with_generator_count(mut self) -> Self {
         self.profile.swap_generators = self.generators.len();
@@ -3326,6 +3343,37 @@ mod tests {
         assert_eq!(plan.subsumption_generators.len(), 1);
         assert_eq!(plan.subsumption_generators[0].representative, 0);
         assert_eq!(plan.subsumption_generators[0].member, 1);
+    }
+
+    #[test]
+    fn directed_subsumption_selection_does_not_coalesce_multiple_pairwise_members() {
+        // A pairwise witness only supports a single replacement. In particular,
+        // edges `0 ≼ 2` and `1 ≼ 2` do not certify the quotient that maps both
+        // members to 2, because that quotient makes terminal 2 denote their
+        // union. Keep one edge and leave the other terminal concrete.
+        let active = [true, true, true];
+        let active_ids = [0, 1, 2];
+        let mut transports = FxHashMap::default();
+        let transport = || SubsumptionTransport {
+            representative_state_to_members: vec![Vec::new()],
+        };
+        transports.insert((0, 2), transport());
+        transports.insert((1, 2), transport());
+
+        let (representatives, members, generators) =
+            TerminalInterchangeability::select_disjoint_directed_subsumption_pairs(
+                &active,
+                &active_ids,
+                transports,
+            );
+
+        assert_eq!(representatives, vec![false, true, true]);
+        assert_eq!(members[2], vec![0, 2]);
+        assert_eq!(members[1], vec![1]);
+        assert_eq!(generators.len(), 1);
+        assert_eq!(generators[0].representative, 2);
+        assert_eq!(generators[0].member, 0);
+        assert!(members.iter().all(|members| members.len() <= 2));
     }
 
     #[test]
