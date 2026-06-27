@@ -5,6 +5,7 @@ use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr;
 use crate::automata::lexer::DFA as LexerDFA;
 use crate::automata::unweighted_u32::dfa::DFA;
+use crate::automata::unweighted_u32::minimize_acyclic::reindex_minimized_acyclic_order;
 use crate::automata::lexer::regex::parse_regex;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::{
@@ -1529,6 +1530,103 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
+    /// Emit an already-minimized acyclic DFA without materializing the
+    /// intermediate DFA copy that only exists to apply the standard reindexing
+    /// convention. The ordering and rule emission are intentionally identical
+    /// to `emit_expr_dfa_leftlinear(reindex_minimized_acyclic_dfa(dfa))`.
+    fn emit_canonical_expr_dfa_leftlinear(
+        &mut self,
+        lhs: NonterminalID,
+        expr_nfa: &ExprNFA,
+        dfa: &DFA,
+    ) -> Result<(), GlrMaskError> {
+        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+        let rules_before = self.rules.len();
+        let reindex = reindex_minimized_acyclic_order(dfa);
+        let state_count = reindex.old_states_in_new_order.len();
+        let start = reindex.start_state as usize;
+        let nts = self.expr_nfa_state_nonterminals(state_count, start, "expr_nfa_prefix", None)?;
+        let start_nt = nts[start];
+        self.rules.push(Rule {
+            lhs: start_nt,
+            rhs: Vec::new(),
+        });
+
+        let mut reusable_symbols: Vec<Option<Symbol>> = vec![None; expr_nfa.symbols.len()];
+        let mut reusable_symbol_cache_hits = 0usize;
+        let mut transition_count = 0usize;
+        for (state_index, &old_state) in reindex.old_states_in_new_order.iter().enumerate() {
+            let state = &dfa.states[old_state];
+            for (label, target) in &state.transitions {
+                let target = *target as usize;
+                let Some(&target_state) = reindex.new_state_of_old.get(target) else {
+                    continue;
+                };
+                if target_state == u32::MAX {
+                    continue;
+                }
+                transition_count += 1;
+                let symbol_expr = expr_nfa.symbol_for_label(*label).ok_or_else(|| {
+                    GlrMaskError::GrammarParse(format!(
+                        "ExprNFA transition label {label} is not a valid symbol index"
+                    ))
+                })?;
+                let cacheable = matches!(
+                    symbol_expr,
+                    GrammarExpr::Ref(_)
+                        | GrammarExpr::Literal(_)
+                        | GrammarExpr::CharClass { .. }
+                        | GrammarExpr::RawRegex(_)
+                        | GrammarExpr::AnyByte
+                );
+                let symbol = if cacheable {
+                    let cache_slot = reusable_symbols.get_mut(*label as usize).ok_or_else(|| {
+                        GlrMaskError::GrammarParse(format!(
+                            "ExprNFA transition label {label} is not a valid symbol index"
+                        ))
+                    })?;
+                    if let Some(symbol) = cache_slot {
+                        reusable_symbol_cache_hits += 1;
+                        symbol.clone()
+                    } else {
+                        let symbol = self.lower_expr_terminalish(symbol_expr)?;
+                        *cache_slot = Some(symbol.clone());
+                        symbol
+                    }
+                } else {
+                    self.lower_expr_terminalish(symbol_expr)?
+                };
+                self.rules.push(Rule {
+                    lhs: nts[target_state as usize],
+                    rhs: vec![Symbol::Nonterminal(nts[state_index]), symbol],
+                });
+            }
+        }
+
+        for (state_index, &old_state) in reindex.old_states_in_new_order.iter().enumerate() {
+            if dfa.states[old_state].is_accepting {
+                self.rules.push(Rule {
+                    lhs,
+                    rhs: vec![Symbol::Nonterminal(nts[state_index])],
+                });
+            }
+        }
+
+        if profile_enabled && transition_count >= 64 {
+            eprintln!(
+                "[glrmask/profile][expr_nfa_emit] dfa_states={} transitions={} symbols={} reusable_cache_hits={} emitted_rules={}",
+                state_count,
+                transition_count,
+                expr_nfa.symbols.len(),
+                reusable_symbol_cache_hits,
+                self.rules.len() - rules_before,
+            );
+        }
+
+        Ok(())
+    }
+
     fn emit_expr_dfa_leftlinear_nonnullable(
         &mut self,
         lhs: NonterminalID,
@@ -1612,6 +1710,12 @@ impl<'a> Lowerer<'a> {
     }
 
     fn emit_expr_nfa(&mut self, lhs: NonterminalID, expr_nfa: &ExprNFA) -> Result<(), GlrMaskError> {
+        if expr_nfa.is_determinized_and_minimized
+            && let Some(dfa) = &expr_nfa.canonical_dfa
+            && dfa.is_acyclic()
+        {
+            return self.emit_canonical_expr_dfa_leftlinear(lhs, expr_nfa, dfa);
+        }
         let dfa = expr_nfa.determinize_and_minimize();
         self.emit_expr_dfa_leftlinear(lhs, expr_nfa, &dfa)
     }
