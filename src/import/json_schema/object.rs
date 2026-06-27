@@ -3336,8 +3336,6 @@ impl<'a> Lowerer<'a> {
         satisfies_any_group: bool,
         exclusive_group: bool,
     ) -> ImportResult<ObjectItem> {
-        let key = self.lower_literal_key_colon(&property.name);
-        let separator_key = self.lower_literal_key_colon_with_prefix(b", ", &property.name);
         let mut intersected_schema = None;
         for pattern_property in pattern_properties {
             if property_matches_pattern(&pattern_property.pattern, &property.name)? {
@@ -3359,6 +3357,8 @@ impl<'a> Lowerer<'a> {
         )? {
             return Ok(item);
         }
+        let key = self.lower_literal_key_colon(&property.name);
+        let separator_key = self.lower_literal_key_colon_with_prefix(b", ", &property.name);
         let value = self.lower_object_property_value_schema(effective_schema)?;
         if let Some(non_string_value) = Self::without_json_string_branch(value.clone()) {
             let (non_string_value, has_null_branch) =
