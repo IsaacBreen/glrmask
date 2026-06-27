@@ -2,6 +2,7 @@
 
 use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::ds::bitset::BitSet;
@@ -20,18 +21,146 @@ pub struct SharedClassifyBytesets {
     reachable_bytes: Vec<U8Set>,
     first_bytes: Vec<U8Set>,
     last_bytes: Vec<U8Set>,
+    transitions_by_byte: Vec<u32>,
+    sparse_transitions_by_byte: Vec<Vec<(u32, u32)>>,
+    reverse_transitions_by_byte: Vec<ReverseByteTransitions>,
+    matched_states_by_terminal: Vec<Vec<u32>>,
+    has_matched_terminal_by_state: Vec<u8>,
+    future_by_state_words: Vec<u64>,
+    representative_future_terminal_by_state: Vec<u32>,
+    words_per_terminal_set: usize,
+    active_route_setup_cache: Mutex<HashMap<(BitSet, usize), Arc<ActiveL2pRouteSetup>>>,
+}
+
+struct ActiveL2pRouteSetup {
+    active_start_states: Arc<[u32]>,
+    allowed_boundary_pairs: Box<[U8Set; 256]>,
+    allowed_boundary_pair_words: Box<[u64; 1024]>,
+    active_reachable_by_byte: Box<[u8; 256]>,
+    active_suffix_start_by_byte: Box<[u8; 256]>,
+}
+
+#[derive(Default)]
+struct ReverseByteTransitions {
+    targets: Vec<u32>,
+    source_offsets: Vec<u32>,
+    sources: Vec<u32>,
+}
+
+fn build_reverse_transitions_by_byte(
+    sparse_transitions_by_byte: &[Vec<(u32, u32)>],
+    num_states: usize,
+) -> Vec<ReverseByteTransitions> {
+    let mut target_seen = vec![0u32; num_states];
+    let mut target_index = vec![0u32; num_states];
+    let mut stamp = 0u32;
+
+    sparse_transitions_by_byte
+        .iter()
+        .map(|transitions| {
+            if transitions.is_empty() {
+                return ReverseByteTransitions::default();
+            }
+            stamp = stamp.wrapping_add(1);
+            if stamp == 0 {
+                target_seen.fill(0);
+                stamp = 1;
+            }
+
+            let mut targets = Vec::new();
+            let mut counts = Vec::<u32>::new();
+            for &(_, target) in transitions {
+                let target = target as usize;
+                if target_seen[target] != stamp {
+                    target_seen[target] = stamp;
+                    target_index[target] = targets.len() as u32;
+                    targets.push(target as u32);
+                    counts.push(0);
+                }
+                counts[target_index[target] as usize] += 1;
+            }
+
+            let mut source_offsets = Vec::with_capacity(targets.len() + 1);
+            source_offsets.push(0);
+            for &count in &counts {
+                source_offsets.push(source_offsets.last().copied().unwrap() + count);
+            }
+            let mut next_source_offsets = source_offsets[..targets.len()].to_vec();
+            let mut sources = vec![0u32; transitions.len()];
+            for &(source, target) in transitions {
+                let group = target_index[target as usize] as usize;
+                let offset = &mut next_source_offsets[group];
+                sources[*offset as usize] = source;
+                *offset += 1;
+            }
+
+            ReverseByteTransitions {
+                targets,
+                source_offsets,
+                sources,
+            }
+        })
+        .collect()
 }
 
 /// Cache type for lazy `SharedClassifyBytesets` initialization across partitions.
 pub type SharedClassifyCache = std::sync::OnceLock<SharedClassifyBytesets>;
 
 pub(crate) struct L2pVocabBoundarySplit {
-    pub(crate) boundary_vocab: Vocab,
-    pub(crate) single_vocab: Vocab,
+    boundary_token_ids: Vec<u32>,
+    single_token_ids: Vec<u32>,
     pub(crate) adjacent_tokens: usize,
     pub(crate) boundary_tokens: usize,
     pub(crate) single_tokens: usize,
     pub(crate) irrelevant_tokens: usize,
+}
+
+impl L2pVocabBoundarySplit {
+    fn materialize_vocab(vocab: &Vocab, token_ids: &[u32]) -> Vocab {
+        let mut entries = Vec::with_capacity(token_ids.len());
+        let mut token_ids = token_ids.iter().copied().peekable();
+        for (&token_id, bytes) in vocab.entries.iter() {
+            while token_ids.peek().is_some_and(|candidate| *candidate < token_id) {
+                token_ids.next();
+            }
+            if token_ids.peek().is_some_and(|candidate| *candidate == token_id) {
+                entries.push((token_id, bytes.clone()));
+                token_ids.next();
+            }
+            if token_ids.peek().is_none() {
+                break;
+            }
+        }
+        Vocab::new(entries, None)
+    }
+
+    pub(crate) fn boundary_vocab(&self, vocab: &Vocab) -> Vocab {
+        Self::materialize_vocab(vocab, &self.boundary_token_ids)
+    }
+
+    pub(crate) fn single_vocab(&self, vocab: &Vocab) -> Vocab {
+        Self::materialize_vocab(vocab, &self.single_token_ids)
+    }
+}
+
+fn merge_sorted_token_ids(mut left: Vec<u32>, right: Vec<u32>) -> Vec<u32> {
+    if right.is_empty() {
+        return left;
+    }
+    if left.is_empty() {
+        return right;
+    }
+
+    let mut merged = Vec::with_capacity(left.len() + right.len());
+    let mut right = right.into_iter().peekable();
+    for token_id in left.drain(..) {
+        while right.peek().is_some_and(|candidate| *candidate < token_id) {
+            merged.push(right.next().unwrap());
+        }
+        merged.push(token_id);
+    }
+    merged.extend(right);
+    merged
 }
 
 #[derive(Debug)]
@@ -133,6 +262,11 @@ impl L2pPartitionBucket {
 }
 
 impl SharedClassifyBytesets {
+    #[inline]
+    pub(crate) fn transitions_by_byte(&self) -> &[u32] {
+        &self.transitions_by_byte
+    }
+
     /// Scan the DFA to compute per-terminal byte sets.
     pub fn build(tokenizer: &Tokenizer, num_terminals: u32) -> Self {
         let nt = num_terminals as usize;
@@ -150,11 +284,39 @@ impl SharedClassifyBytesets {
         let words_per_terminal_set = nt.div_ceil(64);
         let mut reachable_by_byte = vec![0u64; 256 * words_per_terminal_set];
         let mut last_by_byte = vec![0u64; 256 * words_per_terminal_set];
+        let num_states = tokenizer.num_states() as usize;
+        let mut transitions_by_byte = vec![u32::MAX; 256 * num_states];
+        let mut sparse_transitions_by_byte = vec![Vec::<(u32, u32)>::new(); 256];
+        let mut matched_states_by_terminal = vec![Vec::<u32>::new(); nt];
+        let mut has_matched_terminal_by_state = vec![0u8; num_states];
+        let mut future_by_state_words = vec![0u64; num_states * words_per_terminal_set];
+        let mut representative_future_terminal_by_state = vec![u32::MAX; num_states];
         let mut transition_count = 0usize;
 
         for state in 0..tokenizer.num_states() {
+            for terminal in tokenizer.matched_terminals_iter(state) {
+                if (terminal as usize) < nt {
+                    matched_states_by_terminal[terminal as usize].push(state);
+                    has_matched_terminal_by_state[state as usize] = 1;
+                }
+            }
+            let future_words = tokenizer.possible_future_terminals(state).words();
+            future_by_state_words[state as usize * words_per_terminal_set
+                ..(state as usize + 1) * words_per_terminal_set]
+                .copy_from_slice(future_words);
+            if let Some((word_index, &word)) = future_words
+                .iter()
+                .take(words_per_terminal_set)
+                .enumerate()
+                .find(|(_, word)| **word != 0)
+            {
+                representative_future_terminal_by_state[state as usize] =
+                    (word_index * 64 + word.trailing_zeros() as usize) as u32;
+            }
             for (byte, target) in tokenizer.transitions_from(state) {
                 transition_count += 1;
+                transitions_by_byte[byte as usize * num_states + state as usize] = target;
+                sparse_transitions_by_byte[byte as usize].push((state, target));
                 let bucket_offset = byte as usize * words_per_terminal_set;
                 let matched_words = tokenizer.matched_terminal_bitset(target).words();
                 let future_words = tokenizer.possible_future_terminals(target).words();
@@ -172,6 +334,8 @@ impl SharedClassifyBytesets {
                 }
             }
         }
+        let reverse_transitions_by_byte =
+            build_reverse_transitions_by_byte(&sparse_transitions_by_byte, num_states);
         let scan_ms = started_at.elapsed().as_secs_f64() * 1000.0;
 
         let mut reachable_bytes = vec![U8Set::empty(); nt];
@@ -233,6 +397,15 @@ impl SharedClassifyBytesets {
             reachable_bytes,
             first_bytes,
             last_bytes,
+            transitions_by_byte,
+            sparse_transitions_by_byte,
+            reverse_transitions_by_byte,
+            matched_states_by_terminal,
+            has_matched_terminal_by_state,
+            future_by_state_words,
+            representative_future_terminal_by_state,
+            words_per_terminal_set,
+            active_route_setup_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -515,6 +688,291 @@ fn token_has_active_l2p_boundary(bytes: &[u8], allowed_boundary_pairs: &[U8Set; 
         .any(|pair| allowed_boundary_pairs[pair[0] as usize].contains(pair[1]))
 }
 
+fn token_has_active_l2p_boundary_words(
+    bytes: &[u8],
+    allowed_boundary_pair_words: &[u64; 1024],
+) -> bool {
+    bytes.windows(2).any(|pair| {
+        let pair_index = ((pair[0] as usize) << 8) | pair[1] as usize;
+        (allowed_boundary_pair_words[pair_index >> 6] & (1u64 << (pair_index & 63))) != 0
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenL2pRouteHint {
+    Adjacent,
+    Single,
+    Irrelevant,
+}
+
+/// Classify the cheap, byte-level L2P route hint in one token pass.
+///
+/// The route scan formerly searched every token once for an allowed adjacent
+/// pair and, when none was found, searched it again for an active reachable
+/// byte. The adjacency result has precedence, so retaining the first byte while
+/// tracking reachability produces exactly the same split with one traversal.
+#[inline]
+fn token_l2p_route_hint(
+    bytes: &[u8],
+    allowed_boundary_pair_words: &[u64; 1024],
+    active_reachable_by_byte: &[u8; 256],
+) -> TokenL2pRouteHint {
+    let Some((&first, rest)) = bytes.split_first() else {
+        return TokenL2pRouteHint::Irrelevant;
+    };
+    let mut previous = first;
+    let mut reaches_active = active_reachable_by_byte[first as usize] != 0;
+    for &byte in rest {
+        let pair_index = ((previous as usize) << 8) | byte as usize;
+        if (allowed_boundary_pair_words[pair_index >> 6] & (1u64 << (pair_index & 63)))
+            != 0
+        {
+            return TokenL2pRouteHint::Adjacent;
+        }
+        reaches_active |= active_reachable_by_byte[byte as usize] != 0;
+        previous = byte;
+    }
+    if reaches_active {
+        TokenL2pRouteHint::Single
+    } else {
+        TokenL2pRouteHint::Irrelevant
+    }
+}
+
+#[inline]
+fn bitset_intersects_words(bitset: &BitSet, words: &[u64]) -> bool {
+    bitset
+        .words()
+        .iter()
+        .zip(words)
+        .any(|(lhs, rhs)| (*lhs & *rhs) != 0)
+}
+
+#[inline]
+fn state_future_intersects_words(
+    bytesets: &SharedClassifyBytesets,
+    state: u32,
+    active_words: &[u64],
+) -> bool {
+    let offset = state as usize * bytesets.words_per_terminal_set;
+    bytesets.future_by_state_words[offset..offset + bytesets.words_per_terminal_set]
+        .iter()
+        .zip(active_words)
+        .any(|(state_word, active_word)| (*state_word & *active_word) != 0)
+}
+
+fn build_active_matched_by_state(
+    bytesets: &SharedClassifyBytesets,
+    active_bitset: &BitSet,
+) -> Box<[u8]> {
+    let mut matched = vec![
+        0u8;
+        bytesets.future_by_state_words.len() / bytesets.words_per_terminal_set
+    ];
+    for terminal in active_bitset.iter() {
+        for &state in &bytesets.matched_states_by_terminal[terminal] {
+            matched[state as usize] = 1;
+        }
+    }
+    matched.into()
+}
+
+fn build_active_suffix_start_by_byte(
+    tokenizer: &Tokenizer,
+    bytesets: &SharedClassifyBytesets,
+    active_words: &[u64],
+) -> Box<[u8; 256]> {
+    let mut can_start = Box::new([0u8; 256]);
+    let initial = tokenizer.initial_state_id();
+    if !state_future_intersects_words(bytesets, initial, active_words) {
+        return can_start;
+    }
+    for byte in 0u8..=u8::MAX {
+        let next = bytesets.transitions_by_byte
+            [byte as usize * tokenizer.num_states() as usize + initial as usize];
+        if next == u32::MAX {
+            continue;
+        }
+        if state_future_intersects_words(bytesets, next, active_words)
+            || bitset_intersects_words(tokenizer.matched_terminal_bitset(next), active_words)
+        {
+            can_start[byte as usize] = 1;
+        }
+    }
+    can_start
+}
+
+#[inline]
+fn suffix_can_reach_active_terminal(
+    tokenizer: &Tokenizer,
+    bytesets: &SharedClassifyBytesets,
+    flat_trans: &[u32],
+    suffix: &[u8],
+    active_words: &[u64],
+    active_matched_by_state: Option<&[u8]>,
+) -> bool {
+    let mut state = tokenizer.initial_state_id();
+    for &byte in suffix {
+        if !state_future_intersects_words(bytesets, state, active_words) {
+            return false;
+        }
+        let next = flat_trans[state as usize * 256 + byte as usize];
+        if next == u32::MAX {
+            return false;
+        }
+        state = next;
+        if active_matched_by_state.map_or_else(
+            || bitset_intersects_words(tokenizer.matched_terminal_bitset(state), active_words),
+            |matched| matched[state as usize] != 0,
+        ) {
+            return true;
+        }
+    }
+    state_future_intersects_words(bytesets, state, active_words)
+}
+
+fn token_has_active_terminal_suffix(
+    tokenizer: &Tokenizer,
+    bytesets: &SharedClassifyBytesets,
+    flat_trans: &[u32],
+    bytes: &[u8],
+    active_words: &[u64],
+    active_matched_by_state: Option<&[u8]>,
+    active_suffix_start_by_byte: &[u8; 256],
+) -> bool {
+    (1..bytes.len()).any(|suffix_start| {
+        active_suffix_start_by_byte[bytes[suffix_start] as usize] != 0
+            &&
+        suffix_can_reach_active_terminal(
+            tokenizer,
+            bytesets,
+            flat_trans,
+            &bytes[suffix_start..],
+            active_words,
+            active_matched_by_state,
+        )
+    })
+}
+
+fn active_l2p_route_setup(
+    tokenizer: &Tokenizer,
+    bytesets: &SharedClassifyBytesets,
+    active_bitset: &BitSet,
+    disallowed_follows: &Arc<BTreeMap<u32, BitSet>>,
+) -> Arc<ActiveL2pRouteSetup> {
+    let cache_key = (
+        active_bitset.clone(),
+        Arc::as_ptr(disallowed_follows) as usize,
+    );
+    if let Some(cached) = bytesets
+        .active_route_setup_cache
+        .lock()
+        .unwrap()
+        .get(&cache_key)
+        .cloned()
+    {
+        return cached;
+    }
+
+    let setup_started_at = std::time::Instant::now();
+    let active_words = active_bitset.words();
+    let active_count = active_bitset.count_ones();
+    let use_representative_fast_path = active_count >= active_bitset.len().div_ceil(2);
+    let mut active_start_states = Vec::new();
+    let mut start_full_checks = 0usize;
+    for state in 0..tokenizer.num_states() {
+        if use_representative_fast_path {
+            let representative = bytesets.representative_future_terminal_by_state[state as usize];
+            if representative != u32::MAX && active_bitset.contains(representative as usize) {
+                active_start_states.push(state);
+                continue;
+            }
+        }
+        {
+            start_full_checks += 1;
+            if state_future_intersects_words(bytesets, state, active_words) {
+                active_start_states.push(state);
+            }
+        }
+    }
+    let start_states_ms = setup_started_at.elapsed().as_secs_f64() * 1000.0;
+    let boundary_pairs_started_at = std::time::Instant::now();
+    let mut allowed_boundary_pairs = Box::new([U8Set::empty(); 256]);
+    let mut active_reachable = U8Set::empty();
+    let mut active_first_bytes = U8Set::empty();
+    let mut unrestricted_last_bytes = U8Set::empty();
+    let mut allowed_first_bytes_cache = HashMap::<&BitSet, U8Set>::new();
+
+    for terminal in active_bitset.iter() {
+        active_reachable = active_reachable.union(&bytesets.reachable_bytes[terminal]);
+        active_first_bytes = active_first_bytes.union(&bytesets.first_bytes[terminal]);
+    }
+    let mut active_reachable_by_byte = Box::new([0u8; 256]);
+    for byte in active_reachable.iter() {
+        active_reachable_by_byte[byte as usize] = 1;
+    }
+    let active_suffix_start_by_byte =
+        build_active_suffix_start_by_byte(tokenizer, bytesets, active_words);
+    for terminal_1 in active_bitset.iter() {
+        let last_bytes = bytesets.last_bytes[terminal_1];
+        if last_bytes.is_empty() {
+            continue;
+        }
+        let Some(blocked) = disallowed_follows
+            .get(&(terminal_1 as u32))
+            .filter(|blocked| !blocked.is_empty())
+        else {
+            unrestricted_last_bytes = unrestricted_last_bytes.union(&last_bytes);
+            continue;
+        };
+        let allowed_first_bytes = *allowed_first_bytes_cache.entry(blocked).or_insert_with(|| {
+            let mut allowed = U8Set::empty();
+            for terminal_2 in active_bitset.iter() {
+                if !blocked.contains(terminal_2) {
+                    allowed = allowed.union(&bytesets.first_bytes[terminal_2]);
+                }
+            }
+            allowed
+        });
+        for last_byte in last_bytes.iter() {
+            allowed_boundary_pairs[last_byte as usize] =
+                allowed_boundary_pairs[last_byte as usize].union(&allowed_first_bytes);
+        }
+    }
+    for last_byte in unrestricted_last_bytes.iter() {
+        allowed_boundary_pairs[last_byte as usize] =
+            allowed_boundary_pairs[last_byte as usize].union(&active_first_bytes);
+    }
+    let mut allowed_boundary_pair_words = Box::new([0u64; 1024]);
+    for (last_byte, first_bytes) in allowed_boundary_pairs.iter().enumerate() {
+        for first_byte in first_bytes.iter() {
+            let pair_index = (last_byte << 8) | first_byte as usize;
+            allowed_boundary_pair_words[pair_index >> 6] |= 1u64 << (pair_index & 63);
+        }
+    }
+
+    let setup = Arc::new(ActiveL2pRouteSetup {
+        active_start_states: active_start_states.into(),
+        allowed_boundary_pairs,
+        allowed_boundary_pair_words,
+        active_reachable_by_byte,
+        active_suffix_start_by_byte,
+    });
+    if super::types::compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][l2p_route_setup] active={} starts={} start_full_checks={} start_states_ms={:.3} boundary_pairs_ms={:.3} total_ms={:.3}",
+            active_bitset.count_ones(),
+            setup.active_start_states.len(),
+            start_full_checks,
+            start_states_ms,
+            boundary_pairs_started_at.elapsed().as_secs_f64() * 1000.0,
+            setup_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    let mut cache = bytesets.active_route_setup_cache.lock().unwrap();
+    Arc::clone(cache.entry(cache_key).or_insert(setup))
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ExactL2pBoundaryFilterMode {
     Auto,
@@ -552,247 +1010,20 @@ fn exact_l2p_boundary_filter_work_limit() -> usize {
     })
 }
 
-struct ExactPrefixStates {
-    states: std::sync::Arc<Vec<u32>>,
-    matched: BitSet,
-}
-
-struct ExactL2pBoundaryFilter {
-    profile_enabled: bool,
-    active_terminals: BitSet,
-    allowed_after: Vec<Option<BitSet>>,
-    predecessor_terminals_by_follow: Vec<BitSet>,
-    active_start_states: Vec<u32>,
-    first_byte_states: [Option<std::sync::Arc<ExactPrefixStates>>; 256],
-    seen: Vec<u32>,
-    seen_stamp: u32,
-    suffix_predecessors: HashMap<Vec<u8>, BitSet>,
-    first_byte_cache_hits: usize,
-    first_byte_cache_misses: usize,
-    suffix_cache_hits: usize,
-    suffix_cache_misses: usize,
-    prefix_state_reuses: usize,
-    prefix_state_builds: usize,
-    prefix_state_visits: usize,
-    prefix_transition_ms: f64,
-    prefix_matched_ms: f64,
-    suffix_follow_ms: f64,
-    suffix_predecessor_union_ms: f64,
-}
-
-impl ExactL2pBoundaryFilter {
-    fn new(
-        tokenizer: &Tokenizer,
-        active_terminals: BitSet,
-        disallowed_follows: &BTreeMap<u32, BitSet>,
-        active_start_states: Vec<u32>,
-        profile_enabled: bool,
-    ) -> Self {
-        let mut allowed_after = vec![None; active_terminals.len()];
-        for terminal in active_terminals.iter() {
-            let allowed = disallowed_follows
-                .get(&(terminal as u32))
-                .map_or_else(|| active_terminals.clone(), |blocked| active_terminals.difference(blocked));
-            if !allowed.is_empty() {
-                allowed_after[terminal] = Some(allowed);
-            }
-        }
-        let mut predecessor_terminals_by_follow =
-            (0..active_terminals.len()).map(|_| BitSet::new(active_terminals.len())).collect::<Vec<_>>();
-        for predecessor in active_terminals.iter() {
-            let Some(allowed) = allowed_after[predecessor].as_ref() else {
-                continue;
-            };
-            for follow in allowed.iter() {
-                predecessor_terminals_by_follow[follow].set(predecessor);
-            }
-        }
-        Self {
-            profile_enabled,
-            active_terminals,
-            allowed_after,
-            predecessor_terminals_by_follow,
-            active_start_states,
-            first_byte_states: std::array::from_fn(|_| None),
-            seen: vec![0; tokenizer.num_states() as usize],
-            seen_stamp: 0,
-            suffix_predecessors: HashMap::new(),
-            first_byte_cache_hits: 0,
-            first_byte_cache_misses: 0,
-            suffix_cache_hits: 0,
-            suffix_cache_misses: 0,
-            prefix_state_reuses: 0,
-            prefix_state_builds: 0,
-            prefix_state_visits: 0,
-            prefix_transition_ms: 0.0,
-            prefix_matched_ms: 0.0,
-            suffix_follow_ms: 0.0,
-            suffix_predecessor_union_ms: 0.0,
-        }
-    }
-
-    fn next_stamp(&mut self) -> u32 {
-        self.seen_stamp = self.seen_stamp.wrapping_add(1);
-        if self.seen_stamp == 0 {
-            self.seen.fill(0);
-            self.seen_stamp = 1;
-        }
-        self.seen_stamp
-    }
-
-    fn prefix_states(&self, tokenizer: &Tokenizer, states: Vec<u32>) -> ExactPrefixStates {
-        let mut matched = BitSet::new(self.active_terminals.len());
-        for &state in &states {
-            matched.union_with(tokenizer.matched_terminal_bitset(state));
-        }
-        matched.intersect_with(&self.active_terminals);
-        ExactPrefixStates {
-            states: std::sync::Arc::new(states),
-            matched,
-        }
-    }
-
-    fn advance_states(&mut self, tokenizer: &Tokenizer, states: &[u32], byte: u8) -> ExactPrefixStates {
-        let transition_started_at = self.profile_enabled.then(std::time::Instant::now);
-        self.prefix_state_visits += states.len();
-        let stamp = self.next_stamp();
-        let mut next_states = Vec::new();
-        for &state in states {
-            let Some(next) = tokenizer.step(state, byte) else {
-                continue;
-            };
-            let slot = &mut self.seen[next as usize];
-            if *slot == stamp {
-                continue;
-            }
-            *slot = stamp;
-            next_states.push(next);
-        }
-        if let Some(transition_started_at) = transition_started_at {
-            self.prefix_transition_ms += transition_started_at.elapsed().as_secs_f64() * 1000.0;
-        }
-        let matched_started_at = self.profile_enabled.then(std::time::Instant::now);
-        let result = self.prefix_states(tokenizer, next_states);
-        if let Some(matched_started_at) = matched_started_at {
-            self.prefix_matched_ms += matched_started_at.elapsed().as_secs_f64() * 1000.0;
-        }
-        result
-    }
-
-    fn states_after_first_byte(
-        &mut self,
-        tokenizer: &Tokenizer,
-        byte: u8,
-    ) -> std::sync::Arc<ExactPrefixStates> {
-        let index = byte as usize;
-        if let Some(states) = &self.first_byte_states[index] {
-            self.first_byte_cache_hits += 1;
-            return std::sync::Arc::clone(states);
-        }
-        self.first_byte_cache_misses += 1;
-        let transition_started_at = self.profile_enabled.then(std::time::Instant::now);
-        self.prefix_state_visits += self.active_start_states.len();
-        let stamp = self.next_stamp();
-        let mut states = Vec::new();
-        for index in 0..self.active_start_states.len() {
-            let state = self.active_start_states[index];
-            let Some(next) = tokenizer.step(state, byte) else {
-                continue;
-            };
-            let slot = &mut self.seen[next as usize];
-            if *slot == stamp {
-                continue;
-            }
-            *slot = stamp;
-            states.push(next);
-        }
-        if let Some(transition_started_at) = transition_started_at {
-            self.prefix_transition_ms += transition_started_at.elapsed().as_secs_f64() * 1000.0;
-        }
-        let matched_started_at = self.profile_enabled.then(std::time::Instant::now);
-        let states = std::sync::Arc::new(self.prefix_states(tokenizer, states));
-        if let Some(matched_started_at) = matched_started_at {
-            self.prefix_matched_ms += matched_started_at.elapsed().as_secs_f64() * 1000.0;
-        }
-        self.first_byte_states[index] = Some(std::sync::Arc::clone(&states));
-        states
-    }
-
-    fn matched_terminals_can_precede_suffix(
-        &mut self,
-        tokenizer: &Tokenizer,
-        matched: &BitSet,
-        suffix: &[u8],
-    ) -> bool {
-        let predecessors = if let Some(cached) = self.suffix_predecessors.get(suffix) {
-            self.suffix_cache_hits += 1;
-            cached
-        } else {
-            self.suffix_cache_misses += 1;
-            let suffix_follow_started_at = self.profile_enabled.then(std::time::Instant::now);
-            let follows = suffix_follow_terminals(tokenizer, suffix, self.active_terminals.len());
-            if let Some(suffix_follow_started_at) = suffix_follow_started_at {
-                self.suffix_follow_ms += suffix_follow_started_at.elapsed().as_secs_f64() * 1000.0;
-            }
-            let predecessor_union_started_at = self.profile_enabled.then(std::time::Instant::now);
-            let mut computed = BitSet::new(self.active_terminals.len());
-            for follow in follows.iter() {
-                computed.union_with(&self.predecessor_terminals_by_follow[follow]);
-            }
-            if let Some(predecessor_union_started_at) = predecessor_union_started_at {
-                self.suffix_predecessor_union_ms += predecessor_union_started_at.elapsed().as_secs_f64() * 1000.0;
-            }
-            self.suffix_predecessors.insert(suffix.to_vec(), computed);
-            self.suffix_predecessors
-                .get(suffix)
-                .expect("inserted suffix predecessor set is present")
-        };
-        let result = !matched.is_disjoint(predecessors);
-        #[cfg(debug_assertions)]
-        {
-            let mut reference = false;
-            for predecessor in matched.iter() {
-                if let Some(allowed_after) = self.allowed_after[predecessor].as_ref()
-                    && suffix_has_allowed_l2p_follow_reference(tokenizer, suffix, allowed_after)
-                {
-                    reference = true;
-                    break;
-                }
-            }
-            debug_assert_eq!(
-                result,
-                reference,
-                "suffix terminal-set cache must preserve exact follow semantics",
-            );
-        }
-        result
-    }
-}
-
-/// The old per-terminal predicate is true precisely when an allowed terminal
-/// is accepted after some non-empty prefix of `suffix`, or remains live after
-/// the entire suffix.  Materializing that terminal set once lets all candidate
-/// predecessor terminals share the same lexer traversal.
-fn suffix_follow_terminals(tokenizer: &Tokenizer, suffix: &[u8], num_terminals: usize) -> BitSet {
-    let mut terminals = BitSet::new(num_terminals);
-    let mut state = tokenizer.initial_state_id();
-    for &byte in suffix {
-        let Some(next) = tokenizer.step(state, byte) else {
-            return terminals;
-        };
-        state = next;
-        terminals.union_with(tokenizer.matched_terminal_bitset(state));
-    }
-    terminals.union_with(tokenizer.possible_future_terminals(state));
-    terminals
-}
-
-#[cfg(debug_assertions)]
-fn suffix_has_allowed_l2p_follow_reference(
+fn suffix_has_allowed_l2p_follow(
     tokenizer: &Tokenizer,
+    terminal_1: usize,
     suffix: &[u8],
-    allowed_after: &BitSet,
+    active_bitset: &BitSet,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> bool {
+    let allowed_after = disallowed_follows
+        .get(&(terminal_1 as u32))
+        .map_or_else(|| active_bitset.clone(), |blocked| active_bitset.difference(blocked));
+    if allowed_after.is_empty() {
+        return false;
+    }
+
     let mut state = tokenizer.initial_state_id();
     for &byte in suffix {
         if tokenizer
@@ -817,93 +1048,478 @@ fn suffix_has_allowed_l2p_follow_reference(
         .is_disjoint(&allowed_after)
 }
 
-#[inline]
-fn common_byte_prefix_len(left: &[u8], right: &[u8]) -> usize {
-    left.iter()
-        .zip(right)
-        .take_while(|(left, right)| left == right)
-        .count()
-}
-
-/// Evaluate exact L2P boundary membership for all candidate tokens in
-/// lexicographic byte order. Consecutive BPE tokens often share long prefixes;
-/// retaining the corresponding lexer-state subsets avoids both hash-key
-/// allocation and repeated subset propagation.
-fn classify_exact_l2p_boundary_candidates(
+fn token_has_exact_active_l2p_boundary(
     tokenizer: &Tokenizer,
-    candidates: &[(u32, &[u8])],
-    filter: &mut ExactL2pBoundaryFilter,
-) -> HashMap<u32, bool> {
-    let mut sorted = candidates.to_vec();
-    sorted.sort_unstable_by(|(left_id, left), (right_id, right)| {
-        left.cmp(right).then_with(|| left_id.cmp(right_id))
-    });
-
-    let mut results = HashMap::with_capacity(sorted.len());
-    let mut previous: Option<&[u8]> = None;
-    let mut prefix_states = Vec::<std::sync::Arc<ExactPrefixStates>>::new();
-
-    for (token_id, bytes) in sorted {
-        if bytes.len() < 2 {
-            results.insert(token_id, false);
-            previous = Some(bytes);
-            prefix_states.clear();
-            continue;
-        }
-
-        let common = previous.map_or(0, |previous| common_byte_prefix_len(previous, bytes));
-        prefix_states.truncate(common.min(prefix_states.len()));
-        filter.prefix_state_reuses += prefix_states.len();
-
-        while prefix_states.len() < bytes.len() - 1 {
-            let prefix_len = prefix_states.len() + 1;
-            let states = if prefix_len == 1 {
-                filter.states_after_first_byte(tokenizer, bytes[0])
-            } else {
-                let parent = &prefix_states[prefix_len - 2];
-                std::sync::Arc::new(filter.advance_states(
-                    tokenizer,
-                    parent.states.as_ref(),
-                    bytes[prefix_len - 1],
-                ))
-            };
-            filter.prefix_state_builds += 1;
-            prefix_states.push(states);
-        }
-
-        let mut crosses = false;
-        for (split_after, prefix) in prefix_states.iter().enumerate() {
-            if prefix.states.is_empty() {
-                break;
-            }
-            if filter.matched_terminals_can_precede_suffix(
-                tokenizer,
-                &prefix.matched,
-                &bytes[split_after + 1..],
-            ) {
-                crosses = true;
-                break;
-            }
-        }
-        results.insert(token_id, crosses);
-        previous = Some(bytes);
+    bytes: &[u8],
+    active_bitset: &BitSet,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    active_start_states: &[u32],
+) -> bool {
+    if bytes.len() < 2 {
+        return false;
     }
 
-    results
+    let mut current_states = active_start_states.to_vec();
+    let mut next_states = Vec::<u32>::new();
+    let mut seen = vec![0u32; tokenizer.num_states() as usize];
+    let mut seen_stamp = 0u32;
+    let mut suffix_cache = HashMap::<(usize, usize), bool>::new();
+
+    for split_after in 0..bytes.len() - 1 {
+        seen_stamp = seen_stamp.wrapping_add(1);
+        if seen_stamp == 0 {
+            seen.fill(0);
+            seen_stamp = 1;
+        }
+        next_states.clear();
+
+        for &state in &current_states {
+            let Some(next) = tokenizer.step(state, bytes[split_after]) else {
+                continue;
+            };
+            let slot = &mut seen[next as usize];
+            if *slot == seen_stamp {
+                continue;
+            }
+            *slot = seen_stamp;
+            next_states.push(next);
+        }
+
+        if next_states.is_empty() {
+            return false;
+        }
+
+        for &state in &next_states {
+            for terminal_1 in tokenizer.matched_terminals_iter(state) {
+                let terminal_1 = terminal_1 as usize;
+                if !active_bitset.contains(terminal_1) {
+                    continue;
+                }
+                let suffix_start = split_after + 1;
+                let has_follow = *suffix_cache.entry((terminal_1, suffix_start)).or_insert_with(|| {
+                    suffix_has_allowed_l2p_follow(
+                        tokenizer,
+                        terminal_1,
+                        &bytes[suffix_start..],
+                        active_bitset,
+                        disallowed_follows,
+                    )
+                });
+                if has_follow {
+                    return true;
+                }
+            }
+        }
+
+        std::mem::swap(&mut current_states, &mut next_states);
+    }
+
+    false
+}
+
+#[derive(Default)]
+struct ExactBoundaryPrefixNode {
+    children: Vec<(u8, usize)>,
+    allowed_follow_terminals: Option<BitSet>,
+}
+
+fn insert_exact_boundary_prefix(
+    nodes: &mut Vec<ExactBoundaryPrefixNode>,
+    parent: usize,
+    byte: u8,
+) -> usize {
+    if let Some((_, child)) = nodes[parent]
+        .children
+        .iter()
+        .find(|(candidate, _)| *candidate == byte)
+    {
+        return *child;
+    }
+
+    let child = nodes.len();
+    nodes.push(ExactBoundaryPrefixNode::default());
+    nodes[parent].children.push((byte, child));
+    child
+}
+
+fn populate_exact_boundary_prefixes(
+    tokenizer: &Tokenizer,
+    transitions_by_byte: &[u32],
+    sparse_transitions_by_byte: &[Vec<(u32, u32)>],
+    reverse_transitions_by_byte: &[ReverseByteTransitions],
+    active_bitset: &BitSet,
+    nodes: &mut [ExactBoundaryPrefixNode],
+    node: usize,
+    current_states: &[u32],
+    depth: usize,
+    state_seen: &mut [u32],
+    state_stamp: &mut u32,
+    terminal_seen: &mut [u32],
+    terminal_stamp: &mut u32,
+    class_seen: &mut [u32],
+    class_stamp: &mut u32,
+    states_scanned: &mut usize,
+    reached_states: &mut usize,
+    finalizer_terminals_scanned: &mut usize,
+    has_matched_terminal_by_state: &[u8],
+    allowed_class_by_terminal: &[Option<usize>],
+    allowed_follow_classes: &[BitSet],
+    matched_classes: &mut Vec<usize>,
+    state_buffers: &mut Vec<Vec<u32>>,
+    source_seen_by_depth: &mut Vec<Vec<u32>>,
+    source_stamps: &mut Vec<u32>,
+) {
+    let child_count = nodes[node].children.len();
+    let frontier_is_dense = current_states.len() * 4 >= tokenizer.num_states() as usize;
+    let source_stamp = if nodes[node]
+        .children
+        .iter()
+        .any(|(byte, _)| {
+            let sparse = &sparse_transitions_by_byte[*byte as usize];
+            let reverse = &reverse_transitions_by_byte[*byte as usize];
+            sparse.len() < current_states.len()
+                || (frontier_is_dense && reverse.targets.len() * 2 < sparse.len())
+        })
+    {
+        if source_seen_by_depth.len() <= depth {
+            source_seen_by_depth.resize_with(depth + 1, || {
+                vec![0u32; tokenizer.num_states() as usize]
+            });
+            source_stamps.resize(depth + 1, 0);
+        }
+        let source_seen = &mut source_seen_by_depth[depth];
+        let source_stamp = &mut source_stamps[depth];
+        *source_stamp = source_stamp.wrapping_add(1);
+        if *source_stamp == 0 {
+            source_seen.fill(0);
+            *source_stamp = 1;
+        }
+        for &state in current_states {
+            source_seen[state as usize] = *source_stamp;
+        }
+        Some(*source_stamp)
+    } else {
+        None
+    };
+    for child_index in 0..child_count {
+        let (byte, child) = nodes[node].children[child_index];
+        if state_buffers.len() <= depth {
+            state_buffers.resize_with(depth + 1, Vec::new);
+        }
+        let mut next_states = std::mem::take(&mut state_buffers[depth]);
+        next_states.clear();
+        if next_states.capacity() < current_states.len() {
+            next_states.reserve(current_states.len() - next_states.capacity());
+        }
+        let sparse_transitions = &sparse_transitions_by_byte[byte as usize];
+        let reverse_transitions = &reverse_transitions_by_byte[byte as usize];
+        let use_reverse_transitions = source_stamp.is_some()
+            && frontier_is_dense
+            && reverse_transitions.targets.len() * 2 < sparse_transitions.len();
+        if use_reverse_transitions {
+            let source_stamp = source_stamp.unwrap();
+            let source_seen = &source_seen_by_depth[depth];
+            for (target_index, &target) in reverse_transitions.targets.iter().enumerate() {
+                let source_start = reverse_transitions.source_offsets[target_index] as usize;
+                let source_end = reverse_transitions.source_offsets[target_index + 1] as usize;
+                for &source in &reverse_transitions.sources[source_start..source_end] {
+                    *states_scanned += 1;
+                    if source_seen[source as usize] == source_stamp {
+                        next_states.push(target);
+                        break;
+                    }
+                }
+            }
+        } else {
+            *state_stamp = state_stamp.wrapping_add(1);
+            if *state_stamp == 0 {
+                state_seen.fill(0);
+                *state_stamp = 1;
+            }
+            if source_stamp.is_some() && sparse_transitions.len() < current_states.len() {
+            *states_scanned += sparse_transitions.len();
+            let source_stamp = source_stamp.unwrap();
+            let source_seen = &source_seen_by_depth[depth];
+            for &(source, next) in sparse_transitions {
+                if source_seen[source as usize] != source_stamp {
+                    continue;
+                }
+                let slot = &mut state_seen[next as usize];
+                if *slot == *state_stamp {
+                    continue;
+                }
+                *slot = *state_stamp;
+                next_states.push(next);
+            }
+            } else {
+            *states_scanned += current_states.len();
+            let transition_column =
+                &transitions_by_byte[byte as usize * tokenizer.num_states() as usize
+                    ..(byte as usize + 1) * tokenizer.num_states() as usize];
+            for &state in current_states {
+                let next = transition_column[state as usize];
+                if next == u32::MAX {
+                    continue;
+                }
+                let slot = &mut state_seen[next as usize];
+                if *slot == *state_stamp {
+                    continue;
+                }
+                *slot = *state_stamp;
+                next_states.push(next);
+            }
+            }
+        }
+        *reached_states += next_states.len();
+
+        *terminal_stamp = terminal_stamp.wrapping_add(1);
+        if *terminal_stamp == 0 {
+            terminal_seen.fill(0);
+            *terminal_stamp = 1;
+        }
+        *class_stamp = class_stamp.wrapping_add(1);
+        if *class_stamp == 0 {
+            class_seen.fill(0);
+            *class_stamp = 1;
+        }
+        matched_classes.clear();
+        for &state in &next_states {
+            if has_matched_terminal_by_state[state as usize] == 0 {
+                continue;
+            }
+            for terminal in tokenizer.matched_terminals_iter(state) {
+                *finalizer_terminals_scanned += 1;
+                let terminal = terminal as usize;
+                if !active_bitset.contains(terminal)
+                    || terminal_seen[terminal] == *terminal_stamp
+                {
+                    continue;
+                }
+                terminal_seen[terminal] = *terminal_stamp;
+                if let Some(class) = allowed_class_by_terminal[terminal] {
+                    if class_seen[class] != *class_stamp {
+                        class_seen[class] = *class_stamp;
+                        matched_classes.push(class);
+                    }
+                }
+            }
+        }
+        let mut allowed_follow_terminals = None;
+        for &class in matched_classes.iter() {
+            allowed_follow_terminals
+                .get_or_insert_with(|| BitSet::new(active_bitset.len()))
+                .union_with(&allowed_follow_classes[class]);
+        }
+        nodes[child].allowed_follow_terminals = allowed_follow_terminals;
+
+        if !next_states.is_empty() {
+            populate_exact_boundary_prefixes(
+                tokenizer,
+                transitions_by_byte,
+                sparse_transitions_by_byte,
+                reverse_transitions_by_byte,
+                active_bitset,
+                nodes,
+                child,
+                &next_states,
+                depth + 1,
+                state_seen,
+                state_stamp,
+                terminal_seen,
+                terminal_stamp,
+                class_seen,
+                class_stamp,
+                states_scanned,
+                reached_states,
+                finalizer_terminals_scanned,
+                has_matched_terminal_by_state,
+                allowed_class_by_terminal,
+                allowed_follow_classes,
+                matched_classes,
+                state_buffers,
+                source_seen_by_depth,
+                source_stamps,
+            );
+        }
+        next_states.clear();
+        state_buffers[depth] = next_states;
+    }
+}
+
+fn tokens_have_exact_active_l2p_boundary(
+    tokenizer: &Tokenizer,
+    bytesets: &SharedClassifyBytesets,
+    flat_trans: &[u32],
+    transitions_by_byte: &[u32],
+    tokens: &[&[u8]],
+    active_bitset: &BitSet,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    active_start_states: &[u32],
+) -> Vec<bool> {
+    let total_started_at = std::time::Instant::now();
+    let trie_started_at = std::time::Instant::now();
+    let mut nodes = vec![ExactBoundaryPrefixNode::default()];
+    let total_token_bytes = tokens
+        .iter()
+        .map(|bytes| bytes.len().saturating_sub(1))
+        .sum();
+    let mut token_path_offsets = Vec::with_capacity(tokens.len() + 1);
+    let mut token_paths = Vec::with_capacity(total_token_bytes);
+    token_path_offsets.push(0);
+    for &bytes in tokens {
+        let mut node = 0usize;
+        for &byte in bytes.iter().take(bytes.len().saturating_sub(1)) {
+            node = insert_exact_boundary_prefix(&mut nodes, node, byte);
+            token_paths.push(node);
+        }
+        token_path_offsets.push(token_paths.len());
+    }
+    let trie_ms = trie_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let populate_started_at = std::time::Instant::now();
+    let mut state_seen = vec![0u32; tokenizer.num_states() as usize];
+    let mut terminal_seen = vec![0u32; active_bitset.len()];
+    let mut state_stamp = 0u32;
+    let mut terminal_stamp = 0u32;
+    let mut class_stamp = 0u32;
+    let mut states_scanned = 0usize;
+    let mut reached_states = 0usize;
+    let mut finalizer_terminals_scanned = 0usize;
+    let mut allowed_follow_classes = vec![active_bitset.clone()];
+    let mut blocked_class_cache = HashMap::<&BitSet, usize>::new();
+    let allowed_class_by_terminal = (0..active_bitset.len())
+        .map(|terminal| {
+            if !active_bitset.contains(terminal) {
+                return None;
+            }
+            let Some(blocked) = disallowed_follows
+                .get(&(terminal as u32))
+                .filter(|blocked| !blocked.is_empty())
+            else {
+                return Some(0);
+            };
+            Some(*blocked_class_cache.entry(blocked).or_insert_with(|| {
+                let class = allowed_follow_classes.len();
+                allowed_follow_classes.push(active_bitset.difference(blocked));
+                class
+            }))
+        })
+        .collect::<Vec<_>>();
+    let mut class_seen = vec![0u32; allowed_follow_classes.len()];
+    let mut matched_classes = Vec::with_capacity(allowed_follow_classes.len());
+    let mut state_buffers = Vec::<Vec<u32>>::new();
+    let mut source_seen_by_depth = Vec::<Vec<u32>>::new();
+    let mut source_stamps = Vec::<u32>::new();
+    populate_exact_boundary_prefixes(
+        tokenizer,
+        transitions_by_byte,
+        &bytesets.sparse_transitions_by_byte,
+        &bytesets.reverse_transitions_by_byte,
+        active_bitset,
+        &mut nodes,
+        0,
+        active_start_states,
+        0,
+        &mut state_seen,
+        &mut state_stamp,
+        &mut terminal_seen,
+        &mut terminal_stamp,
+        &mut class_seen,
+        &mut class_stamp,
+        &mut states_scanned,
+        &mut reached_states,
+        &mut finalizer_terminals_scanned,
+        &bytesets.has_matched_terminal_by_state,
+        &allowed_class_by_terminal,
+        &allowed_follow_classes,
+        &mut matched_classes,
+        &mut state_buffers,
+        &mut source_seen_by_depth,
+        &mut source_stamps,
+    );
+    let populate_ms = populate_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let evaluate_started_at = std::time::Instant::now();
+    let mut prefix_allowed_checks = 0usize;
+    let mut suffixes_evaluated = 0usize;
+    let mut suffixes_with_terminals = 0usize;
+    let result = tokens
+        .iter()
+        .enumerate()
+        .map(|(token_index, &bytes)| {
+            token_paths[token_path_offsets[token_index]..token_path_offsets[token_index + 1]]
+                .iter()
+                .copied()
+                .enumerate()
+                .any(|(split_after, node)| {
+                    let Some(allowed) = nodes[node].allowed_follow_terminals.as_ref() else {
+                        return false;
+                    };
+                    prefix_allowed_checks += 1;
+                    suffixes_evaluated += 1;
+                    let suffix_start = split_after + 1;
+                    let mut state = tokenizer.initial_state_id();
+                    let mut consumed_suffix = true;
+                    for &byte in &bytes[suffix_start..] {
+                        if tokenizer.possible_future_terminals(state).is_disjoint(allowed) {
+                            consumed_suffix = false;
+                            break;
+                        }
+                        let next = flat_trans[state as usize * 256 + byte as usize];
+                        if next == u32::MAX {
+                            consumed_suffix = false;
+                            break;
+                        }
+                        state = next;
+                        for terminal in tokenizer.matched_terminals_iter(state) {
+                            if allowed.contains(terminal as usize) {
+                                suffixes_with_terminals += 1;
+                                return true;
+                            }
+                        }
+                    }
+                    if consumed_suffix {
+                        let suffix_has_allowed_terminal =
+                            !tokenizer.possible_future_terminals(state).is_disjoint(allowed);
+                        suffixes_with_terminals += usize::from(suffix_has_allowed_terminal);
+                        return suffix_has_allowed_terminal;
+                    }
+                    false
+                })
+        })
+        .collect();
+    let evaluate_ms = evaluate_started_at.elapsed().as_secs_f64() * 1000.0;
+    if super::types::compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][exact_boundary_batch] tokens={} nodes={} follow_classes={} states_scanned={} reached_states={} finalizer_terminals_scanned={} prefix_allowed_checks={} suffixes_evaluated={} suffixes_with_terminals={} trie_ms={:.3} populate_ms={:.3} evaluate_ms={:.3} total_ms={:.3}",
+            tokens.len(),
+            nodes.len(),
+            allowed_follow_classes.len(),
+            states_scanned,
+            reached_states,
+            finalizer_terminals_scanned,
+            prefix_allowed_checks,
+            suffixes_evaluated,
+            suffixes_with_terminals,
+            trie_ms,
+            populate_ms,
+            evaluate_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    result
 }
 
 pub(crate) fn split_vocab_for_active_l2p_terminals(
     tokenizer: &Tokenizer,
+    flat_trans: &[u32],
     vocab: &Vocab,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
+    disallowed_follows: &Arc<BTreeMap<u32, BitSet>>,
     num_terminals: u32,
     active_terminals: &[bool],
     shared_classify_cache: Option<&SharedClassifyCache>,
 ) -> L2pVocabBoundarySplit {
-    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
-    let total_started_at = profile_enabled.then(std::time::Instant::now);
-    let setup_started_at = profile_enabled.then(std::time::Instant::now);
+    let split_started_at = std::time::Instant::now();
     let owned_bytesets: Option<SharedClassifyBytesets>;
     let bytesets = if let Some(cache) = shared_classify_cache {
         cache.get_or_init(|| SharedClassifyBytesets::build(tokenizer, num_terminals))
@@ -921,67 +1537,32 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
     for &terminal in &active {
         active_bitset.set(terminal);
     }
-    let active_start_states: Vec<u32> = (0..tokenizer.num_states())
-        .filter(|&state| {
-            !tokenizer
-                .possible_future_terminals(state)
-                .is_disjoint(&active_bitset)
-        })
-        .collect();
-    let mut allowed_boundary_pairs = [U8Set::empty(); 256];
-    let mut active_reachable = U8Set::empty();
+    let active_setup_started_at = std::time::Instant::now();
+    let route_setup =
+        active_l2p_route_setup(tokenizer, bytesets, &active_bitset, disallowed_follows);
+    let active_setup_ms = active_setup_started_at.elapsed().as_secs_f64() * 1000.0;
+    let boundary_pairs_ms = 0.0;
 
-    for &terminal in &active {
-        active_reachable = active_reachable.union(&bytesets.reachable_bytes[terminal]);
-    }
-    let setup_ms = setup_started_at
-        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-
-    let boundary_pairs_started_at = profile_enabled.then(std::time::Instant::now);
-    for &terminal_1 in &active {
-        let last_bytes = bytesets.last_bytes[terminal_1];
-        if last_bytes.is_empty() {
-            continue;
-        }
-        let disallowed = disallowed_follows.get(&(terminal_1 as u32));
-        for &terminal_2 in &active {
-            if disallowed.map_or(false, |blocked| blocked.contains(terminal_2)) {
-                continue;
-            }
-            let first_bytes = bytesets.first_bytes[terminal_2];
-            if first_bytes.is_empty() {
-                continue;
-            }
-            for last_byte in last_bytes.iter() {
-                for first_byte in first_bytes.iter() {
-                    allowed_boundary_pairs[last_byte as usize].insert(first_byte);
-                }
-            }
-        }
-    }
-    let boundary_pairs_ms = boundary_pairs_started_at
-        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-
-    let mut boundary_entries = Vec::<(u32, Vec<u8>)>::new();
-    let mut single_entries = Vec::<(u32, Vec<u8>)>::new();
-    let mut adjacent_tokens = 0usize;
+    let vocab_scan_started_at = std::time::Instant::now();
+    let mut boundary_token_ids = Vec::<u32>::new();
+    let mut single_token_ids = Vec::<u32>::with_capacity(vocab.entries.len());
     let mut irrelevant_tokens = 0usize;
-    let candidate_scan_started_at = profile_enabled.then(std::time::Instant::now);
-    let adjacent_candidates = vocab
-        .entries
-        .iter()
-        .filter_map(|(&token_id, bytes)| {
-            token_has_active_l2p_boundary(bytes, &allowed_boundary_pairs)
-                .then_some((token_id, bytes.as_slice()))
-        })
-        .collect::<Vec<_>>();
-    let adjacent_candidate_count = adjacent_candidates.len();
-    let candidate_scan_ms = candidate_scan_started_at
-        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-    let estimated_exact_work = active_start_states
+    let mut adjacent_entries = Vec::new();
+    for (&token_id, bytes) in vocab.entries.iter() {
+        match token_l2p_route_hint(
+            bytes,
+            &route_setup.allowed_boundary_pair_words,
+            &route_setup.active_reachable_by_byte,
+        ) {
+            TokenL2pRouteHint::Adjacent => adjacent_entries.push((token_id, bytes.as_slice())),
+            TokenL2pRouteHint::Single => single_token_ids.push(token_id),
+            TokenL2pRouteHint::Irrelevant => irrelevant_tokens += 1,
+        }
+    }
+    let vocab_scan_ms = vocab_scan_started_at.elapsed().as_secs_f64() * 1000.0;
+    let adjacent_candidate_count = adjacent_entries.len();
+    let estimated_exact_work = route_setup
+        .active_start_states
         .len()
         .saturating_mul(adjacent_candidate_count);
     let use_exact_boundary_filter = match exact_l2p_boundary_filter_mode() {
@@ -991,115 +1572,113 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
         }
     };
 
-    let exact_filter_started_at = (use_exact_boundary_filter && profile_enabled)
-        .then(std::time::Instant::now);
-    let mut exact_filter = use_exact_boundary_filter.then(|| {
-        ExactL2pBoundaryFilter::new(
-            tokenizer,
-            active_bitset.clone(),
-            disallowed_follows,
-            active_start_states.clone(),
-            profile_enabled,
-        )
-    });
-    let exact_filter_setup_ms = exact_filter_started_at
-        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-
     if std::env::var_os("GLRMASK_PROFILE_EXACT_L2P_BOUNDARY_FILTER").is_some() {
         eprintln!(
             "[glrmask/profile][exact_l2p_boundary_filter] vocab_tokens={} active_terminals={} active_start_states={} adjacent_candidates={} estimated_work={} enabled={}",
             vocab.entries.len(),
             active.len(),
-            active_start_states.len(),
+            route_setup.active_start_states.len(),
             adjacent_candidate_count,
             estimated_exact_work,
             use_exact_boundary_filter,
         );
     }
 
-    let exact_batch_started_at = (use_exact_boundary_filter && profile_enabled)
-        .then(std::time::Instant::now);
-    let exact_boundary_results = exact_filter.as_mut().map(|filter| {
-        classify_exact_l2p_boundary_candidates(tokenizer, &adjacent_candidates, filter)
-    });
-    let exact_boundary_ms = exact_batch_started_at
-        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-
-    let classify_tokens_started_at = profile_enabled.then(std::time::Instant::now);
-    let mut exact_boundary_calls = 0usize;
-    for (&token_id, bytes) in vocab.entries.iter() {
-        if token_has_active_l2p_boundary(bytes, &allowed_boundary_pairs) {
-            adjacent_tokens += 1;
-            let crosses_active_boundary = !use_exact_boundary_filter
-                || exact_boundary_results
-                    .as_ref()
-                    .and_then(|results| results.get(&token_id))
-                    .copied()
-                    .expect("exact L2P result exists for every adjacent candidate");
-            if use_exact_boundary_filter {
-                exact_boundary_calls += 1;
-            }
-            if crosses_active_boundary {
-                boundary_entries.push((token_id, bytes.clone()));
-            } else if bytes.iter().any(|&byte| active_reachable.contains(byte)) {
-                single_entries.push((token_id, bytes.clone()));
-            } else {
-                irrelevant_tokens += 1;
-            }
-            continue;
+    let exact_started_at = std::time::Instant::now();
+    let mut exact_prefilter_ms = 0.0;
+    let mut exact_batch_ms = 0.0;
+    let mut exact_viable_tokens = 0usize;
+    let exact_boundary_matches = use_exact_boundary_filter.then(|| {
+        let prefilter_started_at = std::time::Instant::now();
+        let active_words = active_bitset.words();
+        let active_matched_by_state = (adjacent_entries.len()
+            > (tokenizer.num_states() as usize).div_ceil(16))
+        .then(|| build_active_matched_by_state(bytesets, &active_bitset));
+        let viable_indices = adjacent_entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (_, bytes))| {
+                token_has_active_terminal_suffix(
+                    tokenizer,
+                    bytesets,
+                    flat_trans,
+                    bytes,
+                    active_words,
+                    active_matched_by_state.as_deref(),
+                    &route_setup.active_suffix_start_by_byte,
+                )
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        exact_prefilter_ms = prefilter_started_at.elapsed().as_secs_f64() * 1000.0;
+        exact_viable_tokens = viable_indices.len();
+        let tokens = viable_indices
+            .iter()
+            .map(|&index| adjacent_entries[index].1)
+            .collect::<Vec<_>>();
+        let batch_started_at = std::time::Instant::now();
+        let viable_matches = tokens_have_exact_active_l2p_boundary(
+            tokenizer,
+            bytesets,
+            flat_trans,
+            &bytesets.transitions_by_byte,
+            &tokens,
+            &active_bitset,
+            disallowed_follows.as_ref(),
+            &route_setup.active_start_states,
+        );
+        exact_batch_ms = batch_started_at.elapsed().as_secs_f64() * 1000.0;
+        let mut matches = vec![false; adjacent_entries.len()];
+        for (index, exact_match) in viable_indices.into_iter().zip(viable_matches) {
+            matches[index] = exact_match;
         }
-
-        if bytes.iter().any(|&byte| active_reachable.contains(byte)) {
-            single_entries.push((token_id, bytes.clone()));
+        matches
+    });
+    let exact_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
+    let finalize_started_at = std::time::Instant::now();
+    let mut adjacent_single_token_ids = Vec::<u32>::new();
+    for (adjacent_index, &(token_id, bytes)) in adjacent_entries.iter().enumerate() {
+        let exact_match = exact_boundary_matches
+            .as_ref()
+            .map_or(true, |matches| matches[adjacent_index]);
+        if exact_match {
+            boundary_token_ids.push(token_id);
+        } else if bytes
+            .iter()
+            .any(|&byte| route_setup.active_reachable_by_byte[byte as usize] != 0)
+        {
+            adjacent_single_token_ids.push(token_id);
         } else {
             irrelevant_tokens += 1;
         }
     }
-    let classify_tokens_ms = classify_tokens_started_at
-        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
 
-    let boundary_tokens = boundary_entries.len();
-    let single_tokens = single_entries.len();
-    if let Some(total_started_at) = total_started_at {
-        let exact_filter = exact_filter.as_ref();
+    single_token_ids = merge_sorted_token_ids(single_token_ids, adjacent_single_token_ids);
+    let adjacent_tokens = adjacent_entries.len();
+    let boundary_tokens = boundary_token_ids.len();
+    let single_tokens = single_token_ids.len();
+    let finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
+    if super::types::compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l2p_vocab_routing] vocab_tokens={} active_terminals={} active_start_states={} setup_ms={:.3} boundary_pairs_ms={:.3} adjacent_candidate_scan_ms={:.3} exact_filter_setup_ms={:.3} classify_tokens_ms={:.3} exact_calls={} exact_ms={:.3} first_cache_hits={} first_cache_misses={} prefix_state_reuses={} prefix_state_builds={} prefix_state_visits={} prefix_transition_ms={:.3} prefix_matched_ms={:.3} suffix_follow_ms={:.3} suffix_predecessor_union_ms={:.3} suffix_cache_hits={} suffix_cache_misses={} suffix_cache_entries={} adjacent_candidates={} boundary_tokens={} single_tokens={} irrelevant_tokens={} total_ms={:.3}",
+            "[glrmask/profile][l2p_vocab_route] tokens={} active={} starts={} adjacent={} exact_viable={} setup_ms={:.3} pairs_ms={:.3} scan_ms={:.3} exact_prefilter_ms={:.3} exact_batch_ms={:.3} exact_ms={:.3} finalize_ms={:.3} total_ms={:.3}",
             vocab.entries.len(),
             active.len(),
-            active_start_states.len(),
-            setup_ms,
+            route_setup.active_start_states.len(),
+            adjacent_entries.len(),
+            exact_viable_tokens,
+            active_setup_ms,
             boundary_pairs_ms,
-            candidate_scan_ms,
-            exact_filter_setup_ms,
-            classify_tokens_ms,
-            exact_boundary_calls,
-            exact_boundary_ms,
-            exact_filter.map_or(0, |filter| filter.first_byte_cache_hits),
-            exact_filter.map_or(0, |filter| filter.first_byte_cache_misses),
-            exact_filter.map_or(0, |filter| filter.prefix_state_reuses),
-            exact_filter.map_or(0, |filter| filter.prefix_state_builds),
-            exact_filter.map_or(0, |filter| filter.prefix_state_visits),
-            exact_filter.map_or(0.0, |filter| filter.prefix_transition_ms),
-            exact_filter.map_or(0.0, |filter| filter.prefix_matched_ms),
-            exact_filter.map_or(0.0, |filter| filter.suffix_follow_ms),
-            exact_filter.map_or(0.0, |filter| filter.suffix_predecessor_union_ms),
-            exact_filter.map_or(0, |filter| filter.suffix_cache_hits),
-            exact_filter.map_or(0, |filter| filter.suffix_cache_misses),
-            exact_filter.map_or(0, |filter| filter.suffix_predecessors.len()),
-            adjacent_candidate_count,
-            boundary_tokens,
-            single_tokens,
-            irrelevant_tokens,
-            total_started_at.elapsed().as_secs_f64() * 1000.0,
+            vocab_scan_ms,
+            exact_prefilter_ms,
+            exact_batch_ms,
+            exact_ms,
+            finalize_ms,
+            split_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
-
     L2pVocabBoundarySplit {
-        boundary_vocab: Vocab::new(boundary_entries, None),
-        single_vocab: Vocab::new(single_entries, None),
+        boundary_token_ids,
+        single_token_ids,
         adjacent_tokens,
         boundary_tokens,
         single_tokens,
@@ -1394,16 +1973,24 @@ pub(crate) fn partition_vocab_by_l2p_cost(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::collections::{BTreeSet, HashMap};
+    use std::sync::{Arc, Mutex};
 
     use super::{
+        build_active_suffix_start_by_byte, build_reverse_transitions_by_byte,
+        token_has_active_terminal_suffix,
+    };
+    use super::{
         parse_exact_l2p_boundary_filter_mode, ExactL2pBoundaryFilterMode,
-        SharedClassifyBytesets,
+        state_future_intersects_words, token_has_active_l2p_boundary_words,
+        token_l2p_route_hint, SharedClassifyBytesets, TokenL2pRouteHint,
     };
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::compile::build_regex;
     use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::automata::lexer::Lexer;
+    use crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table;
+    use crate::ds::bitset::BitSet;
     use crate::ds::u8set::U8Set;
 
     fn reference_bytesets(tokenizer: &Tokenizer, num_terminals: u32) -> SharedClassifyBytesets {
@@ -1446,6 +2033,15 @@ mod tests {
             reachable_bytes,
             first_bytes,
             last_bytes,
+            transitions_by_byte: Vec::new(),
+            sparse_transitions_by_byte: Vec::new(),
+            reverse_transitions_by_byte: Vec::new(),
+            matched_states_by_terminal: Vec::new(),
+            has_matched_terminal_by_state: Vec::new(),
+            future_by_state_words: Vec::new(),
+            representative_future_terminal_by_state: Vec::new(),
+            words_per_terminal_set: 0,
+            active_route_setup_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1459,6 +2055,69 @@ mod tests {
         assert!(matches!(parse_exact_l2p_boundary_filter_mode("0"), ExactL2pBoundaryFilterMode::Force(false)));
         assert!(matches!(parse_exact_l2p_boundary_filter_mode("false"), ExactL2pBoundaryFilterMode::Force(false)));
         assert!(matches!(parse_exact_l2p_boundary_filter_mode("off"), ExactL2pBoundaryFilterMode::Force(false)));
+    }
+
+    #[test]
+    fn combined_l2p_route_hint_matches_two_pass_route_scan() {
+        let mut active_reachable = U8Set::empty();
+        active_reachable.insert(b'a');
+        active_reachable.insert(b'z');
+        let mut active_reachable_by_byte = [0u8; 256];
+        for byte in active_reachable.iter() {
+            active_reachable_by_byte[byte as usize] = 1;
+        }
+        let mut pairs = [0u64; 1024];
+        let pair_index = ((b'x' as usize) << 8) | b'y' as usize;
+        pairs[pair_index >> 6] |= 1u64 << (pair_index & 63);
+
+        for bytes in [b"".as_slice(), b"a", b"q", b"xy", b"xya", b"qz", b"ax"] {
+            let expected = if token_has_active_l2p_boundary_words(bytes, &pairs) {
+                TokenL2pRouteHint::Adjacent
+            } else if bytes.iter().any(|&byte| active_reachable.contains(byte)) {
+                TokenL2pRouteHint::Single
+            } else {
+                TokenL2pRouteHint::Irrelevant
+            };
+            assert_eq!(
+                token_l2p_route_hint(bytes, &pairs, &active_reachable_by_byte),
+                expected,
+                "bytes={bytes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reverse_byte_transition_index_preserves_frontier_targets() {
+        let by_byte = vec![
+            vec![(0, 2), (2, 2), (3, 5), (4, 2), (5, 5)],
+            vec![(1, 4), (2, 4)],
+        ];
+        let reverse = build_reverse_transitions_by_byte(&by_byte, 6);
+
+        assert_eq!(reverse[0].targets, vec![2, 5]);
+        assert_eq!(reverse[0].source_offsets, vec![0, 3, 5]);
+        assert_eq!(reverse[0].sources, vec![0, 2, 4, 3, 5]);
+
+        let frontier = BTreeSet::from([2u32, 3, 5]);
+        let direct_targets = by_byte[0]
+            .iter()
+            .filter_map(|&(source, target)| frontier.contains(&source).then_some(target))
+            .collect::<BTreeSet<_>>();
+        let reverse_targets = reverse[0]
+            .targets
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &target)| {
+                let start = reverse[0].source_offsets[index] as usize;
+                let end = reverse[0].source_offsets[index + 1] as usize;
+                reverse[0].sources[start..end]
+                    .iter()
+                    .any(|source| frontier.contains(source))
+                    .then_some(target)
+            })
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(reverse_targets, direct_targets);
     }
 
     #[test]
@@ -1482,5 +2141,75 @@ mod tests {
         assert_eq!(actual.reachable_bytes, expected.reachable_bytes);
         assert_eq!(actual.first_bytes, expected.first_bytes);
         assert_eq!(actual.last_bytes, expected.last_bytes);
+        for state in 0..tokenizer.num_states() {
+            assert_eq!(
+                actual.has_matched_terminal_by_state[state as usize] != 0,
+                tokenizer
+                    .matched_terminals_iter(state)
+                    .any(|terminal| terminal < tokenizer.num_terminals()),
+                "state={state}"
+            );
+        }
+
+        let mut active_sets = vec![BitSet::new(tokenizer.num_terminals() as usize)];
+        let mut all_active = BitSet::new(tokenizer.num_terminals() as usize);
+        for terminal in 0..tokenizer.num_terminals() as usize {
+            all_active.set(terminal);
+            let mut single = BitSet::new(tokenizer.num_terminals() as usize);
+            single.set(terminal);
+            active_sets.push(single);
+        }
+        active_sets.push(all_active);
+        let flat_trans = build_flat_transition_table(&tokenizer);
+        let unrestricted_suffix_start = [1u8; 256];
+        for active in &active_sets {
+            let active_suffix_start =
+                build_active_suffix_start_by_byte(&tokenizer, &actual, active.words());
+            for bytes in [
+                b"".as_slice(),
+                b"a",
+                b"ab",
+                b"ac",
+                b"xy",
+                b"xyz",
+                b"zz",
+                b"bxyz",
+            ] {
+                assert_eq!(
+                    token_has_active_terminal_suffix(
+                        &tokenizer,
+                        &actual,
+                        &flat_trans,
+                        bytes,
+                        active.words(),
+                        None,
+                        &active_suffix_start,
+                    ),
+                    token_has_active_terminal_suffix(
+                        &tokenizer,
+                        &actual,
+                        &flat_trans,
+                        bytes,
+                        active.words(),
+                        None,
+                        &unrestricted_suffix_start,
+                    ),
+                    "active={active:?} bytes={bytes:?}"
+                );
+            }
+            for state in 0..tokenizer.num_states() {
+                let representative = actual.representative_future_terminal_by_state[state as usize];
+                let future = tokenizer.possible_future_terminals(state);
+                assert_eq!(representative == u32::MAX, future.is_empty());
+                if representative != u32::MAX {
+                    assert!(future.contains(representative as usize));
+                }
+                let full = state_future_intersects_words(&actual, state, active.words());
+                let fast = representative != u32::MAX && active.contains(representative as usize)
+                    || (representative == u32::MAX || !active.contains(representative as usize))
+                        && full;
+                assert_eq!(fast, full, "state={state}");
+            }
+        }
     }
 }

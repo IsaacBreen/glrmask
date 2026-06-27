@@ -498,6 +498,7 @@ pub(crate) fn count_l1_equivalence_classes(
         &max_length_representatives,
         active_terminals,
         flat_trans.as_slice(),
+        None,
     );
     exact_mapping
         .into_iter()
@@ -524,6 +525,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     grammar: &AnalyzedGrammar,
     active_terminals: &[bool],
     flat_trans: &Arc<[u32]>,
+    transitions_by_byte: Option<&[u32]>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
@@ -538,6 +540,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         vocab,
         active_terminals,
         flat_trans,
+        transitions_by_byte,
         initial_state_map,
     );
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -669,6 +672,7 @@ fn build_l1_id_map<'a>(
     vocab: &'a Vocab,
     active_terminals: &[bool],
     flat_trans: &Arc<[u32]>,
+    transitions_by_byte: Option<&[u32]>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> (
     InternalIdMap,
@@ -798,6 +802,7 @@ fn build_l1_id_map<'a>(
         &max_length_representatives,
         active_terminals,
         flat_trans.as_ref(),
+        transitions_by_byte,
     );
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
     let mut max_rep_to_exact_rep = FxHashMap::<usize, usize>::default();
@@ -987,12 +992,28 @@ fn token_length_stats_from_entries(tokens: &[(u32, Arc<[u8]>)]) -> TokenLengthSt
     stats
 }
 
+#[inline]
+fn l1_transition(
+    flat_trans: &[u32],
+    transitions_by_byte: Option<&[u32]>,
+    num_tokenizer_states: usize,
+    state: u32,
+    byte: usize,
+) -> u32 {
+    if let Some(transitions_by_byte) = transitions_by_byte {
+        transitions_by_byte[byte * num_tokenizer_states + state as usize]
+    } else {
+        flat_trans[state as usize * 256 + byte]
+    }
+}
+
 fn find_l1_exact_state_equivalence_by_token_signatures(
     tokenizer: &Tokenizer,
     vocab_order: &L1IdentityVocabOrder,
     states: &[usize],
     active_terminals: &[bool],
     flat_trans: &[u32],
+    transitions_by_byte: Option<&[u32]>,
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
     if states.len() <= 1 {
         return (states.to_vec(), None);
@@ -1017,6 +1038,7 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     });
     let token_buckets = &vocab_order.token_buckets;
     let dead = u32::MAX;
+    let num_tokenizer_states = tokenizer.num_states() as usize;
 
     let nonempty_first_bytes: Vec<usize> = token_buckets
         .token_indices_by_first_byte
@@ -1028,9 +1050,14 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     let unique_targets_started_at = profile_enabled.then(Instant::now);
     let mut unique_targets = FxHashSet::<(u8, u32)>::default();
     for &state in states {
-        let base = state * 256;
         for &byte in &nonempty_first_bytes {
-            let target = flat_trans[base + byte];
+            let target = l1_transition(
+                flat_trans,
+                transitions_by_byte,
+                num_tokenizer_states,
+                state as u32,
+                byte,
+            );
             if target != dead {
                 unique_targets.insert((byte as u8, target));
             }
@@ -1067,6 +1094,8 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
             token_buckets.has_empty_suffix_by_bucket[byte_idx],
             &state_to_terminal_signature,
             flat_trans,
+            transitions_by_byte,
+            num_tokenizer_states,
         )
     };
     let target_profile_batches: Vec<Vec<((u8, u32), Arc<[(u32, u32, u32)]>)>> =
@@ -1115,7 +1144,6 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     // use a collision-checked scalar fingerprint for grouping.  Equality is
     // still the full exact profile vector.
     let state_keys_started_at = profile_enabled.then(Instant::now);
-    let num_tokenizer_states = tokenizer.num_states() as usize;
     let mut byte_slots = [u16::MAX; 256];
     for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
         byte_slots[byte] = slot as u16;
@@ -1134,9 +1162,14 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
             hash ^= state_to_terminal_signature[state] as u64;
             hash = hash.rotate_left(17).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         }
-        let base = state * 256;
         for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
-            let target = flat_trans[base + byte];
+            let target = l1_transition(
+                flat_trans,
+                transitions_by_byte,
+                num_tokenizer_states,
+                state as u32,
+                byte,
+            );
             let profile_id = if target == dead {
                 0
             } else {
@@ -1165,11 +1198,21 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         {
             return false;
         }
-        let left_base = left * 256;
-        let right_base = right * 256;
         for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
-            let left_target = flat_trans[left_base + byte];
-            let right_target = flat_trans[right_base + byte];
+            let left_target = l1_transition(
+                flat_trans,
+                transitions_by_byte,
+                num_tokenizer_states,
+                left as u32,
+                byte,
+            );
+            let right_target = l1_transition(
+                flat_trans,
+                transitions_by_byte,
+                num_tokenizer_states,
+                right as u32,
+                byte,
+            );
             let left_profile = if left_target == dead {
                 0
             } else {
@@ -1664,6 +1707,8 @@ fn l1_bucket_suffix_signature_profiles_packed(
     has_empty_suffix: bool,
     state_to_terminal_signature: &[u32],
     flat_trans: &[u32],
+    transitions_by_byte: Option<&[u32]>,
+    num_lexer_states: usize,
 ) -> Vec<((u8, u32), Arc<[(u32, u32, u32)]>)> {
     let profiling = compile_profile_enabled();
     let total_started_at = profiling.then(Instant::now);
@@ -1709,7 +1754,15 @@ fn l1_bucket_suffix_signature_profiles_packed(
             for &target in &walk_targets {
                 let fp: Vec<u32> = first_suffix_bytes
                     .iter()
-                    .map(|&byte| flat_trans[target as usize * 256 + byte as usize])
+                    .map(|&byte| {
+                        l1_transition(
+                            flat_trans,
+                            transitions_by_byte,
+                            num_lexer_states,
+                            target,
+                            byte as usize,
+                        )
+                    })
                     .collect();
                 fp_groups.entry(fp).or_default().push(target);
             }
@@ -1747,7 +1800,6 @@ fn l1_bucket_suffix_signature_profiles_packed(
     data[0].states_start = 0;
     data[0].states_len = walk_targets.len() as u32;
 
-    let num_lexer_states = flat_trans.len() / 256;
     let mut seen_stamp = vec![0u32; num_lexer_states];
     let mut seen_index = vec![0u32; num_lexer_states];
     let mut stamp = 0u32;
@@ -1771,7 +1823,13 @@ fn l1_bucket_suffix_signature_profiles_packed(
             let child_start = states.len() as u32;
             for state_offset in 0..parent_len {
                 let state = states[parent_start + state_offset];
-                let next = flat_trans[state as usize * 256 + edge.byte as usize];
+                let next = l1_transition(
+                    flat_trans,
+                    transitions_by_byte,
+                    num_lexer_states,
+                    state,
+                    edge.byte as usize,
+                );
                 if next == dead {
                     transition_maps.push(L1_NONE);
                 } else if seen_stamp[next as usize] == stamp {
@@ -3623,9 +3681,9 @@ mod packed_suffix_product_tests {
                 &buckets.suffix_lcps_by_first_byte[first_byte],
                 &buckets.suffix_subtree_bytes[first_byte],
                 &buckets.suffix_first_bytes_by_bucket[first_byte],
-                buckets.has_empty_suffix_by_bucket[first_byte],
-                &state_to_terminal_signature,
-                &flat_trans,
+                  buckets.has_empty_suffix_by_bucket[first_byte],
+                  &state_to_terminal_signature,
+                  &flat_trans,
             );
             let mut actual = l1_bucket_suffix_signature_profiles_packed(
                 first_byte as u8,
@@ -3636,8 +3694,10 @@ mod packed_suffix_product_tests {
                 &buckets.suffix_subtree_bytes[first_byte],
                 &buckets.suffix_first_bytes_by_bucket[first_byte],
                 buckets.has_empty_suffix_by_bucket[first_byte],
-                &state_to_terminal_signature,
-                &flat_trans,
+                  &state_to_terminal_signature,
+                  &flat_trans,
+                  None,
+                  tokenizer.num_states() as usize,
             );
             expected.sort_unstable_by_key(|(key, _)| *key);
             actual.sort_unstable_by_key(|(key, _)| *key);
@@ -3734,13 +3794,30 @@ mod packed_suffix_product_tests {
         let order = l1_identity_vocab_order(&vocab);
         let flat_trans = build_flat_transition_table(&tokenizer);
         let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
-        let (mapping, _) = find_l1_exact_state_equivalence_by_token_signatures(
+          let (mapping, _) = find_l1_exact_state_equivalence_by_token_signatures(
+            &tokenizer,
+            &order,
+            &states,
+              &active_terminals,
+              &flat_trans,
+                None,
+            );
+        let num_states = tokenizer.num_states() as usize;
+        let mut transitions_by_byte = vec![u32::MAX; num_states * 256];
+        for state in 0..num_states {
+            for byte in 0..256usize {
+                transitions_by_byte[byte * num_states + state] = flat_trans[state * 256 + byte];
+            }
+        }
+        let (transposed_mapping, _) = find_l1_exact_state_equivalence_by_token_signatures(
             &tokenizer,
             &order,
             &states,
             &active_terminals,
             &flat_trans,
+            Some(&transitions_by_byte),
         );
+        assert_eq!(transposed_mapping, mapping);
         let (state_to_signature, _) =
             build_l1_state_to_terminal_signatures(&tokenizer, &active_terminals);
         let profiles: Vec<Vec<(u32, u32, u32)>> = states
