@@ -1746,21 +1746,26 @@ impl TerminalInterchangeability {
         profile.concrete_tsids_after = state_map.num_internal_ids() as usize;
         profile.weight_remap_ms = remap_started.elapsed().as_secs_f64() * 1000.0;
 
-        // Direct semantic oracle: the identity DWA plus one full swapped view
-        // per representative/member pair. The optional initial-only path is a
-        // candidate shortcut and is not used by default while validating this.
-        profile.group_elements = 1 + self.generators.len() + self.subsumption_generators.len();
+        // Strict interchangeability requires the full closure of the terminal
+        // swaps, not merely the star of representative/member transpositions.
+        // Each element keeps the exact same DWA control graph and transports
+        // only labels plus the lexer-state coordinate in all weights/finals.
+        let strict_group = if self.generators.is_empty() {
+            Vec::new()
+        } else {
+            let machine = self.row_machine.as_ref().expect("swap expansion needs a row machine");
+            enumerate_group_elements(
+                self.original_active.len(),
+                machine.class_count(),
+                &self.generators,
+            )
+        };
+        profile.group_elements = if strict_group.is_empty() {
+            1 + self.subsumption_generators.len()
+        } else {
+            strict_group.len()
+        };
         let original = dwa.clone();
-        if std::env::var_os("GLRMASK_DEBUG_TERMINAL_SUBSUMPTION_DWA").is_some() {
-            eprintln!("[glrmask/debug][terminal_subsumption_dwa] start={} states={}", original.start_state(), original.states().len());
-            for (state_id, state) in original.states().iter().enumerate() {
-                let labels = state.transitions.keys().copied().collect::<Vec<_>>();
-                eprintln!("[glrmask/debug][terminal_subsumption_dwa_state] state={} labels={:?}", state_id, labels);
-            }
-        }
-        let full_swap_reference = std::env::var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_REFERENCE_MODE")
-            .map(|value| value.trim().eq_ignore_ascii_case("full_swap"))
-            .unwrap_or(true);
         let only_member = std::env::var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_ONLY_MEMBER")
             .ok()
             .and_then(|value| value.trim().parse::<TerminalID>().ok());
@@ -1775,37 +1780,21 @@ impl TerminalInterchangeability {
                 &mut profile,
             )
         });
-        let mut views = vec![subsumption_base.clone().unwrap_or_else(|| original.clone())];
-        for generator in &self.generators {
-            if only_member.is_some_and(|member| member != generator.member) {
-                continue;
+        let mut views = if strict_group.is_empty() {
+            vec![subsumption_base.clone().unwrap_or_else(|| original.clone())]
+        } else {
+            let machine = self.row_machine.as_ref().expect("swap expansion needs a row machine");
+            let mut views = vec![original.clone()];
+            for element in strict_group.iter().skip(1) {
+                views.push(transformed_dwa_view(&original, element, machine, &mut profile));
             }
-            let element = GroupElement {
-                terminal_map: generator.terminal_map.clone(),
-                class_map: generator.class_map.clone(),
-            };
-            if full_swap_reference {
-                views.push(transformed_dwa_view(
-                    &original,
-                    &element,
-                    self.row_machine.as_ref().expect("swap expansion needs a row machine"),
-                    &mut profile,
-                ));
-            } else {
-                let base_view = expand_noninitial_terminal_labels(
-                    &original,
-                    &self.members_by_representative,
-                    &mut profile,
-                );
-                views.push(substitute_initial_terminal(
-                    &base_view,
-                    generator.representative,
-                    generator.member,
-                    &generator.class_map,
-                    self.row_machine.as_ref().expect("swap expansion needs a row machine"),
-                    &mut profile,
-                ));
-            }
+            views
+        };
+        if only_member.is_some() && !strict_group.is_empty() {
+            // This diagnostic mode is intentionally unsupported for the full
+            // closure: selecting arbitrary generators no longer describes a
+            // closed group action.
+            panic!("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_ONLY_MEMBER is incompatible with full group expansion");
         }
         if let Some(base) = &subsumption_base {
             for generator in &self.subsumption_generators {
@@ -3350,6 +3339,55 @@ mod tests {
             class_map: vec![0, 2, 1],
         };
         assert_eq!(enumerate_group_elements(3, 3, &[first, second]).len(), 6);
+    }
+
+    #[test]
+    fn strict_reference_expansion_materializes_full_group_closure() {
+        let machine = tiny_machine(&[0b001, 0b010, 0b100], &[1, 2, 0], 1);
+        let plan = TerminalInterchangeability {
+            original_active: vec![true, true, true],
+            active_representatives: vec![true, false, false],
+            members_by_representative: vec![vec![0, 1, 2], vec![1], vec![2]],
+            row_machine: Some(machine),
+            generators: vec![
+                SwapGenerator {
+                    representative: 0,
+                    member: 1,
+                    terminal_map: terminal_swap_map(3, 0, 1),
+                    class_map: vec![1, 0, 2],
+                },
+                SwapGenerator {
+                    representative: 0,
+                    member: 2,
+                    terminal_map: terminal_swap_map(3, 0, 2),
+                    class_map: vec![2, 1, 0],
+                },
+            ],
+            subsumption_generators: Vec::new(),
+            original_state_count: 3,
+            debug_target_state: None,
+            debug_token_id: None,
+            profile: TerminalInterchangeabilityProfile::default(),
+        };
+        let mut dwa = DWA::from_parts(
+            vec![DWAState {
+                transitions: [(0, (0, Weight::all()))].into_iter().collect(),
+                final_weight: None,
+            }],
+            0,
+        );
+        let mut state_map = concrete_state_map(3);
+        let (views, profile) = plan.expand_reference_dwa_views(&mut dwa, &mut state_map);
+        assert_eq!(profile.group_elements, 6);
+        assert_eq!(views.len(), 6);
+        let mut label_counts = [0usize; 3];
+        for view in &views {
+            let (target, _) = view.states()[0].transitions.values().next().unwrap();
+            assert_eq!(*target, 0);
+            let label = *view.states()[0].transitions.keys().next().unwrap() as usize;
+            label_counts[label] += 1;
+        }
+        assert_eq!(label_counts, [2, 2, 2]);
     }
 
     #[test]
