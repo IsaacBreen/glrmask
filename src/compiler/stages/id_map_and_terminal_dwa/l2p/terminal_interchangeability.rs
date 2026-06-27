@@ -1257,6 +1257,16 @@ impl TerminalInterchangeability {
         }
     }
 
+    pub(crate) fn terminal_representative_map(&self) -> Vec<TerminalID> {
+        let mut map = (0..self.original_active.len() as TerminalID).collect::<Vec<_>>();
+        for (representative, members) in self.members_by_representative.iter().enumerate() {
+            for &member in members {
+                map[member as usize] = representative as TerminalID;
+            }
+        }
+        map
+    }
+
     pub(crate) fn active_representatives(&self) -> &[bool] { &self.active_representatives }
     pub(crate) fn is_identity(&self) -> bool {
         self.generators.is_empty() && self.subsumption_generators.is_empty()

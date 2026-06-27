@@ -496,6 +496,18 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             );
         }
     }
+    let terminal_relabel_map = (!terminal_interchangeability.is_identity())
+        .then(|| terminal_interchangeability.terminal_representative_map());
+    // Keep every member matcher path in the lexer, but make it emit its
+    // representative label.  This is distinct from filtering inactive bits:
+    // filtering erases paths that the post-DWA expansion must later restore.
+    let relabelled_tokenizer_storage = terminal_relabel_map
+        .as_ref()
+        .map(|map| tokenizer.relabel_terminals(map));
+    let tokenizer_for_terminal_partition = relabelled_tokenizer_storage
+        .as_ref()
+        .unwrap_or(tokenizer);
+    let tokenizer_was_relabelled = relabelled_tokenizer_storage.is_some();
     let analysis_active_terminals = terminal_interchangeability.active_representatives();
     let num_analysis_active_terminals = analysis_active_terminals
         .iter()
@@ -514,17 +526,29 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let can_skip_simplify = l2p_tokenizer_simplify_disabled() || num_analysis_active_terminals == analysis_active_terminals.len();
     let (simplified_tok_storage, simplify_state_map, simplify_cache_hit) = if can_skip_simplify {
         (None, None, false)
-    } else if let Some(cache) = shared_simplify_cache {
-        let (tok, map, cache_hit) =
-            cache.simplify_for_terminals(tokenizer, analysis_active_terminals, &relevant_bytes);
-        (Some(tok), Some(map), cache_hit)
+    } else if !tokenizer_was_relabelled {
+        if let Some(cache) = shared_simplify_cache {
+            let (tok, map, cache_hit) = cache.simplify_for_terminals(
+                tokenizer_for_terminal_partition,
+                analysis_active_terminals,
+                &relevant_bytes,
+            );
+            (Some(tok), Some(map), cache_hit)
+        } else {
+            let (tok, map) = tokenizer_for_terminal_partition
+                .simplify_for_terminals(analysis_active_terminals, Some(&relevant_bytes));
+            (Some(tok), Some(map), false)
+        }
     } else {
-        let (tok, map) = tokenizer.simplify_for_terminals(analysis_active_terminals, Some(&relevant_bytes));
+        let (tok, map) = tokenizer_for_terminal_partition
+            .simplify_for_terminals(analysis_active_terminals, Some(&relevant_bytes));
         (Some(tok), Some(map), false)
     };
     let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
     let use_simplified_tok = simplified_tok_storage.is_some();
-    let tokenizer_for_build = simplified_tok_storage.as_ref().unwrap_or(tokenizer);
+    let tokenizer_for_build = simplified_tok_storage
+        .as_ref()
+        .unwrap_or(tokenizer_for_terminal_partition);
     let candidate_unmapped_original_states = simplify_state_map.as_ref().map_or(0, |state_map| {
         state_map
             .original_to_internal
@@ -594,7 +618,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // unsimplified partition. Derive its exact byte partition lazily from
     // sparse lexer edges once; simplified tokenizers retain their local cache.
     let shared_base_setup_started_at = Instant::now();
-    let equivalence_vocab_dfa_cache = if use_simplified_tok {
+    let equivalence_vocab_dfa_cache = if tokenizer_was_relabelled {
+        None
+    } else if use_simplified_tok {
         shared_vocab_dfa_cache
     } else if let (Some(original_cache), Some(transition_cache), Some(flat_trans)) = (
         shared_original_vocab_dfa_cache,
@@ -617,7 +643,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         shared_vocab_dfa_cache
     };
     let shared_base_setup_ms = shared_base_setup_started_at.elapsed().as_secs_f64() * 1000.0;
-    let shared_analysis_dfa_cache = (!use_simplified_tok)
+    let shared_analysis_dfa_cache = (!use_simplified_tok && !tokenizer_was_relabelled)
         .then_some(shared_original_vocab_analysis_dfa_cache)
         .flatten();
     // Do not remove this note. Do not remove the instruction saying not to
@@ -644,7 +670,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             equivalence_vocab_dfa_cache,
             shared_analysis_dfa_cache,
             shared_base_setup_ms,
-            if use_simplified_tok { None } else { flat_trans },
+            if use_simplified_tok || tokenizer_was_relabelled { None } else { flat_trans },
             equivalence_initial_state_map,
         );
     let mut simplified_id_map = simplified_id_map;

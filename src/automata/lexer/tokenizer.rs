@@ -527,6 +527,37 @@ impl Tokenizer {
     ///
     /// Non-active terminal bits are cleared from finalizers and the filtered
     /// DFA is then minimized when that preserves the required mapping shape.
+    /// Merge terminal *labels* without removing any lexer states or matcher
+    /// paths. Each finalizer/future-terminal bit is rewritten through
+    /// `representative_for`, while byte transitions remain unchanged.
+    ///
+    /// This is the terminal-partition quotient used before L2P analysis: a
+    /// representative terminal must retain the lexical topology of every
+    /// member so that the post-DWA expansion can later restore member labels.
+    pub(crate) fn relabel_terminals(
+        &self,
+        representative_for: &[TerminalID],
+    ) -> Tokenizer {
+        assert_eq!(representative_for.len(), self.num_terminals as usize);
+        let mut dfa = self.dfa.clone();
+        for state in 0..dfa.num_states() as u32 {
+            let mut finalizers = BitSet::new(self.num_terminals as usize);
+            for terminal in dfa.finalizers(state).iter() {
+                finalizers.set(representative_for[terminal] as usize);
+            }
+            let mut futures = BitSet::new(self.num_terminals as usize);
+            for terminal in dfa.possible_future_group_ids(state).iter() {
+                futures.set(representative_for[terminal] as usize);
+            }
+            dfa.overwrite_state_metadata(state, finalizers, futures);
+        }
+        Tokenizer {
+            dfa,
+            num_terminals: self.num_terminals,
+            exprs: self.exprs.clone(),
+        }
+    }
+
     pub fn simplify_for_terminals(
         &self,
         active_terminals: &[bool],
