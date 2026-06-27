@@ -6,10 +6,10 @@
 //! merges one full DWA view for every representative/member swap.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::time::Instant;
 
-use rustc_hash::{FxHashMap, FxHasher, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
@@ -568,15 +568,25 @@ fn quotient_sparse_transition_columns(
     if width <= 1 || pairs == 0 {
         return (transitions, width);
     }
+
+    // `transitions` is pair-major. Fingerprint all byte columns in that order
+    // so the scan stays contiguous in memory; the exact check below remains the
+    // authority for equal columns and resolves any 64-bit hash collision.
+    let mut hashes = vec![0x517c_c1b7_2722_0a95u64; width];
+    for pair in 0..pairs {
+        let row = &transitions[pair * width..(pair + 1) * width];
+        for (slot, &target) in row.iter().enumerate() {
+            hashes[slot] = hashes[slot]
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                .rotate_left(7)
+                ^ (target as u64).wrapping_add(0x94d0_49bb_1331_11eb);
+        }
+    }
+
     let mut buckets = FxHashMap::<u64, Vec<usize>>::default();
     let mut retained = Vec::<usize>::new();
     for slot in 0..width {
-        let mut hasher = FxHasher::default();
-        for pair in 0..pairs {
-            transitions[pair * width + slot].hash(&mut hasher);
-        }
-        let hash = hasher.finish();
-        let candidates = buckets.entry(hash).or_default();
+        let candidates = buckets.entry(hashes[slot]).or_default();
         let duplicate = candidates.iter().copied().any(|other| {
             (0..pairs).all(|pair| {
                 transitions[pair * width + slot] == transitions[pair * width + other]
