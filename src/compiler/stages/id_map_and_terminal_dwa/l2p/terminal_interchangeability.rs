@@ -3192,6 +3192,47 @@ mod tests {
     }
 
     #[test]
+    fn strict_discovery_finds_byte_preserving_swap() {
+        let four = Expr::U8Seq(b"aaaa".to_vec());
+        let expressions = vec![
+            Expr::Seq(vec![
+                Expr::U8Seq(b"a".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(four.clone()),
+                    min: 0,
+                    max: None,
+                },
+            ]),
+            Expr::Seq(vec![
+                Expr::U8Seq(b"aaa".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(four),
+                    min: 0,
+                    max: None,
+                },
+            ]),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let machine = RowMachine::build(&tokenizer, &[true; 256]);
+        assert!(swap_transport(&machine, 0, 1).is_some());
+        let plan = TerminalInterchangeability::build(
+            &tokenizer,
+            &[true, true],
+            None,
+            &[true; 256],
+        );
+        assert!(!plan.is_identity());
+        assert_eq!(plan.active_representatives, vec![true, false]);
+        assert_eq!(plan.members_by_representative[0], vec![0, 1]);
+        assert_eq!(plan.generators.len(), 1);
+        assert_eq!(plan.generators[0].representative, 0);
+        assert_eq!(plan.generators[0].member, 1);
+    }
+
+    #[test]
     fn finite_refinement_prunes_only_impossible_swaps() {
         let asymmetric = tiny_machine(&[0b101, 0b010], &[0, 1], 1);
         let pruned = minimize_terminal_residuals_with_swap_pruning(&asymmetric, &[(0, 1)]);
@@ -3336,8 +3377,12 @@ mod tests {
         );
         let mut profile = TerminalInterchangeabilityProfile::default();
         let transformed = transformed_dwa_view(&original, &element, &machine, &mut profile);
-        let (_, mapped_initial) = transformed.states()[0].transitions.get(&1).unwrap();
-        let (_, mapped_later) = transformed.states()[1].transitions.get(&1).unwrap();
+        let (initial_target, mapped_initial) = transformed.states()[0].transitions.get(&1).unwrap();
+        let (later_target, mapped_later) = transformed.states()[1].transitions.get(&1).unwrap();
+        // A terminal swap never rewrites DWA control state. The target graph is
+        // identical; only labels and the lexer-state coordinate in weights move.
+        assert_eq!(*initial_target, 1);
+        assert_eq!(*later_target, 1);
         assert!(mapped_initial.tokens_for_tsid(1).contains(0));
         assert!(!mapped_initial.tokens_for_tsid(0).contains(0));
         assert!(mapped_later.tokens_for_tsid(1).contains(1));
