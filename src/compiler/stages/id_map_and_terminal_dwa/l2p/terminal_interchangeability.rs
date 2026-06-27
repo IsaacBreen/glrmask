@@ -3067,6 +3067,52 @@ mod tests {
         }
     }
 
+    fn simultaneous_relabel_has_representative_witness(
+        machine: &RowMachine,
+        members: &[TerminalID],
+        representative: TerminalID,
+    ) -> bool {
+        let representative = representative as usize;
+        let members = members.iter().map(|&member| member as usize).collect::<Vec<_>>();
+        let classes = machine.class_count();
+        let mut outputs = Vec::with_capacity(classes * 2);
+        outputs.extend(machine.class_outputs.iter().map(|output| {
+            let mut relabelled = output.clone();
+            let representative_value = relabelled.contains(representative)
+                || members.iter().any(|&member| relabelled.contains(member));
+            for &member in &members {
+                relabelled.clear(member);
+            }
+            relabelled.set_to(representative, representative_value);
+            relabelled
+        }));
+        outputs.extend(machine.class_outputs.iter().map(|output| {
+            let mut representatives_only = output.clone();
+            for &member in &members {
+                representatives_only.clear(member);
+            }
+            representatives_only
+        }));
+        let mut transitions = vec![0u32; classes * 2 * machine.width];
+        for copy in 0..2usize {
+            for class in 0..classes {
+                for slot in 0..machine.width {
+                    let target = machine.transition(class as u32, slot) as usize;
+                    transitions[(copy * classes + class) * machine.width + slot] =
+                        (copy * classes + target) as u32;
+                }
+            }
+        }
+        let blocks = minimize_moore(&outputs, &transitions, machine.width);
+        let rhs_blocks = (0..classes)
+            .filter(|&class| machine.class_has_real_state[class])
+            .map(|class| blocks[classes + class])
+            .collect::<FxHashSet<_>>();
+        (0..classes)
+            .filter(|&class| machine.class_has_real_state[class])
+            .all(|class| rhs_blocks.contains(&blocks[class]))
+    }
+
     #[test]
     fn hopcroft_sparse_minimizer_matches_fixed_point_oracle() {
         for seed in 0u32..64 {
@@ -3326,13 +3372,31 @@ mod tests {
     }
 
     #[test]
+    fn pairwise_directed_subsumption_does_not_compose_under_relabeling() {
+        // All four states are reachable from state 0. Both 0 ≼ 2 and 1 ≼ 2
+        // hold when each replacement is tested alone, but mapping 0 and 1 to
+        // 2 together makes the representative bit the union of two columns.
+        // That relabelled machine has no representative-only witness.
+        let machine = tiny_machine(
+            &[0b100, 0b011, 0b111, 0b000],
+            &[2, 1, 1, 0, 2, 3, 2, 2],
+            2,
+        );
+        assert!(subsumption_transport_pairwise(&machine, 0, 2).is_some());
+        assert!(subsumption_transport_pairwise(&machine, 1, 2).is_some());
+        assert!(!simultaneous_relabel_has_representative_witness(
+            &machine,
+            &[0, 1],
+            2,
+        ));
+    }
+
+    #[test]
     fn directed_subsumption_selection_uses_only_one_pairwise_witness() {
         // A pairwise witness only supports a single replacement. In particular,
         // edges `0 ≼ 2` and `1 ≼ 2` do not certify the quotient that maps both
         // members to 2, because that quotient makes terminal 2 denote their
         // union. Keep one edge and leave the other terminal concrete.
-        let active = [true, true, true];
-        let active_ids = [0, 1, 2];
         let mut transports = FxHashMap::default();
         let transport = || SubsumptionTransport {
             representative_state_to_members: vec![Vec::new()],
