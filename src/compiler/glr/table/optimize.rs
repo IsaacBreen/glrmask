@@ -2513,6 +2513,21 @@ fn apply_reduce_to_frame(
         )?
     };
 
+    if goto_froms.len() == 1 {
+        let goto_from = *goto_froms
+            .iter()
+            .next()
+            .expect("a singleton set has one element");
+        let Some((target, replace)) = table.goto[goto_from as usize].get(&nt).copied() else {
+            return Some(ReduceFrameResult::Dead);
+        };
+        push_transition_to_frame(&mut frame, target, replace);
+        return Some(ReduceFrameResult::Frames {
+            frames: vec![frame],
+            origin_dependent,
+        });
+    }
+
     let guard_pop = frame.pop;
     let mut by_target: BTreeMap<(u32, bool), BTreeSet<u32>> = BTreeMap::new();
     let mut missing = 0usize;
