@@ -109,6 +109,52 @@ fn build_minimized_acyclic_dfa(
     minimized
 }
 
+/// Reindex an already-minimized acyclic DFA into the exact state order used by
+/// [`minimize_acyclic`].
+///
+/// `minimize_acyclic` assigns class IDs in reverse DFS topological order.  When
+/// every reachable state is already a distinct non-dead equivalence class, the
+/// signature/interner pass is unnecessary: this reindexing is its only effect.
+/// Callers must guarantee that the input is minimal and has no explicit dead
+/// state (the normal output of `minimize_acyclic` satisfies both conditions).
+pub fn reindex_minimized_acyclic_dfa(dfa: &DFA) -> DFA {
+    assert!(
+        dfa.is_acyclic(),
+        "reindex_minimized_acyclic_dfa: input DFA is cyclic"
+    );
+    if dfa.states.is_empty() {
+        return dfa.clone();
+    }
+
+    debug_assert!(dfa
+        .states
+        .iter()
+        .all(|state| state.is_accepting || !state.transitions.is_empty()));
+
+    let topo = reverse_topological_order(dfa);
+    let mut state_map = vec![u32::MAX; dfa.states.len()];
+    for (new_state, &old_state) in topo.iter().enumerate() {
+        state_map[old_state] = new_state as u32;
+    }
+
+    let mut reindexed = DFA::new();
+    reindexed.states = vec![super::dfa::DFAState::default(); topo.len()];
+    reindexed.start_state = state_map[dfa.start_state as usize];
+    for (new_state, &old_state) in topo.iter().enumerate() {
+        let old = &dfa.states[old_state];
+        reindexed.states[new_state].is_accepting = old.is_accepting;
+        reindexed.states[new_state].transitions = old
+            .transitions
+            .iter()
+            .filter_map(|(&label, &target)| {
+                let mapped_target = state_map.get(target as usize).copied().unwrap_or(u32::MAX);
+                (mapped_target != u32::MAX).then_some((label, mapped_target))
+            })
+            .collect();
+    }
+    reindexed
+}
+
 /// Minimize an acyclic unweighted DFA by merging states with identical
 /// signatures (acceptance + transition map modulo equivalence class).
 ///

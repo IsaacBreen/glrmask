@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use regex::escape as regex_escape;
 use serde_json::Value;
@@ -11,6 +11,7 @@ use super::ast::{
     AdditionalProperties, ArraySchema, NumberSchema, ObjectSchema, Schema, SchemaAssertions,
     SchemaDocument, SchemaKind, SchemaType,
 };
+
 use super::config::JsonSchemaConfig;
 use super::error::{ImportResult, SchemaImportError};
 use super::string::{property_name_matches_pattern, string_value_satisfies_schema};
@@ -56,15 +57,40 @@ pub(crate) struct FixedObjectShapeProfile {
 pub(crate) struct FixedObjectLowerProfile {
     pub(crate) calls: usize,
     pub(crate) total_items: usize,
+    pub(crate) template_hits: usize,
+    pub(crate) template_misses: usize,
     pub(crate) shapes: BTreeMap<(usize, usize), FixedObjectShapeProfile>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct FixedObjectTemplateKey {
+    pub(crate) required: Vec<bool>,
+    /// ExprNfaBuilder label IDs in the exact order the fixed-object builder
+    /// first observes them. This captures equality relationships between key,
+    /// value, and separator expressions while abstracting their identities.
+    pub(crate) symbol_occurrences: Vec<i32>,
 }
 
 pub(crate) fn lower_document(
     document: &SchemaDocument,
     config: JsonSchemaConfig,
 ) -> ImportResult<NamedGrammar> {
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+    let started_at = profile_enabled.then(std::time::Instant::now);
     let lowerer = Lowerer::new(document, config);
-    lowerer.finish()
+    let setup_ms = started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let grammar = lowerer.finish()?;
+    if let Some(started_at) = started_at {
+        eprintln!(
+            "[glrmask/profile][json_schema_lower_document] setup_ms={:.3} finish_ms={:.3} total_ms={:.3}",
+            setup_ms,
+            started_at.elapsed().as_secs_f64() * 1000.0 - setup_ms,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Ok(grammar)
 }
 
 pub(crate) struct Lowerer<'a> {
@@ -86,6 +112,7 @@ pub(crate) struct Lowerer<'a> {
     pub(crate) shared_pattern_overlap_literal_rules: BTreeMap<String, String>,
     pub(crate) shared_pattern_appearance_rules: BTreeMap<(String, Vec<String>), String>,
     pub(crate) fixed_object_profile: Option<FixedObjectLowerProfile>,
+    pub(crate) fixed_object_nfa_templates: HashMap<FixedObjectTemplateKey, ExprNFA>,
     definition_rules: BTreeMap<String, String>,
     definition_by_pointer: BTreeMap<String, &'a Schema>,
     used_rule_names: BTreeSet<String>,
@@ -137,6 +164,7 @@ impl<'a> Lowerer<'a> {
             fixed_object_profile: (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
                 || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some())
             .then(FixedObjectLowerProfile::default),
+            fixed_object_nfa_templates: HashMap::new(),
             definition_rules: BTreeMap::new(),
             definition_by_pointer,
             used_rule_names: BTreeSet::new(),
@@ -147,11 +175,16 @@ impl<'a> Lowerer<'a> {
     }
 
     fn finish(mut self) -> ImportResult<NamedGrammar> {
+        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+        let root_started_at = profile_enabled.then(std::time::Instant::now);
         let root_rule = self.fresh_rule_name("schema_root");
         self.definition_rules.insert("#".to_string(), root_rule.clone());
         let root_expr = self.lower_schema(&self.document.root)?;
         self.add_nonterminal_rule(&root_rule, root_expr);
         self.add_nonterminal_rule("start", r(&root_rule));
+        let root_lower_ms = root_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
         if let Some(profile) = self.fixed_object_profile.take() {
             let shapes = profile
                 .shapes
@@ -171,12 +204,15 @@ impl<'a> Lowerer<'a> {
                 .collect::<Vec<_>>()
                 .join("; ");
             eprintln!(
-                "[glrmask/profile][fixed_object_lower] calls={} total_items={} shapes=[{}]",
+                "[glrmask/profile][fixed_object_lower] calls={} total_items={} template_hits={} template_misses={} shapes=[{}]",
                 profile.calls,
                 profile.total_items,
+                profile.template_hits,
+                profile.template_misses,
                 shapes,
             );
         }
+        let simplify_started_at = profile_enabled.then(std::time::Instant::now);
         simplify_terminal_rules(&mut self.rules);
         let mut grammar = NamedGrammar {
             rules: self.rules,
@@ -184,6 +220,14 @@ impl<'a> Lowerer<'a> {
             ignore: None,
         };
         simplify_named_grammar_expressions(&mut grammar);
+        if let Some(simplify_started_at) = simplify_started_at {
+            eprintln!(
+                "[glrmask/profile][json_schema_lower_finish] root_lower_ms={:.3} simplify_ms={:.3} rules={}",
+                root_lower_ms,
+                simplify_started_at.elapsed().as_secs_f64() * 1000.0,
+                grammar.rules.len(),
+            );
+        }
         Ok(grammar)
     }
 
@@ -807,12 +851,26 @@ impl<'a> Lowerer<'a> {
     fn hoist_raw_regexes_out_of_expr_nfa_symbols(&mut self, expr: GrammarExpr) -> GrammarExpr {
         match expr {
             GrammarExpr::ExprNFA(expr_nfa) => {
-                let ExprNFA { nfa, symbols } = *expr_nfa;
+                let ExprNFA {
+                    nfa,
+                    symbols,
+                    is_determinized_and_minimized,
+                    canonical_dfa,
+                } = *expr_nfa;
+                let preserves_canonical_dfa = is_determinized_and_minimized
+                    && symbols
+                        .iter()
+                        .all(|symbol| !Self::expr_contains_raw_regex(symbol));
                 let symbols = symbols
                     .into_iter()
                     .map(|symbol| self.hoist_raw_regexes_out_of_expr_nfa_symbol(symbol))
                     .collect();
-                GrammarExpr::ExprNFA(Box::new(ExprNFA::new(nfa, symbols)))
+                GrammarExpr::ExprNFA(Box::new(ExprNFA {
+                    nfa,
+                    symbols,
+                    is_determinized_and_minimized: preserves_canonical_dfa,
+                    canonical_dfa: preserves_canonical_dfa.then_some(canonical_dfa).flatten(),
+                }))
             }
             other => other,
         }
@@ -865,14 +923,59 @@ impl<'a> Lowerer<'a> {
                 }
             }
             GrammarExpr::ExprNFA(expr_nfa) => {
-                let ExprNFA { nfa, symbols } = *expr_nfa;
+                let ExprNFA {
+                    nfa,
+                    symbols,
+                    is_determinized_and_minimized,
+                    canonical_dfa,
+                } = *expr_nfa;
+                let preserves_canonical_dfa = is_determinized_and_minimized
+                    && symbols
+                        .iter()
+                        .all(|symbol| !Self::expr_contains_raw_regex(symbol));
                 let symbols = symbols
                     .into_iter()
                     .map(|symbol| self.hoist_raw_regexes_out_of_expr_nfa_symbol(symbol))
                     .collect();
-                GrammarExpr::ExprNFA(Box::new(ExprNFA::new(nfa, symbols)))
+                GrammarExpr::ExprNFA(Box::new(ExprNFA {
+                    nfa,
+                    symbols,
+                    is_determinized_and_minimized: preserves_canonical_dfa,
+                    canonical_dfa: preserves_canonical_dfa.then_some(canonical_dfa).flatten(),
+                }))
             }
             other => other,
+        }
+    }
+
+    fn expr_contains_raw_regex(expr: &GrammarExpr) -> bool {
+        match expr {
+            GrammarExpr::RawRegex(_) => true,
+            GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+                Self::expr_contains_raw_regex(inner)
+            }
+            GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
+                items.iter().any(Self::expr_contains_raw_regex)
+            }
+            GrammarExpr::Exclude { expr, exclude } | GrammarExpr::Intersect { expr, intersect: exclude } => {
+                Self::expr_contains_raw_regex(expr) || Self::expr_contains_raw_regex(exclude)
+            }
+            GrammarExpr::SeparatedSequence { items, separator, .. } => {
+                items
+                    .iter()
+                    .any(|(item, _)| Self::expr_contains_raw_regex(item))
+                    || Self::expr_contains_raw_regex(separator)
+            }
+            GrammarExpr::ExprNFA(expr_nfa) => expr_nfa
+                .symbols
+                .iter()
+                .any(Self::expr_contains_raw_regex),
+            GrammarExpr::Epsilon
+            | GrammarExpr::Literal(_)
+            | GrammarExpr::Ref(_)
+            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::LexerDfa(_)
+            | GrammarExpr::AnyByte => false,
         }
     }
 

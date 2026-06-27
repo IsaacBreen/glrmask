@@ -35,6 +35,8 @@ use self::lower::lower_document;
 /// Unsupported schema keywords are rejected while loading so the lowering phase
 /// is not forced to carry partially-understood JSON values.
 pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskError> {
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+    let total_started_at = profile_enabled.then(std::time::Instant::now);
     let config = JsonSchemaConfig::from_env();
     // Coercion is default-on, but the large majority of schemas do not contain
     // oneOf. Preserve the source Value unless there is an actual rewrite.
@@ -45,9 +47,30 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
     } else {
         Cow::Borrowed(schema)
     };
+    let preflight_started_at = profile_enabled.then(std::time::Instant::now);
     preflight::check_schema_preflight(imported_schema.as_ref()).map_err(GlrMaskError::from)?;
+    let preflight_ms = preflight_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let load_started_at = profile_enabled.then(std::time::Instant::now);
     let document = load_document(imported_schema.as_ref()).map_err(GlrMaskError::from)?;
-    lower_document(&document, config).map_err(GlrMaskError::from)
+    let load_ms = load_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let lower_started_at = profile_enabled.then(std::time::Instant::now);
+    let grammar = lower_document(&document, config).map_err(GlrMaskError::from)?;
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][json_schema_import] preflight_ms={:.3} load_ms={:.3} lower_ms={:.3} total_ms={:.3}",
+            preflight_ms,
+            load_ms,
+            lower_started_at
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0),
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Ok(grammar)
 }
 
 fn schema_contains_one_of(node: &Value) -> bool {

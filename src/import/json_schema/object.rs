@@ -1,7 +1,7 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use crate::grammar::expr_nfa::ExprNfaBuilder;
+use crate::grammar::expr_nfa::{ExprNFA, ExprNfaBuilder};
 use crate::import::ast::{GrammarExpr, Quantifier};
 
 use super::ast::{
@@ -15,7 +15,8 @@ use super::combinators::{
 use super::error::{ImportResult, SchemaImportError};
 use super::split_literal_terminals_enabled;
 use super::lower::{
-    choice, lit, lit_bytes, never, normalize_local_ref, r, seq, Lowerer, JSON_ARRAY_RULE,
+    choice, lit, lit_bytes, never, normalize_local_ref, r, seq, FixedObjectTemplateKey,
+    Lowerer, JSON_ARRAY_RULE,
     json_key_string_rule,
     JSON_BOOL_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
@@ -2567,6 +2568,43 @@ impl<'a> Lowerer<'a> {
         Ok(Some(object_expr))
     }
 
+    fn fixed_object_template_symbols(
+        items: &[ObjectItem],
+        item_symbols: &[[GrammarExpr; 2]],
+        separator: GrammarExpr,
+    ) -> (FixedObjectTemplateKey, Vec<GrammarExpr>) {
+        let mut symbols = Vec::<GrammarExpr>::new();
+        let mut labels = HashMap::<GrammarExpr, i32>::new();
+        let mut occurrences = Vec::<i32>::with_capacity(item_symbols.len() * 5);
+        let mut intern = |expr: GrammarExpr| {
+            if let Some(&label) = labels.get(&expr) {
+                return label;
+            }
+            let label = i32::try_from(symbols.len())
+                .expect("fixed-object expression symbol table exceeded i32 labels");
+            symbols.push(expr.clone());
+            labels.insert(expr, label);
+            label
+        };
+
+        for item in item_symbols {
+            let key = intern(item[0].clone());
+            let value = intern(item[1].clone());
+            let separator = intern(separator.clone());
+            // The normal builder emits the first-item path, followed by the
+            // separator-prefixed path, in this exact order.
+            occurrences.extend([key, value, separator, key, value]);
+        }
+
+        (
+            FixedObjectTemplateKey {
+                required: items.iter().map(|item| item.required).collect(),
+                symbol_occurrences: occurrences,
+            },
+            symbols,
+        )
+    }
+
     fn lower_fixed_object_body_exprnfa_without_group(
         &mut self,
         items: &[ObjectItem],
@@ -2600,6 +2638,40 @@ impl<'a> Lowerer<'a> {
         let item_symbol_ms = item_symbols_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
+        let template_symbols = tail_pair.is_none().then(|| {
+            Self::fixed_object_template_symbols(
+                items,
+                &item_symbols,
+                self.item_separator_expr(),
+            )
+        });
+        if let Some((template_key, symbols)) = &template_symbols
+            && let Some(template_nfa) = self.fixed_object_nfa_templates.get(template_key).cloned()
+        {
+            let rule_name = self.fresh_rule_name("json_closed_object_body");
+            let body = GrammarExpr::ExprNFA(Box::new(ExprNFA {
+                nfa: template_nfa.nfa,
+                symbols: symbols.clone(),
+                is_determinized_and_minimized: template_nfa.is_determinized_and_minimized,
+                canonical_dfa: template_nfa.canonical_dfa,
+            }));
+            self.add_nonterminal_rule(&rule_name, body);
+
+            let total_ms = profile_started_at
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+            if let Some(profile) = self.fixed_object_profile.as_mut() {
+                let shape = profile.shapes.entry((items.len(), required_count)).or_default();
+                profile.calls += 1;
+                profile.total_items += items.len();
+                profile.template_hits += 1;
+                shape.calls += 1;
+                shape.item_symbol_ms += item_symbol_ms;
+                shape.total_ms += total_ms;
+            }
+
+            return Ok(seq(vec![lit("{"), r(&rule_name), lit("}")]));
+        }
         let graph_build_started_at = profile_started_at.map(|_| std::time::Instant::now());
         let tail_symbols = tail_pair
             .as_ref()
@@ -2717,7 +2789,13 @@ impl<'a> Lowerer<'a> {
         let determinize_minimize_started_at =
             profile_started_at.map(|_| std::time::Instant::now());
         let rule_name = self.fresh_rule_name("json_closed_object_body");
-        let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
+        let expr_nfa = builder.build().into_determinized_and_minimized();
+        if let Some((template_key, symbols)) = &template_symbols {
+            debug_assert_eq!(expr_nfa.symbols, *symbols);
+            self.fixed_object_nfa_templates
+                .insert(template_key.clone(), expr_nfa.clone());
+        }
+        let body = GrammarExpr::ExprNFA(Box::new(expr_nfa));
         self.add_nonterminal_rule(&rule_name, body);
 
         let determinize_minimize_ms = determinize_minimize_started_at
@@ -2746,6 +2824,7 @@ impl<'a> Lowerer<'a> {
             let shape = profile.shapes.entry((items.len(), required_count)).or_default();
             profile.calls += 1;
             profile.total_items += items.len();
+            profile.template_misses += usize::from(template_symbols.is_some());
             shape.calls += 1;
             shape.item_symbol_ms += item_symbol_ms;
             shape.graph_build_ms += graph_build_ms;

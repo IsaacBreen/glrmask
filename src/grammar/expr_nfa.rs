@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 
 use crate::automata::unweighted_u32::dfa::{DFA, Label};
-use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic;
+use crate::automata::unweighted_u32::minimize_acyclic::{
+    minimize_acyclic, reindex_minimized_acyclic_dfa,
+};
 use crate::automata::unweighted_u32::minimize_cyclic::minimize_cyclic;
 use crate::automata::unweighted_u32::nfa::NFA;
 
@@ -12,15 +15,43 @@ use super::ast::GrammarExpr;
 /// This keeps the transition graph compact while allowing each transition
 /// symbol to be an arbitrary [`GrammarExpr`]. A transition label is valid when
 /// it is non-negative and less than `symbols.len()`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct ExprNFA {
     pub nfa: NFA,
     pub symbols: Vec<GrammarExpr>,
+    /// `true` only when `nfa` is the exact minimized deterministic DFA for its
+    /// current label graph.  AST lowering can then avoid repeating the same
+    /// minimization before emitting left-linear rules.
+    pub is_determinized_and_minimized: bool,
+    /// The exact DFA produced by the first minimization, when available.
+    /// This is performance metadata only: equality and hashing deliberately
+    /// ignore it, and any graph or symbol rewrite must clear it.
+    pub(crate) canonical_dfa: Option<DFA>,
+}
+
+impl PartialEq for ExprNFA {
+    fn eq(&self, other: &Self) -> bool {
+        self.nfa == other.nfa && self.symbols == other.symbols
+    }
+}
+
+impl Eq for ExprNFA {}
+
+impl Hash for ExprNFA {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.nfa.hash(state);
+        self.symbols.hash(state);
+    }
 }
 
 impl ExprNFA {
     pub fn new(nfa: NFA, symbols: Vec<GrammarExpr>) -> Self {
-        Self { nfa, symbols }
+        Self {
+            nfa,
+            symbols,
+            is_determinized_and_minimized: false,
+            canonical_dfa: None,
+        }
     }
 
     pub fn into_determinized_and_minimized(self) -> Self {
@@ -41,7 +72,12 @@ impl ExprNFA {
                 nfa.add_transition(state_id as u32, label, target);
             }
         }
-        Self::new(nfa, symbols)
+        Self {
+            nfa,
+            symbols,
+            is_determinized_and_minimized: true,
+            canonical_dfa: Some(dfa),
+        }
     }
 
     pub fn determinize(&self) -> DFA {
@@ -49,7 +85,18 @@ impl ExprNFA {
     }
 
     pub fn determinize_and_minimize(&self) -> DFA {
-        minimize_dfa(&self.determinize())
+        if self.is_determinized_and_minimized
+            && let Some(dfa) = &self.canonical_dfa
+            && dfa.is_acyclic()
+        {
+            return reindex_minimized_acyclic_dfa(dfa);
+        }
+        let dfa = self.determinize();
+        if self.is_determinized_and_minimized && dfa.is_acyclic() {
+            reindex_minimized_acyclic_dfa(&dfa)
+        } else {
+            minimize_dfa(&dfa)
+        }
     }
 
     pub fn symbol_for_label(&self, label: Label) -> Option<&GrammarExpr> {
@@ -372,6 +419,9 @@ fn determinize_general_nfa(nfa: &NFA) -> DFA {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
     use crate::grammar::ast::{lower, NamedGrammar, NamedRule};
     use crate::grammar::flat::Symbol;
 
@@ -450,5 +500,35 @@ mod tests {
         nfa.set_accepting(accept);
 
         assert_eq!(determinize_nfa(&nfa), determinize_general_nfa(&nfa));
+    }
+
+    #[test]
+    fn canonical_marker_does_not_affect_expression_identity() {
+        let mut builder = ExprNfaBuilder::new();
+        let accept = builder.add_state();
+        builder.add_transition(
+            builder.start_state(),
+            GrammarExpr::Literal(b"a".to_vec()),
+            accept,
+        );
+        builder.set_accepting(accept);
+
+        let canonical = builder.build().into_determinized_and_minimized();
+        let unmarked = ExprNFA {
+            nfa: canonical.nfa.clone(),
+            symbols: canonical.symbols.clone(),
+            is_determinized_and_minimized: false,
+            canonical_dfa: None,
+        };
+        assert_eq!(canonical, unmarked);
+        let mut canonical_hasher = DefaultHasher::new();
+        canonical.hash(&mut canonical_hasher);
+        let mut unmarked_hasher = DefaultHasher::new();
+        unmarked.hash(&mut unmarked_hasher);
+        assert_eq!(canonical_hasher.finish(), unmarked_hasher.finish());
+        assert_eq!(
+            canonical.determinize_and_minimize(),
+            unmarked.determinize_and_minimize(),
+        );
     }
 }

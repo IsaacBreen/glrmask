@@ -432,9 +432,9 @@ fn grammar_expr_to_lark_with_indent(
 
 struct Lowerer<'a> {
     rules: Vec<Rule>,
-    terminal_map: BTreeMap<String, TerminalID>,
+    terminal_map: HashMap<String, TerminalID>,
     terminals: Vec<Terminal>,
-    nonterminal_ids: BTreeMap<String, NonterminalID>,
+    nonterminal_ids: HashMap<String, NonterminalID>,
     generated_nonterminal_counter: u32,
     terminal_names: BTreeMap<TerminalID, String>,
     internal_terminal_names: HashSet<String>,
@@ -543,9 +543,9 @@ impl<'a> Lowerer<'a> {
     fn new() -> Self {
         Self {
             rules: Vec::new(),
-            terminal_map: BTreeMap::new(),
+            terminal_map: HashMap::new(),
             terminals: Vec::new(),
-            nonterminal_ids: BTreeMap::new(),
+            nonterminal_ids: HashMap::new(),
             generated_nonterminal_counter: 0,
             terminal_names: BTreeMap::new(),
             internal_terminal_names: HashSet::new(),
@@ -711,6 +711,10 @@ impl<'a> Lowerer<'a> {
                     .iter()
                     .map(|symbol| self.canonical_exact_expr_inner(symbol, visiting, memo))
                     .collect(),
+                // Symbol canonicalization can merge formerly distinct labels,
+                // so conservatively re-run minimization before lowering.
+                is_determinized_and_minimized: false,
+                canonical_dfa: None,
             })),
             GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
