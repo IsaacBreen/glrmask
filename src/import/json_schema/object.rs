@@ -1,7 +1,7 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use crate::grammar::expr_nfa::ExprNfaBuilder;
+use crate::grammar::expr_nfa::{ExprNFA, ExprNfaBuilder};
 use crate::import::ast::{GrammarExpr, Quantifier};
 
 use super::ast::{
@@ -15,7 +15,8 @@ use super::combinators::{
 use super::error::{ImportResult, SchemaImportError};
 use super::split_literal_terminals_enabled;
 use super::lower::{
-    choice, lit, lit_bytes, never, normalize_local_ref, r, seq, Lowerer, JSON_ARRAY_RULE,
+    choice, lit, lit_bytes, never, normalize_local_ref, r, seq, FixedObjectTemplateKey,
+    Lowerer, JSON_ARRAY_RULE,
     json_key_string_rule,
     JSON_BOOL_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
@@ -702,16 +703,24 @@ impl<'a> Lowerer<'a> {
             // constraints and ignore unsupported minProperties shapes.
             false
         };
-        let fixed_names = normalized
-            .properties
-            .iter()
-            .map(|property| property.name.clone())
-            .collect::<BTreeSet<_>>();
+        let fixed_names = (property_name_pattern.is_some()
+            || !normalized.pattern_properties.is_empty()
+            || !matches!(normalized.additional_properties, AdditionalProperties::Deny))
+        .then(|| {
+            normalized
+                .properties
+                .iter()
+                .map(|property| property.name.clone())
+                .collect::<BTreeSet<_>>()
+        });
         let implicit_ap_default_false = self.llguidance_compat_enabled()
             && normalized.required.len() > normalized.properties.len()
             && matches!(normalized.additional_properties, AdditionalProperties::AllowAny);
         if let Some(pattern) = &property_name_pattern {
-            for key in &fixed_names {
+            for key in fixed_names
+                .as_ref()
+                .expect("propertyNames requires fixed property names")
+            {
                 if !property_name_matches_pattern(pattern, key)? {
                     return Err(SchemaImportError::new(format!(
                         "propertyNames pattern {pattern:?} does not allow fixed property {key:?}"
@@ -770,7 +779,9 @@ impl<'a> Lowerer<'a> {
                 AdditionalProperties::AllowAny if implicit_ap_default_false || max_properties_filled_by_required => None,
                 AdditionalProperties::AllowAny => Some(seq(vec![
                     self.lower_object_additional_key_colon(
-                        &fixed_names,
+                        fixed_names
+                            .as_ref()
+                            .expect("open objects require fixed property names"),
                         &[],
                         property_name_pattern.as_deref(),
                     )?,
@@ -780,7 +791,9 @@ impl<'a> Lowerer<'a> {
                     let value = self.lower_schema(value_schema)?;
                     Some(seq(vec![
                         self.lower_object_additional_key_colon(
-                            &fixed_names,
+                            fixed_names
+                                .as_ref()
+                                .expect("open objects require fixed property names"),
                             &[],
                             property_name_pattern.as_deref(),
                         )?,
@@ -854,7 +867,12 @@ impl<'a> Lowerer<'a> {
 
         let mut tail_pairs = Vec::new();
         for pattern_property in &normalized.pattern_properties {
-            let key = self.lower_pattern_key_colon_appearance(&pattern_property.pattern, &fixed_names)?;
+            let key = self.lower_pattern_key_colon_appearance(
+                &pattern_property.pattern,
+                fixed_names
+                    .as_ref()
+                    .expect("pattern properties require fixed property names"),
+            )?;
             let value = self.lower_schema(&pattern_property.schema)?;
             tail_pairs.push(seq(vec![key, value]));
         }
@@ -862,7 +880,10 @@ impl<'a> Lowerer<'a> {
         match &normalized.additional_properties {
             AdditionalProperties::AllowAny if implicit_ap_default_false || max_properties_filled_by_required => {}
             AdditionalProperties::AllowAny => {
-                let key_colon = if fixed_names.is_empty()
+                let key_colon = if fixed_names
+                    .as_ref()
+                    .expect("pattern properties require fixed property names")
+                    .is_empty()
                     && pattern_keys.is_empty()
                     && property_name_pattern.is_none()
                     && super::string::json_string_compat_mode()
@@ -871,7 +892,9 @@ impl<'a> Lowerer<'a> {
                     seq(vec![r(json_key_string_rule()), r(JSON_KEY_SEPARATOR_RULE)])
                 } else {
                     self.lower_object_additional_key_colon(
-                        &fixed_names,
+                        fixed_names
+                            .as_ref()
+                            .expect("open objects require fixed property names"),
                         &pattern_keys,
                         property_name_pattern.as_deref(),
                     )?
@@ -882,7 +905,10 @@ impl<'a> Lowerer<'a> {
             AdditionalProperties::Schema(_) if max_properties_filled_by_required => {}
             AdditionalProperties::Schema(value_schema) => {
                 let value = self.lower_schema(value_schema)?;
-                let key_colon = if fixed_names.is_empty()
+                let key_colon = if fixed_names
+                    .as_ref()
+                    .expect("pattern properties require fixed property names")
+                    .is_empty()
                     && pattern_keys.is_empty()
                     && property_name_pattern.is_none()
                     && super::string::json_string_compat_mode()
@@ -893,7 +919,9 @@ impl<'a> Lowerer<'a> {
                     seq(vec![r(json_key_string_rule()), r(JSON_KEY_SEPARATOR_RULE)])
                 } else {
                     self.lower_object_additional_key_colon(
-                        &fixed_names,
+                        fixed_names
+                            .as_ref()
+                            .expect("open objects require fixed property names"),
                         &pattern_keys,
                         property_name_pattern.as_deref(),
                     )?
@@ -2567,6 +2595,43 @@ impl<'a> Lowerer<'a> {
         Ok(Some(object_expr))
     }
 
+    fn fixed_object_template_symbols(
+        items: &[ObjectItem],
+        item_symbols: &[[GrammarExpr; 2]],
+        separator: GrammarExpr,
+    ) -> (FixedObjectTemplateKey, Vec<GrammarExpr>) {
+        let mut symbols = Vec::<GrammarExpr>::new();
+        let mut labels = HashMap::<GrammarExpr, i32>::new();
+        let mut occurrences = Vec::<i32>::with_capacity(item_symbols.len() * 5);
+        let mut intern = |expr: GrammarExpr| {
+            if let Some(&label) = labels.get(&expr) {
+                return label;
+            }
+            let label = i32::try_from(symbols.len())
+                .expect("fixed-object expression symbol table exceeded i32 labels");
+            symbols.push(expr.clone());
+            labels.insert(expr, label);
+            label
+        };
+
+        for item in item_symbols {
+            let key = intern(item[0].clone());
+            let value = intern(item[1].clone());
+            let separator = intern(separator.clone());
+            // The normal builder emits the first-item path, followed by the
+            // separator-prefixed path, in this exact order.
+            occurrences.extend([key, value, separator, key, value]);
+        }
+
+        (
+            FixedObjectTemplateKey {
+                required: items.iter().map(|item| item.required).collect(),
+                symbol_occurrences: occurrences,
+            },
+            symbols,
+        )
+    }
+
     fn lower_fixed_object_body_exprnfa_without_group(
         &mut self,
         items: &[ObjectItem],
@@ -2577,6 +2642,49 @@ impl<'a> Lowerer<'a> {
             .as_ref()
             .map(|_| std::time::Instant::now());
         let required_count = items.iter().filter(|item| item.required).count();
+        let item_symbols_started_at = profile_started_at.map(|_| std::time::Instant::now());
+        let mut item_symbols = Vec::with_capacity(items.len());
+        for item in items {
+            item_symbols.push(Self::split_object_pair_symbols(&item.pair)?);
+        }
+        let item_symbol_ms = item_symbols_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let template_symbols = tail_pair.is_none().then(|| {
+            Self::fixed_object_template_symbols(
+                items,
+                &item_symbols,
+                self.item_separator_expr(),
+            )
+        });
+        if let Some((template_key, symbols)) = &template_symbols
+            && let Some(template_nfa) = self.fixed_object_nfa_templates.get(template_key).cloned()
+        {
+            let rule_name = self.fresh_rule_name("json_closed_object_body");
+            let body = GrammarExpr::ExprNFA(Box::new(ExprNFA {
+                nfa: template_nfa.nfa,
+                symbols: symbols.clone(),
+                is_determinized_and_minimized: template_nfa.is_determinized_and_minimized,
+                canonical_dfa: template_nfa.canonical_dfa,
+            }));
+            self.add_nonterminal_rule(&rule_name, body);
+
+            let total_ms = profile_started_at
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+            if let Some(profile) = self.fixed_object_profile.as_mut() {
+                let shape = profile.shapes.entry((items.len(), required_count)).or_default();
+                profile.calls += 1;
+                profile.total_items += items.len();
+                profile.template_hits += 1;
+                shape.calls += 1;
+                shape.item_symbol_ms += item_symbol_ms;
+                shape.total_ms += total_ms;
+            }
+
+            return Ok(seq(vec![lit("{"), r(&rule_name), lit("}")]));
+        }
+        let graph_build_started_at = profile_started_at.map(|_| std::time::Instant::now());
         let mut builder = ExprNfaBuilder::new();
         let mut states = vec![[0u32; 2]; items.len() + 1];
         states[0][0] = builder.start_state();
@@ -2592,15 +2700,6 @@ impl<'a> Lowerer<'a> {
         } else {
             None
         };
-        let item_symbols_started_at = profile_started_at.map(|_| std::time::Instant::now());
-        let mut item_symbols = Vec::with_capacity(items.len());
-        for item in items {
-            item_symbols.push(Self::split_object_pair_symbols(&item.pair)?);
-        }
-        let item_symbol_ms = item_symbols_started_at
-            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-            .unwrap_or(0.0);
-        let graph_build_started_at = profile_started_at.map(|_| std::time::Instant::now());
         let tail_symbols = tail_pair
             .as_ref()
             .map(Self::split_object_pair_symbols)
@@ -2717,7 +2816,13 @@ impl<'a> Lowerer<'a> {
         let determinize_minimize_started_at =
             profile_started_at.map(|_| std::time::Instant::now());
         let rule_name = self.fresh_rule_name("json_closed_object_body");
-        let body = GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized()));
+        let expr_nfa = builder.build().into_determinized_and_minimized();
+        if let Some((template_key, symbols)) = &template_symbols {
+            debug_assert_eq!(expr_nfa.symbols, *symbols);
+            self.fixed_object_nfa_templates
+                .insert(template_key.clone(), expr_nfa.clone());
+        }
+        let body = GrammarExpr::ExprNFA(Box::new(expr_nfa));
         self.add_nonterminal_rule(&rule_name, body);
 
         let determinize_minimize_ms = determinize_minimize_started_at
@@ -2746,6 +2851,7 @@ impl<'a> Lowerer<'a> {
             let shape = profile.shapes.entry((items.len(), required_count)).or_default();
             profile.calls += 1;
             profile.total_items += items.len();
+            profile.template_misses += usize::from(template_symbols.is_some());
             shape.calls += 1;
             shape.item_symbol_ms += item_symbol_ms;
             shape.graph_build_ms += graph_build_ms;
@@ -3230,25 +3336,30 @@ impl<'a> Lowerer<'a> {
         satisfies_any_group: bool,
         exclusive_group: bool,
     ) -> ImportResult<ObjectItem> {
-        let key = self.lower_literal_key_colon(&property.name);
-        let separator_key = self.lower_literal_key_colon_with_prefix(b", ", &property.name);
-        let mut effective_schema = property.schema.clone();
+        let mut intersected_schema = None;
         for pattern_property in pattern_properties {
             if property_matches_pattern(&pattern_property.pattern, &property.name)? {
-                let pattern_schema = pattern_schema_for_property(&effective_schema, &pattern_property.schema);
-                effective_schema = all_of_schema(effective_schema, pattern_schema);
+                let current_schema = intersected_schema
+                    .take()
+                    .unwrap_or_else(|| property.schema.clone());
+                let pattern_schema =
+                    pattern_schema_for_property(&current_schema, &pattern_property.schema);
+                intersected_schema = Some(all_of_schema(current_schema, pattern_schema));
             }
         }
+        let effective_schema = intersected_schema.as_ref().unwrap_or(&property.schema);
         if let Some(item) = self.lower_string_property_item(
             &property.name,
-            &effective_schema,
+            effective_schema,
             required,
             satisfies_any_group,
             exclusive_group,
         )? {
             return Ok(item);
         }
-        let value = self.lower_object_property_value_schema(&effective_schema)?;
+        let key = self.lower_literal_key_colon(&property.name);
+        let separator_key = self.lower_literal_key_colon_with_prefix(b", ", &property.name);
+        let value = self.lower_object_property_value_schema(effective_schema)?;
         if let Some(non_string_value) = Self::without_json_string_branch(value.clone()) {
             let (non_string_value, has_null_branch) =
                 if let Some(non_string_value) = non_string_value {

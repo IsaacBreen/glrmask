@@ -240,6 +240,9 @@ impl<'a> ExactSubtractionResolver<'a> {
                         .iter()
                         .map(|symbol| self.canonical_exact_expr_inner(symbol, visiting, memo))
                         .collect(),
+                    // Rewritten labels may admit further state merges.
+                    is_determinized_and_minimized: false,
+                    canonical_dfa: None,
                 },
             )),
             GrammarExpr::Epsilon

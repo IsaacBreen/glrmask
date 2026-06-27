@@ -109,6 +109,85 @@ fn build_minimized_acyclic_dfa(
     minimized
 }
 
+/// Reindex an already-minimized acyclic DFA into the exact state order used by
+/// [`minimize_acyclic`].
+///
+/// `minimize_acyclic` assigns class IDs in reverse DFS topological order.  When
+/// every reachable state is already a distinct non-dead equivalence class, the
+/// signature/interner pass is unnecessary: this reindexing is its only effect.
+/// Callers must guarantee that the input is minimal and has no explicit dead
+/// state (the normal output of `minimize_acyclic` satisfies both conditions).
+#[derive(Debug, Clone)]
+pub(crate) struct AcyclicDfaReindex {
+    /// Original state IDs in the exact order assigned by `minimize_acyclic`.
+    pub(crate) old_states_in_new_order: Vec<usize>,
+    /// New state ID for each original state, or `u32::MAX` for unreachable
+    /// states omitted by the partial-DFA representation.
+    pub(crate) new_state_of_old: Vec<u32>,
+    pub(crate) start_state: u32,
+}
+
+/// Compute the exact reindexing performed by [`reindex_minimized_acyclic_dfa`]
+/// without copying transition maps.
+pub(crate) fn reindex_minimized_acyclic_order(dfa: &DFA) -> AcyclicDfaReindex {
+    assert!(
+        dfa.is_acyclic(),
+        "reindex_minimized_acyclic_order: input DFA is cyclic"
+    );
+    if dfa.states.is_empty() {
+        return AcyclicDfaReindex {
+            old_states_in_new_order: Vec::new(),
+            new_state_of_old: Vec::new(),
+            start_state: 0,
+        };
+    }
+
+    debug_assert!(dfa
+        .states
+        .iter()
+        .all(|state| state.is_accepting || !state.transitions.is_empty()));
+
+    let topo = reverse_topological_order(dfa);
+    let mut state_map = vec![u32::MAX; dfa.states.len()];
+    for (new_state, &old_state) in topo.iter().enumerate() {
+        state_map[old_state] = new_state as u32;
+    }
+
+    AcyclicDfaReindex {
+        start_state: state_map[dfa.start_state as usize],
+        old_states_in_new_order: topo,
+        new_state_of_old: state_map,
+    }
+}
+
+pub fn reindex_minimized_acyclic_dfa(dfa: &DFA) -> DFA {
+    let reindex = reindex_minimized_acyclic_order(dfa);
+    if reindex.old_states_in_new_order.is_empty() {
+        return dfa.clone();
+    }
+
+    let mut reindexed = DFA::new();
+    reindexed.states = vec![super::dfa::DFAState::default(); reindex.old_states_in_new_order.len()];
+    reindexed.start_state = reindex.start_state;
+    for (new_state, &old_state) in reindex.old_states_in_new_order.iter().enumerate() {
+        let old = &dfa.states[old_state];
+        reindexed.states[new_state].is_accepting = old.is_accepting;
+        reindexed.states[new_state].transitions = old
+            .transitions
+            .iter()
+            .filter_map(|(&label, &target)| {
+                let mapped_target = reindex
+                    .new_state_of_old
+                    .get(target as usize)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                (mapped_target != u32::MAX).then_some((label, mapped_target))
+            })
+            .collect();
+    }
+    reindexed
+}
+
 /// Minimize an acyclic unweighted DFA by merging states with identical
 /// signatures (acceptance + transition map modulo equivalence class).
 ///

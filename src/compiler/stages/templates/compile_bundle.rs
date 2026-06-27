@@ -18,6 +18,7 @@ use crate::compiler::stages::templates::compile_dfa::Templates;
 use crate::ds::weight::{SharedTokenSet, Weight};
 
 type SubsetKey = SmallVec<[u64; 4]>;
+type LabelTargets = SmallVec<[(i32, u32, u32); 8]>;
 const SUBSET_BLOCK_BITS: usize = 8;
 const SUBSET_BLOCK_MASK: u64 = (1u64 << SUBSET_BLOCK_BITS) - 1;
 
@@ -60,6 +61,24 @@ fn clear_subset_key(key: &mut SubsetKey) {
     for word in key.iter_mut() {
         *word = 0;
     }
+}
+
+fn collect_label_targets(
+    groups: &[(&Weight, UnweightedDfa)],
+    product_state: &[(u32, u32)],
+    label_targets: &mut LabelTargets,
+) {
+    label_targets.clear();
+    for &(group_id, dfa_state) in product_state {
+        for (&label, &target) in &groups[group_id as usize].1.states[dfa_state as usize]
+            .transitions
+        {
+            label_targets.push((label, group_id, target));
+        }
+    }
+    // Preserve the former BTreeMap's ascending-label traversal, while retaining
+    // each product state's canonical group order within a label.
+    label_targets.sort_unstable_by_key(|&(label, group_id, _)| (label, group_id));
 }
 
 fn set_subset_key_bit(key: &mut SubsetKey, index: usize) {
@@ -610,7 +629,7 @@ fn determinize_bundle_groups_profiled(
     worklist.push_back(start_key.clone());
     profile.worklist_peak = worklist.len();
 
-    let mut label_targets: BTreeMap<i32, Vec<(u32, u32)>> = BTreeMap::new();
+    let mut label_targets = LabelTargets::new();
     let key_words = n.div_ceil(64);
     let mut final_groups = SmallVec::<[usize; 8]>::new();
     let mut final_key = SubsetKey::from_elem(0, key_words);
@@ -654,28 +673,27 @@ fn determinize_bundle_groups_profiled(
         profile.final_weight_ms += elapsed_ms(final_started_at);
 
         let labels_started_at = Instant::now();
-        label_targets.clear();
-        for &(group_id, dfa_state) in &product_state {
-            for (&label, &target) in &groups[group_id as usize].1.states[dfa_state as usize]
-                .transitions
-            {
-                label_targets
-                    .entry(label)
-                    .or_default()
-                    .push((group_id, target));
-            }
-        }
+        collect_label_targets(groups, &product_state, &mut label_targets);
         profile.collect_labels_ms += elapsed_ms(labels_started_at);
-        profile.labels_processed += label_targets.len();
 
-        for (&label, next_state) in &label_targets {
+        let mut label_start = 0usize;
+        while label_start < label_targets.len() {
+            let label = label_targets[label_start].0;
+            let mut label_end = label_start + 1;
+            while label_end < label_targets.len() && label_targets[label_end].0 == label {
+                label_end += 1;
+            }
+            profile.labels_processed += 1;
+
             let next_state_started_at = Instant::now();
             edge_groups.clear();
             clear_subset_key(&mut edge_key);
-            for &(group_id, _) in next_state {
+            let mut next_state = Vec::with_capacity(label_end - label_start);
+            for &(_, group_id, target) in &label_targets[label_start..label_end] {
                 let group_id = group_id as usize;
                 edge_groups.push(group_id);
                 set_subset_key_bit(&mut edge_key, group_id);
+                next_state.push((group_id as u32, target));
             }
             profile.next_state_ms += elapsed_ms(next_state_started_at);
 
@@ -701,18 +719,18 @@ fn determinize_bundle_groups_profiled(
             );
             if edge_w.is_empty() {
                 profile.edge_weight_ms += elapsed_ms(edge_weight_started_at);
+                label_start = label_end;
                 continue;
             }
             profile.edge_weight_ms += elapsed_ms(edge_weight_started_at);
 
             let lookup_started_at = Instant::now();
-            let to_dwa = if let Some(&existing) = state_map.get(next_state) {
+            let to_dwa = if let Some(&existing) = state_map.get(&next_state) {
                 existing
             } else {
-                let key = next_state.clone();
                 let new_id = dwa.add_state();
-                state_map.insert(key.clone(), new_id);
-                worklist.push_back(key);
+                state_map.insert(next_state.clone(), new_id);
+                worklist.push_back(next_state);
                 profile.worklist_peak = profile.worklist_peak.max(worklist.len());
                 new_id
             };
@@ -722,6 +740,7 @@ fn determinize_bundle_groups_profiled(
             dwa.add_transition(dwa_state, label, to_dwa, edge_w);
             profile.add_transition_ms += elapsed_ms(add_transition_started_at);
             profile.transitions_added += 1;
+            label_start = label_end;
         }
     }
 
@@ -768,7 +787,7 @@ fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
     state_map.insert(start_key.clone(), 0);
     worklist.push_back(start_key);
 
-    let mut label_targets: BTreeMap<i32, Vec<(u32, u32)>> = BTreeMap::new();
+    let mut label_targets = LabelTargets::new();
     let key_words = n.div_ceil(64);
     let mut final_groups = SmallVec::<[usize; 8]>::new();
     let mut final_key = SubsetKey::from_elem(0, key_words);
@@ -799,25 +818,24 @@ fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
             dwa.set_final_weight(dwa_state, final_w);
         }
 
-        label_targets.clear();
-        for &(group_id, dfa_state) in &product_state {
-            for (&label, &target) in &groups[group_id as usize].1.states[dfa_state as usize]
-                .transitions
-            {
-                label_targets
-                    .entry(label)
-                    .or_default()
-                    .push((group_id, target));
-            }
-        }
+        collect_label_targets(groups, &product_state, &mut label_targets);
 
-        for (&label, next_state) in &label_targets {
+        let mut label_start = 0usize;
+        while label_start < label_targets.len() {
+            let label = label_targets[label_start].0;
+            let mut label_end = label_start + 1;
+            while label_end < label_targets.len() && label_targets[label_end].0 == label {
+                label_end += 1;
+            }
+
             edge_groups.clear();
             clear_subset_key(&mut edge_key);
-            for &(group_id, _) in next_state {
+            let mut next_state = Vec::with_capacity(label_end - label_start);
+            for &(_, group_id, target) in &label_targets[label_start..label_end] {
                 let group_id = group_id as usize;
                 edge_groups.push(group_id);
                 set_subset_key_bit(&mut edge_key, group_id);
+                next_state.push((group_id as u32, target));
             }
 
             let edge_w = cached_subset_union(
@@ -829,20 +847,21 @@ fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
                 single_tsid_entries.as_deref(),
             );
             if edge_w.is_empty() {
+                label_start = label_end;
                 continue;
             }
 
-            let to_dwa = if let Some(&existing) = state_map.get(next_state) {
+            let to_dwa = if let Some(&existing) = state_map.get(&next_state) {
                 existing
             } else {
-                let key = next_state.clone();
                 let new_id = dwa.add_state();
-                state_map.insert(key.clone(), new_id);
-                worklist.push_back(key);
+                state_map.insert(next_state.clone(), new_id);
+                worklist.push_back(next_state);
                 new_id
             };
 
             dwa.add_transition(dwa_state, label, to_dwa, edge_w);
+            label_start = label_end;
         }
     }
 
@@ -910,4 +929,27 @@ fn dwa_to_nwa(dwa: &DWA) -> NWA {
         states,
         vec![dwa.start_state()],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collect_label_targets_is_sorted() {
+        let mut first = UnweightedDfa::new();
+        first.add_transition(0, 2, 20);
+        first.add_transition(0, 1, 10);
+        let mut second = UnweightedDfa::new();
+        second.add_transition(0, 3, 31);
+        second.add_transition(0, 1, 11);
+        let weight = Weight::all();
+        let groups = vec![(&weight, first), (&weight, second)];
+        let state = vec![(0, 0), (1, 0)];
+        let mut targets = LabelTargets::new();
+
+        collect_label_targets(&groups, &state, &mut targets);
+
+        assert_eq!(targets.as_slice(), &[(1, 0, 10), (1, 1, 11), (2, 0, 20), (3, 1, 31)]);
+    }
 }

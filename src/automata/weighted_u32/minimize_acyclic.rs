@@ -1169,11 +1169,97 @@ struct PointwiseProfile {
     by_tsid: Vec<(u32, Arc<Vec<TokenBehaviorRange>>)>,
 }
 
+const MAX_DENSE_POINTWISE_TSID_SLOTS: usize = 65_536;
+
+#[derive(Clone, Copy)]
+enum PointwiseBehaviorMapLayout {
+    Sparse,
+    Dense { slots: usize },
+}
+
+enum PointwiseBehaviorMap {
+    Sparse(FxHashMap<u32, Arc<Vec<TokenBehaviorRange>>>),
+    Dense(Vec<Option<Arc<Vec<TokenBehaviorRange>>>>),
+}
+
+impl Default for PointwiseBehaviorMap {
+    fn default() -> Self {
+        Self::Sparse(FxHashMap::default())
+    }
+}
+
+impl PointwiseBehaviorMap {
+    fn new(layout: PointwiseBehaviorMapLayout) -> Self {
+        match layout {
+            PointwiseBehaviorMapLayout::Sparse => Self::Sparse(FxHashMap::default()),
+            PointwiseBehaviorMapLayout::Dense { slots } => Self::Dense(vec![None; slots]),
+        }
+    }
+
+    fn get(&self, tsid: u32) -> Option<&Arc<Vec<TokenBehaviorRange>>> {
+        match self {
+            Self::Sparse(entries) => entries.get(&tsid),
+            Self::Dense(entries) => entries.get(tsid as usize).and_then(Option::as_ref),
+        }
+    }
+
+    fn merge_profile(
+        &mut self,
+        profile: &PointwiseProfile,
+        regions: &mut PointwiseRegionInterner,
+    ) {
+        for (tsid, ranges) in &profile.by_tsid {
+            match self {
+                Self::Sparse(entries) => match entries.get_mut(tsid) {
+                    Some(existing) if Arc::ptr_eq(existing, ranges) => {}
+                    Some(existing) => {
+                        *existing = regions.intern(overlay_compatible_token_behavior_ranges(
+                            existing.as_ref(),
+                            ranges.as_ref(),
+                        ));
+                    }
+                    None => {
+                        entries.insert(*tsid, Arc::clone(ranges));
+                    }
+                },
+                Self::Dense(entries) => {
+                    let entry = entries
+                        .get_mut(*tsid as usize)
+                        .expect("dense pointwise behavior map must cover every profile TSID");
+                    match entry {
+                        Some(existing) if Arc::ptr_eq(existing, ranges) => {}
+                        Some(existing) => {
+                            *existing = regions.intern(overlay_compatible_token_behavior_ranges(
+                                existing.as_ref(),
+                                ranges.as_ref(),
+                            ));
+                        }
+                        None => {
+                            *entry = Some(Arc::clone(ranges));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn region_entry_count(&self) -> usize {
+        match self {
+            Self::Sparse(entries) => entries.values().map(|ranges| ranges.len()).sum(),
+            Self::Dense(entries) => entries
+                .iter()
+                .flatten()
+                .map(|ranges| ranges.len())
+                .sum(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct PointwiseMergeGroup {
     targets_by_label: FxHashMap<Label, u32>,
     /// Exact partial behavior function of all members already in this group.
-    behavior_by_tsid: FxHashMap<u32, Arc<Vec<TokenBehaviorRange>>>,
+    behavior_by_tsid: PointwiseBehaviorMap,
     member_classes: Vec<usize>,
 }
 
@@ -1490,7 +1576,7 @@ fn overlay_compatible_token_behavior_ranges(
 
 fn pointwise_profile_compatible(group: &PointwiseMergeGroup, profile: &PointwiseProfile) -> bool {
     profile.by_tsid.iter().all(|(tsid, ranges)| {
-        group.behavior_by_tsid.get(tsid).is_none_or(|existing| {
+        group.behavior_by_tsid.get(*tsid).is_none_or(|existing| {
             Arc::ptr_eq(existing, ranges)
                 || token_behavior_ranges_compatible(existing.as_ref(), ranges.as_ref())
         })
@@ -1502,20 +1588,7 @@ fn merge_pointwise_profile_into_group(
     profile: &PointwiseProfile,
     regions: &mut PointwiseRegionInterner,
 ) {
-    for (tsid, ranges) in &profile.by_tsid {
-        match group.behavior_by_tsid.get_mut(tsid) {
-            Some(existing) if Arc::ptr_eq(existing, ranges) => {}
-            Some(existing) => {
-                *existing = regions.intern(overlay_compatible_token_behavior_ranges(
-                    existing.as_ref(),
-                    ranges.as_ref(),
-                ));
-            }
-            None => {
-                group.behavior_by_tsid.insert(*tsid, Arc::clone(ranges));
-            }
-        }
-    }
+    group.behavior_by_tsid.merge_profile(profile, regions);
 }
 /// Exact greedy grouping using one sparse partial behavior function per group.
 /// The class order and target-map restriction are identical to the memberwise
@@ -1543,6 +1616,20 @@ fn try_build_and_color_pointwise(
         )?);
     }
     let profile_build_ms = profile_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let profile_entries = pointwise_profiles
+        .iter()
+        .map(|profile| profile.by_tsid.len())
+        .sum::<usize>();
+    let max_tsid = pointwise_profiles
+        .iter()
+        .flat_map(|profile| profile.by_tsid.iter().map(|(tsid, _)| *tsid))
+        .max();
+    let behavior_map_layout = max_tsid
+        .and_then(|max_tsid| usize::try_from(max_tsid).ok()?.checked_add(1))
+        .filter(|&slots| slots <= MAX_DENSE_POINTWISE_TSID_SLOTS && slots <= profile_entries)
+        .map(|slots| PointwiseBehaviorMapLayout::Dense { slots })
+        .unwrap_or(PointwiseBehaviorMapLayout::Sparse);
 
     let merge_started_at = Instant::now();
     let mut groups = Vec::<PointwiseMergeGroup>::new();
@@ -1587,7 +1674,7 @@ fn try_build_and_color_pointwise(
             }
             let mut group = PointwiseMergeGroup {
                 targets_by_label,
-                behavior_by_tsid: FxHashMap::default(),
+                behavior_by_tsid: PointwiseBehaviorMap::new(behavior_map_layout),
                 member_classes: vec![class],
             };
             merge_pointwise_profile_into_group(&mut group, pointwise_profile, &mut regions);
@@ -1611,11 +1698,7 @@ fn try_build_and_color_pointwise(
         let region_entries = groups
             .iter()
             .map(|group| {
-                group
-                    .behavior_by_tsid
-                    .values()
-                    .map(|ranges| ranges.len())
-                    .sum::<usize>()
+                group.behavior_by_tsid.region_entry_count()
             })
             .sum::<usize>();
         eprintln!(
@@ -3205,7 +3288,9 @@ mod tests {
         sorted_weights_compatible_on_domain_intersection,
         weight_is_disjoint_from_domain_intersection, weights_equal_on_domain,
         weights_equal_on_domain_intersection, ClassProfile, PointwiseBehaviorInterner,
-        PointwiseRegionBuildCache, PointwiseRegionInterner, build_token_behavior_region,
+        PointwiseBehaviorMap, PointwiseBehaviorMapLayout, PointwiseProfile,
+        PointwiseRegionBuildCache, PointwiseRegionInterner, TokenBehaviorRange,
+        build_token_behavior_region,
     };
     use crate::automata::weighted_u32::dwa::{DWA, DWAState};
     use crate::ds::weight::Weight;
@@ -3284,6 +3369,44 @@ mod tests {
         assert_eq!(cache.entries.len(), 2);
         assert_eq!(cache.hits, 1);
         assert_eq!(cache.misses, 2);
+    }
+
+    #[test]
+    fn dense_pointwise_behavior_map_matches_sparse() {
+        let left = Arc::new(vec![TokenBehaviorRange {
+            start: 0,
+            end: 3,
+            behavior: 1,
+        }]);
+        let right = Arc::new(vec![TokenBehaviorRange {
+            start: 4,
+            end: 7,
+            behavior: 2,
+        }]);
+        let first = PointwiseProfile {
+            by_tsid: vec![(1, Arc::clone(&left)), (3, Arc::clone(&right))],
+        };
+        let second = PointwiseProfile {
+            by_tsid: vec![(1, Arc::clone(&right)), (2, Arc::clone(&left))],
+        };
+
+        let mut sparse = PointwiseBehaviorMap::new(PointwiseBehaviorMapLayout::Sparse);
+        let mut dense = PointwiseBehaviorMap::new(PointwiseBehaviorMapLayout::Dense { slots: 4 });
+        let mut sparse_regions = PointwiseRegionInterner::default();
+        let mut dense_regions = PointwiseRegionInterner::default();
+        for profile in [&first, &second] {
+            sparse.merge_profile(profile, &mut sparse_regions);
+            dense.merge_profile(profile, &mut dense_regions);
+        }
+
+        for tsid in 0..4 {
+            assert_eq!(
+                sparse.get(tsid).map(AsRef::as_ref),
+                dense.get(tsid).map(AsRef::as_ref),
+                "tsid={tsid}",
+            );
+        }
+        assert_eq!(sparse.region_entry_count(), dense.region_entry_count());
     }
 
     #[test]
