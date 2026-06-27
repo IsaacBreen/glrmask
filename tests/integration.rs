@@ -248,6 +248,54 @@ fn terminal_subsumption_post_dwa_expansion_preserves_partial_continuations() {
 }
 
 #[test]
+fn terminal_interchangeability_post_dwa_swap_preserves_masks() {
+    let _lock = TERMINAL_SUBSUMPTION_ENV_LOCK.lock().unwrap();
+    let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+    let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+    let _disable_interchangeability =
+        EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
+    let _disable_subsumption = EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_SUBSUMPTION");
+
+    // Advancing one `a` byte swaps the two accepting residues. This is a real
+    // strict interchangeability witness, not merely duplicate regex syntax.
+    let entries = [
+        "a", "aa", "aaa", "aaaa", "aaaaa", "aaaaaa", "aaaaaaa", "aaaaaaaa", "x",
+    ];
+    let grammar = r#"
+        start: choice choice
+        choice: A | B
+        A: /a(?:aaaa)*/
+        B: /aaa(?:aaaa)*/
+    "#;
+    let baseline = Constraint::from_lark(grammar, &vocab(&entries)).unwrap();
+    drop(_disable_interchangeability);
+    let _enable_interchangeability =
+        EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let swapped = Constraint::from_lark(grammar, &vocab(&entries)).unwrap();
+
+    for first in 0..entries.len() as u32 {
+        for second in 0..entries.len() as u32 {
+            for sequence in [Vec::new(), vec![first], vec![first, second]] {
+                let observe = |constraint: &Constraint| {
+                    let mut state = constraint.start();
+                    for &token in &sequence {
+                        if state.commit_token(token).is_err() {
+                            return None;
+                        }
+                    }
+                    Some((state.is_finished(), allowed(&state.mask())))
+                };
+                assert_eq!(
+                    observe(&baseline),
+                    observe(&swapped),
+                    "terminal swap changed token prefix {sequence:?}",
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn lark_rejects_parser_refs_inside_terminals() {
     let result = Constraint::from_lark(
         r#"
