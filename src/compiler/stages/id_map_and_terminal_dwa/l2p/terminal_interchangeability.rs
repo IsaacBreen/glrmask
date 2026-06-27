@@ -3110,6 +3110,47 @@ mod tests {
     }
 
     #[test]
+    fn mutual_subsumption_can_lack_a_global_swap_automorphism() {
+        // A --a--> B --a--> empty --a--> A.  Replacing either terminal by
+        // the other preserves the *set* of full residual rows, but the only
+        // transition-commuting symmetries are rotations, not a transposition.
+        let expressions = vec![
+            Expr::Seq(vec![
+                Expr::U8Seq(b"a".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"aaa".to_vec())),
+                    min: 0,
+                    max: None,
+                },
+            ]),
+            Expr::Seq(vec![
+                Expr::U8Seq(b"aa".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"aaa".to_vec())),
+                    min: 0,
+                    max: None,
+                },
+            ]),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let machine = RowMachine::build(&tokenizer, &[true; 256]);
+        assert!(swap_transport(&machine, 0, 1).is_none());
+        assert!(subsumption_transport_pairwise(&machine, 0, 1).is_some());
+        assert!(subsumption_transport_pairwise(&machine, 1, 0).is_some());
+        let plan = TerminalInterchangeability::build_subsumption(
+            &tokenizer,
+            &[true, true],
+            None,
+            &[true; 256],
+        );
+        assert_eq!(plan.active_representatives, vec![true, false]);
+        assert_eq!(plan.members_by_representative[0], vec![0, 1]);
+    }
+
+    #[test]
     fn sparse_subsumption_finds_prefix_embedded_terminal() {
         let expressions = vec![Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"ba".to_vec())];
         let tokenizer = build_regex(&expressions).into_tokenizer(

@@ -341,6 +341,56 @@ fn terminal_interchangeability_post_dwa_full_three_member_closure_preserves_mask
 }
 
 #[test]
+fn terminal_mutual_subsumption_post_dwa_expansion_preserves_cycle_masks() {
+    let _lock = TERMINAL_SUBSUMPTION_ENV_LOCK.lock().unwrap();
+    let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+    let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+    let _disable_interchangeability =
+        EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
+    let _disable_subsumption = EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_SUBSUMPTION");
+
+    // The two terminal residuals are rotations of a three-state `a` cycle.
+    // They are mutually subsumed under the full-row definition, but there is
+    // no global transition-commuting transposition of their lexer states.
+    let entries = ["a", "aa", "aaa", "aaaa", "aaaaa", "aaaaaa", "x"];
+    let grammar = r#"
+        start start;
+        t A ::= /a(?:aaa)*/;
+        t B ::= /aa(?:aaa)*/;
+        nt choice ::= A | B;
+        nt start ::= choice choice;
+    "#;
+    let baseline = Constraint::from_glrm_grammar(grammar, &vocab(&entries)).unwrap();
+    drop(_disable_interchangeability);
+    drop(_disable_subsumption);
+    let _enable_interchangeability =
+        EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _enable_subsumption = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_SUBSUMPTION", "1");
+    let expanded = Constraint::from_glrm_grammar(grammar, &vocab(&entries)).unwrap();
+
+    for first in 0..entries.len() as u32 {
+        for second in 0..entries.len() as u32 {
+            for sequence in [Vec::new(), vec![first], vec![first, second]] {
+                let observe = |constraint: &Constraint| {
+                    let mut state = constraint.start();
+                    for &token in &sequence {
+                        if state.commit_token(token).is_err() {
+                            return None;
+                        }
+                    }
+                    Some((state.is_finished(), allowed(&state.mask())))
+                };
+                assert_eq!(
+                    observe(&baseline),
+                    observe(&expanded),
+                    "mutual-subsumption expansion changed token prefix {sequence:?}",
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn terminal_interchangeability_post_dwa_swap_preserves_ignore_paths() {
     let _lock = TERMINAL_SUBSUMPTION_ENV_LOCK.lock().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
