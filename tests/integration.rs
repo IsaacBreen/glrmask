@@ -362,10 +362,8 @@ fn terminal_mutual_subsumption_post_dwa_expansion_preserves_cycle_masks() {
     "#;
     let baseline = Constraint::from_glrm_grammar(grammar, &vocab(&entries)).unwrap();
     drop(_disable_interchangeability);
-    drop(_disable_subsumption);
     let _enable_interchangeability =
         EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
-    let _enable_subsumption = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_SUBSUMPTION", "1");
     let expanded = Constraint::from_glrm_grammar(grammar, &vocab(&entries)).unwrap();
 
     for first in 0..entries.len() as u32 {

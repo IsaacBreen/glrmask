@@ -1271,6 +1271,128 @@ impl TerminalInterchangeability {
         if std::env::var_os("GLRMASK_L2P_TERMINAL_SUBSUMPTION").is_some() {
             return Self::build_subsumption(tokenizer, active, ignore_terminal, relevant_bytes);
         }
+        if std::env::var_os("GLRMASK_L2P_TERMINAL_STRICT_SWAP_ONLY").is_some() {
+            return Self::build_strict_swap(tokenizer, active, ignore_terminal, relevant_bytes);
+        }
+        Self::build_one_mutual_pair(tokenizer, active, ignore_terminal, relevant_bytes)
+    }
+
+    /// Conservative exact implementation of the unrooted interchangeability
+    /// relation.  Mutual directed row transport is the definition; unlike a
+    /// global label transposition it also accepts rotation witnesses.  We merge
+    /// one certified pair at a time because the relation is not transitive and
+    /// simultaneous quotienting needs its own closure proof.
+    fn build_one_mutual_pair(
+        tokenizer: &Tokenizer,
+        active: &[bool],
+        ignore_terminal: Option<TerminalID>,
+        relevant_bytes: &[bool; 256],
+    ) -> Self {
+        let active_ids = active
+            .iter()
+            .enumerate()
+            .filter_map(|(terminal, &is_active)| is_active.then_some(terminal as TerminalID))
+            .filter(|&terminal| Some(terminal) != ignore_terminal)
+            .collect::<Vec<_>>();
+        if active_ids.len() < 2 {
+            return Self::identity(active);
+        }
+
+        let started_at = Instant::now();
+        let product = SparseTerminalResidualProduct::build(tokenizer, relevant_bytes);
+        let (blocks, _) = minimize_sparse_terminal_residuals(
+            &product.outputs,
+            &product.transitions,
+            product.width,
+        );
+        let sparse = SparseTerminalResiduals::from_product(&product, &blocks);
+        let mut candidates = Vec::new();
+        for &member in &active_ids {
+            for &representative in &active_ids {
+                if member != representative
+                    && sparse.inventory_is_subset_of(member, representative)
+                {
+                    candidates.push((member, representative));
+                }
+            }
+        }
+        let transports = sparse.subsumption_transports(&candidates);
+        let selected = active_ids
+            .iter()
+            .enumerate()
+            .flat_map(|(index, &representative)| {
+                active_ids[index + 1..]
+                    .iter()
+                    .copied()
+                    .map(move |member| (representative, member))
+            })
+            .find_map(|(representative, member)| {
+                transports
+                    .get(&(member, representative))
+                    .cloned()
+                    .filter(|_| transports.contains_key(&(representative, member)))
+                    .map(|transport| (representative, member, transport))
+            });
+        let Some((representative, member, transport)) = selected else {
+            return Self::identity(active);
+        };
+
+        let mut active_representatives = active.to_vec();
+        active_representatives[member as usize] = false;
+        let mut members_by_representative = (0..active.len() as u32)
+            .map(|terminal| vec![terminal])
+            .collect::<Vec<_>>();
+        members_by_representative[representative as usize] = vec![representative, member];
+        let active_count = active.iter().filter(|&&value| value).count();
+        let representative_count = active_representatives.iter().filter(|&&value| value).count();
+        if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][l2p_terminal_mutual_interchangeability] active_terminals={} sparse_pairs={} candidates={} directed_edges={} representative={} member={} total_ms={:.3}",
+                active_count,
+                sparse.pair_count,
+                candidates.len(),
+                transports.len(),
+                representative,
+                member,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        Self {
+            original_active: active.to_vec(),
+            active_representatives,
+            members_by_representative,
+            row_machine: None,
+            generators: Vec::new(),
+            subsumption_generators: vec![SubsumptionGenerator {
+                representative,
+                member,
+                transport,
+            }],
+            original_state_count: tokenizer.num_states() as usize,
+            debug_target_state: None,
+            debug_token_id: None,
+            profile: TerminalInterchangeabilityProfile {
+                active_terminals: active_count,
+                equivalence_classes: representative_count,
+                inactive_members: active_count.saturating_sub(representative_count),
+                row_classes: sparse.block_count,
+                terminal_sigma_ms: started_at.elapsed().as_secs_f64() * 1000.0,
+                ..TerminalInterchangeabilityProfile::default()
+            },
+        }
+        .with_generator_count()
+    }
+
+    /// Stronger-than-needed diagnostic path: require a global automorphism
+    /// whose terminal action is a transposition.
+    fn build_strict_swap(
+        tokenizer: &Tokenizer,
+        active: &[bool],
+        ignore_terminal: Option<TerminalID>,
+        relevant_bytes: &[bool; 256],
+    ) -> Self {
         let active_ids: Vec<TerminalID> = active.iter().enumerate()
             .filter_map(|(t, &yes)| yes.then_some(t as TerminalID))
             .collect();
@@ -3140,7 +3262,7 @@ mod tests {
         assert!(swap_transport(&machine, 0, 1).is_none());
         assert!(subsumption_transport_pairwise(&machine, 0, 1).is_some());
         assert!(subsumption_transport_pairwise(&machine, 1, 0).is_some());
-        let plan = TerminalInterchangeability::build_subsumption(
+        let plan = TerminalInterchangeability::build(
             &tokenizer,
             &[true, true],
             None,
@@ -3262,7 +3384,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_discovery_finds_byte_preserving_swap() {
+    fn mutual_discovery_finds_byte_preserving_pair() {
         let four = Expr::U8Seq(b"aaaa".to_vec());
         let expressions = vec![
             Expr::Seq(vec![
@@ -3297,9 +3419,10 @@ mod tests {
         assert!(!plan.is_identity());
         assert_eq!(plan.active_representatives, vec![true, false]);
         assert_eq!(plan.members_by_representative[0], vec![0, 1]);
-        assert_eq!(plan.generators.len(), 1);
-        assert_eq!(plan.generators[0].representative, 0);
-        assert_eq!(plan.generators[0].member, 1);
+        assert!(plan.generators.is_empty());
+        assert_eq!(plan.subsumption_generators.len(), 1);
+        assert_eq!(plan.subsumption_generators[0].representative, 0);
+        assert_eq!(plan.subsumption_generators[0].member, 1);
     }
 
     #[test]
