@@ -341,6 +341,59 @@ fn terminal_interchangeability_post_dwa_full_three_member_closure_preserves_mask
 }
 
 #[test]
+fn terminal_interchangeability_post_dwa_swap_preserves_ignore_paths() {
+    let _lock = TERMINAL_SUBSUMPTION_ENV_LOCK.lock().unwrap();
+    let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+    let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+    let _disable_interchangeability =
+        EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
+    let _disable_subsumption = EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_SUBSUMPTION");
+
+    let entries = [
+        "a", "aa", "aaa", "aaaa", "aaaaa", "aaaaaa", " ", " a", " aaa", "x",
+    ];
+    let grammar = r#"
+        start start;
+        ignore WS;
+        t WS ::= ' '+ ;
+        t A ::= /a(?:aaaa)*/;
+        t B ::= /aaa(?:aaaa)*/;
+        nt choice ::= A | B;
+        nt start ::= choice choice;
+    "#;
+    let baseline = Constraint::from_glrm_grammar(grammar, &vocab(&entries)).unwrap();
+    let mut baseline_after_space = baseline.start();
+    baseline_after_space.commit_token(6).unwrap();
+    assert!(allowed(&baseline_after_space.mask()).contains(&0));
+
+    drop(_disable_interchangeability);
+    let _enable_interchangeability =
+        EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let swapped = Constraint::from_glrm_grammar(grammar, &vocab(&entries)).unwrap();
+
+    for first in 0..entries.len() as u32 {
+        for second in 0..entries.len() as u32 {
+            for sequence in [Vec::new(), vec![first], vec![first, second]] {
+                let observe = |constraint: &Constraint| {
+                    let mut state = constraint.start();
+                    for &token in &sequence {
+                        if state.commit_token(token).is_err() {
+                            return None;
+                        }
+                    }
+                    Some((state.is_finished(), allowed(&state.mask())))
+                };
+                assert_eq!(
+                    observe(&baseline),
+                    observe(&swapped),
+                    "terminal swap with ignore changed token prefix {sequence:?}",
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn lark_rejects_parser_refs_inside_terminals() {
     let result = Constraint::from_lark(
         r#"
