@@ -175,15 +175,16 @@ fn l2p_tokenizer_simplify_disabled() -> bool {
 /// Enable the deliberately slow generated-swap reference construction.
 /// It is opt-in until it has been validated against full-terminal builds.
 fn l2p_terminal_interchangeability_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY")
-            .map(|value| {
-                let trimmed = value.trim();
-                !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-            })
-            .unwrap_or(false)
-    })
+    // This flag deliberately remains dynamic. Differential tests build a
+    // baseline and an enabled constraint in one process, and a cache would
+    // freeze the baseline setting for the enabled build. The function runs
+    // once per L2P partition, so the environment lookup is immaterial.
+    std::env::var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY")
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
 }
 
 fn l2p_terminal_interchangeability_enabled_for_partition(partition: &str) -> bool {
@@ -1045,4 +1046,38 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             ..TerminalDwaPhaseProfile::default()
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::*;
+
+    static INTERCHANGEABILITY_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct RestoreEnv {
+        original: Option<OsString>,
+    }
+
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => unsafe { std::env::set_var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", value) },
+                None => unsafe { std::env::remove_var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY") },
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_interchangeability_flag_is_dynamic() {
+        let _lock = INTERCHANGEABILITY_ENV_LOCK.lock().unwrap();
+        let _restore = RestoreEnv {
+            original: std::env::var_os("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY"),
+        };
+        unsafe { std::env::remove_var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY") };
+        assert!(!l2p_terminal_interchangeability_enabled());
+        unsafe { std::env::set_var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1") };
+        assert!(l2p_terminal_interchangeability_enabled());
+    }
 }

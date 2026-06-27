@@ -3316,6 +3316,57 @@ mod tests {
     }
 
     #[test]
+    fn directed_pairwise_witness_differs_from_or_label_quotient_on_compiled_lexer() {
+        // `a` is ignored and the two terminals accept b-counts congruent to
+        // one and two modulo three respectively. Each directed replacement is
+        // a valid unrooted row witness, whereas the actual lexer quotient ORs
+        // their outputs under one label and has no representative-only row
+        // witness. This is intentional: post-DWA expansion is a union of
+        // separately transported views, not a claim that the raw quotient is
+        // itself row-equivalent to the concrete lexer.
+        let a_star = || Expr::Repeat {
+            expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+            min: 0,
+            max: None,
+        };
+        let b_then_as = || Expr::Seq(vec![Expr::U8Seq(b"b".to_vec()), a_star()]);
+        let repeated_tail = |count| Expr::Repeat {
+            expr: Box::new(Expr::Seq((0..count).map(|_| b_then_as()).collect())),
+            min: 0,
+            max: None,
+        };
+        let expressions = vec![
+            Expr::Seq(vec![a_star(), b_then_as(), repeated_tail(3)]),
+            Expr::Seq(vec![a_star(), b_then_as(), b_then_as(), repeated_tail(3)]),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.clone().into_boxed_slice())),
+        );
+        let machine = RowMachine::build(&tokenizer, &[true; 256]);
+        assert!(subsumption_transport_pairwise(&machine, 0, 1).is_some());
+        assert!(!simultaneous_relabel_has_representative_witness(
+            &machine,
+            &[0],
+            1,
+        ));
+        assert!(subsumption_transport_pairwise(&machine, 1, 0).is_some());
+        assert!(!simultaneous_relabel_has_representative_witness(
+            &machine,
+            &[1],
+            0,
+        ));
+        let plan = TerminalInterchangeability::build_subsumption(
+            &tokenizer,
+            &[true, true],
+            None,
+            &[true; 256],
+        );
+        assert_eq!(plan.active_representatives, vec![true, false]);
+        assert_eq!(plan.members_by_representative[0], vec![0, 1]);
+    }
+
+    #[test]
     fn sparse_subsumption_finds_prefix_embedded_terminal() {
         let expressions = vec![Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"ba".to_vec())];
         let tokenizer = build_regex(&expressions).into_tokenizer(

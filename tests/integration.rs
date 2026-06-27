@@ -248,6 +248,64 @@ fn terminal_subsumption_post_dwa_expansion_preserves_partial_continuations() {
 }
 
 #[test]
+fn terminal_subsumption_or_label_quotient_preserves_masks() {
+    let _lock = TERMINAL_SUBSUMPTION_ENV_LOCK.lock().unwrap();
+    let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+    let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+    let _disable_interchangeability =
+        EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
+    let _disable_subsumption = EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_SUBSUMPTION");
+
+    // A accepts strings with #b = 1 (mod 3); B accepts #b = 2 (mod 3).
+    // The raw lexer quotient ORs their output bits under one label, even though
+    // that quotient has no direct representative-row witness. The post-DWA
+    // copy-and-union construction must nevertheless preserve concrete masks.
+    let entries = ["a", "b", "aa", "ab", "ba", "bb", "aba", "bab", "x"];
+    let grammar = r#"
+        start: choice choice
+        choice: A | B
+        A: /a*ba*(?:ba*ba*ba*)*/
+        B: /a*ba*ba*(?:ba*ba*ba*)*/
+    "#;
+    let baseline = Constraint::from_lark(grammar, &vocab(&entries)).unwrap();
+    drop(_disable_interchangeability);
+    drop(_disable_subsumption);
+    let _enable_interchangeability =
+        EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _enable_subsumption =
+        EnvVarGuard::set("GLRMASK_L2P_TERMINAL_SUBSUMPTION", "1");
+    let expanded = Constraint::from_lark(grammar, &vocab(&entries)).unwrap();
+
+    let observe = |constraint: &Constraint, sequence: &[u32]| {
+        let mut state = constraint.start();
+        for &token in sequence {
+            if state.commit_token(token).is_err() {
+                return None;
+            }
+        }
+        Some((state.is_finished(), allowed(&state.mask())))
+    };
+    for first in 0..entries.len() as u32 {
+        for second in 0..entries.len() as u32 {
+            for third in 0..entries.len() as u32 {
+                for sequence in [
+                    Vec::new(),
+                    vec![first],
+                    vec![first, second],
+                    vec![first, second, third],
+                ] {
+                    assert_eq!(
+                        observe(&baseline, &sequence),
+                        observe(&expanded, &sequence),
+                        "subsumption OR-label quotient changed token prefix {sequence:?}",
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn terminal_interchangeability_post_dwa_swap_preserves_masks() {
     let _lock = TERMINAL_SUBSUMPTION_ENV_LOCK.lock().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
