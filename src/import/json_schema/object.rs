@@ -3311,23 +3311,28 @@ impl<'a> Lowerer<'a> {
     ) -> ImportResult<ObjectItem> {
         let key = self.lower_literal_key_colon(&property.name);
         let separator_key = self.lower_literal_key_colon_with_prefix(b", ", &property.name);
-        let mut effective_schema = property.schema.clone();
+        let mut intersected_schema = None;
         for pattern_property in pattern_properties {
             if property_matches_pattern(&pattern_property.pattern, &property.name)? {
-                let pattern_schema = pattern_schema_for_property(&effective_schema, &pattern_property.schema);
-                effective_schema = all_of_schema(effective_schema, pattern_schema);
+                let current_schema = intersected_schema
+                    .take()
+                    .unwrap_or_else(|| property.schema.clone());
+                let pattern_schema =
+                    pattern_schema_for_property(&current_schema, &pattern_property.schema);
+                intersected_schema = Some(all_of_schema(current_schema, pattern_schema));
             }
         }
+        let effective_schema = intersected_schema.as_ref().unwrap_or(&property.schema);
         if let Some(item) = self.lower_string_property_item(
             &property.name,
-            &effective_schema,
+            effective_schema,
             required,
             satisfies_any_group,
             exclusive_group,
         )? {
             return Ok(item);
         }
-        let value = self.lower_object_property_value_schema(&effective_schema)?;
+        let value = self.lower_object_property_value_schema(effective_schema)?;
         if let Some(non_string_value) = Self::without_json_string_branch(value.clone()) {
             let (non_string_value, has_null_branch) =
                 if let Some(non_string_value) = non_string_value {
