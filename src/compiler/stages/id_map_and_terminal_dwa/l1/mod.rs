@@ -1546,7 +1546,21 @@ impl L1PackedSuffixTrie {
         token_ids: &[usize],
         suffix_lcps: &[usize],
     ) -> Self {
-        let mut nodes = vec![L1PackedSuffixTrieNode::root()];
+        // The LCP walk determines the exact number of nodes appended by each
+        // token. Reserve once so large vocabulary buckets do not repeatedly
+        // copy the packed trie while it is being constructed.
+        let mut node_capacity = 1usize;
+        let mut previous_suffix_len = 0usize;
+        for (bucket_pos, &internal_token_id) in token_ids.iter().enumerate() {
+            let suffix_len = sorted_entries[internal_token_id].1.len().saturating_sub(1);
+            let lcp = suffix_lcps[bucket_pos]
+                .min(suffix_len)
+                .min(previous_suffix_len);
+            node_capacity += suffix_len - lcp;
+            previous_suffix_len = suffix_len;
+        }
+        let mut nodes = Vec::with_capacity(node_capacity);
+        nodes.push(L1PackedSuffixTrieNode::root());
         let mut path = vec![0u32];
 
         for (bucket_pos, &internal_token_id) in token_ids.iter().enumerate() {
@@ -1574,6 +1588,7 @@ impl L1PackedSuffixTrie {
             debug_assert_eq!(nodes[terminal].terminal_token, L1_NONE);
             nodes[terminal].terminal_token = token_id;
         }
+        debug_assert_eq!(nodes.len(), node_capacity);
 
         // Token IDs follow the byte-sorted vocabulary order. Every suffix-trie
         // subtree therefore spans one contiguous leaf-token interval. Computing
