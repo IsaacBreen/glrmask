@@ -1572,36 +1572,19 @@ impl TerminalInterchangeability {
 
         let started_at = Instant::now();
         let product = SparseTerminalResidualProduct::build(tokenizer, relevant_bytes);
-        let prune_started_at = Instant::now();
-        let prune = sparse_inventory_prune(&product, &active_ids);
-        let prune_ms = prune_started_at.elapsed().as_secs_f64() * 1000.0;
         if std::env::var_os("GLRMASK_L2P_SUBSUMPTION_INVENTORY_PROBE_ONLY").is_some() {
+            let probe_started_at = Instant::now();
+            let probe = sparse_inventory_prune(&product, &active_ids);
             eprintln!(
-                "[glrmask/profile][l2p_subsumption_inventory_probe] active_terminals={} pairs={} residual_bytes={} candidate_counts={:?} hash_candidate_counts={:?} converged={} product_ms={:.3} probe_ms={:.3}",
+                "[glrmask/profile][l2p_subsumption_inventory_probe] active_terminals={} pairs={} residual_bytes={} candidate_counts={:?} hash_candidate_counts={:?} converged={} probe_ms={:.3}",
                 active_ids.len(),
                 product.pair_terminals.len(),
                 product.width,
-                prune.candidate_counts,
-                prune.hash_candidate_counts,
-                prune.converged,
-                product.column_quotient_ms,
-                prune_ms,
+                probe.candidate_counts,
+                probe.hash_candidate_counts,
+                probe.converged,
+                probe_started_at.elapsed().as_secs_f64() * 1000.0,
             );
-            return Self::identity(active);
-        }
-        if prune.eliminated_all() {
-            if std::env::var_os("GLRMASK_PROFILE_L2P_SUBSUMPTION_PLAN").is_some() {
-                eprintln!(
-                    "[glrmask/profile][l2p_subsumption_plan] active_terminals={} sparse_pairs={} early_pruned=true candidate_counts={:?} hash_candidate_counts={:?} product_ms={:.3} prune_ms={:.3} total_ms={:.3}",
-                    active_ids.len(),
-                    product.pair_terminals.len(),
-                    prune.candidate_counts,
-                    prune.hash_candidate_counts,
-                    product.column_quotient_ms,
-                    prune_ms,
-                    started_at.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
             return Self::identity(active);
         }
         let (blocks, _) = minimize_sparse_terminal_residuals(
