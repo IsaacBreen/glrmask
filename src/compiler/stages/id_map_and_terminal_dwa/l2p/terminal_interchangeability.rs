@@ -3202,6 +3202,30 @@ mod tests {
     }
 
     #[test]
+    fn relabelled_tokenizer_keeps_member_paths_under_representative_label() {
+        let expressions = vec![Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"ba".to_vec())];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let relabelled = tokenizer.relabel_terminals(&[1, 1]);
+        assert_eq!(tokenizer.num_states(), relabelled.num_states());
+        for state in 0..tokenizer.num_states() {
+            for byte in 0..=255u8 {
+                assert_eq!(
+                    tokenizer.get_transition(state, byte),
+                    relabelled.get_transition(state, byte),
+                );
+            }
+        }
+        let after_a = relabelled.run(b"a");
+        assert_eq!(relabelled.matched_terminals(after_a), [1].into_iter().collect());
+        let (simplified, _) = relabelled.simplify_for_terminals(&[false, true], Some(&[true; 256]));
+        let simplified_after_a = simplified.run(b"a");
+        assert_eq!(simplified.matched_terminals(simplified_after_a), [1].into_iter().collect());
+    }
+
+    #[test]
     fn strict_discovery_finds_byte_preserving_swap() {
         let four = Expr::U8Seq(b"aaaa".to_vec());
         let expressions = vec![
