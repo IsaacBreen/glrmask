@@ -67,25 +67,6 @@ fn max_guarded_stack_effects() -> Option<usize> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum StackEffectActionKey {
-    Shift(u32, bool),
-    StackShifts(Vec<StackShift>),
-    GuardedStackShifts(Vec<GuardedStackShift>),
-    Reduce(NonterminalID, u32),
-    Split,
-    Accept,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct StackEffectKey {
-    origin_state: u32,
-    state: u32,
-    tid: TerminalID,
-    action: StackEffectActionKey,
-    frame: StackEffectFrame,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct StackEffectVisitKey {
     state: u32,
     tid: TerminalID,
@@ -258,17 +239,36 @@ impl GLRTable {
     /// Iterates until no more merges are possible, since remapping targets
     /// can reveal new equivalences.
     pub(super) fn merge_identical_rows(&mut self) {
+        let profile_detail = std::env::var("GLRMASK_PROFILE_GLR_ROW_MERGE_DETAIL")
+            .map(|value| value == "1")
+            .unwrap_or(false);
+        let mut iteration = 0usize;
         loop {
-            let mut sig_to_reps: FxHashMap<u64, Vec<u32>> = FxHashMap::default();
+            iteration += 1;
+            let states_before = self.num_states;
+            let scan_started_at = profile_detail.then(std::time::Instant::now);
+            // Almost every row fingerprint is unique. Keep the first
+            // representative inline and allocate a collision list only when a
+            // fingerprint actually contains distinct rows. This preserves the
+            // old first-representative search order exactly.
+            let mut sig_to_first_rep: FxHashMap<u64, u32> = FxHashMap::default();
+            let mut collision_reps: FxHashMap<u64, Vec<u32>> = FxHashMap::default();
             let mut remap: Vec<u32> = (0..self.num_states).collect();
             let mut changed = false;
+            let mut fingerprint_collisions = 0usize;
+            let mut equality_checks = 0usize;
+            let mut matched_rows = 0usize;
 
             let has_advance_rows = self.advance.len() == self.num_states as usize;
             for state in 0..self.num_states as usize {
                 let advance_row = has_advance_rows.then(|| &self.advance[state]);
                 let fingerprint = row_fingerprint(&self.action[state], &self.goto[state], advance_row);
-                let reps = sig_to_reps.entry(fingerprint).or_default();
-                if let Some(&rep) = reps.iter().find(|&&rep| {
+                let Some(&first_rep) = sig_to_first_rep.get(&fingerprint) else {
+                    sig_to_first_rep.insert(fingerprint, state as u32);
+                    continue;
+                };
+                fingerprint_collisions += 1;
+                let row_matches = |rep: u32| {
                     rows_equal(
                         &self.action[state],
                         &self.goto[state],
@@ -277,18 +277,51 @@ impl GLRTable {
                         &self.goto[rep as usize],
                         has_advance_rows.then(|| &self.advance[rep as usize]),
                     )
-                }) {
+                };
+                equality_checks += 1;
+                if row_matches(first_rep) {
+                    remap[state] = first_rep;
+                    changed = true;
+                    matched_rows += 1;
+                    continue;
+                }
+
+                let reps = collision_reps.entry(fingerprint).or_default();
+                let mut matching_rep = None;
+                for &rep in reps.iter() {
+                    equality_checks += 1;
+                    if row_matches(rep) {
+                        matching_rep = Some(rep);
+                        break;
+                    }
+                }
+                if let Some(rep) = matching_rep {
                     remap[state] = rep;
                     changed = true;
+                    matched_rows += 1;
                 } else {
                     reps.push(state as u32);
                 }
             }
 
             if !changed {
+                if let Some(scan_started_at) = scan_started_at {
+                    eprintln!(
+                        "[glrmask/profile][row_merge] iteration={} states_before={} states_after={} changed=false fingerprints={} fingerprint_collisions={} equality_checks={} matched_rows={} scan_ms={:.3} remap_ms=0.000",
+                        iteration,
+                        states_before,
+                        states_before,
+                        sig_to_first_rep.len(),
+                        fingerprint_collisions,
+                        equality_checks,
+                        matched_rows,
+                        scan_started_at.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
                 break;
             }
 
+            let remap_started_at = profile_detail.then(std::time::Instant::now);
             // Build old_to_new: compose remap (merge) with sequential renumbering
             let mut new_id = 0u32;
             let mut rep_to_new: FxHashMap<u32, u32> = FxHashMap::default();
@@ -304,35 +337,43 @@ impl GLRTable {
                 .map(|s| rep_to_new[&remap[s]])
                 .collect();
 
-            // Extract representative rows and remap all state references
-            let new_action: Vec<_> = kept
-                .iter()
-                .map(|&s| {
-                    self.action[s as usize]
-                        .iter()
-                        .map(|(tid, action)| (tid, remap_action_targets(action, &mapping)))
-                        .collect()
-                })
-                .collect();
-            let new_goto: Vec<_> = kept
-                .iter()
-                .map(|&s| {
-                    self.goto[s as usize]
-                        .iter()
-                        .map(|(&nt, &(target, replace))| (nt, (mapping[target as usize], replace)))
-                        .collect()
-                })
-                .collect();
-
-            let new_advance = has_advance_rows.then(|| {
-                kept.iter()
-                    .map(|&s| self.advance[s as usize].clone())
+            // Move surviving rows forward instead of cloning every action,
+            // goto, and advance row on every refinement round.  The remap is
+            // still applied to exactly the same representatives in the same
+            // state order.
+            let old_action = std::mem::take(&mut self.action);
+            let old_goto = std::mem::take(&mut self.goto);
+            let mut old_advance = has_advance_rows.then(|| {
+                std::mem::take(&mut self.advance)
+                    .into_iter()
+                    .map(Some)
                     .collect::<Vec<_>>()
             });
+            let mut new_action = Vec::with_capacity(kept.len());
+            let mut new_goto = Vec::with_capacity(kept.len());
+            let mut new_advance = Vec::with_capacity(kept.len());
+            for (state, (mut action_row, mut goto_row)) in
+                old_action.into_iter().zip(old_goto).enumerate()
+            {
+                if remap[state] != state as u32 {
+                    continue;
+                }
+                remap_action_row_targets_in_place(&mut action_row, &mapping);
+                remap_goto_row_targets_in_place(&mut goto_row, &mapping);
+                new_action.push(action_row);
+                new_goto.push(goto_row);
+                if let Some(old_advance) = &mut old_advance {
+                    new_advance.push(
+                        old_advance[state]
+                            .take()
+                            .expect("kept state has an advance row"),
+                    );
+                }
+            }
 
             self.action = new_action;
             self.goto = new_goto;
-            if let Some(new_advance) = new_advance {
+            if has_advance_rows {
                 self.advance = new_advance;
             }
             self.forwarded_shifts = self.forwarded_shifts
@@ -340,8 +381,25 @@ impl GLRTable {
                 .map(|&(state, terminal)| (mapping[state as usize], terminal))
                 .collect();
             self.num_states = kept.len() as u32;
+            if let (Some(scan_started_at), Some(remap_started_at)) =
+                (scan_started_at, remap_started_at)
+            {
+                eprintln!(
+                    "[glrmask/profile][row_merge] iteration={} states_before={} states_after={} changed=true fingerprints={} fingerprint_collisions={} equality_checks={} matched_rows={} scan_ms={:.3} remap_ms={:.3}",
+                    iteration,
+                    states_before,
+                    self.num_states,
+                    sig_to_first_rep.len(),
+                    fingerprint_collisions,
+                    equality_checks,
+                    matched_rows,
+                    remap_started_at.duration_since(scan_started_at).as_secs_f64() * 1000.0,
+                    remap_started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
         }
     }
+
 
     pub(super) fn prune_unreachable_states(&mut self) {
         if self.num_states == 0 {
@@ -438,26 +496,34 @@ impl GLRTable {
                 guarded_shift_index: Vec::new(),
             },
         );
+        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+        let clone_started_at = profile_enabled.then(std::time::Instant::now);
         let mut work = original.clone();
+        let clone_ms = clone_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+        let inner_started_at = profile_enabled.then(std::time::Instant::now);
         let mut budget = UnitInlineBudget::from_env();
         work.collapse_sr_unit_reductions_with_compatible_gotos_inner(&mut budget);
         let report = budget.report();
+        let inner_ms = inner_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
         if report.aborted {
             *self = original;
         } else {
             *self = work;
         }
-        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
-        {
+        if let (Some(clone_ms), Some(inner_ms)) = (clone_ms, inner_ms) {
             eprintln!(
-                "[glrmask/profile][unit_reduction_inlining] outcome={} reason={} iterations={} cells={} synthetic_states={} stack_effect_visits={} elapsed_ms={:.3} max_ms={} max_iterations={} max_cells={} max_synthetic_states={} max_stack_effect_visits={}",
+                "[glrmask/profile][unit_reduction_inlining] outcome={} reason={} iterations={} cells={} synthetic_states={} stack_effect_visits={} clone_ms={:.3} inner_ms={:.3} elapsed_ms={:.3} max_ms={} max_iterations={} max_cells={} max_synthetic_states={} max_stack_effect_visits={}",
                 if report.aborted { "aborted" } else { "committed" },
                 report.reason.unwrap_or("none"),
                 report.iterations,
                 report.cells,
                 report.synthetic_states,
                 report.stack_effect_visits,
+                clone_ms,
+                inner_ms,
                 report.elapsed_ms,
                 budget.max_ms,
                 budget.max_iterations,
@@ -473,6 +539,8 @@ impl GLRTable {
         &mut self,
         budget: &mut UnitInlineBudget,
     ) {
+        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let original_num_states = self.num_states;
         let mut constituent_sets: Vec<BTreeSet<u32>> = (0..self.num_states)
             .map(|state| BTreeSet::from([state]))
@@ -487,6 +555,10 @@ impl GLRTable {
             if !budget.record_iteration() {
                 break;
             }
+            let iteration = budget.iterations;
+            let cells_before = budget.cells;
+            let visits_before = budget.stack_effect_visits;
+            let refresh_started_at = profile_enabled.then(std::time::Instant::now);
             if !dirty_original_states.is_empty() {
                 refresh_merged_states_depending_on(
                     self,
@@ -503,17 +575,24 @@ impl GLRTable {
                 dirty_original_states.clear();
             }
 
+            let refresh_ms = refresh_started_at
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+            let predecessors_started_at = profile_enabled.then(std::time::Instant::now);
             let predecessors = build_runtime_state_predecessors(self, original_num_states, &constituent_sets);
+            let predecessors_ms = predecessors_started_at
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
             // The scan below computes updates against a stable snapshot of the
             // current original rows for this iteration. Delayed synthetic
             // states may be appended, but existing rows are not mutated until
-            // after the scan, so stack-effect results are memoizable.
-            let mut stack_effect_memo: FxHashMap<StackEffectKey, Option<StackEffectResult>> =
-                FxHashMap::default();
+            // after the scan, so stack-effect reductions use a shared depth
+            // cache while their rows remain stable.
             let mut states_at_depth_cache: FxHashMap<(u32, u32), Option<BTreeSet<u32>>> =
                 FxHashMap::default();
             let nstates = original_num_states as usize;
             let mut pending_updates: Vec<(usize, TerminalID, CellUpdate)> = Vec::new();
+            let scan_started_at = profile_enabled.then(std::time::Instant::now);
 
             for state in 0..nstates {
                 let tids: Vec<TerminalID> = self.action[state].keys().collect();
@@ -532,7 +611,6 @@ impl GLRTable {
                         tid,
                         &action,
                         &mut constituent_sets,
-                        &mut stack_effect_memo,
                         &mut states_at_depth_cache,
                         &mut subset_to_state,
                         &mut failed_subsets,
@@ -560,9 +638,31 @@ impl GLRTable {
             }
 
             if pending_updates.is_empty() || budget.abort_reason.is_some() {
+                if profile_enabled {
+                    eprintln!(
+                        "[glrmask/profile][unit_reduction_inlining_iteration] iteration={} refresh_ms={:.3} predecessors_ms={:.3} scan_ms={:.3} apply_ms=0.000 scanned_cells={} stack_effect_visits={} pending_updates={} terminal={}",
+                        iteration,
+                        refresh_ms,
+                        predecessors_ms,
+                        scan_started_at
+                            .expect("profile start exists when profiling is enabled")
+                            .elapsed()
+                            .as_secs_f64()
+                            * 1000.0,
+                        budget.cells - cells_before,
+                        budget.stack_effect_visits - visits_before,
+                        pending_updates.len(),
+                        if budget.abort_reason.is_some() { "abort" } else { "stable" },
+                    );
+                }
                 break;
             }
 
+            let update_count = pending_updates.len();
+            let scan_ms = scan_started_at
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+            let apply_started_at = profile_enabled.then(std::time::Instant::now);
             for (state, tid, update) in pending_updates {
                 match update {
                     CellUpdate::Set(new_action) => {
@@ -578,6 +678,23 @@ impl GLRTable {
                     }
                 }
                 dirty_original_states.insert(state as u32);
+            }
+            if profile_enabled {
+                eprintln!(
+                    "[glrmask/profile][unit_reduction_inlining_iteration] iteration={} refresh_ms={:.3} predecessors_ms={:.3} scan_ms={:.3} apply_ms={:.3} scanned_cells={} stack_effect_visits={} pending_updates={} terminal=continue",
+                    iteration,
+                    refresh_ms,
+                    predecessors_ms,
+                    scan_ms,
+                    apply_started_at
+                        .expect("profile start exists when profiling is enabled")
+                        .elapsed()
+                        .as_secs_f64()
+                        * 1000.0,
+                    budget.cells - cells_before,
+                    budget.stack_effect_visits - visits_before,
+                    update_count,
+                );
             }
         }
     }
@@ -2359,19 +2476,6 @@ fn frame_to_guarded_shift(frame: StackEffectFrame) -> GuardedStackShift {
     }
 }
 
-fn stack_effect_action_key(action: &Action) -> StackEffectActionKey {
-    match action {
-        Action::Shift(target, replace) => StackEffectActionKey::Shift(*target, *replace),
-        Action::StackShifts(shifts) => StackEffectActionKey::StackShifts(shifts.clone()),
-        Action::GuardedStackShifts(shifts) => {
-            StackEffectActionKey::GuardedStackShifts(shifts.clone())
-        }
-        Action::Reduce(nt, len) => StackEffectActionKey::Reduce(*nt, *len),
-        Action::Split { .. } => StackEffectActionKey::Split,
-        Action::Accept => StackEffectActionKey::Accept,
-    }
-}
-
 fn stack_effect_action_tag(action: &Action) -> u8 {
     match action {
         Action::Shift(..) => 0,
@@ -2494,23 +2598,11 @@ fn stack_effects_for_action(
     frame: StackEffectFrame,
     states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
     visiting: &mut FxHashSet<StackEffectVisitKey>,
-    memo: &mut FxHashMap<StackEffectKey, Option<StackEffectResult>>,
     budget: &mut UnitInlineBudget,
 ) -> Option<StackEffectResult> {
     if !budget.record_stack_effect_visit() {
         return None;
     }
-    let memo_key = StackEffectKey {
-        origin_state,
-        state,
-        tid,
-        action: stack_effect_action_key(action),
-        frame: frame.clone(),
-    };
-    if let Some(cached) = memo.get(&memo_key) {
-        return cached.clone();
-    }
-
     let key = StackEffectVisitKey {
         state,
         tid,
@@ -2589,7 +2681,6 @@ fn stack_effects_for_action(
                         frame,
                         states_at_depth_cache,
                         visiting,
-                        memo,
                         budget,
                     )?;
                     origin_dependent |= next_result.origin_dependent;
@@ -2612,7 +2703,6 @@ fn stack_effects_for_action(
                         frame.clone(),
                         states_at_depth_cache,
                         visiting,
-                        memo,
                         budget,
                     )?;
                     origin_dependent |= shift_result.origin_dependent;
@@ -2630,7 +2720,6 @@ fn stack_effects_for_action(
                         frame.clone(),
                         states_at_depth_cache,
                         visiting,
-                        memo,
                         budget,
                     )?;
                     origin_dependent |= reduce_result.origin_dependent;
@@ -2649,7 +2738,6 @@ fn stack_effects_for_action(
     })();
 
     visiting.remove(&key);
-    memo.insert(memo_key, result.clone());
     result
 }
 
@@ -2700,7 +2788,6 @@ fn try_inline_action_to_stack_shifts(
     state: u32,
     tid: TerminalID,
     action: &Action,
-    stack_effect_memo: &mut FxHashMap<StackEffectKey, Option<StackEffectResult>>,
     states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
     budget: &mut UnitInlineBudget,
 ) -> Option<Action> {
@@ -2731,7 +2818,6 @@ fn try_inline_action_to_stack_shifts(
         },
         states_at_depth_cache,
         &mut FxHashSet::default(),
-        stack_effect_memo,
         budget,
     )?;
     let effects = result.effects;
@@ -3312,7 +3398,6 @@ mod tests {
             0,
             action,
             &mut FxHashMap::default(),
-            &mut FxHashMap::default(),
             &mut budget,
         );
 
@@ -3376,7 +3461,6 @@ mod tests {
             0,
             action,
             &mut FxHashMap::default(),
-            &mut FxHashMap::default(),
             &mut budget,
         );
 
@@ -3434,7 +3518,6 @@ mod tests {
             2,
             0,
             action,
-            &mut FxHashMap::default(),
             &mut FxHashMap::default(),
             &mut budget,
         );
@@ -3741,7 +3824,6 @@ fn try_inline_unit_reductions_for_cell(
     tid: TerminalID,
     action: &Action,
     constituent_sets: &mut Vec<BTreeSet<u32>>,
-    stack_effect_memo: &mut FxHashMap<StackEffectKey, Option<StackEffectResult>>,
     states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
@@ -3753,7 +3835,6 @@ fn try_inline_unit_reductions_for_cell(
         state,
         tid,
         action,
-        stack_effect_memo,
         states_at_depth_cache,
         budget,
     ) {
@@ -3891,6 +3972,34 @@ fn try_inline_unit_reductions_for_cell_inner(
     };
     visiting.remove(&(state, tid));
     result
+}
+
+fn remap_action_row_targets_in_place(action_row: &mut ActionRow, mapping: &[u32]) {
+    let terminals = action_row.keys().collect::<Vec<_>>();
+    for terminal in terminals {
+        let remapped = remap_action_targets(
+            action_row
+                .get(&terminal)
+                .expect("action-row key remains present while remapping"),
+            mapping,
+        );
+        *action_row
+            .get_mut(&terminal)
+            .expect("action-row key remains present while remapping") = remapped;
+    }
+}
+
+fn remap_goto_row_targets_in_place(goto_row: &mut GotoRow, mapping: &[u32]) {
+    let nonterminals = goto_row.keys().copied().collect::<Vec<_>>();
+    for nonterminal in nonterminals {
+        let (target, replace) = *goto_row
+            .get(&nonterminal)
+            .expect("goto-row key remains present while remapping");
+        *goto_row
+            .get_mut(&nonterminal)
+            .expect("goto-row key remains present while remapping") =
+            (mapping[target as usize], replace);
+    }
 }
 
 fn remap_action_targets(action: &Action, mapping: &[u32]) -> Action {
@@ -4042,15 +4151,27 @@ fn core_classes(core_keys: &[Vec<Item>]) -> Vec<u32> {
 }
 
 fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<u32> {
+    let profile_detail = std::env::var("GLRMASK_PROFILE_GLR_CORE_MERGE_DETAIL")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    let core_classes_started_at = profile_detail.then(std::time::Instant::now);
     let nstates = table.num_states as usize;
     let has_advance_rows = table.advance.len() == nstates;
     let core_class_of = core_classes(core_keys);
+    let core_classes_ms = core_classes_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
     let mut partition = core_class_of.clone();
+    let mut iteration = 0usize;
 
     loop {
+        iteration += 1;
+        let iteration_started_at = profile_detail.then(std::time::Instant::now);
         let mut sig_to_part: FxHashMap<RowSignature, u32> = FxHashMap::default();
         let mut next_partition = vec![0u32; nstates];
         let mut next_id = 0u32;
+        let mut action_entries = 0usize;
+        let mut goto_entries = 0usize;
 
         for state in 0..nstates {
             let action = table.action[state]
@@ -4059,10 +4180,12 @@ fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<
                     (terminal, remap_action_to_partition(action, &partition))
                 })
                 .collect();
+            action_entries += table.action[state].len();
             let goto = table.goto[state]
                 .iter()
                 .map(|(&nt, &(target, replace))| (nt, (partition[target as usize], replace)))
                 .collect();
+            goto_entries += table.goto[state].len();
             let signature = RowSignature {
                 core_class: core_class_of[state],
                 action,
@@ -4078,7 +4201,27 @@ fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<
             next_partition[state] = class;
         }
 
-        if next_partition == partition {
+        let changed = next_partition != partition;
+        if let Some(iteration_started_at) = iteration_started_at {
+            eprintln!(
+                "[glrmask/profile][same_core_refine] iteration={} states={} core_classes_ms={:.3} unique_partitions={} action_entries={} goto_entries={} changed={} elapsed_ms={:.3}",
+                iteration,
+                nstates,
+                core_classes_ms,
+                next_id,
+                action_entries,
+                goto_entries,
+                changed,
+                iteration_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        // Refinement only splits classes. Once every state has its own class,
+        // no later pass can change the partition; because classes are assigned
+        // in source-state order, this is also the identity partition.
+        if next_id as usize == nstates {
+            return next_partition;
+        }
+        if !changed {
             return partition;
         }
         partition = next_partition;
@@ -4088,6 +4231,13 @@ fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<
 pub(super) fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>]) -> GLRTable {
     let partition = refine_same_core_partition(&table, core_keys);
     let nstates = table.num_states as usize;
+    let has_merge = partition
+        .iter()
+        .enumerate()
+        .any(|(state, &group)| group != state as u32);
+    if !has_merge {
+        return table;
+    }
     let ngroups = partition.iter().copied().max().map(|x| x + 1).unwrap_or(0) as usize;
 
     let mut representatives = vec![u32::MAX; ngroups];
