@@ -2386,36 +2386,35 @@ enum ReduceFrameResult {
     },
 }
 
-fn states_at_depth(
+fn states_at_depth<'a>(
     predecessors: &[BTreeSet<u32>],
     origin_state: u32,
     depth: u32,
-    cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
+    cache: &'a mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
     budget: &mut UnitInlineBudget,
-) -> Option<BTreeSet<u32>> {
-    if let Some(cached) = cache.get(&(origin_state, depth)) {
-        return cached.clone();
+) -> Option<&'a BTreeSet<u32>> {
+    let cache_key = (origin_state, depth);
+    if !cache.contains_key(&cache_key) {
+        let mut states = BTreeSet::from([origin_state]);
+        for _ in 0..depth {
+            if !budget.record_stack_effect_visit() {
+                return None;
+            }
+            let mut next = BTreeSet::new();
+            for state in states {
+                next.extend(predecessors.get(state as usize)?.iter().copied());
+            }
+            if next.is_empty() {
+                cache.insert(cache_key, None);
+                return None;
+            }
+            states = next;
+        }
+
+        cache.insert(cache_key, Some(states));
     }
 
-    let mut states = BTreeSet::from([origin_state]);
-    for _ in 0..depth {
-        if !budget.record_stack_effect_visit() {
-            return None;
-        }
-        let mut next = BTreeSet::new();
-        for state in states {
-            next.extend(predecessors.get(state as usize)?.iter().copied());
-        }
-        if next.is_empty() {
-            cache.insert((origin_state, depth), None);
-            return None;
-        }
-        states = next;
-    }
-
-    let result = Some(states);
-    cache.insert((origin_state, depth), result.clone());
-    result
+    cache.get(&cache_key).and_then(Option::as_ref)
 }
 
 fn normalize_states(mut states: Vec<u32>) -> Vec<u32> {
@@ -2500,8 +2499,10 @@ fn apply_reduce_to_frame(
     pop_frame(&mut frame, len);
 
     let mut origin_dependent = false;
+    let direct_goto_from;
     let goto_froms = if let Some(&state) = frame.pushes.last() {
-        BTreeSet::from([state])
+        direct_goto_from = BTreeSet::from([state]);
+        &direct_goto_from
     } else {
         origin_dependent = true;
         states_at_depth(
@@ -2514,9 +2515,9 @@ fn apply_reduce_to_frame(
     };
 
     if goto_froms.len() == 1 {
-        let goto_from = *goto_froms
-            .iter()
-            .next()
+        let goto_from = goto_froms
+            .first()
+            .copied()
             .expect("a singleton set has one element");
         let Some((target, replace)) = table.goto[goto_from as usize].get(&nt).copied() else {
             return Some(ReduceFrameResult::Dead);
@@ -2531,7 +2532,7 @@ fn apply_reduce_to_frame(
     let guard_pop = frame.pop;
     let mut by_target: BTreeMap<(u32, bool), BTreeSet<u32>> = BTreeMap::new();
     let mut missing = 0usize;
-    for goto_from in goto_froms {
+    for &goto_from in goto_froms {
         let Some((next_target, replace)) = table.goto[goto_from as usize].get(&nt).copied() else {
             missing += 1;
             continue;
