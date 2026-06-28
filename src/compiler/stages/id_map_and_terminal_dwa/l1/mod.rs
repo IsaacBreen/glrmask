@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 /// Exact first-byte target profiles computed for L1 state equivalence.
 ///
@@ -23,21 +23,18 @@ use rustc_hash::{FxHashMap, FxHashSet};
 type L1WalkProfile = Arc<[(u32, Arc<[(u32, u32)]>)]>;
 
 fn freeze_l1_walk_profile(runs: &[(u32, u32, u32)]) -> L1WalkProfile {
-    let mut positions = FxHashMap::<u32, usize>::default();
+    let mut positions = None;
     let mut grouped = Vec::<(u32, Vec<(u32, u32)>)>::new();
     for &(signature_id, start, end) in runs {
         if signature_id == 0 {
             continue;
         }
         let direct_signature_id = signature_id - 1;
-        let position = if let Some(&position) = positions.get(&direct_signature_id) {
-            position
-        } else {
-            let position = grouped.len();
-            positions.insert(direct_signature_id, position);
-            grouped.push((direct_signature_id, Vec::new()));
-            position
-        };
+        let position = touch_l1_profile_signature(
+            &mut positions,
+            &mut grouped,
+            direct_signature_id,
+        );
         grouped[position].1.push((start, end));
     }
     Arc::from(
@@ -57,34 +54,88 @@ fn freeze_l1_walk_profile_from_direct(profile: Vec<(u32, Vec<(u32, u32)>)>) -> L
     )
 }
 
+fn index_l1_walk_profile<'a>(
+    profile: &'a L1WalkProfile,
+) -> Vec<(usize, &'a [(u32, u32)], u64, usize)> {
+    profile
+        .iter()
+        .map(|(signature_id, ranges)| {
+            let ranges = ranges.as_ref();
+            let mut hash = 0u64;
+            for &(start, end) in ranges {
+                hash = hash.wrapping_add(range_hash_val(start, end));
+            }
+            let entry_hash = (ranges.len() as u64).wrapping_add(hash);
+            (
+                *signature_id as usize,
+                ranges,
+                entry_hash,
+                ranges.len(),
+            )
+        })
+        .collect()
+}
+
+const L1_LINEAR_SIGNATURE_SCRATCH_LIMIT: usize = 8;
+
+fn touch_l1_profile_signature(
+    positions: &mut Option<FxHashMap<u32, usize>>,
+    signatures: &mut Vec<(u32, Vec<(u32, u32)>)>,
+    signature_id: u32,
+) -> usize {
+    if let Some(positions) = positions.as_mut() {
+        if let Some(&position) = positions.get(&signature_id) {
+            return position;
+        }
+        let position = signatures.len();
+        signatures.push((signature_id, Vec::new()));
+        positions.insert(signature_id, position);
+        return position;
+    }
+
+    if let Some(position) = signatures
+        .iter()
+        .position(|(existing_signature_id, _)| *existing_signature_id == signature_id)
+    {
+        return position;
+    }
+
+    let position = signatures.len();
+    signatures.push((signature_id, Vec::new()));
+    if signatures.len() == L1_LINEAR_SIGNATURE_SCRATCH_LIMIT {
+        let mut promoted = FxHashMap::default();
+        for (position, (existing_signature_id, _)) in signatures.iter().enumerate() {
+            promoted.insert(*existing_signature_id, position);
+        }
+        *positions = Some(promoted);
+    }
+    position
+}
+
 #[derive(Debug)]
 struct L1ExactProfileReuse {
-    target_to_profile_id: FxHashMap<(u8, u32), u32>,
     walk_profiles_by_id: Vec<L1WalkProfile>,
+    // Exact equivalence computes this fixed-width profile key for every input
+    // start state. Terminal assembly consumes the same key, so retaining it
+    // avoids a second first-byte DFA walk.
+    profile_ids_by_start_state: Arc<[u32]>,
+    start_state_profile_rows: Arc<[u32]>,
+    first_byte_slots: [u16; 256],
+    num_profile_slots: usize,
     direct_terminal_signatures: Arc<[Vec<u32>]>,
     direct_state_to_terminal_signature: Arc<[u32]>,
 }
 
 impl L1ExactProfileReuse {
-    fn materialize_walk_cache(&self) -> FxHashMap<(u8, u32), L1WalkProfile> {
-        let profiling = compile_profile_enabled();
-        let total_started_at = profiling.then(Instant::now);
-        let mut cache = FxHashMap::default();
-        for (&target, &profile_id) in &self.target_to_profile_id {
-            if profile_id != 0 {
-                cache.insert(target, Arc::clone(&self.walk_profiles_by_id[profile_id as usize]));
-            }
+    #[inline]
+    fn profile_id_for_start_state(&self, first_byte: u8, start_state: u32) -> u32 {
+        let slot = self.first_byte_slots[first_byte as usize];
+        if slot == u16::MAX {
+            return 0;
         }
-        if let Some(total_started_at) = total_started_at {
-            eprintln!(
-                "[glrmask/profile][l1_exact_profile_materialize] profiles={} targets={} profile_build_ms=0.000 target_clone_ms={:.3} total_ms={:.3}",
-                self.walk_profiles_by_id.len(),
-                self.target_to_profile_id.len(),
-                total_started_at.elapsed().as_secs_f64() * 1000.0,
-                total_started_at.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-        cache
+        let row = self.start_state_profile_rows[start_state as usize];
+        debug_assert_ne!(row, u32::MAX);
+        self.profile_ids_by_start_state[row as usize * self.num_profile_slots + slot as usize]
     }
 }
 
@@ -534,7 +585,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
 
     let total_started_at = Instant::now();
     let id_map_started_at = Instant::now();
-    let (mut id_map, vocab_order, _state_to_rep, id_map_profile, exact_profile_reuse) = build_l1_id_map(
+    let (mut id_map, vocab_order, id_map_profile, exact_profile_reuse) = build_l1_id_map(
         partition_label,
         tokenizer,
         vocab,
@@ -677,7 +728,6 @@ fn build_l1_id_map<'a>(
 ) -> (
     InternalIdMap,
     Arc<L1IdentityVocabOrder>,
-    Vec<u32>,
     L1IdMapProfile,
     Option<L1ExactProfileReuse>,
 ) {
@@ -709,7 +759,6 @@ fn build_l1_id_map<'a>(
         let tokenizer_states = initial_state_map
             .expect("checked by should_use_fast_projected_l1_id_map")
             .clone();
-        let state_to_rep = state_to_representative_vector(&tokenizer_states, num_dfa_states);
         let exact_reps = tokenizer_states.num_internal_ids() as usize;
 
         return (
@@ -718,7 +767,6 @@ fn build_l1_id_map<'a>(
                 vocab_tokens,
             },
             vocab_order,
-            state_to_rep,
             L1IdMapProfile {
                 initial_states_considered: states.len(),
                 max_length_skipped: true,
@@ -755,8 +803,17 @@ fn build_l1_id_map<'a>(
         should_skip_max_length_for_partition(partition_label, states.len(), projected_by_global);
     let state_equiv_started_at = Instant::now();
     let mut view_ms = 0.0;
-    let equiv_mapping = if max_length_skipped {
-        states.clone()
+    // With a skipped bounded prepass, `states` itself is the identity map. If
+    // it is already strictly ordered, that is also the canonical exact-input
+    // order the old clone/sort/dedup path would produce.
+    let direct_identity_mapping = max_length_skipped
+        && states
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]);
+    let equiv_mapping = if direct_identity_mapping {
+        None
+    } else if max_length_skipped {
+        Some(states.clone())
     } else {
         let tokenizer_view =
             TokenizerView::new_filtered_from_flat_trans(flat_trans, tokenizer, active_terminals);
@@ -772,14 +829,14 @@ fn build_l1_id_map<'a>(
             }
         }
         let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
-        super::l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted(
+        Some(super::l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_byte_restricted(
             &tokenizer_view,
             &token_bytes,
             &states,
             Some(&byte_to_class),
             Some(active_terminals),
             Some(&relevant_bytes),
-        )
+        ))
     };
 
     // Token IDs are first-byte bucketed and lexicographic within each bucket.
@@ -793,36 +850,59 @@ fn build_l1_id_map<'a>(
         state_equiv_started_at.elapsed().as_secs_f64() * 1000.0 - view_ms - token_sort_ms
     };
     let exact_started_at = Instant::now();
-    let mut max_length_representatives = equiv_mapping.clone();
-    max_length_representatives.sort_unstable();
-    max_length_representatives.dedup();
+    let mut max_length_representatives = equiv_mapping.clone().unwrap_or_default();
+    if !direct_identity_mapping {
+        max_length_representatives.sort_unstable();
+        max_length_representatives.dedup();
+    }
+    let exact_input = if direct_identity_mapping {
+        states.as_slice()
+    } else {
+        max_length_representatives.as_slice()
+    };
     let (exact_mapping, exact_profile_reuse) = find_l1_exact_state_equivalence_by_token_signatures(
         tokenizer,
         order.as_ref(),
-        &max_length_representatives,
+        exact_input,
         active_terminals,
         flat_trans.as_ref(),
         transitions_by_byte,
     );
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
-    let mut max_rep_to_exact_rep = FxHashMap::<usize, usize>::default();
-    for (&max_rep, &exact_rep) in max_length_representatives.iter().zip(exact_mapping.iter()) {
-        max_rep_to_exact_rep.insert(max_rep, exact_rep);
-    }
 
     // Build representative → internal_id mapping, composing through initial_state_map when present
     let mut rep_to_internal: FxHashMap<usize, u32> = FxHashMap::default();
     let mut state_original_to_internal = vec![u32::MAX; num_dfa_states];
     let mut state_representatives = Vec::new();
-    for (i, &rep) in equiv_mapping.iter().enumerate() {
-        let state_id = states[i];
-        let exact_rep = max_rep_to_exact_rep[&rep];
-        let internal_id = *rep_to_internal.entry(exact_rep).or_insert_with(|| {
-            let id = state_representatives.len() as u32;
-            state_representatives.push(exact_rep as u32);
-            id
-        });
-        state_original_to_internal[state_id] = internal_id;
+    if direct_identity_mapping {
+        for (&state_id, &exact_rep) in states.iter().zip(exact_mapping.iter()) {
+            let internal_id = *rep_to_internal.entry(exact_rep).or_insert_with(|| {
+                let id = state_representatives.len() as u32;
+                state_representatives.push(exact_rep as u32);
+                id
+            });
+            state_original_to_internal[state_id] = internal_id;
+        }
+    } else {
+        let mut max_rep_to_exact_rep = FxHashMap::<usize, usize>::default();
+        for (&max_rep, &exact_rep) in max_length_representatives.iter().zip(exact_mapping.iter()) {
+            max_rep_to_exact_rep.insert(max_rep, exact_rep);
+        }
+        for (i, &rep) in equiv_mapping
+            .as_ref()
+            .expect("non-direct path retains a max-length mapping")
+            .iter()
+            .enumerate()
+        {
+            let state_id = states[i];
+            let exact_rep = max_rep_to_exact_rep[&rep];
+            let internal_id = *rep_to_internal.entry(exact_rep).or_insert_with(|| {
+                let id = state_representatives.len() as u32;
+                state_representatives.push(exact_rep as u32);
+                id
+            });
+            state_original_to_internal[state_id] = internal_id;
+        }
     }
 
     // When initial_state_map is present, compose: all DFA states map through
@@ -847,13 +927,6 @@ fn build_l1_id_map<'a>(
     // signature for every token. Sampling tokens here is not a proof and has
     // caused order-sensitive mask/commit mismatches.
 
-    // Build state_to_rep: original_state → representative_state (for trie traversal)
-    let mut state_to_rep = vec![0u32; num_dfa_states];
-    for (state_id, &internal) in state_original_to_internal.iter().enumerate() {
-        if internal != u32::MAX {
-            state_to_rep[state_id] = state_representatives[internal as usize];
-        }
-    }
     let state_equiv_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let token_map_started_at = Instant::now();
@@ -876,7 +949,6 @@ fn build_l1_id_map<'a>(
             ),
         },
         order,
-        state_to_rep,
         L1IdMapProfile {
             initial_states_considered: states.len(),
             max_length_skipped,
@@ -889,7 +961,7 @@ fn build_l1_id_map<'a>(
             state_equiv_ms,
             max_length_state_equiv_ms: max_length_ms,
             exact_state_equiv_ms,
-            max_length_reps: max_length_representatives.len(),
+            max_length_reps: exact_input.len(),
             exact_reps,
             token_identity_map_ms,
         },
@@ -912,18 +984,6 @@ fn build_l1_identity_vocab_map(vocab: &Vocab) -> (ManyToOneIdMap, Arc<L1Identity
         order,
         token_identity_map_ms,
     )
-}
-
-fn state_to_representative_vector(state_map: &ManyToOneIdMap, num_dfa_states: usize) -> Vec<u32> {
-    let mut state_to_rep = vec![0u32; num_dfa_states];
-    for (state_id, &internal) in state_map.original_to_internal.iter().enumerate() {
-        if internal != u32::MAX {
-            if let Some(&rep) = state_map.representative_original_ids.get(internal as usize) {
-                state_to_rep[state_id] = rep;
-            }
-        }
-    }
-    state_to_rep
 }
 
 struct TokenLengthStats {
@@ -1046,11 +1106,18 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         .enumerate()
         .filter_map(|(byte, token_ids)| (!token_ids.is_empty()).then_some(byte))
         .collect();
+    let mut byte_slots = [u16::MAX; 256];
+    for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
+        byte_slots[byte] = slot as u16;
+    }
+    let mut profile_by_first_byte =
+        vec![0u32; nonempty_first_bytes.len() * num_tokenizer_states];
 
     let unique_targets_started_at = profile_enabled.then(Instant::now);
-    let mut unique_targets = FxHashSet::<(u8, u32)>::default();
+    let mut targets_by_first_byte = vec![Vec::<u32>::new(); 256];
+    let mut unique_targets_len = 0usize;
     for &state in states {
-        for &byte in &nonempty_first_bytes {
+        for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
             let target = l1_transition(
                 flat_trans,
                 transitions_by_byte,
@@ -1059,23 +1126,20 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
                 byte,
             );
             if target != dead {
-                unique_targets.insert((byte as u8, target));
+                let profile_slot = slot * num_tokenizer_states + target as usize;
+                if profile_by_first_byte[profile_slot] != u32::MAX {
+                    profile_by_first_byte[profile_slot] = u32::MAX;
+                    targets_by_first_byte[byte].push(target);
+                    unique_targets_len += 1;
+                }
             }
         }
     }
-
-    let mut unique_targets: Vec<(u8, u32)> = unique_targets.into_iter().collect();
-    unique_targets.sort_unstable();
-    let unique_targets_len = unique_targets.len();
     let unique_targets_ms = unique_targets_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
 
     let target_profiles_started_at = profile_enabled.then(Instant::now);
-    let mut targets_by_first_byte = vec![Vec::<u32>::new(); 256];
-    for (byte, target) in unique_targets {
-        targets_by_first_byte[byte as usize].push(target);
-    }
     let byte_target_groups: Vec<(u8, Vec<u32>)> = targets_by_first_byte
         .into_iter()
         .enumerate()
@@ -1119,7 +1183,6 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         std::env::var_os("GLRMASK_ASSERT_L1_PROFILE_POINTER_PARTITION").is_some();
     let mut profile_content_to_bucket_and_ptr = assert_profile_pointer_partition
         .then(FxHashMap::<Arc<[(u32, u32, u32)]>, (u8, usize)>::default);
-    let mut target_to_profile_id = FxHashMap::<(u8, u32), u32>::default();
     for (target_key, profile) in target_profiles {
         if !profile.is_empty() {
             if let Some(content_to_pointer) = profile_content_to_bucket_and_ptr.as_mut() {
@@ -1148,7 +1211,11 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
                 profile_id
             }
         };
-        target_to_profile_id.insert(target_key, profile_id);
+        let slot = byte_slots[target_key.0 as usize];
+        debug_assert_ne!(slot, u16::MAX);
+        let profile_slot = slot as usize * num_tokenizer_states + target_key.1 as usize;
+        debug_assert_eq!(profile_by_first_byte[profile_slot], u32::MAX);
+        profile_by_first_byte[profile_slot] = profile_id;
     }
     let profile_ids_len = next_profile_id as usize;
     let profile_id_intern_ms = profile_intern_started_at.map_or(0.0, |started| {
@@ -1172,19 +1239,14 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     // use a collision-checked scalar fingerprint for grouping.  Equality is
     // still the full exact profile vector.
     let state_keys_started_at = profile_enabled.then(Instant::now);
-    let mut byte_slots = [u16::MAX; 256];
-    for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
-        byte_slots[byte] = slot as u16;
-    }
-    let mut profile_by_first_byte =
-        vec![0u32; nonempty_first_bytes.len() * num_tokenizer_states];
-    for (&(byte, target), &profile_id) in &target_to_profile_id {
-        let slot = byte_slots[byte as usize];
-        debug_assert_ne!(slot, u16::MAX);
-        profile_by_first_byte[slot as usize * num_tokenizer_states + target as usize] = profile_id;
-    }
     let has_empty_tokens = !token_buckets.empty_token_indices.is_empty();
-    let hash_state_key = |&state: &usize| {
+    let num_profile_slots = nonempty_first_bytes.len();
+    let mut start_state_profile_rows = vec![u32::MAX; num_tokenizer_states];
+    for (row, &state) in states.iter().enumerate() {
+        start_state_profile_rows[state] = row as u32;
+    }
+    let mut profile_ids_by_start_state = vec![0u32; states.len() * num_profile_slots];
+    let hash_state_key = |state: usize, profile_ids: &mut [u32]| {
         let mut hash = 0x9e37_79b9_7f4a_7c15u64;
         if has_empty_tokens {
             hash ^= state_to_terminal_signature[state] as u64;
@@ -1203,6 +1265,7 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
             } else {
                 profile_by_first_byte[slot * num_tokenizer_states + target as usize]
             };
+            profile_ids[slot] = profile_id;
             hash ^= (profile_id as u64)
                 .wrapping_add(0x9e37_79b9_7f4a_7c15)
                 .wrapping_add((slot as u64).wrapping_mul(0x517c_c1b7_2722_0a95));
@@ -1210,10 +1273,30 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         }
         hash
     };
-    let state_key_hashes: Vec<u64> = if rayon::current_num_threads() == 1 {
-        states.iter().map(hash_state_key).collect()
+    let state_key_hashes: Vec<u64> = if num_profile_slots == 0 {
+        states
+            .iter()
+            .map(|&state| {
+                let mut hash = 0x9e37_79b9_7f4a_7c15u64;
+                if has_empty_tokens {
+                    hash ^= state_to_terminal_signature[state] as u64;
+                    hash = hash.rotate_left(17).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                }
+                hash
+            })
+            .collect()
+    } else if rayon::current_num_threads() == 1 {
+        states
+            .iter()
+            .zip(profile_ids_by_start_state.chunks_mut(num_profile_slots))
+            .map(|(&state, profile_ids)| hash_state_key(state, profile_ids))
+            .collect()
     } else {
-        states.par_iter().map(hash_state_key).collect()
+        states
+            .par_iter()
+            .zip(profile_ids_by_start_state.par_chunks_mut(num_profile_slots))
+            .map(|(&state, profile_ids)| hash_state_key(state, profile_ids))
+            .collect()
     };
     let state_keys_ms = state_keys_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
@@ -1226,36 +1309,13 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         {
             return false;
         }
-        for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
-            let left_target = l1_transition(
-                flat_trans,
-                transitions_by_byte,
-                num_tokenizer_states,
-                left as u32,
-                byte,
-            );
-            let right_target = l1_transition(
-                flat_trans,
-                transitions_by_byte,
-                num_tokenizer_states,
-                right as u32,
-                byte,
-            );
-            let left_profile = if left_target == dead {
-                0
-            } else {
-                profile_by_first_byte[slot * num_tokenizer_states + left_target as usize]
-            };
-            let right_profile = if right_target == dead {
-                0
-            } else {
-                profile_by_first_byte[slot * num_tokenizer_states + right_target as usize]
-            };
-            if left_profile != right_profile {
-                return false;
-            }
-        }
-        true
+        let left_row = start_state_profile_rows[left] as usize;
+        let right_row = start_state_profile_rows[right] as usize;
+        debug_assert_ne!(left_row, u32::MAX as usize);
+        debug_assert_ne!(right_row, u32::MAX as usize);
+        profile_ids_by_start_state[left_row * num_profile_slots..(left_row + 1) * num_profile_slots]
+            == profile_ids_by_start_state
+                [right_row * num_profile_slots..(right_row + 1) * num_profile_slots]
     };
     let mut primary_representative_by_hash = FxHashMap::<u64, usize>::default();
     let mut collision_representatives_by_hash = FxHashMap::<u64, Vec<usize>>::default();
@@ -1314,11 +1374,14 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     (
         mapping,
         Some(L1ExactProfileReuse {
-            target_to_profile_id,
             walk_profiles_by_id,
+            profile_ids_by_start_state: profile_ids_by_start_state.into(),
+            start_state_profile_rows: start_state_profile_rows.into(),
+            first_byte_slots: byte_slots,
+            num_profile_slots,
             // Exact-equivalence signature ids reserve zero for empty. The
             // direct DWA builder uses `u32::MAX` for empty and zero-based ids
-            // for non-empty signatures, matching `materialize_walk_cache`.
+            // for non-empty signatures, matching the direct builder.
             direct_terminal_signatures: terminal_signatures[1..].to_vec().into(),
             direct_state_to_terminal_signature: state_to_terminal_signature
                 .into_iter()
@@ -1564,15 +1627,26 @@ impl L1PackedSuffixTrie {
         let mut path = vec![0u32];
 
         for (bucket_pos, &internal_token_id) in token_ids.iter().enumerate() {
+            let token_id = internal_token_id as u32;
             let suffix = &sorted_entries[internal_token_id].1[1..];
             let lcp = suffix_lcps[bucket_pos]
                 .min(suffix.len())
                 .min(path.len().saturating_sub(1));
+            if bucket_pos == 0 {
+                nodes[0].subtree_start = token_id;
+            } else {
+                let previous_token_id = token_ids[bucket_pos - 1] as u32;
+                for &node in &path[lcp + 1..] {
+                    nodes[node as usize].subtree_end = previous_token_id;
+                }
+            }
             path.truncate(lcp + 1);
             for &byte in &suffix[lcp..] {
                 let parent = *path.last().expect("suffix trie path") as usize;
                 let child = nodes.len() as u32;
-                nodes.push(L1PackedSuffixTrieNode::child(byte));
+                let mut child_node = L1PackedSuffixTrieNode::child(byte);
+                child_node.subtree_start = token_id;
+                nodes.push(child_node);
                 if nodes[parent].first_child == L1_NONE {
                     nodes[parent].first_child = child;
                 } else {
@@ -1583,35 +1657,18 @@ impl L1PackedSuffixTrie {
                 path.push(child);
             }
 
-            let token_id = internal_token_id as u32;
             let terminal = *path.last().expect("suffix trie terminal path") as usize;
             debug_assert_eq!(nodes[terminal].terminal_token, L1_NONE);
             nodes[terminal].terminal_token = token_id;
         }
         debug_assert_eq!(nodes.len(), node_capacity);
-
-        // Token IDs follow the byte-sorted vocabulary order. Every suffix-trie
-        // subtree therefore spans one contiguous leaf-token interval. Computing
-        // that interval once bottom-up avoids rewriting it along each token path.
-        for node_index in (0..nodes.len()).rev() {
-            let mut subtree_start = nodes[node_index].terminal_token;
-            let mut subtree_end = nodes[node_index].terminal_token;
-            let mut child = nodes[node_index].first_child;
-            while child != L1_NONE {
-                let child_node = nodes[child as usize];
-                if subtree_start == L1_NONE || child_node.subtree_start < subtree_start {
-                    subtree_start = child_node.subtree_start;
-                }
-                if subtree_end == L1_NONE || child_node.subtree_end > subtree_end {
-                    subtree_end = child_node.subtree_end;
-                }
-                child = child_node.next_sibling;
-            }
-            debug_assert_ne!(subtree_start, L1_NONE);
-            debug_assert_ne!(subtree_end, L1_NONE);
-            nodes[node_index].subtree_start = subtree_start;
-            nodes[node_index].subtree_end = subtree_end;
+        let last_token_id = *token_ids.last().expect("non-empty suffix bucket") as u32;
+        for &node in &path {
+            nodes[node as usize].subtree_end = last_token_id;
         }
+        debug_assert!(nodes.iter().all(|node| {
+            node.subtree_start != L1_NONE && node.subtree_end != L1_NONE
+        }));
 
         let mut edges = Vec::with_capacity(nodes.len().saturating_sub(1));
         for node_index in 0..nodes.len() {
@@ -2378,21 +2435,24 @@ fn build_l1_sorted_token_buckets(sorted_entries: &[(u32, Arc<[u8]>)]) -> L1Sorte
 fn collect_active_terminal_signature(
     tokenizer: &Tokenizer,
     state: u32,
-    active_terminals: &[bool],
+    active_terminal_words: &[u64],
 ) -> Vec<u32> {
     let mut signature = Vec::<u32>::new();
-    for tid in tokenizer.matched_terminals_iter(state) {
-        if active_terminals.get(tid as usize).copied().unwrap_or(false) {
-            signature.push(tid);
+    let matched = tokenizer.matched_terminal_bitset(state).words();
+    let future = tokenizer.tokens_accessible_from_state(state).words();
+    for (word_index, ((&matched, &future), &active)) in matched
+        .iter()
+        .zip(future)
+        .zip(active_terminal_words)
+        .enumerate()
+    {
+        let mut terminals = (matched | future) & active;
+        while terminals != 0 {
+            let offset = terminals.trailing_zeros() as usize;
+            signature.push((word_index * 64 + offset) as u32);
+            terminals &= terminals - 1;
         }
     }
-    for tid in tokenizer.tokens_accessible_from_state(state).iter() {
-        if active_terminals.get(tid).copied().unwrap_or(false) {
-            signature.push(tid as u32);
-        }
-    }
-    signature.sort_unstable();
-    signature.dedup();
     signature
 }
 
@@ -2405,14 +2465,23 @@ fn build_l1_state_to_terminal_signatures(
     tokenizer: &Tokenizer,
     active_terminals: &[bool],
 ) -> (Vec<u32>, Vec<Vec<u32>>) {
+    let mut active_terminal_words = vec![0u64; active_terminals.len().div_ceil(64)];
+    for (terminal, &active) in active_terminals.iter().enumerate() {
+        if active {
+            active_terminal_words[terminal / 64] |= 1u64 << (terminal % 64);
+        }
+    }
     let mut signature_to_id = FxHashMap::<Vec<u32>, u32>::default();
     signature_to_id.insert(Vec::new(), 0);
     let mut terminal_signatures = vec![Vec::new()];
     let mut state_to_terminal_signature = vec![0u32; tokenizer.num_states() as usize];
 
     for state in 0..tokenizer.num_states() as usize {
-        let signature =
-            collect_active_terminal_signature(tokenizer, state as u32, active_terminals);
+        let signature = collect_active_terminal_signature(
+            tokenizer,
+            state as u32,
+            &active_terminal_words,
+        );
         let next_signature_id = terminal_signatures.len() as u32;
         let sig_id = *signature_to_id.entry(signature.clone()).or_insert_with(|| {
             terminal_signatures.push(signature);
@@ -2624,8 +2693,10 @@ fn build_l1_terminal_dwa(
     // has self-loops on all suffix bytes, all tokens end at the target
     // state and the walk can be skipped entirely.
     let walk_cache: FxHashMap<(u8, u32), L1WalkProfile> =
-        if let Some(exact_profile_reuse) = exact_profile_reuse {
-            exact_profile_reuse.materialize_walk_cache()
+        if exact_profile_reuse.is_some() {
+            // Exact equivalence already retained the dense lookup table below.
+            // Avoid materializing a duplicate sparse `(byte, target)` cache.
+            FxHashMap::default()
         } else {
     // Phase 1: Identify unique concrete (first_byte, target_state) pairs.
     // State equivalence is valid for whole-token walks from a start state,
@@ -2927,37 +2998,46 @@ fn build_l1_terminal_dwa(
     // entry_hash is precomputed from the ranges so Phase 2 can combine hashes
     // in O(entries) instead of O(ranges).
     let indexed_cache_started_at = compile_profile_enabled().then(Instant::now);
+    let indexed_exact_profiles = exact_profile_reuse.map(|reuse| {
+        reuse
+            .walk_profiles_by_id
+            .iter()
+            .map(index_l1_walk_profile)
+            .collect::<Vec<_>>()
+    });
     let indexed_walk_cache: FxHashMap<(u8, u32), Vec<(usize, &[(u32, u32)], u64, usize)>> =
         walk_cache
             .iter()
-            .map(|(&key, results)| {
-                let indexed: Vec<(usize, &[(u32, u32)], u64, usize)> = results
-                    .iter()
-                    .map(|(sig_id, ranges)| {
-                        let ranges = ranges.as_ref();
-                        let mut h: u64 = 0;
-                        for &(s, e) in ranges {
-                            h = h.wrapping_add(range_hash_val(s, e));
-                        }
-                        let entry_hash = (ranges.len() as u64).wrapping_add(h);
-                        (
-                            *sig_id as usize,
-                            ranges,
-                            entry_hash,
-                            ranges.len(),
-                        )
-                    })
-                    .collect();
-                (key, indexed)
-            })
+            .map(|(&key, profile)| (key, index_l1_walk_profile(profile)))
             .collect();
     if let Some(indexed_cache_started_at) = indexed_cache_started_at {
         eprintln!(
-            "[glrmask/profile][l1_indexed_walk_cache] targets={} total_ms={:.3}",
+            "[glrmask/profile][l1_indexed_walk_cache] targets={} exact_profiles={} total_ms={:.3}",
             indexed_walk_cache.len(),
+            indexed_exact_profiles.as_ref().map_or(0, Vec::len),
             indexed_cache_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
+    let indexed_profile_for = |first_byte: u8, start_state: u32| {
+        if let Some(reuse) = exact_profile_reuse {
+            let profile_id = reuse.profile_id_for_start_state(first_byte, start_state);
+            if profile_id == 0 {
+                None
+            } else {
+                Some(
+                    &indexed_exact_profiles
+                        .as_ref()
+                        .expect("exact profile index missing")[profile_id as usize],
+                )
+            }
+        } else {
+            let target_state = flat_trans[start_state as usize * 256 + first_byte as usize];
+            if target_state == dead {
+                return None;
+            }
+            indexed_walk_cache.get(&(first_byte, target_state))
+        }
+    };
 
     // Phase 2: For each start_state, collect walk_cache references per
 
@@ -3010,11 +3090,7 @@ fn build_l1_terminal_dwa(
                 if token_ids.is_empty() {
                     continue;
                 }
-                let target_state = flat_trans[start_state as usize * 256 + byte];
-                if target_state == dead {
-                    continue;
-                }
-                if let Some(results) = indexed_walk_cache.get(&(byte as u8, target_state)) {
+                if let Some(results) = indexed_profile_for(byte as u8, start_state) {
                     for &(sig_idx, ranges, entry_hash, entry_mc) in results {
                         let position = if let Some(&position) = touched_positions.get(&sig_idx) {
                             position
@@ -3247,6 +3323,8 @@ fn build_l1_terminal_dwa(
             // that Arc instead of copying, sorting, and rebuilding it.
             let mut group_single_arc: Vec<Option<Arc<RangeSetBlaze<u32>>>> =
                 (0..num_groups).map(|_| None).collect();
+            let mut group_second_arc: Vec<Option<Arc<RangeSetBlaze<u32>>>> =
+                (0..num_groups).map(|_| None).collect();
             let mut touched_groups = Vec::<usize>::new();
 
             for (tsid, contributions) in tsid_group_contributions.iter().enumerate() {
@@ -3258,6 +3336,7 @@ fn build_l1_terminal_dwa(
                     group_counts[group_idx] = 0;
                     group_ranges[group_idx].clear();
                     group_single_arc[group_idx] = None;
+                    group_second_arc[group_idx] = None;
                 }
                 touched_groups.clear();
 
@@ -3269,9 +3348,12 @@ fn build_l1_terminal_dwa(
                             group_single_arc[group_idx] = Some(Arc::clone(arc));
                             continue;
                         }
-                        if group_counts[group_idx] == 1
-                            && tsid_total_rep_counts[tsid] != 2
-                        {
+                        if group_counts[group_idx] == 1 {
+                            group_second_arc[group_idx] = Some(Arc::clone(arc));
+                            group_counts[group_idx] = 2;
+                            continue;
+                        }
+                        if group_counts[group_idx] == 2 {
                             group_ranges[group_idx].extend(
                                 group_single_arc[group_idx]
                                     .as_ref()
@@ -3279,14 +3361,20 @@ fn build_l1_terminal_dwa(
                                     .ranges()
                                     .map(|range| (*range.start(), *range.end())),
                             );
-                        }
-                        group_single_arc[group_idx] = None;
-                        group_counts[group_idx] += 1;
-                        if tsid_total_rep_counts[tsid] != 2 {
                             group_ranges[group_idx].extend(
-                                arc.ranges().map(|range| (*range.start(), *range.end())),
+                                group_second_arc[group_idx]
+                                    .as_ref()
+                                    .expect("second group contribution")
+                                    .ranges()
+                                    .map(|range| (*range.start(), *range.end())),
                             );
+                            group_single_arc[group_idx] = None;
+                            group_second_arc[group_idx] = None;
                         }
+                        group_counts[group_idx] += 1;
+                        group_ranges[group_idx].extend(
+                            arc.ranges().map(|range| (*range.start(), *range.end())),
+                        );
                     }
                 }
 
@@ -3300,11 +3388,29 @@ fn build_l1_terminal_dwa(
                     } else if group_counts[group_idx] == tsid_total_rep_counts[tsid] {
                         tsid_full_arc_cache[tsid]
                             .get_or_init(|| {
-                                shared_rangeset_from_unsorted_pairs(
-                                    tsid_full_ranges[tsid].as_slice(),
-                                )
+                                if tsid_total_rep_counts[tsid] == 2 && contributions.len() == 2 {
+                                    Some(shared_rangeset_from_two_sorted_sets(
+                                        contributions[0].1.as_ref(),
+                                        contributions[1].1.as_ref(),
+                                    ))
+                                } else {
+                                    shared_rangeset_from_unsorted_pairs(
+                                        tsid_full_ranges[tsid].as_slice(),
+                                    )
+                                }
                             })
                             .clone()
+                    } else if group_counts[group_idx] == 2 {
+                        Some(shared_rangeset_from_two_sorted_sets(
+                            group_single_arc[group_idx]
+                                .as_ref()
+                                .expect("first group contribution")
+                                .as_ref(),
+                            group_second_arc[group_idx]
+                                .as_ref()
+                                .expect("second group contribution")
+                                .as_ref(),
+                        ))
                     } else {
                         shared_rangeset_from_unsorted_pairs(group_ranges[group_idx].as_slice())
                     };
@@ -3351,9 +3457,18 @@ fn build_l1_terminal_dwa(
                             let shared = if group_counts[group_idx] == tsid_total_rep_counts[tsid] {
                                 tsid_full_arc_cache[tsid]
                                     .get_or_init(|| {
-                                        shared_rangeset_from_unsorted_pairs(
-                                            tsid_full_ranges[tsid].as_slice(),
-                                        )
+                                        if tsid_total_rep_counts[tsid] == 2
+                                            && contributions.len() == 2
+                                        {
+                                            Some(shared_rangeset_from_two_sorted_sets(
+                                                contributions[0].1.as_ref(),
+                                                contributions[1].1.as_ref(),
+                                            ))
+                                        } else {
+                                            shared_rangeset_from_unsorted_pairs(
+                                                tsid_full_ranges[tsid].as_slice(),
+                                            )
+                                        }
                                     })
                                     .clone()
                             } else {
@@ -3602,6 +3717,50 @@ fn shared_rangeset_from_unsorted_pairs(ranges: &[(u32, u32)]) -> Option<Arc<Rang
     Some(shared_rangeset(
         merged.iter().map(|&(start, end)| start..=end).collect(),
     ))
+}
+
+/// Exact union of two individually sorted token range sets. This avoids the
+/// generic copy-and-sort route when a TSID has exactly two terminal-signature
+/// contributions, which is common in the L1 single-token route.
+fn shared_rangeset_from_two_sorted_sets(
+    left: &RangeSetBlaze<u32>,
+    right: &RangeSetBlaze<u32>,
+) -> Arc<RangeSetBlaze<u32>> {
+    let mut left_ranges = left.ranges().map(|range| (*range.start(), *range.end()));
+    let mut right_ranges = right.ranges().map(|range| (*range.start(), *range.end()));
+    let mut next_left = left_ranges.next();
+    let mut next_right = right_ranges.next();
+    let mut merged = Vec::<(u32, u32)>::with_capacity(left.ranges_len() + right.ranges_len());
+
+    let mut push_range = |start: u32, end: u32| {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1.saturating_add(1) {
+                last.1 = last.1.max(end);
+                return;
+            }
+        }
+        merged.push((start, end));
+    };
+
+    while next_left.is_some() || next_right.is_some() {
+        let take_left = match (next_left, next_right) {
+            (Some((left_start, _)), Some((right_start, _))) => left_start <= right_start,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => unreachable!(),
+        };
+        if take_left {
+            let (start, end) = next_left.take().expect("left range present");
+            push_range(start, end);
+            next_left = left_ranges.next();
+        } else {
+            let (start, end) = next_right.take().expect("right range present");
+            push_range(start, end);
+            next_right = right_ranges.next();
+        }
+    }
+
+    shared_rangeset(merged.into_iter().map(|(start, end)| start..=end).collect())
 }
 
 fn build_end_rep_groups(
@@ -3898,6 +4057,25 @@ mod packed_suffix_product_tests {
     }
 
     #[test]
+    fn two_sorted_token_sets_merge_exactly() {
+        let make_set = |ranges: &[(u32, u32)]| {
+            ranges
+                .iter()
+                .map(|&(start, end)| start..=end)
+                .collect::<RangeSetBlaze<u32>>()
+        };
+        let left = make_set(&[(1, 3), (8, 10), (20, 20)]);
+        let right = make_set(&[(4, 6), (9, 14), (18, 19), (21, 22)]);
+
+        let merged = shared_rangeset_from_two_sorted_sets(&left, &right);
+        let actual: Vec<(u32, u32)> = merged
+            .ranges()
+            .map(|range| (*range.start(), *range.end()))
+            .collect();
+        assert_eq!(actual, vec![(1, 6), (8, 14), (18, 22)]);
+    }
+
+    #[test]
     fn frozen_walk_profiles_preserve_signature_ranges() {
         let empty: Arc<[(u32, u32, u32)]> = Arc::from([]);
         let profile_one: Arc<[(u32, u32, u32)]> = Arc::from([
@@ -3906,17 +4084,28 @@ mod packed_suffix_product_tests {
             (1, 7, 8),
             (0, 9, 10),
         ]);
+        let mut first_byte_slots = [u16::MAX; 256];
+        first_byte_slots[b'a' as usize] = 0;
+        let mut start_state_profile_rows = vec![u32::MAX; 18];
+        start_state_profile_rows[17] = 0;
+        start_state_profile_rows[3] = 1;
         let reuse = L1ExactProfileReuse {
-            target_to_profile_id: [((b'a', 17), 1u32)].into_iter().collect(),
             walk_profiles_by_id: vec![
                 freeze_l1_walk_profile(&empty),
                 freeze_l1_walk_profile(&profile_one),
             ],
+            profile_ids_by_start_state: Arc::from([1u32, 0]),
+            start_state_profile_rows: start_state_profile_rows.into(),
+            first_byte_slots,
+            num_profile_slots: 1,
             direct_terminal_signatures: Arc::from([]),
             direct_state_to_terminal_signature: Arc::from([]),
         };
-        let cache = reuse.materialize_walk_cache();
-        let profile = cache.get(&(b'a', 17)).expect("profile present");
+        assert_eq!(reuse.profile_id_for_start_state(b'a', 17), 1);
+        assert_eq!(reuse.profile_id_for_start_state(b'a', 3), 0);
+        assert_eq!(reuse.profile_id_for_start_state(b'b', 17), 0);
+        let profile =
+            &reuse.walk_profiles_by_id[reuse.profile_id_for_start_state(b'a', 17) as usize];
         let grouped: Vec<(u32, Vec<(u32, u32)>)> = profile
             .iter()
             .map(|(signature, ranges)| (*signature, ranges.as_ref().to_vec()))

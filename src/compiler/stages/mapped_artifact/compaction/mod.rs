@@ -780,47 +780,82 @@ struct TokenProfileWordEvent {
     pos: usize,
     word: usize,
     bit: u64,
+    fingerprint: u64,
     add: bool,
+}
+
+#[inline]
+fn token_profile_context_fingerprint(word: usize, bit: u64) -> u64 {
+    let mut value = ((word as u64) << 6) | bit.trailing_zeros() as u64;
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn intern_active_token_profile(
+    active_profile: &[u64],
+    profile_fingerprint: u64,
+    profile_groups: &mut HashMap<u64, Vec<(Vec<u64>, u32)>>,
+    next_group: &mut u32,
+) -> u32 {
+    let candidates = profile_groups.entry(profile_fingerprint).or_default();
+    if let Some((_, group)) = candidates
+        .iter()
+        .find(|(existing_profile, _)| existing_profile.as_slice() == active_profile)
+    {
+        return *group;
+    }
+
+    let group = *next_group;
+    *next_group += 1;
+    candidates.push((active_profile.to_vec(), group));
+    group
 }
 
 fn sort_token_profile_word_events(
     events: &mut Vec<TokenProfileWordEvent>,
-    num_tokens: usize,
 ) {
-    // Counting by token position avoids comparison sorting for dense boundary
-    // sets. Event order within a position is intentionally irrelevant: the
-    // sweep processes all removals, then all additions, and bit operations
-    // commute within either phase.
-    let use_counting_sort = events.len() > num_tokens.saturating_mul(2);
-    if !use_counting_sort {
-        events.sort_unstable_by_key(|event| (event.pos, event.add, event.word, event.bit));
+    if events.len() < 2 {
         return;
     }
 
-    let mut counts = vec![0usize; num_tokens];
-    for event in events.iter() {
-        counts[event.pos] += 1;
+    // The sweep only needs events grouped by token position; event order inside
+    // a position is immaterial because removals and additions are processed in
+    // separate passes. For large boundary sets, radix sorting the integer
+    // positions is strictly linear in the input. Pick it using its actual pass
+    // count versus the comparison-sort work estimate, not a density constant.
+    let max_pos = events.iter().map(|event| event.pos).max().unwrap();
+    let bit_width = usize::BITS as usize - max_pos.leading_zeros() as usize;
+    let radix_passes = bit_width.div_ceil(8).max(1);
+    let comparison_work = events.len().saturating_mul(events.len().ilog2() as usize);
+    let radix_work = radix_passes.saturating_mul(events.len().saturating_add(256));
+    if radix_work >= comparison_work {
+        events.sort_unstable_by_key(|event| event.pos);
+        return;
     }
-    let mut offsets = vec![0usize; num_tokens + 1];
-    for position in 0..num_tokens {
-        offsets[position + 1] = offsets[position] + counts[position];
+
+    let mut input = std::mem::take(events);
+    let mut output = vec![input[0]; input.len()];
+    for shift in (0..radix_passes * 8).step_by(8) {
+        let mut counts = [0usize; 256];
+        for event in &input {
+            counts[(event.pos >> shift) & 0xff] += 1;
+        }
+        let mut offsets = [0usize; 256];
+        let mut cursor = 0usize;
+        for bucket in 0..256 {
+            offsets[bucket] = cursor;
+            cursor += counts[bucket];
+        }
+        for event in &input {
+            let bucket = (event.pos >> shift) & 0xff;
+            output[offsets[bucket]] = *event;
+            offsets[bucket] += 1;
+        }
+        std::mem::swap(&mut input, &mut output);
     }
-    let mut next = offsets[..num_tokens].to_vec();
-    let mut ordered = vec![
-        TokenProfileWordEvent {
-            pos: 0,
-            word: 0,
-            bit: 0,
-            add: false,
-        };
-        events.len()
-    ];
-    for &event in events.iter() {
-        let slot = next[event.pos];
-        ordered[slot] = event;
-        next[event.pos] += 1;
-    }
-    *events = ordered;
+    *events = input;
 }
 
 fn build_exact_token_merge_permutation_multiword_sweep(
@@ -832,6 +867,7 @@ fn build_exact_token_merge_permutation_multiword_sweep(
     for (context, token_set) in token_sets.iter().enumerate() {
         let word = context / 64;
         let bit = 1u64 << (context % 64);
+        let fingerprint = token_profile_context_fingerprint(word, bit);
         for token_range in token_set.ranges() {
             let start = (*token_range.start() as usize).min(num_tokens);
             let end = (*token_range.end() as usize).min(num_tokens.saturating_sub(1));
@@ -842,6 +878,7 @@ fn build_exact_token_merge_permutation_multiword_sweep(
                 pos: start,
                 word,
                 bit,
+                fingerprint,
                 add: true,
             });
             let remove_pos = end + 1;
@@ -850,6 +887,7 @@ fn build_exact_token_merge_permutation_multiword_sweep(
                     pos: remove_pos,
                     word,
                     bit,
+                    fingerprint,
                     add: false,
                 });
             }
@@ -862,10 +900,11 @@ fn build_exact_token_merge_permutation_multiword_sweep(
 
     // At a boundary, remove old membership before adding new membership. This
     // also makes the behavior match the one-word sweep implementation.
-    sort_token_profile_word_events(&mut events, num_tokens);
+    sort_token_profile_word_events(&mut events);
 
     let mut active_profile = vec![0u64; profile_words];
-    let mut profile_to_group = HashMap::<Vec<u64>, u32>::new();
+    let mut active_profile_fingerprint = 0u64;
+    let mut profile_groups = HashMap::<u64, Vec<(Vec<u64>, u32)>>::new();
     let mut perm = vec![0u32; num_tokens];
     let mut next_group = 0u32;
     let mut cursor = 0usize;
@@ -874,13 +913,12 @@ fn build_exact_token_merge_permutation_multiword_sweep(
     while idx < events.len() {
         let pos = events[idx].pos;
         if cursor < pos {
-            let group = *profile_to_group
-                .entry(active_profile.clone())
-                .or_insert_with(|| {
-                    let group = next_group;
-                    next_group += 1;
-                    group
-                });
+            let group = intern_active_token_profile(
+                &active_profile,
+                active_profile_fingerprint,
+                &mut profile_groups,
+                &mut next_group,
+            );
             perm[cursor..pos].fill(group);
             cursor = pos;
         }
@@ -892,23 +930,24 @@ fn build_exact_token_merge_permutation_multiword_sweep(
         for event in &events[bucket_start..idx] {
             if !event.add {
                 active_profile[event.word] &= !event.bit;
+                active_profile_fingerprint ^= event.fingerprint;
             }
         }
         for event in &events[bucket_start..idx] {
             if event.add {
                 active_profile[event.word] |= event.bit;
+                active_profile_fingerprint ^= event.fingerprint;
             }
         }
     }
 
     if cursor < num_tokens {
-        let group = *profile_to_group
-            .entry(active_profile)
-            .or_insert_with(|| {
-                let group = next_group;
-                next_group += 1;
-                group
-            });
+        let group = intern_active_token_profile(
+            &active_profile,
+            active_profile_fingerprint,
+            &mut profile_groups,
+            &mut next_group,
+        );
         perm[cursor..num_tokens].fill(group);
     }
 
