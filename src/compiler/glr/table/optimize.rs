@@ -2573,18 +2573,13 @@ fn unit_reduce_destination(
     let preds = &predecessors[state as usize];
     assert!(!preds.is_empty());
 
-    let relevant_preds: Vec<u32> = preds
-        .iter()
-        .copied()
-        .filter(|&pred| table.goto[pred as usize].contains_key(&lhs))
-        .collect();
-    if relevant_preds.is_empty() {
-        return None;
-    }
-
+    let mut found_relevant_pred = false;
     let mut reduce_dst: Option<u32> = None;
-    for pred in relevant_preds {
-        let (dst, is_replace) = table.goto[pred as usize][&lhs];
+    for &pred in preds {
+        let Some(&(dst, is_replace)) = table.goto[pred as usize].get(&lhs) else {
+            continue;
+        };
+        found_relevant_pred = true;
         if is_replace {
             return None;
         }
@@ -2598,7 +2593,7 @@ fn unit_reduce_destination(
         }
     }
 
-    reduce_dst
+    found_relevant_pred.then_some(reduce_dst).flatten()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -4097,7 +4092,7 @@ fn try_inline_unit_reductions_for_cell(
         _ => return Ok(None),
     }
 
-    let mut visiting = BTreeSet::new();
+    let mut visiting = FxHashSet::default();
     try_inline_unit_reductions_for_cell_inner(
         table,
         predecessors,
@@ -4121,7 +4116,7 @@ fn try_inline_unit_reductions_for_cell_inner(
     constituent_sets: &mut Vec<BTreeSet<u32>>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
-    visiting: &mut BTreeSet<(u32, TerminalID)>,
+    visiting: &mut FxHashSet<(u32, TerminalID)>,
     budget: &mut UnitInlineBudget,
 ) -> Result<Option<CellUpdate>, ()> {
     if !budget.record_stack_effect_visit() {
