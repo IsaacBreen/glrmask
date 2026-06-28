@@ -5,7 +5,7 @@
 //! a shared implicit rejecting sink. Processing in reverse-topological order
 //! guarantees that children are classified before their parents.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use super::dfa::DFA;
 
@@ -65,29 +65,26 @@ fn state_signature(
 fn build_minimized_acyclic_dfa(
     dfa: &DFA,
     class_of_state: &[usize],
-    class_representatives: &HashMap<usize, usize>,
+    class_representatives: &[Option<usize>],
     dead_class: usize,
 ) -> DFA {
     if class_of_state[dfa.start_state as usize] == dead_class {
         return DFA::new();
     }
 
-    let mut class_ids: Vec<usize> = class_representatives.keys().copied().collect();
-    class_ids.sort_unstable();
-    let class_to_state: HashMap<usize, u32> = class_ids
-        .iter()
-        .enumerate()
-        .map(|(new_state, &class_id)| (class_id, new_state as u32))
-        .collect();
+    // Class IDs are allocated consecutively in reverse topological order, so
+    // the old map-and-sort path always mapped class n to output state n - 1.
+    let num_classes = class_representatives.len().saturating_sub(1);
 
     let mut minimized = DFA::new();
-    minimized.states = vec![super::dfa::DFAState::default(); class_ids.len()];
-    minimized.start_state = class_to_state[&class_of_state[dfa.start_state as usize]];
+    minimized.states = vec![super::dfa::DFAState::default(); num_classes];
+    minimized.start_state = (class_of_state[dfa.start_state as usize] - 1) as u32;
 
-    for &class_id in &class_ids {
-        let repr_state_id = class_representatives[&class_id];
+    for class_id in 1..class_representatives.len() {
+        let repr_state_id = class_representatives[class_id]
+            .expect("every non-dead acyclic DFA class has a representative");
         let repr = &dfa.states[repr_state_id];
-        let out_state = class_to_state[&class_id] as usize;
+        let out_state = class_id - 1;
         minimized.states[out_state].is_accepting = repr.is_accepting;
         minimized.states[out_state].transitions = repr
             .transitions
@@ -100,7 +97,7 @@ fn build_minimized_acyclic_dfa(
                 if target_class == dead_class {
                     None
                 } else {
-                    Some((label, class_to_state[&target_class]))
+                    Some((label, (target_class - 1) as u32))
                 }
             })
             .collect();
@@ -210,10 +207,10 @@ pub fn minimize_acyclic(dfa: &DFA) -> DFA {
         transitions: Vec::new(),
     };
 
-    let mut signature_to_class = HashMap::<StateSignature, usize>::new();
+    let mut signature_to_class = FxHashMap::<StateSignature, usize>::default();
     signature_to_class.insert(dead_signature.clone(), DEAD_CLASS);
     let mut class_of_state = vec![DEAD_CLASS; dfa.states.len()];
-    let mut class_representatives = HashMap::<usize, usize>::new();
+    let mut class_representatives = vec![None];
     let mut next_class_id = 1usize;
 
     for &state_id in &topo {
@@ -230,7 +227,7 @@ pub fn minimize_acyclic(dfa: &DFA) -> DFA {
             let new_id = next_class_id;
             next_class_id += 1;
             signature_to_class.insert(signature, new_id);
-            class_representatives.insert(new_id, state_id);
+            class_representatives.push(Some(state_id));
             new_id
         };
         class_of_state[state_id] = class_id;
@@ -242,4 +239,46 @@ pub fn minimize_acyclic(dfa: &DFA) -> DFA {
         &class_representatives,
         DEAD_CLASS,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::minimize_acyclic;
+    use crate::automata::unweighted_u32::dfa::DFA;
+
+    #[test]
+    fn merges_equal_accepting_leaves_in_class_id_order() {
+        let mut dfa = DFA::new();
+        let left = dfa.add_state();
+        let right = dfa.add_state();
+        dfa.add_transition(0, 1, left);
+        dfa.add_transition(0, 2, right);
+        dfa.set_accepting(left, true);
+        dfa.set_accepting(right, true);
+
+        let minimized = minimize_acyclic(&dfa);
+
+        assert_eq!(minimized.start_state, 1);
+        assert_eq!(minimized.states.len(), 2);
+        assert!(minimized.states[0].is_accepting);
+        assert_eq!(minimized.states[1].transitions.get(&1), Some(&0));
+        assert_eq!(minimized.states[1].transitions.get(&2), Some(&0));
+    }
+
+    #[test]
+    fn removes_transitions_to_implicit_dead_class() {
+        let mut dfa = DFA::new();
+        let accepting = dfa.add_state();
+        let dead = dfa.add_state();
+        dfa.add_transition(0, 1, accepting);
+        dfa.add_transition(0, 2, dead);
+        dfa.set_accepting(accepting, true);
+
+        let minimized = minimize_acyclic(&dfa);
+
+        assert_eq!(minimized.start_state, 1);
+        assert_eq!(minimized.states.len(), 2);
+        assert_eq!(minimized.states[1].transitions.get(&1), Some(&0));
+        assert_eq!(minimized.states[1].transitions.get(&2), None);
+    }
 }
