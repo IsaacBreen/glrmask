@@ -9,6 +9,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use rustc_hash::FxHashSet;
+
 use super::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier};
 
 fn contains_regex_features(expr: &GrammarExpr) -> bool {
@@ -49,8 +51,53 @@ fn colon_literal() -> GrammarExpr {
 }
 
 pub fn factor_named_grammar(grammar: NamedGrammar) -> NamedGrammar {
+    let profile = std::env::var_os("GLRMASK_PROFILE_NAMED_FACTORING").is_some();
+    let input_rule_count = grammar.rules.len();
+    let started_at = profile.then(std::time::Instant::now);
+    if factoring_is_provably_noop(&grammar) {
+        if let Some(started_at) = started_at {
+            eprintln!(
+                "[glrmask/profile][named_factoring] input_rules={} output_rules={} fast_path=true elapsed_ms={:.3}",
+                input_rule_count,
+                input_rule_count,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return grammar;
+    }
+
+    factor_named_grammar_slow(grammar, input_rule_count, started_at)
+}
+
+/// Return `true` only when the generic factorer is guaranteed to leave the
+/// grammar untouched. Duplicate names matter because the slow path merges them;
+/// otherwise it can only change nonterminal rules whose underscore-prefixed
+/// names are eligible for recursive choice factoring.
+fn factoring_is_provably_noop(grammar: &NamedGrammar) -> bool {
+    let mut seen_names = FxHashSet::<&str>::default();
+    grammar.rules.iter().all(|rule| {
+        seen_names.insert(rule.name.as_str())
+            && (rule.is_terminal
+                || !rule.name.starts_with('_')
+                || contains_regex_features(&rule.expr))
+    })
+}
+
+fn factor_named_grammar_slow(
+    grammar: NamedGrammar,
+    input_rule_count: usize,
+    started_at: Option<std::time::Instant>,
+) -> NamedGrammar {
     let terminal_names = grammar.terminal_names_set();
     let rules = ChoiceFactorer::new(grammar.rules, &terminal_names).factor_all();
+    if let Some(started_at) = started_at {
+        eprintln!(
+            "[glrmask/profile][named_factoring] input_rules={} output_rules={} fast_path=false elapsed_ms={:.3}",
+            input_rule_count,
+            rules.len(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     NamedGrammar {
         rules,
         start: grammar.start,
@@ -444,5 +491,67 @@ impl ChoiceFactorer {
         }
 
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{factor_named_grammar, factor_named_grammar_slow, factoring_is_provably_noop};
+    use crate::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule};
+
+    fn rule(name: &str, expr: GrammarExpr, is_terminal: bool) -> NamedRule {
+        NamedRule {
+            name: name.to_string(),
+            expr,
+            is_terminal,
+            is_internal: false,
+        }
+    }
+
+    #[test]
+    fn fast_path_matches_slow_path_when_no_rule_is_eligible() {
+        let grammar = NamedGrammar {
+            rules: vec![
+                rule("start", GrammarExpr::Ref("_regex".to_string()), false),
+                rule("_regex", GrammarExpr::RawRegex("[a-z]".to_string()), false),
+                rule("token", GrammarExpr::Literal(b"x".to_vec()), true),
+            ],
+            start: "start".to_string(),
+            ignore: None,
+        };
+
+        assert!(factoring_is_provably_noop(&grammar));
+        let expected = factor_named_grammar_slow(grammar.clone(), grammar.rules.len(), None);
+        let actual = factor_named_grammar(grammar);
+        assert_eq!(actual.rules, expected.rules);
+        assert_eq!(actual.start, expected.start);
+        assert_eq!(actual.ignore, expected.ignore);
+    }
+
+    #[test]
+    fn fast_path_rejects_factorable_and_duplicate_rules() {
+        let factorable = NamedGrammar {
+            rules: vec![rule(
+                "_private",
+                GrammarExpr::Choice(vec![
+                    GrammarExpr::Literal(b"a".to_vec()),
+                    GrammarExpr::Literal(b"b".to_vec()),
+                ]),
+                false,
+            )],
+            start: "_private".to_string(),
+            ignore: None,
+        };
+        assert!(!factoring_is_provably_noop(&factorable));
+
+        let duplicate_names = NamedGrammar {
+            rules: vec![
+                rule("start", GrammarExpr::Literal(b"a".to_vec()), false),
+                rule("start", GrammarExpr::Literal(b"b".to_vec()), false),
+            ],
+            start: "start".to_string(),
+            ignore: None,
+        };
+        assert!(!factoring_is_provably_noop(&duplicate_names));
     }
 }
