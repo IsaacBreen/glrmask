@@ -5,6 +5,7 @@
 
 use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
@@ -1123,20 +1124,59 @@ mod tests {
     }
 }
 
+/// Residual scanner used by one strict-interchangeability transport mode.
+///
+/// Its alphabet is the byte set of the current vocabulary partition. State IDs
+/// are minimized residual classes, not concrete lexer state IDs. The raw lexer
+/// state is carried separately by `TransportContext` for token-end semantics.
+#[derive(Clone, Debug)]
+pub(crate) struct TerminalNwaTransportMachine {
+    byte_slot: Box<[i16; 256]>,
+    transitions: Vec<Vec<u32>>,
+    matched_terminals: Vec<Vec<TerminalID>>,
+}
+
+impl TerminalNwaTransportMachine {
+    pub(crate) fn new(
+        byte_slot: Box<[i16; 256]>,
+        transitions: Vec<Vec<u32>>,
+        matched_terminals: Vec<Vec<TerminalID>>,
+    ) -> Self {
+        assert_eq!(transitions.len(), matched_terminals.len());
+        Self {
+            byte_slot,
+            transitions,
+            matched_terminals,
+        }
+    }
+
+    pub(crate) fn step(&self, state: u32, byte: u8) -> Option<u32> {
+        let slot = *self.byte_slot.get(byte as usize)?;
+        (slot >= 0)
+            .then(|| self.transitions.get(state as usize)?.get(slot as usize).copied())
+            .flatten()
+    }
+
+    pub(crate) fn matched_terminals(&self, state: u32) -> &[TerminalID] {
+        self.matched_terminals
+            .get(state as usize)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+}
+
 /// One strict-interchangeability scanner mode for the slow reference builder.
-/// `scanner_state_for_original[s]` is the representative-terminal simulator
-/// state used when the actual current lexer state is `s`; `terminal_map` maps
-/// representative labels emitted by that simulator back to concrete terminals.
+/// `logical_state_for_original[s]` selects the residual scanner state which
+/// emits this mode's completed terminal label(s) for concrete lexer state `s`.
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalNwaTransportMode {
-    pub(crate) scanner_state_for_original: Vec<TokenizerState>,
-    pub(crate) terminal_map: Vec<TerminalID>,
+    pub(crate) logical_state_for_original: Vec<u32>,
+    pub(crate) machine: Arc<TerminalNwaTransportMachine>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct TransportContext {
-    scanner_state: TokenizerState,
-    mode: usize,
+    raw_scanner_state: TokenizerState,
 }
 
 #[derive(Clone, Default)]
@@ -1177,38 +1217,43 @@ struct TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
 }
 
 impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
-    fn mapped_label(&self, mode: usize, terminal: TerminalID) -> TerminalID {
-        self.modes[mode]
-            .terminal_map
-            .get(terminal as usize)
-            .copied()
-            .unwrap_or(terminal)
-    }
-
-    fn reset_context(&self, mode: usize) -> TransportContext {
-        let root = self.base.tokenizer.initial_state_id() as usize;
+    fn reset_context(&self) -> TransportContext {
         TransportContext {
-            scanner_state: self.modes[mode].scanner_state_for_original[root],
-            mode,
+            raw_scanner_state: self.base.tokenizer.initial_state_id(),
         }
     }
 
-    fn add_future_leaf_token_from_sources(
+    /// Terminal prefixes at the token boundary are a property of the actual
+    /// lexer state. Do not transform these metadata queries: interchangeability
+    /// is only over this partition's byte alphabet, whereas a later token may
+    /// start with bytes from any partition.
+    fn add_raw_future_leaf_token_from_sources(
         &mut self,
         sources: &[NwaState],
-        context: TransportContext,
+        raw_state: TokenizerState,
         internal_token_id: u32,
     ) {
         let future = self
             .base
-            .possible_future_terminals_for_state(context.scanner_state);
+            .possible_future_terminals_for_state(raw_state);
         self.base.profile.future_terminal_additions += (sources.len() * future.len()) as u64;
         for terminal in future {
-            self.base.add_leaf_token_from_sources(
-                sources,
-                self.mapped_label(context.mode, terminal),
-                internal_token_id,
-            );
+            self.base
+                .add_leaf_token_from_sources(sources, terminal, internal_token_id);
+        }
+    }
+
+    fn record_mode_matches(
+        &self,
+        raw_state: TokenizerState,
+        width: usize,
+        matches: &mut FxHashMap<TerminalID, (usize, TokenizerState)>,
+    ) {
+        for mode in self.modes {
+            let logical_state = mode.logical_state_for_original[raw_state as usize];
+            for &terminal in mode.machine.matched_terminals(logical_state) {
+                matches.insert(terminal, (width, raw_state));
+            }
         }
     }
 
@@ -1251,21 +1296,17 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
 
             for (context, source_nodes) in contexts_at_offset {
                 match_map.clear();
-                let mut scan_state = context.scanner_state;
+                let mut raw_state = context.raw_scanner_state;
                 let mut alive = true;
                 for (index, &byte) in segment_bytes[offset..].iter().enumerate() {
-                    let Some(next) = self.base.fast_step(scan_state, byte) else {
+                    let Some(next_raw) = self.base.fast_step(raw_state, byte) else {
                         alive = false;
                         break;
                     };
-                    scan_state = next;
-                    for terminal in self.base.tokenizer.matched_terminals_iter(scan_state) {
-                        if self.base.terminal_is_active(terminal) {
-                            match_map.insert(terminal, (index + 1, scan_state));
-                        }
-                    }
+                    raw_state = next_raw;
+                    self.record_mode_matches(raw_state, index + 1, &mut match_map);
                 }
-                let end_state = alive.then_some(scan_state);
+                let end_state = alive.then_some(raw_state);
 
                 matches.clear();
                 matches.extend(match_map.iter().map(|(&id, &(width, end_state))| TokenizerMatch {
@@ -1276,21 +1317,17 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
 
                 if let Some(end_state) = end_state {
                     if child_node.has_token() {
-                        self.add_future_leaf_token_from_sources(
+                        self.add_raw_future_leaf_token_from_sources(
                             &source_nodes,
-                            TransportContext { scanner_state: end_state, ..context },
+                            end_state,
                             leaf_token_id,
                         );
                     }
-                    next_level.merge(
-                        TransportContext { scanner_state: end_state, ..context },
-                        &source_nodes,
-                    );
+                    next_level.merge(TransportContext { raw_scanner_state: end_state }, &source_nodes);
                 }
 
                 for matched in &matches {
                     let next_offset = offset + matched.width;
-                    let mapped_label = self.mapped_label(context.mode, matched.id);
                     if next_offset == segment_bytes.len()
                         && child_node.has_token()
                         && !end_state.is_some_and(|state| {
@@ -1302,7 +1339,7 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                         self.base.profile.match_transition_additions += source_nodes.len() as u64;
                         self.base.add_leaf_token_from_sources(
                             &source_nodes,
-                            mapped_label,
+                            matched.id,
                             leaf_token_id,
                         );
                     }
@@ -1321,21 +1358,19 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                     }
 
                     let continuation_contexts = pending.entry(next_offset).or_default();
-                    for next_mode in 0..self.modes.len() {
-                        let next_context = self.reset_context(next_mode);
-                        let destination = ensure_transport_continuation_state(
-                            continuation_contexts,
-                            next_context,
-                            self.base.nwa,
-                        );
-                        self.base.profile.match_transition_additions += source_nodes.len() as u64;
-                        self.base.add_match_from_sources(
-                            &source_nodes,
-                            mapped_label,
-                            destination,
-                            &weight,
-                        );
-                    }
+                    let next_context = self.reset_context();
+                    let destination = ensure_transport_continuation_state(
+                        continuation_contexts,
+                        next_context,
+                        self.base.nwa,
+                    );
+                    self.base.profile.match_transition_additions += source_nodes.len() as u64;
+                    self.base.add_match_from_sources(
+                        &source_nodes,
+                        matched.id,
+                        destination,
+                        &weight,
+                    );
                 }
             }
         }
@@ -1381,22 +1416,19 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
         .iter_representative_ids()
         .enumerate()
     {
-        for (mode, transport) in modes.iter().enumerate() {
-            let root = nwa.add_state();
-            let weight = all_token_weight(internal_tsid as u32, id_map.max_internal_token_id());
-            nwa.add_epsilon(start_state, root, weight);
-            if root as usize >= initial_source_states.len() {
-                initial_source_states.resize(root as usize + 1, false);
-            }
-            initial_source_states[root as usize] = true;
-            roots.merge(
-                TransportContext {
-                    scanner_state: transport.scanner_state_for_original[representative_state as usize],
-                    mode,
-                },
-                &[root],
-            );
+        let root = nwa.add_state();
+        let weight = all_token_weight(internal_tsid as u32, id_map.max_internal_token_id());
+        nwa.add_epsilon(start_state, root, weight);
+        if root as usize >= initial_source_states.len() {
+            initial_source_states.resize(root as usize + 1, false);
         }
+        initial_source_states[root as usize] = true;
+        roots.merge(
+            TransportContext {
+                raw_scanner_state: representative_state,
+            },
+            &[root],
+        );
     }
 
     let base = TerminalNwaBuilder::new(
