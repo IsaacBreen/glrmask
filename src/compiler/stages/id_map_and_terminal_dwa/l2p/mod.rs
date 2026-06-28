@@ -683,6 +683,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 disallowed_follows,
                 grammar.num_terminals as usize,
                 shared_disallowed_follow_dfa_cache,
+                ignore_terminal,
             );
             let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_disallowed = nwa.states().len();

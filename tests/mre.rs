@@ -98,6 +98,45 @@ nt start ::= 'if' '(' 'true' ')' ;
     state.commit_token(2).unwrap();
 }
 
+#[test]
+fn glrm_initial_ignore_token_uses_a_noop_template() {
+    let vocab = Vocab::new(
+        vec![
+            (0, b" ".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b" a".to_vec()),
+        ],
+        None,
+    );
+    let grammar = r#"
+start start;
+ignore WS;
+t WS ::= ' '+ ;
+nt start ::= 'a' ;
+"#;
+
+    let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+
+    let mut separate_token_state = constraint.start();
+    assert!(
+        token_allowed(&separate_token_state.mask(), 0),
+        "an initial ignore token must be admitted by the parser DWA"
+    );
+    separate_token_state.commit_token(0).unwrap();
+    assert!(
+        token_allowed(&separate_token_state.mask(), 1),
+        "committing the initial ignore token must leave the parser ready for 'a'"
+    );
+    separate_token_state.commit_token(1).unwrap();
+
+    let mut combined_token_state = constraint.start();
+    assert!(
+        token_allowed(&combined_token_state.mask(), 2),
+        "a token beginning with ignore then 'a' must traverse the labelled initial ignore edge"
+    );
+    combined_token_state.commit_token(2).unwrap();
+}
+
 fn byte_vocab_with_separator_token() -> (Vocab, u32) {
     let mut entries: Vec<(u32, Vec<u8>)> = (0u32..=255).map(|byte| (byte, vec![byte as u8])).collect();
     let separator_token_id = 256;

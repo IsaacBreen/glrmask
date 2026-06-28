@@ -623,12 +623,13 @@ pub(crate) fn apply_disallowed_follow_constraints(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     num_terminals: usize,
     shared_cache: Option<&SharedDisallowedFollowDfaCache>,
+    ignore_terminal: Option<TerminalID>,
 ) {
     if let Some(cache) = shared_cache {
         let Some(normalized) = cache.get_or_build(num_terminals, disallowed_follows) else {
             return;
         };
-        *nwa = subtract_disallowed_follows_direct(nwa, normalized.as_ref());
+        *nwa = subtract_disallowed_follows_direct(nwa, normalized.as_ref(), ignore_terminal);
         return;
     }
 
@@ -637,10 +638,14 @@ pub(crate) fn apply_disallowed_follow_constraints(
         return;
     }
 
-    *nwa = subtract_disallowed_follows_direct(nwa, &normalized);
+    *nwa = subtract_disallowed_follows_direct(nwa, &normalized, ignore_terminal);
 }
 
-fn subtract_disallowed_follows_direct(nwa: &NWA, disallowed_follows: &[BitSet]) -> NWA {
+fn subtract_disallowed_follows_direct(
+    nwa: &NWA,
+    disallowed_follows: &[BitSet],
+    ignore_terminal: Option<TerminalID>,
+) -> NWA {
     type ProdState = (u32, Option<u32>);
 
     let mut result = NWA::new(0, 0);
@@ -683,7 +688,13 @@ fn subtract_disallowed_follows_direct(nwa: &NWA, disallowed_follows: &[BitSet]) 
         }
 
         for (&label, targets) in &nwa_state.transitions {
-            let next_previous_terminal = if label < 0 {
+            // Initial ignore edges are deliberately retained as labels so
+            // parser-DWA composition can consume their identity template. They
+            // remain transparent to the within-token follow-pair automaton:
+            // they must neither be constrained by a predecessor nor become one.
+            let next_previous_terminal = if label < 0
+                || ignore_terminal.is_some_and(|ignore| label as TerminalID == ignore)
+            {
                 previous_terminal
             } else if (label as usize) < disallowed_follows.len() {
                 let terminal = label as usize;
@@ -706,4 +717,47 @@ fn subtract_disallowed_follows_direct(nwa: &NWA, disallowed_follows: &[BitSet]) 
     }
 
     result
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automata::weighted::determinize::determinize;
+
+    #[test]
+    fn labelled_ignore_does_not_become_a_follow_pair_predecessor() {
+        let ignore = 0;
+        let real_terminal = 1;
+        let mut nwa = NWA::new(1, 0);
+        let start = nwa.add_state();
+        let after_ignore = nwa.add_state();
+        let accept = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+        nwa.add_transition(start, ignore as i32, after_ignore, Weight::all());
+        nwa.add_transition(
+            after_ignore,
+            real_terminal as i32,
+            accept,
+            Weight::all(),
+        );
+        nwa.set_final_weight(accept, Weight::all());
+
+        let mut ignore_disallowed = BitSet::new(2);
+        ignore_disallowed.set(real_terminal as usize);
+        let disallowed = BTreeMap::from([(ignore, ignore_disallowed)]);
+        apply_disallowed_follow_constraints(
+            &mut nwa,
+            &disallowed,
+            2,
+            None,
+            Some(ignore),
+        );
+
+        let dwa = determinize(&nwa).unwrap();
+        assert!(
+            !dwa.eval_word(&[ignore as i32, real_terminal as i32]).is_empty(),
+            "an initial labelled ignore must be transparent to follow pruning"
+        );
+    }
 }

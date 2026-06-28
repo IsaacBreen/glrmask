@@ -512,6 +512,22 @@ impl Templates {
         Self::from_characterizations_profiled(characterizations).0
     }
 
+    /// Install a terminal template which accepts immediately and has no stack
+    /// effect.
+    ///
+    /// The grammar-level ignore terminal is not present in parser action rows,
+    /// so its ordinary characterization is empty and would compile to a
+    /// rejecting template. Initial ignore edges deliberately remain labelled in
+    /// the terminal DWA; this identity template carries them through parser-DWA
+    /// construction while leaving the parser stack unchanged.
+    pub(crate) fn install_identity_template(&mut self, terminal: TerminalID) {
+        let mut dfa = UnweightedDfa::new();
+        dfa.set_accepting(dfa.start_state, true);
+        let skeleton = dfa_to_nwa_skeleton(&dfa);
+        self.by_terminal.insert(terminal, dfa);
+        self.by_terminal_nwa.insert(terminal, skeleton);
+    }
+
     pub(crate) fn from_characterizations_profiled(
         characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
     ) -> (Self, TemplateCompileProfile) {
@@ -1002,4 +1018,29 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
     }
 
     nfa
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_template_accepts_without_stack_effect() {
+        let terminal = 7;
+        let mut templates = Templates::default();
+        templates.install_identity_template(terminal);
+
+        let dfa = templates.by_terminal.get(&terminal).unwrap();
+        assert_eq!(dfa.states.len(), 1);
+        assert_eq!(dfa.start_state, 0);
+        assert!(dfa.states[0].is_accepting);
+        assert!(dfa.states[0].transitions.is_empty());
+
+        let nwa = templates.by_terminal_nwa.get(&terminal).unwrap();
+        assert_eq!(nwa.start_states(), &[0]);
+        assert!(nwa.states()[0].final_weight.is_some());
+        assert!(nwa.states()[0].transitions.is_empty());
+        assert!(nwa.states()[0].epsilons.is_empty());
+    }
 }

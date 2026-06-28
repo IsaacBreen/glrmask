@@ -602,8 +602,11 @@ fn compile_prepared_with_profile_and_table_construction(
                 let templates_started_at = Instant::now();
                 let (characterizations, characterization_profile) =
                     characterize_terminals_profiled(&table, &analyzed_grammar);
-                let (templates, template_profile) =
+                let (mut templates, template_profile) =
                     Templates::from_characterizations_profiled(&characterizations);
+                if let Some(ignore_terminal) = prepared_grammar.ignore_terminal {
+                    templates.install_identity_template(ignore_terminal);
+                }
                 let mut template_dfas_by_terminal =
                     vec![None; analyzed_grammar.num_terminals as usize];
                 let commit_template_dfas_enabled = commit_template_dfas_enabled();

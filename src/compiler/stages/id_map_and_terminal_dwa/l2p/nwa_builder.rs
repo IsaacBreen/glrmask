@@ -94,6 +94,12 @@ pub(crate) struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     num_tsids: u32,
     leaf_state: u32,
     ignore_terminal: Option<TerminalID>,
+    /// States reached from the NWA start using only epsilon transitions.
+    ///
+    /// Ignore is transparent only after a terminal boundary. An ignore match
+    /// from one of these sources is the token's first terminal and must remain
+    /// labelled so the parser DWA can account for it with the ignore template.
+    initial_source_states: Vec<bool>,
     use_terminal_coloring: bool,
     terminal_path_lengths: Option<Vec<TerminalPathLength>>,
     active_terminals: Option<Vec<bool>>,
@@ -124,6 +130,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         num_tsids: u32,
         leaf_state: u32,
         ignore_terminal: Option<TerminalID>,
+        initial_source_states: Vec<bool>,
         use_terminal_coloring: bool,
         terminal_path_lengths: Option<Vec<TerminalPathLength>>,
         active_terminals: Option<Vec<bool>>,
@@ -141,6 +148,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             num_tsids,
             leaf_state,
             ignore_terminal,
+            initial_source_states,
             use_terminal_coloring,
             terminal_path_lengths,
             active_terminals,
@@ -492,15 +500,20 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         target: u32,
         weight: &Weight,
     ) {
-        if self.ignore_terminal == Some(label) {
-            for &source in sources {
+        let lower_ignore_to_epsilon = self.ignore_terminal == Some(label);
+        for &source in sources {
+            if lower_ignore_to_epsilon
+                && !self
+                    .initial_source_states
+                    .get(source as usize)
+                    .copied()
+                    .unwrap_or(false)
+            {
                 self.epsilon_buffer
                     .entry((source, target))
                     .and_modify(|existing| *existing = existing.union(weight))
                     .or_insert_with(|| weight.clone());
-            }
-        } else {
-            for &source in sources {
+            } else {
                 self.transition_buffer
                     .entry((source, label as i32, target))
                     .and_modify(|existing| *existing = existing.union(weight))
@@ -980,6 +993,12 @@ pub(crate) fn build_nwa_via_trie_walk<'a>(
     active_terminals: Option<&[bool]>,
 ) -> TerminalDwaBuildProfile {
     let num_tokenizer_states = tokenizer.num_states() as usize;
+    let mut initial_source_states = vec![false; nwa.states().len()];
+    for (_, source_nodes) in roots.iter() {
+        for &source in source_nodes {
+            initial_source_states[source as usize] = true;
+        }
+    }
     let mut builder = TerminalNwaBuilder::new(
         tokenizer,
         terminal_coloring.clone(),
@@ -988,6 +1007,7 @@ pub(crate) fn build_nwa_via_trie_walk<'a>(
         num_tsids,
         leaf_state,
         ignore_terminal,
+        initial_source_states,
         use_terminal_coloring,
         None,
         active_terminals.map(|a| a.to_vec()),
@@ -1006,4 +1026,83 @@ pub(crate) fn build_nwa_via_trie_walk<'a>(
     drop(builder);
 
     profile
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::automata::lexer::ast::Expr;
+    use crate::automata::lexer::compile::build_regex;
+
+    fn one_terminal_tokenizer() -> Tokenizer {
+        let expressions = vec![Expr::U8Seq(b" ".to_vec())];
+        build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        )
+    }
+
+    #[test]
+    fn ignore_matches_are_labelled_initially_and_epsilon_later() {
+        let tokenizer = one_terminal_tokenizer();
+        let mut possible_matches = PossibleMatchesComputer::new(&tokenizer);
+        let mut nwa = NWA::new(1, 0);
+        let initial_source = nwa.add_state();
+        let later_source = nwa.add_state();
+        let target = nwa.add_state();
+
+        let mut builder = TerminalNwaBuilder::new(
+            &tokenizer,
+            TerminalColoring::identity(1),
+            &mut possible_matches,
+            &mut nwa,
+            1,
+            target,
+            Some(0),
+            vec![true, false, false],
+            false,
+            None,
+            None,
+            tokenizer.num_states() as usize,
+        );
+        builder.add_match_from_sources(
+            &[initial_source, later_source],
+            0,
+            target,
+            &Weight::all(),
+        );
+        builder.flush_transition_buffer();
+        drop(builder);
+
+        assert!(
+            nwa.states()[initial_source as usize]
+                .transitions
+                .get(&0)
+                .is_some_and(|edges| edges.iter().any(|(dst, _)| *dst == target)),
+            "an initial ignore match must remain a labelled terminal edge"
+        );
+        assert!(
+            nwa.states()[later_source as usize]
+                .epsilons
+                .iter()
+                .any(|(dst, _)| *dst == target),
+            "a non-initial ignore match must remain transparent"
+        );
+        assert!(
+            !nwa.states()[initial_source as usize]
+                .epsilons
+                .iter()
+                .any(|(dst, _)| *dst == target),
+            "the initial ignore match must not also be lowered to epsilon"
+        );
+        assert!(
+            !nwa.states()[later_source as usize]
+                .transitions
+                .contains_key(&0),
+            "the non-initial ignore match must not become a terminal edge"
+        );
+    }
 }
