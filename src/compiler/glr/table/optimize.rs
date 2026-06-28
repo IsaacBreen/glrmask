@@ -595,14 +595,18 @@ impl GLRTable {
             let scan_started_at = profile_enabled.then(std::time::Instant::now);
 
             for state in 0..nstates {
-                let tids: Vec<TerminalID> = self.action[state].keys().collect();
-                for tid in tids {
+                // Inlining may synthesize states through `&mut self`, so take a
+                // compact snapshot of the row before the analysis. This still
+                // avoids the old keys-only allocation followed by a second hash
+                // lookup for every cell.
+                let actions: Vec<(TerminalID, Action)> = self.action[state]
+                    .iter()
+                    .map(|(tid, action)| (tid, action.clone()))
+                    .collect();
+                for (tid, action) in actions {
                     if !budget.record_cell() {
                         break;
                     }
-                    let Some(action) = self.action[state].get(&tid).cloned() else {
-                        continue;
-                    };
 
                     let Ok(update) = try_inline_unit_reductions_for_cell(
                         self,
