@@ -1709,3 +1709,60 @@ fn direct_glrm_minimized_lowered_schema_collapses_when_tail_token_differs() {
     assert_eq!(stacks.len(), 1, "{stacks:?}");
     assert_eq!(stack_count(&state), 1, "{stacks:?}");
 }
+
+#[test]
+fn terminal_subsumption_family_preserves_masks() {
+    let _lock = TERMINAL_SUBSUMPTION_ENV_LOCK.lock().unwrap();
+    let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+    let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+    let _disable_interchangeability =
+        EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
+    let _disable_subsumption = EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_SUBSUMPTION");
+
+    let entries = ["a", "b", "ba", "aa", "aba", "baa", "baba", "x"];
+    let grammar = r#"
+        start: choice choice choice choice
+        choice: A | B | C
+        A: "a"
+        B: "a"
+        C: "ba"
+    "#;
+    let baseline = Constraint::from_lark(grammar, &vocab(&entries)).unwrap();
+    drop(_disable_interchangeability);
+    drop(_disable_subsumption);
+    let _enable_interchangeability =
+        EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _enable_subsumption =
+        EnvVarGuard::set("GLRMASK_L2P_TERMINAL_SUBSUMPTION", "1");
+    let expanded = Constraint::from_lark(grammar, &vocab(&entries)).unwrap();
+
+    fn observe(constraint: &Constraint, sequence: &[u32]) -> Option<(bool, Vec<usize>)> {
+        let mut state = constraint.start();
+        for &token in sequence {
+            state.commit_token(token).ok()?;
+        }
+        Some((state.is_finished(), allowed(&state.mask())))
+    }
+    fn compare(
+        baseline: &Constraint,
+        expanded: &Constraint,
+        vocab_len: u32,
+        remaining: usize,
+        sequence: &mut Vec<u32>,
+    ) {
+        assert_eq!(
+            observe(baseline, sequence),
+            observe(expanded, sequence),
+            "family subsumption changed token prefix {sequence:?}",
+        );
+        if remaining == 0 {
+            return;
+        }
+        for token in 0..vocab_len {
+            sequence.push(token);
+            compare(baseline, expanded, vocab_len, remaining - 1, sequence);
+            sequence.pop();
+        }
+    }
+    compare(&baseline, &expanded, entries.len() as u32, 4, &mut Vec::new());
+}

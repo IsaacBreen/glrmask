@@ -475,6 +475,84 @@ impl SparseTerminalResiduals {
         true
     }
 
+    /// Exact family-level directed transport for one representative and a set
+    /// of members. Unlike pairwise subsumption, this relabels every member to
+    /// the representative in the same residual-row comparison. A source row
+    /// may contain several group members only when they carry the same residual
+    /// block, so quotienting their labels does not erase a real distinction.
+    fn family_subsumption_transport(
+        &self,
+        members: &[TerminalID],
+        representative: TerminalID,
+    ) -> Option<SubsumptionTransport> {
+        if members.len() < 2 || representative as usize >= self.terminal_count {
+            return None;
+        }
+        let mut is_member = vec![false; self.terminal_count];
+        for &member in members {
+            let member = member as usize;
+            if member >= self.terminal_count || member == representative as usize || is_member[member] {
+                return None;
+            }
+            is_member[member] = true;
+        }
+
+        let mut rhs_states_by_hash = FxHashMap::<u64, Vec<u32>>::default();
+        for (state, row) in self.rows_by_state.iter().enumerate() {
+            let rhs = family_subsumption_rhs_row(row, &is_member);
+            rhs_states_by_hash
+                .entry(sparse_full_row_hash(&rhs))
+                .or_default()
+                .push(state as u32);
+        }
+
+        let mut representative_state_to_members = vec![Vec::<u32>::new(); self.state_count];
+        for (source_state, source_row) in self.rows_by_state.iter().enumerate() {
+            let source = family_subsumption_source_row(source_row, &is_member, representative)?;
+            let Some(candidates) = rhs_states_by_hash.get(&sparse_full_row_hash(&source)) else {
+                return None;
+            };
+            let mut found = false;
+            for &target_state in candidates {
+                let target = family_subsumption_rhs_row(
+                    &self.rows_by_state[target_state as usize],
+                    &is_member,
+                );
+                if source == target {
+                    representative_state_to_members[target_state as usize].push(source_state as u32);
+                    found = true;
+                }
+            }
+            if !found {
+                return None;
+            }
+        }
+        for sources in &mut representative_state_to_members {
+            sources.sort_unstable();
+            sources.dedup();
+        }
+        Some(SubsumptionTransport { representative_state_to_members })
+    }
+
+    /// Active terminals with identical residual columns are safe family seeds:
+    /// every concrete lexer state gives them the same terminal-restricted
+    /// residual. The family transport below still decides whether they can all
+    /// be hidden under a particular representative.
+    fn identical_active_terminal_groups(&self, active_ids: &[TerminalID]) -> Vec<Vec<TerminalID>> {
+        let mut groups = BTreeMap::<Vec<(u32, u32)>, Vec<TerminalID>>::new();
+        for &terminal in active_ids {
+            let column = &self.state_blocks_by_terminal[terminal as usize];
+            if column.is_empty() {
+                continue;
+            }
+            groups.entry(column.clone()).or_default().push(terminal);
+        }
+        groups
+            .into_values()
+            .filter(|members| members.len() >= 2)
+            .collect()
+    }
+
     fn subsumption_transports(
         &self,
         candidates: &[(TerminalID, TerminalID)],
@@ -487,6 +565,59 @@ impl SparseTerminalResiduals {
             })
             .collect()
     }
+}
+
+/// Relabel a source row by dropping the representative and mapping every
+/// selected member to it. Multiple members may collapse only if their residual
+/// blocks agree; otherwise the quotient would conflate distinct lexer futures.
+fn family_subsumption_source_row(
+    row: &[(TerminalID, u32)],
+    is_member: &[bool],
+    representative: TerminalID,
+) -> Option<Vec<(TerminalID, u32)>> {
+    let mut member_block = None;
+    for &(terminal, block) in row {
+        if is_member[terminal as usize] {
+            match member_block {
+                Some(existing) if existing != block => return None,
+                Some(_) => {}
+                None => member_block = Some(block),
+            }
+        }
+    }
+
+    let mut result = Vec::with_capacity(row.len());
+    let mut inserted_member = false;
+    for &(terminal, block) in row {
+        if terminal == representative || is_member[terminal as usize] {
+            continue;
+        }
+        if !inserted_member && terminal > representative {
+            if let Some(member_block) = member_block {
+                result.push((representative, member_block));
+            }
+            inserted_member = true;
+        }
+        result.push((terminal, block));
+    }
+    if !inserted_member {
+        if let Some(member_block) = member_block {
+            result.push((representative, member_block));
+        }
+    }
+    Some(result)
+}
+
+/// The representative-side row retains the representative itself and removes
+/// every member hidden by the candidate quotient.
+fn family_subsumption_rhs_row(
+    row: &[(TerminalID, u32)],
+    is_member: &[bool],
+) -> Vec<(TerminalID, u32)> {
+    row.iter()
+        .copied()
+        .filter(|&(terminal, _)| !is_member[terminal as usize])
+        .collect()
 }
 
 fn sparse_row_item_hash(terminal: TerminalID, block: u32) -> u64 {
@@ -806,6 +937,7 @@ fn minimize_sparse_terminal_residuals(
     let pairs = outputs.len();
     let dead = pairs;
     let states = pairs + 1;
+    let started_at = Instant::now();
 
     // For every byte, materialize reverse edges as a target-indexed contiguous
     // range. There is one outgoing edge per state/byte, including dead's loop.
@@ -844,6 +976,7 @@ fn minimize_sparse_terminal_residuals(
         }
     }
     drop(cursors);
+    let reverse_build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
 
     let mut nonaccepting = Vec::with_capacity(states);
     let mut accepting = Vec::new();
@@ -883,6 +1016,10 @@ fn minimize_sparse_terminal_residuals(
     let mut touched_epoch = vec![0usize; blocks.len()];
     let mut epoch = 0usize;
     let mut processed_splitters = 0usize;
+    // A BFCL-sized minimization processes more than a million splitters. Keep
+    // the per-splitter touched-block workspace so that common nonempty passes
+    // do not allocate and free a fresh vector every iteration.
+    let mut touched = Vec::<usize>::new();
     while let Some((splitter, slot)) = worklist.pop_front() {
         if splitter >= blocks.len() || blocks[splitter].is_empty() {
             continue;
@@ -895,7 +1032,7 @@ fn minimize_sparse_terminal_residuals(
             touched_epoch.fill(0);
             epoch = 1;
         }
-        let mut touched = Vec::new();
+        touched.clear();
         let offset_base = slot * (states + 1);
         for &target in &blocks[splitter] {
             let start = offsets[offset_base + target as usize];
@@ -914,28 +1051,29 @@ fn minimize_sparse_terminal_residuals(
             }
         }
 
-        for block in touched {
-            let old = std::mem::take(&mut blocks[block]);
-            let mut inside = Vec::new();
-            let mut outside = Vec::new();
-            for state in old {
-                if marked[state as usize] == epoch {
-                    inside.push(state);
+        for &block in &touched {
+            let mut keep = std::mem::take(&mut blocks[block]);
+            // Retain one side in the old allocation and move only marked states
+            // into a new vector. A minimization creates many small splits; this
+            // avoids constructing two replacement vectors for each one.
+            let mut split = Vec::new();
+            let mut index = 0usize;
+            while index < keep.len() {
+                if marked[keep[index] as usize] == epoch {
+                    split.push(keep.swap_remove(index));
                 } else {
-                    outside.push(state);
+                    index += 1;
                 }
             }
-            if inside.is_empty() || outside.is_empty() {
-                blocks[block] = if inside.is_empty() { outside } else { inside };
+            if split.is_empty() || keep.is_empty() {
+                blocks[block] = if split.is_empty() { keep } else { split };
                 continue;
             }
             // Keep the larger half under its old ID. This minimizes block_of
             // writes; the smaller half receives the fresh ID.
-            let (keep, split) = if inside.len() >= outside.len() {
-                (inside, outside)
-            } else {
-                (outside, inside)
-            };
+            if split.len() > keep.len() {
+                std::mem::swap(&mut keep, &mut split);
+            }
             blocks[block] = keep;
             let split_id = blocks.len();
             for &state in &split {
@@ -957,6 +1095,20 @@ fn minimize_sparse_terminal_residuals(
                 }
             }
         }
+    }
+
+    let refinement_ms = started_at.elapsed().as_secs_f64() * 1000.0 - reverse_build_ms;
+    if std::env::var_os("GLRMASK_PROFILE_L2P_SUBSUMPTION_MINIMIZER").is_some() {
+        eprintln!(
+            "[glrmask/profile][l2p_subsumption_minimizer] pairs={} states={} width={} reverse_build_ms={:.3} refinement_ms={:.3} splitters={} final_blocks={}",
+            pairs,
+            states,
+            width,
+            reverse_build_ms,
+            refinement_ms,
+            processed_splitters,
+            blocks.len(),
+        );
     }
 
     let dead_block = block_of[dead];
@@ -1756,7 +1908,12 @@ impl TerminalInterchangeability {
         }
 
         let (mut active_representatives, mut members_by_representative, generators) =
-            Self::select_one_directed_subsumption_pair(active, &active_ids, transports);
+            Self::select_directed_subsumption_family(
+                active,
+                &active_ids,
+                &sparse,
+                transports,
+            );
         if let Some(ignore) = ignore_terminal {
             if active.get(ignore as usize).copied().unwrap_or(false) {
                 active_representatives[ignore as usize] = true;
@@ -1787,6 +1944,71 @@ impl TerminalInterchangeability {
         }
         .with_generator_count()
     }
+
+/// Select one exact family of directed terminal merges.
+///
+/// Members must have identical terminal-residual columns at every lexer state,
+/// then their complete simultaneous relabeling must admit one transport. This
+/// avoids assuming arbitrary pairwise directed witnesses compose. Limit the
+/// plan to one group per vocabulary partition: separate groups still alter one
+/// another's terminal context.
+fn select_directed_subsumption_family(
+    active: &[bool],
+    active_ids: &[TerminalID],
+    sparse: &SparseTerminalResiduals,
+    transports: FxHashMap<(TerminalID, TerminalID), SubsumptionTransport>,
+) -> (Vec<bool>, Vec<Vec<TerminalID>>, Vec<SubsumptionGenerator>) {
+    let mut best = None::<(TerminalID, Vec<TerminalID>, SubsumptionTransport)>;
+    for members in sparse.identical_active_terminal_groups(active_ids) {
+        for &representative in active_ids {
+            if members.contains(&representative) {
+                continue;
+            }
+            let Some(transport) =
+                sparse.family_subsumption_transport(&members, representative)
+            else {
+                continue;
+            };
+            let replace = match &best {
+                None => true,
+                Some((best_representative, best_members, _)) => {
+                    members.len() > best_members.len()
+                        || (members.len() == best_members.len()
+                            && (representative, &members)
+                                < (*best_representative, best_members))
+                }
+            };
+            if replace {
+                best = Some((representative, members.clone(), transport));
+            }
+        }
+    }
+
+    let Some((representative, members, transport)) = best else {
+        return Self::select_one_directed_subsumption_pair(active, active_ids, transports);
+    };
+    let mut active_representatives = active.to_vec();
+    let mut members_by_representative = (0..active.len() as u32)
+        .map(|terminal| vec![terminal])
+        .collect::<Vec<_>>();
+    for &member in &members {
+        active_representatives[member as usize] = false;
+    }
+    let mut group = Vec::with_capacity(1 + members.len());
+    group.push(representative);
+    group.extend(members.iter().copied());
+    group.sort_unstable();
+    members_by_representative[representative as usize] = group;
+    let generators = members
+        .into_iter()
+        .map(|member| SubsumptionGenerator {
+            representative,
+            member,
+            transport: transport.clone(),
+        })
+        .collect();
+    (active_representatives, members_by_representative, generators)
+}
 
 /// Select one conservative directed terminal merge.
 ///
@@ -3794,4 +4016,62 @@ mod tests {
         assert!(mapped_later.tokens_for_tsid(1).contains(1));
         assert!(!mapped_later.tokens_for_tsid(0).contains(1));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn subsumption_planner_groups_certified_member_family() {
+    use std::sync::Arc;
+
+    use crate::automata::lexer::ast::Expr;
+    use crate::automata::lexer::compile::build_regex;
+
+    let expressions = vec![
+        Expr::U8Seq(b"a".to_vec()),
+        Expr::U8Seq(b"a".to_vec()),
+        Expr::U8Seq(b"ba".to_vec()),
+    ];
+    let tokenizer = build_regex(&expressions).into_tokenizer(
+        expressions.len() as u32,
+        Some(Arc::from(expressions.into_boxed_slice())),
+    );
+    let sparse = SparseTerminalResiduals::build(&tokenizer, &[true; 256]);
+    assert!(sparse.family_subsumption_transport(&[0, 1], 2).is_some());
+    let plan = TerminalInterchangeability::build_subsumption(
+        &tokenizer,
+        &[true, true, true],
+        None,
+        &[true; 256],
+    );
+    assert_eq!(plan.active_representatives, vec![false, false, true]);
+    assert_eq!(plan.members_by_representative[2], vec![0, 1, 2]);
+    assert_eq!(plan.subsumption_generators.len(), 2);
+    assert!(plan
+        .subsumption_generators
+        .iter()
+        .all(|generator| generator.representative == 2));
+}
+
+#[cfg(test)]
+#[test]
+fn family_subsumption_rejects_distinct_cooccurring_member_residuals() {
+    use std::sync::Arc;
+
+    use crate::automata::lexer::ast::Expr;
+    use crate::automata::lexer::compile::build_regex;
+
+    // After `a`, terminal 0 accepts immediately while terminal 1 still needs
+    // `b`. Relabelling both to one representative would erase that residual
+    // distinction at the same lexer state.
+    let expressions = vec![
+        Expr::U8Seq(b"a".to_vec()),
+        Expr::U8Seq(b"ab".to_vec()),
+        Expr::U8Seq(b"x".to_vec()),
+    ];
+    let tokenizer = build_regex(&expressions).into_tokenizer(
+        expressions.len() as u32,
+        Some(Arc::from(expressions.into_boxed_slice())),
+    );
+    let sparse = SparseTerminalResiduals::build(&tokenizer, &[true; 256]);
+    assert!(sparse.family_subsumption_transport(&[0, 1], 2).is_none());
 }
