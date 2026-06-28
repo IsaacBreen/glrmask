@@ -941,7 +941,10 @@ fn minimize_sparse_terminal_residuals(
 
     // For every byte, materialize reverse edges as a target-indexed contiguous
     // range. There is one outgoing edge per state/byte, including dead's loop.
-    let mut offsets = vec![0usize; width * (states + 1)];
+    // State IDs already fit in u32 (as required by reverse_sources), so every
+    // per-byte predecessor offset does too. This table remains hot throughout
+    // refinement; keeping it narrow substantially improves cache density.
+    let mut offsets = vec![0u32; width * (states + 1)];
     for source in 0..states {
         for slot in 0..width {
             let target = if source == dead {
@@ -970,7 +973,7 @@ fn minimize_sparse_terminal_residuals(
                 if target == NO_RESIDUAL_PAIR { dead } else { target as usize }
             };
             let base = slot * (states + 1);
-            let position = cursors[base + target];
+            let position = cursors[base + target] as usize;
             reverse_sources[slot * states + position] = source as u32;
             cursors[base + target] += 1;
         }
@@ -1038,8 +1041,8 @@ fn minimize_sparse_terminal_residuals(
         touched.clear();
         let offset_base = slot * (states + 1);
         for &target in &blocks[splitter] {
-            let start = offsets[offset_base + target as usize];
-            let end = offsets[offset_base + target as usize + 1];
+            let start = offsets[offset_base + target as usize] as usize;
+            let end = offsets[offset_base + target as usize + 1] as usize;
             for edge in start..end {
                 let source = reverse_sources[slot * states + edge] as usize;
                 if marked[source] == epoch {
