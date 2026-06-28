@@ -2632,6 +2632,90 @@ impl<'a> Lowerer<'a> {
         )
     }
 
+    fn build_ordered_fixed_object_dfa(
+        &self,
+        builder: &mut ExprNfaBuilder,
+        items: &[ObjectItem],
+        item_symbols: &[[GrammarExpr; 2]],
+    ) {
+        let item_count = items.len();
+        let mut before_item = Vec::with_capacity(item_count + 1);
+        let mut after_item = Vec::with_capacity(item_count + 1);
+        for index in 0..=item_count {
+            before_item.push(if index == 0 {
+                builder.start_state()
+            } else {
+                builder.add_state()
+            });
+            after_item.push(builder.add_state());
+        }
+
+        // Keep the symbol table byte-for-byte compatible with the existing
+        // template builder. The direct graph below reaches separator edges at
+        // a different time from the former epsilon NFA, but callers cache the
+        // minimized graph together with this symbol ordering.
+        let separator = self.item_separator_expr();
+        for item in item_symbols {
+            builder.add_symbol(item[0].clone());
+            builder.add_symbol(item[1].clone());
+            builder.add_symbol(separator.clone());
+        }
+
+        let mut next_required = vec![item_count; item_count + 1];
+        let mut required_index = item_count;
+        for index in (0..item_count).rev() {
+            if items[index].required {
+                required_index = index;
+            }
+            next_required[index] = required_index;
+        }
+        for index in 0..=item_count {
+            let first_required = next_required[index];
+            if first_required == item_count {
+                builder.set_accepting(before_item[index]);
+                builder.set_accepting(after_item[index]);
+            }
+            if index == item_count {
+                continue;
+            }
+            let last_selectable = if first_required == item_count {
+                item_count - 1
+            } else {
+                first_required
+            };
+
+            for item_index in index..=last_selectable {
+                let key_state = builder.add_state();
+                builder.add_transition(
+                    before_item[index],
+                    item_symbols[item_index][0].clone(),
+                    key_state,
+                );
+                builder.add_transition(
+                    key_state,
+                    item_symbols[item_index][1].clone(),
+                    after_item[item_index + 1],
+                );
+            }
+
+            let separator_state = builder.add_state();
+            builder.add_transition(after_item[index], separator.clone(), separator_state);
+            for item_index in index..=last_selectable {
+                let key_state = builder.add_state();
+                builder.add_transition(
+                    separator_state,
+                    item_symbols[item_index][0].clone(),
+                    key_state,
+                );
+                builder.add_transition(
+                    key_state,
+                    item_symbols[item_index][1].clone(),
+                    after_item[item_index + 1],
+                );
+            }
+        }
+    }
+
     fn lower_fixed_object_body_exprnfa_without_group(
         &mut self,
         items: &[ObjectItem],
@@ -2686,6 +2770,9 @@ impl<'a> Lowerer<'a> {
         }
         let graph_build_started_at = profile_started_at.map(|_| std::time::Instant::now());
         let mut builder = ExprNfaBuilder::new();
+        if tail_pair.is_none() {
+            self.build_ordered_fixed_object_dfa(&mut builder, items, &item_symbols);
+        } else {
         let mut states = vec![[0u32; 2]; items.len() + 1];
         states[0][0] = builder.start_state();
         states[0][1] = builder.add_state();
@@ -2808,6 +2895,8 @@ impl<'a> Lowerer<'a> {
                     tail_state,
                 );
             }
+        }
+
         }
 
         let graph_build_ms = graph_build_started_at
