@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -2238,42 +2238,61 @@ fn grammar_expr_is_nullable(
                 })
         }
         GrammarExpr::ExprNFA(expr_nfa) => {
-            let dfa = expr_nfa.determinize_and_minimize();
-            let state_count = dfa.states.len();
-            let start = dfa.start_state as usize;
-            if start >= state_count {
-                return false;
+            // An ExprNFA accepts epsilon iff an accepting NFA state is
+            // reachable from any start state using only epsilon transitions and
+            // labels that are nullable in the current rule fixed point. This is
+            // exact for the original NFA; determinizing and minimizing first
+            // only adds avoidable work to every fixed-point sweep.
+            let mut seen = vec![false; expr_nfa.nfa.states.len()];
+            let mut pending = VecDeque::new();
+            let mut nullable_labels = vec![None; expr_nfa.symbols.len()];
+            for &start in &expr_nfa.nfa.start_states {
+                let start = start as usize;
+                if start < seen.len() && !seen[start] {
+                    seen[start] = true;
+                    pending.push_back(start);
+                }
             }
-
-            let mut nullable_from_state = vec![false; state_count];
-            for (state_index, state) in dfa.states.iter().enumerate() {
-                nullable_from_state[state_index] = state.is_accepting;
-            }
-
-            let mut changed = true;
-            while changed {
-                changed = false;
-                for (state_index, state) in dfa.states.iter().enumerate() {
-                    if nullable_from_state[state_index] {
+            while let Some(state_id) = pending.pop_front() {
+                let state = &expr_nfa.nfa.states[state_id];
+                if state.is_accepting {
+                    return true;
+                }
+                for &target in &state.epsilons {
+                    let target = target as usize;
+                    if target < seen.len() && !seen[target] {
+                        seen[target] = true;
+                        pending.push_back(target);
+                    }
+                }
+                for (&label, targets) in &state.transitions {
+                    let Ok(label_index) = usize::try_from(label) else {
+                        continue;
+                    };
+                    let Some(symbol) = expr_nfa.symbols.get(label_index) else {
+                        continue;
+                    };
+                    let label_is_nullable = match nullable_labels[label_index] {
+                        Some(nullable) => nullable,
+                        None => {
+                            let nullable = grammar_expr_is_nullable(symbol, rule_nullable);
+                            nullable_labels[label_index] = Some(nullable);
+                            nullable
+                        }
+                    };
+                    if !label_is_nullable {
                         continue;
                     }
-                    for (label, target) in &state.transitions {
-                        let target = *target as usize;
-                        let Some(symbol) = expr_nfa.symbol_for_label(*label) else {
-                            continue;
-                        };
-                        if target < state_count
-                            && nullable_from_state[target]
-                            && grammar_expr_is_nullable(symbol, rule_nullable)
-                        {
-                            nullable_from_state[state_index] = true;
-                            changed = true;
-                            break;
+                    for &target in targets {
+                        let target = target as usize;
+                        if target < seen.len() && !seen[target] {
+                            seen[target] = true;
+                            pending.push_back(target);
                         }
                     }
                 }
             }
-            nullable_from_state[start]
+            false
         }
     }
 }
@@ -2747,7 +2766,11 @@ fn regex_escape_byte(b: u8) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{lower, GrammarExpr, NamedGrammar, NamedRule, Quantifier};
+    use super::{
+        grammar_expr_is_nullable, lower, GrammarExpr, NamedGrammar, NamedRule, Quantifier,
+    };
+    use crate::grammar::expr_nfa::ExprNfaBuilder;
+    use rustc_hash::FxHashMap;
 
     fn nonterminal(name: &str, expr: GrammarExpr) -> NamedRule {
         NamedRule {
@@ -2776,6 +2799,33 @@ mod tests {
             expr: Box::new(GrammarExpr::Ref(lhs.to_string())),
             exclude: Box::new(exclude),
         }
+    }
+
+    #[test]
+    fn expr_nfa_nullability_uses_epsilon_and_nullable_label_reachability() {
+        let mut builder = ExprNfaBuilder::new();
+        let nullable_state = builder.add_state();
+        let accept = builder.add_state();
+        builder.add_epsilon(builder.start_state(), nullable_state);
+        // Include a cycle to verify the reachability walk terminates.
+        builder.add_epsilon(nullable_state, builder.start_state());
+        builder.add_transition(
+            nullable_state,
+            GrammarExpr::Ref("EMPTY".to_string()),
+            accept,
+        );
+        builder.add_transition(
+            builder.start_state(),
+            literal("x"),
+            accept,
+        );
+        builder.set_accepting(accept);
+        let expr = GrammarExpr::ExprNFA(Box::new(builder.build()));
+
+        let mut nullable = FxHashMap::default();
+        assert!(!grammar_expr_is_nullable(&expr, &nullable));
+        nullable.insert("EMPTY".to_string(), true);
+        assert!(grammar_expr_is_nullable(&expr, &nullable));
     }
 
     #[test]
