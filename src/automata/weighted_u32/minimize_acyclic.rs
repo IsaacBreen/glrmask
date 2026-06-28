@@ -2142,7 +2142,6 @@ fn update_exact_group_summary(
     merge_sorted_weights(&mut summary.transition_weights, &profile.weights);
 }
 
-#[cfg(debug_assertions)]
 fn memberwise_group_compatible(
     class_domain: &Weight,
     class_profile: &ClassProfile,
