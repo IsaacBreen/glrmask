@@ -242,6 +242,10 @@ impl GLRTable {
         let profile_detail = std::env::var("GLRMASK_PROFILE_GLR_ROW_MERGE_DETAIL")
             .map(|value| value == "1")
             .unwrap_or(false);
+        if !env_flag_enabled("GLRMASK_FORCE_ITERATIVE_ROW_MERGE", false) {
+            self.merge_identical_rows_by_partition_refinement(profile_detail);
+            return;
+        }
         let mut iteration = 0usize;
         loop {
             iteration += 1;
@@ -397,6 +401,171 @@ impl GLRTable {
                     remap_started_at.elapsed().as_secs_f64() * 1000.0,
                 );
             }
+        }
+    }
+
+    fn merge_identical_rows_by_partition_refinement(&mut self, profile_detail: bool) {
+        let states_before = self.num_states as usize;
+        let has_advance_rows = self.advance.len() == states_before;
+        let mut state_to_group = (0..self.num_states).collect::<Vec<_>>();
+        let mut representatives = (0..states_before).collect::<Vec<_>>();
+        let mut iteration = 0usize;
+
+        loop {
+            iteration += 1;
+            let iteration_started_at = profile_detail.then(std::time::Instant::now);
+            let mut fingerprint_to_first_group: FxHashMap<u64, u32> = FxHashMap::default();
+            let mut collision_groups: FxHashMap<u64, Vec<u32>> = FxHashMap::default();
+            let mut group_to_next_group = vec![0u32; representatives.len()];
+            let mut next_representatives = Vec::with_capacity(representatives.len());
+            let mut fingerprint_collisions = 0usize;
+            let mut equality_checks = 0usize;
+
+            for (group, &state) in representatives.iter().enumerate() {
+                let advance = has_advance_rows.then(|| &self.advance[state]);
+                let fingerprint = remapped_row_fingerprint(
+                    &self.action[state],
+                    &self.goto[state],
+                    advance,
+                    &state_to_group,
+                );
+                let Some(&first_group) = fingerprint_to_first_group.get(&fingerprint) else {
+                    let next_group = next_representatives.len() as u32;
+                    fingerprint_to_first_group.insert(fingerprint, next_group);
+                    next_representatives.push(state);
+                    group_to_next_group[group] = next_group;
+                    continue;
+                };
+
+                fingerprint_collisions += 1;
+                let mut matching_group = None;
+                equality_checks += 1;
+                if rows_equal_after_remap(
+                    &self.action[state],
+                    &self.goto[state],
+                    advance,
+                    &self.action[next_representatives[first_group as usize]],
+                    &self.goto[next_representatives[first_group as usize]],
+                    has_advance_rows
+                        .then(|| &self.advance[next_representatives[first_group as usize]]),
+                    &state_to_group,
+                ) {
+                    matching_group = Some(first_group);
+                } else {
+                    for &candidate_group in collision_groups
+                        .get(&fingerprint)
+                        .into_iter()
+                        .flatten()
+                    {
+                        equality_checks += 1;
+                        if rows_equal_after_remap(
+                            &self.action[state],
+                            &self.goto[state],
+                            advance,
+                            &self.action[next_representatives[candidate_group as usize]],
+                            &self.goto[next_representatives[candidate_group as usize]],
+                            has_advance_rows.then(|| {
+                                &self.advance[next_representatives[candidate_group as usize]]
+                            }),
+                            &state_to_group,
+                        ) {
+                            matching_group = Some(candidate_group);
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(next_group) = matching_group {
+                    group_to_next_group[group] = next_group;
+                } else {
+                    let next_group = next_representatives.len() as u32;
+                    collision_groups
+                        .entry(fingerprint)
+                        .or_default()
+                        .push(next_group);
+                    next_representatives.push(state);
+                    group_to_next_group[group] = next_group;
+                }
+            }
+
+            let next_group_count = next_representatives.len();
+            if let Some(iteration_started_at) = iteration_started_at {
+                eprintln!(
+                    "[glrmask/profile][row_merge_partition] iteration={} states_before={} states_after={} fingerprint_collisions={} equality_checks={} refine_ms={:.3}",
+                    iteration,
+                    representatives.len(),
+                    next_group_count,
+                    fingerprint_collisions,
+                    equality_checks,
+                    iteration_started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            if next_group_count == representatives.len() {
+                break;
+            }
+            for group in &mut state_to_group {
+                *group = group_to_next_group[*group as usize];
+            }
+            representatives = next_representatives;
+        }
+
+        if representatives.len() == states_before {
+            return;
+        }
+
+        let apply_started_at = profile_detail.then(std::time::Instant::now);
+        debug_assert!(representatives.windows(2).all(|pair| pair[0] < pair[1]));
+        let mut keep = vec![false; states_before];
+        for &state in &representatives {
+            keep[state] = true;
+        }
+        let old_action = std::mem::take(&mut self.action);
+        let old_goto = std::mem::take(&mut self.goto);
+        let mut old_advance = has_advance_rows.then(|| {
+            std::mem::take(&mut self.advance)
+                .into_iter()
+                .map(Some)
+                .collect::<Vec<_>>()
+        });
+        let mut new_action = Vec::with_capacity(representatives.len());
+        let mut new_goto = Vec::with_capacity(representatives.len());
+        let mut new_advance = Vec::with_capacity(representatives.len());
+        for (state, (mut action_row, mut goto_row)) in
+            old_action.into_iter().zip(old_goto).enumerate()
+        {
+            if !keep[state] {
+                continue;
+            }
+            remap_action_row_targets_in_place(&mut action_row, &state_to_group);
+            remap_goto_row_targets_in_place(&mut goto_row, &state_to_group);
+            new_action.push(action_row);
+            new_goto.push(goto_row);
+            if let Some(old_advance) = &mut old_advance {
+                new_advance.push(
+                    old_advance[state]
+                        .take()
+                        .expect("kept state has an advance row"),
+                );
+            }
+        }
+        self.action = new_action;
+        self.goto = new_goto;
+        if has_advance_rows {
+            self.advance = new_advance;
+        }
+        self.forwarded_shifts = self
+            .forwarded_shifts
+            .iter()
+            .map(|&(state, terminal)| (state_to_group[state as usize], terminal))
+            .collect();
+        self.num_states = representatives.len() as u32;
+        if let Some(apply_started_at) = apply_started_at {
+            eprintln!(
+                "[glrmask/profile][row_merge_partition_apply] states_before={} states_after={} apply_ms={:.3}",
+                states_before,
+                self.num_states,
+                apply_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
         }
     }
 
@@ -595,14 +764,18 @@ impl GLRTable {
             let scan_started_at = profile_enabled.then(std::time::Instant::now);
 
             for state in 0..nstates {
-                let tids: Vec<TerminalID> = self.action[state].keys().collect();
-                for tid in tids {
+                // Inlining may synthesize states through `&mut self`, so take a
+                // compact snapshot of the row before the analysis. This still
+                // avoids the old keys-only allocation followed by a second hash
+                // lookup for every cell.
+                let actions: Vec<(TerminalID, Action)> = self.action[state]
+                    .iter()
+                    .map(|(tid, action)| (tid, action.clone()))
+                    .collect();
+                for (tid, action) in actions {
                     if !budget.record_cell() {
                         break;
                     }
-                    let Some(action) = self.action[state].get(&tid).cloned() else {
-                        continue;
-                    };
 
                     let Ok(update) = try_inline_unit_reductions_for_cell(
                         self,
@@ -1847,6 +2020,37 @@ fn row_fingerprint(
     hasher.finish()
 }
 
+fn remapped_row_fingerprint(
+    action_row: &ActionRow,
+    goto_row: &GotoRow,
+    advance_row: Option<&BitSet>,
+    state_to_group: &[u32],
+) -> u64 {
+    let (action_sum, action_xor) = unordered_row_hash(
+        action_row.iter().map(|(terminal, action)| {
+            (terminal, remap_action_targets(action, state_to_group))
+        }),
+        action_row.len(),
+    );
+    let (goto_sum, goto_xor) = unordered_row_hash(
+        goto_row.iter().map(|(nonterminal, &(target, replace))| {
+            (*nonterminal, (state_to_group[target as usize], replace))
+        }),
+        goto_row.len(),
+    );
+    let mut hasher = FxHasher::default();
+    action_row.len().hash(&mut hasher);
+    action_sum.hash(&mut hasher);
+    action_xor.hash(&mut hasher);
+    goto_row.len().hash(&mut hasher);
+    goto_sum.hash(&mut hasher);
+    goto_xor.hash(&mut hasher);
+    if let Some(advance_row) = advance_row {
+        advance_row.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 fn rows_equal(
     action_a: &ActionRow,
     goto_a: &GotoRow,
@@ -1864,6 +2068,32 @@ fn rows_equal(
         && goto_a
             .iter()
             .all(|(&nonterminal, target)| goto_b.get(&nonterminal) == Some(target))
+}
+
+fn rows_equal_after_remap(
+    action_a: &ActionRow,
+    goto_a: &GotoRow,
+    advance_a: Option<&BitSet>,
+    action_b: &ActionRow,
+    goto_b: &GotoRow,
+    advance_b: Option<&BitSet>,
+    state_to_group: &[u32],
+) -> bool {
+    advance_a == advance_b
+        && action_a.len() == action_b.len()
+        && goto_a.len() == goto_b.len()
+        && action_a.iter().all(|(terminal, action)| {
+            action_b.get(&terminal).is_some_and(|other| {
+                remap_action_targets(action, state_to_group)
+                    == remap_action_targets(other, state_to_group)
+            })
+        })
+        && goto_a.iter().all(|(&nonterminal, &(target, replace))| {
+            goto_b.get(&nonterminal).is_some_and(|&(other_target, other_replace)| {
+                replace == other_replace
+                    && state_to_group[target as usize] == state_to_group[other_target as usize]
+            })
+        })
 }
 
 fn push_reachable_state(state: u32, reachable: &mut [bool], stack: &mut Vec<u32>) {
@@ -3991,31 +4221,15 @@ fn try_inline_unit_reductions_for_cell_inner(
 }
 
 fn remap_action_row_targets_in_place(action_row: &mut ActionRow, mapping: &[u32]) {
-    let terminals = action_row.keys().collect::<Vec<_>>();
-    for terminal in terminals {
-        let remapped = remap_action_targets(
-            action_row
-                .get(&terminal)
-                .expect("action-row key remains present while remapping"),
-            mapping,
-        );
-        *action_row
-            .get_mut(&terminal)
-            .expect("action-row key remains present while remapping") = remapped;
-    }
+    action_row.for_each_value_mut(|action| {
+        *action = remap_action_targets(action, mapping);
+    });
 }
 
 fn remap_goto_row_targets_in_place(goto_row: &mut GotoRow, mapping: &[u32]) {
-    let nonterminals = goto_row.keys().copied().collect::<Vec<_>>();
-    for nonterminal in nonterminals {
-        let (target, replace) = *goto_row
-            .get(&nonterminal)
-            .expect("goto-row key remains present while remapping");
-        *goto_row
-            .get_mut(&nonterminal)
-            .expect("goto-row key remains present while remapping") =
-            (mapping[target as usize], replace);
-    }
+    goto_row.for_each_value_mut(|(target, _)| {
+        *target = mapping[*target as usize];
+    });
 }
 
 fn remap_action_targets(action: &Action, mapping: &[u32]) -> Action {
