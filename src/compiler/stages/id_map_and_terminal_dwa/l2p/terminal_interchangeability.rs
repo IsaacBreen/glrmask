@@ -997,8 +997,9 @@ fn minimize_sparse_terminal_residuals(
     if !accepting.is_empty() {
         blocks.push(accepting);
     }
-    let mut block_of = vec![0usize; states];
+    let mut block_of = vec![0u32; states];
     for (block, members) in blocks.iter().enumerate() {
+        let block = u32::try_from(block).expect("terminal residual block exceeds u32");
         for &state in members {
             block_of[state as usize] = block;
         }
@@ -1017,9 +1018,9 @@ fn minimize_sparse_terminal_residuals(
         enqueue_sparse_splitter(&mut worklist, &mut in_work, seed, slot);
     }
 
-    let mut marked = vec![0usize; states];
-    let mut touched_epoch = vec![0usize; blocks.len()];
-    let mut epoch = 0usize;
+    let mut marked = vec![0u32; states];
+    let mut touched_epoch = vec![0u32; blocks.len()];
+    let mut epoch = 0u32;
     let mut processed_splitters = 0usize;
     // A BFCL-sized minimization processes more than a million splitters. Keep
     // the per-splitter touched-block workspace so that common nonempty passes
@@ -1033,7 +1034,7 @@ fn minimize_sparse_terminal_residuals(
         in_work[splitter][slot] = false;
         processed_splitters += 1;
         epoch += 1;
-        if epoch == usize::MAX {
+        if epoch == u32::MAX {
             marked.fill(0);
             touched_epoch.fill(0);
             epoch = 1;
@@ -1049,7 +1050,7 @@ fn minimize_sparse_terminal_residuals(
                     continue;
                 }
                 marked[source] = epoch;
-                let block = block_of[source];
+                let block = block_of[source] as usize;
                 if touched_epoch[block] != epoch {
                     touched_epoch[block] = epoch;
                     touched.push(block);
@@ -1082,8 +1083,10 @@ fn minimize_sparse_terminal_residuals(
             }
             blocks[block] = keep;
             let split_id = blocks.len();
+            let split_id_u32 =
+                u32::try_from(split_id).expect("terminal residual block exceeds u32");
             for &state in &split {
-                block_of[state as usize] = split_id;
+                block_of[state as usize] = split_id_u32;
             }
             blocks.push(split);
             in_work.push(vec![false; width]);
@@ -1117,7 +1120,7 @@ fn minimize_sparse_terminal_residuals(
         );
     }
 
-    let dead_block = block_of[dead];
+    let dead_block = block_of[dead] as usize;
     let mut remap = vec![u32::MAX; blocks.len()];
     remap[dead_block] = DEAD_RESIDUAL_BLOCK;
     let mut next_block = DEAD_RESIDUAL_BLOCK + 1;
@@ -1129,7 +1132,7 @@ fn minimize_sparse_terminal_residuals(
     }
     (
         (0..pairs)
-            .map(|pair| remap[block_of[pair]])
+            .map(|pair| remap[block_of[pair] as usize])
             .collect(),
         processed_splitters,
     )
