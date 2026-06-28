@@ -39,6 +39,23 @@ impl<'a> Lowerer<'a> {
                 "recursive additionalProperties anyOf schemas are unsupported",
             ));
         }
+        // The two-field string-discriminator path checks its complete object
+        // shape itself. With no enclosing sibling assertions it can run before
+        // the generic branch cloning and subsumption work.
+        if !discriminator_anyof_fastpath_disabled()
+            && sibling_assertion_schema(assertions).is_none()
+            && let Some(expr) = self
+                .try_lower_ordered_string_discriminator_closed_anyof(&assertions.any_of)?
+        {
+            if let Some(profile_started_at) = profile_started_at {
+                eprintln!(
+                    "[glrmask/profile][json_schema_anyof] branches={} path=direct_ordered_discriminator elapsed_ms={:.3}",
+                    assertions.any_of.len(),
+                    profile_started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            return Ok(expr);
+        }
         if let Some((object, any_required_names)) = try_factor_required_property_any_of(assertions) {
             return self.lower_object_requiring_any_property(&object, &any_required_names);
         }

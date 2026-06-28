@@ -354,7 +354,7 @@ impl<'a> Lowerer<'a> {
     /// key is represented directly, while the discriminator value selects the
     /// branch-specific remainder.  This is the same language, including the
     /// declaration-order restriction used by the ordinary closed-object path.
-    fn try_lower_ordered_string_discriminator_closed_anyof(
+    pub(super) fn try_lower_ordered_string_discriminator_closed_anyof(
         &mut self,
         branches: &[Schema],
     ) -> ImportResult<Option<GrammarExpr>> {
