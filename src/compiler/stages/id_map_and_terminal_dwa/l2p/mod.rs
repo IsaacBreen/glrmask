@@ -17,6 +17,8 @@ mod terminal_interchangeability;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Instant;
@@ -93,6 +95,28 @@ fn l2p_terminal_interchangeability_enabled() -> bool {
 /// transformed terminal DWA. A later production implementation can make this
 /// optional only after it has an independent proof and broader regression data.
 fn l2p_terminal_interchangeability_validation_enabled() -> bool { true }
+
+/// Development-only unbuffered phase trace. CFA captures compiler stderr until
+/// the build exits, so a file trace is the only useful way to identify a phase
+/// that outlives the harness timeout.
+fn trace_terminal_interchangeability_reference(
+    partition: &str,
+    phase: &str,
+    elapsed: std::time::Duration,
+    detail: impl std::fmt::Display,
+) {
+    let Some(path) = std::env::var_os("GLRMASK_L2P_TI_TRACE_FILE") else {
+        return;
+    };
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let _ = writeln!(
+        file,
+        "partition={partition} phase={phase} elapsed_ms={:.3} {detail}",
+        elapsed.as_secs_f64() * 1000.0,
+    );
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct SimplifyCacheKey {
@@ -483,22 +507,23 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         TerminalInterchangeability::identity(active_terminals)
     };
     let reference_terminal_expansion = !terminal_interchangeability.is_identity();
-    let analysis_active_terminals = terminal_interchangeability.active_representatives();
+    // A residual transport keeps raw lexer state alongside its logical scanner
+    // state. It therefore needs the full terminal metadata for token-end and
+    // continuation semantics; only completed-match labels are quotientized.
+    let analysis_active_terminals = if reference_terminal_expansion {
+        active_terminals
+    } else {
+        terminal_interchangeability.active_representatives()
+    };
     let num_analysis_active_terminals = analysis_active_terminals
         .iter()
         .filter(|&&active| active)
         .count();
-    // The validation-first interchangeability path keeps the original DFA state
-    // coordinate so scanner transport maps can be applied exactly. It clears
-    // inactive metadata but deliberately does not minimize.
-    let reference_filtered_tokenizer = reference_terminal_expansion.then(|| {
-        tokenizer.deactivate_terminals_without_minimizing(analysis_active_terminals)
-    });
-    let tokenizer_before_simplify = reference_filtered_tokenizer.as_ref().unwrap_or(tokenizer);
+    let tokenizer_before_simplify = tokenizer;
 
     // The normal path strips inactive terminal metadata and may minimize.
-    // The reference interchangeability path instead uses the metadata-only
-    // filtered tokenizer above, preserving original state IDs for transport.
+    // The reference path keeps the original tokenizer coordinate and forces
+    // singleton TSIDs below.
     //
     // Unmapped original states (states with no active-terminal future
     // under this partition) are filled into a dead class via
@@ -634,7 +659,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // builder still consults full-tokenizer future-terminal sets in several
     // paths, so filtering equivalence by `active_terminals` would be unsound: it
     // could merge states that the later NWA construction still distinguishes.
-    let (mut simplified_id_map, equiv_profile) =
+    let (simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
             tokenizer_for_build,
@@ -648,21 +673,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             if use_simplified_tok || reference_terminal_expansion { None } else { flat_trans },
             equivalence_initial_state_map,
         );
-    if reference_terminal_expansion {
-        // Keep the exact raw lexer-state coordinate in the reference artifact.
-        // Each transport mode simulates a different state for the current
-        // terminal segment, while terminal-DWA weights remain indexed by the
-        // actual token-start state. A quotient TSID could merge source states
-        // whose transported continuations differ; singletons avoid that
-        // representational shortcut. The final artifact comparator accepts the
-        // intentionally different id map.
-        let ids = (0..tokenizer_for_build.num_states()).collect::<Vec<u32>>();
-        simplified_id_map.tokenizer_states =
-            ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-                ids.clone(),
-                ids,
-            );
-    }
+    // The residual transport carries its raw lexer coordinate separately.
+    // Retain the ordinary exact TSID quotient here; the equality gate below
+    // validates that every transported residual remains compatible with it.
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // tsid_fallback is independent of the NWA build / postprocess /
@@ -733,7 +746,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let vocab_tree_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
 
             // ---- Step 4: Possible matches (lazy via computer) ----
-            let mut pm_computer = PossibleMatchesComputer::new(tokenizer_for_build);
+            let mut pm_computer = PossibleMatchesComputer::new(
+                if reference_terminal_expansion { tokenizer } else { tokenizer_for_build },
+            );
             let possible_matches_ms = 0.0;
 
             // ---- Step 5: Create NWA and seed root nodes ----
@@ -748,16 +763,36 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             nwa.start_states_mut().push(start_state);
 
             let transport_modes = reference_terminal_expansion
-                .then(|| terminal_interchangeability.terminal_nwa_transport_modes())
+                .then(|| terminal_interchangeability.terminal_nwa_transport_modes(tokenizer, &relevant_bytes))
                 .flatten();
+            if reference_terminal_expansion {
+                trace_terminal_interchangeability_reference(
+                    partition_label,
+                    "transport-modes",
+                    total_started_at.elapsed(),
+                    format!(
+                        "tsids={} modes={}",
+                        simplified_id_map.num_tsids(),
+                        transport_modes.as_ref().map_or(0, Vec::len),
+                    ),
+                );
+            }
             let seed_ms;
 
             // ---- Step 6: Trie-walk NWA build ----
             let trie_build_started_at = Instant::now();
+            if reference_terminal_expansion {
+                trace_terminal_interchangeability_reference(
+                    partition_label,
+                    "nwa-build-start",
+                    total_started_at.elapsed(),
+                    "",
+                );
+            }
             let _build_profile = if let Some(modes) = transport_modes.as_deref() {
                 seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
                 build_transport_nwa_via_trie_walk(
-                    tokenizer_for_build,
+                    tokenizer,
                     ignore_terminal,
                     &mut nwa,
                     start_state,
@@ -765,7 +800,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                     &simplified_id_map,
                     &full_tree.root,
                     &mut pm_computer,
-                    analysis_active_terminals,
+                    active_terminals,
                     modes,
                 )
             } else {
@@ -786,6 +821,14 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 )
             };
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
+            if reference_terminal_expansion {
+                trace_terminal_interchangeability_reference(
+                    partition_label,
+                    "nwa-build-end",
+                    total_started_at.elapsed(),
+                    format!("states={}", nwa.states().len()),
+                );
+            }
 
             let always_allowed_started_at = Instant::now();
             let always_allowed = compute_always_allowed_follows(grammar);
@@ -817,10 +860,26 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             canonicalize_acyclic_nwa(&mut nwa);
             let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_canonicalize = nwa.states().len();
+            if reference_terminal_expansion {
+                trace_terminal_interchangeability_reference(
+                    partition_label,
+                    "determinize-start",
+                    total_started_at.elapsed(),
+                    format!("states={nwa_states_after_canonicalize}"),
+                );
+            }
 
             let determinize_started_at = Instant::now();
             let det = determinize(&nwa).expect("L2+ terminal NWA determinization failed");
             let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
+            if reference_terminal_expansion {
+                trace_terminal_interchangeability_reference(
+                    partition_label,
+                    "determinize-end",
+                    total_started_at.elapsed(),
+                    format!("states={}", det.states().len()),
+                );
+            }
 
             let minimize_started_at = Instant::now();
             let skip_minimize = defer_minimization_to_local_merge
@@ -834,6 +893,14 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
             let dwa_stats_before_compact = dwa.stats();
             let dwa_stats_after_compact = dwa.stats();
+            if reference_terminal_expansion {
+                trace_terminal_interchangeability_reference(
+                    partition_label,
+                    "minimize-end",
+                    total_started_at.elapsed(),
+                    format!("states={}", dwa_stats_before_compact.states),
+                );
+            }
 
             (
                 dwa,

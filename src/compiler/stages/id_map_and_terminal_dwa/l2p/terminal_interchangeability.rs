@@ -6,19 +6,21 @@
 //! DFA and the DFA with those output labels swapped have a bijection between
 //! their residual-state partitions.
 //!
-//! This is intentionally a validation-first construction: hide
-//! nonrepresentatives before id-map/DWA construction, restore noninitial labels,
-//! make one transported copy per relevant initial replacement, and use the
-//! existing local DWA/id-map merger. The simple restoration is used only when
-//! the transport fixes the lexer reset residual class. Directed subsumption is
-//! deliberately excluded.
+//! This is intentionally validation-first. For every accepted
+//! representative/member swap, the builder constructs a restricted residual
+//! scanner. During the trie walk it keeps the raw lexer state for token-boundary
+//! semantics, while the union of residual scanners supplies completed terminal
+//! labels. The resulting local DWA is checked exactly against the baseline.
+//! Directed subsumption is deliberately excluded.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
-use super::nwa_builder::TerminalNwaTransportMode;
 use crate::grammar::flat::TerminalID;
+
+use super::nwa_builder::{TerminalNwaTransportMachine, TerminalNwaTransportMode};
 
 const NO_STATE: u32 = u32::MAX;
 
@@ -26,11 +28,22 @@ const NO_STATE: u32 = u32::MAX;
 struct OutputBits(Vec<u64>);
 
 impl OutputBits {
-    fn new(words: usize) -> Self { Self(vec![0; words]) }
-    fn set(&mut self, terminal: usize) { self.0[terminal / 64] |= 1u64 << (terminal % 64); }
+    fn new(words: usize) -> Self {
+        Self(vec![0; words])
+    }
+
+    fn set(&mut self, terminal: usize) {
+        self.0[terminal / 64] |= 1u64 << (terminal % 64);
+    }
+
+    fn contains(&self, terminal: usize) -> bool {
+        (self.0[terminal / 64] & (1u64 << (terminal % 64))) != 0
+    }
 
     fn swap(&self, left: usize, right: usize) -> Self {
-        if left == right { return self.clone(); }
+        if left == right {
+            return self.clone();
+        }
         let mut result = self.clone();
         let left_word = left / 64;
         let right_word = right / 64;
@@ -44,12 +57,114 @@ impl OutputBits {
     }
 }
 
-/// Concrete representation of a bijection between residual-state partitions.
-/// A source lexer state maps to every concrete state in its target partition;
-/// the relation is bijective at the partition level.
+/// Bijection from the original minimized restricted-DFA states to the states
+/// representing their swapped-output residuals.
 #[derive(Clone, Debug)]
 struct InterchangeMap {
-    source_state_to_target_states: Vec<Vec<u32>>,
+    target_block_for_source_block: Vec<u32>,
+}
+
+/// The minimized restricted lexer DFA. A terminal-label swap only relabels this
+/// machine's outputs; it does not change its transition graph or its intrinsic
+/// state-equivalence partition.
+#[derive(Clone, Debug)]
+struct MinimizedResidualDfa {
+    transitions: Vec<Vec<u32>>,
+    outputs: Vec<OutputBits>,
+}
+
+impl MinimizedResidualDfa {
+    fn state_count(&self) -> usize {
+        self.outputs.len()
+    }
+
+    fn structural_colors(&self) -> Vec<u32> {
+        let state_count = self.state_count();
+        let cardinality = |state: usize| self.outputs[state]
+            .0
+            .iter()
+            .map(|word| word.count_ones())
+            .sum::<u32>();
+        let mut colors = classify_keys((0..state_count).map(&cardinality));
+        loop {
+            let keys = (0..state_count)
+                .map(|state| {
+                    let successors = self.transitions[state]
+                        .iter()
+                        .map(|&target| colors[target as usize])
+                        .collect::<Vec<_>>();
+                    (cardinality(state), successors)
+                })
+                .collect::<Vec<_>>();
+            let next = classify_keys(keys);
+            if next == colors {
+                return colors;
+            }
+            colors = next;
+        }
+    }
+
+    /// Group terminals by a necessary structural signature for an output-label
+    /// swap. Any swap automorphism preserves the cardinality-only transition
+    /// colors, hence it preserves the multiset of colors on which each terminal
+    /// appears. Different groups cannot be interchangeable.
+    fn compatible_terminal_groups(
+        &self,
+        terminals: &[TerminalID],
+    ) -> BTreeMap<Vec<u32>, Vec<TerminalID>> {
+        let colors = self.structural_colors();
+        let mut profiles = vec![Vec::<u32>::new(); terminals.len()];
+        for (state, output) in self.outputs.iter().enumerate() {
+            let color = colors[state];
+            for (index, &terminal) in terminals.iter().enumerate() {
+                if output.contains(terminal as usize) {
+                    profiles[index].push(color);
+                }
+            }
+        }
+        let mut groups = BTreeMap::<Vec<u32>, Vec<TerminalID>>::new();
+        for (terminal, mut profile) in terminals.iter().copied().zip(profiles) {
+            profile.sort_unstable();
+            groups.entry(profile).or_default().push(terminal);
+        }
+        groups
+    }
+
+    /// Minimize the disjoint union of the original-output and swapped-output
+    /// copies of this already-minimized DFA. The result gives the exact
+    /// cross-copy residual equivalence relation for one proposed swap.
+    fn minimize_original_and_swapped(&self, left: usize, right: usize) -> Vec<u32> {
+        let state_count = self.state_count();
+        let combined_count = state_count * 2;
+        let output = |combined: usize| {
+            let copy = combined / state_count;
+            let state = combined % state_count;
+            if copy == 0 {
+                self.outputs[state].clone()
+            } else {
+                self.outputs[state].swap(left, right)
+            }
+        };
+        let mut blocks = classify_keys((0..combined_count).map(&output));
+        loop {
+            let keys = (0..combined_count)
+                .map(|combined| {
+                    let copy = combined / state_count;
+                    let state = combined % state_count;
+                    let successors = self.transitions[state]
+                        .iter()
+                        .map(|&target| blocks[copy * state_count + target as usize])
+                        .collect::<Vec<_>>();
+                    (output(combined), successors)
+                })
+                .collect::<Vec<_>>();
+            let next = classify_keys(keys);
+            if next == blocks {
+                return blocks;
+            }
+            blocks = next;
+        }
+    }
 }
 
 struct RestrictedDfa<'a> {
@@ -138,54 +253,100 @@ impl<'a> RestrictedDfa<'a> {
         }
     }
 
-    fn minimize_original_and_swapped(&self, left: usize, right: usize) -> Vec<u32> {
-        let state_count = self.state_count();
-        let combined_count = state_count * 2;
-        let mut blocks = classify_keys((0..combined_count).map(|combined| {
-            let copy = combined / state_count;
-            let state = combined % state_count;
-            self.output(state, (copy == 1).then_some((left, right)))
-        }));
-        loop {
-            let keys = (0..combined_count)
-                .map(|combined| {
-                    let copy = combined / state_count;
-                    let state = combined % state_count;
-                    let successors = (0..self.bytes.len())
-                        .map(|slot| blocks[copy * state_count + self.successor(state, slot)])
-                        .collect::<Vec<_>>();
-                    (
-                        self.output(state, (copy == 1).then_some((left, right))),
-                        successors,
-                    )
-                })
-                .collect::<Vec<_>>();
-            let next = classify_keys(keys);
-            if next == blocks {
-                return blocks;
+    fn minimized_residual(&self, blocks: &[u32]) -> MinimizedResidualDfa {
+        assert_eq!(blocks.len(), self.state_count());
+        let count = blocks.iter().copied().max().map_or(0, |id| id as usize + 1);
+        let mut representatives = vec![None::<usize>; count];
+        for (state, &block) in blocks.iter().enumerate() {
+            representatives[block as usize].get_or_insert(state);
+        }
+        let mut transitions = vec![vec![0u32; self.bytes.len()]; count];
+        let mut outputs = Vec::with_capacity(count);
+        for (block, state) in representatives.into_iter().enumerate() {
+            let state = state.expect("every minimized residual block has a representative");
+            for slot in 0..self.bytes.len() {
+                transitions[block][slot] = blocks[self.successor(state, slot)];
             }
-            blocks = next;
+            outputs.push(self.output(state, None));
+        }
+        MinimizedResidualDfa {
+            transitions,
+            outputs,
         }
     }
 
-    /// Return a concrete DFA automorphism for this label swap, if the
-    /// residual partition map has a singleton, transition-commuting lift.
-    ///
-    /// The terminal-NWA transport executes concrete lexer states, so a
-    /// quotient-level residual bijection alone is not sufficient here.
-    fn concrete_swap_automorphism(
+    fn residual_machine(
         &self,
-        map: &InterchangeMap,
+        blocks: &[u32],
+        swap: Option<(usize, usize)>,
+        emit: &[bool],
+    ) -> TerminalNwaTransportMachine {
+        assert_eq!(blocks.len(), self.state_count());
+        let count = blocks.iter().copied().max().map_or(0, |id| id as usize + 1);
+        let mut representative = vec![None::<usize>; count];
+        for (state, &block) in blocks.iter().enumerate() {
+            representative[block as usize].get_or_insert(state);
+        }
+        let mut byte_slot = Box::new([-1i16; 256]);
+        for (slot, &byte) in self.bytes.iter().enumerate() {
+            byte_slot[byte as usize] = slot as i16;
+        }
+        let mut transitions = vec![vec![0u32; self.bytes.len()]; count];
+        let mut matched_terminals = vec![Vec::<TerminalID>::new(); count];
+        for (block, state) in representative.into_iter().enumerate() {
+            let state = state.expect("every residual block has a representative");
+            for slot in 0..self.bytes.len() {
+                transitions[block][slot] = blocks[self.successor(state, slot)];
+            }
+            let output = self.output(state, swap);
+            for terminal in 0..emit.len() {
+                if emit[terminal] && output.contains(terminal) {
+                    matched_terminals[block].push(terminal as TerminalID);
+                }
+            }
+        }
+        TerminalNwaTransportMachine::new(byte_slot, transitions, matched_terminals)
+    }
+
+    fn interchange_map(
+        &self,
+        residual: &MinimizedResidualDfa,
         left: TerminalID,
         right: TerminalID,
-    ) -> Option<Vec<u32>> {
-        let mapping = map
-            .source_state_to_target_states
-            .iter()
-            .map(|targets| (targets.len() == 1).then_some(targets[0]))
+    ) -> Option<InterchangeMap> {
+        let left = left as usize;
+        let right = right as usize;
+        let state_count = residual.state_count();
+        if left == right {
+            return Some(InterchangeMap {
+                target_block_for_source_block: (0..state_count as u32).collect(),
+            });
+        }
+
+        // A global output-label renaming preserves the DFA's state-equivalence
+        // relation. Work on the minimized residual machine, then refine only
+        // the relation between its original and swapped-output copies.
+        let combined_blocks = residual.minimize_original_and_swapped(left, right);
+        let mut target_for_source = vec![None::<u32>; state_count];
+        for source in 0..state_count {
+            let mut target = None;
+            for candidate in 0..state_count {
+                if combined_blocks[state_count + candidate] != combined_blocks[source] {
+                    continue;
+                }
+                match target {
+                    Some(existing) if existing != candidate as u32 => return None,
+                    Some(_) => {}
+                    None => target = Some(candidate as u32),
+                }
+            }
+            target_for_source[source] = Some(target?);
+        }
+        let target_block_for_source_block = target_for_source
+            .into_iter()
             .collect::<Option<Vec<_>>>()?;
-        let mut seen = vec![false; self.real_state_count];
-        for &target in &mapping {
+        let mut seen = vec![false; state_count];
+        for &target in &target_block_for_source_block {
             let slot = seen.get_mut(target as usize)?;
             if *slot {
                 return None;
@@ -195,116 +356,8 @@ impl<'a> RestrictedDfa<'a> {
         if seen.iter().any(|&seen| !seen) {
             return None;
         }
-
-        let swap = Some((left as usize, right as usize));
-        for source in 0..self.real_state_count {
-            let target = mapping[source] as usize;
-            if self.output(source, None) != self.output(target, swap) {
-                return None;
-            }
-            for slot in 0..self.bytes.len() {
-                let source_next = self.successor(source, slot);
-                let target_next = self.successor(target, slot);
-                if source_next == self.dead_state() {
-                    if target_next != self.dead_state() {
-                        return None;
-                    }
-                } else if target_next != mapping[source_next] as usize {
-                    return None;
-                }
-            }
-        }
-        Some(mapping)
-    }
-
-    fn interchange_map(&self, left: TerminalID, right: TerminalID) -> Option<InterchangeMap> {
-        let state_count = self.state_count();
-        let left = left as usize;
-        let right = right as usize;
-        if left == right {
-            return Some(InterchangeMap {
-                source_state_to_target_states: (0..self.real_state_count)
-                    .map(|state| vec![state as u32])
-                    .collect(),
-            });
-        }
-
-        let combined_blocks = self.minimize_original_and_swapped(left, right);
-        let source_blocks = self.minimize(None);
-        let swapped_blocks = self.minimize(Some((left, right)));
-
-        let source_count = source_blocks
-            .iter()
-            .copied()
-            .max()
-            .map_or(0, |block| block as usize + 1);
-        let target_count = swapped_blocks
-            .iter()
-            .copied()
-            .max()
-            .map_or(0, |block| block as usize + 1);
-        let mut target_states_by_block = vec![Vec::<u32>::new(); target_count];
-        for state in 0..self.real_state_count {
-            target_states_by_block[swapped_blocks[state] as usize].push(state as u32);
-        }
-        let mut source_states_by_block = vec![Vec::<u32>::new(); source_count];
-        for source in 0..self.real_state_count {
-            source_states_by_block[source_blocks[source] as usize].push(source as u32);
-        }
-        let mut source_to_target = vec![None::<u32>; source_count];
-
-        for source in 0..self.real_state_count {
-            let mut target_block = None;
-            for target in 0..self.real_state_count {
-                if combined_blocks[state_count + target] != combined_blocks[source] {
-                    continue;
-                }
-                let candidate = swapped_blocks[target];
-                match target_block {
-                    Some(existing) if existing != candidate => return None,
-                    Some(_) => {}
-                    None => target_block = Some(candidate),
-                }
-            }
-            let target_block = target_block?;
-            let source_block = source_blocks[source] as usize;
-            match source_to_target[source_block] {
-                Some(existing) if existing != target_block => return None,
-                Some(_) => {}
-                None => source_to_target[source_block] = Some(target_block),
-            }
-        }
-
-        let mut target_to_source = vec![None::<u32>; target_count];
-        for (source, target) in source_to_target.iter().enumerate() {
-            if source_states_by_block[source].is_empty() {
-                continue;
-            }
-            let target = (*target)? as usize;
-            match target_to_source[target] {
-                Some(existing) if existing != source as u32 => return None,
-                Some(_) => {}
-                None => target_to_source[target] = Some(source as u32),
-            }
-        }
-        if target_to_source.iter().enumerate().any(|(block, source)| {
-            !target_states_by_block[block].is_empty() && source.is_none()
-        }) {
-            return None;
-        }
-
-        let source_state_to_target_states = (0..self.real_state_count)
-            .map(|source| {
-                let target = source_to_target[source_blocks[source] as usize]
-                    .expect("checked above") as usize;
-                target_states_by_block[target].clone()
-            })
-            .collect::<Vec<_>>();
-        if source_state_to_target_states.iter().any(Vec::is_empty) {
-            return None;
-        }
         Some(InterchangeMap {
-            source_state_to_target_states,
+            target_block_for_source_block,
         })
     }
 }
@@ -327,6 +380,7 @@ pub(crate) struct TerminalInterchangeability {
     representative_for: Vec<TerminalID>,
     members_by_representative: Vec<Vec<TerminalID>>,
     maps_by_representative_member: BTreeMap<(TerminalID, TerminalID), InterchangeMap>,
+    source_blocks: Vec<u32>,
 }
 
 impl TerminalInterchangeability {
@@ -338,6 +392,7 @@ impl TerminalInterchangeability {
             representative_for: (0..terminal_count as u32).collect(),
             members_by_representative: (0..terminal_count as u32).map(|terminal| vec![terminal]).collect(),
             maps_by_representative_member: BTreeMap::new(),
+            source_blocks: Vec::new(),
         }
     }
 
@@ -354,23 +409,40 @@ impl TerminalInterchangeability {
         if candidates.len() < 2 { return Self::identity(active_terminals); }
 
         let restricted = RestrictedDfa::new(tokenizer, active_terminals, relevant_bytes);
+        let source_blocks = restricted.minimize(None);
+        let residual = restricted.minimized_residual(&source_blocks);
+        let candidate_groups = residual.compatible_terminal_groups(&candidates);
+        let candidate_pairs = candidate_groups
+            .values()
+            .map(|group| group.len().saturating_sub(1) * group.len() / 2)
+            .sum::<usize>();
+        if std::env::var_os("GLRMASK_PROFILE_L2P_INTERCHANGEABILITY").is_some() {
+            eprintln!(
+                "[glrmask/profile][l2p_terminal_interchangeability] active_terminals={} residual_states={} structural_groups={} candidate_pairs={} total_pairs={}",
+                candidates.len(),
+                residual.state_count(),
+                candidate_groups.len(),
+                candidate_pairs,
+                candidates.len().saturating_sub(1) * candidates.len() / 2,
+            );
+        }
         let mut accepted = BTreeMap::<(TerminalID, TerminalID), InterchangeMap>::new();
         let mut components = DisjointSet::new(active_terminals.len());
-        for (index, &left) in candidates.iter().enumerate() {
-            for &right in &candidates[index + 1..] {
-                if let Some(left_to_right) = restricted.interchange_map(left, right) {
-                    if restricted
-                        .concrete_swap_automorphism(&left_to_right, left, right)
-                        .is_none()
+        for group in candidate_groups.values() {
+            for (index, &left) in group.iter().enumerate() {
+                for &right in &group[index + 1..] {
+                    if let Some(left_to_right) =
+                        restricted.interchange_map(&residual, left, right)
                     {
-                        continue;
+                        assert!(
+                            restricted
+                                .interchange_map(&residual, right, left)
+                                .is_some(),
+                            "terminal interchange map was not symmetric: {left} <-> {right}",
+                        );
+                        components.union(left as usize, right as usize);
+                        accepted.insert((left, right), left_to_right);
                     }
-                    assert!(
-                        restricted.interchange_map(right, left).is_some(),
-                        "terminal interchange map was not symmetric: {left} <-> {right}",
-                    );
-                    components.union(left as usize, right as usize);
-                    accepted.insert((left, right), left_to_right);
                 }
             }
         }
@@ -381,6 +453,7 @@ impl TerminalInterchangeability {
         }
 
         let mut result = Self::identity(active_terminals);
+        result.source_blocks = source_blocks;
         for members in groups.into_values() {
             if members.len() < 2 { continue; }
             // The definition makes this an equivalence relation. Fail closed if
@@ -430,7 +503,7 @@ impl TerminalInterchangeability {
                             "[glrmask/debug][terminal_interchangeability_transport] representative={} member={} map={:?}",
                             representative,
                             member,
-                            map.source_state_to_target_states,
+                            map.target_block_for_source_block,
                         );
                     }
                 }
@@ -452,21 +525,28 @@ impl TerminalInterchangeability {
         self.active_representatives.iter().filter(|&&active| active).count()
     }
 
-    pub(crate) fn terminal_nwa_transport_modes(&self) -> Option<Vec<TerminalNwaTransportMode>> {
+    pub(crate) fn terminal_nwa_transport_modes(
+        &self,
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+    ) -> Option<Vec<TerminalNwaTransportMode>> {
         if self.is_identity() {
             return None;
         }
-        let terminal_count = self.original_active.len();
-        let identity_states = (0..self
-            .maps_by_representative_member
-            .values()
-            .next()
-            .map(|map| map.source_state_to_target_states.len())? as u32)
-            .collect::<Vec<_>>();
-        let identity_labels = (0..terminal_count as u32).collect::<Vec<_>>();
+        let restricted = RestrictedDfa::new(tokenizer, &self.original_active, relevant_bytes);
+        let source_blocks = &self.source_blocks;
+        debug_assert_eq!(source_blocks.len(), restricted.state_count());
+        let identity_machine = Arc::new(restricted.residual_machine(
+            source_blocks,
+            None,
+            &self.active_representatives,
+        ));
         let mut modes = vec![TerminalNwaTransportMode {
-            scanner_state_for_original: identity_states,
-            terminal_map: identity_labels.clone(),
+            logical_state_for_original: source_blocks[..restricted.real_state_count]
+                .iter()
+                .copied()
+                .collect(),
+            machine: identity_machine,
         }];
 
         for (representative, members) in self.members_by_representative.iter().enumerate() {
@@ -476,22 +556,25 @@ impl TerminalInterchangeability {
                     continue;
                 }
                 let map = self.maps_by_representative_member.get(&(representative, member))?;
-                let scanner_state_for_original = map
-                    .source_state_to_target_states
+                let logical_state_for_original = source_blocks[..restricted.real_state_count]
                     .iter()
-                    .map(|targets| targets.first().copied())
-                    .collect::<Option<Vec<_>>>()?;
-                let mut terminal_map = identity_labels.clone();
-                terminal_map[representative as usize] = member;
-                terminal_map[member as usize] = representative;
+                    .map(|&source| map.target_block_for_source_block[source as usize])
+                    .collect::<Vec<_>>();
+                let mut emit_member = vec![false; self.original_active.len()];
+                emit_member[member as usize] = true;
                 modes.push(TerminalNwaTransportMode {
-                    scanner_state_for_original,
-                    terminal_map,
+                    logical_state_for_original,
+                    machine: Arc::new(restricted.residual_machine(
+                        source_blocks,
+                        Some((representative as usize, member as usize)),
+                        &emit_member,
+                    )),
                 });
             }
         }
         Some(modes)
     }
+
 
 
 }
@@ -532,39 +615,6 @@ mod tests {
     use crate::automata::lexer::compile::build_regex;
 
     #[test]
-    fn strict_interchange_map_exists_for_rotated_residuals() {
-        let expressions = vec![
-            Expr::Seq(vec![Expr::U8Seq(b"a".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
-            Expr::Seq(vec![Expr::U8Seq(b"aaa".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
-        ];
-        let tokenizer = build_regex(&expressions).into_tokenizer(
-            expressions.len() as u32,
-            Some(Arc::from(expressions.into_boxed_slice())),
-        );
-        let dfa = RestrictedDfa::new(&tokenizer, &[true, true], &[true; 256]);
-        let forward = dfa.interchange_map(0, 1).expect("rotated map must exist");
-        assert!(dfa.concrete_swap_automorphism(&forward, 0, 1).is_some());
-        assert!(dfa.interchange_map(1, 0).is_some());
-    }
-
-    #[test]
-    fn transport_rejects_a_non_singleton_residual_target() {
-        let expressions = vec![
-            Expr::Seq(vec![Expr::U8Seq(b"a".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
-            Expr::Seq(vec![Expr::U8Seq(b"aaa".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
-        ];
-        let tokenizer = build_regex(&expressions).into_tokenizer(
-            expressions.len() as u32,
-            Some(Arc::from(expressions.into_boxed_slice())),
-        );
-        let dfa = RestrictedDfa::new(&tokenizer, &[true, true], &[true; 256]);
-        let mut map = dfa.interchange_map(0, 1).expect("rotated map must exist");
-        let duplicated_target = map.source_state_to_target_states[0][0];
-        map.source_state_to_target_states[0].push(duplicated_target);
-        assert!(dfa.concrete_swap_automorphism(&map, 0, 1).is_none());
-    }
-
-    #[test]
     fn rotated_residuals_form_an_l2p_terminal_partition() {
         let expressions = vec![
             Expr::Seq(vec![Expr::U8Seq(b"a".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
@@ -577,7 +627,56 @@ mod tests {
         let plan = TerminalInterchangeability::build(&tokenizer, &[true, true], &[true; 256], None);
         assert_eq!(plan.active_terminal_count_before(), 2);
         assert_eq!(plan.active_terminal_count_after(), 1);
-        assert!(plan.terminal_nwa_transport_modes().is_some());
+        assert!(plan.terminal_nwa_transport_modes(&tokenizer, &[true; 256]).is_some());
+    }
+
+    #[test]
+    fn residual_modes_follow_raw_transitions_and_restore_all_labels() {
+        let expressions = vec![
+            Expr::Seq(vec![Expr::U8Seq(b"a".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
+            Expr::Seq(vec![Expr::U8Seq(b"aaa".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let active = [true, true];
+        let plan = TerminalInterchangeability::build(&tokenizer, &active, &[true; 256], None);
+        let modes = plan
+            .terminal_nwa_transport_modes(&tokenizer, &[true; 256])
+            .expect("rotated terminals must produce residual modes");
+
+        for state in 0..tokenizer.num_states() {
+            let mut expected = tokenizer.matched_terminals_iter(state).collect::<Vec<_>>();
+            expected.sort_unstable();
+            let mut actual = modes
+                .iter()
+                .flat_map(|mode| {
+                    mode.machine
+                        .matched_terminals(mode.logical_state_for_original[state as usize])
+                        .iter()
+                        .copied()
+                })
+                .collect::<Vec<_>>();
+            actual.sort_unstable();
+            actual.dedup();
+            assert_eq!(actual, expected, "residual labels differed at lexer state {state}");
+
+            for byte in 0..=255u8 {
+                let next = tokenizer.get_transition(state, byte);
+                if next == NO_STATE {
+                    continue;
+                }
+                for mode in &modes {
+                    let logical = mode.logical_state_for_original[state as usize];
+                    assert_eq!(
+                        mode.machine.step(logical, byte),
+                        Some(mode.logical_state_for_original[next as usize]),
+                        "residual transport did not commute at state={state} byte={byte}",
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -588,7 +687,7 @@ mod tests {
             Some(Arc::from(expressions.into_boxed_slice())),
         );
         let dfa = RestrictedDfa::new(&tokenizer, &[true, true], &[true; 256]);
-        assert!(dfa.interchange_map(0, 1).is_none());
+        assert!({ let blocks = dfa.minimize(None); let residual = dfa.minimized_residual(&blocks); dfa.interchange_map(&residual, 0, 1) }.is_none());
         let plan = TerminalInterchangeability::build(&tokenizer, &[true, true], &[true; 256], None);
         assert!(plan.is_identity());
     }
@@ -670,6 +769,6 @@ mod tests {
             Some(Arc::from(expressions.into_boxed_slice())),
         );
         let dfa = RestrictedDfa::new(&tokenizer, &[true, false, true], &[true; 256]);
-        assert!(dfa.interchange_map(0, 2).is_some());
+        assert!({ let blocks = dfa.minimize(None); let residual = dfa.minimized_residual(&blocks); dfa.interchange_map(&residual, 0, 2) }.is_some());
     }
 }
