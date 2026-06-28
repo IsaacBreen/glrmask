@@ -3991,31 +3991,15 @@ fn try_inline_unit_reductions_for_cell_inner(
 }
 
 fn remap_action_row_targets_in_place(action_row: &mut ActionRow, mapping: &[u32]) {
-    let terminals = action_row.keys().collect::<Vec<_>>();
-    for terminal in terminals {
-        let remapped = remap_action_targets(
-            action_row
-                .get(&terminal)
-                .expect("action-row key remains present while remapping"),
-            mapping,
-        );
-        *action_row
-            .get_mut(&terminal)
-            .expect("action-row key remains present while remapping") = remapped;
-    }
+    action_row.for_each_value_mut(|action| {
+        *action = remap_action_targets(action, mapping);
+    });
 }
 
 fn remap_goto_row_targets_in_place(goto_row: &mut GotoRow, mapping: &[u32]) {
-    let nonterminals = goto_row.keys().copied().collect::<Vec<_>>();
-    for nonterminal in nonterminals {
-        let (target, replace) = *goto_row
-            .get(&nonterminal)
-            .expect("goto-row key remains present while remapping");
-        *goto_row
-            .get_mut(&nonterminal)
-            .expect("goto-row key remains present while remapping") =
-            (mapping[target as usize], replace);
-    }
+    goto_row.for_each_value_mut(|(target, _)| {
+        *target = mapping[*target as usize];
+    });
 }
 
 fn remap_action_targets(action: &Action, mapping: &[u32]) -> Action {

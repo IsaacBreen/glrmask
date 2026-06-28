@@ -124,6 +124,22 @@ impl<K: Copy + Eq + Hash, V: Clone> SparseRow<K, V> {
             Self::Large(entries) => SparseRowValues::Large(entries.values()),
         }
     }
+
+    #[inline]
+    pub(crate) fn for_each_value_mut(&mut self, mut f: impl FnMut(&mut V)) {
+        match self {
+            Self::Inline(entries) => {
+                for (_, value) in entries {
+                    f(value);
+                }
+            }
+            Self::Large(entries) => {
+                for value in entries.values_mut() {
+                    f(value);
+                }
+            }
+        }
+    }
 }
 
 impl<K: Copy + Eq + Hash, V: Clone + PartialEq> PartialEq for SparseRow<K, V> {
@@ -429,6 +445,14 @@ impl ActionRow {
         ActionRowValues { iter: self.iter() }
     }
 
+    pub(crate) fn for_each_value_mut(&mut self, mut f: impl FnMut(&mut Action)) {
+        self.expand_default_to_sparse();
+        match self {
+            Self::Sparse(row) => row.for_each_value_mut(|action| f(action)),
+            Self::Default { .. } => unreachable!("default row should have been expanded"),
+        }
+    }
+
     pub(crate) fn compress_default(&mut self, num_terminals: TerminalID) {
         let Self::Sparse(row) = self else {
             return;
@@ -696,6 +720,26 @@ mod tests {
         assert_eq!(row.get(&0), Some(&Action::Accept));
         assert_eq!(row.get(&2), None);
         assert_eq!(row.get(&4), Some(&shift(8)));
+    }
+
+    #[test]
+    fn mutable_action_traversal_expands_default_rows_and_preserves_holes() {
+        let mut row = ActionRow::Default {
+            default: shift(3),
+            exceptions: SparseRow::from_iter([
+                (1, None),
+                (2, Some(Action::Accept)),
+            ]),
+            num_terminals: 4,
+        };
+
+        row.for_each_value_mut(|action| *action = Action::Accept);
+
+        assert!(!row.is_default_compressed());
+        assert_eq!(row.get(&0), Some(&Action::Accept));
+        assert_eq!(row.get(&1), None);
+        assert_eq!(row.get(&2), Some(&Action::Accept));
+        assert_eq!(row.get(&3), Some(&Action::Accept));
     }
 
     #[test]
