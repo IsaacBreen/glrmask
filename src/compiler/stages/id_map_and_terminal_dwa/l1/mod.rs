@@ -1112,28 +1112,56 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
 
     let profile_intern_started_at = profile_enabled.then(Instant::now);
     let empty_profile: Arc<[(u32, u32, u32)]> = Arc::from([]);
-    let mut profile_to_id = FxHashMap::<Arc<[(u32, u32, u32)]>, u32>::default();
-    profile_to_id.insert(Arc::clone(&empty_profile), 0);
     let mut profiles_by_id = vec![empty_profile];
     let mut next_profile_id = 1u32;
+    let mut profile_id_by_bucket_and_ptr = FxHashMap::<(u8, usize), u32>::default();
+    let assert_profile_pointer_partition =
+        std::env::var_os("GLRMASK_ASSERT_L1_PROFILE_POINTER_PARTITION").is_some();
+    let mut profile_content_to_bucket_and_ptr = assert_profile_pointer_partition
+        .then(FxHashMap::<Arc<[(u32, u32, u32)]>, (u8, usize)>::default);
     let mut target_to_profile_id = FxHashMap::<(u8, u32), u32>::default();
     for (target_key, profile) in target_profiles {
-        let profile_id = if let Some(&profile_id) = profile_to_id.get(&profile) {
-            profile_id
+        if !profile.is_empty() {
+            if let Some(content_to_pointer) = profile_content_to_bucket_and_ptr.as_mut() {
+                let pointer_key = (target_key.0, profile.as_ptr() as usize);
+                if let Some(&existing) = content_to_pointer.get(&profile) {
+                    assert_eq!(
+                        existing, pointer_key,
+                        "equal L1 profiles must share their first-byte behavior identity",
+                    );
+                } else {
+                    content_to_pointer.insert(Arc::clone(&profile), pointer_key);
+                }
+            }
+        }
+        let profile_id = if profile.is_empty() {
+            0
         } else {
-            let profile_id = next_profile_id;
-            next_profile_id += 1;
-            profile_to_id.insert(Arc::clone(&profile), profile_id);
-            profiles_by_id.push(profile);
-            profile_id
+            let pointer_key = (target_key.0, profile.as_ptr() as usize);
+            if let Some(&profile_id) = profile_id_by_bucket_and_ptr.get(&pointer_key) {
+                profile_id
+            } else {
+                let profile_id = next_profile_id;
+                next_profile_id += 1;
+                profile_id_by_bucket_and_ptr.insert(pointer_key, profile_id);
+                profiles_by_id.push(profile);
+                profile_id
+            }
         };
         target_to_profile_id.insert(target_key, profile_id);
     }
     let profile_ids_len = next_profile_id as usize;
+    let profile_id_intern_ms = profile_intern_started_at.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
+    let profile_freeze_started_at = profile_enabled.then(Instant::now);
     let walk_profiles_by_id: Vec<L1WalkProfile> = profiles_by_id
         .iter()
         .map(|profile| freeze_l1_walk_profile(profile.as_ref()))
         .collect();
+    let profile_freeze_ms = profile_freeze_started_at.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
     let profile_intern_ms = profile_intern_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
@@ -1265,7 +1293,7 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
 
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][l1_exact_equiv_detail] states={} first_bytes={} unique_targets={} profile_ids={} groups={} terminal_signature_ms={:.3} unique_targets_ms={:.3} target_profiles_ms={:.3} profile_intern_ms={:.3} state_keys_ms={:.3} group_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_exact_equiv_detail] states={} first_bytes={} unique_targets={} profile_ids={} groups={} terminal_signature_ms={:.3} unique_targets_ms={:.3} target_profiles_ms={:.3} profile_id_intern_ms={:.3} profile_freeze_ms={:.3} profile_intern_ms={:.3} state_keys_ms={:.3} group_ms={:.3} total_ms={:.3}",
             states.len(),
             nonempty_first_bytes.len(),
             unique_targets_len,
@@ -1274,6 +1302,8 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
             terminal_signature_ms,
             unique_targets_ms,
             target_profiles_ms,
+            profile_id_intern_ms,
+            profile_freeze_ms,
             profile_intern_ms,
             state_keys_ms,
             group_ms,
@@ -1516,7 +1546,21 @@ impl L1PackedSuffixTrie {
         token_ids: &[usize],
         suffix_lcps: &[usize],
     ) -> Self {
-        let mut nodes = vec![L1PackedSuffixTrieNode::root()];
+        // The LCP walk determines the exact number of nodes appended by each
+        // token. Reserve once so large vocabulary buckets do not repeatedly
+        // copy the packed trie while it is being constructed.
+        let mut node_capacity = 1usize;
+        let mut previous_suffix_len = 0usize;
+        for (bucket_pos, &internal_token_id) in token_ids.iter().enumerate() {
+            let suffix_len = sorted_entries[internal_token_id].1.len().saturating_sub(1);
+            let lcp = suffix_lcps[bucket_pos]
+                .min(suffix_len)
+                .min(previous_suffix_len);
+            node_capacity += suffix_len - lcp;
+            previous_suffix_len = suffix_len;
+        }
+        let mut nodes = Vec::with_capacity(node_capacity);
+        nodes.push(L1PackedSuffixTrieNode::root());
         let mut path = vec![0u32];
 
         for (bucket_pos, &internal_token_id) in token_ids.iter().enumerate() {
@@ -1544,6 +1588,7 @@ impl L1PackedSuffixTrie {
             debug_assert_eq!(nodes[terminal].terminal_token, L1_NONE);
             nodes[terminal].terminal_token = token_id;
         }
+        debug_assert_eq!(nodes.len(), node_capacity);
 
         // Token IDs follow the byte-sorted vocabulary order. Every suffix-trie
         // subtree therefore spans one contiguous leaf-token interval. Computing
@@ -1696,6 +1741,19 @@ fn l1_packed_append_behavior(
     }
 }
 
+fn l1_uniform_bucket_profile(
+    profiles_by_signature: &mut FxHashMap<u32, Arc<[(u32, u32, u32)]>>,
+    signature_id: u32,
+    token_start: u32,
+    token_end: u32,
+) -> Arc<[(u32, u32, u32)]> {
+    Arc::clone(
+        profiles_by_signature
+            .entry(signature_id)
+            .or_insert_with(|| Arc::from(vec![(signature_id, token_start, token_end)])),
+    )
+}
+
 fn l1_bucket_suffix_signature_profiles_packed(
     first_byte: u8,
     targets: &[u32],
@@ -1720,16 +1778,26 @@ fn l1_bucket_suffix_signature_profiles_packed(
         }
         return results;
     }
+    let token_start = token_ids[0] as u32;
+    let token_end = *token_ids.last().expect("non-empty suffix bucket") as u32;
+    let mut uniform_profiles_by_signature =
+        FxHashMap::<u32, Arc<[(u32, u32, u32)]>>::default();
 
     let mut walk_targets = Vec::<u32>::new();
     for &target in targets {
         if l1_target_self_loop_covers_suffix_subtree(target, suffix_subtree, flat_trans) {
-            let mut profile = Vec::<(u32, u32, u32)>::new();
             let sig_id = state_to_terminal_signature[target as usize];
-            if sig_id != 0 {
-                profile.push((sig_id, token_ids[0] as u32, *token_ids.last().unwrap() as u32));
-            }
-            results.push(((first_byte, target), Arc::from(profile)));
+            let profile = if sig_id == 0 {
+                Arc::from([])
+            } else {
+                l1_uniform_bucket_profile(
+                    &mut uniform_profiles_by_signature,
+                    sig_id,
+                    token_start,
+                    token_end,
+                )
+            };
+            results.push(((first_byte, target), profile));
         } else {
             walk_targets.push(target);
         }
@@ -1814,32 +1882,80 @@ fn l1_bucket_suffix_signature_profiles_packed(
             let edge_index = node.first_edge as usize + edge_offset;
             let edge = trie.edges[edge_index];
             let child = edge.child as usize;
-            stamp = stamp.wrapping_add(1);
-            if stamp == 0 {
-                seen_stamp.fill(0);
-                stamp = 1;
-            }
             edge_data[edge_index].map_start = transition_maps.len() as u32;
             let child_start = states.len() as u32;
-            for state_offset in 0..parent_len {
-                let state = states[parent_start + state_offset];
+            if parent_len == 1 {
                 let next = l1_transition(
                     flat_trans,
                     transitions_by_byte,
                     num_lexer_states,
-                    state,
+                    states[parent_start],
                     edge.byte as usize,
                 );
                 if next == dead {
                     transition_maps.push(L1_NONE);
-                } else if seen_stamp[next as usize] == stamp {
-                    transition_maps.push(seen_index[next as usize]);
                 } else {
-                    let child_index = states.len() as u32 - child_start;
-                    seen_stamp[next as usize] = stamp;
-                    seen_index[next as usize] = child_index;
                     states.push(next);
-                    transition_maps.push(child_index);
+                    transition_maps.push(0);
+                }
+            } else if parent_len == 2 {
+                let first = l1_transition(
+                    flat_trans,
+                    transitions_by_byte,
+                    num_lexer_states,
+                    states[parent_start],
+                    edge.byte as usize,
+                );
+                let second = l1_transition(
+                    flat_trans,
+                    transitions_by_byte,
+                    num_lexer_states,
+                    states[parent_start + 1],
+                    edge.byte as usize,
+                );
+                let first_index = if first == dead {
+                    L1_NONE
+                } else {
+                    states.push(first);
+                    0
+                };
+                let second_index = if second == dead {
+                    L1_NONE
+                } else if second == first && first != dead {
+                    0
+                } else {
+                    let index = states.len() as u32 - child_start;
+                    states.push(second);
+                    index
+                };
+                transition_maps.push(first_index);
+                transition_maps.push(second_index);
+            } else {
+                stamp = stamp.wrapping_add(1);
+                if stamp == 0 {
+                    seen_stamp.fill(0);
+                    stamp = 1;
+                }
+                for state_offset in 0..parent_len {
+                    let state = states[parent_start + state_offset];
+                    let next = l1_transition(
+                        flat_trans,
+                        transitions_by_byte,
+                        num_lexer_states,
+                        state,
+                        edge.byte as usize,
+                    );
+                    if next == dead {
+                        transition_maps.push(L1_NONE);
+                    } else if seen_stamp[next as usize] == stamp {
+                        transition_maps.push(seen_index[next as usize]);
+                    } else {
+                        let child_index = states.len() as u32 - child_start;
+                        seen_stamp[next as usize] = stamp;
+                        seen_index[next as usize] = child_index;
+                        states.push(next);
+                        transition_maps.push(child_index);
+                    }
                 }
             }
             data[child].states_start = child_start;
@@ -2138,17 +2254,33 @@ fn l1_bucket_suffix_signature_profiles_packed(
         let profile = if let Some(profile) = profiles_by_behavior.get(&behavior_id) {
             Arc::clone(profile)
         } else {
-            let mut profile = Vec::new();
-            l1_packed_append_behavior(
+            let uniform_signature = l1_packed_uniform_signature(
                 &trie,
                 0,
                 behavior_id,
                 &data,
                 &records,
-                &record_child_behaviors,
-                &mut profile,
             );
-            let profile: Arc<[(u32, u32, u32)]> = Arc::from(profile);
+            let profile = if uniform_signature != 0 {
+                l1_uniform_bucket_profile(
+                    &mut uniform_profiles_by_signature,
+                    uniform_signature,
+                    token_start,
+                    token_end,
+                )
+            } else {
+                let mut profile = Vec::new();
+                l1_packed_append_behavior(
+                    &trie,
+                    0,
+                    behavior_id,
+                    &data,
+                    &records,
+                    &record_child_behaviors,
+                    &mut profile,
+                );
+                Arc::from(profile)
+            };
             profiles_by_behavior.insert(behavior_id, Arc::clone(&profile));
             profile
         };
@@ -3109,6 +3241,12 @@ fn build_l1_terminal_dwa(
             let mut group_counts = vec![0usize; num_groups];
             let mut group_ranges: Vec<Vec<(u32, u32)>> =
                 (0..num_groups).map(|_| Vec::new()).collect();
+            // Most TSIDs contribute one signature, or have a terminal group
+            // that sees only one of their few signatures. In that case the
+            // group weight is exactly the existing shared range set: preserve
+            // that Arc instead of copying, sorting, and rebuilding it.
+            let mut group_single_arc: Vec<Option<Arc<RangeSetBlaze<u32>>>> =
+                (0..num_groups).map(|_| None).collect();
             let mut touched_groups = Vec::<usize>::new();
 
             for (tsid, contributions) in tsid_group_contributions.iter().enumerate() {
@@ -3119,6 +3257,7 @@ fn build_l1_terminal_dwa(
                 for &group_idx in &touched_groups {
                     group_counts[group_idx] = 0;
                     group_ranges[group_idx].clear();
+                    group_single_arc[group_idx] = None;
                 }
                 touched_groups.clear();
 
@@ -3126,16 +3265,39 @@ fn build_l1_terminal_dwa(
                     for &group_idx in &signature_groups[sig_id] {
                         if group_counts[group_idx] == 0 {
                             touched_groups.push(group_idx);
+                            group_counts[group_idx] = 1;
+                            group_single_arc[group_idx] = Some(Arc::clone(arc));
+                            continue;
                         }
+                        if group_counts[group_idx] == 1
+                            && tsid_total_rep_counts[tsid] != 2
+                        {
+                            group_ranges[group_idx].extend(
+                                group_single_arc[group_idx]
+                                    .as_ref()
+                                    .expect("single group contribution")
+                                    .ranges()
+                                    .map(|range| (*range.start(), *range.end())),
+                            );
+                        }
+                        group_single_arc[group_idx] = None;
                         group_counts[group_idx] += 1;
-                        group_ranges[group_idx].extend(
-                            arc.ranges().map(|range| (*range.start(), *range.end())),
-                        );
+                        if tsid_total_rep_counts[tsid] != 2 {
+                            group_ranges[group_idx].extend(
+                                arc.ranges().map(|range| (*range.start(), *range.end())),
+                            );
+                        }
                     }
                 }
 
                 for &group_idx in &touched_groups {
-                    let shared = if group_counts[group_idx] == tsid_total_rep_counts[tsid] {
+                    let shared = if group_counts[group_idx] == 1 {
+                        Some(Arc::clone(
+                            group_single_arc[group_idx]
+                                .as_ref()
+                                .expect("single group contribution"),
+                        ))
+                    } else if group_counts[group_idx] == tsid_total_rep_counts[tsid] {
                         tsid_full_arc_cache[tsid]
                             .get_or_init(|| {
                                 shared_rangeset_from_unsorted_pairs(
