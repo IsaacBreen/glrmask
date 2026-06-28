@@ -1863,50 +1863,79 @@ fn l1_bucket_suffix_signature_profiles_packed(
         return results;
     }
 
-    let mut dedup_others: Option<Vec<Vec<u32>>> = None;
-    if !has_empty_suffix {
-        let mut first_suffix_bytes = Vec::<u8>::new();
-        for word in 0..4u8 {
-            let mut bits = suffix_first_bytes[word as usize];
-            while bits != 0 {
-                let offset = bits.trailing_zeros() as u8;
-                first_suffix_bytes.push(word * 64 + offset);
-                bits &= bits - 1;
-            }
+    let empty_suffix_token = has_empty_suffix.then(|| {
+        let token_id = token_ids[0] as u32;
+        debug_assert_eq!(
+            sorted_entries[token_id as usize].1.as_ref(),
+            &[first_byte],
+            "the empty suffix token must be first in byte order",
+        );
+        token_id
+    });
+    let mut first_suffix_bytes = Vec::<u8>::new();
+    for word in 0..4u8 {
+        let mut bits = suffix_first_bytes[word as usize];
+        while bits != 0 {
+            let offset = bits.trailing_zeros() as u8;
+            first_suffix_bytes.push(word * 64 + offset);
+            bits &= bits - 1;
         }
-        if !first_suffix_bytes.is_empty() {
-            let mut fp_groups = FxHashMap::<Vec<u32>, Vec<u32>>::default();
-            for &target in &walk_targets {
-                let fp: Vec<u32> = first_suffix_bytes
-                    .iter()
-                    .map(|&byte| {
-                        l1_transition(
-                            flat_trans,
-                            transitions_by_byte,
-                            num_lexer_states,
-                            target,
-                            byte as usize,
-                        )
-                    })
-                    .collect();
-                fp_groups.entry(fp).or_default().push(target);
-            }
-            let mut deduped_targets = Vec::<u32>::new();
-            let mut others = Vec::<Vec<u32>>::new();
-            for (fp, group) in fp_groups {
-                if fp.iter().all(|&state| state == dead) {
-                    for target in group {
-                        results.push(((first_byte, target), Arc::from([])));
-                    }
-                    continue;
+    }
+
+    let mut dedup_others: Option<Vec<Vec<u32>>> = None;
+    if first_suffix_bytes.is_empty() {
+        let empty_token = empty_suffix_token.expect("empty-only bucket");
+        for target in walk_targets.drain(..) {
+            let sig_id = state_to_terminal_signature[target as usize];
+            let profile = if sig_id == 0 {
+                Arc::from([])
+            } else {
+                Arc::from(vec![(sig_id, empty_token, empty_token)])
+            };
+            results.push(((first_byte, target), profile));
+        }
+    } else {
+        let mut fp_groups = FxHashMap::<Vec<u32>, Vec<u32>>::default();
+        for &target in &walk_targets {
+            let fp: Vec<u32> = first_suffix_bytes
+                .iter()
+                .map(|&byte| {
+                    l1_transition(
+                        flat_trans,
+                        transitions_by_byte,
+                        num_lexer_states,
+                        target,
+                        byte as usize,
+                    )
+                })
+                .collect();
+            fp_groups.entry(fp).or_default().push(target);
+        }
+        let mut deduped_targets = Vec::<u32>::new();
+        let mut others = Vec::<Vec<u32>>::new();
+        for (fp, group) in fp_groups {
+            if fp.iter().all(|&state| state == dead) {
+                for target in group {
+                    let profile = if let Some(empty_token) = empty_suffix_token {
+                        let sig_id = state_to_terminal_signature[target as usize];
+                        if sig_id == 0 {
+                            Arc::from([])
+                        } else {
+                            Arc::from(vec![(sig_id, empty_token, empty_token)])
+                        }
+                    } else {
+                        Arc::from([])
+                    };
+                    results.push(((first_byte, target), profile));
                 }
-                deduped_targets.push(group[0]);
-                others.push(group[1..].to_vec());
+                continue;
             }
-            if deduped_targets.len() < walk_targets.len() {
-                walk_targets = deduped_targets;
-                dedup_others = Some(others);
-            }
+            deduped_targets.push(group[0]);
+            others.push(group[1..].to_vec());
+        }
+        if deduped_targets.len() < walk_targets.len() {
+            walk_targets = deduped_targets;
+            dedup_others = Some(others);
         }
     }
     if walk_targets.is_empty() {
@@ -1914,7 +1943,15 @@ fn l1_bucket_suffix_signature_profiles_packed(
     }
 
     let trie_started_at = profiling.then(Instant::now);
-    let trie = L1PackedSuffixTrie::build(sorted_entries, token_ids, suffix_lcps);
+    let mut trie = L1PackedSuffixTrie::build(sorted_entries, token_ids, suffix_lcps);
+    if let Some(empty_token) = empty_suffix_token {
+        debug_assert_eq!(trie.nodes[0].terminal_token, empty_token);
+        let first_child = trie.nodes[0].first_child;
+        debug_assert_ne!(first_child, L1_NONE);
+        trie.nodes[0].terminal_token = L1_NONE;
+        trie.nodes[0].subtree_start = trie.nodes[first_child as usize].subtree_start;
+    }
+    let product_token_start = trie.nodes[0].subtree_start;
     let trie_ms = trie_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let propagate_started_at = profiling.then(Instant::now);
     let mut data = vec![L1PackedProductNodeData::default(); trie.nodes.len()];
@@ -2306,9 +2343,10 @@ fn l1_bucket_suffix_signature_profiles_packed(
     let materialize_started_at = profiling.then(Instant::now);
     let root_behavior_start = data[0].behaviors_start as usize;
     let mut profiles_by_behavior = FxHashMap::<u32, Arc<[(u32, u32, u32)]>>::default();
+    let mut empty_suffix_profiles = FxHashMap::<(u32, u32), Arc<[(u32, u32, u32)]>>::default();
     for (target_index, &target) in walk_targets.iter().enumerate() {
         let behavior_id = behavior_ids[root_behavior_start + target_index];
-        let profile = if let Some(profile) = profiles_by_behavior.get(&behavior_id) {
+        let future_profile = if let Some(profile) = profiles_by_behavior.get(&behavior_id) {
             Arc::clone(profile)
         } else {
             let uniform_signature = l1_packed_uniform_signature(
@@ -2322,7 +2360,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                 l1_uniform_bucket_profile(
                     &mut uniform_profiles_by_signature,
                     uniform_signature,
-                    token_start,
+                    product_token_start,
                     token_end,
                 )
             } else {
@@ -2341,12 +2379,28 @@ fn l1_bucket_suffix_signature_profiles_packed(
             profiles_by_behavior.insert(behavior_id, Arc::clone(&profile));
             profile
         };
+        let mut profile_for_target = |target: u32| {
+            let Some(empty_token) = empty_suffix_token else {
+                return Arc::clone(&future_profile);
+            };
+            let sig_id = state_to_terminal_signature[target as usize];
+            if sig_id == 0 {
+                return Arc::clone(&future_profile);
+            }
+            Arc::clone(
+                empty_suffix_profiles
+                    .entry((behavior_id, sig_id))
+                    .or_insert_with(|| {
+                        l1_profile_with_inserted_token(&future_profile, sig_id, empty_token)
+                    }),
+            )
+        };
         if let Some(ref others) = dedup_others {
             for &other_target in &others[target_index] {
-                results.push(((first_byte, other_target), Arc::clone(&profile)));
+                results.push(((first_byte, other_target), profile_for_target(other_target)));
             }
         }
-        results.push(((first_byte, target), profile));
+        results.push(((first_byte, target), profile_for_target(target)));
     }
     let materialize_ms = materialize_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
@@ -2602,6 +2656,49 @@ fn append_l1_signature_profile_run(profile: &mut Vec<(u32, u32, u32)>, sig_id: u
         }
     }
     profile.push((sig_id, token_id, token_id));
+}
+
+fn append_l1_signature_profile_range(
+    profile: &mut Vec<(u32, u32, u32)>,
+    sig_id: u32,
+    start: u32,
+    end: u32,
+) {
+    if sig_id == 0 {
+        return;
+    }
+    if let Some((last_sig, _last_start, last_end)) = profile.last_mut() {
+        if *last_sig == sig_id && last_end.checked_add(1) == Some(start) {
+            *last_end = end;
+            return;
+        }
+    }
+    profile.push((sig_id, start, end));
+}
+
+fn l1_profile_with_inserted_token(
+    profile: &Arc<[(u32, u32, u32)]>,
+    sig_id: u32,
+    token_id: u32,
+) -> Arc<[(u32, u32, u32)]> {
+    if sig_id == 0 {
+        return Arc::clone(profile);
+    }
+
+    let mut combined = Vec::with_capacity(profile.len() + 2);
+    let mut inserted = false;
+    for &(existing_sig, start, end) in profile.iter() {
+        if !inserted && token_id < start {
+            append_l1_signature_profile_range(&mut combined, sig_id, token_id, token_id);
+            inserted = true;
+        }
+        debug_assert!(inserted || token_id > end);
+        append_l1_signature_profile_range(&mut combined, existing_sig, start, end);
+    }
+    if !inserted {
+        append_l1_signature_profile_range(&mut combined, sig_id, token_id, token_id);
+    }
+    Arc::from(combined)
 }
 
 fn build_l1_terminal_dwa(
@@ -4073,6 +4170,19 @@ mod packed_suffix_product_tests {
             .map(|range| (*range.start(), *range.end()))
             .collect();
         assert_eq!(actual, vec![(1, 6), (8, 14), (18, 22)]);
+    }
+
+    #[test]
+    fn inserted_empty_suffix_token_merges_with_adjacent_future_run() {
+        let future_profile: Arc<[(u32, u32, u32)]> = Arc::from(vec![
+            (4, 10, 11),
+            (7, 14, 14),
+        ]);
+        let combined = l1_profile_with_inserted_token(&future_profile, 4, 9);
+        assert_eq!(combined.as_ref(), &[(4, 9, 11), (7, 14, 14)]);
+
+        let later = l1_profile_with_inserted_token(&future_profile, 5, 12);
+        assert_eq!(later.as_ref(), &[(4, 10, 11), (5, 12, 12), (7, 14, 14)]);
     }
 
     #[test]
