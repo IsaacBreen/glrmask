@@ -127,7 +127,7 @@ pub(crate) struct AcyclicDfaReindex {
 /// Compute the exact reindexing performed by [`reindex_minimized_acyclic_dfa`]
 /// without copying transition maps.
 pub(crate) fn reindex_minimized_acyclic_order(dfa: &DFA) -> AcyclicDfaReindex {
-    assert!(
+    debug_assert!(
         dfa.is_acyclic(),
         "reindex_minimized_acyclic_order: input DFA is cyclic"
     );
@@ -190,7 +190,7 @@ pub fn reindex_minimized_acyclic_dfa(dfa: &DFA) -> DFA {
 ///
 /// Panics (debug) if the input is cyclic.
 pub fn minimize_acyclic(dfa: &DFA) -> DFA {
-    assert!(
+    debug_assert!(
         dfa.is_acyclic(),
         "minimize_acyclic: input DFA is cyclic"
     );
