@@ -38,10 +38,7 @@ use rustc_hash::FxHashMap;
 
 use super::grammar_helpers::compute_always_allowed_follows;
 use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhaseProfile};
-use nwa_builder::{
-    build_nwa_via_trie_walk, build_transport_nwa_via_trie_walk, internal_vocab_entries,
-    seed_root_nodes,
-};
+use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
 use terminal_interchangeability::TerminalInterchangeability;
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
@@ -634,7 +631,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // builder still consults full-tokenizer future-terminal sets in several
     // paths, so filtering equivalence by `active_terminals` would be unsound: it
     // could merge states that the later NWA construction still distinguishes.
-    let (mut simplified_id_map, equiv_profile) =
+    let (simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
             tokenizer_for_build,
@@ -648,21 +645,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             if use_simplified_tok || reference_terminal_expansion { None } else { flat_trans },
             equivalence_initial_state_map,
         );
-    if reference_terminal_expansion {
-        // Keep the exact raw lexer-state coordinate in the reference artifact.
-        // Each transport mode simulates a different state for the current
-        // terminal segment, while terminal-DWA weights remain indexed by the
-        // actual token-start state. A quotient TSID could merge source states
-        // whose transported continuations differ; singletons avoid that
-        // representational shortcut. The final artifact comparator accepts the
-        // intentionally different id map.
-        let ids = (0..tokenizer_for_build.num_states()).collect::<Vec<u32>>();
-        simplified_id_map.tokenizer_states =
-            ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-                ids.clone(),
-                ids,
-            );
-    }
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // tsid_fallback is independent of the NWA build / postprocess /
@@ -747,44 +729,23 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let start_state = nwa.add_state();
             nwa.start_states_mut().push(start_state);
 
-            let transport_modes = reference_terminal_expansion
-                .then(|| terminal_interchangeability.terminal_nwa_transport_modes())
-                .flatten();
-            let seed_ms;
-
             // ---- Step 6: Trie-walk NWA build ----
             let trie_build_started_at = Instant::now();
-            let _build_profile = if let Some(modes) = transport_modes.as_deref() {
-                seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
-                build_transport_nwa_via_trie_walk(
-                    tokenizer_for_build,
-                    ignore_terminal,
-                    &mut nwa,
-                    start_state,
-                    leaf_state,
-                    &simplified_id_map,
-                    &full_tree.root,
-                    &mut pm_computer,
-                    analysis_active_terminals,
-                    modes,
-                )
-            } else {
-                let roots = seed_root_nodes(&mut nwa, start_state, &simplified_id_map);
-                seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
-                build_nwa_via_trie_walk(
-                    tokenizer_for_build,
-                    terminal_coloring,
-                    use_terminal_coloring && !reference_terminal_expansion,
-                    ignore_terminal,
-                    &mut nwa,
-                    leaf_state,
-                    simplified_id_map.num_tsids(),
-                    &full_tree.root,
-                    &roots,
-                    &mut pm_computer,
-                    reference_terminal_expansion.then_some(analysis_active_terminals),
-                )
-            };
+            let roots = seed_root_nodes(&mut nwa, start_state, &simplified_id_map);
+            let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+            let _build_profile = build_nwa_via_trie_walk(
+                tokenizer_for_build,
+                terminal_coloring,
+                use_terminal_coloring && !reference_terminal_expansion,
+                ignore_terminal,
+                &mut nwa,
+                leaf_state,
+                simplified_id_map.num_tsids(),
+                &full_tree.root,
+                &roots,
+                &mut pm_computer,
+                reference_terminal_expansion.then_some(analysis_active_terminals),
+            );
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let always_allowed_started_at = Instant::now();
@@ -972,6 +933,13 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         },
     };
 
+    if reference_terminal_expansion {
+        output = terminal_interchangeability.restore_reference_artifact(
+            output,
+            tokenizer.num_states() as usize,
+            vocab.max_token_id(),
+        );
+    }
 
     if reference_terminal_expansion && l2p_terminal_interchangeability_validation_enabled() {
         // Rebuild the same local L2P artifact with the feature suppressed, then
@@ -1013,21 +981,11 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 }
             }
             Err(mismatch) => {
-                if std::env::var_os("GLRMASK_ASSERT_L2P_TERMINAL_INTERCHANGEABILITY_EQUAL").is_some() {
-                    panic!(
-                        "terminal interchangeability candidate differed from baseline: partition={} {}",
-                        partition_label,
-                        mismatch,
-                    );
-                }
-                if l2p_timing_profile_enabled() {
-                    eprintln!(
-                        "[glrmask/profile][l2p_terminal_interchangeability_validation] partition={} result=mismatch {}",
-                        partition_label,
-                        mismatch,
-                    );
-                }
-                output = baseline;
+                panic!(
+                    "terminal interchangeability candidate differed from baseline: partition={} {}",
+                    partition_label,
+                    mismatch,
+                );
             }
         }
     }
