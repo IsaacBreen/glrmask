@@ -12,7 +12,10 @@ use crate::automata::lexer::Lexer;
 pub(crate) mod equivalence_analysis;
 pub(crate) mod nwa_builder;
 pub(crate) mod postprocess;
+mod terminal_dwa_equivalence;
+mod terminal_interchangeability;
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -35,7 +38,11 @@ use rustc_hash::FxHashMap;
 
 use super::grammar_helpers::compute_always_allowed_follows;
 use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhaseProfile};
-use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
+use nwa_builder::{
+    build_nwa_via_trie_walk, build_transport_nwa_via_trie_walk, internal_vocab_entries,
+    seed_root_nodes,
+};
+use terminal_interchangeability::TerminalInterchangeability;
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
     prune_non_coreachable_states, SharedDisallowedFollowDfaCache,
@@ -44,6 +51,48 @@ use postprocess::{
 fn l2p_timing_profile_enabled() -> bool {
     compile_profile_enabled() || std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
 }
+
+thread_local! {
+    static TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+struct SuppressTerminalInterchangeability;
+
+impl SuppressTerminalInterchangeability {
+    fn new() -> Self {
+        TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+impl Drop for SuppressTerminalInterchangeability {
+    fn drop(&mut self) {
+        TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH.with(|depth| {
+            depth.set(depth.get().checked_sub(1).expect("unbalanced terminal interchangeability suppression"));
+        });
+    }
+}
+
+/// Enable the deliberately slow strict terminal-interchangeability reference
+/// construction. It preserves raw lexer-state coordinates, uses a
+/// transport-aware trie walk, and checks the completed local artifact against a
+/// baseline build before returning it.
+fn l2p_terminal_interchangeability_enabled() -> bool {
+    if TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH.with(|depth| depth.get() != 0) {
+        return false;
+    }
+    std::env::var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
+/// The reference path is validation-gated: it may never return an unchecked
+/// transformed terminal DWA. A later production implementation can make this
+/// optional only after it has an independent proof and broader regression data.
+fn l2p_terminal_interchangeability_validation_enabled() -> bool { true }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct SimplifyCacheKey {
@@ -418,29 +467,63 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         }
     }
 
-    // Strip non-active terminal bits from DFA finalizers and minimize.
-    // When every terminal remains active, reuse the original tokenizer.
-    // Otherwise simplify to the smaller partition-local DFA.
+    // Discover strict interchangeability in the current vocabulary byte
+    // partition, with exactly this L2+ phase's terminal outputs observable.
+    // Nonrepresentatives are then hidden by clearing metadata only. The
+    // transport-aware trie walk restores their concrete terminal behavior while
+    // retaining the raw lexer-state coordinate for every segment.
+    let terminal_interchangeability = if l2p_terminal_interchangeability_enabled() {
+        TerminalInterchangeability::build(
+            tokenizer,
+            active_terminals,
+            &relevant_bytes,
+            ignore_terminal,
+        )
+    } else {
+        TerminalInterchangeability::identity(active_terminals)
+    };
+    let reference_terminal_expansion = !terminal_interchangeability.is_identity();
+    let analysis_active_terminals = terminal_interchangeability.active_representatives();
+    let num_analysis_active_terminals = analysis_active_terminals
+        .iter()
+        .filter(|&&active| active)
+        .count();
+    // The validation-first interchangeability path keeps the original DFA state
+    // coordinate so scanner transport maps can be applied exactly. It clears
+    // inactive metadata but deliberately does not minimize.
+    let reference_filtered_tokenizer = reference_terminal_expansion.then(|| {
+        tokenizer.deactivate_terminals_without_minimizing(analysis_active_terminals)
+    });
+    let tokenizer_before_simplify = reference_filtered_tokenizer.as_ref().unwrap_or(tokenizer);
+
+    // The normal path strips inactive terminal metadata and may minimize.
+    // The reference interchangeability path instead uses the metadata-only
+    // filtered tokenizer above, preserving original state IDs for transport.
     //
     // Unmapped original states (states with no active-terminal future
     // under this partition) are filled into a dead class via
     // `fill_unmapped_with_new_class` after composition, so we always
     // use the simplified tokenizer.
     let simplify_started_at = Instant::now();
-    let can_skip_simplify = l2p_tokenizer_simplify_disabled() || num_active_terminals == active_terminals.len();
+    let can_skip_simplify = reference_terminal_expansion
+        || l2p_tokenizer_simplify_disabled()
+        || num_analysis_active_terminals == analysis_active_terminals.len();
     let (simplified_tok_storage, simplify_state_map, simplify_cache_hit) = if can_skip_simplify {
         (None, None, false)
     } else if let Some(cache) = shared_simplify_cache {
         let (tok, map, cache_hit) =
-            cache.simplify_for_terminals(tokenizer, active_terminals, &relevant_bytes);
+            cache.simplify_for_terminals(tokenizer_before_simplify, analysis_active_terminals, &relevant_bytes);
         (Some(tok), Some(map), cache_hit)
     } else {
-        let (tok, map) = tokenizer.simplify_for_terminals(active_terminals, Some(&relevant_bytes));
+        let (tok, map) = tokenizer_before_simplify
+            .simplify_for_terminals(analysis_active_terminals, Some(&relevant_bytes));
         (Some(tok), Some(map), false)
     };
     let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
     let use_simplified_tok = simplified_tok_storage.is_some();
-    let tokenizer_for_build = simplified_tok_storage.as_ref().unwrap_or(tokenizer);
+    let tokenizer_for_build = simplified_tok_storage
+        .as_ref()
+        .unwrap_or(tokenizer_before_simplify);
     let candidate_unmapped_original_states = simplify_state_map.as_ref().map_or(0, |state_map| {
         state_map
             .original_to_internal
@@ -510,7 +593,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // unsimplified partition. Derive its exact byte partition lazily from
     // sparse lexer edges once; simplified tokenizers retain their local cache.
     let shared_base_setup_started_at = Instant::now();
-    let equivalence_vocab_dfa_cache = if use_simplified_tok {
+    let equivalence_vocab_dfa_cache = if reference_terminal_expansion {
+        None
+    } else if use_simplified_tok {
         shared_vocab_dfa_cache
     } else if let (Some(original_cache), Some(transition_cache), Some(flat_trans)) = (
         shared_original_vocab_dfa_cache,
@@ -533,7 +618,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         shared_vocab_dfa_cache
     };
     let shared_base_setup_ms = shared_base_setup_started_at.elapsed().as_secs_f64() * 1000.0;
-    let shared_analysis_dfa_cache = (!use_simplified_tok)
+    let shared_analysis_dfa_cache = (!use_simplified_tok && !reference_terminal_expansion)
         .then_some(shared_original_vocab_analysis_dfa_cache)
         .flatten();
     // Do not remove this note. Do not remove the instruction saying not to
@@ -549,7 +634,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // builder still consults full-tokenizer future-terminal sets in several
     // paths, so filtering equivalence by `active_terminals` would be unsound: it
     // could merge states that the later NWA construction still distinguishes.
-    let (simplified_id_map, equiv_profile) =
+    let (mut simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
             tokenizer_for_build,
@@ -560,9 +645,24 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             equivalence_vocab_dfa_cache,
             shared_analysis_dfa_cache,
             shared_base_setup_ms,
-            if use_simplified_tok { None } else { flat_trans },
+            if use_simplified_tok || reference_terminal_expansion { None } else { flat_trans },
             equivalence_initial_state_map,
         );
+    if reference_terminal_expansion {
+        // Keep the exact raw lexer-state coordinate in the reference artifact.
+        // Each transport mode simulates a different state for the current
+        // terminal segment, while terminal-DWA weights remain indexed by the
+        // actual token-start state. A quotient TSID could merge source states
+        // whose transported continuations differ; singletons avoid that
+        // representational shortcut. The final artifact comparator accepts the
+        // intentionally different id map.
+        let ids = (0..tokenizer_for_build.num_states()).collect::<Vec<u32>>();
+        simplified_id_map.tokenizer_states =
+            ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+                ids.clone(),
+                ids,
+            );
+    }
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // tsid_fallback is independent of the NWA build / postprocess /
@@ -647,24 +747,44 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let start_state = nwa.add_state();
             nwa.start_states_mut().push(start_state);
 
-            let roots = seed_root_nodes(&mut nwa, start_state, &simplified_id_map);
-            let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+            let transport_modes = reference_terminal_expansion
+                .then(|| terminal_interchangeability.terminal_nwa_transport_modes())
+                .flatten();
+            let seed_ms;
 
             // ---- Step 6: Trie-walk NWA build ----
             let trie_build_started_at = Instant::now();
-            let _build_profile = build_nwa_via_trie_walk(
-                tokenizer_for_build,
-                terminal_coloring,
-                use_terminal_coloring,
-                ignore_terminal,
-                &mut nwa,
-                leaf_state,
-                simplified_id_map.num_tsids(),
-                &full_tree.root,
-                &roots,
-                &mut pm_computer,
-                None,
-            );
+            let _build_profile = if let Some(modes) = transport_modes.as_deref() {
+                seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+                build_transport_nwa_via_trie_walk(
+                    tokenizer_for_build,
+                    ignore_terminal,
+                    &mut nwa,
+                    start_state,
+                    leaf_state,
+                    &simplified_id_map,
+                    &full_tree.root,
+                    &mut pm_computer,
+                    analysis_active_terminals,
+                    modes,
+                )
+            } else {
+                let roots = seed_root_nodes(&mut nwa, start_state, &simplified_id_map);
+                seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+                build_nwa_via_trie_walk(
+                    tokenizer_for_build,
+                    terminal_coloring,
+                    use_terminal_coloring && !reference_terminal_expansion,
+                    ignore_terminal,
+                    &mut nwa,
+                    leaf_state,
+                    simplified_id_map.num_tsids(),
+                    &full_tree.root,
+                    &roots,
+                    &mut pm_computer,
+                    reference_terminal_expansion.then_some(analysis_active_terminals),
+                )
+            };
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let always_allowed_started_at = Instant::now();
@@ -835,7 +955,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         );
     }
 
-    Some(LocalIdMapTerminalDwa {
+    let mut output = LocalIdMapTerminalDwa {
         id_map: composed_id_map,
         dwa,
         profile: TerminalDwaPhaseProfile {
@@ -850,5 +970,67 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             compact_ms: 0.0,
             ..TerminalDwaPhaseProfile::default()
         },
-    })
+    };
+
+
+    if reference_terminal_expansion && l2p_terminal_interchangeability_validation_enabled() {
+        // Rebuild the same local L2P artifact with the feature suppressed, then
+        // compare the completed weighted terminal languages after expanding both
+        // id maps into original tokenizer-state and token coordinates. This is
+        // intentionally expensive: it is the correctness gate for the reference
+        // construction.
+        let baseline = {
+            let _suppress = SuppressTerminalInterchangeability::new();
+            build_l2p_id_map_and_terminal_dwa(
+                partition_label,
+                tokenizer,
+                vocab,
+                terminal_coloring,
+                use_terminal_coloring,
+                ignore_terminal,
+                grammar,
+                active_terminals,
+                disallowed_follows,
+                shared_vocab_dfa_cache,
+                shared_original_vocab_dfa_cache,
+                shared_original_vocab_analysis_dfa_cache,
+                shared_transition_cache,
+                shared_simplify_cache,
+                shared_disallowed_follow_dfa_cache,
+                flat_trans,
+                initial_state_map,
+                defer_minimization_to_local_merge,
+            )
+            .expect("terminal interchangeability baseline L2P build unexpectedly returned None")
+        };
+        match terminal_dwa_equivalence::compare(&baseline, &output) {
+            Ok(()) => {
+                if l2p_timing_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][l2p_terminal_interchangeability_validation] partition={} result=equal",
+                        partition_label,
+                    );
+                }
+            }
+            Err(mismatch) => {
+                if std::env::var_os("GLRMASK_ASSERT_L2P_TERMINAL_INTERCHANGEABILITY_EQUAL").is_some() {
+                    panic!(
+                        "terminal interchangeability candidate differed from baseline: partition={} {}",
+                        partition_label,
+                        mismatch,
+                    );
+                }
+                if l2p_timing_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][l2p_terminal_interchangeability_validation] partition={} result=mismatch {}",
+                        partition_label,
+                        mismatch,
+                    );
+                }
+                output = baseline;
+            }
+        }
+    }
+
+    Some(output)
 }
