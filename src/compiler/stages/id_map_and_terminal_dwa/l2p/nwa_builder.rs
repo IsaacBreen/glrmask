@@ -195,12 +195,22 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         self.leaf_token_ids_for(source, label).push(internal_token_id);
     }
 
+    fn terminal_is_active(&self, terminal: TerminalID) -> bool {
+        self.active_terminals.as_ref().map_or(true, |active| {
+            active.get(terminal as usize).copied().unwrap_or(false)
+        })
+    }
+
     fn possible_future_terminals_for_state(&mut self, tokenizer_state: TokenizerState) -> Vec<TerminalID> {
+        let active = self.active_terminals.clone();
         self.possible_future_terminals
             .entry(tokenizer_state)
             .or_insert_with(|| {
                 self.tokenizer
                     .possible_future_terminals_iter(tokenizer_state)
+                    .filter(|&terminal| active.as_ref().map_or(true, |mask| {
+                        mask.get(terminal as usize).copied().unwrap_or(false)
+                    }))
                     .collect()
             })
             .clone()
@@ -216,6 +226,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let mut ignore_present = false;
 
         for terminal_id in self.tokenizer.possible_future_terminals_iter(tokenizer_state) {
+            if !self.terminal_is_active(terminal_id) {
+                continue;
+            }
             if Some(terminal_id) == self.ignore_terminal {
                 ignore_present = true;
                 continue;
@@ -711,6 +724,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 if alive {
                     // Terminal matches at the exact token endpoint.
                     for terminal in self.tokenizer.matched_terminals_iter(scan_state) {
+                        if !self.terminal_is_active(terminal) {
+                            continue;
+                        }
                         self.profile.match_transition_additions += source_nodes.len() as u64;
                         self.add_leaf_token_from_sources(
                             source_nodes,
@@ -1105,4 +1121,300 @@ mod tests {
             "the non-initial ignore match must not become a terminal edge"
         );
     }
+}
+
+/// One strict-interchangeability scanner mode for the slow reference builder.
+/// `scanner_state_for_original[s]` is the representative-terminal simulator
+/// state used when the actual current lexer state is `s`; `terminal_map` maps
+/// representative labels emitted by that simulator back to concrete terminals.
+#[derive(Clone, Debug)]
+pub(crate) struct TerminalNwaTransportMode {
+    pub(crate) scanner_state_for_original: Vec<TokenizerState>,
+    pub(crate) terminal_map: Vec<TerminalID>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct TransportContext {
+    scanner_state: TokenizerState,
+    mode: usize,
+}
+
+#[derive(Clone, Default)]
+struct NodesByTransportContext {
+    entries: FxHashMap<TransportContext, Vec<NwaState>>,
+}
+
+impl NodesByTransportContext {
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn merge(&mut self, context: TransportContext, nodes: &[NwaState]) {
+        self.entries.entry(context).or_default().extend_from_slice(nodes);
+    }
+
+    fn first(&self, context: TransportContext) -> Option<NwaState> {
+        self.entries.get(&context).and_then(|nodes| nodes.first().copied())
+    }
+
+    fn push_one(&mut self, context: TransportContext, node: NwaState) {
+        self.entries.entry(context).or_default().push(node);
+    }
+}
+
+impl IntoIterator for NodesByTransportContext {
+    type Item = (TransportContext, Vec<NwaState>);
+    type IntoIter = <FxHashMap<TransportContext, Vec<NwaState>> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
+struct TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
+    base: TerminalNwaBuilder<'tok, 'pm, 'nwa>,
+    modes: &'m [TerminalNwaTransportMode],
+}
+
+impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
+    fn mapped_label(&self, mode: usize, terminal: TerminalID) -> TerminalID {
+        self.modes[mode]
+            .terminal_map
+            .get(terminal as usize)
+            .copied()
+            .unwrap_or(terminal)
+    }
+
+    fn reset_context(&self, mode: usize) -> TransportContext {
+        let root = self.base.tokenizer.initial_state_id() as usize;
+        TransportContext {
+            scanner_state: self.modes[mode].scanner_state_for_original[root],
+            mode,
+        }
+    }
+
+    fn add_future_leaf_token_from_sources(
+        &mut self,
+        sources: &[NwaState],
+        context: TransportContext,
+        internal_token_id: u32,
+    ) {
+        let future = self
+            .base
+            .possible_future_terminals_for_state(context.scanner_state);
+        self.base.profile.future_terminal_additions += (sources.len() * future.len()) as u64;
+        for terminal in future {
+            self.base.add_leaf_token_from_sources(
+                sources,
+                self.mapped_label(context.mode, terminal),
+                internal_token_id,
+            );
+        }
+    }
+
+    fn build_from_trie(
+        &mut self,
+        node: &VocabPrefixTreeNode,
+        contexts: &NodesByTransportContext,
+    ) {
+        if contexts.is_empty() {
+            return;
+        }
+        for (segment_bytes, child) in node.iter_children() {
+            let next = self.process_child_segment(segment_bytes, child, contexts);
+            if !next.is_empty() {
+                self.build_from_trie(child, &next);
+            }
+        }
+    }
+
+    fn process_child_segment(
+        &mut self,
+        segment_bytes: &[u8],
+        child_node: &VocabPrefixTreeNode,
+        initial_contexts: &NodesByTransportContext,
+    ) -> NodesByTransportContext {
+        let leaf_token_id = child_node.token_id() as u32;
+        let mut next_level = NodesByTransportContext::default();
+        let mut pending = BTreeMap::<usize, NodesByTransportContext>::new();
+        pending.insert(0, initial_contexts.clone());
+        let mut match_map = FxHashMap::<TerminalID, (usize, TokenizerState)>::default();
+        let mut matches = Vec::<TokenizerMatch>::new();
+
+        while let Some((offset, contexts_at_offset)) = pending.pop_first() {
+            if offset == segment_bytes.len() {
+                for (context, nodes) in contexts_at_offset {
+                    next_level.merge(context, &nodes);
+                }
+                continue;
+            }
+
+            for (context, source_nodes) in contexts_at_offset {
+                match_map.clear();
+                let mut scan_state = context.scanner_state;
+                let mut alive = true;
+                for (index, &byte) in segment_bytes[offset..].iter().enumerate() {
+                    let Some(next) = self.base.fast_step(scan_state, byte) else {
+                        alive = false;
+                        break;
+                    };
+                    scan_state = next;
+                    for terminal in self.base.tokenizer.matched_terminals_iter(scan_state) {
+                        if self.base.terminal_is_active(terminal) {
+                            match_map.insert(terminal, (index + 1, scan_state));
+                        }
+                    }
+                }
+                let end_state = alive.then_some(scan_state);
+
+                matches.clear();
+                matches.extend(match_map.iter().map(|(&id, &(width, end_state))| TokenizerMatch {
+                    id,
+                    width,
+                    end_state,
+                }));
+
+                if let Some(end_state) = end_state {
+                    if child_node.has_token() {
+                        self.add_future_leaf_token_from_sources(
+                            &source_nodes,
+                            TransportContext { scanner_state: end_state, ..context },
+                            leaf_token_id,
+                        );
+                    }
+                    next_level.merge(
+                        TransportContext { scanner_state: end_state, ..context },
+                        &source_nodes,
+                    );
+                }
+
+                for matched in &matches {
+                    let next_offset = offset + matched.width;
+                    let mapped_label = self.mapped_label(context.mode, matched.id);
+                    if next_offset == segment_bytes.len()
+                        && child_node.has_token()
+                        && !end_state.is_some_and(|state| {
+                            self.base
+                                .possible_future_terminals_for_state(state)
+                                .contains(&matched.id)
+                        })
+                    {
+                        self.base.profile.match_transition_additions += source_nodes.len() as u64;
+                        self.base.add_leaf_token_from_sources(
+                            &source_nodes,
+                            mapped_label,
+                            leaf_token_id,
+                        );
+                    }
+
+                    let Some(weight) = self.base.continuation_weight_for_match(
+                        child_node,
+                        leaf_token_id,
+                        matched.id,
+                        end_state,
+                        next_offset == segment_bytes.len(),
+                    ) else {
+                        continue;
+                    };
+                    if weight.is_empty() {
+                        continue;
+                    }
+
+                    let continuation_contexts = pending.entry(next_offset).or_default();
+                    for next_mode in 0..self.modes.len() {
+                        let next_context = self.reset_context(next_mode);
+                        let destination = ensure_transport_continuation_state(
+                            continuation_contexts,
+                            next_context,
+                            self.base.nwa,
+                        );
+                        self.base.profile.match_transition_additions += source_nodes.len() as u64;
+                        self.base.add_match_from_sources(
+                            &source_nodes,
+                            mapped_label,
+                            destination,
+                            &weight,
+                        );
+                    }
+                }
+            }
+        }
+
+        next_level
+    }
+}
+
+fn ensure_transport_continuation_state(
+    pending: &mut NodesByTransportContext,
+    context: TransportContext,
+    nwa: &mut NWA,
+) -> NwaState {
+    if let Some(existing) = pending.first(context) {
+        return existing;
+    }
+    let state = nwa.add_state();
+    pending.push_one(context, state);
+    state
+}
+
+/// Slow reference trie walk for strict terminal interchangeability. It is used
+/// only while the feature is validation-gated. Normal L2P construction remains
+/// on `build_nwa_via_trie_walk` above.
+pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
+    tokenizer: &'a Tokenizer,
+    ignore_terminal: Option<TerminalID>,
+    nwa: &mut NWA,
+    start_state: u32,
+    leaf_state: u32,
+    id_map: &InternalIdMap,
+    vocab_tree_root: &VocabPrefixTreeNode,
+    possible_matches: &mut PossibleMatchesComputer<'a>,
+    active_terminals: &[bool],
+    modes: &[TerminalNwaTransportMode],
+) -> TerminalDwaBuildProfile {
+    assert!(!modes.is_empty());
+    let mut roots = NodesByTransportContext::default();
+    let mut initial_source_states = Vec::<bool>::new();
+
+    for (internal_tsid, representative_state) in id_map
+        .tokenizer_states
+        .iter_representative_ids()
+        .enumerate()
+    {
+        for (mode, transport) in modes.iter().enumerate() {
+            let root = nwa.add_state();
+            let weight = all_token_weight(internal_tsid as u32, id_map.max_internal_token_id());
+            nwa.add_epsilon(start_state, root, weight);
+            if root as usize >= initial_source_states.len() {
+                initial_source_states.resize(root as usize + 1, false);
+            }
+            initial_source_states[root as usize] = true;
+            roots.merge(
+                TransportContext {
+                    scanner_state: transport.scanner_state_for_original[representative_state as usize],
+                    mode,
+                },
+                &[root],
+            );
+        }
+    }
+
+    let base = TerminalNwaBuilder::new(
+        tokenizer,
+        TerminalColoring::identity(tokenizer.num_terminals() as usize),
+        possible_matches,
+        nwa,
+        id_map.num_tsids(),
+        leaf_state,
+        ignore_terminal,
+        initial_source_states,
+        false,
+        None,
+        Some(active_terminals.to_vec()),
+        tokenizer.num_states() as usize,
+    );
+    let mut builder = TransportNwaBuilder { base, modes };
+    builder.build_from_trie(vocab_tree_root, &roots);
+    builder.base.flush_transition_buffer();
+    builder.base.profile
 }

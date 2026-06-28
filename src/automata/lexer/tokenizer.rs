@@ -523,6 +523,38 @@ impl Tokenizer {
         }
     }
 
+    /// Clear inactive terminal metadata while preserving every DFA state ID and
+    /// byte transition. The terminal-interchangeability reference path needs a
+    /// stable original-state coordinate for its transport maps, so it cannot use
+    /// the minimizing simplifier below.
+    pub(crate) fn deactivate_terminals_without_minimizing(
+        &self,
+        active_terminals: &[bool],
+    ) -> Tokenizer {
+        assert_eq!(active_terminals.len(), self.num_terminals as usize);
+        let mut dfa = self.dfa.clone();
+        for state in 0..dfa.num_states() as u32 {
+            let mut finalizers = BitSet::new(self.num_terminals as usize);
+            for terminal in dfa.finalizers(state).iter() {
+                if active_terminals[terminal] {
+                    finalizers.set(terminal);
+                }
+            }
+            let mut futures = BitSet::new(self.num_terminals as usize);
+            for terminal in dfa.possible_future_group_ids(state).iter() {
+                if active_terminals[terminal] {
+                    futures.set(terminal);
+                }
+            }
+            dfa.overwrite_state_metadata(state, finalizers, futures);
+        }
+        Tokenizer {
+            dfa,
+            num_terminals: self.num_terminals,
+            exprs: self.exprs.clone(),
+        }
+    }
+
     /// Create a simplified tokenizer that only knows about `active_terminals`.
     ///
     /// Non-active terminal bits are cleared from finalizers and the filtered

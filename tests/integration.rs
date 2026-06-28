@@ -6,6 +6,7 @@ use std::{env, ffi::OsString, sync::Mutex};
 use glrmask::{Constraint, ConstraintState, Vocab};
 
 static URI_ENV_LOCK: Mutex<()> = Mutex::new(());
+static TI_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct EnvVarGuard {
     key: &'static str,
@@ -1349,4 +1350,163 @@ fn direct_glrm_minimized_lowered_schema_collapses_when_tail_token_differs() {
     assert_eq!(state.parser_path_count(10), 1, "{stacks:?}");
     assert_eq!(stacks.len(), 1, "{stacks:?}");
     assert_eq!(stack_count(&state), 1, "{stacks:?}");
+}
+
+
+#[test]
+fn strict_terminal_interchangeability_reference_matches_baseline_l2p_artifact() {
+    let _lock = TI_ENV_LOCK.lock().unwrap();
+    let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+    let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+    let _disable_feature = EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
+    let _disable_validation = EnvVarGuard::unset("GLRMASK_VALIDATE_L2P_TERMINAL_INTERCHANGEABILITY");
+
+    // Advancing through the `a` cycle exchanges the two terminal residuals.
+    // The enabled build also performs its own local terminal-DWA/id-map
+    // comparison against this baseline before returning.
+    let entries = [
+        "a", "aa", "aaa", "aaaa", "aaaaa", "aaaaaa", "aaaaaaa", "aaaaaaaa", "x",
+    ];
+    let grammar = r#"
+        start: choice choice
+        choice: A | B
+        A: /a(?:aaaa)*/
+        B: /aaa(?:aaaa)*/
+    "#;
+    let baseline = lark(&entries, grammar);
+
+    drop(_disable_feature);
+    drop(_disable_validation);
+    let _enable_feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _assert_equal = EnvVarGuard::set(
+        "GLRMASK_ASSERT_L2P_TERMINAL_INTERCHANGEABILITY_EQUAL",
+        "1",
+    );
+    let expanded = lark(&entries, grammar);
+
+    let observe = |constraint: &Constraint, sequence: &[u32]| {
+        let mut state = constraint.start();
+        for &token in sequence {
+            if state.commit_token(token).is_err() {
+                return None;
+            }
+        }
+        Some((state.is_finished(), allowed(&state.mask())))
+    };
+    for first in 0..entries.len() as u32 {
+        for second in 0..entries.len() as u32 {
+            for sequence in [Vec::new(), vec![first], vec![first, second]] {
+                assert_eq!(
+                    observe(&baseline, &sequence),
+                    observe(&expanded, &sequence),
+                    "strict terminal interchangeability changed token prefix {sequence:?}",
+                );
+            }
+        }
+    }
+
+    for prefix_len in 0..=12usize {
+        let prefix = vec![b'a'; prefix_len];
+        let observe_bytes = |constraint: &Constraint| {
+            let mut state = constraint.start();
+            if state.commit_bytes(&prefix).is_err() {
+                return None;
+            }
+            Some((state.is_finished(), allowed(&state.mask())))
+        };
+        assert_eq!(
+            observe_bytes(&baseline),
+            observe_bytes(&expanded),
+            "strict terminal interchangeability changed byte prefill {prefix:?}",
+        );
+    }
+}
+
+#[test]
+fn strict_terminal_interchangeability_reference_validates_one_terminal_position() {
+    let _lock = TI_ENV_LOCK.lock().unwrap();
+    let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+    let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+    let _feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _assert_equal = EnvVarGuard::set(
+        "GLRMASK_ASSERT_L2P_TERMINAL_INTERCHANGEABILITY_EQUAL",
+        "1",
+    );
+    let entries = ["a", "aa", "aaa", "aaaa", "aaaaa", "aaaaaa", "x"];
+    let grammar = r#"
+        start: A | B
+        A: /a(?:aaaa)*/
+        B: /aaa(?:aaaa)*/
+    "#;
+    let _ = lark(&entries, grammar);
+}
+
+#[test]
+fn transported_terminal_interchangeability_with_ignore_equals_baseline_artifact() {
+    let _lock = TI_ENV_LOCK.lock().unwrap();
+    let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+    let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+    let _feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _assert_equal = EnvVarGuard::set(
+        "GLRMASK_ASSERT_L2P_TERMINAL_INTERCHANGEABILITY_EQUAL",
+        "1",
+    );
+
+    let entries = [
+        "a", "aa", "aaa", "aaaa", " ", "a ", " aaa", "aaaa ", "x",
+    ];
+    let grammar = r#"
+        start: choice choice
+        choice: A | B
+        A: /a(?:aaaa)*/
+        B: /aaa(?:aaaa)*/
+        WS: / +/
+        %ignore WS
+    "#;
+    let _ = lark(&entries, grammar);
+}
+
+#[test]
+fn three_member_terminal_interchangeability_equals_baseline_artifact() {
+    let _lock = TI_ENV_LOCK.lock().unwrap();
+    let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+    let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+    let _feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _assert_equal = EnvVarGuard::set(
+        "GLRMASK_ASSERT_L2P_TERMINAL_INTERCHANGEABILITY_EQUAL",
+        "1",
+    );
+
+    let entries = ["x", "xx", "xxx", "xxxx", "a"];
+    let grammar = r#"
+        start: item item item
+        item: A | B | C
+        A: "x"
+        B: "x"
+        C: "x"
+    "#;
+    let _ = lark(&entries, grammar);
+}
+
+#[test]
+fn independent_terminal_interchangeability_classes_equal_baseline_artifact() {
+    let _lock = TI_ENV_LOCK.lock().unwrap();
+    let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+    let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+    let _feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _assert_equal = EnvVarGuard::set(
+        "GLRMASK_ASSERT_L2P_TERMINAL_INTERCHANGEABILITY_EQUAL",
+        "1",
+    );
+
+    let entries = ["x", "y", "xx", "xy", "yx", "yy", "xxy", "yxx", "z"];
+    let grammar = r#"
+        start: item item item
+        item: A | B | C | D
+        A: "x"
+        B: "x"
+        C: "y"
+        D: "y"
+    "#;
+    let _ = lark(&entries, grammar);
 }
