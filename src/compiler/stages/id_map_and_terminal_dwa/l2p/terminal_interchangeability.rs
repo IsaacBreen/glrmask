@@ -168,6 +168,55 @@ impl<'a> RestrictedDfa<'a> {
         }
     }
 
+    /// Return a concrete DFA automorphism for this label swap, if the
+    /// residual partition map has a singleton, transition-commuting lift.
+    ///
+    /// The terminal-NWA transport executes concrete lexer states, so a
+    /// quotient-level residual bijection alone is not sufficient here.
+    fn concrete_swap_automorphism(
+        &self,
+        map: &InterchangeMap,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<Vec<u32>> {
+        let mapping = map
+            .source_state_to_target_states
+            .iter()
+            .map(|targets| (targets.len() == 1).then_some(targets[0]))
+            .collect::<Option<Vec<_>>>()?;
+        let mut seen = vec![false; self.real_state_count];
+        for &target in &mapping {
+            let slot = seen.get_mut(target as usize)?;
+            if *slot {
+                return None;
+            }
+            *slot = true;
+        }
+        if seen.iter().any(|&seen| !seen) {
+            return None;
+        }
+
+        let swap = Some((left as usize, right as usize));
+        for source in 0..self.real_state_count {
+            let target = mapping[source] as usize;
+            if self.output(source, None) != self.output(target, swap) {
+                return None;
+            }
+            for slot in 0..self.bytes.len() {
+                let source_next = self.successor(source, slot);
+                let target_next = self.successor(target, slot);
+                if source_next == self.dead_state() {
+                    if target_next != self.dead_state() {
+                        return None;
+                    }
+                } else if target_next != mapping[source_next] as usize {
+                    return None;
+                }
+            }
+        }
+        Some(mapping)
+    }
+
     fn interchange_map(&self, left: TerminalID, right: TerminalID) -> Option<InterchangeMap> {
         let state_count = self.state_count();
         let left = left as usize;
@@ -310,6 +359,12 @@ impl TerminalInterchangeability {
         for (index, &left) in candidates.iter().enumerate() {
             for &right in &candidates[index + 1..] {
                 if let Some(left_to_right) = restricted.interchange_map(left, right) {
+                    if restricted
+                        .concrete_swap_automorphism(&left_to_right, left, right)
+                        .is_none()
+                    {
+                        continue;
+                    }
                     assert!(
                         restricted.interchange_map(right, left).is_some(),
                         "terminal interchange map was not symmetric: {left} <-> {right}",
@@ -362,20 +417,22 @@ impl TerminalInterchangeability {
                     representative,
                     members,
                 );
-                for &member in members {
-                    if member == representative as TerminalID {
-                        continue;
+                if std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY_MAPS").is_some() {
+                    for &member in members {
+                        if member == representative as TerminalID {
+                            continue;
+                        }
+                        let map = result
+                            .maps_by_representative_member
+                            .get(&(representative as TerminalID, member))
+                            .expect("debug transport missing");
+                        eprintln!(
+                            "[glrmask/debug][terminal_interchangeability_transport] representative={} member={} map={:?}",
+                            representative,
+                            member,
+                            map.source_state_to_target_states,
+                        );
                     }
-                    let map = result
-                        .maps_by_representative_member
-                        .get(&(representative as TerminalID, member))
-                        .expect("debug transport missing");
-                    eprintln!(
-                        "[glrmask/debug][terminal_interchangeability_transport] representative={} member={} map={:?}",
-                        representative,
-                        member,
-                        map.source_state_to_target_states,
-                    );
                 }
             }
         }
@@ -485,8 +542,26 @@ mod tests {
             Some(Arc::from(expressions.into_boxed_slice())),
         );
         let dfa = RestrictedDfa::new(&tokenizer, &[true, true], &[true; 256]);
-        assert!(dfa.interchange_map(0, 1).is_some());
+        let forward = dfa.interchange_map(0, 1).expect("rotated map must exist");
+        assert!(dfa.concrete_swap_automorphism(&forward, 0, 1).is_some());
         assert!(dfa.interchange_map(1, 0).is_some());
+    }
+
+    #[test]
+    fn transport_rejects_a_non_singleton_residual_target() {
+        let expressions = vec![
+            Expr::Seq(vec![Expr::U8Seq(b"a".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
+            Expr::Seq(vec![Expr::U8Seq(b"aaa".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let dfa = RestrictedDfa::new(&tokenizer, &[true, true], &[true; 256]);
+        let mut map = dfa.interchange_map(0, 1).expect("rotated map must exist");
+        let duplicated_target = map.source_state_to_target_states[0][0];
+        map.source_state_to_target_states[0].push(duplicated_target);
+        assert!(dfa.concrete_swap_automorphism(&map, 0, 1).is_none());
     }
 
     #[test]
