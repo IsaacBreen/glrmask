@@ -2200,6 +2200,49 @@ fn grammar_expr_to_expr(
     })
 }
 
+fn collect_terminal_rule_refs<'a>(expr: &'a GrammarExpr, refs: &mut FxHashSet<&'a str>) {
+    match expr {
+        GrammarExpr::Ref(name) => {
+            refs.insert(name.as_str());
+        }
+        GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+            collect_terminal_rule_refs(inner, refs)
+        }
+        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+            for part in parts {
+                collect_terminal_rule_refs(part, refs);
+            }
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            collect_terminal_rule_refs(expr, refs);
+            collect_terminal_rule_refs(exclude, refs);
+        }
+        GrammarExpr::Intersect { expr, intersect } => {
+            collect_terminal_rule_refs(expr, refs);
+            collect_terminal_rule_refs(intersect, refs);
+        }
+        GrammarExpr::SeparatedSequence {
+            items, separator, ..
+        } => {
+            for (item, _) in items {
+                collect_terminal_rule_refs(item, refs);
+            }
+            collect_terminal_rule_refs(separator, refs);
+        }
+        GrammarExpr::ExprNFA(expr_nfa) => {
+            for symbol in &expr_nfa.symbols {
+                collect_terminal_rule_refs(symbol, refs);
+            }
+        }
+        GrammarExpr::Epsilon
+        | GrammarExpr::Literal(_)
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte => {}
+    }
+}
+
 fn grammar_expr_is_nullable(
     expr: &GrammarExpr,
     rule_nullable: &FxHashMap<String, bool>,
@@ -2568,6 +2611,10 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     let terminal_bodies_ms = terminal_bodies_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
+    let mut terminal_rule_refs = FxHashSet::default();
+    for rule in grammar.rules.iter().filter(|rule| rule.is_terminal) {
+        collect_terminal_rule_refs(&rule.expr, &mut terminal_rule_refs);
+    }
     let setup_ms = setup_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
 
@@ -2584,9 +2631,19 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         // Terminal rules: convert the entire body to a single Terminal::Expr.
         // Refs to other terminal rules are resolved via Expr::Shared.
         if rule.is_terminal {
-            let expr = lowerer.resolve_terminal_expr(Some(&rule.name), &rule.expr)?;
-            let arc = Arc::new(expr.clone());
-            lowerer.terminal_expr_cache.insert(rule.name.clone(), arc);
+            let cached_expr = lowerer.terminal_expr_cache.get(&rule.name).cloned();
+            let expr = if let Some(cached_expr) = cached_expr {
+                (*cached_expr).clone()
+            } else {
+                lowerer.resolve_terminal_expr(Some(&rule.name), &rule.expr)?
+            };
+            if terminal_rule_refs.contains(rule.name.as_str())
+                && !lowerer.terminal_expr_cache.contains_key(&rule.name)
+            {
+                lowerer
+                    .terminal_expr_cache
+                    .insert(rule.name.clone(), Arc::new(expr.clone()));
+            }
 
             if rule.is_internal {
                 // Internal-only: cached for Shared resolution, no terminal or production.
@@ -2767,10 +2824,11 @@ fn regex_escape_byte(b: u8) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        grammar_expr_is_nullable, lower, GrammarExpr, NamedGrammar, NamedRule, Quantifier,
+        collect_terminal_rule_refs, grammar_expr_is_nullable, lower, GrammarExpr, NamedGrammar,
+        NamedRule, Quantifier,
     };
     use crate::grammar::expr_nfa::ExprNfaBuilder;
-    use rustc_hash::FxHashMap;
+    use rustc_hash::{FxHashMap, FxHashSet};
 
     fn nonterminal(name: &str, expr: GrammarExpr) -> NamedRule {
         NamedRule {
@@ -2826,6 +2884,29 @@ mod tests {
         assert!(!grammar_expr_is_nullable(&expr, &nullable));
         nullable.insert("EMPTY".to_string(), true);
         assert!(grammar_expr_is_nullable(&expr, &nullable));
+    }
+
+    #[test]
+    fn terminal_reference_collection_walks_nested_expression_forms() {
+        let expr = GrammarExpr::Exclude {
+            expr: Box::new(GrammarExpr::Choice(vec![
+                GrammarExpr::Ref("first".to_string()),
+                GrammarExpr::Grouped(Box::new(GrammarExpr::Ref("second".to_string()))),
+            ])),
+            exclude: Box::new(GrammarExpr::SeparatedSequence {
+                items: vec![(GrammarExpr::Ref("third".to_string()), None)],
+                separator: Box::new(GrammarExpr::Ref("separator".to_string())),
+                allow_empty: false,
+            }),
+        };
+        let mut refs = FxHashSet::default();
+        collect_terminal_rule_refs(&expr, &mut refs);
+
+        assert_eq!(refs.len(), 4);
+        assert!(refs.contains("first"));
+        assert!(refs.contains("second"));
+        assert!(refs.contains("third"));
+        assert!(refs.contains("separator"));
     }
 
     #[test]
