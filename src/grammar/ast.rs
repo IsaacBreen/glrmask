@@ -1,5 +1,8 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr;
@@ -433,18 +436,20 @@ fn grammar_expr_to_lark_with_indent(
 
 struct Lowerer<'a> {
     rules: Vec<Rule>,
-    terminal_map: HashMap<String, TerminalID>,
+    terminal_map: FxHashMap<String, TerminalID>,
     terminals: Vec<Terminal>,
-    nonterminal_ids: HashMap<String, NonterminalID>,
+    terminal_expr_hash_index: FxHashMap<u64, Vec<TerminalID>>,
+    nonterminal_ids: FxHashMap<String, NonterminalID>,
+    next_nonterminal_id: NonterminalID,
     generated_nonterminal_counter: u32,
     terminal_names: BTreeMap<TerminalID, String>,
-    internal_terminal_names: HashSet<String>,
-    named_rule_exprs: HashMap<String, &'a GrammarExpr>,
-    named_rule_is_terminal: HashMap<String, bool>,
-    rule_nullable: HashMap<String, bool>,
-    terminal_bodies: HashMap<String, &'a GrammarExpr>,
-    terminal_expr_cache: HashMap<String, Arc<Expr>>,
-    nonnullable_named_rule_cache: HashMap<String, NonterminalID>,
+    internal_terminal_names: FxHashSet<String>,
+    named_rule_exprs: FxHashMap<String, &'a GrammarExpr>,
+    named_rule_is_terminal: FxHashMap<String, bool>,
+    rule_nullable: FxHashMap<String, bool>,
+    terminal_bodies: FxHashMap<String, &'a GrammarExpr>,
+    terminal_expr_cache: FxHashMap<String, Arc<Expr>>,
+    nonnullable_named_rule_cache: FxHashMap<String, NonterminalID>,
     /// Shared cache for repeat-exact nonterminals, keyed by (symbol, count).
     repeat_exact_cache: BTreeMap<(Symbol, usize), NonterminalID>,
     /// Shared cache for repeat-range nonterminals, keyed by (symbol, min, max).
@@ -544,18 +549,20 @@ impl<'a> Lowerer<'a> {
     fn new() -> Self {
         Self {
             rules: Vec::new(),
-            terminal_map: HashMap::new(),
+            terminal_map: FxHashMap::default(),
             terminals: Vec::new(),
-            nonterminal_ids: HashMap::new(),
+            terminal_expr_hash_index: FxHashMap::default(),
+            nonterminal_ids: FxHashMap::default(),
+            next_nonterminal_id: 0,
             generated_nonterminal_counter: 0,
             terminal_names: BTreeMap::new(),
-            internal_terminal_names: HashSet::new(),
-            named_rule_exprs: HashMap::new(),
-            named_rule_is_terminal: HashMap::new(),
-            rule_nullable: HashMap::new(),
-            terminal_bodies: HashMap::new(),
-            terminal_expr_cache: HashMap::new(),
-            nonnullable_named_rule_cache: HashMap::new(),
+            internal_terminal_names: FxHashSet::default(),
+            named_rule_exprs: FxHashMap::default(),
+            named_rule_is_terminal: FxHashMap::default(),
+            rule_nullable: FxHashMap::default(),
+            terminal_bodies: FxHashMap::default(),
+            terminal_expr_cache: FxHashMap::default(),
+            nonnullable_named_rule_cache: FxHashMap::default(),
             repeat_exact_cache: BTreeMap::new(),
             repeat_range_cache: BTreeMap::new(),
             repeat_max_cache: BTreeMap::new(),
@@ -567,10 +574,18 @@ impl<'a> Lowerer<'a> {
         if let Some(&id) = self.nonterminal_ids.get(name) {
             id
         } else {
-            let id = self.nonterminal_ids.len() as NonterminalID;
+            let id = self.next_nonterminal_id;
+            self.next_nonterminal_id += 1;
             self.nonterminal_ids.insert(name.to_string(), id);
             id
         }
+    }
+
+    #[inline]
+    fn fresh_anonymous_nonterminal(&mut self) -> NonterminalID {
+        let id = self.next_nonterminal_id;
+        self.next_nonterminal_id += 1;
+        id
     }
 
     fn fresh_nonterminal(&mut self, hint: &str) -> (String, NonterminalID) {
@@ -1428,8 +1443,8 @@ impl<'a> Lowerer<'a> {
             if Some(state_index) == start_lhs.map(|_| start) {
                 nts.push(start_lhs.unwrap());
             } else {
-                let (_, nt) = self.fresh_nonterminal(hint);
-                nts.push(nt);
+                let _ = hint;
+                nts.push(self.fresh_anonymous_nonterminal());
             }
         }
         Ok(nts)
@@ -2063,16 +2078,23 @@ impl<'a> Lowerer<'a> {
 
     /// Register a pre-resolved terminal Expr, deduplicating by value.
     fn register_terminal_expr(&mut self, name: &str, expr: Expr) -> TerminalID {
-        if let Some(id) = self.terminals.iter().find_map(|terminal| match terminal {
-            Terminal::Expr { id, expr: existing } if *existing == expr => Some(*id),
-            _ => None,
-        }) {
-            return id;
+        let mut hasher = FxHasher::default();
+        expr.hash(&mut hasher);
+        let hash = hasher.finish();
+        if let Some(candidates) = self.terminal_expr_hash_index.get(&hash) {
+            for &id in candidates {
+                if let Some(Terminal::Expr { expr: existing, .. }) = self.terminals.get(id as usize)
+                    && *existing == expr
+                {
+                    return id;
+                }
+            }
         }
 
         let id = self.terminals.len() as TerminalID;
         self.terminal_names.insert(id, name.to_string());
         self.terminals.push(Terminal::Expr { id, expr });
+        self.terminal_expr_hash_index.entry(hash).or_default().push(id);
         id
     }
 }
@@ -2081,8 +2103,8 @@ impl<'a> Lowerer<'a> {
 /// via the `terminal_bodies` map and caching results in `terminal_expr_cache`.
 fn grammar_expr_to_expr(
     expr: &GrammarExpr,
-    terminal_bodies: &HashMap<String, &GrammarExpr>,
-    terminal_expr_cache: &mut HashMap<String, Arc<Expr>>,
+    terminal_bodies: &FxHashMap<String, &GrammarExpr>,
+    terminal_expr_cache: &mut FxHashMap<String, Arc<Expr>>,
     visiting: &mut HashSet<String>,
 ) -> Result<Expr, GlrMaskError> {
     Ok(match expr {
@@ -2178,9 +2200,52 @@ fn grammar_expr_to_expr(
     })
 }
 
+fn collect_terminal_rule_refs<'a>(expr: &'a GrammarExpr, refs: &mut FxHashSet<&'a str>) {
+    match expr {
+        GrammarExpr::Ref(name) => {
+            refs.insert(name.as_str());
+        }
+        GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+            collect_terminal_rule_refs(inner, refs)
+        }
+        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+            for part in parts {
+                collect_terminal_rule_refs(part, refs);
+            }
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            collect_terminal_rule_refs(expr, refs);
+            collect_terminal_rule_refs(exclude, refs);
+        }
+        GrammarExpr::Intersect { expr, intersect } => {
+            collect_terminal_rule_refs(expr, refs);
+            collect_terminal_rule_refs(intersect, refs);
+        }
+        GrammarExpr::SeparatedSequence {
+            items, separator, ..
+        } => {
+            for (item, _) in items {
+                collect_terminal_rule_refs(item, refs);
+            }
+            collect_terminal_rule_refs(separator, refs);
+        }
+        GrammarExpr::ExprNFA(expr_nfa) => {
+            for symbol in &expr_nfa.symbols {
+                collect_terminal_rule_refs(symbol, refs);
+            }
+        }
+        GrammarExpr::Epsilon
+        | GrammarExpr::Literal(_)
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte => {}
+    }
+}
+
 fn grammar_expr_is_nullable(
     expr: &GrammarExpr,
-    rule_nullable: &HashMap<String, bool>,
+    rule_nullable: &FxHashMap<String, bool>,
 ) -> bool {
     match expr {
         GrammarExpr::Ref(name) => rule_nullable.get(name).copied().unwrap_or(false),
@@ -2216,52 +2281,71 @@ fn grammar_expr_is_nullable(
                 })
         }
         GrammarExpr::ExprNFA(expr_nfa) => {
-            let dfa = expr_nfa.determinize_and_minimize();
-            let state_count = dfa.states.len();
-            let start = dfa.start_state as usize;
-            if start >= state_count {
-                return false;
+            // An ExprNFA accepts epsilon iff an accepting NFA state is
+            // reachable from any start state using only epsilon transitions and
+            // labels that are nullable in the current rule fixed point. This is
+            // exact for the original NFA; determinizing and minimizing first
+            // only adds avoidable work to every fixed-point sweep.
+            let mut seen = vec![false; expr_nfa.nfa.states.len()];
+            let mut pending = VecDeque::new();
+            let mut nullable_labels = vec![None; expr_nfa.symbols.len()];
+            for &start in &expr_nfa.nfa.start_states {
+                let start = start as usize;
+                if start < seen.len() && !seen[start] {
+                    seen[start] = true;
+                    pending.push_back(start);
+                }
             }
-
-            let mut nullable_from_state = vec![false; state_count];
-            for (state_index, state) in dfa.states.iter().enumerate() {
-                nullable_from_state[state_index] = state.is_accepting;
-            }
-
-            let mut changed = true;
-            while changed {
-                changed = false;
-                for (state_index, state) in dfa.states.iter().enumerate() {
-                    if nullable_from_state[state_index] {
+            while let Some(state_id) = pending.pop_front() {
+                let state = &expr_nfa.nfa.states[state_id];
+                if state.is_accepting {
+                    return true;
+                }
+                for &target in &state.epsilons {
+                    let target = target as usize;
+                    if target < seen.len() && !seen[target] {
+                        seen[target] = true;
+                        pending.push_back(target);
+                    }
+                }
+                for (&label, targets) in &state.transitions {
+                    let Ok(label_index) = usize::try_from(label) else {
+                        continue;
+                    };
+                    let Some(symbol) = expr_nfa.symbols.get(label_index) else {
+                        continue;
+                    };
+                    let label_is_nullable = match nullable_labels[label_index] {
+                        Some(nullable) => nullable,
+                        None => {
+                            let nullable = grammar_expr_is_nullable(symbol, rule_nullable);
+                            nullable_labels[label_index] = Some(nullable);
+                            nullable
+                        }
+                    };
+                    if !label_is_nullable {
                         continue;
                     }
-                    for (label, target) in &state.transitions {
-                        let target = *target as usize;
-                        let Some(symbol) = expr_nfa.symbol_for_label(*label) else {
-                            continue;
-                        };
-                        if target < state_count
-                            && nullable_from_state[target]
-                            && grammar_expr_is_nullable(symbol, rule_nullable)
-                        {
-                            nullable_from_state[state_index] = true;
-                            changed = true;
-                            break;
+                    for &target in targets {
+                        let target = target as usize;
+                        if target < seen.len() && !seen[target] {
+                            seen[target] = true;
+                            pending.push_back(target);
                         }
                     }
                 }
             }
-            nullable_from_state[start]
+            false
         }
     }
 }
 
-fn compute_rule_nullability(grammar: &NamedGrammar) -> HashMap<String, bool> {
+fn compute_rule_nullability(grammar: &NamedGrammar) -> FxHashMap<String, bool> {
     let mut nullable = grammar
         .rules
         .iter()
         .map(|rule| (rule.name.clone(), false))
-        .collect::<HashMap<_, _>>();
+        .collect::<FxHashMap<_, _>>();
 
     loop {
         let mut changed = false;
@@ -2441,8 +2525,21 @@ fn push_class_char(out: &mut String, b: u8) {
 }
 
 fn dedup_rules_preserving_first_occurrence(rules: &mut Vec<Rule>) {
-    let mut seen = HashSet::new();
-    rules.retain(|rule| seen.insert(rule.clone()));
+    let mut unique = Vec::with_capacity(rules.len());
+    let mut hash_to_unique_indices: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
+    for rule in std::mem::take(rules) {
+        let mut hasher = FxHasher::default();
+        rule.hash(&mut hasher);
+        let hash = hasher.finish();
+        let duplicate = hash_to_unique_indices
+            .get(&hash)
+            .is_some_and(|candidates| candidates.iter().any(|&index| unique[index] == rule));
+        if !duplicate {
+            hash_to_unique_indices.entry(hash).or_default().push(unique.len());
+            unique.push(rule);
+        }
+    }
+    *rules = unique;
 }
 
 pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
@@ -2455,51 +2552,98 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
 
     let setup_started_at = profile_enabled.then(std::time::Instant::now);
     let mut lowerer = Lowerer::new();
+    let setup_detail_profile = std::env::var_os("GLRMASK_PROFILE_AST_LOWER_DETAIL").is_some();
+    let named_exprs_started_at = setup_detail_profile.then(std::time::Instant::now);
     lowerer.named_rule_exprs = grammar
         .rules
         .iter()
         .map(|rule| (rule.name.clone(), &rule.expr))
         .collect();
+    let named_exprs_ms = named_exprs_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let named_terminal_started_at = setup_detail_profile.then(std::time::Instant::now);
     lowerer.named_rule_is_terminal = grammar
         .rules
         .iter()
         .map(|rule| (rule.name.clone(), rule.is_terminal))
         .collect();
+    let named_terminal_ms = named_terminal_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let nullable_started_at = setup_detail_profile.then(std::time::Instant::now);
     lowerer.rule_nullable = compute_rule_nullability(grammar);
+    let nullable_ms = nullable_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
     // Collect internal terminal names for validation.
+    let internal_names_started_at = setup_detail_profile.then(std::time::Instant::now);
     lowerer.internal_terminal_names = grammar
         .rules
         .iter()
         .filter(|r| r.is_terminal && r.is_internal)
         .map(|r| r.name.clone())
         .collect();
+    let internal_names_ms = internal_names_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
+    let named_ids_started_at = setup_detail_profile.then(std::time::Instant::now);
     for rule in &grammar.rules {
         if rule.is_terminal && rule.is_internal {
             continue; // don't allocate nonterminal IDs for internal terminals
         }
         lowerer.nonterminal_id(&rule.name);
     }
+    let named_ids_ms = named_ids_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
     // Build a map of terminal rule bodies for resolving Ref nodes inside terminal exprs.
+    let terminal_bodies_started_at = setup_detail_profile.then(std::time::Instant::now);
     lowerer.terminal_bodies = grammar
         .rules
         .iter()
         .filter(|r| r.is_terminal)
         .map(|r| (r.name.clone(), &r.expr))
         .collect();
+    let terminal_bodies_ms = terminal_bodies_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let mut terminal_rule_refs = FxHashSet::default();
+    for rule in grammar.rules.iter().filter(|rule| rule.is_terminal) {
+        collect_terminal_rule_refs(&rule.expr, &mut terminal_rule_refs);
+    }
     let setup_ms = setup_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
 
     let rule_lowering_started_at = profile_enabled.then(std::time::Instant::now);
+    let detail_profile = std::env::var_os("GLRMASK_PROFILE_AST_LOWER_DETAIL").is_some();
+    let mut terminal_rule_ms = 0.0f64;
+    let mut expr_nfa_rule_ms = 0.0f64;
+    let mut other_rule_ms = 0.0f64;
+    let mut expr_nfa_rules = 0usize;
+    let mut expr_nfa_states = 0usize;
+    let mut expr_nfa_transitions = 0usize;
     for rule in &grammar.rules {
+        let rule_started_at = detail_profile.then(std::time::Instant::now);
         // Terminal rules: convert the entire body to a single Terminal::Expr.
         // Refs to other terminal rules are resolved via Expr::Shared.
         if rule.is_terminal {
-            let expr = lowerer.resolve_terminal_expr(Some(&rule.name), &rule.expr)?;
-            let arc = Arc::new(expr.clone());
-            lowerer.terminal_expr_cache.insert(rule.name.clone(), arc);
+            let cached_expr = lowerer.terminal_expr_cache.get(&rule.name).cloned();
+            let expr = if let Some(cached_expr) = cached_expr {
+                (*cached_expr).clone()
+            } else {
+                lowerer.resolve_terminal_expr(Some(&rule.name), &rule.expr)?
+            };
+            if terminal_rule_refs.contains(rule.name.as_str())
+                && !lowerer.terminal_expr_cache.contains_key(&rule.name)
+            {
+                lowerer
+                    .terminal_expr_cache
+                    .insert(rule.name.clone(), Arc::new(expr.clone()));
+            }
 
             if rule.is_internal {
                 // Internal-only: cached for Shared resolution, no terminal or production.
@@ -2509,6 +2653,9 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
             let lhs = lowerer.nonterminal_id(&rule.name);
             let tid = lowerer.register_terminal_expr(&rule.name, expr);
             lowerer.rules.push(Rule { lhs, rhs: vec![Symbol::Terminal(tid)] });
+            if let Some(rule_started_at) = rule_started_at {
+                terminal_rule_ms += rule_started_at.elapsed().as_secs_f64() * 1000.0;
+            }
             continue;
         }
 
@@ -2556,11 +2703,27 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
                 lowerer.emit_repeat_range(lhs, expr, *min, *max)?;
             }
             GrammarExpr::ExprNFA(expr_nfa) => {
+                expr_nfa_rules += 1;
+                expr_nfa_states += expr_nfa.nfa.states.len();
+                expr_nfa_transitions += expr_nfa
+                    .nfa
+                    .states
+                    .iter()
+                    .map(|state| state.transitions.values().map(Vec::len).sum::<usize>())
+                    .sum::<usize>();
                 lowerer.emit_expr_nfa(lhs, expr_nfa)?;
             }
             _ => {
                 let symbol = lowerer.lower_expr_terminalish(&rule.expr)?;
                 lowerer.rules.push(Rule { lhs, rhs: vec![symbol] });
+            }
+        }
+        if let Some(rule_started_at) = rule_started_at {
+            let elapsed_ms = rule_started_at.elapsed().as_secs_f64() * 1000.0;
+            if matches!(rule.expr, GrammarExpr::ExprNFA(_)) {
+                expr_nfa_rule_ms += elapsed_ms;
+            } else {
+                other_rule_ms += elapsed_ms;
             }
         }
     }
@@ -2589,7 +2752,11 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
             .find_map(|(&id, name)| (name == ignore_name).then_some(id))
     });
 
+    let dedup_started_at = detail_profile.then(std::time::Instant::now);
     dedup_rules_preserving_first_occurrence(&mut lowerer.rules);
+    let dedup_ms = dedup_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
     if let (Some(validate_ms), Some(setup_ms), Some(rule_lowering_ms), Some(finish_started_at)) =
         (validate_ms, setup_ms, rule_lowering_ms, finish_started_at)
     {
@@ -2602,6 +2769,24 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
             setup_ms,
             rule_lowering_ms,
             finish_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    if detail_profile {
+        eprintln!(
+            "[glrmask/profile][grammar_ast_lower_detail] named_exprs_ms={:.3} named_terminal_ms={:.3} nullable_ms={:.3} internal_names_ms={:.3} named_ids_ms={:.3} terminal_bodies_ms={:.3} terminal_rule_ms={:.3} expr_nfa_rule_ms={:.3} other_rule_ms={:.3} dedup_ms={:.3} expr_nfa_rules={} expr_nfa_states={} expr_nfa_transitions={}",
+            named_exprs_ms,
+            named_terminal_ms,
+            nullable_ms,
+            internal_names_ms,
+            named_ids_ms,
+            terminal_bodies_ms,
+            terminal_rule_ms,
+            expr_nfa_rule_ms,
+            other_rule_ms,
+            dedup_ms,
+            expr_nfa_rules,
+            expr_nfa_states,
+            expr_nfa_transitions,
         );
     }
 
@@ -2638,7 +2823,12 @@ fn regex_escape_byte(b: u8) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{lower, GrammarExpr, NamedGrammar, NamedRule, Quantifier};
+    use super::{
+        collect_terminal_rule_refs, grammar_expr_is_nullable, lower, GrammarExpr, NamedGrammar,
+        NamedRule, Quantifier,
+    };
+    use crate::grammar::expr_nfa::ExprNfaBuilder;
+    use rustc_hash::{FxHashMap, FxHashSet};
 
     fn nonterminal(name: &str, expr: GrammarExpr) -> NamedRule {
         NamedRule {
@@ -2667,6 +2857,56 @@ mod tests {
             expr: Box::new(GrammarExpr::Ref(lhs.to_string())),
             exclude: Box::new(exclude),
         }
+    }
+
+    #[test]
+    fn expr_nfa_nullability_uses_epsilon_and_nullable_label_reachability() {
+        let mut builder = ExprNfaBuilder::new();
+        let nullable_state = builder.add_state();
+        let accept = builder.add_state();
+        builder.add_epsilon(builder.start_state(), nullable_state);
+        // Include a cycle to verify the reachability walk terminates.
+        builder.add_epsilon(nullable_state, builder.start_state());
+        builder.add_transition(
+            nullable_state,
+            GrammarExpr::Ref("EMPTY".to_string()),
+            accept,
+        );
+        builder.add_transition(
+            builder.start_state(),
+            literal("x"),
+            accept,
+        );
+        builder.set_accepting(accept);
+        let expr = GrammarExpr::ExprNFA(Box::new(builder.build()));
+
+        let mut nullable = FxHashMap::default();
+        assert!(!grammar_expr_is_nullable(&expr, &nullable));
+        nullable.insert("EMPTY".to_string(), true);
+        assert!(grammar_expr_is_nullable(&expr, &nullable));
+    }
+
+    #[test]
+    fn terminal_reference_collection_walks_nested_expression_forms() {
+        let expr = GrammarExpr::Exclude {
+            expr: Box::new(GrammarExpr::Choice(vec![
+                GrammarExpr::Ref("first".to_string()),
+                GrammarExpr::Grouped(Box::new(GrammarExpr::Ref("second".to_string()))),
+            ])),
+            exclude: Box::new(GrammarExpr::SeparatedSequence {
+                items: vec![(GrammarExpr::Ref("third".to_string()), None)],
+                separator: Box::new(GrammarExpr::Ref("separator".to_string())),
+                allow_empty: false,
+            }),
+        };
+        let mut refs = FxHashSet::default();
+        collect_terminal_rule_refs(&expr, &mut refs);
+
+        assert_eq!(refs.len(), 4);
+        assert!(refs.contains("first"));
+        assert!(refs.contains("second"));
+        assert!(refs.contains("third"));
+        assert!(refs.contains("separator"));
     }
 
     #[test]
