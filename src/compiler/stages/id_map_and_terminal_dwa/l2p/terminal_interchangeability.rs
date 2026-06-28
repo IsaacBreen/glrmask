@@ -1002,7 +1002,9 @@ fn minimize_sparse_terminal_residuals(
     }
 
     let mut in_work = vec![vec![false; width]; blocks.len()];
-    let mut worklist = VecDeque::<(usize, usize)>::new();
+    // A splitter byte is always below 256. Packing it with the block ID halves
+    // the FIFO's element footprint on 64-bit targets.
+    let mut worklist = VecDeque::<u64>::new();
     let seed = if blocks.len() == 2 && blocks[1].len() < blocks[0].len() {
         1
     } else {
@@ -1020,7 +1022,8 @@ fn minimize_sparse_terminal_residuals(
     // the per-splitter touched-block workspace so that common nonempty passes
     // do not allocate and free a fresh vector every iteration.
     let mut touched = Vec::<usize>::new();
-    while let Some((splitter, slot)) = worklist.pop_front() {
+    while let Some(packed) = worklist.pop_front() {
+        let (splitter, slot) = unpack_sparse_splitter(packed);
         if splitter >= blocks.len() || blocks[splitter].is_empty() {
             continue;
         }
@@ -1130,15 +1133,26 @@ fn minimize_sparse_terminal_residuals(
 }
 
 fn enqueue_sparse_splitter(
-    worklist: &mut VecDeque<(usize, usize)>,
+    worklist: &mut VecDeque<u64>,
     in_work: &mut [Vec<bool>],
     block: usize,
     slot: usize,
 ) {
     if !in_work[block][slot] {
         in_work[block][slot] = true;
-        worklist.push_back((block, slot));
+        worklist.push_back(pack_sparse_splitter(block, slot));
     }
+}
+
+#[inline]
+fn pack_sparse_splitter(block: usize, slot: usize) -> u64 {
+    debug_assert!(slot < 256);
+    (block as u64) << 8 | slot as u64
+}
+
+#[inline]
+fn unpack_sparse_splitter(value: u64) -> (usize, usize) {
+    ((value >> 8) as usize, (value & 0xff) as usize)
 }
 
 fn initial_sparse_terminal_blocks(outputs: &[bool]) -> Vec<u32> {
