@@ -1720,8 +1720,25 @@ fn l1_packed_hash_behavior(terminal_signature: u32, child_behaviors: &[u32]) -> 
     hash
 }
 
+fn l1_packed_uniform_signature_source_nodes(trie: &L1PackedSuffixTrie) -> Vec<u32> {
+    let mut source_nodes = vec![0u32; trie.nodes.len()];
+    for node_index in (0..trie.nodes.len()).rev() {
+        let node = trie.nodes[node_index];
+        source_nodes[node_index] = if node.terminal_token == L1_NONE && node.edge_len == 1 {
+            let child = trie.edges[node.first_edge as usize].child as usize;
+            debug_assert!(child > node_index);
+            source_nodes[child]
+        } else {
+            node_index as u32
+        };
+    }
+    source_nodes
+}
+
+#[inline]
 fn l1_packed_uniform_signature(
     trie: &L1PackedSuffixTrie,
+    uniform_signature_source_nodes: &[u32],
     node_index: usize,
     behavior_id: u32,
     data: &[L1PackedProductNodeData],
@@ -1730,13 +1747,10 @@ fn l1_packed_uniform_signature(
     if behavior_id == 0 {
         return 0;
     }
+    let node_index = uniform_signature_source_nodes[node_index] as usize;
     let node = trie.nodes[node_index];
     if node.edge_len == 0 {
         return behavior_id;
-    }
-    if node.terminal_token == L1_NONE && node.edge_len == 1 {
-        let child = trie.edges[node.first_edge as usize].child as usize;
-        return l1_packed_uniform_signature(trie, child, behavior_id, data, records);
     }
     records[data[node_index].records_start as usize + behavior_id as usize - 1].uniform_signature
 }
@@ -1952,6 +1966,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
         trie.nodes[0].subtree_start = trie.nodes[first_child as usize].subtree_start;
     }
     let product_token_start = trie.nodes[0].subtree_start;
+    let uniform_signature_source_nodes = l1_packed_uniform_signature_source_nodes(&trie);
     let trie_ms = trie_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let propagate_started_at = profiling.then(Instant::now);
     let mut data = vec![L1PackedProductNodeData::default(); trie.nodes.len()];
@@ -2126,6 +2141,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     record_child_behaviors.push(child_behavior);
                     let child_uniform = l1_packed_uniform_signature(
                         &trie,
+                        &uniform_signature_source_nodes,
                         child,
                         child_behavior,
                         &data,
@@ -2194,6 +2210,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     record_child_behaviors.push(second_behavior);
                     let first_uniform = l1_packed_uniform_signature(
                         &trie,
+                        &uniform_signature_source_nodes,
                         first_child,
                         first_behavior,
                         &data,
@@ -2201,6 +2218,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     );
                     let second_uniform = l1_packed_uniform_signature(
                         &trie,
+                        &uniform_signature_source_nodes,
                         second_child,
                         second_behavior,
                         &data,
@@ -2293,6 +2311,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                         let child = trie.edges[edge_index].child as usize;
                         let child_uniform = l1_packed_uniform_signature(
                             &trie,
+                            &uniform_signature_source_nodes,
                             child,
                             scratch_children[edge_offset],
                             &data,
@@ -2310,6 +2329,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                         let child = trie.edges[edge_index].child as usize;
                         let child_uniform = l1_packed_uniform_signature(
                             &trie,
+                            &uniform_signature_source_nodes,
                             child,
                             scratch_children[edge_offset],
                             &data,
@@ -2351,6 +2371,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
         } else {
             let uniform_signature = l1_packed_uniform_signature(
                 &trie,
+                &uniform_signature_source_nodes,
                 0,
                 behavior_id,
                 &data,
