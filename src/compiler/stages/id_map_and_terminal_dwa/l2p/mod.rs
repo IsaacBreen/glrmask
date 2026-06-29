@@ -766,6 +766,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let transport_modes = reference_terminal_expansion
                 .then(|| terminal_interchangeability.terminal_nwa_transport_modes(tokenizer, &relevant_bytes))
                 .flatten();
+            let terminal_nwa_label_plan = reference_terminal_expansion
+                .then(|| terminal_interchangeability.terminal_nwa_label_plan(ignore_terminal))
+                .flatten();
             if reference_terminal_expansion {
                 trace_terminal_interchangeability_reference(
                     partition_label,
@@ -831,19 +834,22 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 );
             }
 
+            if let Some(label_plan) = terminal_nwa_label_plan.as_ref() {
+                label_plan.tag_in_place(&mut nwa);
+            }
+
             let always_allowed_started_at = Instant::now();
             let always_allowed = compute_always_allowed_follows(grammar);
             let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_build = nwa.states().len();
 
-            // The transport-aware trie walk has already restored every concrete
-            // member label with its own residual-scanner control context.  This
-            // first pass projects only the follow-control labels to their class
-            // representatives.  It is conservative because its relations hold
-            // for every concrete member pair; it never rewrites an NWA edge.
+            // A non-representative terminal is held under a private NWA label.
+            // The tag retains its own byte boundary, target and weight; the
+            // conservative pass observes only its representative label.  Expand
+            // the tags before the exact concrete grammar pass.
             let mut collapse_ms = 0.0;
             let mut disallowed_ms = 0.0;
-            if reference_terminal_expansion {
+            if let Some(label_plan) = terminal_nwa_label_plan.as_ref() {
                 let projected_collapse_started_at = Instant::now();
                 let lifted_always_allowed =
                     terminal_interchangeability.lifted_always_allowed_follows(&always_allowed);
@@ -851,7 +857,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                     &mut nwa,
                     &lifted_always_allowed,
                     grammar.num_terminals as usize,
-                    terminal_interchangeability.representative_for(),
+                    label_plan.representative_projection(),
                 );
                 collapse_ms += projected_collapse_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -863,14 +869,16 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                     &lifted_disallowed,
                     grammar.num_terminals as usize,
                     ignore_terminal,
-                    terminal_interchangeability.representative_for(),
+                    label_plan.representative_projection(),
                 );
                 disallowed_ms += projected_disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
+
+                label_plan.expand_in_place(&mut nwa);
             }
 
-            // The concrete pass remains authoritative and is deliberately run
-            // after the coarse representative pass, before pruning and the one
-            // final determinize/minimize pass.
+            // This exact pass sees ordinary concrete terminal IDs and is the
+            // final authority before the one prune/canonicalize/determinize/
+            // minimize sequence.
             let collapse_started_at = Instant::now();
             collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
             collapse_ms += collapse_started_at.elapsed().as_secs_f64() * 1000.0;

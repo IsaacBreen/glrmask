@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
+use crate::automata::weighted::nwa::NWA;
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 
@@ -374,6 +375,108 @@ fn classify_keys<K: Ord>(keys: impl IntoIterator<Item = K>) -> Vec<u32> {
         .collect()
 }
 
+/// Physical labels used while a terminal NWA is in its representative phase.
+///
+/// A non-representative member gets a private label.  The label preserves the
+/// member-specific terminal boundary, target and weight while every pre-expansion
+/// grammar transform observes its representative through `projection`.  After
+/// the conservative pass, `expand_in_place` restores ordinary terminal labels.
+#[derive(Clone, Debug)]
+pub(crate) struct TerminalNwaLabelPlan {
+    edge_label_for_terminal: Vec<i32>,
+    representative_for_physical_label: Vec<TerminalID>,
+    concrete_label_for_physical_label: Vec<i32>,
+}
+
+impl TerminalNwaLabelPlan {
+    fn new(
+        representative_for: &[TerminalID],
+        ignore_terminal: Option<TerminalID>,
+    ) -> Option<Self> {
+        let terminal_count = representative_for.len();
+        let mut edge_label_for_terminal = (0..terminal_count)
+            .map(|terminal| terminal as i32)
+            .collect::<Vec<_>>();
+        let mut representative_for_physical_label = vec![0; terminal_count * 2];
+        let mut concrete_label_for_physical_label = vec![0; terminal_count * 2];
+        for terminal in 0..terminal_count {
+            representative_for_physical_label[terminal] = representative_for[terminal];
+            representative_for_physical_label[terminal_count + terminal] =
+                representative_for[terminal];
+            concrete_label_for_physical_label[terminal] = terminal as i32;
+            concrete_label_for_physical_label[terminal_count + terminal] = terminal as i32;
+        }
+
+        let mut has_private_member_labels = false;
+        for terminal in 0..terminal_count {
+            let terminal_id = terminal as TerminalID;
+            if Some(terminal_id) == ignore_terminal
+                || representative_for[terminal] == terminal_id
+            {
+                continue;
+            }
+            edge_label_for_terminal[terminal] = (terminal_count + terminal) as i32;
+            has_private_member_labels = true;
+        }
+        has_private_member_labels.then_some(Self {
+            edge_label_for_terminal,
+            representative_for_physical_label,
+            concrete_label_for_physical_label,
+        })
+    }
+
+    pub(crate) fn representative_projection(&self) -> &[TerminalID] {
+        &self.representative_for_physical_label
+    }
+
+    /// Replace concrete member labels with private labels before the
+    /// representative-level grammar transforms. Epsilons, including lowered
+    /// noninitial ignore edges, are intentionally untouched.
+    pub(crate) fn tag_in_place(&self, nwa: &mut NWA) {
+        for state in nwa.states_mut() {
+            let old_transitions = std::mem::take(&mut state.transitions);
+            for (concrete_label, targets) in old_transitions {
+                let physical_label = if concrete_label >= 0 {
+                    self.edge_label_for_terminal
+                        .get(concrete_label as usize)
+                        .copied()
+                        .unwrap_or(concrete_label)
+                } else {
+                    concrete_label
+                };
+                state
+                    .transitions
+                    .entry(physical_label)
+                    .or_default()
+                    .extend(targets);
+            }
+        }
+    }
+
+    /// Restore ordinary grammar terminal labels after the conservative
+    /// representative pass.
+    pub(crate) fn expand_in_place(&self, nwa: &mut NWA) {
+        for state in nwa.states_mut() {
+            let old_transitions = std::mem::take(&mut state.transitions);
+            for (physical_label, targets) in old_transitions {
+                let concrete_label = if physical_label >= 0 {
+                    self.concrete_label_for_physical_label
+                        .get(physical_label as usize)
+                        .copied()
+                        .unwrap_or(physical_label)
+                } else {
+                    physical_label
+                };
+                state
+                    .transitions
+                    .entry(concrete_label)
+                    .or_default()
+                    .extend(targets);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalInterchangeability {
     original_active: Vec<bool>,
@@ -516,6 +619,13 @@ impl TerminalInterchangeability {
     pub(crate) fn is_identity(&self) -> bool {
         self.representative_for.iter().enumerate()
             .all(|(terminal, &representative)| terminal as TerminalID == representative)
+    }
+
+    pub(crate) fn terminal_nwa_label_plan(
+        &self,
+        ignore_terminal: Option<TerminalID>,
+    ) -> Option<TerminalNwaLabelPlan> {
+        TerminalNwaLabelPlan::new(&self.representative_for, ignore_terminal)
     }
 
     pub(crate) fn active_representatives(&self) -> &[bool] { &self.active_representatives }
@@ -734,6 +844,45 @@ mod tests {
             bits
         })]);
         assert!(plan.lifted_disallowed_follows(&not_universal).get(&0).is_none());
+    }
+
+    #[test]
+    fn private_member_tags_expand_to_their_own_concrete_labels_and_targets() {
+        use crate::ds::weight::Weight;
+
+        let plan = TerminalNwaLabelPlan::new(&[0, 0, 2], None)
+            .expect("terminal 1 must receive a private member tag");
+        assert_eq!(plan.representative_projection()[4], 0);
+
+        let mut nwa = NWA::new(1, 0);
+        let start = nwa.add_state();
+        let representative_target = nwa.add_state();
+        let member_target = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+        nwa.add_transition(start, 0, representative_target, Weight::all());
+        nwa.add_transition(start, 1, member_target, Weight::all());
+
+        plan.tag_in_place(&mut nwa);
+        assert!(nwa.states()[start as usize].transitions.contains_key(&0));
+        assert!(nwa.states()[start as usize].transitions.contains_key(&4));
+        plan.expand_in_place(&mut nwa);
+        assert!(nwa.states()[start as usize].transitions[&0]
+            .iter()
+            .any(|(target, _)| *target == representative_target));
+        assert!(nwa.states()[start as usize].transitions[&1]
+            .iter()
+            .any(|(target, _)| *target == member_target));
+
+        let ignore_safe = TerminalNwaLabelPlan::new(&[0, 1, 1], Some(0))
+            .expect("the unrelated class still needs a private member tag");
+        let mut ignore_nwa = NWA::new(1, 0);
+        let ignore_start = ignore_nwa.add_state();
+        let other_target = ignore_nwa.add_state();
+        ignore_nwa.add_transition(ignore_start, 0, other_target, Weight::all());
+        ignore_nwa.add_transition(ignore_start, 2, other_target, Weight::all());
+        ignore_safe.tag_in_place(&mut ignore_nwa);
+        assert!(ignore_nwa.states()[ignore_start as usize].transitions.contains_key(&0));
+        assert!(ignore_nwa.states()[ignore_start as usize].transitions.contains_key(&5));
     }
 
     #[test]

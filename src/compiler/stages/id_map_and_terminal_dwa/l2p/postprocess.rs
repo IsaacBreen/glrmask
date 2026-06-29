@@ -325,15 +325,12 @@ fn project_terminal_label(
     terminals_count: usize,
     label_projection: Option<&[TerminalID]>,
 ) -> Option<TerminalID> {
-    let terminal = TerminalID::try_from(label).ok()?;
-    if terminal as usize >= terminals_count {
-        return None;
-    }
-    Some(
-        label_projection
-            .and_then(|projection| projection.get(terminal as usize).copied())
-            .unwrap_or(terminal),
-    )
+    let physical_label = usize::try_from(label).ok()?;
+    let terminal = match label_projection {
+        Some(projection) => projection.get(physical_label).copied()?,
+        None => (physical_label < terminals_count).then_some(physical_label as TerminalID)?,
+    };
+    ((terminal as usize) < terminals_count).then_some(terminal)
 }
 
 fn propagate_incoming_labels(
@@ -774,20 +771,19 @@ fn subtract_disallowed_follows_direct(
                 || ignore_terminal.is_some_and(|ignore| label as TerminalID == ignore)
             {
                 previous_terminal
-            } else if (label as usize) < disallowed_follows.len() {
-                let terminal = label as usize;
-                let projected_terminal = label_projection
-                    .and_then(|projection| projection.get(terminal).copied())
-                    .unwrap_or(terminal as TerminalID);
-                if previous_terminal.is_some_and(|previous| {
-                    disallowed_follows[previous as usize]
-                        .contains(projected_terminal as usize)
-                }) {
-                    continue;
-                }
-                Some(projected_terminal)
             } else {
-                None
+                match project_terminal_label(label, disallowed_follows.len(), label_projection) {
+                    Some(projected_terminal) => {
+                        if previous_terminal.is_some_and(|previous| {
+                            disallowed_follows[previous as usize]
+                                .contains(projected_terminal as usize)
+                        }) {
+                            continue;
+                        }
+                        Some(projected_terminal)
+                    }
+                    None => None,
+                }
             };
 
             for (nwa_dst, weight) in targets {
@@ -808,17 +804,17 @@ mod tests {
     use crate::automata::weighted::determinize::determinize;
 
     #[test]
-    fn projected_collapse_uses_representative_labels_without_relabeling_edges() {
+    fn projected_collapse_accepts_private_member_tags_without_relabeling_edges() {
         let mut nwa = NWA::new(1, 0);
         let start = nwa.add_state();
         let middle = nwa.add_state();
         let accept = nwa.add_state();
         nwa.set_start_states(vec![start]);
-        nwa.add_transition(start, 1, middle, Weight::all());
-        nwa.add_transition(middle, 2, accept, Weight::all());
+        nwa.add_transition(start, 4, middle, Weight::all());
+        nwa.add_transition(middle, 5, accept, Weight::all());
         nwa.set_final_weight(accept, Weight::all());
 
-        let projection = [0, 0, 0];
+        let projection = [0, 1, 2, 0, 0, 0];
         let always_allowed = vec![vec![0], vec![], vec![]];
         assert!(collapse_always_allowed_projected(
             &mut nwa,
@@ -828,19 +824,19 @@ mod tests {
         ));
 
         assert!(nwa.states()[middle as usize].final_weight.is_some());
-        assert!(!nwa.states()[middle as usize].transitions.contains_key(&2));
-        assert!(nwa.states()[start as usize].transitions.contains_key(&1));
+        assert!(!nwa.states()[middle as usize].transitions.contains_key(&5));
+        assert!(nwa.states()[start as usize].transitions.contains_key(&4));
     }
 
     #[test]
-    fn projected_disallowed_follows_track_representatives_but_keep_edge_labels() {
+    fn projected_disallowed_follows_track_private_member_tags_but_keep_edges() {
         let mut nwa = NWA::new(1, 0);
         let start = nwa.add_state();
         let middle = nwa.add_state();
         let accept = nwa.add_state();
         nwa.set_start_states(vec![start]);
-        nwa.add_transition(start, 1, middle, Weight::all());
-        nwa.add_transition(middle, 2, accept, Weight::all());
+        nwa.add_transition(start, 4, middle, Weight::all());
+        nwa.add_transition(middle, 5, accept, Weight::all());
         nwa.set_final_weight(accept, Weight::all());
 
         let mut disallowed_after_rep = BitSet::new(3);
@@ -851,12 +847,12 @@ mod tests {
             &disallowed,
             3,
             None,
-            &[0, 0, 0],
+            &[0, 1, 2, 0, 0, 0],
         );
 
-        let after_first = nwa.states()[start as usize].transitions[&1][0].0;
-        assert!(!nwa.states()[after_first as usize].transitions.contains_key(&2));
-        assert!(nwa.states()[start as usize].transitions.contains_key(&1));
+        let after_first = nwa.states()[start as usize].transitions[&4][0].0;
+        assert!(!nwa.states()[after_first as usize].transitions.contains_key(&5));
+        assert!(nwa.states()[start as usize].transitions.contains_key(&4));
     }
 
     #[test]
