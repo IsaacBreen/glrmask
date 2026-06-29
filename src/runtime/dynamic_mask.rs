@@ -376,7 +376,6 @@ nt start ::= A B;
         state.commit_token(1).unwrap();
         assert_dynamic_parity(&state);
         assert!(token_allowed(&state.mask(), 3));
-        assert!(token_allowed(&state.mask(), 3));
 
         state.commit_token(3).unwrap();
         assert!(state.is_finished());

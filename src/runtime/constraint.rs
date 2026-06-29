@@ -2062,14 +2062,12 @@ impl Constraint {
 
 impl<'a> ConstraintState<'a> {
     /// Fill a mask directly from the lexer and parser stack, without using the
-    /// parser DWA. This is available only when the lexer persistence check
-    /// recorded on the constraint succeeds.
+    /// parser DWA.
     pub fn fill_mask_dynamic(&self, buf: &mut [u32]) {
         super::dynamic_mask::fill_mask_dynamic(self, buf);
     }
 
 }
-
 #[cfg(test)]
 mod dense_internal_token_mask_tests {
     use super::*;
