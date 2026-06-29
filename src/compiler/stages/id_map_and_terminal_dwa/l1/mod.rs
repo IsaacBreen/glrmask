@@ -57,10 +57,35 @@ fn freeze_l1_walk_profile_from_direct(profile: Vec<(u32, Vec<(u32, u32)>)>) -> L
     )
 }
 
+fn index_l1_walk_profile<'a>(
+    results: &'a L1WalkProfile,
+) -> Vec<(usize, &'a [(u32, u32)], u64, usize)> {
+    results
+        .iter()
+        .map(|(sig_id, ranges)| {
+            let ranges = ranges.as_ref();
+            let mut h: u64 = 0;
+            for &(start, end) in ranges {
+                h = h.wrapping_add(range_hash_val(start, end));
+            }
+            (
+                *sig_id as usize,
+                ranges,
+                (ranges.len() as u64).wrapping_add(h),
+                ranges.len(),
+            )
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 struct L1ExactProfileReuse {
     target_to_profile_id: FxHashMap<(u8, u32), u32>,
     walk_profiles_by_id: Vec<L1WalkProfile>,
+    /// Exact whole-token behavior for every state retained as an L1 id-map
+    /// representative. Entries are aligned with the non-empty first-byte
+    /// buckets and use zero for an empty suffix profile.
+    representative_profile_ids: FxHashMap<u32, Arc<[u32]>>,
     direct_terminal_signatures: Arc<[Vec<u32>]>,
     direct_state_to_terminal_signature: Arc<[u32]>,
 }
@@ -398,6 +423,28 @@ impl<'a> PartialEq for LazyRanges<'a> {
 }
 
 impl<'a> Eq for LazyRanges<'a> {}
+
+fn append_l1_profile_entry<'a>(
+    touched_positions: &mut FxHashMap<usize, usize>,
+    touched_signatures: &mut Vec<(usize, Vec<&'a [(u32, u32)]>, u64, usize)>,
+    sig_idx: usize,
+    ranges: &'a [(u32, u32)],
+    entry_hash: u64,
+    entry_range_count: usize,
+) {
+    let position = if let Some(&position) = touched_positions.get(&sig_idx) {
+        position
+    } else {
+        let position = touched_signatures.len();
+        touched_positions.insert(sig_idx, position);
+        touched_signatures.push((sig_idx, Vec::new(), 0, 0));
+        position
+    };
+    let (_, refs, hash_accum, len_accum) = &mut touched_signatures[position];
+    refs.push(ranges);
+    *hash_accum = hash_accum.wrapping_add(entry_hash);
+    *len_accum += entry_range_count;
+}
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
@@ -1291,6 +1338,37 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         started.elapsed().as_secs_f64() * 1000.0
     });
 
+    // Exact-class representatives become the L1 id-map representatives.
+    // Preserve their already-proved first-byte profile vectors so the direct
+    // terminal-DWA builder does not repeat the same transition and profile-map
+    // lookup work.
+    let mut representative_profile_ids = FxHashMap::<u32, Arc<[u32]>>::default();
+    for &representative in &mapping {
+        representative_profile_ids
+            .entry(representative as u32)
+            .or_insert_with(|| {
+                nonempty_first_bytes
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, &byte)| {
+                        let target = l1_transition(
+                            flat_trans,
+                            transitions_by_byte,
+                            num_tokenizer_states,
+                            representative as u32,
+                            byte,
+                        );
+                        if target == dead {
+                            0
+                        } else {
+                            profile_by_first_byte[slot * num_tokenizer_states + target as usize]
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .into()
+            });
+    }
+
     if let Some(total_started_at) = total_started_at {
         eprintln!(
             "[glrmask/profile][l1_exact_equiv_detail] states={} first_bytes={} unique_targets={} profile_ids={} groups={} terminal_signature_ms={:.3} unique_targets_ms={:.3} target_profiles_ms={:.3} profile_id_intern_ms={:.3} profile_freeze_ms={:.3} profile_intern_ms={:.3} state_keys_ms={:.3} group_ms={:.3} total_ms={:.3}",
@@ -1316,6 +1394,7 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         Some(L1ExactProfileReuse {
             target_to_profile_id,
             walk_profiles_by_id,
+            representative_profile_ids,
             // Exact-equivalence signature ids reserve zero for empty. The
             // direct DWA builder uses `u32::MAX` for empty and zero-based ids
             // for non-empty signatures, matching `materialize_walk_cache`.
@@ -2623,10 +2702,11 @@ fn build_l1_terminal_dwa(
     // the raw merged ranges. Self-loop optimization: if the target state
     // has self-loops on all suffix bytes, all tokens end at the target
     // state and the walk can be skipped entirely.
-    let walk_cache: FxHashMap<(u8, u32), L1WalkProfile> =
-        if let Some(exact_profile_reuse) = exact_profile_reuse {
-            exact_profile_reuse.materialize_walk_cache()
+    let walk_cache: Option<FxHashMap<(u8, u32), L1WalkProfile>> =
+        if exact_profile_reuse.is_some() {
+            None
         } else {
+            Some({
     // Phase 1: Identify unique concrete (first_byte, target_state) pairs.
     // State equivalence is valid for whole-token walks from a start state,
     // but it is not necessarily closed over suffixes after the first byte.
@@ -2916,45 +2996,42 @@ fn build_l1_terminal_dwa(
                 cache.insert(key, value);
             }
         }
-        cache
-            .into_iter()
-            .map(|(target, profile)| (target, freeze_l1_walk_profile_from_direct(profile)))
-            .collect()
-    }
-        };
+              cache
+                  .into_iter()
+                  .map(|(target, profile)| (target, freeze_l1_walk_profile_from_direct(profile)))
+                  .collect()
+          }
+              })
+          };
 
     // Build indexed walk_cache: (byte, target) → Vec of (signature_id, &ranges, entry_hash, entry_range_count).
     // entry_hash is precomputed from the ranges so Phase 2 can combine hashes
     // in O(entries) instead of O(ranges).
     let indexed_cache_started_at = compile_profile_enabled().then(Instant::now);
-    let indexed_walk_cache: FxHashMap<(u8, u32), Vec<(usize, &[(u32, u32)], u64, usize)>> =
-        walk_cache
-            .iter()
-            .map(|(&key, results)| {
-                let indexed: Vec<(usize, &[(u32, u32)], u64, usize)> = results
-                    .iter()
-                    .map(|(sig_id, ranges)| {
-                        let ranges = ranges.as_ref();
-                        let mut h: u64 = 0;
-                        for &(s, e) in ranges {
-                            h = h.wrapping_add(range_hash_val(s, e));
-                        }
-                        let entry_hash = (ranges.len() as u64).wrapping_add(h);
-                        (
-                            *sig_id as usize,
-                            ranges,
-                            entry_hash,
-                            ranges.len(),
-                        )
-                    })
-                    .collect();
-                (key, indexed)
-            })
-            .collect();
+    let indexed_reuse_profiles: Option<Vec<Vec<(usize, &[(u32, u32)], u64, usize)>>> =
+        exact_profile_reuse.map(|reuse| {
+            reuse
+                .walk_profiles_by_id
+                .iter()
+                .map(index_l1_walk_profile)
+                .collect()
+        });
+    let indexed_walk_cache: Option<FxHashMap<(u8, u32), Vec<(usize, &[(u32, u32)], u64, usize)>>> =
+        walk_cache.as_ref().map(|walk_cache| {
+            walk_cache
+                .iter()
+                .map(|(&key, results)| (key, index_l1_walk_profile(results)))
+                .collect()
+        });
     if let Some(indexed_cache_started_at) = indexed_cache_started_at {
         eprintln!(
             "[glrmask/profile][l1_indexed_walk_cache] targets={} total_ms={:.3}",
-            indexed_walk_cache.len(),
+            indexed_walk_cache
+                .as_ref()
+                .map_or_else(
+                    || indexed_reuse_profiles.as_ref().map_or(0, Vec::len),
+                    FxHashMap::len,
+                ),
             indexed_cache_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
@@ -2990,44 +3067,65 @@ fn build_l1_terminal_dwa(
             if !empty_token_ranges.is_empty() {
                 let sig_id = state_to_terminal_signature[start_state as usize];
                 if sig_id != u32::MAX {
-                    let sig_idx = sig_id as usize;
-                    let position = if let Some(&position) = touched_positions.get(&sig_idx) {
-                        position
-                    } else {
-                        let position = touched_signatures.len();
-                        touched_positions.insert(sig_idx, position);
-                        touched_signatures.push((sig_idx, Vec::new(), 0, 0));
-                        position
-                    };
-                    let (_, refs, hash_accum, len_accum) = &mut touched_signatures[position];
-                    refs.push(empty_token_ranges.as_slice());
-                    *hash_accum = hash_accum.wrapping_add(empty_token_hash);
-                    *len_accum += empty_token_ranges.len();
+                    append_l1_profile_entry(
+                        &mut touched_positions,
+                        &mut touched_signatures,
+                        sig_id as usize,
+                        empty_token_ranges.as_slice(),
+                        empty_token_hash,
+                        empty_token_ranges.len(),
+                    );
                 }
             }
 
-            for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
-                if token_ids.is_empty() {
-                    continue;
+            if let Some(reuse) = exact_profile_reuse {
+                let profile_ids = reuse
+                    .representative_profile_ids
+                    .get(&start_state)
+                    .expect("exact L1 profile reuse missing id-map representative");
+                let profiles = indexed_reuse_profiles
+                    .as_ref()
+                    .expect("missing indexed exact L1 profiles");
+                for &profile_id in profile_ids.iter() {
+                    if profile_id == 0 {
+                        continue;
+                    }
+                    for &(sig_idx, ranges, entry_hash, entry_mc) in
+                        &profiles[profile_id as usize]
+                    {
+                        append_l1_profile_entry(
+                            &mut touched_positions,
+                            &mut touched_signatures,
+                            sig_idx,
+                            ranges,
+                            entry_hash,
+                            entry_mc,
+                        );
+                    }
                 }
-                let target_state = flat_trans[start_state as usize * 256 + byte];
-                if target_state == dead {
-                    continue;
-                }
-                if let Some(results) = indexed_walk_cache.get(&(byte as u8, target_state)) {
-                    for &(sig_idx, ranges, entry_hash, entry_mc) in results {
-                        let position = if let Some(&position) = touched_positions.get(&sig_idx) {
-                            position
-                        } else {
-                            let position = touched_signatures.len();
-                            touched_positions.insert(sig_idx, position);
-                            touched_signatures.push((sig_idx, Vec::new(), 0, 0));
-                            position
-                        };
-                        let (_, refs, hash_accum, len_accum) = &mut touched_signatures[position];
-                        refs.push(ranges);
-                        *hash_accum = hash_accum.wrapping_add(entry_hash);
-                        *len_accum += entry_mc;
+            } else {
+                let cache = indexed_walk_cache
+                    .as_ref()
+                    .expect("missing fallback indexed L1 walk cache");
+                for (byte, token_ids) in token_indices_by_first_byte.iter().enumerate() {
+                    if token_ids.is_empty() {
+                        continue;
+                    }
+                    let target_state = flat_trans[start_state as usize * 256 + byte];
+                    if target_state == dead {
+                        continue;
+                    }
+                    if let Some(results) = cache.get(&(byte as u8, target_state)) {
+                        for &(sig_idx, ranges, entry_hash, entry_mc) in results {
+                            append_l1_profile_entry(
+                                &mut touched_positions,
+                                &mut touched_signatures,
+                                sig_idx,
+                                ranges,
+                                entry_hash,
+                                entry_mc,
+                            );
+                        }
                     }
                 }
             }
@@ -3912,6 +4010,7 @@ mod packed_suffix_product_tests {
                 freeze_l1_walk_profile(&empty),
                 freeze_l1_walk_profile(&profile_one),
             ],
+            representative_profile_ids: FxHashMap::default(),
             direct_terminal_signatures: Arc::from([]),
             direct_state_to_terminal_signature: Arc::from([]),
         };
