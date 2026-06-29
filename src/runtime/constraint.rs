@@ -138,26 +138,6 @@ fn count_complement_subgroups(missing: u64, valid_mask: u64) -> (u32, u32, u32) 
 }
 
 impl Constraint {
-    /// A direct mask is sound when accepting a terminal remains true along
-    /// every successor where that same terminal is still completable.
-    fn supports_dynamic_masks(&self) -> bool {
-        for state in 0..self.tokenizer.num_states() {
-            let accepted = self.tokenizer.matched_terminal_bitset(state);
-            for (_, successor) in self.tokenizer.transitions_from(state) {
-                let successor_accepted = self.tokenizer.matched_terminal_bitset(successor);
-                let successor_future = self.tokenizer.possible_future_terminals(successor);
-                for terminal in accepted.iter() {
-                    if successor_future.contains(terminal)
-                        && !successor_accepted.contains(terminal)
-                    {
-                        return false;
-                    }
-                }
-            }
-        }
-        true
-    }
-
     fn build_dynamic_mask_vocab(&self) -> DynamicMaskVocab {
         let mut aliases_by_bytes = BTreeMap::<Vec<u8>, Vec<u32>>::new();
         for (&token_id, bytes) in self.token_bytes.iter() {
@@ -182,11 +162,6 @@ impl Constraint {
             )),
             token_ids: Arc::new(aliases_by_canonical),
         }
-    }
-
-    /// Whether [`ConstraintState::fill_mask_dynamic`] is available.
-    pub fn dynamic_mask_available(&self) -> bool {
-        self.dynamic_mask_vocab.is_some()
     }
 
     pub fn table_ambiguous_actions(&self) -> Vec<TableAmbiguity> {
@@ -445,9 +420,7 @@ impl Constraint {
 
     pub(crate) fn rebuild_runtime_caches_impl(&mut self) {
         self.table.rebuild_guarded_shift_index();
-        self.dynamic_mask_vocab = self
-            .supports_dynamic_masks()
-            .then(|| self.build_dynamic_mask_vocab());
+        self.dynamic_mask_vocab = self.build_dynamic_mask_vocab();
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);

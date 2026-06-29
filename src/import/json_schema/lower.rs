@@ -31,9 +31,6 @@ pub(crate) const JSON_ITEM_SEPARATOR_RULE: &str = "JSON_ITEM_SEPARATOR";
 pub(crate) const JSON_KEY_SEPARATOR_RULE: &str = "JSON_KEY_SEPARATOR";
 pub(crate) const JSON_KEY_SUFFIX_RULE: &str = "JSON_KEY_SUFFIX";
 pub(crate) const JSON_INTEGER_RULE: &str = "JSON_INTEGER";
-pub(crate) const JSON_NUMBER_DECIMAL_RULE: &str = "JSON_NUMBER_DECIMAL";
-pub(crate) const JSON_NUMBER_EXPONENT_RULE: &str = "JSON_NUMBER_EXPONENT";
-/// A nonterminal union of JSON's integer, fractional, and exponent forms.
 pub(crate) const JSON_NUMBER_RULE: &str = "JSON_NUMBER";
 pub(crate) const JSON_BOOL_RULE: &str = "JSON_BOOL";
 pub(crate) const JSON_NULL_RULE: &str = "JSON_NULL";
@@ -296,27 +293,9 @@ impl<'a> Lowerer<'a> {
             JSON_INTEGER_RULE,
             GrammarExpr::RawRegex(r#"-?(0|[1-9][0-9]*)"#.to_string()),
         );
-        // Keep each numeric terminal acceptance-closed over its own live
-        // continuations. An integer is accepted before `.` or `e`, but those
-        // bytes begin different terminal forms; putting optional suffixes in a
-        // single JSON_NUMBER terminal would violate dynamic-mask availability.
         self.add_terminal_rule(
-            JSON_NUMBER_DECIMAL_RULE,
-            GrammarExpr::RawRegex(r#"-?(0|[1-9][0-9]*)\.[0-9]+"#.to_string()),
-        );
-        self.add_terminal_rule(
-            JSON_NUMBER_EXPONENT_RULE,
-            GrammarExpr::RawRegex(
-                r#"-?(0|[1-9][0-9]*)(\.[0-9]+)?[eE][+-]?[0-9]+"#.to_string(),
-            ),
-        );
-        self.add_nonterminal_rule(
             JSON_NUMBER_RULE,
-            choice(vec![
-                r(JSON_INTEGER_RULE),
-                r(JSON_NUMBER_DECIMAL_RULE),
-                r(JSON_NUMBER_EXPONENT_RULE),
-            ]),
+            GrammarExpr::RawRegex(r#"-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?"#.to_string()),
         );
         self.add_terminal_rule(
             JSON_BOOL_RULE,

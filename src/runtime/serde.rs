@@ -59,7 +59,7 @@ impl RuntimePayloadV1 {
             terminal_display_names: self.terminal_display_names,
             tokenizer: self.tokenizer,
             ignore_terminal: self.ignore_terminal,
-            dynamic_mask_vocab: None,
+            dynamic_mask_vocab: Default::default(),
             possible_matches: self.possible_matches,
             state_to_internal_tsid: self.state_to_internal_tsid,
             internal_tsid_to_states: self.internal_tsid_to_states,

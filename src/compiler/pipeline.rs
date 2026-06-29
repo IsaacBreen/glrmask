@@ -868,7 +868,7 @@ fn compile_prepared_with_profile_and_table_construction(
             terminal_display_names: analyzed_grammar.terminal_display_names.clone(),
             tokenizer,
             ignore_terminal: prepared_grammar.ignore_terminal,
-            dynamic_mask_vocab: None,
+            dynamic_mask_vocab: Default::default(),
             possible_matches: possible_matches.into_artifact(),
             state_to_internal_tsid: internal_ids.tokenizer_states.original_to_internal.clone(),
             internal_tsid_to_states: internal_ids.tokenizer_states.internal_to_originals_vecs(),

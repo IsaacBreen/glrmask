@@ -468,11 +468,6 @@ impl PyConstraint {
         }
     }
 
-    #[getter]
-    fn dynamic_mask_available(&self) -> bool {
-        self.inner.dynamic_mask_available()
-    }
-
     fn mask_len(&self) -> usize {
         self.inner.mask_len()
     }
