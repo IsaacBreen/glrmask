@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
+use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 
 use super::nwa_builder::{TerminalNwaTransportMachine, TerminalNwaTransportMode};
@@ -518,6 +519,92 @@ impl TerminalInterchangeability {
     }
 
     pub(crate) fn active_representatives(&self) -> &[bool] { &self.active_representatives }
+
+    pub(crate) fn representative_for(&self) -> &[TerminalID] { &self.representative_for }
+
+    /// A relation is available to the coarse representative pass only when it
+    /// holds for every pair of concrete members represented by the two labels.
+    pub(crate) fn lifted_always_allowed_follows(
+        &self,
+        always_allowed: &[Vec<TerminalID>],
+    ) -> Vec<Vec<TerminalID>> {
+        let terminal_count = self.active_representatives.len();
+        let mut result = vec![Vec::new(); terminal_count];
+        let active_classes = self
+            .members_by_representative
+            .iter()
+            .enumerate()
+            .filter(|(representative, members)| {
+                self.active_representatives[*representative] && !members.is_empty()
+            })
+            .collect::<Vec<_>>();
+        for &(representative, left_members) in &active_classes {
+            let mut universally_allowed = BitSet::all(terminal_count);
+            for &left in left_members {
+                let mut follows = BitSet::new(terminal_count);
+                if let Some(concrete_follows) = always_allowed.get(left as usize) {
+                    for &right in concrete_follows {
+                        follows.set(right as usize);
+                    }
+                }
+                universally_allowed.intersect_with(&follows);
+                if universally_allowed.is_zero() {
+                    break;
+                }
+            }
+            for &(successor, right_members) in &active_classes {
+                if right_members
+                    .iter()
+                    .all(|&right| universally_allowed.contains(right as usize))
+                {
+                    result[representative].push(successor as TerminalID);
+                }
+            }
+        }
+        result
+    }
+
+    pub(crate) fn lifted_disallowed_follows(
+        &self,
+        disallowed: &BTreeMap<u32, BitSet>,
+    ) -> BTreeMap<u32, BitSet> {
+        let terminal_count = self.active_representatives.len();
+        let mut result = BTreeMap::new();
+        let active_classes = self
+            .members_by_representative
+            .iter()
+            .enumerate()
+            .filter(|(representative, members)| {
+                self.active_representatives[*representative] && !members.is_empty()
+            })
+            .collect::<Vec<_>>();
+        for &(representative, left_members) in &active_classes {
+            let mut universally_disallowed = BitSet::all(terminal_count);
+            for &left in left_members {
+                let Some(concrete_follows) = disallowed.get(&left) else {
+                    universally_disallowed.clear_all();
+                    break;
+                };
+                universally_disallowed.intersect_with(concrete_follows);
+                if universally_disallowed.is_zero() {
+                    break;
+                }
+            }
+            let mut forbidden = BitSet::new(terminal_count);
+            for &(successor, right_members) in &active_classes {
+                if right_members
+                    .iter()
+                    .all(|&right| universally_disallowed.contains(right as usize))
+                {
+                    forbidden.set(successor);
+                }
+            }
+            if !forbidden.is_zero() {
+                result.insert(representative as u32, forbidden);
+            }
+        }
+        result
+    }
     pub(crate) fn active_terminal_count_before(&self) -> usize {
         self.original_active.iter().filter(|&&active| active).count()
     }
@@ -609,10 +696,45 @@ impl DisjointSet {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
+
     use super::*;
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::compile::build_regex;
+
+    #[test]
+    fn lifted_follow_relations_require_every_concrete_member_pair() {
+        let plan = TerminalInterchangeability {
+            original_active: vec![true, true, true],
+            active_representatives: vec![true, false, true],
+            representative_for: vec![0, 0, 2],
+            members_by_representative: vec![vec![0, 1], Vec::new(), vec![2]],
+            maps_by_representative_member: BTreeMap::new(),
+            source_blocks: Vec::new(),
+        };
+
+        let always_allowed = vec![vec![2], vec![2], vec![]];
+        assert_eq!(plan.lifted_always_allowed_follows(&always_allowed)[0], vec![2]);
+
+        let mut first = BitSet::new(3);
+        first.set(2);
+        let mut second = BitSet::new(3);
+        second.set(2);
+        let disallowed = BTreeMap::from([(0, first), (1, second)]);
+        assert!(plan
+            .lifted_disallowed_follows(&disallowed)
+            .get(&0)
+            .expect("universal relation must remain")
+            .contains(2));
+
+        let not_universal = BTreeMap::from([(0, {
+            let mut bits = BitSet::new(3);
+            bits.set(2);
+            bits
+        })]);
+        assert!(plan.lifted_disallowed_follows(&not_universal).get(&0).is_none());
+    }
 
     #[test]
     fn rotated_residuals_form_an_l2p_terminal_partition() {
