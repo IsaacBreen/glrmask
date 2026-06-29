@@ -320,9 +320,26 @@ pub(crate) fn prune_non_coreachable_states(nwa: &mut NWA) -> bool {
 
 // ─── Collapse always-allowed ─────────────────────────────────────────────────
 
+fn project_terminal_label(
+    label: i32,
+    terminals_count: usize,
+    label_projection: Option<&[TerminalID]>,
+) -> Option<TerminalID> {
+    let terminal = TerminalID::try_from(label).ok()?;
+    if terminal as usize >= terminals_count {
+        return None;
+    }
+    Some(
+        label_projection
+            .and_then(|projection| projection.get(terminal as usize).copied())
+            .unwrap_or(terminal),
+    )
+}
+
 fn propagate_incoming_labels(
     nwa: &NWA,
     terminals_count: usize,
+    label_projection: Option<&[TerminalID]>,
 ) -> Vec<HashSet<TerminalID>> {
     let mut incoming = vec![HashSet::new(); nwa.states().len()];
     let mut queue = VecDeque::new();
@@ -349,11 +366,13 @@ fn propagate_incoming_labels(
         }
 
         for (&label, targets) in &state.transitions {
-            if label < 0 || (label as usize) >= terminals_count {
+            let Some(projected_label) =
+                project_terminal_label(label, terminals_count, label_projection)
+            else {
                 continue;
-            }
+            };
             for (dst, _) in targets {
-                if incoming[*dst as usize].insert(label as TerminalID) && !in_queue[*dst as usize] {
+                if incoming[*dst as usize].insert(projected_label) && !in_queue[*dst as usize] {
                     in_queue[*dst as usize] = true;
                     queue.push_back(*dst);
                 }
@@ -367,6 +386,7 @@ fn propagate_incoming_labels(
 fn propagate_collapse_context(
     nwa: &NWA,
     terminals_count: usize,
+    label_projection: Option<&[TerminalID]>,
 ) -> (Vec<HashSet<TerminalID>>, Vec<Weight>) {
     let mut incoming = vec![HashSet::new(); nwa.states().len()];
     let mut domain = vec![Weight::empty(); nwa.states().len()];
@@ -407,9 +427,11 @@ fn propagate_collapse_context(
         }
 
         for (&label, targets) in &state.transitions {
-            if label < 0 || (label as usize) >= terminals_count {
+            let Some(projected_label) =
+                project_terminal_label(label, terminals_count, label_projection)
+            else {
                 continue;
-            }
+            };
 
             for (dst, weight) in targets {
                 let contrib = state_domain.intersection(weight);
@@ -419,7 +441,7 @@ fn propagate_collapse_context(
                     domain[*dst as usize] = next_domain;
                 }
 
-                let labels_changed = incoming[*dst as usize].insert(label as TerminalID);
+                let labels_changed = incoming[*dst as usize].insert(projected_label);
                 if (domain_changed || labels_changed) && !in_queue[*dst as usize] {
                     in_queue[*dst as usize] = true;
                     queue.push_back(*dst);
@@ -467,6 +489,7 @@ fn collapse_single_allowed_transitions(
     domain: &[Weight],
     allowed_by_state: &[HashSet<TerminalID>],
     terminals_count: usize,
+    label_projection: Option<&[TerminalID]>,
 ) -> bool {
     let mut final_weights: Vec<Option<Weight>> =
         nwa.states().iter().map(|state| state.final_weight.clone()).collect();
@@ -489,10 +512,9 @@ fn collapse_single_allowed_transitions(
         let mut labels_to_remove = Vec::new();
 
         for (&label, targets) in state.transitions.iter_mut() {
-            if label < 0 || (label as usize) >= terminals_count {
-                continue;
-            }
-            if label as TerminalID != only_allowed {
+            if project_terminal_label(label, terminals_count, label_projection)
+                != Some(only_allowed)
+            {
                 continue;
             }
 
@@ -542,6 +564,29 @@ pub(crate) fn collapse_always_allowed(
     always_allowed_by_label: &[Vec<TerminalID>],
     terminals_count: usize,
 ) -> bool {
+    collapse_always_allowed_impl(nwa, always_allowed_by_label, terminals_count, None)
+}
+
+pub(crate) fn collapse_always_allowed_projected(
+    nwa: &mut NWA,
+    always_allowed_by_label: &[Vec<TerminalID>],
+    terminals_count: usize,
+    label_projection: &[TerminalID],
+) -> bool {
+    collapse_always_allowed_impl(
+        nwa,
+        always_allowed_by_label,
+        terminals_count,
+        Some(label_projection),
+    )
+}
+
+fn collapse_always_allowed_impl(
+    nwa: &mut NWA,
+    always_allowed_by_label: &[Vec<TerminalID>],
+    terminals_count: usize,
+    label_projection: Option<&[TerminalID]>,
+) -> bool {
     if always_allowed_by_label.is_empty() || terminals_count == 0 || nwa.states().is_empty() {
         return false;
     }
@@ -559,7 +604,8 @@ pub(crate) fn collapse_always_allowed(
     // Lightweight check: propagate only incoming labels (no Weight arithmetic)
     // and check if any state has exactly 1 allowed label before doing expensive
     // domain propagation.
-    let incoming_labels = propagate_incoming_labels(nwa, terminals_count);
+    let incoming_labels =
+        propagate_incoming_labels(nwa, terminals_count, label_projection);
 
     let allowed_by_state = allowed_labels_by_state(&incoming_labels, always_allowed_by_label);
 
@@ -569,10 +615,17 @@ pub(crate) fn collapse_always_allowed(
     }
 
     // Full propagation: compute domains (Weight arithmetic) only when needed.
-    let (_, domain) = propagate_collapse_context(nwa, terminals_count);
+    let (_, domain) =
+        propagate_collapse_context(nwa, terminals_count, label_projection);
 
-    let mut changed =
-        collapse_single_allowed_transitions(nwa, &topo_order, &domain, &allowed_by_state, terminals_count);
+    let mut changed = collapse_single_allowed_transitions(
+        nwa,
+        &topo_order,
+        &domain,
+        &allowed_by_state,
+        terminals_count,
+        label_projection,
+    );
 
     if prune_unreachable_states(nwa) {
         changed = true;
@@ -629,7 +682,12 @@ pub(crate) fn apply_disallowed_follow_constraints(
         let Some(normalized) = cache.get_or_build(num_terminals, disallowed_follows) else {
             return;
         };
-        *nwa = subtract_disallowed_follows_direct(nwa, normalized.as_ref(), ignore_terminal);
+        *nwa = subtract_disallowed_follows_direct(
+            nwa,
+            normalized.as_ref(),
+            ignore_terminal,
+            None,
+        );
         return;
     }
 
@@ -638,13 +696,33 @@ pub(crate) fn apply_disallowed_follow_constraints(
         return;
     }
 
-    *nwa = subtract_disallowed_follows_direct(nwa, &normalized, ignore_terminal);
+    *nwa = subtract_disallowed_follows_direct(nwa, &normalized, ignore_terminal, None);
+}
+
+pub(crate) fn apply_disallowed_follow_constraints_projected(
+    nwa: &mut NWA,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: usize,
+    ignore_terminal: Option<TerminalID>,
+    label_projection: &[TerminalID],
+) {
+    let normalized = normalize_disallowed_follows(num_terminals, disallowed_follows);
+    if normalized.iter().all(|bits| bits.is_zero()) {
+        return;
+    }
+    *nwa = subtract_disallowed_follows_direct(
+        nwa,
+        &normalized,
+        ignore_terminal,
+        Some(label_projection),
+    );
 }
 
 fn subtract_disallowed_follows_direct(
     nwa: &NWA,
     disallowed_follows: &[BitSet],
     ignore_terminal: Option<TerminalID>,
+    label_projection: Option<&[TerminalID]>,
 ) -> NWA {
     type ProdState = (u32, Option<u32>);
 
@@ -698,12 +776,16 @@ fn subtract_disallowed_follows_direct(
                 previous_terminal
             } else if (label as usize) < disallowed_follows.len() {
                 let terminal = label as usize;
+                let projected_terminal = label_projection
+                    .and_then(|projection| projection.get(terminal).copied())
+                    .unwrap_or(terminal as TerminalID);
                 if previous_terminal.is_some_and(|previous| {
-                    disallowed_follows[previous as usize].contains(terminal)
+                    disallowed_follows[previous as usize]
+                        .contains(projected_terminal as usize)
                 }) {
                     continue;
                 }
-                Some(terminal as u32)
+                Some(projected_terminal)
             } else {
                 None
             };
@@ -724,6 +806,58 @@ fn subtract_disallowed_follows_direct(
 mod tests {
     use super::*;
     use crate::automata::weighted::determinize::determinize;
+
+    #[test]
+    fn projected_collapse_uses_representative_labels_without_relabeling_edges() {
+        let mut nwa = NWA::new(1, 0);
+        let start = nwa.add_state();
+        let middle = nwa.add_state();
+        let accept = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+        nwa.add_transition(start, 1, middle, Weight::all());
+        nwa.add_transition(middle, 2, accept, Weight::all());
+        nwa.set_final_weight(accept, Weight::all());
+
+        let projection = [0, 0, 0];
+        let always_allowed = vec![vec![0], vec![], vec![]];
+        assert!(collapse_always_allowed_projected(
+            &mut nwa,
+            &always_allowed,
+            3,
+            &projection,
+        ));
+
+        assert!(nwa.states()[middle as usize].final_weight.is_some());
+        assert!(!nwa.states()[middle as usize].transitions.contains_key(&2));
+        assert!(nwa.states()[start as usize].transitions.contains_key(&1));
+    }
+
+    #[test]
+    fn projected_disallowed_follows_track_representatives_but_keep_edge_labels() {
+        let mut nwa = NWA::new(1, 0);
+        let start = nwa.add_state();
+        let middle = nwa.add_state();
+        let accept = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+        nwa.add_transition(start, 1, middle, Weight::all());
+        nwa.add_transition(middle, 2, accept, Weight::all());
+        nwa.set_final_weight(accept, Weight::all());
+
+        let mut disallowed_after_rep = BitSet::new(3);
+        disallowed_after_rep.set(0);
+        let disallowed = BTreeMap::from([(0, disallowed_after_rep)]);
+        apply_disallowed_follow_constraints_projected(
+            &mut nwa,
+            &disallowed,
+            3,
+            None,
+            &[0, 0, 0],
+        );
+
+        let after_first = nwa.states()[start as usize].transitions[&1][0].0;
+        assert!(!nwa.states()[after_first as usize].transitions.contains_key(&2));
+        assert!(nwa.states()[start as usize].transitions.contains_key(&1));
+    }
 
     #[test]
     fn labelled_ignore_does_not_become_a_follow_pair_predecessor() {
