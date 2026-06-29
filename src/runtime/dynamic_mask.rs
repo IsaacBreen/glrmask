@@ -516,6 +516,44 @@ nt start ::= A A;
     }
 
     #[test]
+    fn dynamic_mask_keeps_other_gss_paths_when_one_path_excludes_a_terminal() {
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+                (2, b"c".to_vec()),
+                (3, b"ab".to_vec()),
+            ],
+            None,
+        );
+        let grammar = r#"
+start start;
+t A ::= 'a' | 'ab';
+t B ::= 'a';
+t C ::= 'c';
+t D ::= 'b';
+nt start ::= A C | B D;
+"#;
+        let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let mut state = constraint.start();
+        state.commit_token(0).unwrap();
+
+        let paths = state
+            .state
+            .values()
+            .flat_map(|gss| gss.to_stacks())
+            .collect::<Vec<_>>();
+        assert!(paths.iter().any(|(_, exclusions)| exclusions.is_empty()));
+        assert!(paths.iter().any(|(_, exclusions)| !exclusions.is_empty()));
+
+        assert_dynamic_parity(&state);
+        assert!(token_allowed(&direct_mask(&state), 1));
+        state.commit_token(1).unwrap();
+        assert!(state.is_complete());
+        assert_dynamic_parity(&state);
+    }
+
+    #[test]
     fn dynamic_mask_handles_overlapping_live_terminal_paths() {
         let vocab = Vocab::new(
             vec![
