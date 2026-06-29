@@ -1362,7 +1362,7 @@ fn strict_terminal_interchangeability_reference_matches_baseline_l2p_artifact() 
     let _disable_validation = EnvVarGuard::unset("GLRMASK_VALIDATE_L2P_TERMINAL_INTERCHANGEABILITY");
 
     // Minimized rotated-residual fixture: one token, two terminal positions.
-    let entries = ["aaa"];
+    let entries = ["aa"];
     let grammar = r#"
         start: A B
         A: /a(aaaa)*/
