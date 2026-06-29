@@ -46,8 +46,8 @@ use nwa_builder::{
 };
 use terminal_interchangeability::TerminalInterchangeability;
 use postprocess::{
-    apply_disallowed_follow_constraints, apply_disallowed_follow_constraints_projected,
-    canonicalize_acyclic_nwa, collapse_always_allowed, collapse_always_allowed_projected,
+    apply_disallowed_follow_constraints, apply_disallowed_follow_constraints_with_origins,
+    canonicalize_acyclic_nwa, collapse_always_allowed, collapse_always_allowed_without_prune,
     prune_non_coreachable_states, SharedDisallowedFollowDfaCache,
 };
 
@@ -766,9 +766,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let transport_modes = reference_terminal_expansion
                 .then(|| terminal_interchangeability.terminal_nwa_transport_modes(tokenizer, &relevant_bytes))
                 .flatten();
-            let terminal_nwa_label_plan = reference_terminal_expansion
-                .then(|| terminal_interchangeability.terminal_nwa_label_plan(ignore_terminal))
-                .flatten();
             if reference_terminal_expansion {
                 trace_terminal_interchangeability_reference(
                     partition_label,
@@ -834,51 +831,59 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 );
             }
 
-            if let Some(label_plan) = terminal_nwa_label_plan.as_ref() {
-                label_plan.tag_in_place(&mut nwa);
-            }
-
             let always_allowed_started_at = Instant::now();
             let always_allowed = compute_always_allowed_follows(grammar);
             let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_build = nwa.states().len();
 
-            // A non-representative terminal is held under a private NWA label.
-            // The tag retains its own byte boundary, target and weight; the
-            // conservative pass observes only its representative label.  Expand
-            // the tags before the exact concrete grammar pass.
+            // Build a genuine representative NWA for the coarse pass.  Each
+            // representative edge carries a ledger of its exact concrete member
+            // alternatives, so expansion restores the original target and
+            // weight rather than cloning an edge into the wrong continuation.
             let mut collapse_ms = 0.0;
             let mut disallowed_ms = 0.0;
-            if let Some(label_plan) = terminal_nwa_label_plan.as_ref() {
-                let projected_collapse_started_at = Instant::now();
+            if reference_terminal_expansion {
+                let lift_started_at = Instant::now();
                 let lifted_always_allowed =
                     terminal_interchangeability.lifted_always_allowed_follows(&always_allowed);
-                collapse_always_allowed_projected(
-                    &mut nwa,
-                    &lifted_always_allowed,
-                    grammar.num_terminals as usize,
-                    label_plan.representative_projection(),
-                );
-                collapse_ms += projected_collapse_started_at.elapsed().as_secs_f64() * 1000.0;
-
-                let projected_disallowed_started_at = Instant::now();
                 let lifted_disallowed =
                     terminal_interchangeability.lifted_disallowed_follows(disallowed_follows);
-                apply_disallowed_follow_constraints_projected(
-                    &mut nwa,
-                    &lifted_disallowed,
-                    grammar.num_terminals as usize,
-                    ignore_terminal,
-                    label_plan.representative_projection(),
-                );
-                disallowed_ms += projected_disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
+                let has_coarse_relation = lifted_always_allowed.iter().any(|follows| !follows.is_empty())
+                    || !lifted_disallowed.is_empty();
+                if has_coarse_relation {
+                    let mut representative = terminal_interchangeability.coalesce_terminal_nwa(&nwa, ignore_terminal);
 
-                label_plan.expand_in_place(&mut nwa);
+                    let projected_collapse_started_at = Instant::now();
+                    collapse_always_allowed_without_prune(
+                        &mut representative.nwa,
+                        &lifted_always_allowed,
+                        grammar.num_terminals as usize,
+                    );
+                    collapse_ms += projected_collapse_started_at.elapsed().as_secs_f64() * 1000.0;
+
+                    let projected_disallowed_started_at = Instant::now();
+                    if let Some(product) = apply_disallowed_follow_constraints_with_origins(
+                        &representative.nwa,
+                        &lifted_disallowed,
+                        grammar.num_terminals as usize,
+                        ignore_terminal,
+                    ) {
+                        nwa = representative.expand(
+                            &product.nwa,
+                            &product.source_state_for_output,
+                        );
+                    } else {
+                        let origins = (0..representative.nwa.states().len())
+                            .map(|state| state as u32)
+                            .collect::<Vec<_>>();
+                        nwa = representative.expand(&representative.nwa, &origins);
+                    }
+                    disallowed_ms += projected_disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
+                }
+                collapse_ms += lift_started_at.elapsed().as_secs_f64() * 1000.0
+                    - collapse_ms - disallowed_ms;
             }
 
-            // This exact pass sees ordinary concrete terminal IDs and is the
-            // final authority before the one prune/canonicalize/determinize/
-            // minimize sequence.
             let collapse_started_at = Instant::now();
             collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
             collapse_ms += collapse_started_at.elapsed().as_secs_f64() * 1000.0;

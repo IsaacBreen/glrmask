@@ -561,7 +561,15 @@ pub(crate) fn collapse_always_allowed(
     always_allowed_by_label: &[Vec<TerminalID>],
     terminals_count: usize,
 ) -> bool {
-    collapse_always_allowed_impl(nwa, always_allowed_by_label, terminals_count, None)
+    collapse_always_allowed_impl(nwa, always_allowed_by_label, terminals_count, None, true)
+}
+
+pub(crate) fn collapse_always_allowed_without_prune(
+    nwa: &mut NWA,
+    always_allowed_by_label: &[Vec<TerminalID>],
+    terminals_count: usize,
+) -> bool {
+    collapse_always_allowed_impl(nwa, always_allowed_by_label, terminals_count, None, false)
 }
 
 pub(crate) fn collapse_always_allowed_projected(
@@ -575,6 +583,7 @@ pub(crate) fn collapse_always_allowed_projected(
         always_allowed_by_label,
         terminals_count,
         Some(label_projection),
+        true,
     )
 }
 
@@ -583,6 +592,7 @@ fn collapse_always_allowed_impl(
     always_allowed_by_label: &[Vec<TerminalID>],
     terminals_count: usize,
     label_projection: Option<&[TerminalID]>,
+    prune_unreachable: bool,
 ) -> bool {
     if always_allowed_by_label.is_empty() || terminals_count == 0 || nwa.states().is_empty() {
         return false;
@@ -624,7 +634,7 @@ fn collapse_always_allowed_impl(
         label_projection,
     );
 
-    if prune_unreachable_states(nwa) {
+    if prune_unreachable && prune_unreachable_states(nwa) {
         changed = true;
     }
 
@@ -715,6 +725,142 @@ pub(crate) fn apply_disallowed_follow_constraints_projected(
     );
 }
 
+/// Result of a representative-level disallowed-follow pass.  Every output
+/// state remembers the representative NWA state from which it came, allowing
+/// deferred concrete edge variants to be expanded after this pass.
+#[derive(Debug)]
+pub(crate) struct DisallowedFollowProduct {
+    pub(crate) nwa: NWA,
+    pub(crate) source_state_for_output: Vec<u32>,
+}
+
+pub(crate) fn apply_disallowed_follow_constraints_with_origins(
+    nwa: &NWA,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: usize,
+    ignore_terminal: Option<TerminalID>,
+) -> Option<DisallowedFollowProduct> {
+    let normalized = normalize_disallowed_follows(num_terminals, disallowed_follows);
+    (!normalized.iter().all(|bits| bits.is_zero())).then(|| {
+        subtract_disallowed_follows_direct_with_origins(nwa, &normalized, ignore_terminal)
+    })
+}
+
+fn subtract_disallowed_follows_direct_with_origins(
+    nwa: &NWA,
+    disallowed_follows: &[BitSet],
+    ignore_terminal: Option<TerminalID>,
+) -> DisallowedFollowProduct {
+    type ProdState = (u32, Option<u32>);
+
+    // Preserve the original NWA's tokenizer/weight metadata.  Reuse its
+    // existing state slots first, then append slots when the product splits
+    // more states than the base NWA had.
+    let mut result = nwa.clone();
+    let base_state_slots = result.states().len();
+    for state in result.states_mut() {
+        state.final_weight = None;
+        state.transitions.clear();
+        state.epsilons.clear();
+    }
+    result.start_states_mut().clear();
+
+    let mut state_ids: HashMap<ProdState, u32> = HashMap::new();
+    let mut worklist: VecDeque<ProdState> = VecDeque::new();
+    let mut source_state_for_output = vec![0; base_state_slots];
+
+    let get_or_create = |result: &mut NWA,
+                         state_ids: &mut HashMap<ProdState, u32>,
+                         worklist: &mut VecDeque<ProdState>,
+                         source_state_for_output: &mut Vec<u32>,
+                         ps: ProdState|
+     -> u32 {
+        if let Some(&id) = state_ids.get(&ps) {
+            id
+        } else {
+            let next = state_ids.len();
+            let id = if next < base_state_slots {
+                next as u32
+            } else {
+                result.add_state()
+            };
+            if id as usize == source_state_for_output.len() {
+                source_state_for_output.push(ps.0);
+            } else {
+                source_state_for_output[id as usize] = ps.0;
+            }
+            state_ids.insert(ps, id);
+            worklist.push_back(ps);
+            id
+        }
+    };
+
+    for &nwa_start in nwa.start_states() {
+        let ps = (nwa_start, None);
+        let id = get_or_create(
+            &mut result,
+            &mut state_ids,
+            &mut worklist,
+            &mut source_state_for_output,
+            ps,
+        );
+        result.start_states_mut().push(id);
+    }
+
+    while let Some((nwa_sid, previous_terminal)) = worklist.pop_front() {
+        let result_sid = state_ids[&(nwa_sid, previous_terminal)];
+        let nwa_state = &nwa.states()[nwa_sid as usize];
+
+        if let Some(fw) = &nwa_state.final_weight {
+            result.set_final_weight(result_sid, fw.clone());
+        }
+
+        for (nwa_dst, weight) in &nwa_state.epsilons {
+            let dst_id = get_or_create(
+                &mut result,
+                &mut state_ids,
+                &mut worklist,
+                &mut source_state_for_output,
+                (*nwa_dst, previous_terminal),
+            );
+            result.add_epsilon(result_sid, dst_id, weight.clone());
+        }
+
+        for (&label, targets) in &nwa_state.transitions {
+            let next_previous_terminal = if label < 0
+                || ignore_terminal.is_some_and(|ignore| label as TerminalID == ignore)
+            {
+                previous_terminal
+            } else if (label as usize) < disallowed_follows.len() {
+                if previous_terminal.is_some_and(|previous| {
+                    disallowed_follows[previous as usize].contains(label as usize)
+                }) {
+                    continue;
+                }
+                Some(label as u32)
+            } else {
+                None
+            };
+
+            for (nwa_dst, weight) in targets {
+                let dst_id = get_or_create(
+                    &mut result,
+                    &mut state_ids,
+                    &mut worklist,
+                    &mut source_state_for_output,
+                    (*nwa_dst, next_previous_terminal),
+                );
+                result.add_transition(result_sid, label, dst_id, weight.clone());
+            }
+        }
+    }
+
+    DisallowedFollowProduct {
+        nwa: result,
+        source_state_for_output,
+    }
+}
+
 fn subtract_disallowed_follows_direct(
     nwa: &NWA,
     disallowed_follows: &[BitSet],
@@ -802,6 +948,37 @@ fn subtract_disallowed_follows_direct(
 mod tests {
     use super::*;
     use crate::automata::weighted::determinize::determinize;
+
+    #[test]
+    fn disallowed_follow_product_retains_base_state_origins() {
+        let mut nwa = NWA::new(1, 0);
+        let start = nwa.add_state();
+        let middle = nwa.add_state();
+        let accept = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+        nwa.add_transition(start, 0, middle, Weight::all());
+        nwa.add_transition(middle, 1, accept, Weight::all());
+        nwa.set_final_weight(accept, Weight::all());
+
+        let mut forbidden_after_zero = BitSet::new(2);
+        forbidden_after_zero.set(1);
+        let disallowed = BTreeMap::from([(0, forbidden_after_zero)]);
+        let product = apply_disallowed_follow_constraints_with_origins(
+            &nwa,
+            &disallowed,
+            2,
+            None,
+        )
+        .expect("nonempty table must construct a product");
+
+        let product_start = product.nwa.start_states()[0];
+        assert_eq!(product.source_state_for_output[product_start as usize], start);
+        let product_middle = product.nwa.states()[product_start as usize].transitions[&0][0].0;
+        assert_eq!(product.source_state_for_output[product_middle as usize], middle);
+        assert!(!product.nwa.states()[product_middle as usize]
+            .transitions
+            .contains_key(&1));
+    }
 
     #[test]
     fn projected_collapse_accepts_private_member_tags_without_relabeling_edges() {

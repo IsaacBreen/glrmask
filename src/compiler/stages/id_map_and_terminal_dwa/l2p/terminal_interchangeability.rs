@@ -19,6 +19,7 @@ use std::sync::Arc;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
 use crate::automata::weighted::nwa::NWA;
+use crate::ds::weight::Weight;
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 
@@ -375,105 +376,108 @@ fn classify_keys<K: Ord>(keys: impl IntoIterator<Item = K>) -> Vec<u32> {
         .collect()
 }
 
-/// Physical labels used while a terminal NWA is in its representative phase.
+/// A physically representative terminal NWA together with the exact concrete
+/// alternatives that were merged into each representative edge.
 ///
-/// A non-representative member gets a private label.  The label preserves the
-/// member-specific terminal boundary, target and weight while every pre-expansion
-/// grammar transform observes its representative through `projection`.  After
-/// the conservative pass, `expand_in_place` restores ordinary terminal labels.
-#[derive(Clone, Debug)]
-pub(crate) struct TerminalNwaLabelPlan {
-    edge_label_for_terminal: Vec<i32>,
-    representative_for_physical_label: Vec<TerminalID>,
-    concrete_label_for_physical_label: Vec<i32>,
+/// During the coarse pass, `nwa` contains only representative terminal labels.
+/// The ledger keeps every original `(member label, weight)` variant keyed by
+/// its source, representative label and destination.  Expansion therefore
+/// restores the original labels without inventing a destination or weight.
+#[derive(Debug)]
+pub(crate) struct RepresentativeTerminalNwa {
+    pub(crate) nwa: NWA,
+    concrete_variants: BTreeMap<(u32, i32, u32), BTreeMap<i32, Weight>>,
 }
 
-impl TerminalNwaLabelPlan {
-    fn new(
+impl RepresentativeTerminalNwa {
+    fn coalesce(
+        concrete: &NWA,
         representative_for: &[TerminalID],
         ignore_terminal: Option<TerminalID>,
-    ) -> Option<Self> {
-        let terminal_count = representative_for.len();
-        let mut edge_label_for_terminal = (0..terminal_count)
-            .map(|terminal| terminal as i32)
-            .collect::<Vec<_>>();
-        let mut representative_for_physical_label = vec![0; terminal_count * 2];
-        let mut concrete_label_for_physical_label = vec![0; terminal_count * 2];
-        for terminal in 0..terminal_count {
-            representative_for_physical_label[terminal] = representative_for[terminal];
-            representative_for_physical_label[terminal_count + terminal] =
-                representative_for[terminal];
-            concrete_label_for_physical_label[terminal] = terminal as i32;
-            concrete_label_for_physical_label[terminal_count + terminal] = terminal as i32;
-        }
-
-        let mut has_private_member_labels = false;
-        for terminal in 0..terminal_count {
-            let terminal_id = terminal as TerminalID;
-            if Some(terminal_id) == ignore_terminal
-                || representative_for[terminal] == terminal_id
-            {
-                continue;
-            }
-            edge_label_for_terminal[terminal] = (terminal_count + terminal) as i32;
-            has_private_member_labels = true;
-        }
-        has_private_member_labels.then_some(Self {
-            edge_label_for_terminal,
-            representative_for_physical_label,
-            concrete_label_for_physical_label,
-        })
-    }
-
-    pub(crate) fn representative_projection(&self) -> &[TerminalID] {
-        &self.representative_for_physical_label
-    }
-
-    /// Replace concrete member labels with private labels before the
-    /// representative-level grammar transforms. Epsilons, including lowered
-    /// noninitial ignore edges, are intentionally untouched.
-    pub(crate) fn tag_in_place(&self, nwa: &mut NWA) {
+    ) -> Self {
+        // Clone preserves the NWA's tokenizer/weight metadata.  Only labelled
+        // transitions are rebuilt; finals, epsilons, and starts are unchanged.
+        let mut nwa = concrete.clone();
         for state in nwa.states_mut() {
-            let old_transitions = std::mem::take(&mut state.transitions);
-            for (concrete_label, targets) in old_transitions {
-                let physical_label = if concrete_label >= 0 {
-                    self.edge_label_for_terminal
+            state.transitions.clear();
+        }
+
+        let mut concrete_variants = BTreeMap::<(u32, i32, u32), BTreeMap<i32, Weight>>::new();
+        for (source, state) in concrete.states().iter().enumerate() {
+            let source = source as u32;
+            for (&concrete_label, targets) in &state.transitions {
+                let representative_label = if concrete_label >= 0
+                    && Some(concrete_label as TerminalID) != ignore_terminal
+                {
+                    representative_for
                         .get(concrete_label as usize)
                         .copied()
+                        .map(|terminal| terminal as i32)
                         .unwrap_or(concrete_label)
                 } else {
                     concrete_label
                 };
-                state
-                    .transitions
-                    .entry(physical_label)
-                    .or_default()
-                    .extend(targets);
+                for (destination, weight) in targets {
+                    let key = (source, representative_label, *destination);
+                    // Preserve each member weight as a separate representative
+                    // alternative.  Coarse grammar transforms see one label,
+                    // while later expansion still has exact weight provenance.
+                    nwa.states_mut()[source as usize]
+                        .transitions
+                        .entry(representative_label)
+                        .or_default()
+                        .push((*destination, weight.clone()));
+                    concrete_variants
+                        .entry(key)
+                        .or_default()
+                        .entry(concrete_label)
+                        .and_modify(|existing| *existing = existing.union(weight))
+                        .or_insert_with(|| weight.clone());
+                }
             }
+        }
+        Self {
+            nwa,
+            concrete_variants,
         }
     }
 
-    /// Restore ordinary grammar terminal labels after the conservative
-    /// representative pass.
-    pub(crate) fn expand_in_place(&self, nwa: &mut NWA) {
-        for state in nwa.states_mut() {
-            let old_transitions = std::mem::take(&mut state.transitions);
-            for (physical_label, targets) in old_transitions {
-                let concrete_label = if physical_label >= 0 {
-                    self.concrete_label_for_physical_label
-                        .get(physical_label as usize)
-                        .copied()
-                        .unwrap_or(physical_label)
-                } else {
-                    physical_label
-                };
-                state
-                    .transitions
-                    .entry(concrete_label)
-                    .or_default()
-                    .extend(targets);
+    pub(crate) fn expand(&self, coarse: &NWA, source_state_for_output: &[u32]) -> NWA {
+        assert_eq!(coarse.states().len(), source_state_for_output.len());
+        // Preserve the product NWA's metadata, starts, finals, and epsilons.
+        let mut expanded = coarse.clone();
+        for state in expanded.states_mut() {
+            state.transitions.clear();
+        }
+        for (source, state) in coarse.states().iter().enumerate() {
+            let source = source as u32;
+            let original_source = source_state_for_output[source as usize];
+            for (&representative_label, targets) in &state.transitions {
+                for (destination, representative_weight) in targets {
+                    let original_destination = source_state_for_output[*destination as usize];
+                    let key = (original_source, representative_label, original_destination);
+                    if let Some(variants) = self.concrete_variants.get(&key) {
+                        for (&concrete_label, concrete_weight) in variants {
+                            let weight = concrete_weight.intersection(representative_weight);
+                            if !weight.is_empty() {
+                                expanded.add_transition(source, concrete_label, *destination, weight);
+                            }
+                        }
+                    } else {
+                        // A transform-created edge has no underlying concrete
+                        // terminal alternative.  Preserve its representative
+                        // label verbatim; the exact post-pass handles it.
+                        expanded.add_transition(
+                            source,
+                            representative_label,
+                            *destination,
+                            representative_weight.clone(),
+                        );
+                    }
+                }
             }
         }
+        expanded
     }
 }
 
@@ -621,11 +625,16 @@ impl TerminalInterchangeability {
             .all(|(terminal, &representative)| terminal as TerminalID == representative)
     }
 
-    pub(crate) fn terminal_nwa_label_plan(
+    pub(crate) fn coalesce_terminal_nwa(
         &self,
+        concrete: &NWA,
         ignore_terminal: Option<TerminalID>,
-    ) -> Option<TerminalNwaLabelPlan> {
-        TerminalNwaLabelPlan::new(&self.representative_for, ignore_terminal)
+    ) -> RepresentativeTerminalNwa {
+        RepresentativeTerminalNwa::coalesce(
+            concrete,
+            &self.representative_for,
+            ignore_terminal,
+        )
     }
 
     pub(crate) fn active_representatives(&self) -> &[bool] { &self.active_representatives }
@@ -847,42 +856,62 @@ mod tests {
     }
 
     #[test]
-    fn private_member_tags_expand_to_their_own_concrete_labels_and_targets() {
-        use crate::ds::weight::Weight;
+    fn representative_nwa_ledger_preserves_ignore_label_and_epsilon() {
+        let mut concrete = NWA::new(1, 0);
+        let initial = concrete.add_state();
+        let later = concrete.add_state();
+        let target = concrete.add_state();
+        concrete.set_start_states(vec![initial]);
+        concrete.add_transition(initial, 0, target, Weight::all());
+        concrete.add_epsilon(later, target, Weight::all());
 
-        let plan = TerminalNwaLabelPlan::new(&[0, 0, 2], None)
-            .expect("terminal 1 must receive a private member tag");
-        assert_eq!(plan.representative_projection()[4], 0);
+        // Deliberately give ignore a nonidentity representative.  The explicit
+        // ignore parameter must still keep its physical edge label intact.
+        let representative = RepresentativeTerminalNwa::coalesce(
+            &concrete,
+            &[1, 1],
+            Some(0),
+        );
+        assert!(representative.nwa.states()[initial as usize]
+            .transitions
+            .contains_key(&0));
+        assert!(!representative.nwa.states()[initial as usize]
+            .transitions
+            .contains_key(&1));
+        assert!(representative.nwa.states()[later as usize]
+            .epsilons
+            .iter()
+            .any(|(destination, _)| *destination == target));
+    }
 
-        let mut nwa = NWA::new(1, 0);
-        let start = nwa.add_state();
-        let representative_target = nwa.add_state();
-        let member_target = nwa.add_state();
-        nwa.set_start_states(vec![start]);
-        nwa.add_transition(start, 0, representative_target, Weight::all());
-        nwa.add_transition(start, 1, member_target, Weight::all());
+    #[test]
+    fn representative_nwa_ledger_restores_concrete_member_edges() {
+        let mut concrete = NWA::new(1, 0);
+        let start = concrete.add_state();
+        let representative_target = concrete.add_state();
+        let member_target = concrete.add_state();
+        concrete.set_start_states(vec![start]);
+        concrete.add_transition(start, 0, representative_target, Weight::all());
+        concrete.add_transition(start, 1, member_target, Weight::all());
 
-        plan.tag_in_place(&mut nwa);
-        assert!(nwa.states()[start as usize].transitions.contains_key(&0));
-        assert!(nwa.states()[start as usize].transitions.contains_key(&4));
-        plan.expand_in_place(&mut nwa);
-        assert!(nwa.states()[start as usize].transitions[&0]
+        let representative = RepresentativeTerminalNwa::coalesce(&concrete, &[0, 0], None);
+        assert!(representative.nwa.states()[start as usize]
+            .transitions
+            .contains_key(&0));
+        assert!(!representative.nwa.states()[start as usize]
+            .transitions
+            .contains_key(&1));
+
+        let origins = (0..representative.nwa.states().len())
+            .map(|state| state as u32)
+            .collect::<Vec<_>>();
+        let expanded = representative.expand(&representative.nwa, &origins);
+        assert!(expanded.states()[start as usize].transitions[&0]
             .iter()
             .any(|(target, _)| *target == representative_target));
-        assert!(nwa.states()[start as usize].transitions[&1]
+        assert!(expanded.states()[start as usize].transitions[&1]
             .iter()
             .any(|(target, _)| *target == member_target));
-
-        let ignore_safe = TerminalNwaLabelPlan::new(&[0, 1, 1], Some(0))
-            .expect("the unrelated class still needs a private member tag");
-        let mut ignore_nwa = NWA::new(1, 0);
-        let ignore_start = ignore_nwa.add_state();
-        let other_target = ignore_nwa.add_state();
-        ignore_nwa.add_transition(ignore_start, 0, other_target, Weight::all());
-        ignore_nwa.add_transition(ignore_start, 2, other_target, Weight::all());
-        ignore_safe.tag_in_place(&mut ignore_nwa);
-        assert!(ignore_nwa.states()[ignore_start as usize].transitions.contains_key(&0));
-        assert!(ignore_nwa.states()[ignore_start as usize].transitions.contains_key(&5));
     }
 
     #[test]
