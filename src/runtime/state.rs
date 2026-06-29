@@ -16,6 +16,16 @@ pub(crate) struct MaskCacheData {
     pub merged_dense: Vec<u64>,
 }
 
+/// Cached direct mask, guarded by exact lexer/GLR state equality.
+///
+/// A commit can leave the dynamic state unchanged, such as while consuming a
+/// self-looping string lexer state. Exact equality makes reusing the prior
+/// result sound without coupling this path to Parser-DWA generations.
+pub(crate) struct DynamicMaskCacheData {
+    pub state: BTreeMap<u32, ParserGSS>,
+    pub mask: Vec<u32>,
+}
+
 #[derive(Default)]
 pub(crate) struct MaskScratch {
     pub merged_dense: Vec<u64>,
@@ -70,6 +80,8 @@ pub struct ConstraintState<'a> {
     pub(crate) mask_cache: Mutex<Option<MaskCacheData>>,
     /// Reusable scratch buffers for fill_mask to avoid per-call allocation.
     pub(crate) mask_scratch: Mutex<MaskScratch>,
+    /// Exact-state cache for direct lexer/GLR dynamic masks.
+    pub(crate) dynamic_mask_cache: Mutex<Option<DynamicMaskCacheData>>,
 }
 
 impl<'a> Clone for ConstraintState<'a> {
@@ -81,6 +93,7 @@ impl<'a> Clone for ConstraintState<'a> {
             generation: self.generation,
             mask_cache: Mutex::new(None),
             mask_scratch: Mutex::new(MaskScratch::default()),
+            dynamic_mask_cache: Mutex::new(None),
         }
     }
 }
@@ -107,6 +120,25 @@ enum GreedyTokenizationStep {
 }
 
 impl<'a> ConstraintState<'a> {
+    pub(crate) fn try_fill_dynamic_mask_from_cache(&self, buf: &mut [u32]) -> bool {
+        let cache = self.dynamic_mask_cache.lock().unwrap();
+        let Some(cache) = cache.as_ref() else {
+            return false;
+        };
+        if cache.mask.len() != buf.len() || cache.state != self.state {
+            return false;
+        }
+        buf.copy_from_slice(&cache.mask);
+        true
+    }
+
+    pub(crate) fn store_dynamic_mask_cache(&self, buf: &[u32]) {
+        *self.dynamic_mask_cache.lock().unwrap() = Some(DynamicMaskCacheData {
+            state: self.state.clone(),
+            mask: buf.to_vec(),
+        });
+    }
+
     pub fn is_complete(&self) -> bool {
         let initial_tsid = self.constraint.tokenizer.initial_state();
         let Some(stack) = self.state.get(&initial_tsid) else {

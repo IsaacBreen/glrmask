@@ -511,7 +511,14 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
         state.constraint.dynamic_mask_available,
         "dynamic mask generation is unavailable: the lexer persistence property does not hold"
     );
+    if state.try_fill_dynamic_mask_from_cache(buf) {
+        return;
+    }
+    fill_mask_dynamic_uncached(state, buf);
+    state.store_dynamic_mask_cache(buf);
+}
 
+fn fill_mask_dynamic_uncached(state: &ConstraintState<'_>, buf: &mut [u32]) {
     buf.fill(0);
     let initial_tsid = state.constraint.tokenizer.initial_state();
     let mut parser_nodes = Vec::<ParserTrieNode>::new();

@@ -1366,6 +1366,7 @@ impl Constraint {
             generation: 0,
             mask_cache: Mutex::new(None),
             mask_scratch: Mutex::new(Default::default()),
+            dynamic_mask_cache: Mutex::new(None),
         };
         state.prefill_mask_cache();
         state
