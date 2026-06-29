@@ -29,6 +29,18 @@ pub(crate) type FastDwaTransitions = Vec<FxHashMap<i32, (u32, Weight)>>;
 pub(crate) type FastTokenizerTransitions = Vec<Box<[u32; 256]>>;
 pub(crate) type TemplateDfasByTerminal = Vec<Option<Arc<CommitTemplateDfas>>>;
 
+/// Runtime-only vocabulary data for direct dynamic mask generation.
+///
+/// A missing value means that the lexer does not satisfy the required
+/// terminal-relative acceptance-persistence property.
+#[derive(Debug, Clone)]
+pub(crate) struct DynamicMaskVocab {
+    pub(crate) trie: Arc<VocabPrefixTree>,
+    /// Each trie leaf stores one canonical token id. This restores every vocab
+    /// id that has the same byte string.
+    pub(crate) token_ids: Arc<BTreeMap<u32, Box<[u32]>>>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CommitTemplateDfas {
     pub(crate) pop: UnweightedDfa,
@@ -49,19 +61,10 @@ pub struct Constraint {
     #[serde(default)]
     pub(crate) ignore_terminal: Option<TerminalID>,
 
-    /// Whether the lexer satisfies the persistence property required by the
-    /// direct dynamic-mask traversal. It is derived when runtime caches are
-    /// rebuilt and deliberately is not persisted.
+    /// Runtime-only direct-mask data. `None` means this lexer is unsuitable for
+    /// direct dynamic masking.
     #[serde(skip, default)]
-    pub dynamic_mask_available: bool,
-    /// Byte-prefix trie over original vocabulary token ids, used only by the
-    /// direct dynamic-mask traversal.
-    #[serde(skip, default)]
-    pub(crate) dynamic_mask_vocab_trie: Arc<VocabPrefixTree>,
-    /// The trie stores one canonical id per byte string; this maps it back to
-    /// every original vocabulary id that has those exact bytes.
-    #[serde(skip, default)]
-    pub(crate) dynamic_mask_token_aliases: Arc<BTreeMap<u32, Box<[u32]>>>,
+    pub(crate) dynamic_mask_vocab: Option<DynamicMaskVocab>,
 
     /// possible_matches keyed by grammar terminal id.
     ///

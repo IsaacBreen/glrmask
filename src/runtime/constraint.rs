@@ -9,7 +9,6 @@ use rayon::prelude::*;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::table::TableAmbiguity;
 use crate::ds::weight::Weight;
-use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::grammar::flat::TerminalID;
 
 use super::artifact::{
@@ -17,6 +16,7 @@ use super::artifact::{
     DenseWeightBufMaskCache,
     DenseWeightMaskCache,
     DenseWords,
+    DynamicMaskVocab,
     FastDwaTransitions,
     FastTokenizerTransitions,
     InternalTokenBufMasks,
@@ -138,40 +138,27 @@ fn count_complement_subgroups(missing: u64, valid_mask: u64) -> (u32, u32, u32) 
 }
 
 impl Constraint {
-    /// Return a violating one-byte lexer transition for the acceptance-closed
-    /// lexer property, or `None` when the property holds.
-    ///
-    /// `t` is live at a lexer state when another byte can still extend that
-    /// state to a match of that same terminal. The direct mask traversal relies
-    /// on accepting states being closed under those terminal-relative live
-    /// successors: a terminal which is already matchable cannot cease to be
-    /// matchable while it remains completable.
-    fn dynamic_mask_unavailability_witness(&self) -> Option<(u32, u8, u32, TerminalID)> {
+    /// A direct mask is sound when accepting a terminal remains true along
+    /// every successor where that same terminal is still completable.
+    fn supports_dynamic_masks(&self) -> bool {
         for state in 0..self.tokenizer.num_states() {
             let accepted = self.tokenizer.matched_terminal_bitset(state);
-            if accepted.is_empty() {
-                continue;
-            }
-            for (byte, successor) in self.tokenizer.transitions_from(state) {
+            for (_, successor) in self.tokenizer.transitions_from(state) {
                 let successor_accepted = self.tokenizer.matched_terminal_bitset(successor);
                 let successor_future = self.tokenizer.possible_future_terminals(successor);
                 for terminal in accepted.iter() {
-                    // “Live successor” is relative to this terminal, not merely
-                    // a state where some competing terminal remains live.
                     if successor_future.contains(terminal)
                         && !successor_accepted.contains(terminal)
                     {
-                        return Some((state, byte, successor, terminal as TerminalID));
+                        return false;
                     }
                 }
             }
         }
-        None
+        true
     }
 
-    fn build_dynamic_mask_vocab_trie(
-        &self,
-    ) -> (Arc<VocabPrefixTree>, Arc<BTreeMap<u32, Box<[u32]>>>) {
+    fn build_dynamic_mask_vocab(&self) -> DynamicMaskVocab {
         let mut aliases_by_bytes = BTreeMap::<Vec<u8>, Vec<u32>>::new();
         for (&token_id, bytes) in self.token_bytes.iter() {
             aliases_by_bytes
@@ -189,10 +176,17 @@ impl Constraint {
             trie_entries.push((canonical as usize, bytes));
         }
 
-        (
-            Arc::new(VocabPrefixTree::build_owned(trie_entries)),
-            Arc::new(aliases_by_canonical),
-        )
+        DynamicMaskVocab {
+            trie: Arc::new(crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(
+                trie_entries,
+            )),
+            token_ids: Arc::new(aliases_by_canonical),
+        }
+    }
+
+    /// Whether [`ConstraintState::fill_mask_dynamic`] is available.
+    pub fn dynamic_mask_available(&self) -> bool {
+        self.dynamic_mask_vocab.is_some()
     }
 
     pub fn table_ambiguous_actions(&self) -> Vec<TableAmbiguity> {
@@ -451,48 +445,9 @@ impl Constraint {
 
     pub(crate) fn rebuild_runtime_caches_impl(&mut self) {
         self.table.rebuild_guarded_shift_index();
-        let dynamic_mask_witness = self.dynamic_mask_unavailability_witness();
-        self.dynamic_mask_available = dynamic_mask_witness.is_none();
-        if self.dynamic_mask_available {
-            let (trie, aliases) = self.build_dynamic_mask_vocab_trie();
-            self.dynamic_mask_vocab_trie = trie;
-            self.dynamic_mask_token_aliases = aliases;
-        } else {
-            self.dynamic_mask_vocab_trie = Arc::new(VocabPrefixTree::new());
-            self.dynamic_mask_token_aliases = Arc::new(BTreeMap::new());
-        }
-        if std::env::var_os("GLRMASK_DEBUG_DYNAMIC_MASK").is_some() {
-            if let Some((state, byte, successor, terminal)) = dynamic_mask_witness {
-                let successor_future_sample: Vec<_> = self
-                    .tokenizer
-                    .possible_future_terminals(successor)
-                    .iter()
-                    .take(4)
-                    .map(|future| {
-                        let future = future as TerminalID;
-                        format!(
-                            "{future}:{}",
-                            self.terminal_display_name(future).unwrap_or("<unnamed>")
-                        )
-                    })
-                    .collect();
-                eprintln!(
-                    "[glrmask/debug][dynamic_mask] available=false lexer_states={} terminals={} witness_state={} byte=0x{byte:02x} successor={} terminal={} name={} successor_future_sample={successor_future_sample:?}",
-                    self.tokenizer.num_states(),
-                    self.tokenizer.num_terminals(),
-                    state,
-                    successor,
-                    terminal,
-                    self.terminal_display_name(terminal).unwrap_or("<unnamed>"),
-                );
-            } else {
-                eprintln!(
-                    "[glrmask/debug][dynamic_mask] available=true lexer_states={} terminals={}",
-                    self.tokenizer.num_states(),
-                    self.tokenizer.num_terminals(),
-                );
-            }
-        }
+        self.dynamic_mask_vocab = self
+            .supports_dynamic_masks()
+            .then(|| self.build_dynamic_mask_vocab());
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
@@ -2140,15 +2095,6 @@ impl<'a> ConstraintState<'a> {
         super::dynamic_mask::fill_mask_dynamic(self, buf);
     }
 
-    pub fn dynamic_mask_available(&self) -> bool {
-        self.constraint.dynamic_mask_available
-    }
-
-    pub fn dynamic_mask(&self) -> Vec<u32> {
-        let mut buf = vec![0u32; self.constraint.mask_len()];
-        self.fill_mask_dynamic(&mut buf);
-        buf
-    }
 }
 
 #[cfg(test)]

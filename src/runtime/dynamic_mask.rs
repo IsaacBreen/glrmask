@@ -3,48 +3,23 @@
 //! This implementation intentionally does not consult the parser DWA. It walks
 //! the vocabulary byte trie while advancing the lexer and GLR parser directly.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
-use std::sync::OnceLock;
-
-use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::Lexer;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{advance_stacks, stack_may_advance_on, ParserGSS};
-use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::grammar::flat::TerminalID;
 
 use super::artifact::Constraint;
 use super::state::ConstraintState;
 
-/// A node in the parser-state trie cache. Children are indexed by the lexer
-/// state at which the terminal was matched as well as the terminal itself,
-/// because disallowed-follow accumulators are keyed by lexer state.
-struct ParserTrieNode {
-    gss: ParserGSS,
-    terminal_children: FxHashMap<(u32, TerminalID, Option<u32>), usize>,
-    /// Lazily populated exact may-advance bitsets, one for each active lexer
-    /// state. The cache is state-sensitive for the same accumulator reason.
-    may_advance: FxHashMap<u32, BitSet>,
-}
-
-impl ParserTrieNode {
-    fn new(gss: ParserGSS) -> Self {
-        Self {
-            gss,
-            terminal_children: FxHashMap::default(),
-            may_advance: FxHashMap::default(),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct TraverseWork<'a> {
     node: &'a VocabPrefixTreeNode,
     tokenizer_state: u32,
-    parser_node: usize,
+    gss: ParserGSS,
     exclusion: Option<(u32, TerminalID)>,
 }
 
@@ -114,7 +89,7 @@ fn remap_continuation(
     end_state: u32,
     matched_terminals: &[TerminalID],
 ) -> ParserGSS {
-    let actionable: BTreeSet<TerminalID> = matched_terminals
+    let actionable: Vec<TerminalID> = matched_terminals
         .iter()
         .copied()
         .filter(|&terminal| {
@@ -146,15 +121,14 @@ fn remap_continuation(
 
 fn parser_child(
     constraint: &Constraint,
-    parser_node: usize,
+    gss: &ParserGSS,
     tokenizer_state: u32,
     terminal: TerminalID,
     execution_end_state: Option<u32>,
-    nodes: &mut Vec<ParserTrieNode>,
-) -> Option<usize> {
+) -> Option<ParserGSS> {
     // Ignore terminals reset the lexer but deliberately leave the parser alone.
     if Some(terminal) == constraint.ignore_terminal {
-        return Some(parser_node);
+        return Some(gss.clone());
     }
 
     // This is the same future-terminal restriction attached by the ordinary
@@ -167,16 +141,8 @@ fn parser_child(
             .possible_future_terminals(end_state)
             .contains(terminal as usize)
     });
-    // Existing accumulator restrictions are remapped to the actual lexer
-    // end-state even when this terminal does not itself stay live there, so the
-    // cache key must retain `execution_end_state`, not merely the new exclusion.
-    let key = (tokenizer_state, terminal, execution_end_state);
-    if let Some(&child) = nodes[parser_node].terminal_children.get(&key) {
-        return Some(child);
-    }
-
     let pruned = prune_for_terminal(
-        &nodes[parser_node].gss,
+        gss,
         tokenizer_state,
         terminal,
         execution_end_state,
@@ -195,23 +161,19 @@ fn parser_child(
         });
     }
 
-    let child = nodes.len();
-    nodes.push(ParserTrieNode::new(advanced));
-    nodes[parser_node].terminal_children.insert(key, child);
-    Some(child)
+    Some(advanced)
 }
 
-fn continuation_node(
+fn continuation_gss(
     constraint: &Constraint,
-    parser_node: usize,
+    gss: &ParserGSS,
     tokenizer_state: u32,
     end_state: u32,
     matched_terminals: &[TerminalID],
-    nodes: &mut Vec<ParserTrieNode>,
-) -> Option<usize> {
+ ) -> Option<ParserGSS> {
     let remapped = remap_continuation(
         constraint,
-        &nodes[parser_node].gss,
+        gss,
         tokenizer_state,
         end_state,
         matched_terminals,
@@ -219,51 +181,25 @@ fn continuation_node(
     if remapped.is_empty() {
         return None;
     }
-    let node = nodes.len();
-    nodes.push(ParserTrieNode::new(remapped));
-    Some(node)
+    Some(remapped)
 }
 
 fn token_boundary_allowed(
     constraint: &Constraint,
     tokenizer_state: u32,
-    parser_node: usize,
-    nodes: &mut [ParserTrieNode],
+    gss: &ParserGSS,
 ) -> bool {
-    if !nodes[parser_node].may_advance.contains_key(&tokenizer_state) {
-        let mut may_advance = BitSet::new(constraint.tokenizer.num_terminals() as usize);
-        for terminal in constraint
-            .tokenizer
-            .tokens_accessible_from_state(tokenizer_state)
-            .iter()
-        {
+    constraint
+        .tokenizer
+        .tokens_accessible_from_state(tokenizer_state)
+        .iter()
+        .any(|terminal| {
             let terminal = terminal as TerminalID;
-            let pruned = prune_for_terminal(
-                &nodes[parser_node].gss,
-                tokenizer_state,
-                terminal,
-                None,
-            );
-            if pruned.is_empty() {
-                continue;
-            }
-            if Some(terminal) == constraint.ignore_terminal
-                || stack_may_advance_on(&constraint.table, &pruned, terminal)
-            {
-                may_advance.set(terminal as usize);
-            }
-        }
-        nodes[parser_node]
-            .may_advance
-            .insert(tokenizer_state, may_advance);
-    }
-
-    let accessible = constraint.tokenizer.tokens_accessible_from_state(tokenizer_state);
-    let may_advance = nodes[parser_node]
-        .may_advance
-        .get(&tokenizer_state)
-        .expect("dynamic may-advance cache was just populated");
-    !accessible.is_disjoint(may_advance)
+            let pruned = prune_for_terminal(gss, tokenizer_state, terminal, None);
+            !pruned.is_empty()
+                && (Some(terminal) == constraint.ignore_terminal
+                    || stack_may_advance_on(&constraint.table, &pruned, terminal))
+        })
 }
 
 fn excluded_by_first_byte(
@@ -284,26 +220,22 @@ fn excluded_by_first_byte(
 }
 
 pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
-    assert!(
-        state.constraint.dynamic_mask_available,
-        "dynamic mask generation is unavailable: the lexer persistence property does not hold"
+    let vocab = state.constraint.dynamic_mask_vocab.as_ref().expect(
+        "dynamic mask generation is unavailable: the lexer persistence property does not hold",
     );
 
     buf.fill(0);
     let initial_tsid = state.constraint.tokenizer.initial_state();
-    let mut parser_nodes = Vec::<ParserTrieNode>::new();
     let mut traversal = Vec::<TraverseWork<'_>>::new();
 
     for (&tokenizer_state, gss) in &state.state {
         if gss.is_empty() {
             continue;
         }
-        let parser_node = parser_nodes.len();
-        parser_nodes.push(ParserTrieNode::new(gss.clone()));
         traversal.push(TraverseWork {
-            node: &state.constraint.dynamic_mask_vocab_trie.root,
+            node: &vocab.trie.root,
             tokenizer_state,
-            parser_node,
+            gss: gss.clone(),
             exclusion: None,
         });
     }
@@ -314,22 +246,16 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                 || token_boundary_allowed(
                     state.constraint,
                     current.tokenizer_state,
-                    current.parser_node,
-                    &mut parser_nodes,
+                    &current.gss,
                 ))
         {
             let canonical_token_id = current.node.token_id() as u32;
-            if let Some(token_ids) = state
-                .constraint
-                .dynamic_mask_token_aliases
+            let token_ids = vocab
+                .token_ids
                 .get(&canonical_token_id)
-            {
-                for &token_id in token_ids.iter() {
-                    set_mask_bit(buf, token_id);
-                }
-            } else {
-                debug_assert!(false, "dynamic vocabulary trie node lacks aliases");
-                set_mask_bit(buf, canonical_token_id);
+                .expect("dynamic vocabulary trie node lacks token ids");
+            for &token_id in token_ids.iter() {
+                set_mask_bit(buf, token_id);
             }
         }
 
@@ -339,9 +265,9 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
             }
 
             let mut segment_queue = VecDeque::new();
-            segment_queue.push_back((0usize, current.tokenizer_state, current.parser_node));
+            segment_queue.push_back((0usize, current.tokenizer_state, current.gss.clone()));
 
-            while let Some((position, tokenizer_state, parser_node)) = segment_queue.pop_front() {
+            while let Some((position, tokenizer_state, gss)) = segment_queue.pop_front() {
                 let execution = state
                     .constraint
                     .tokenizer
@@ -353,11 +279,10 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                     debug_assert!(matched.width > 0);
                     let Some(advanced_parser) = parser_child(
                         state.constraint,
-                        parser_node,
+                        &gss,
                         tokenizer_state,
                         matched.id,
                         execution.end_state,
-                        &mut parser_nodes,
                     ) else {
                         continue;
                     };
@@ -367,7 +292,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                         traversal.push(TraverseWork {
                             node: child,
                             tokenizer_state: initial_tsid,
-                            parser_node: advanced_parser,
+                            gss: advanced_parser,
                             exclusion: execution.end_state.map(|end_state| (end_state, matched.id)),
                         });
                     } else {
@@ -376,18 +301,17 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                 }
 
                 if let Some(end_state) = execution.end_state {
-                    if let Some(continuation) = continuation_node(
+                    if let Some(continuation) = continuation_gss(
                         state.constraint,
-                        parser_node,
+                        &gss,
                         tokenizer_state,
                         end_state,
                         &matched_terminals,
-                        &mut parser_nodes,
                     ) {
                         traversal.push(TraverseWork {
                             node: child,
                             tokenizer_state: end_state,
-                            parser_node: continuation,
+                            gss: continuation,
                             exclusion: None,
                         });
                     }
@@ -397,37 +321,6 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
     }
 
     update_eos_mask(state, buf);
-}
-
-pub(crate) fn assert_normal_mask_matches_dynamic(
-    state: &ConstraintState<'_>,
-    normal_mask: &[u32],
-) {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let enabled = *ENABLED.get_or_init(|| {
-        if cfg!(debug_assertions) {
-            return true;
-        }
-        std::env::var("GLRMASK_ASSERT_DYNAMIC_MASK_EQUIVALENCE")
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-            .unwrap_or(false)
-    });
-    if !enabled || !state.constraint.dynamic_mask_available {
-        return;
-    }
-
-    let mut dynamic_mask = vec![0u32; state.constraint.mask_len()];
-    fill_mask_dynamic(state, &mut dynamic_mask);
-    assert_eq!(
-        normal_mask,
-        dynamic_mask.as_slice(),
-        "normal parser-DWA mask disagrees with direct dynamic mask"
-    );
 }
 
 #[cfg(test)]
@@ -441,8 +334,14 @@ mod tests {
         mask.get(word).is_some_and(|word| word & (1u32 << bit) != 0)
     }
 
+    fn direct_mask(state: &ConstraintState<'_>) -> Vec<u32> {
+        let mut mask = vec![0u32; state.constraint.mask_len()];
+        state.fill_mask_dynamic(&mut mask);
+        mask
+    }
+
     fn assert_dynamic_parity(state: &ConstraintState<'_>) {
-        assert_eq!(state.mask(), state.dynamic_mask());
+        assert_eq!(state.mask(), direct_mask(state));
     }
 
     #[test]
@@ -465,7 +364,7 @@ t B ::= 'b';
 nt start ::= A B | A;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
-        assert!(constraint.dynamic_mask_available);
+        assert!(constraint.dynamic_mask_available());
 
         let mut state = constraint.start();
         assert_dynamic_parity(&state);
@@ -494,7 +393,7 @@ nt start ::= A B;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let loaded = Constraint::load(&constraint.save()).unwrap();
-        assert!(loaded.dynamic_mask_available);
+        assert!(loaded.dynamic_mask_available());
         assert_dynamic_parity(&loaded.start());
     }
 
@@ -516,18 +415,18 @@ t B ::= 'b';
 nt start ::= A B;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
-        assert!(constraint.dynamic_mask_available);
+        assert!(constraint.dynamic_mask_available());
 
         let mut state = constraint.start();
         assert_dynamic_parity(&state);
-        let mask = state.dynamic_mask();
+        let mask = direct_mask(&state);
         assert!(token_allowed(&mask, 0));
         assert!(token_allowed(&mask, 7));
         assert!(token_allowed(&mask, 12));
 
         state.commit_token(7).unwrap();
         assert_dynamic_parity(&state);
-        assert!(token_allowed(&state.dynamic_mask(), 1));
+        assert!(token_allowed(&direct_mask(&state), 1));
     }
 
     #[test]
@@ -551,7 +450,7 @@ t B ::= 'b';
 nt start ::= A B;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
-        assert!(constraint.dynamic_mask_available);
+        assert!(constraint.dynamic_mask_available());
 
         let mut state = constraint.start();
         assert_dynamic_parity(&state);
@@ -593,7 +492,7 @@ t C ::= 'c';
 nt start ::= A B C | B A C | A C | B C;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
-        assert!(constraint.dynamic_mask_available);
+        assert!(constraint.dynamic_mask_available());
 
         fn visit(state: ConstraintState<'_>, depth: usize) {
             assert_dynamic_parity(&state);
@@ -631,7 +530,7 @@ t A ::= 'a'+;
 nt start ::= A A;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
-        assert!(constraint.dynamic_mask_available);
+        assert!(constraint.dynamic_mask_available());
 
         fn visit(state: ConstraintState<'_>, depth: usize) {
             assert_dynamic_parity(&state);
@@ -667,7 +566,7 @@ nt start ::= A A;
         );
         let constraint =
             Constraint::from_json_schema(r#"{"type":"string"}"#, &vocab).unwrap();
-        assert!(constraint.dynamic_mask_available);
+        assert!(constraint.dynamic_mask_available());
 
         let mut state = constraint.start();
         assert_dynamic_parity(&state);
@@ -697,7 +596,7 @@ nt start ::= A A;
         );
         let constraint =
             Constraint::from_json_schema(r#"{"type":"number"}"#, &vocab).unwrap();
-        assert!(constraint.dynamic_mask_available);
+        assert!(constraint.dynamic_mask_available());
 
         let mut state = constraint.start();
         assert_dynamic_parity(&state);
@@ -724,11 +623,11 @@ t A ::= 'a' | 'abc';
 nt start ::= A;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
-        assert!(!constraint.dynamic_mask_available);
+        assert!(!constraint.dynamic_mask_available());
 
         let state = constraint.start();
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = state.dynamic_mask();
+            let _ = direct_mask(&state);
         }))
         .is_err());
     }
