@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::automata::lexer::Lexer;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{advance_stacks, stack_may_advance_on, ParserGSS};
+use crate::ds::leveled_gss::LeveledGSS;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::grammar::flat::TerminalID;
 
@@ -17,12 +18,13 @@ use super::state::ConstraintState;
 
 type ExclusionMap = BTreeMap<u32, BTreeSet<TerminalID>>;
 type Exclusions = Arc<ExclusionMap>;
+type ParserStacks = LeveledGSS<u32, ()>;
 
 #[derive(Clone)]
 struct TraverseWork<'a> {
     node: &'a VocabPrefixTreeNode,
     tokenizer_state: u32,
-    gss: ParserGSS,
+    gss: ParserStacks,
     exclusions: Exclusions,
 }
 
@@ -50,20 +52,11 @@ fn update_eos_mask(state: &ConstraintState<'_>, buf: &mut [u32]) {
     }
 }
 
-/// Materialize the restrictions already attached to a live GSS as one map for
-/// this direct traversal branch. Subsequent traversal updates only this map;
-/// it never mutates or merges GSS accumulators.
-fn exclusions_from_gss(gss: &ParserGSS) -> Exclusions {
-    let mut exclusions = ExclusionMap::new();
-    gss.for_each_acc(|disallowed: &TerminalsDisallowed| {
-        for (&tokenizer_state, terminals) in disallowed.iter() {
-            exclusions
-                .entry(tokenizer_state)
-                .or_default()
-                .extend(terminals.iter().copied());
-        }
-    });
-    Arc::new(exclusions)
+/// Dynamic masking keeps terminal restrictions in `Exclusions`. The parser
+/// table routines still use `ParserGSS`, so give their stack operations an
+/// otherwise-unused empty accumulator.
+fn with_empty_accumulators(stacks: &ParserStacks) -> ParserGSS {
+    stacks.apply(|_| TerminalsDisallowed::new())
 }
 
 /// Advance every outstanding exclusion through one compressed vocabulary-trie
@@ -121,25 +114,27 @@ fn with_excluded_terminal(
 
 fn parser_child(
     constraint: &Constraint,
-    gss: &ParserGSS,
+    stacks: &ParserStacks,
     terminal: TerminalID,
-) -> Option<ParserGSS> {
+) -> Option<ParserStacks> {
     // Ignore terminals reset the lexer but deliberately leave the parser alone.
     if Some(terminal) == constraint.ignore_terminal {
-        return Some(gss.clone());
+        return Some(stacks.clone());
     }
-    if !stack_may_advance_on(&constraint.table, gss, terminal) {
+    let parser_gss = with_empty_accumulators(stacks);
+    if !stack_may_advance_on(&constraint.table, &parser_gss, terminal) {
         return None;
     }
-    let advanced = advance_stacks(&constraint.table, gss, terminal);
+    let advanced = advance_stacks(&constraint.table, &parser_gss, terminal).apply(|_| ());
     (!advanced.is_empty()).then_some(advanced)
 }
 
 fn token_boundary_allowed(
     constraint: &Constraint,
     tokenizer_state: u32,
-    gss: &ParserGSS,
+    stacks: &ParserStacks,
 ) -> bool {
+    let parser_gss = with_empty_accumulators(stacks);
     constraint
         .tokenizer
         .tokens_accessible_from_state(tokenizer_state)
@@ -147,7 +142,7 @@ fn token_boundary_allowed(
         .any(|terminal| {
             let terminal = terminal as TerminalID;
             Some(terminal) == constraint.ignore_terminal
-                || stack_may_advance_on(&constraint.table, gss, terminal)
+                || stack_may_advance_on(&constraint.table, &parser_gss, terminal)
         })
 }
 
@@ -159,15 +154,14 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
     let mut traversal = Vec::<TraverseWork<'_>>::new();
 
     for (&tokenizer_state, gss) in &state.state {
-        if gss.is_empty() {
-            continue;
+        for (stacks, exclusions) in gss.partition_by_accumulator() {
+            traversal.push(TraverseWork {
+                node: &vocab.trie.root,
+                tokenizer_state,
+                gss: stacks,
+                exclusions: exclusions.0,
+            });
         }
-        traversal.push(TraverseWork {
-            node: &vocab.trie.root,
-            tokenizer_state,
-            gss: gss.clone(),
-            exclusions: exclusions_from_gss(gss),
-        });
     }
 
     while let Some(current) = traversal.pop() {
