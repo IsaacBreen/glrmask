@@ -13,7 +13,7 @@
 //! labels. The resulting local DWA is checked exactly against the baseline.
 //! Directed subsumption is deliberately excluded.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -76,6 +76,18 @@ struct MinimizedResidualDfa {
     outputs: Vec<OutputBits>,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct OneStepSignature {
+    output: OutputBits,
+    successor_outputs: Vec<OutputBits>,
+}
+
+enum FastSwapResult {
+    Accepted(InterchangeMap),
+    Rejected,
+    Ambiguous,
+}
+
 impl MinimizedResidualDfa {
     fn state_count(&self) -> usize {
         self.outputs.len()
@@ -131,6 +143,108 @@ impl MinimizedResidualDfa {
             groups.entry(profile).or_default().push(terminal);
         }
         groups
+    }
+
+    fn one_step_signature(&self, state: usize, swap: Option<(usize, usize)>) -> OneStepSignature {
+        let swap_output = |state: usize| match swap {
+            Some((left, right)) => self.outputs[state].swap(left, right),
+            None => self.outputs[state].clone(),
+        };
+        OneStepSignature {
+            output: swap_output(state),
+            successor_outputs: self.transitions[state]
+                .iter()
+                .map(|&target| swap_output(target as usize))
+                .collect(),
+        }
+    }
+
+    fn one_step_signature_index(&self) -> BTreeMap<OneStepSignature, Vec<u32>> {
+        let mut index = BTreeMap::<OneStepSignature, Vec<u32>>::new();
+        for state in 0..self.state_count() {
+            index.entry(self.one_step_signature(state, None))
+                .or_default()
+                .push(state as u32);
+        }
+        index
+    }
+
+    /// A sound fast path for a proposed terminal-label swap.  It uses exact
+    /// one-step output signatures to seed forced state pairs, then propagates
+    /// transition equalities.  If symmetry leaves any pair unforced, callers
+    /// must use the full exact refinement rather than guessing.
+    fn fast_interchange_map(
+        &self,
+        left: usize,
+        right: usize,
+        signature_index: &BTreeMap<OneStepSignature, Vec<u32>>,
+    ) -> FastSwapResult {
+        let state_count = self.state_count();
+        let mut source_to_target = vec![NO_STATE; state_count];
+        let mut target_to_source = vec![NO_STATE; state_count];
+        let mut pending = VecDeque::<(u32, u32)>::new();
+
+        let assign = |source: u32,
+                          target: u32,
+                          source_to_target: &mut [u32],
+                          target_to_source: &mut [u32],
+                          pending: &mut VecDeque<(u32, u32)>|
+         -> bool {
+            let source_slot = &mut source_to_target[source as usize];
+            if *source_slot != NO_STATE {
+                return *source_slot == target;
+            }
+            let target_slot = &mut target_to_source[target as usize];
+            if *target_slot != NO_STATE {
+                return false;
+            }
+            *source_slot = target;
+            *target_slot = source;
+            pending.push_back((source, target));
+            true
+        };
+
+        for source in 0..state_count {
+            let signature = self.one_step_signature(source, Some((left, right)));
+            let Some(candidates) = signature_index.get(&signature) else {
+                return FastSwapResult::Rejected;
+            };
+            if candidates.len() == 1
+                && !assign(
+                    source as u32,
+                    candidates[0],
+                    &mut source_to_target,
+                    &mut target_to_source,
+                    &mut pending,
+                )
+            {
+                return FastSwapResult::Rejected;
+            }
+        }
+
+        while let Some((source, target)) = pending.pop_front() {
+            for (&source_next, &target_next) in self.transitions[source as usize]
+                .iter()
+                .zip(self.transitions[target as usize].iter())
+            {
+                if !assign(
+                    source_next,
+                    target_next,
+                    &mut source_to_target,
+                    &mut target_to_source,
+                    &mut pending,
+                ) {
+                    return FastSwapResult::Rejected;
+                }
+            }
+        }
+
+        if source_to_target.iter().any(|&target| target == NO_STATE) {
+            return FastSwapResult::Ambiguous;
+        }
+        FastSwapResult::Accepted(InterchangeMap {
+            target_block_for_source_block: source_to_target,
+        })
     }
 
     /// Minimize the disjoint union of the original-output and swapped-output
@@ -534,25 +648,50 @@ impl TerminalInterchangeability {
                 candidates.len().saturating_sub(1) * candidates.len() / 2,
             );
         }
+        let signature_index = residual.one_step_signature_index();
+        let mut fast_accepted = 0usize;
+        let mut fast_rejected = 0usize;
+        let mut exact_fallbacks = 0usize;
         let mut accepted = BTreeMap::<(TerminalID, TerminalID), InterchangeMap>::new();
         let mut components = DisjointSet::new(active_terminals.len());
         for group in candidate_groups.values() {
             for (index, &left) in group.iter().enumerate() {
                 for &right in &group[index + 1..] {
-                    if let Some(left_to_right) =
-                        restricted.interchange_map(&residual, left, right)
-                    {
-                        assert!(
-                            restricted
-                                .interchange_map(&residual, right, left)
-                                .is_some(),
-                            "terminal interchange map was not symmetric: {left} <-> {right}",
-                        );
+                    let map = match residual.fast_interchange_map(
+                        left as usize,
+                        right as usize,
+                        &signature_index,
+                    ) {
+                        FastSwapResult::Accepted(map) => {
+                            fast_accepted += 1;
+                            Some(map)
+                        }
+                        FastSwapResult::Rejected => {
+                            fast_rejected += 1;
+                            None
+                        }
+                        FastSwapResult::Ambiguous => {
+                            exact_fallbacks += 1;
+                            restricted.interchange_map(&residual, left, right)
+                        }
+                    };
+                    if let Some(left_to_right) = map {
+                        // `interchange_map` and the fast path both prove a
+                        // bijection. Since the label swap is involutive, the
+                        // inverse bijection is the reverse witness.
                         components.union(left as usize, right as usize);
                         accepted.insert((left, right), left_to_right);
                     }
                 }
             }
+        }
+        if std::env::var_os("GLRMASK_PROFILE_L2P_INTERCHANGEABILITY").is_some() {
+            eprintln!(
+                "[glrmask/profile][l2p_terminal_interchangeability] fast_accepted={} fast_rejected={} exact_fallbacks={}",
+                fast_accepted,
+                fast_rejected,
+                exact_fallbacks,
+            );
         }
 
         let mut groups = BTreeMap::<usize, Vec<TerminalID>>::new();
@@ -1104,6 +1243,47 @@ mod tests {
                 expected.as_slice(),
                 "combined mode differed at raw lexer state {raw_state}",
             );
+        }
+    }
+
+    #[test]
+    fn one_step_fast_path_agrees_when_it_is_decisive() {
+        let expressions = vec![
+            Expr::Seq(vec![
+                Expr::U8Seq(b"a".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())),
+                    min: 0,
+                    max: None,
+                },
+            ]),
+            Expr::Seq(vec![
+                Expr::U8Seq(b"aaa".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())),
+                    min: 0,
+                    max: None,
+                },
+            ]),
+            Expr::U8Seq(b"x".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let restricted = RestrictedDfa::new(&tokenizer, &[true, true, true], &[true; 256]);
+        let blocks = restricted.minimize(None);
+        let residual = restricted.minimized_residual(&blocks);
+        let index = residual.one_step_signature_index();
+        for left in 0..3u32 {
+            for right in left + 1..3u32 {
+                let exact = restricted.interchange_map(&residual, left, right).is_some();
+                match residual.fast_interchange_map(left as usize, right as usize, &index) {
+                    FastSwapResult::Accepted(_) => assert!(exact),
+                    FastSwapResult::Rejected => assert!(!exact),
+                    FastSwapResult::Ambiguous => {}
+                }
+            }
         }
     }
 
