@@ -88,6 +88,17 @@ enum FastSwapResult {
     Ambiguous,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CanonicalSignature {
+    output: OutputBits,
+    successor_colors: Vec<u32>,
+}
+
+struct ResidualCanonicalization {
+    stages: Vec<BTreeMap<CanonicalSignature, u32>>,
+    state_for_final_color: Vec<u32>,
+}
+
 impl MinimizedResidualDfa {
     fn state_count(&self) -> usize {
         self.outputs.len()
@@ -247,6 +258,53 @@ impl MinimizedResidualDfa {
         })
     }
 
+    /// Canonical depth refinement of this minimal residual DFA.  The final
+    /// partition is discrete, so its colors name individual residual states.
+    fn canonicalization(&self) -> ResidualCanonicalization {
+        let state_count = self.state_count();
+        let mut previous = None::<Vec<u32>>;
+        let mut stages = Vec::new();
+        let final_colors = loop {
+            let mut map = BTreeMap::<CanonicalSignature, u32>::new();
+            let colors = (0..state_count)
+                .map(|state| {
+                    let successor_colors = previous.as_ref().map_or_else(Vec::new, |colors| {
+                        self.transitions[state]
+                            .iter()
+                            .map(|&target| colors[target as usize])
+                            .collect()
+                    });
+                    let key = CanonicalSignature {
+                        output: self.outputs[state].clone(),
+                        successor_colors,
+                    };
+                    let next = map.len() as u32;
+                    *map.entry(key).or_insert(next)
+                })
+                .collect::<Vec<_>>();
+            let stable = previous.as_ref().is_some_and(|prior| *prior == colors);
+            stages.push(map);
+            if stable {
+                break colors;
+            }
+            previous = Some(colors);
+        };
+        let mut state_for_final_color = vec![NO_STATE; stages.last().expect("canonical stages").len()];
+        for (state, &color) in final_colors.iter().enumerate() {
+            assert_eq!(
+                state_for_final_color[color as usize],
+                NO_STATE,
+                "minimal residual DFA did not reach a discrete canonical coloring",
+            );
+            state_for_final_color[color as usize] = state as u32;
+        }
+        assert!(state_for_final_color.iter().all(|&state| state != NO_STATE));
+        ResidualCanonicalization {
+            stages,
+            state_for_final_color,
+        }
+    }
+
     /// Minimize the disjoint union of the original-output and swapped-output
     /// copies of this already-minimized DFA. The result gives the exact
     /// cross-copy residual equivalence relation for one proposed swap.
@@ -281,6 +339,70 @@ impl MinimizedResidualDfa {
             }
             blocks = next;
         }
+    }
+}
+
+impl ResidualCanonicalization {
+    /// Exact isomorphism test against the DFA with `left` and `right` swapped.
+    /// Each stage looks up the swapped source signature in the corresponding
+    /// canonical target stage.  The final stage names individual target states.
+    fn interchange_map(
+        &self,
+        residual: &MinimizedResidualDfa,
+        left: usize,
+        right: usize,
+    ) -> Option<InterchangeMap> {
+        let state_count = residual.state_count();
+        let mut colors = None::<Vec<u32>>;
+        for stage in &self.stages {
+            let mut next = Vec::with_capacity(state_count);
+            for state in 0..state_count {
+                let successor_colors = colors.as_ref().map_or_else(Vec::new, |colors| {
+                    residual.transitions[state]
+                        .iter()
+                        .map(|&target| colors[target as usize])
+                        .collect()
+                });
+                let key = CanonicalSignature {
+                    output: residual.outputs[state].swap(left, right),
+                    successor_colors,
+                };
+                next.push(*stage.get(&key)?);
+            }
+            colors = Some(next);
+        }
+        let colors = colors?;
+        let mut targets = colors
+            .iter()
+            .map(|&color| self.state_for_final_color[color as usize])
+            .collect::<Vec<_>>();
+        let mut seen = vec![false; state_count];
+        for &target in &targets {
+            let slot = seen.get_mut(target as usize)?;
+            if *slot {
+                return None;
+            }
+            *slot = true;
+        }
+        if seen.iter().any(|&used| !used) {
+            return None;
+        }
+        for (source, &target) in targets.iter().enumerate() {
+            if residual.outputs[target as usize] != residual.outputs[source].swap(left, right) {
+                return None;
+            }
+            for (&source_next, &target_next) in residual.transitions[source]
+                .iter()
+                .zip(residual.transitions[target as usize].iter())
+            {
+                if targets[source_next as usize] != target_next {
+                    return None;
+                }
+            }
+        }
+        Some(InterchangeMap {
+            target_block_for_source_block: std::mem::take(&mut targets),
+        })
     }
 }
 
@@ -649,9 +771,11 @@ impl TerminalInterchangeability {
             );
         }
         let signature_index = residual.one_step_signature_index();
+        let canonicalization = residual.canonicalization();
         let mut fast_accepted = 0usize;
         let mut fast_rejected = 0usize;
-        let mut exact_fallbacks = 0usize;
+        let mut canonical_accepted = 0usize;
+        let mut canonical_rejected = 0usize;
         let mut accepted = BTreeMap::<(TerminalID, TerminalID), InterchangeMap>::new();
         let mut components = DisjointSet::new(active_terminals.len());
         for group in candidate_groups.values() {
@@ -671,8 +795,14 @@ impl TerminalInterchangeability {
                             None
                         }
                         FastSwapResult::Ambiguous => {
-                            exact_fallbacks += 1;
-                            restricted.interchange_map(&residual, left, right)
+                            let result = canonicalization
+                                .interchange_map(&residual, left as usize, right as usize);
+                            if result.is_some() {
+                                canonical_accepted += 1;
+                            } else {
+                                canonical_rejected += 1;
+                            }
+                            result
                         }
                     };
                     if let Some(left_to_right) = map {
@@ -687,10 +817,11 @@ impl TerminalInterchangeability {
         }
         if std::env::var_os("GLRMASK_PROFILE_L2P_INTERCHANGEABILITY").is_some() {
             eprintln!(
-                "[glrmask/profile][l2p_terminal_interchangeability] fast_accepted={} fast_rejected={} exact_fallbacks={}",
+                "[glrmask/profile][l2p_terminal_interchangeability] fast_accepted={} fast_rejected={} canonical_accepted={} canonical_rejected={}",
                 fast_accepted,
                 fast_rejected,
-                exact_fallbacks,
+                canonical_accepted,
+                canonical_rejected,
             );
         }
 
@@ -1275,9 +1406,17 @@ mod tests {
         let blocks = restricted.minimize(None);
         let residual = restricted.minimized_residual(&blocks);
         let index = residual.one_step_signature_index();
+        let canonicalization = residual.canonicalization();
         for left in 0..3u32 {
             for right in left + 1..3u32 {
                 let exact = restricted.interchange_map(&residual, left, right).is_some();
+                assert_eq!(
+                    canonicalization
+                        .interchange_map(&residual, left as usize, right as usize)
+                        .is_some(),
+                    exact,
+                    "canonical interchange result differed for {left} <-> {right}",
+                );
                 match residual.fast_interchange_map(left as usize, right as usize, &index) {
                     FastSwapResult::Accepted(_) => assert!(exact),
                     FastSwapResult::Rejected => assert!(!exact),
