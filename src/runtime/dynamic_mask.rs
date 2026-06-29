@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
+use crate::automata::lexer::tokenizer::TokenizerMatch;
 use crate::automata::lexer::Lexer;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{advance_stacks, stack_may_advance_on, ParserGSS};
@@ -115,7 +116,7 @@ fn remap_continuation(
     gss: &ParserGSS,
     tokenizer_state: u32,
     end_state: u32,
-    matched_terminals: &[TerminalID],
+    matched_terminals: &[TokenizerMatch],
 ) -> ParserGSS {
     // With no accumulated restrictions an uncommitted lexer continuation is
     // unchanged. In particular, there is no need to compute which just-matched
@@ -126,10 +127,11 @@ fn remap_continuation(
 
     let actionable: BTreeSet<TerminalID> = matched_terminals
         .iter()
-        .copied()
-        .filter(|&terminal| {
-            Some(terminal) != constraint.ignore_terminal
-                && stack_may_advance_on(&constraint.table, gss, terminal)
+        .filter_map(|matched| {
+            let terminal = matched.id;
+            (Some(terminal) != constraint.ignore_terminal
+                && stack_may_advance_on(&constraint.table, gss, terminal))
+                .then_some(terminal)
         })
         .collect();
 
@@ -220,7 +222,7 @@ fn continuation_node(
     parser_node: usize,
     tokenizer_state: u32,
     end_state: u32,
-    matched_terminals: &[TerminalID],
+    matched_terminals: &[TokenizerMatch],
     nodes: &mut Vec<ParserTrieNode>,
 ) -> Option<usize> {
     if nodes[parser_node]
@@ -402,9 +404,6 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                         first_state,
                         &mut matches,
                     );
-                let matched_terminals: SmallVec<[TerminalID; 4]> =
-                    matches.iter().map(|matched| matched.id).collect();
-
                 for matched in &matches {
                     debug_assert!(matched.width > 0);
                     let Some(advanced_parser) = parser_child(
@@ -437,7 +436,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                         parser_node,
                         tokenizer_state,
                         end_state,
-                        &matched_terminals,
+                        &matches,
                         &mut parser_nodes,
                     ) {
                         traversal.push(TraverseWork {
