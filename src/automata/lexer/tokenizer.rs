@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 use super::dfa::DFA;
 use crate::automata::regex::Expr;
@@ -299,6 +300,43 @@ impl Tokenizer {
         }
     }
 
+    /// Execute while retaining every terminal match, writing them into caller-
+    /// supplied small storage. This is useful for vocabulary-trie walks, where
+    /// most lexer scans have no more than a handful of accepting positions.
+    pub(crate) fn execute_from_state_all_widths_into(
+        &self,
+        input: &[u8],
+        start: u32,
+        matches: &mut SmallVec<[TokenizerMatch; 4]>,
+    ) -> Option<u32> {
+        matches.clear();
+        let end_state = self.scan_input(input, start, matches, |tokenizer, matches, state, width| {
+            tokenizer.record_all_matches(matches, state, width);
+        });
+        end_state.filter(|&state| !self.is_end(state))
+    }
+
+    /// As [`Self::execute_from_state_all_widths_into`], except the caller has
+    /// already consumed the first byte of `input`. This lets vocabulary-trie
+    /// walks reject a dead first edge without executing it a second time.
+    pub(crate) fn execute_from_state_all_widths_after_first_into(
+        &self,
+        input: &[u8],
+        first_state: u32,
+        matches: &mut SmallVec<[TokenizerMatch; 4]>,
+    ) -> Option<u32> {
+        debug_assert!(!input.is_empty());
+        matches.clear();
+        self.record_all_matches(matches, first_state, 1);
+
+        let mut state = first_state;
+        for (offset, &byte) in input[1..].iter().enumerate() {
+            state = self.step(state, byte)?;
+            self.record_all_matches(matches, state, offset + 2);
+        }
+        (!self.is_end(state)).then_some(state)
+    }
+
     fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult {
         let mut matches = FxHashMap::<TerminalID, (usize, u32)>::default();
         let end_state = self.scan_input(input, start, &mut matches, |tokenizer, matches, state, width| {
@@ -393,7 +431,10 @@ impl Tokenizer {
         }
     }
 
-    fn record_all_matches(&self, matches: &mut Vec<TokenizerMatch>, state: u32, width: usize) {
+    fn record_all_matches<C>(&self, matches: &mut C, state: u32, width: usize)
+    where
+        C: Extend<TokenizerMatch>,
+    {
         matches.extend(self.matched_terminals_iter(state).map(|id| TokenizerMatch {
             id,
             width,

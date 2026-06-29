@@ -3,16 +3,16 @@
 //! This implementation intentionally does not consult the parser DWA. It walks
 //! the vocabulary byte trie while advancing the lexer and GLR parser directly.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 use crate::automata::lexer::Lexer;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{advance_stacks, stack_may_advance_on, ParserGSS};
-use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::grammar::flat::TerminalID;
 
@@ -25,9 +25,9 @@ use super::state::ConstraintState;
 struct ParserTrieNode {
     gss: ParserGSS,
     terminal_children: FxHashMap<(u32, TerminalID, Option<u32>), usize>,
-    /// Lazily populated exact may-advance bitsets, one for each active lexer
+    /// Lazily populated token-boundary answers, one for each active lexer
     /// state. The cache is state-sensitive for the same accumulator reason.
-    may_advance: FxHashMap<u32, BitSet>,
+    token_boundary_allowed: FxHashMap<u32, bool>,
 }
 
 impl ParserTrieNode {
@@ -35,7 +35,7 @@ impl ParserTrieNode {
         Self {
             gss,
             terminal_children: FxHashMap::default(),
-            may_advance: FxHashMap::default(),
+            token_boundary_allowed: FxHashMap::default(),
         }
     }
 }
@@ -86,6 +86,9 @@ fn prune_for_terminal(
     // surviving restriction forward to the lexer state at the end of the bytes
     // being tested. Restrictions for any other lexer state belong to other
     // tokenization branches and are intentionally not copied.
+    if gss.all_accs_satisfy(|disallowed: &TerminalsDisallowed| disallowed.is_empty()) {
+        return gss.clone();
+    }
     gss.apply_and_prune_no_promote(|disallowed: &TerminalsDisallowed| {
         if disallowed
             .get(&tokenizer_state)
@@ -114,6 +117,13 @@ fn remap_continuation(
     end_state: u32,
     matched_terminals: &[TerminalID],
 ) -> ParserGSS {
+    // With no accumulated restrictions an uncommitted lexer continuation is
+    // unchanged. In particular, there is no need to compute which just-matched
+    // terminals were actionable merely to remap an empty map.
+    if gss.all_accs_satisfy(|disallowed: &TerminalsDisallowed| disallowed.is_empty()) {
+        return gss.clone();
+    }
+
     let actionable: BTreeSet<TerminalID> = matched_terminals
         .iter()
         .copied()
@@ -122,12 +132,6 @@ fn remap_continuation(
                 && stack_may_advance_on(&constraint.table, gss, terminal)
         })
         .collect();
-
-    if actionable.is_empty()
-        && gss.all_accs_satisfy(|disallowed: &TerminalsDisallowed| disallowed.is_empty())
-    {
-        return gss.clone();
-    }
 
     gss.apply_and_prune_no_promote(|disallowed: &TerminalsDisallowed| {
         if let Some(blocked) = disallowed.get(&tokenizer_state) {
@@ -175,17 +179,27 @@ fn parser_child(
         return Some(child);
     }
 
-    let pruned = prune_for_terminal(
-        &nodes[parser_node].gss,
-        tokenizer_state,
-        terminal,
-        execution_end_state,
-    );
-    if pruned.is_empty() || !stack_may_advance_on(&constraint.table, &pruned, terminal) {
-        return None;
-    }
-
-    let mut advanced = advance_stacks(&constraint.table, &pruned, terminal);
+    let unrestricted = nodes[parser_node]
+        .gss
+        .all_accs_satisfy(|disallowed: &TerminalsDisallowed| disallowed.is_empty());
+    let mut advanced = if unrestricted {
+        let gss = &nodes[parser_node].gss;
+        if !stack_may_advance_on(&constraint.table, gss, terminal) {
+            return None;
+        }
+        advance_stacks(&constraint.table, gss, terminal)
+    } else {
+        let pruned = prune_for_terminal(
+            &nodes[parser_node].gss,
+            tokenizer_state,
+            terminal,
+            execution_end_state,
+        );
+        if pruned.is_empty() || !stack_may_advance_on(&constraint.table, &pruned, terminal) {
+            return None;
+        }
+        advance_stacks(&constraint.table, &pruned, terminal)
+    };
     if advanced.is_empty() {
         return None;
     }
@@ -209,6 +223,12 @@ fn continuation_node(
     matched_terminals: &[TerminalID],
     nodes: &mut Vec<ParserTrieNode>,
 ) -> Option<usize> {
+    if nodes[parser_node]
+        .gss
+        .all_accs_satisfy(|disallowed: &TerminalsDisallowed| disallowed.is_empty())
+    {
+        return Some(parser_node);
+    }
     let remapped = remap_continuation(
         constraint,
         &nodes[parser_node].gss,
@@ -230,40 +250,46 @@ fn token_boundary_allowed(
     parser_node: usize,
     nodes: &mut [ParserTrieNode],
 ) -> bool {
-    if !nodes[parser_node].may_advance.contains_key(&tokenizer_state) {
-        let mut may_advance = BitSet::new(constraint.tokenizer.num_terminals() as usize);
+    if !nodes[parser_node]
+        .token_boundary_allowed
+        .contains_key(&tokenizer_state)
+    {
+        let gss = &nodes[parser_node].gss;
+        let unrestricted = gss
+            .all_accs_satisfy(|disallowed: &TerminalsDisallowed| disallowed.is_empty());
+        let mut allowed = false;
         for terminal in constraint
             .tokenizer
             .tokens_accessible_from_state(tokenizer_state)
             .iter()
         {
             let terminal = terminal as TerminalID;
-            let pruned = prune_for_terminal(
-                &nodes[parser_node].gss,
-                tokenizer_state,
-                terminal,
-                None,
-            );
-            if pruned.is_empty() {
+            if Some(terminal) == constraint.ignore_terminal {
+                allowed = true;
+                break;
+            }
+            if unrestricted {
+                if stack_may_advance_on(&constraint.table, gss, terminal) {
+                    allowed = true;
+                    break;
+                }
                 continue;
             }
-            if Some(terminal) == constraint.ignore_terminal
-                || stack_may_advance_on(&constraint.table, &pruned, terminal)
-            {
-                may_advance.set(terminal as usize);
+            let pruned = prune_for_terminal(gss, tokenizer_state, terminal, None);
+            if !pruned.is_empty() && stack_may_advance_on(&constraint.table, &pruned, terminal) {
+                allowed = true;
+                break;
             }
         }
         nodes[parser_node]
-            .may_advance
-            .insert(tokenizer_state, may_advance);
+            .token_boundary_allowed
+            .insert(tokenizer_state, allowed);
     }
 
-    let accessible = constraint.tokenizer.tokens_accessible_from_state(tokenizer_state);
-    let may_advance = nodes[parser_node]
-        .may_advance
+    *nodes[parser_node]
+        .token_boundary_allowed
         .get(&tokenizer_state)
-        .expect("dynamic may-advance cache was just populated");
-    !accessible.is_disjoint(may_advance)
+        .expect("dynamic token-boundary cache was just populated")
 }
 
 fn excluded_by_first_byte(
@@ -277,10 +303,13 @@ fn excluded_by_first_byte(
     debug_assert!(!segment.is_empty());
     constraint
         .tokenizer
-        .execute_from_state_all_widths(&segment[..1], tokenizer_state)
-        .matches
-        .iter()
-        .any(|matched| matched.id == terminal)
+        .step(tokenizer_state, segment[0])
+        .is_some_and(|next_state| {
+            constraint
+                .tokenizer
+                .matched_terminal_bitset(next_state)
+                .contains(terminal as usize)
+        })
 }
 
 pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
@@ -338,25 +367,52 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                 continue;
             }
 
-            let mut segment_queue = VecDeque::new();
-            segment_queue.push_back((0usize, current.tokenizer_state, current.parser_node));
+            // Most trie branches die on their first byte. Avoid allocating a
+            // match vector or scanning the rest of a compressed edge for them.
+            let Some(first_state) = state
+                .constraint
+                .tokenizer
+                .step(current.tokenizer_state, segment[0])
+            else {
+                continue;
+            };
 
-            while let Some((position, tokenizer_state, parser_node)) = segment_queue.pop_front() {
-                let execution = state
+            let mut segment_stack = SmallVec::<[(usize, u32, usize); 4]>::new();
+            segment_stack.push((0usize, current.tokenizer_state, current.parser_node));
+            let mut matches = SmallVec::<[crate::automata::lexer::tokenizer::TokenizerMatch; 4]>::new();
+
+            while let Some((position, tokenizer_state, parser_node)) = segment_stack.pop() {
+                let first_state = if position == 0 {
+                    first_state
+                } else {
+                    let Some(first_state) = state
+                        .constraint
+                        .tokenizer
+                        .step(tokenizer_state, segment[position])
+                    else {
+                        continue;
+                    };
+                    first_state
+                };
+                let end_state = state
                     .constraint
                     .tokenizer
-                    .execute_from_state_all_widths(&segment[position..], tokenizer_state);
-                let matched_terminals: Vec<TerminalID> =
-                    execution.matches.iter().map(|matched| matched.id).collect();
+                    .execute_from_state_all_widths_after_first_into(
+                        &segment[position..],
+                        first_state,
+                        &mut matches,
+                    );
+                let matched_terminals: SmallVec<[TerminalID; 4]> =
+                    matches.iter().map(|matched| matched.id).collect();
 
-                for matched in &execution.matches {
+                for matched in &matches {
                     debug_assert!(matched.width > 0);
                     let Some(advanced_parser) = parser_child(
                         state.constraint,
                         parser_node,
                         tokenizer_state,
                         matched.id,
-                        execution.end_state,
+                        end_state,
                         &mut parser_nodes,
                     ) else {
                         continue;
@@ -368,14 +424,14 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                             node: child,
                             tokenizer_state: initial_tsid,
                             parser_node: advanced_parser,
-                            exclusion: execution.end_state.map(|end_state| (end_state, matched.id)),
+                            exclusion: end_state.map(|end_state| (end_state, matched.id)),
                         });
                     } else {
-                        segment_queue.push_back((next_position, initial_tsid, advanced_parser));
+                        segment_stack.push((next_position, initial_tsid, advanced_parser));
                     }
                 }
 
-                if let Some(end_state) = execution.end_state {
+                if let Some(end_state) = end_state {
                     if let Some(continuation) = continuation_node(
                         state.constraint,
                         parser_node,
