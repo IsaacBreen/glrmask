@@ -275,11 +275,11 @@ impl PendingAction {
 fn initialize_pending_and_goto(
     transitions: &[BTreeMap<Symbol, (u32, bool, bool)>],
 ) -> (
-    Vec<BTreeMap<TerminalID, PendingAction>>,
+    Vec<FxHashMap<TerminalID, PendingAction>>,
     Vec<FxHashMap<NonterminalID, (u32, bool)>>,
     FxHashSet<(u32, TerminalID)>,
 ) {
-    let mut pending = std::iter::repeat_with(BTreeMap::<TerminalID, PendingAction>::new)
+    let mut pending = std::iter::repeat_with(FxHashMap::<TerminalID, PendingAction>::default)
         .take(transitions.len())
         .collect::<Vec<_>>();
     let mut goto: Vec<FxHashMap<NonterminalID, (u32, bool)>> = (0..transitions.len()).map(|_| FxHashMap::default()).collect();
@@ -309,7 +309,7 @@ fn initialize_pending_and_goto(
 
 fn finish_table(
     grammar: &AnalyzedGrammar,
-    pending: Vec<BTreeMap<TerminalID, PendingAction>>,
+    pending: Vec<FxHashMap<TerminalID, PendingAction>>,
     goto: Vec<FxHashMap<NonterminalID, (u32, bool)>>,
     forwarded_shifts: FxHashSet<(u32, TerminalID)>,
     construction: GlrTableConstruction,
@@ -318,7 +318,13 @@ fn finish_table(
     let action: Vec<ActionRow> = pending
         .into_iter()
         .map(|by_terminal| {
-            by_terminal
+            let mut entries = by_terminal
+                .into_iter()
+                .collect::<Vec<_>>();
+            // `BTreeMap` used to provide this order implicitly. Retain it so
+            // SparseRow insertion and serialized table bytes are unchanged.
+            entries.sort_unstable_by_key(|(terminal, _)| *terminal);
+            entries
                 .into_iter()
                 .map(|(terminal, pending)| (terminal, pending.finish()))
                 .collect()
