@@ -727,11 +727,7 @@ fn union_lookaheads(item_set: &mut LR1ItemSet, core: LR1ItemCore, lookaheads: &B
     let entry = item_set
         .entry(core)
         .or_insert_with(|| BitSet::new(lookaheads.len()));
-    let delta = lookaheads.difference(entry);
-    if !delta.is_empty() {
-        entry.union_with(&delta);
-    }
-    delta
+    entry.union_with_delta(lookaheads)
 }
 
 fn lr1_closure(
@@ -971,7 +967,6 @@ fn build_lr1_item_sets(
                 (state_id, successors)
             })
             .collect::<Vec<_>>();
-
         let mut next_frontier = Vec::new();
         for (state_id, successors) in expanded {
             for (symbol, is_replace, is_forwarded, target_items) in successors {
