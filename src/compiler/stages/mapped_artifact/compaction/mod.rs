@@ -780,7 +780,37 @@ struct TokenProfileWordEvent {
     pos: usize,
     word: usize,
     bit: u64,
+    fingerprint: u64,
     add: bool,
+}
+
+#[inline]
+fn token_profile_context_fingerprint(word: usize, bit: u64) -> u64 {
+    let mut value = ((word as u64) << 6) | bit.trailing_zeros() as u64;
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn intern_active_token_profile(
+    active_profile: &[u64],
+    profile_fingerprint: u64,
+    profile_groups: &mut HashMap<u64, Vec<(Vec<u64>, u32)>>,
+    next_group: &mut u32,
+) -> u32 {
+    let candidates = profile_groups.entry(profile_fingerprint).or_default();
+    if let Some((_, group)) = candidates
+        .iter()
+        .find(|(existing_profile, _)| existing_profile.as_slice() == active_profile)
+    {
+        return *group;
+    }
+
+    let group = *next_group;
+    *next_group += 1;
+    candidates.push((active_profile.to_vec(), group));
+    group
 }
 
 fn sort_token_profile_word_events(
@@ -811,6 +841,7 @@ fn sort_token_profile_word_events(
             pos: 0,
             word: 0,
             bit: 0,
+            fingerprint: 0,
             add: false,
         };
         events.len()
@@ -832,6 +863,7 @@ fn build_exact_token_merge_permutation_multiword_sweep(
     for (context, token_set) in token_sets.iter().enumerate() {
         let word = context / 64;
         let bit = 1u64 << (context % 64);
+        let fingerprint = token_profile_context_fingerprint(word, bit);
         for token_range in token_set.ranges() {
             let start = (*token_range.start() as usize).min(num_tokens);
             let end = (*token_range.end() as usize).min(num_tokens.saturating_sub(1));
@@ -842,6 +874,7 @@ fn build_exact_token_merge_permutation_multiword_sweep(
                 pos: start,
                 word,
                 bit,
+                fingerprint,
                 add: true,
             });
             let remove_pos = end + 1;
@@ -850,6 +883,7 @@ fn build_exact_token_merge_permutation_multiword_sweep(
                     pos: remove_pos,
                     word,
                     bit,
+                    fingerprint,
                     add: false,
                 });
             }
@@ -865,7 +899,8 @@ fn build_exact_token_merge_permutation_multiword_sweep(
     sort_token_profile_word_events(&mut events, num_tokens);
 
     let mut active_profile = vec![0u64; profile_words];
-    let mut profile_to_group = HashMap::<Vec<u64>, u32>::new();
+    let mut active_profile_fingerprint = 0u64;
+    let mut profile_groups = HashMap::<u64, Vec<(Vec<u64>, u32)>>::new();
     let mut perm = vec![0u32; num_tokens];
     let mut next_group = 0u32;
     let mut cursor = 0usize;
@@ -874,13 +909,12 @@ fn build_exact_token_merge_permutation_multiword_sweep(
     while idx < events.len() {
         let pos = events[idx].pos;
         if cursor < pos {
-            let group = *profile_to_group
-                .entry(active_profile.clone())
-                .or_insert_with(|| {
-                    let group = next_group;
-                    next_group += 1;
-                    group
-                });
+            let group = intern_active_token_profile(
+                &active_profile,
+                active_profile_fingerprint,
+                &mut profile_groups,
+                &mut next_group,
+            );
             perm[cursor..pos].fill(group);
             cursor = pos;
         }
@@ -892,23 +926,24 @@ fn build_exact_token_merge_permutation_multiword_sweep(
         for event in &events[bucket_start..idx] {
             if !event.add {
                 active_profile[event.word] &= !event.bit;
+                active_profile_fingerprint ^= event.fingerprint;
             }
         }
         for event in &events[bucket_start..idx] {
             if event.add {
                 active_profile[event.word] |= event.bit;
+                active_profile_fingerprint ^= event.fingerprint;
             }
         }
     }
 
     if cursor < num_tokens {
-        let group = *profile_to_group
-            .entry(active_profile)
-            .or_insert_with(|| {
-                let group = next_group;
-                next_group += 1;
-                group
-            });
+        let group = intern_active_token_profile(
+            &active_profile,
+            active_profile_fingerprint,
+            &mut profile_groups,
+            &mut next_group,
+        );
         perm[cursor..num_tokens].fill(group);
     }
 
