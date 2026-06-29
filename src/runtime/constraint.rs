@@ -2140,6 +2140,13 @@ impl<'a> ConstraintState<'a> {
         super::dynamic_mask::fill_mask_dynamic(self, buf);
     }
 
+    /// Time one direct dynamic mask fill, excluding any caller-side buffer work.
+    pub fn fill_mask_dynamic_timed_ns(&self, buf: &mut [u32]) -> u64 {
+        let start = std::time::Instant::now();
+        self.fill_mask_dynamic(buf);
+        start.elapsed().as_nanos() as u64
+    }
+
     pub fn dynamic_mask_available(&self) -> bool {
         self.constraint.dynamic_mask_available
     }
