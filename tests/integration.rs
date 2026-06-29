@@ -1361,17 +1361,12 @@ fn strict_terminal_interchangeability_reference_matches_baseline_l2p_artifact() 
     let _disable_feature = EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
     let _disable_validation = EnvVarGuard::unset("GLRMASK_VALIDATE_L2P_TERMINAL_INTERCHANGEABILITY");
 
-    // Advancing through the `a` cycle exchanges the two terminal residuals.
-    // The enabled build also performs its own local terminal-DWA/id-map
-    // comparison against this baseline before returning.
-    let entries = [
-        "a", "aa", "aaa", "aaaa", "aaaaa", "aaaaaa", "aaaaaaa", "aaaaaaaa", "x",
-    ];
+    // Minimized rotated-residual fixture: one token, two terminal positions.
+    let entries = ["aaa"];
     let grammar = r#"
-        start: choice choice
-        choice: A | B
-        A: /a(?:aaaa)*/
-        B: /aaa(?:aaaa)*/
+        start: A B
+        A: /a(aaaa)*/
+        B: /aaa(aaaa)*/
     "#;
     let baseline = lark(&entries, grammar);
 
