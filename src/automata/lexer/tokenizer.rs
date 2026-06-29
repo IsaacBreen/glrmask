@@ -139,7 +139,292 @@ struct TerminalFilteredDfa {
     transitions_pruned: bool,
 }
 
+/// For each original tokenizer state and terminal, the bytes whose transition
+/// stays in that terminal's minimized residual-language class.
+///
+/// The row index is an original tokenizer state; the column index is a terminal.
+pub(crate) type TerminalSelfLoopBytes = Arc<[Box<[U8Set]>]>;
+
+#[inline]
+fn ordered_pair(left: u32, right: u32) -> (u32, u32) {
+    if left < right { (left, right) } else { (right, left) }
+}
+
+#[inline]
+fn or_words(into: &mut [u64], other: &[u64]) {
+    for (into, other) in into.iter_mut().zip(other) {
+        *into |= *other;
+    }
+}
+
+fn ensure_pair(
+    pairs: &mut Vec<(u32, u32)>,
+    pair_indices: &mut FxHashMap<(u32, u32), usize>,
+    bases: &mut Vec<Vec<u64>>,
+    successors: &mut Vec<Vec<usize>>,
+    left: u32,
+    right: u32,
+    num_words: usize,
+) -> usize {
+    debug_assert_ne!(left, right);
+    let pair = ordered_pair(left, right);
+    if let Some(&index) = pair_indices.get(&pair) {
+        return index;
+    }
+    let index = pairs.len();
+    pairs.push(pair);
+    pair_indices.insert(pair, index);
+    bases.push(vec![0; num_words]);
+    successors.push(Vec::new());
+    index
+}
+
+/// Return the terminal-wise distinction bitsets for every product pair.
+///
+/// For a terminal `t`, two states are equivalent precisely when the DFA formed
+/// by retaining only `t`'s finalizers would merge them.  A product node `(p,q)`
+/// therefore carries the terminals that distinguish `p` from `q`.  Its local
+/// contribution is their finalizer xor, plus every terminal for a byte present
+/// on only one side; common byte transitions recurse to the corresponding
+/// product node.  Solving those monotone equations over product-graph SCCs is
+/// equivalent to minimizing once per terminal, but shares all transition work.
+fn compute_terminal_self_loop_bytes(tokenizer: &Tokenizer) -> TerminalSelfLoopBytes {
+    let num_states = tokenizer.dfa.num_states();
+    let num_terminals = tokenizer.num_terminals as usize;
+    let num_words = num_terminals.div_ceil(64);
+    let mut rows = (0..num_states)
+        .map(|_| vec![U8Set::empty(); num_terminals].into_boxed_slice())
+        .collect::<Vec<_>>();
+
+    if num_states == 0 || num_terminals == 0 {
+        return Arc::from(rows.into_boxed_slice());
+    }
+
+    let mut all_terminals = vec![u64::MAX; num_words];
+    if let Some(last) = all_terminals.last_mut() {
+        let remainder = num_terminals % 64;
+        if remainder != 0 {
+            *last = (1u64 << remainder) - 1;
+        }
+    }
+
+    let mut pairs = Vec::<(u32, u32)>::new();
+    let mut pair_indices = FxHashMap::<(u32, u32), usize>::default();
+    let mut bases = Vec::<Vec<u64>>::new();
+    let mut successors = Vec::<Vec<usize>>::new();
+
+    // Only pairs reachable from an original transition can be needed when
+    // deciding whether that transition is a quotient self-loop.
+    for (state, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
+        for (_, &target) in dfa_state.transitions.iter() {
+            if target != state as u32 {
+                ensure_pair(
+                    &mut pairs,
+                    &mut pair_indices,
+                    &mut bases,
+                    &mut successors,
+                    state as u32,
+                    target,
+                    num_words,
+                );
+            }
+        }
+    }
+
+    let mut pair_index = 0usize;
+    while pair_index < pairs.len() {
+        let (left, right) = pairs[pair_index];
+        let left_state = &tokenizer.dfa.states()[left as usize];
+        let right_state = &tokenizer.dfa.states()[right as usize];
+
+        for ((base, left_finalizers), right_finalizers) in bases[pair_index]
+            .iter_mut()
+            .zip(left_state.finalizers.words())
+            .zip(right_state.finalizers.words())
+        {
+            *base |= left_finalizers ^ right_finalizers;
+        }
+
+        let mut left_transitions = left_state.transitions.iter().peekable();
+        let mut right_transitions = right_state.transitions.iter().peekable();
+        while left_transitions.peek().is_some() || right_transitions.peek().is_some() {
+            match (left_transitions.peek().copied(), right_transitions.peek().copied()) {
+                (Some((left_byte, left_target)), Some((right_byte, right_target)))
+                    if left_byte == right_byte => {
+                    left_transitions.next();
+                    right_transitions.next();
+                    if left_target != right_target {
+                        let successor = ensure_pair(
+                            &mut pairs,
+                            &mut pair_indices,
+                            &mut bases,
+                            &mut successors,
+                            *left_target,
+                            *right_target,
+                            num_words,
+                        );
+                        successors[pair_index].push(successor);
+                    }
+                }
+                (Some((left_byte, _)), Some((right_byte, _))) if left_byte < right_byte => {
+                    left_transitions.next();
+                    or_words(&mut bases[pair_index], &all_terminals);
+                }
+                (Some(_), Some(_)) => {
+                    right_transitions.next();
+                    or_words(&mut bases[pair_index], &all_terminals);
+                }
+                (Some(_), None) => {
+                    left_transitions.next();
+                    or_words(&mut bases[pair_index], &all_terminals);
+                }
+                (None, Some(_)) => {
+                    right_transitions.next();
+                    or_words(&mut bases[pair_index], &all_terminals);
+                }
+                (None, None) => break,
+            }
+        }
+
+        successors[pair_index].sort_unstable();
+        successors[pair_index].dedup();
+        pair_index += 1;
+    }
+
+    if pairs.is_empty() {
+        return Arc::from(rows.into_boxed_slice());
+    }
+
+    // Kosaraju SCC decomposition of the product graph.  Each SCC has one
+    // shared distinction set, then sinks are solved before their predecessors.
+    let mut reverse = vec![Vec::<usize>::new(); pairs.len()];
+    for (source, targets) in successors.iter().enumerate() {
+        for &target in targets {
+            reverse[target].push(source);
+        }
+    }
+
+    let mut seen = vec![false; pairs.len()];
+    let mut post_order = Vec::with_capacity(pairs.len());
+    for root in 0..pairs.len() {
+        if seen[root] {
+            continue;
+        }
+        seen[root] = true;
+        let mut stack = vec![(root, 0usize)];
+        while let Some((node, edge_index)) = stack.last_mut() {
+            if *edge_index < successors[*node].len() {
+                let next = successors[*node][*edge_index];
+                *edge_index += 1;
+                if !seen[next] {
+                    seen[next] = true;
+                    stack.push((next, 0));
+                }
+            } else {
+                post_order.push(*node);
+                stack.pop();
+            }
+        }
+    }
+
+    let mut scc_of_pair = vec![usize::MAX; pairs.len()];
+    let mut scc_count = 0usize;
+    for &root in post_order.iter().rev() {
+        if scc_of_pair[root] != usize::MAX {
+            continue;
+        }
+        scc_of_pair[root] = scc_count;
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            for &previous in &reverse[node] {
+                if scc_of_pair[previous] == usize::MAX {
+                    scc_of_pair[previous] = scc_count;
+                    stack.push(previous);
+                }
+            }
+        }
+        scc_count += 1;
+    }
+
+    let mut scc_distinctions = vec![vec![0u64; num_words]; scc_count];
+    let mut scc_successors = vec![Vec::<usize>::new(); scc_count];
+    for (pair, &scc) in scc_of_pair.iter().enumerate() {
+        or_words(&mut scc_distinctions[scc], &bases[pair]);
+        for &successor in &successors[pair] {
+            let successor_scc = scc_of_pair[successor];
+            if successor_scc != scc {
+                scc_successors[scc].push(successor_scc);
+            }
+        }
+    }
+    for targets in &mut scc_successors {
+        targets.sort_unstable();
+        targets.dedup();
+    }
+
+    let mut scc_predecessors = vec![Vec::<usize>::new(); scc_count];
+    let mut remaining_successors = vec![0usize; scc_count];
+    for (source, targets) in scc_successors.iter().enumerate() {
+        remaining_successors[source] = targets.len();
+        for &target in targets {
+            scc_predecessors[target].push(source);
+        }
+    }
+
+    let mut ready = remaining_successors
+        .iter()
+        .enumerate()
+        .filter_map(|(scc, &remaining)| (remaining == 0).then_some(scc))
+        .collect::<Vec<_>>();
+    let mut ready_index = 0usize;
+    while ready_index < ready.len() {
+        let solved = ready[ready_index];
+        ready_index += 1;
+        let solved_distinctions = scc_distinctions[solved].clone();
+        for &predecessor in &scc_predecessors[solved] {
+            or_words(
+                &mut scc_distinctions[predecessor],
+                &solved_distinctions,
+            );
+            remaining_successors[predecessor] -= 1;
+            if remaining_successors[predecessor] == 0 {
+                ready.push(predecessor);
+            }
+        }
+    }
+    debug_assert_eq!(ready.len(), scc_count);
+
+    for (state, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
+        for (byte, &target) in dfa_state.transitions.iter() {
+            if target == state as u32 {
+                for terminal in &mut rows[state] {
+                    terminal.insert(byte);
+                }
+                continue;
+            }
+            let pair = ordered_pair(state as u32, target);
+            let pair_index = pair_indices[&pair];
+            let distinctions = &scc_distinctions[scc_of_pair[pair_index]];
+            for (terminal, loop_bytes) in rows[state].iter_mut().enumerate() {
+                if distinctions[terminal / 64] & (1u64 << (terminal % 64)) == 0 {
+                    loop_bytes.insert(byte);
+                }
+            }
+        }
+    }
+
+    Arc::from(rows.into_boxed_slice())
+}
+
 impl Tokenizer {
+    /// Compute the terminal-sensitive quotient self-loop map used by direct
+    /// dynamic masking.  This is intentionally uncached here: the runtime-only
+    /// dynamic-mask artifact owns the lazy cache so tokenizer clones and DFA
+    /// simplifications never inherit stale data.
+    pub(crate) fn terminal_self_loop_bytes_map(&self) -> TerminalSelfLoopBytes {
+        compute_terminal_self_loop_bytes(self)
+    }
+
     pub(super) fn from_parts(
         dfa: DFA,
         num_terminals: u32,
@@ -679,4 +964,73 @@ impl Lexer for Tokenizer {
 pub struct TokenizerResult {
     pub end_state: u32,
     pub matches: Vec<(usize, BTreeSet<TerminalID>)>,
+}
+
+#[cfg(test)]
+mod terminal_self_loop_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::automata::lexer::compile::build_regex;
+    use crate::ds::u8set::U8Set;
+
+    fn repeat(bytes: &[u8]) -> Expr {
+        Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(bytes))),
+            min: 1,
+            max: None,
+        }
+    }
+
+    #[test]
+    fn terminal_self_loop_map_matches_per_terminal_minimization() {
+        let exprs = vec![
+            repeat(b"ab"),
+            Expr::Seq(vec![
+                Expr::U8Seq(b"a".to_vec()),
+                repeat(b"bc"),
+            ]),
+            Expr::Choice(vec![
+                Expr::U8Seq(b"ab".to_vec()),
+                Expr::U8Seq(b"ac".to_vec()),
+                Expr::U8Seq(b"abc".to_vec()),
+            ]),
+            Expr::Seq(vec![
+                Expr::U8Seq(b"x".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"y".to_vec())),
+                    min: 0,
+                    max: Some(3),
+                },
+            ]),
+        ];
+        let tokenizer = build_regex(&exprs).into_tokenizer(
+            exprs.len() as u32,
+            Some(Arc::from(exprs.into_boxed_slice())),
+        );
+        let loops = tokenizer.terminal_self_loop_bytes_map();
+
+        for terminal in 0..tokenizer.num_terminals as usize {
+            let mut terminal_only = tokenizer.dfa.clone();
+            for state in terminal_only.states_mut().iter_mut() {
+                for other_terminal in 0..tokenizer.num_terminals as usize {
+                    if other_terminal != terminal {
+                        state.finalizers.clear(other_terminal);
+                    }
+                }
+            }
+            let (_, state_class) = terminal_only.minimize_with_state_mapping_preserve_all_states();
+
+            for (state, dfa_state) in tokenizer.dfa.states().iter().enumerate() {
+                for (byte, &target) in dfa_state.transitions.iter() {
+                    let expected = state_class[state] == state_class[target as usize];
+                    assert_eq!(
+                        loops[state][terminal].contains(byte),
+                        expected,
+                        "terminal={terminal} state={state} byte={byte:#04x} target={target}",
+                    );
+                }
+            }
+        }
+    }
 }

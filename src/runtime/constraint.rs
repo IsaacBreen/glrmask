@@ -161,6 +161,7 @@ impl Constraint {
                 trie_entries,
             )),
             token_ids: Arc::new(aliases_by_canonical),
+            terminal_self_loop_bytes: Arc::new(std::sync::OnceLock::new()),
         }
     }
 

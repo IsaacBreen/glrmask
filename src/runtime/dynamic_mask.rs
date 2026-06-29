@@ -10,10 +10,11 @@ use crate::automata::lexer::Lexer;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{advance_stacks, stack_may_advance_on, ParserGSS};
 use crate::ds::leveled_gss::LeveledGSS;
+use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::grammar::flat::TerminalID;
 
-use super::artifact::Constraint;
+use super::artifact::{Constraint, DynamicMaskVocab};
 use super::state::ConstraintState;
 
 type ExclusionMap = BTreeMap<u32, BTreeSet<TerminalID>>;
@@ -146,6 +147,112 @@ fn token_boundary_allowed(
         })
 }
 
+fn mark_reachable_tokens(
+    vocab: &DynamicMaskVocab,
+    node: &VocabPrefixTreeNode,
+    buf: &mut [u32],
+) {
+    for canonical_token_id in node.reachable_token_ids().iter() {
+        let token_ids = vocab
+            .token_ids
+            .get(&(canonical_token_id as u32))
+            .expect("dynamic vocabulary trie node lacks token ids");
+        for &token_id in token_ids.iter() {
+            set_mask_bit(buf, token_id);
+        }
+    }
+}
+
+/// The terminal-wise loop map is a quotient loop, not necessarily a raw DFA
+/// loop.  If every possible remaining byte is a loop for every terminal that
+/// the parser can currently admit, then the no-finalization continuation has
+/// exactly the same terminal language at every descendant vocabulary node.
+/// Consequently every token below `node` is admissible through that
+/// continuation and no lexer/parser walk is needed.
+///
+/// `Exclusions` carry parallel lexer continuations that reject a branch if one
+/// of their blocked terminals matches.  They may only be skipped when each
+/// blocked terminal has the same quotient loop property.  A currently accepting
+/// blocked terminal can only reject descendants after one more byte, not the
+/// token ending at the current node; a nonaccepting one cannot newly match
+/// anywhere in the subtree.
+enum TerminalLoopSubtree {
+    CannotSkip,
+    MarkAllTokens,
+    MarkCurrentNodeOnly,
+}
+
+fn terminal_loop_subtree(
+    constraint: &Constraint,
+    vocab: &DynamicMaskVocab,
+    node: &VocabPrefixTreeNode,
+    tokenizer_state: u32,
+    stacks: &ParserStacks,
+    exclusions: &Exclusions,
+) -> TerminalLoopSubtree {
+    let future_terminals = constraint.tokenizer.tokens_accessible_from_state(tokenizer_state);
+    if future_terminals.is_empty() {
+        return TerminalLoopSubtree::CannotSkip;
+    }
+
+    let subtree_bytes = U8Set::from_words(*node.subtree_bytes());
+    let loops_by_state = vocab.terminal_self_loop_bytes(&constraint.tokenizer);
+    let Some(loops) = loops_by_state.get(tokenizer_state as usize) else {
+        return TerminalLoopSubtree::CannotSkip;
+    };
+
+    // `advance_row_allows` is the table's cheap, conservative admission set.
+    // It may include a guarded shift whose lower-stack guard later fails, but
+    // that only makes this optimization decline to fire.  The exact
+    // `token_boundary_allowed` check below establishes the one live parser
+    // continuation required before we mark a whole subtree.
+    let top_states = stacks.peek_values();
+    let mut has_candidate_terminal = false;
+    for terminal in future_terminals.iter() {
+        let terminal = terminal as TerminalID;
+        if Some(terminal) != constraint.ignore_terminal
+            && !top_states
+                .iter()
+                .any(|&parser_state| constraint.table.advance_row_allows(parser_state, terminal))
+        {
+            continue;
+        }
+        has_candidate_terminal = true;
+        let Some(loop_bytes) = loops.get(terminal as usize) else {
+            return TerminalLoopSubtree::CannotSkip;
+        };
+        if !subtree_bytes.is_subset(loop_bytes) {
+            return TerminalLoopSubtree::CannotSkip;
+        }
+    }
+    if !has_candidate_terminal || !token_boundary_allowed(constraint, tokenizer_state, stacks) {
+        return TerminalLoopSubtree::CannotSkip;
+    }
+
+    for (&excluded_state, blocked_terminals) in exclusions.iter() {
+        let Some(exclusion_loops) = loops_by_state.get(excluded_state as usize) else {
+            return TerminalLoopSubtree::CannotSkip;
+        };
+        for &terminal in blocked_terminals {
+            let Some(loop_bytes) = exclusion_loops.get(terminal as usize) else {
+                return TerminalLoopSubtree::CannotSkip;
+            };
+            if !subtree_bytes.is_subset(loop_bytes) {
+                return TerminalLoopSubtree::CannotSkip;
+            }
+            if constraint
+                .tokenizer
+                .matched_terminal_bitset(excluded_state)
+                .contains(terminal as usize)
+            {
+                return TerminalLoopSubtree::MarkCurrentNodeOnly;
+            }
+        }
+    }
+
+    TerminalLoopSubtree::MarkAllTokens
+}
+
 pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
     let vocab = &state.constraint.dynamic_mask_vocab;
 
@@ -165,6 +272,19 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
     }
 
     while let Some(current) = traversal.pop() {
+        let subtree_action = terminal_loop_subtree(
+            state.constraint,
+            vocab,
+            current.node,
+            current.tokenizer_state,
+            &current.gss,
+            &current.exclusions,
+        );
+        if matches!(subtree_action, TerminalLoopSubtree::MarkAllTokens) {
+            mark_reachable_tokens(vocab, current.node, buf);
+            continue;
+        }
+
         if current.node.has_token()
             && (current.tokenizer_state == initial_tsid
                 || token_boundary_allowed(
@@ -181,6 +301,10 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
             for &token_id in token_ids.iter() {
                 set_mask_bit(buf, token_id);
             }
+        }
+
+        if matches!(subtree_action, TerminalLoopSubtree::MarkCurrentNodeOnly) {
+            continue;
         }
 
         for (segment, child) in current.node.iter_children() {
@@ -611,6 +735,73 @@ nt start ::= A;
         state.commit_token(3).unwrap();
         assert!(state.is_complete());
         assert_dynamic_parity(&state);
+    }
+
+    #[test]
+    fn terminal_loop_skip_handles_an_already_accepting_exclusion() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let vocab = Vocab::new(
+            vec![(0, b"a".to_vec()), (1, b"aa".to_vec()), (2, b"aaa".to_vec())],
+            None,
+        );
+        let grammar = r#"
+start start;
+t A ::= 'a'+;
+nt start ::= A;
+"#;
+        let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let state = constraint.start();
+        let initial = constraint.tokenizer.initial_state();
+        let (stacks, _) = state
+            .state
+            .get(&initial)
+            .unwrap()
+            .partition_by_accumulator()
+            .into_iter()
+            .next()
+            .unwrap();
+        let continuation = constraint
+            .tokenizer
+            .execute_from_state_all_widths(b"a", initial)
+            .end_state
+            .unwrap();
+        let (_, node) = constraint
+            .dynamic_mask_vocab
+            .trie
+            .root
+            .iter_children()
+            .next()
+            .unwrap();
+
+        let empty = Arc::new(BTreeMap::new());
+        assert!(matches!(
+            terminal_loop_subtree(
+                &constraint,
+                &constraint.dynamic_mask_vocab,
+                node,
+                continuation,
+                &stacks,
+                &empty,
+            ),
+            TerminalLoopSubtree::MarkAllTokens,
+        ));
+
+        let exclusions = Arc::new(BTreeMap::from([(
+            continuation,
+            BTreeSet::from([0]),
+        )]));
+        assert!(matches!(
+            terminal_loop_subtree(
+                &constraint,
+                &constraint.dynamic_mask_vocab,
+                node,
+                continuation,
+                &stacks,
+                &exclusions,
+            ),
+            TerminalLoopSubtree::MarkCurrentNodeOnly,
+        ));
     }
 
 }

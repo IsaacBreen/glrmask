@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rustc_hash::FxHashMap;
 
-use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::lexer::tokenizer::{TerminalSelfLoopBytes, Tokenizer};
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::table::GLRTable;
@@ -36,6 +36,21 @@ pub(crate) struct DynamicMaskVocab {
     /// Each trie leaf stores one canonical token id. This restores every vocab
     /// id that has the same byte string.
     pub(crate) token_ids: Arc<BTreeMap<u32, Box<[u32]>>>,
+    /// Built only when direct dynamic masking is used.  Keeping this cache in
+    /// the runtime-only artifact avoids serializing it and keeps tokenizer
+    /// simplification/construction paths independent of dynamic-mask details.
+    pub(crate) terminal_self_loop_bytes: Arc<OnceLock<TerminalSelfLoopBytes>>,
+}
+
+impl DynamicMaskVocab {
+    #[inline]
+    pub(crate) fn terminal_self_loop_bytes(
+        &self,
+        tokenizer: &Tokenizer,
+    ) -> &TerminalSelfLoopBytes {
+        self.terminal_self_loop_bytes
+            .get_or_init(|| tokenizer.terminal_self_loop_bytes_map())
+    }
 }
 
 impl Default for DynamicMaskVocab {
@@ -43,6 +58,7 @@ impl Default for DynamicMaskVocab {
         Self {
             trie: Arc::new(VocabPrefixTree::new()),
             token_ids: Arc::new(BTreeMap::new()),
+            terminal_self_loop_bytes: Arc::new(OnceLock::new()),
         }
     }
 }
