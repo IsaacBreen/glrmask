@@ -7,6 +7,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::table::GLRTable;
+use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 
@@ -28,6 +29,24 @@ pub(crate) type FastDwaTransitions = Vec<FxHashMap<i32, (u32, Weight)>>;
 pub(crate) type FastTokenizerTransitions = Vec<Box<[u32; 256]>>;
 pub(crate) type TemplateDfasByTerminal = Vec<Option<Arc<CommitTemplateDfas>>>;
 
+/// Runtime-only vocabulary data for direct dynamic mask generation.
+#[derive(Debug, Clone)]
+pub(crate) struct DynamicMaskVocab {
+    pub(crate) trie: Arc<VocabPrefixTree>,
+    /// Each trie leaf stores one canonical token id. This restores every vocab
+    /// id that has the same byte string.
+    pub(crate) token_ids: Arc<BTreeMap<u32, Box<[u32]>>>,
+}
+
+impl Default for DynamicMaskVocab {
+    fn default() -> Self {
+        Self {
+            trie: Arc::new(VocabPrefixTree::new()),
+            token_ids: Arc::new(BTreeMap::new()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CommitTemplateDfas {
     pub(crate) pop: UnweightedDfa,
@@ -47,6 +66,10 @@ pub struct Constraint {
     pub(crate) tokenizer: Tokenizer,
     #[serde(default)]
     pub(crate) ignore_terminal: Option<TerminalID>,
+
+    /// Runtime-only vocabulary data for direct dynamic masking.
+    #[serde(skip, default)]
+    pub(crate) dynamic_mask_vocab: DynamicMaskVocab,
 
     /// possible_matches keyed by grammar terminal id.
     ///

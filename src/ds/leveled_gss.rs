@@ -17,6 +17,14 @@ pub trait Merge: Clone {
     }
 }
 
+impl Merge for () {
+    fn merge(&self, _other: &Self) -> Self {}
+
+    fn subsumes(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 /// A map optimized for small sizes (≤4 entries). Uses inline SmallVec storage
 /// for small maps and falls back to im::HashMap for larger ones.
 /// Drop-in replacement for im::HashMap in GSS children maps.
@@ -3356,6 +3364,30 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
 
+    /// Partition this GSS by accumulator value.
+    ///
+    /// Each result retains precisely the original stack paths labelled with the
+    /// paired accumulator. The returned GSS erases that label to `()`, so later
+    /// users can keep the accumulator as branch-local state without losing its
+    /// correlation with parser paths.
+    pub fn partition_by_accumulator(&self) -> Vec<(LeveledGSS<T, ()>, A)> {
+        let mut accumulators = Vec::new();
+        self.for_each_acc(|accumulator| {
+            if !accumulators.contains(accumulator) {
+                accumulators.push(accumulator.clone());
+            }
+        });
+
+        accumulators
+            .into_iter()
+            .map(|accumulator| {
+                let paths = self
+                    .apply_and_prune(|candidate| (candidate == &accumulator).then_some(()));
+                (paths, accumulator)
+            })
+            .collect()
+    }
+
     pub fn apply_and_prune<B, M>(&self, mut mutator: M) -> LeveledGSS<T, B>
     where
         B: Merge + Clone + Eq + Hash,
@@ -4707,4 +4739,31 @@ mod tests {
             vec![(vec![0_u32, 1, 17, 47, 74, 131, 96], TestAcc(7))]
         );
     }
+    #[test]
+    fn partition_by_accumulator_preserves_path_correlation() {
+        #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+        struct Acc(u8);
+
+        impl Merge for Acc {
+            fn merge(&self, other: &Self) -> Self {
+                Acc(self.0.max(other.0))
+            }
+        }
+
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![1, 2], Acc(1)),
+            (vec![1, 3], Acc(2)),
+            (vec![4], Acc(1)),
+        ]);
+        let mut partitions = gss.partition_by_accumulator();
+        partitions.sort_by_key(|(_, accumulator)| accumulator.0);
+
+        let mut first = partitions.remove(0).0.to_stacks();
+        let mut second = partitions.remove(0).0.to_stacks();
+        first.sort();
+        second.sort();
+        assert_eq!(first, vec![(vec![1, 2], ()), (vec![4], ())]);
+        assert_eq!(second, vec![(vec![1, 3], ())]);
+    }
+
 }

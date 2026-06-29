@@ -16,6 +16,7 @@ use super::artifact::{
     DenseWeightBufMaskCache,
     DenseWeightMaskCache,
     DenseWords,
+    DynamicMaskVocab,
     FastDwaTransitions,
     FastTokenizerTransitions,
     InternalTokenBufMasks,
@@ -137,6 +138,32 @@ fn count_complement_subgroups(missing: u64, valid_mask: u64) -> (u32, u32, u32) 
 }
 
 impl Constraint {
+    fn build_dynamic_mask_vocab(&self) -> DynamicMaskVocab {
+        let mut aliases_by_bytes = BTreeMap::<Vec<u8>, Vec<u32>>::new();
+        for (&token_id, bytes) in self.token_bytes.iter() {
+            aliases_by_bytes
+                .entry(bytes.clone())
+                .or_default()
+                .push(token_id);
+        }
+
+        let mut aliases_by_canonical = BTreeMap::<u32, Box<[u32]>>::new();
+        let mut trie_entries = Vec::with_capacity(aliases_by_bytes.len());
+        for (bytes, mut token_ids) in aliases_by_bytes {
+            token_ids.sort_unstable();
+            let canonical = token_ids[0];
+            aliases_by_canonical.insert(canonical, token_ids.into_boxed_slice());
+            trie_entries.push((canonical as usize, bytes));
+        }
+
+        DynamicMaskVocab {
+            trie: Arc::new(crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(
+                trie_entries,
+            )),
+            token_ids: Arc::new(aliases_by_canonical),
+        }
+    }
+
     pub fn table_ambiguous_actions(&self) -> Vec<TableAmbiguity> {
         self.table.ambiguous_actions()
     }
@@ -393,6 +420,7 @@ impl Constraint {
 
     pub(crate) fn rebuild_runtime_caches_impl(&mut self) {
         self.table.rebuild_guarded_shift_index();
+        self.dynamic_mask_vocab = self.build_dynamic_mask_vocab();
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
@@ -2032,6 +2060,14 @@ impl Constraint {
 
 }
 
+impl<'a> ConstraintState<'a> {
+    /// Fill a mask directly from the lexer and parser stack, without using the
+    /// parser DWA.
+    pub fn fill_mask_dynamic(&self, buf: &mut [u32]) {
+        super::dynamic_mask::fill_mask_dynamic(self, buf);
+    }
+
+}
 #[cfg(test)]
 mod dense_internal_token_mask_tests {
     use super::*;
