@@ -4446,6 +4446,60 @@ fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<
         if next_id as usize == nstates {
             return next_partition;
         }
+        // Refinement only splits classes. When a pass leaves only a small
+        // number of non-singleton classes, test just their members against the
+        // newly refined target partition. If every such class splits, the next
+        // whole-table pass would necessarily produce the identity partition.
+        let mut class_sizes = vec![0usize; next_id as usize];
+        for &class in &next_partition {
+            class_sizes[class as usize] += 1;
+        }
+        let ambiguous_states = next_partition
+            .iter()
+            .enumerate()
+            .filter_map(|(state, &class)| {
+                (class_sizes[class as usize] > 1).then_some(state)
+            })
+            .collect::<Vec<_>>();
+        if !ambiguous_states.is_empty() {
+            let mut seen = FxHashSet::<(u32, RowSignature)>::default();
+            let mut all_ambiguous_classes_split = true;
+            for state in ambiguous_states {
+                let action = table.action[state]
+                    .iter()
+                    .map(|(terminal, action)| {
+                        (terminal, remap_action_to_partition(action, &next_partition))
+                    })
+                    .collect();
+                let goto = table.goto[state]
+                    .iter()
+                    .map(|(&nt, &(target, replace))| {
+                        (nt, (next_partition[target as usize], replace))
+                    })
+                    .collect();
+                let signature = RowSignature {
+                    core_class: core_class_of[state],
+                    action,
+                    goto,
+                    advance: has_advance_rows.then(|| table.advance[state].clone()),
+                };
+                if !seen.insert((next_partition[state], signature)) {
+                    all_ambiguous_classes_split = false;
+                    break;
+                }
+            }
+            if all_ambiguous_classes_split {
+                if profile_detail {
+                    eprintln!(
+                        "[glrmask/profile][same_core_refine_fast_identity] iteration={} ambiguous_states={} unique_partitions={}",
+                        iteration,
+                        seen.len(),
+                        next_id,
+                    );
+                }
+                return (0..nstates as u32).collect();
+            }
+        }
         if !changed {
             return partition;
         }
