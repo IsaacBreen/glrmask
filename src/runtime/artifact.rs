@@ -1,13 +1,15 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::{TerminalSelfLoopBytes, Tokenizer};
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::DWA;
+use crate::ds::leveled_gss::LeveledGSS;
 use crate::compiler::glr::table::GLRTable;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
+use crate::ds::u8set::U8Set;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 
@@ -29,6 +31,36 @@ pub(crate) type FastDwaTransitions = Vec<FxHashMap<i32, (u32, Weight)>>;
 pub(crate) type FastTokenizerTransitions = Vec<Box<[u32; 256]>>;
 pub(crate) type TemplateDfasByTerminal = Vec<Option<Arc<CommitTemplateDfas>>>;
 
+/// A lazy vocabulary split for a terminal quotient-loop byte set.  Tokens in
+/// `safe_mask` can stay inside the current lexer residual language for their
+/// entire byte string; only `exception_trie` needs exact dynamic traversal.
+#[derive(Debug)]
+pub(crate) struct DynamicLoopPartition {
+    pub(crate) exception_trie: Arc<VocabPrefixTree>,
+    pub(crate) safe_mask: Box<[u32]>,
+    pub(crate) safe_token_count: usize,
+    pub(crate) exception_token_count: usize,
+}
+
+/// Exact direct-continuation partition for one lexer/parser residual state.
+///
+/// A token in `safe_mask` reaches a lexer state from which these unchanged
+/// parser stacks can still eventually consume a terminal. It is therefore
+/// admissible without inspecting terminal matches inside the token. The
+/// exception trie contains every other token and is processed by the normal
+/// exact walk.
+#[derive(Debug)]
+pub(crate) struct DynamicContinuationPartition {
+    pub(crate) tokenizer_state: u32,
+    /// Keeps the pointer used for cache identity live, so an allocator cannot
+    /// recycle it for an unrelated parser GSS.
+    pub(crate) stacks: LeveledGSS<u32, ()>,
+    pub(crate) safe_mask: Arc<[u32]>,
+    pub(crate) exception_trie: Arc<VocabPrefixTree>,
+    pub(crate) safe_canonical_tokens: usize,
+    pub(crate) exception_canonical_tokens: usize,
+}
+
 /// Runtime-only vocabulary data for direct dynamic mask generation.
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicMaskVocab {
@@ -36,10 +68,25 @@ pub(crate) struct DynamicMaskVocab {
     /// Each trie leaf stores one canonical token id. This restores every vocab
     /// id that has the same byte string.
     pub(crate) token_ids: Arc<BTreeMap<u32, Box<[u32]>>>,
+    /// Canonical byte strings retained solely for lazy loop partitions.
+    pub(crate) canonical_token_bytes: Arc<BTreeMap<u32, Box<[u8]>>>,
+    /// Flat form used by hot lazy continuation-partition construction without
+    /// B-tree iteration overhead.
+    pub(crate) canonical_tokens: Arc<[(u32, Box<[u8]>)]>,
+    /// Alias lists parallel to `canonical_tokens`. These avoid a B-tree lookup
+    /// per token while constructing a partition mask.
+    pub(crate) canonical_aliases: Arc<[Box<[u32]>]>,
+    pub(crate) output_mask_words: usize,
     /// Built only when direct dynamic masking is used.  Keeping this cache in
     /// the runtime-only artifact avoids serializing it and keeps tokenizer
     /// simplification/construction paths independent of dynamic-mask details.
     pub(crate) terminal_self_loop_bytes: Arc<OnceLock<TerminalSelfLoopBytes>>,
+    pub(crate) loop_partitions: Arc<Mutex<FxHashMap<U8Set, Arc<DynamicLoopPartition>>>>,
+    /// A small strong-reference cache. Entries are keyed by lexer state and
+    /// parser-GSS identity; retaining the GSS makes the identity immune to
+    /// allocator-address reuse after a state is dropped.
+    pub(crate) continuation_partitions:
+        Arc<Mutex<Vec<Arc<DynamicContinuationPartition>>>>,
 }
 
 impl DynamicMaskVocab {
@@ -51,6 +98,82 @@ impl DynamicMaskVocab {
         self.terminal_self_loop_bytes
             .get_or_init(|| tokenizer.terminal_self_loop_bytes_map())
     }
+
+    pub(crate) fn loop_partition(&self, loop_bytes: U8Set) -> Arc<DynamicLoopPartition> {
+        let mut partitions = self
+            .loop_partitions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(partition) = partitions.get(&loop_bytes) {
+            return partition.clone();
+        }
+
+        let mut safe_mask = vec![0u32; self.output_mask_words];
+        let mut exception_entries = Vec::<(usize, &[u8])>::new();
+        let mut safe_token_count = 0usize;
+        for (index, &(canonical_token_id, ref bytes)) in self.canonical_tokens.iter().enumerate() {
+            if bytes.iter().all(|&byte| loop_bytes.contains(byte)) {
+                let token_ids = &self.canonical_aliases[index];
+                safe_token_count += token_ids.len();
+                for &token_id in token_ids.iter() {
+                    let word = token_id as usize / 32;
+                    debug_assert!(word < safe_mask.len());
+                    safe_mask[word] |= 1u32 << (token_id % 32);
+                }
+            } else {
+                exception_entries.push((canonical_token_id as usize, bytes.as_ref()));
+            }
+        }
+
+        let exception_token_count = exception_entries.len();
+        let partition = Arc::new(DynamicLoopPartition {
+            exception_trie: Arc::new(VocabPrefixTree::build_presorted(&exception_entries)),
+            safe_mask: safe_mask.into_boxed_slice(),
+            safe_token_count,
+            exception_token_count,
+        });
+        partitions.insert(loop_bytes, partition.clone());
+        partition
+    }
+}
+
+pub(crate) fn lookup_dynamic_continuation_partition(
+    vocab: &DynamicMaskVocab,
+    tokenizer_state: u32,
+    stacks: &LeveledGSS<u32, ()>,
+) -> Option<Arc<DynamicContinuationPartition>> {
+    let partitions = vocab
+        .continuation_partitions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    partitions
+        .iter()
+        .find(|partition| {
+            partition.tokenizer_state == tokenizer_state && partition.stacks.ptr_eq(stacks)
+        })
+        .cloned()
+}
+
+pub(crate) fn cache_dynamic_continuation_partition(
+    vocab: &DynamicMaskVocab,
+    partition: Arc<DynamicContinuationPartition>,
+) -> Arc<DynamicContinuationPartition> {
+    const MAX_CACHED_CONTINUATION_PARTITIONS: usize = 64;
+    let mut partitions = vocab
+        .continuation_partitions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(existing) = partitions.iter().find(|existing| {
+        existing.tokenizer_state == partition.tokenizer_state
+            && existing.stacks.ptr_eq(&partition.stacks)
+    }) {
+        return existing.clone();
+    }
+    if partitions.len() == MAX_CACHED_CONTINUATION_PARTITIONS {
+        partitions.remove(0);
+    }
+    partitions.push(partition.clone());
+    partition
 }
 
 impl Default for DynamicMaskVocab {
@@ -58,7 +181,13 @@ impl Default for DynamicMaskVocab {
         Self {
             trie: Arc::new(VocabPrefixTree::new()),
             token_ids: Arc::new(BTreeMap::new()),
+            canonical_token_bytes: Arc::new(BTreeMap::new()),
+            canonical_tokens: Arc::from(Vec::<(u32, Box<[u8]>)>::new().into_boxed_slice()),
+            canonical_aliases: Arc::from(Vec::<Box<[u32]>>::new().into_boxed_slice()),
+            output_mask_words: 0,
             terminal_self_loop_bytes: Arc::new(OnceLock::new()),
+            loop_partitions: Arc::new(Mutex::new(FxHashMap::default())),
+            continuation_partitions: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }

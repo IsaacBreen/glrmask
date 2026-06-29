@@ -287,6 +287,79 @@ fn mask_profile_to_dict<'py>(
     dict.set_item("other_ns", profile.other_ns)?;
     Ok(dict)
 }
+
+fn dynamic_mask_profile_to_dict<'py>(
+    py: Python<'py>,
+    profile: glrmask::DynamicMaskProfile,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("total_ns", profile.total_ns)?;
+    dict.set_item("work_items", profile.work_items)?;
+    dict.set_item("trie_edges", profile.trie_edges)?;
+    dict.set_item("traversal_pushes", profile.traversal_pushes)?;
+    dict.set_item("lexer_executions", profile.lexer_executions)?;
+    dict.set_item("lexer_first_byte_rejects", profile.lexer_first_byte_rejects)?;
+    dict.set_item(
+        "parser_candidate_first_byte_rejects",
+        profile.parser_candidate_first_byte_rejects,
+    )?;
+    dict.set_item(
+        "exclusion_lexer_executions",
+        profile.exclusion_lexer_executions,
+    )?;
+    dict.set_item("terminal_matches", profile.terminal_matches)?;
+    dict.set_item("parser_child_attempts", profile.parser_child_attempts)?;
+    dict.set_item("parser_child_accepts", profile.parser_child_accepts)?;
+    dict.set_item("boundary_checks", profile.boundary_checks)?;
+    dict.set_item(
+        "parser_admission_cache_hits",
+        profile.parser_admission_cache_hits,
+    )?;
+    dict.set_item(
+        "parser_admission_cache_misses",
+        profile.parser_admission_cache_misses,
+    )?;
+    dict.set_item("terminal_loop_checks", profile.terminal_loop_checks)?;
+    dict.set_item("terminal_loop_no_future", profile.terminal_loop_no_future)?;
+    dict.set_item("terminal_loop_no_candidate", profile.terminal_loop_no_candidate)?;
+    dict.set_item("terminal_loop_byte_rejects", profile.terminal_loop_byte_rejects)?;
+    dict.set_item(
+        "terminal_loop_boundary_rejects",
+        profile.terminal_loop_boundary_rejects,
+    )?;
+    dict.set_item(
+        "terminal_loop_exclusion_rejects",
+        profile.terminal_loop_exclusion_rejects,
+    )?;
+    dict.set_item("terminal_loop_mark_all", profile.terminal_loop_mark_all)?;
+    dict.set_item(
+        "terminal_loop_mark_current_only",
+        profile.terminal_loop_mark_current_only,
+    )?;
+    dict.set_item(
+        "terminal_loop_child_mark_all",
+        profile.terminal_loop_child_mark_all,
+    )?;
+    dict.set_item(
+        "terminal_loop_post_edge_mark_all",
+        profile.terminal_loop_post_edge_mark_all,
+    )?;
+    dict.set_item("loop_partition_uses", profile.loop_partition_uses)?;
+    dict.set_item(
+        "loop_partition_loop_bytes_total",
+        profile.loop_partition_loop_bytes_total,
+    )?;
+    dict.set_item(
+        "loop_partition_safe_tokens",
+        profile.loop_partition_safe_tokens,
+    )?;
+    dict.set_item(
+        "loop_partition_exception_tokens",
+        profile.loop_partition_exception_tokens,
+    )?;
+    dict.set_item("marked_subtree_tokens", profile.marked_subtree_tokens)?;
+    Ok(dict)
+}
 fn string_result<T>(result: Result<T, String>) -> PyResult<T> {
     result.map_err(PyValueError::new_err)
 }
@@ -561,6 +634,24 @@ impl PyConstraintState {
         self.inner
             .with_dependent(|_owner, state| state.fill_mask_dynamic(buf));
         Ok(())
+    }
+
+    fn fill_mask_dynamic_profiled<'py>(
+        &self,
+        py: Python<'py>,
+        mut bitmask: PyReadwriteArray1<i32>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let slice = bitmask.as_slice_mut().map_err(|e| {
+            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
+        })?;
+        // Safety: i32 and u32 have identical size, alignment, and bit representation.
+        let buf: &mut [u32] = unsafe {
+            std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
+        };
+        let profile = self
+            .inner
+            .with_dependent(|_owner, state| state.fill_mask_dynamic_profiled(buf));
+        dynamic_mask_profile_to_dict(py, profile)
     }
 
     fn fill_mask_timed_ns(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<u64> {

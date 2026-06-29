@@ -148,20 +148,40 @@ impl Constraint {
         }
 
         let mut aliases_by_canonical = BTreeMap::<u32, Box<[u32]>>::new();
+        let mut canonical_token_bytes = BTreeMap::<u32, Box<[u8]>>::new();
+        let mut canonical_tokens = Vec::<(u32, Box<[u8]>)>::new();
+        let mut canonical_aliases = Vec::<Box<[u32]>>::new();
         let mut trie_entries = Vec::with_capacity(aliases_by_bytes.len());
         for (bytes, mut token_ids) in aliases_by_bytes {
             token_ids.sort_unstable();
             let canonical = token_ids[0];
-            aliases_by_canonical.insert(canonical, token_ids.into_boxed_slice());
+            let aliases = token_ids.into_boxed_slice();
+            canonical_aliases.push(aliases.clone());
+            aliases_by_canonical.insert(canonical, aliases);
+            canonical_token_bytes.insert(canonical, bytes.clone().into_boxed_slice());
+            canonical_tokens.push((canonical, Box::<[u8]>::from(bytes.clone())));
             trie_entries.push((canonical as usize, bytes));
         }
+
+        let output_mask_words = self
+            .token_bytes
+            .keys()
+            .next_back()
+            .map(|&token_id| token_id as usize / 32 + 1)
+            .unwrap_or(0);
 
         DynamicMaskVocab {
             trie: Arc::new(crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(
                 trie_entries,
             )),
             token_ids: Arc::new(aliases_by_canonical),
+            canonical_token_bytes: Arc::new(canonical_token_bytes),
+            canonical_tokens: Arc::from(canonical_tokens.into_boxed_slice()),
+            canonical_aliases: Arc::from(canonical_aliases.into_boxed_slice()),
+            output_mask_words,
             terminal_self_loop_bytes: Arc::new(std::sync::OnceLock::new()),
+            loop_partitions: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+            continuation_partitions: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -2066,6 +2086,12 @@ impl<'a> ConstraintState<'a> {
     /// parser DWA.
     pub fn fill_mask_dynamic(&self, buf: &mut [u32]) {
         super::dynamic_mask::fill_mask_dynamic(self, buf);
+    }
+
+    /// Fill a mask through direct dynamic traversal and return operation counts
+    /// for profiling that traversal.
+    pub fn fill_mask_dynamic_profiled(&self, buf: &mut [u32]) -> super::DynamicMaskProfile {
+        super::dynamic_mask::fill_mask_dynamic_profiled(self, buf)
     }
 
 }

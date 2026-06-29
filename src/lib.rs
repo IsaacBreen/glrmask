@@ -28,6 +28,7 @@ pub use runtime::{
     CommitProfile,
     Constraint,
     ConstraintState,
+    DynamicMaskProfile,
     FinalMaskMapping,
     GssProfileSummary,
     MaskProfile,
