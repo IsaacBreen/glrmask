@@ -14,6 +14,8 @@ use crate::automata::lexer::tokenizer::TokenizerMatch;
 use crate::automata::lexer::Lexer;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{advance_stacks, stack_may_advance_on, ParserGSS};
+use crate::ds::bitset::BitSet;
+use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::grammar::flat::TerminalID;
 
@@ -29,6 +31,11 @@ struct ParserTrieNode {
     /// Lazily populated token-boundary answers, one for each active lexer
     /// state. The cache is state-sensitive for the same accumulator reason.
     token_boundary_allowed: FxHashMap<u32, bool>,
+    admissible_terminals: FxHashMap<u32, BitSet>,
+    /// For an unrestricted GSS, parser-admissible terminals are independent of
+    /// lexer state. Keeping this once per parser node avoids recomputing the
+    /// same GLR admission set for every lexer state reached in a wide string.
+    unrestricted_admissible_terminals: Option<BitSet>,
 }
 
 impl ParserTrieNode {
@@ -37,6 +44,8 @@ impl ParserTrieNode {
             gss,
             terminal_children: FxHashMap::default(),
             token_boundary_allowed: FxHashMap::default(),
+            admissible_terminals: FxHashMap::default(),
+            unrestricted_admissible_terminals: None,
         }
     }
 }
@@ -56,6 +65,115 @@ fn set_mask_bit(buf: &mut [u32], token_id: u32) {
     if let Some(slot) = buf.get_mut(word) {
         *slot |= 1u32 << bit;
     }
+}
+
+#[inline]
+fn mask_bit_is_set(buf: &[u32], token_id: u32) -> bool {
+    let word = token_id as usize / 32;
+    let bit = token_id % 32;
+    buf.get(word).is_some_and(|slot| *slot & (1u32 << bit) != 0)
+}
+
+/// Set every token bit in an inclusive ID range. Dynamic vocab tries use
+/// canonical token IDs, which are not byte-sorted, but their reachable-ID sets
+/// retain compact numeric ranges from the original vocabulary.
+fn set_mask_range(buf: &mut [u32], start: usize, end: usize) {
+    let capacity = buf.len().saturating_mul(32);
+    if start >= capacity {
+        return;
+    }
+    let end = end.min(capacity - 1);
+    if start > end {
+        return;
+    }
+
+    let first_word = start / 32;
+    let last_word = end / 32;
+    for word in first_word..=last_word {
+        let first_bit = if word == first_word { start % 32 } else { 0 };
+        let last_bit = if word == last_word { end % 32 } else { 31 };
+        let high = if last_bit == 31 {
+            u32::MAX
+        } else {
+            (1u32 << (last_bit + 1)) - 1
+        };
+        let low = if first_bit == 0 {
+            0
+        } else {
+            (1u32 << first_bit) - 1
+        };
+        buf[word] |= high & !low;
+    }
+}
+
+fn set_reachable_token_ids(buf: &mut [u32], node: &VocabPrefixTreeNode) {
+    for range in node.reachable_token_ids().ranges() {
+        set_mask_range(buf, *range.start(), *range.end());
+    }
+}
+
+fn expand_dynamic_token_aliases(constraint: &Constraint, buf: &mut [u32]) {
+    for (&canonical, aliases) in constraint.dynamic_mask_token_aliases.iter() {
+        if mask_bit_is_set(buf, canonical) {
+            for &alias in aliases.iter() {
+                set_mask_bit(buf, alias);
+            }
+        }
+    }
+}
+
+fn subtree_bytes_self_loop(node: &VocabPrefixTreeNode, self_loop_bytes: U8Set) -> bool {
+    U8Set::from_words(*node.subtree_bytes()).is_subset(&self_loop_bytes)
+}
+
+fn cached_self_loop_bytes(
+    constraint: &Constraint,
+    tokenizer_state: u32,
+    cache: &mut FxHashMap<u32, U8Set>,
+) -> U8Set {
+    *cache
+        .entry(tokenizer_state)
+        .or_insert_with(|| constraint.tokenizer.self_loop_bytes(tokenizer_state))
+}
+
+/// A sufficient condition for every token endpoint in this vocabulary subtree
+/// to be admissible. Every suffix byte keeps the lexer in the same live state,
+/// and there are no branch-local terminal exclusions to preserve. A token may
+/// therefore end anywhere in the subtree: either an already-matched terminal
+/// can advance the parser now, or the unchanged lexer state is completable by a
+/// later terminal. This is especially important inside unbounded string tokens.
+fn whole_subtree_is_allowed(
+    constraint: &Constraint,
+    current: TraverseWork<'_>,
+    nodes: &mut [ParserTrieNode],
+    self_loop_cache: &mut FxHashMap<u32, U8Set>,
+) -> bool {
+    if current.exclusion.is_some()
+        || !nodes[current.parser_node]
+            .gss
+            .all_accs_satisfy(|disallowed: &TerminalsDisallowed| disallowed.is_empty())
+        || !subtree_bytes_self_loop(
+            current.node,
+            cached_self_loop_bytes(constraint, current.tokenizer_state, self_loop_cache),
+        )
+    {
+        return false;
+    }
+
+    let terminal_can_advance_now = !constraint
+        .tokenizer
+        .matched_terminal_bitset(current.tokenizer_state)
+        .is_disjoint(
+            unrestricted_admissible_terminals(constraint, current.parser_node, nodes)
+                .expect("whole-subtree shortcut requires an unrestricted parser node"),
+        );
+    terminal_can_advance_now
+        || token_boundary_allowed(
+            constraint,
+            current.tokenizer_state,
+            current.parser_node,
+            nodes,
+        )
 }
 
 fn update_eos_mask(state: &ConstraintState<'_>, buf: &mut [u32]) {
@@ -246,6 +364,85 @@ fn continuation_node(
     Some(node)
 }
 
+fn unrestricted_admissible_terminals<'a>(
+    constraint: &Constraint,
+    parser_node: usize,
+    nodes: &'a mut [ParserTrieNode],
+) -> Option<&'a BitSet> {
+    if !nodes[parser_node]
+        .gss
+        .all_accs_satisfy(|disallowed: &TerminalsDisallowed| disallowed.is_empty())
+    {
+        return None;
+    }
+    if nodes[parser_node].unrestricted_admissible_terminals.is_none() {
+        let mut admissible = BitSet::new(constraint.tokenizer.num_terminals() as usize);
+        for terminal_index in 0..constraint.tokenizer.num_terminals() as usize {
+            let terminal = terminal_index as TerminalID;
+            if Some(terminal) == constraint.ignore_terminal
+                || stack_may_advance_on(&constraint.table, &nodes[parser_node].gss, terminal)
+            {
+                admissible.set(terminal_index);
+            }
+        }
+        nodes[parser_node].unrestricted_admissible_terminals = Some(admissible);
+    }
+    nodes[parser_node].unrestricted_admissible_terminals.as_ref()
+}
+
+fn lexer_state_has_admissible_terminal(
+    constraint: &Constraint,
+    tokenizer_state: u32,
+    parser_node: usize,
+    nodes: &mut [ParserTrieNode],
+) -> bool {
+    if let Some(admissible) = unrestricted_admissible_terminals(constraint, parser_node, nodes) {
+        return !constraint
+            .tokenizer
+            .possible_future_terminals(tokenizer_state)
+            .is_disjoint(admissible)
+            || !constraint
+                .tokenizer
+                .matched_terminal_bitset(tokenizer_state)
+                .is_disjoint(admissible);
+    }
+
+    if !nodes[parser_node]
+        .admissible_terminals
+        .contains_key(&tokenizer_state)
+    {
+        let gss = &nodes[parser_node].gss;
+        let mut admissible = BitSet::new(constraint.tokenizer.num_terminals() as usize);
+        for terminal_index in 0..constraint.tokenizer.num_terminals() as usize {
+            let terminal = terminal_index as TerminalID;
+            if Some(terminal) == constraint.ignore_terminal {
+                admissible.set(terminal_index);
+                continue;
+            }
+            let pruned = prune_for_terminal(gss, tokenizer_state, terminal, None);
+            if !pruned.is_empty() && stack_may_advance_on(&constraint.table, &pruned, terminal) {
+                admissible.set(terminal_index);
+            }
+        }
+        nodes[parser_node]
+            .admissible_terminals
+            .insert(tokenizer_state, admissible);
+    }
+
+    let admissible = nodes[parser_node]
+        .admissible_terminals
+        .get(&tokenizer_state)
+        .expect("dynamic admissible-terminal cache was just populated");
+    !constraint
+        .tokenizer
+        .possible_future_terminals(tokenizer_state)
+        .is_disjoint(admissible)
+        || !constraint
+            .tokenizer
+            .matched_terminal_bitset(tokenizer_state)
+            .is_disjoint(admissible)
+}
+
 fn token_boundary_allowed(
     constraint: &Constraint,
     tokenizer_state: u32,
@@ -256,33 +453,28 @@ fn token_boundary_allowed(
         .token_boundary_allowed
         .contains_key(&tokenizer_state)
     {
-        let gss = &nodes[parser_node].gss;
-        let unrestricted = gss
-            .all_accs_satisfy(|disallowed: &TerminalsDisallowed| disallowed.is_empty());
-        let mut allowed = false;
-        for terminal in constraint
-            .tokenizer
-            .tokens_accessible_from_state(tokenizer_state)
-            .iter()
+        let allowed = if let Some(admissible) =
+            unrestricted_admissible_terminals(constraint, parser_node, nodes)
         {
-            let terminal = terminal as TerminalID;
-            if Some(terminal) == constraint.ignore_terminal {
-                allowed = true;
-                break;
-            }
-            if unrestricted {
-                if stack_may_advance_on(&constraint.table, gss, terminal) {
-                    allowed = true;
-                    break;
-                }
-                continue;
-            }
-            let pruned = prune_for_terminal(gss, tokenizer_state, terminal, None);
-            if !pruned.is_empty() && stack_may_advance_on(&constraint.table, &pruned, terminal) {
-                allowed = true;
-                break;
-            }
-        }
+            !constraint
+                .tokenizer
+                .tokens_accessible_from_state(tokenizer_state)
+                .is_disjoint(admissible)
+        } else {
+            let gss = &nodes[parser_node].gss;
+            constraint
+                .tokenizer
+                .tokens_accessible_from_state(tokenizer_state)
+                .iter()
+                .any(|terminal| {
+                    let terminal = terminal as TerminalID;
+                    if Some(terminal) == constraint.ignore_terminal {
+                        return true;
+                    }
+                    let pruned = prune_for_terminal(gss, tokenizer_state, terminal, None);
+                    !pruned.is_empty() && stack_may_advance_on(&constraint.table, &pruned, terminal)
+                })
+        };
         nodes[parser_node]
             .token_boundary_allowed
             .insert(tokenizer_state, allowed);
@@ -324,6 +516,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
     let initial_tsid = state.constraint.tokenizer.initial_state();
     let mut parser_nodes = Vec::<ParserTrieNode>::new();
     let mut traversal = Vec::<TraverseWork<'_>>::new();
+    let mut self_loop_cache = FxHashMap::<u32, U8Set>::default();
 
     for (&tokenizer_state, gss) in &state.state {
         if gss.is_empty() {
@@ -340,6 +533,16 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
     }
 
     while let Some(current) = traversal.pop() {
+        if whole_subtree_is_allowed(
+            state.constraint,
+            current,
+            &mut parser_nodes,
+            &mut self_loop_cache,
+        ) {
+            set_reachable_token_ids(buf, current.node);
+            continue;
+        }
+
         if current.node.has_token()
             && (current.tokenizer_state == initial_tsid
                 || token_boundary_allowed(
@@ -349,19 +552,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                     &mut parser_nodes,
                 ))
         {
-            let canonical_token_id = current.node.token_id() as u32;
-            if let Some(token_ids) = state
-                .constraint
-                .dynamic_mask_token_aliases
-                .get(&canonical_token_id)
-            {
-                for &token_id in token_ids.iter() {
-                    set_mask_bit(buf, token_id);
-                }
-            } else {
-                debug_assert!(false, "dynamic vocabulary trie node lacks aliases");
-                set_mask_bit(buf, canonical_token_id);
-            }
+            set_mask_bit(buf, current.node.token_id() as u32);
         }
 
         for (segment, child) in current.node.iter_children() {
@@ -378,6 +569,14 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
             else {
                 continue;
             };
+            if !lexer_state_has_admissible_terminal(
+                state.constraint,
+                first_state,
+                current.parser_node,
+                &mut parser_nodes,
+            ) {
+                continue;
+            }
 
             let mut segment_stack = SmallVec::<[(usize, u32, usize); 4]>::new();
             segment_stack.push((0usize, current.tokenizer_state, current.parser_node));
@@ -396,6 +595,14 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                     };
                     first_state
                 };
+                if !lexer_state_has_admissible_terminal(
+                    state.constraint,
+                    first_state,
+                    parser_node,
+                    &mut parser_nodes,
+                ) {
+                    continue;
+                }
                 let end_state = state
                     .constraint
                     .tokenizer
@@ -451,6 +658,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
         }
     }
 
+    expand_dynamic_token_aliases(state.constraint, buf);
     update_eos_mask(state, buf);
 }
 
