@@ -1,6 +1,7 @@
 mod artifact;
 mod commit;
 mod constraint;
+mod dynamic_mask;
 mod finalize;
 mod mask;
 pub mod mask_mapping;

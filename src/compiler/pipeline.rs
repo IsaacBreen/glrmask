@@ -868,6 +868,11 @@ fn compile_prepared_with_profile_and_table_construction(
             terminal_display_names: analyzed_grammar.terminal_display_names.clone(),
             tokenizer,
             ignore_terminal: prepared_grammar.ignore_terminal,
+            dynamic_mask_available: false,
+            dynamic_mask_vocab_trie: std::sync::Arc::new(
+                crate::ds::vocab_prefix_tree::VocabPrefixTree::new(),
+            ),
+            dynamic_mask_token_aliases: std::sync::Arc::new(std::collections::BTreeMap::new()),
             possible_matches: possible_matches.into_artifact(),
             state_to_internal_tsid: internal_ids.tokenizer_states.original_to_internal.clone(),
             internal_tsid_to_states: internal_ids.tokenizer_states.internal_to_originals_vecs(),

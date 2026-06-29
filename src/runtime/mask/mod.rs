@@ -1698,10 +1698,12 @@ impl<'a> ConstraintState<'a> {
 
     pub fn fill_mask(&self, buf: &mut [u32]) {
         if self.try_fill_mask_from_cache(buf) {
+            crate::runtime::dynamic_mask::assert_normal_mask_matches_dynamic(self, buf);
             return;
         }
 
         self.fill_mask_uncached(buf);
+        crate::runtime::dynamic_mask::assert_normal_mask_matches_dynamic(self, buf);
     }
 
     pub fn fill_mask_timed_ns(&self, buf: &mut [u32]) -> u64 {

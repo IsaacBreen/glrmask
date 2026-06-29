@@ -7,6 +7,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::table::GLRTable;
+use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 
@@ -47,6 +48,20 @@ pub struct Constraint {
     pub(crate) tokenizer: Tokenizer,
     #[serde(default)]
     pub(crate) ignore_terminal: Option<TerminalID>,
+
+    /// Whether the lexer satisfies the persistence property required by the
+    /// direct dynamic-mask traversal. It is derived when runtime caches are
+    /// rebuilt and deliberately is not persisted.
+    #[serde(skip, default)]
+    pub dynamic_mask_available: bool,
+    /// Byte-prefix trie over original vocabulary token ids, used only by the
+    /// direct dynamic-mask traversal.
+    #[serde(skip, default)]
+    pub(crate) dynamic_mask_vocab_trie: Arc<VocabPrefixTree>,
+    /// The trie stores one canonical id per byte string; this maps it back to
+    /// every original vocabulary id that has those exact bytes.
+    #[serde(skip, default)]
+    pub(crate) dynamic_mask_token_aliases: Arc<BTreeMap<u32, Box<[u32]>>>,
 
     /// possible_matches keyed by grammar terminal id.
     ///

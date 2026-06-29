@@ -468,6 +468,11 @@ impl PyConstraint {
         }
     }
 
+    #[getter]
+    fn dynamic_mask_available(&self) -> bool {
+        self.inner.dynamic_mask_available
+    }
+
     fn mask_len(&self) -> usize {
         self.inner.mask_len()
     }
@@ -547,6 +552,19 @@ impl PyConstraintState {
             std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
         };
         self.inner.with_dependent(|_owner, state| state.fill_mask(buf));
+        Ok(())
+    }
+
+    fn fill_mask_dynamic(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
+        let slice = bitmask.as_slice_mut().map_err(|e| {
+            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
+        })?;
+        // Safety: i32 and u32 have identical size, alignment, and bit representation.
+        let buf: &mut [u32] = unsafe {
+            std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
+        };
+        self.inner
+            .with_dependent(|_owner, state| state.fill_mask_dynamic(buf));
         Ok(())
     }
 
