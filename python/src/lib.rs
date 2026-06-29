@@ -568,22 +568,6 @@ impl PyConstraintState {
         Ok(())
     }
 
-    fn fill_mask_dynamic_timed_ns(
-        &self,
-        mut bitmask: PyReadwriteArray1<i32>,
-    ) -> PyResult<u64> {
-        let slice = bitmask.as_slice_mut().map_err(|e| {
-            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
-        })?;
-        // Safety: i32 and u32 have identical size, alignment, and bit representation.
-        let buf: &mut [u32] = unsafe {
-            std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
-        };
-        Ok(self.inner.with_dependent(|_owner, state| {
-            state.fill_mask_dynamic_timed_ns(buf)
-        }))
-    }
-
     fn fill_mask_timed_ns(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<u64> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
             PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
