@@ -20,6 +20,7 @@ const UNIT_INLINE_WORK_MAX_CELLS_ENV: &str = "GLRMASK_UNIT_REDUCTION_INLINE_MAX_
 const UNIT_INLINE_WORK_MAX_SYNTHETIC_STATES_ENV: &str =
     "GLRMASK_UNIT_REDUCTION_INLINE_MAX_SYNTHETIC_STATES";
 const UNIT_INLINE_WORK_MAX_STACK_EFFECT_VISITS_ENV: &str = "GLRMASK_UNIT_REDUCTION_INLINE_MAX_STACK_VISITS";
+const DISABLE_UNIT_INLINE_WORKLIST_ENV: &str = "GLRMASK_DISABLE_UNIT_INLINE_WORKLIST";
 const DEFAULT_UNIT_INLINE_WORK_MAX_WALL_MS: u128 = 5_000;
 const DEFAULT_UNIT_INLINE_WORK_MAX_ITERATIONS: usize = 64;
 const DEFAULT_UNIT_INLINE_WORK_MAX_CELLS: usize = 2_000_000;
@@ -32,6 +33,10 @@ fn stack_shift_predecessor_canonicalization_enabled() -> bool {
 
 fn recognizer_suffix_quotient_enabled() -> bool {
     !env_flag_enabled(DISABLE_RECOGNIZER_SUFFIX_QUOTIENT_ENV, false)
+}
+
+fn unit_inline_worklist_enabled() -> bool {
+    !env_flag_enabled(DISABLE_UNIT_INLINE_WORKLIST_ENV, false)
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -727,6 +732,7 @@ impl GLRTable {
             let iteration = budget.iterations;
             let cells_before = budget.cells;
             let visits_before = budget.stack_effect_visits;
+            let mut dependencies = (iteration == 1).then(UnitInlineDependencies::default);
             let refresh_started_at = profile_enabled.then(std::time::Instant::now);
             if !dirty_original_states.is_empty() {
                 refresh_merged_states_depending_on(
@@ -761,6 +767,7 @@ impl GLRTable {
                 FxHashMap::default();
             let nstates = original_num_states as usize;
             let mut pending_updates: Vec<(usize, TerminalID, CellUpdate)> = Vec::new();
+            let mut predecessor_edges_changed = 0usize;
             let scan_started_at = profile_enabled.then(std::time::Instant::now);
 
             for state in 0..nstates {
@@ -787,6 +794,7 @@ impl GLRTable {
                         &mut states_at_depth_cache,
                         &mut subset_to_state,
                         &mut failed_subsets,
+                        dependencies.as_mut(),
                         budget,
                     ) else {
                         continue;
@@ -797,9 +805,15 @@ impl GLRTable {
 
                     match update {
                         Some(CellUpdate::Set(new_action)) if new_action != action => {
+                            predecessor_edges_changed += usize::from(
+                                runtime_predecessor_transition(&action)
+                                    != runtime_predecessor_transition(&new_action),
+                            );
                             pending_updates.push((state, tid, CellUpdate::Set(new_action)));
                         }
                         Some(CellUpdate::Remove) => {
+                            predecessor_edges_changed +=
+                                usize::from(runtime_predecessor_transition(&action).is_some());
                             pending_updates.push((state, tid, CellUpdate::Remove));
                         }
                         _ => {}
@@ -832,10 +846,16 @@ impl GLRTable {
             }
 
             let update_count = pending_updates.len();
+            let can_verify_worklist = iteration == 1
+                && unit_inline_worklist_enabled()
+                && predecessor_edges_changed == 0
+                && budget.synthetic_states == 0
+                && dependencies.is_some();
             let scan_ms = scan_started_at
                 .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
                 .unwrap_or(0.0);
             let apply_started_at = profile_enabled.then(std::time::Instant::now);
+            let mut changed_cells = Vec::with_capacity(update_count);
             for (state, tid, update) in pending_updates {
                 match update {
                     CellUpdate::Set(new_action) => {
@@ -851,10 +871,72 @@ impl GLRTable {
                     }
                 }
                 dirty_original_states.insert(state as u32);
+                changed_cells.push((state as u32, tid));
+            }
+
+            if can_verify_worklist {
+                let worklist = dependencies
+                    .as_ref()
+                    .expect("first iteration has a dependency tracker")
+                    .worklist_for_changes(changed_cells.iter().copied());
+                let verification_cells_before = budget.cells;
+                let verification_visits_before = budget.stack_effect_visits;
+                let verification_started_at = profile_enabled.then(std::time::Instant::now);
+                let mut verification_found_update = false;
+
+                for (state, tid) in worklist.iter().copied() {
+                    let Some(action) = self.action[state as usize].get(&tid).cloned() else {
+                        continue;
+                    };
+                    if !budget.record_cell() {
+                        break;
+                    }
+                    let Ok(update) = try_inline_unit_reductions_for_cell(
+                        self,
+                        &predecessors,
+                        state,
+                        tid,
+                        &action,
+                        &mut constituent_sets,
+                        &mut states_at_depth_cache,
+                        &mut subset_to_state,
+                        &mut failed_subsets,
+                        None,
+                        budget,
+                    ) else {
+                        continue;
+                    };
+                    if budget.abort_reason.is_some() {
+                        break;
+                    }
+                    if matches!(update, Some(CellUpdate::Remove))
+                        || matches!(update, Some(CellUpdate::Set(ref next)) if next != &action)
+                    {
+                        verification_found_update = true;
+                        break;
+                    }
+                }
+
+                if profile_enabled {
+                    eprintln!(
+                        "[glrmask/profile][unit_reduction_inlining_worklist] cells={} stack_effect_visits={} found_update={} elapsed_ms={:.3}",
+                        budget.cells - verification_cells_before,
+                        budget.stack_effect_visits - verification_visits_before,
+                        verification_found_update,
+                        verification_started_at
+                            .expect("profile start exists when profiling is enabled")
+                            .elapsed()
+                            .as_secs_f64()
+                            * 1000.0,
+                    );
+                }
+                if !verification_found_update && budget.abort_reason.is_none() {
+                    break;
+                }
             }
             if profile_enabled {
                 eprintln!(
-                    "[glrmask/profile][unit_reduction_inlining_iteration] iteration={} refresh_ms={:.3} predecessors_ms={:.3} scan_ms={:.3} apply_ms={:.3} scanned_cells={} stack_effect_visits={} pending_updates={} terminal=continue",
+                    "[glrmask/profile][unit_reduction_inlining_iteration] iteration={} refresh_ms={:.3} predecessors_ms={:.3} scan_ms={:.3} apply_ms={:.3} scanned_cells={} stack_effect_visits={} pending_updates={} predecessor_edges_changed={} terminal=continue",
                     iteration,
                     refresh_ms,
                     predecessors_ms,
@@ -867,6 +949,7 @@ impl GLRTable {
                     budget.cells - cells_before,
                     budget.stack_effect_visits - visits_before,
                     update_count,
+                    predecessor_edges_changed,
                 );
             }
         }
@@ -2143,6 +2226,45 @@ enum CellUpdate {
     Remove,
 }
 
+type UnitInlineCell = (u32, TerminalID);
+
+#[derive(Default)]
+struct UnitInlineDependencies {
+    reverse: FxHashMap<UnitInlineCell, Vec<UnitInlineCell>>,
+}
+
+impl UnitInlineDependencies {
+    fn record_read(&mut self, owner: UnitInlineCell, read: UnitInlineCell) {
+        if owner != read {
+            self.reverse.entry(read).or_default().push(owner);
+        }
+    }
+
+    fn worklist_for_changes(&self, changed: impl IntoIterator<Item = UnitInlineCell>) -> Vec<UnitInlineCell> {
+        let mut queued = FxHashSet::default();
+        for changed_cell in changed {
+            queued.insert(changed_cell);
+            if let Some(dependents) = self.reverse.get(&changed_cell) {
+                queued.extend(dependents.iter().copied());
+            }
+        }
+        let mut worklist = queued.into_iter().collect::<Vec<_>>();
+        worklist.sort_unstable();
+        worklist
+    }
+}
+
+fn runtime_predecessor_transition(action: &Action) -> Option<(u32, bool)> {
+    match action {
+        Action::Shift(target, replace) => Some((*target, *replace)),
+        Action::Split {
+            shift: Some((target, replace)),
+            ..
+        } => Some((*target, *replace)),
+        _ => None,
+    }
+}
+
 fn build_runtime_state_predecessors(
     table: &GLRTable,
     original_num_states: u32,
@@ -2839,6 +2961,7 @@ fn stack_effects_for_action(
     frame: StackEffectFrame,
     states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
     visiting: &mut FxHashSet<StackEffectVisitKey>,
+    mut dependencies: Option<&mut UnitInlineDependencies>,
     budget: &mut UnitInlineBudget,
 ) -> Option<StackEffectResult> {
     if !budget.record_stack_effect_visit() {
@@ -2912,6 +3035,9 @@ fn stack_effects_for_action(
                     let Some(next) = table.action[next_state as usize].get(&tid) else {
                         continue;
                     };
+                    if let Some(dependencies) = dependencies.as_deref_mut() {
+                        dependencies.record_read((origin_state, tid), (next_state, tid));
+                    }
                     let next_result = stack_effects_for_action(
                         table,
                         predecessors,
@@ -2922,6 +3048,7 @@ fn stack_effects_for_action(
                         frame,
                         states_at_depth_cache,
                         visiting,
+                        dependencies.as_deref_mut(),
                         budget,
                     )?;
                     origin_dependent |= next_result.origin_dependent;
@@ -2944,6 +3071,7 @@ fn stack_effects_for_action(
                         frame.clone(),
                         states_at_depth_cache,
                         visiting,
+                        dependencies.as_deref_mut(),
                         budget,
                     )?;
                     origin_dependent |= shift_result.origin_dependent;
@@ -2961,6 +3089,7 @@ fn stack_effects_for_action(
                         frame.clone(),
                         states_at_depth_cache,
                         visiting,
+                        dependencies.as_deref_mut(),
                         budget,
                     )?;
                     origin_dependent |= reduce_result.origin_dependent;
@@ -3030,6 +3159,7 @@ fn try_inline_action_to_stack_shifts(
     tid: TerminalID,
     action: &Action,
     states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
+    dependencies: Option<&mut UnitInlineDependencies>,
     budget: &mut UnitInlineBudget,
 ) -> Option<Action> {
     let has_reductions = match action {
@@ -3059,6 +3189,7 @@ fn try_inline_action_to_stack_shifts(
         },
         states_at_depth_cache,
         &mut FxHashSet::default(),
+        dependencies,
         budget,
     )?;
     let effects = result.effects;
@@ -3246,6 +3377,19 @@ mod tests {
         assert_eq!(
             row_fingerprint(&action_left, &goto_left, None),
             row_fingerprint(&action_right, &goto_right, None),
+        );
+    }
+
+    #[test]
+    fn unit_inline_dependency_worklist_includes_changed_cells_and_readers() {
+        let mut dependencies = UnitInlineDependencies::default();
+        dependencies.record_read((3, 7), (4, 7));
+        dependencies.record_read((5, 7), (4, 7));
+        dependencies.record_read((5, 8), (4, 8));
+
+        assert_eq!(
+            dependencies.worklist_for_changes([(4, 7)]),
+            vec![(3, 7), (4, 7), (5, 7)],
         );
     }
 
@@ -3639,6 +3783,7 @@ mod tests {
             0,
             action,
             &mut FxHashMap::default(),
+            None,
             &mut budget,
         );
 
@@ -3702,6 +3847,7 @@ mod tests {
             0,
             action,
             &mut FxHashMap::default(),
+            None,
             &mut budget,
         );
 
@@ -3760,6 +3906,7 @@ mod tests {
             0,
             action,
             &mut FxHashMap::default(),
+            None,
             &mut budget,
         );
 
@@ -4068,6 +4215,7 @@ fn try_inline_unit_reductions_for_cell(
     states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
+    mut dependencies: Option<&mut UnitInlineDependencies>,
     budget: &mut UnitInlineBudget,
 ) -> Result<Option<CellUpdate>, ()> {
     if let Some(action) = try_inline_action_to_stack_shifts(
@@ -4077,6 +4225,7 @@ fn try_inline_unit_reductions_for_cell(
         tid,
         action,
         states_at_depth_cache,
+        dependencies.as_deref_mut(),
         budget,
     ) {
         return Ok(Some(CellUpdate::Set(action)));
@@ -4103,6 +4252,8 @@ fn try_inline_unit_reductions_for_cell(
         subset_to_state,
         failed_subsets,
         &mut visiting,
+        (state, tid),
+        dependencies,
         budget,
     )
 }
@@ -4117,6 +4268,8 @@ fn try_inline_unit_reductions_for_cell_inner(
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
     visiting: &mut FxHashSet<(u32, TerminalID)>,
+    owner: UnitInlineCell,
+    mut dependencies: Option<&mut UnitInlineDependencies>,
     budget: &mut UnitInlineBudget,
 ) -> Result<Option<CellUpdate>, ()> {
     if !budget.record_stack_effect_visit() {
@@ -4162,6 +4315,9 @@ fn try_inline_unit_reductions_for_cell_inner(
             continue;
         };
 
+        if let Some(dependencies) = dependencies.as_deref_mut() {
+            dependencies.record_read(owner, (reduce_dst, tid));
+        }
         match table.action[reduce_dst as usize].get(&tid).cloned() {
             None => {
                 pending.push_reduce(lhs, pop_len);
@@ -4177,6 +4333,8 @@ fn try_inline_unit_reductions_for_cell_inner(
                     subset_to_state,
                     failed_subsets,
                     visiting,
+                    owner,
+                    dependencies.as_deref_mut(),
                     budget,
                 )? {
                     Some(CellUpdate::Set(action)) => Some(action),
