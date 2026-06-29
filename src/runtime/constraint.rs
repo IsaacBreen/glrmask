@@ -185,9 +185,7 @@ impl Constraint {
         for (bytes, mut token_ids) in aliases_by_bytes {
             token_ids.sort_unstable();
             let canonical = token_ids[0];
-            if token_ids.len() > 1 {
-                aliases_by_canonical.insert(canonical, token_ids.into_boxed_slice());
-            }
+            aliases_by_canonical.insert(canonical, token_ids.into_boxed_slice());
             trie_entries.push((canonical as usize, bytes));
         }
 
