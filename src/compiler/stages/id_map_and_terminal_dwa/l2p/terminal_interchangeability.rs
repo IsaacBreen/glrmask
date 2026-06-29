@@ -731,6 +731,80 @@ impl TerminalInterchangeability {
         self.active_representatives.iter().filter(|&&active| active).count()
     }
 
+    /// Precompute the exact union of all transport-mode terminal outputs for
+    /// each raw lexer state.  The trie walk only needs these outputs; it does
+    /// not need to re-run every residual scanner mode at every byte position.
+    ///
+    /// This is equivalent to `terminal_nwa_transport_modes`: for a member
+    /// terminal, look up its transported residual block and evaluate that
+    /// block under the same representative/member output swap.
+    pub(crate) fn combined_terminal_nwa_transport_modes(
+        &self,
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+    ) -> Option<Vec<TerminalNwaTransportMode>> {
+        if self.is_identity() {
+            return None;
+        }
+        let restricted = RestrictedDfa::new(tokenizer, &self.original_active, relevant_bytes);
+        let source_blocks = &self.source_blocks;
+        debug_assert_eq!(source_blocks.len(), restricted.state_count());
+        let real_state_count = restricted.real_state_count;
+        let block_count = source_blocks
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |block| block as usize + 1);
+        let mut state_representative_for_block = vec![None::<usize>; block_count];
+        for state in 0..restricted.state_count() {
+            state_representative_for_block[source_blocks[state] as usize]
+                .get_or_insert(state);
+        }
+        assert!(state_representative_for_block.iter().all(Option::is_some));
+
+        let mut matches_by_raw_state = vec![Vec::<TerminalID>::new(); real_state_count];
+        for raw_state in 0..real_state_count {
+            let source_block = source_blocks[raw_state] as usize;
+            let representative_raw = state_representative_for_block[source_block]
+                .expect("every source residual block has a real lexer representative");
+            let output = restricted.output(representative_raw, None);
+            for (terminal, &active) in self.active_representatives.iter().enumerate() {
+                if active && output.contains(terminal) {
+                    matches_by_raw_state[raw_state].push(terminal as TerminalID);
+                }
+            }
+        }
+
+        for (&(representative, member), map) in &self.maps_by_representative_member {
+            for raw_state in 0..real_state_count {
+                let source_block = source_blocks[raw_state] as usize;
+                let target_block = map.target_block_for_source_block[source_block] as usize;
+                let target_raw = state_representative_for_block[target_block]
+                    .expect("every transported residual block has a real lexer representative");
+                let output = restricted.output(
+                    target_raw,
+                    Some((representative as usize, member as usize)),
+                );
+                if output.contains(member as usize) {
+                    matches_by_raw_state[raw_state].push(member);
+                }
+            }
+        }
+        for terminals in &mut matches_by_raw_state {
+            terminals.sort_unstable();
+            terminals.dedup();
+        }
+
+        Some(vec![TerminalNwaTransportMode {
+            logical_state_for_original: (0..real_state_count as u32).collect(),
+            machine: Arc::new(TerminalNwaTransportMachine::new(
+                Box::new([-1; 256]),
+                vec![Vec::new(); real_state_count],
+                matches_by_raw_state,
+            )),
+        }])
+    }
+
     pub(crate) fn terminal_nwa_transport_modes(
         &self,
         tokenizer: &Tokenizer,
@@ -976,6 +1050,60 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn combined_match_mode_equals_per_member_mode_union() {
+        let expressions = vec![
+            Expr::Seq(vec![
+                Expr::U8Seq(b"a".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())),
+                    min: 0,
+                    max: None,
+                },
+            ]),
+            Expr::Seq(vec![
+                Expr::U8Seq(b"aaa".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())),
+                    min: 0,
+                    max: None,
+                },
+            ]),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let plan = TerminalInterchangeability::build(&tokenizer, &[true, true], &[true; 256], None);
+        let per_member = plan
+            .terminal_nwa_transport_modes(&tokenizer, &[true; 256])
+            .expect("rotated terminals must produce transport modes");
+        let combined = plan
+            .combined_terminal_nwa_transport_modes(&tokenizer, &[true; 256])
+            .expect("rotated terminals must produce combined mode");
+        assert_eq!(combined.len(), 1);
+        for raw_state in 0..tokenizer.num_states() {
+            let mut expected = per_member
+                .iter()
+                .flat_map(|mode| {
+                    mode.machine
+                        .matched_terminals(mode.logical_state_for_original[raw_state as usize])
+                        .iter()
+                        .copied()
+                })
+                .collect::<Vec<_>>();
+            expected.sort_unstable();
+            expected.dedup();
+            assert_eq!(
+                combined[0]
+                    .machine
+                    .matched_terminals(combined[0].logical_state_for_original[raw_state as usize]),
+                expected.as_slice(),
+                "combined mode differed at raw lexer state {raw_state}",
+            );
         }
     }
 

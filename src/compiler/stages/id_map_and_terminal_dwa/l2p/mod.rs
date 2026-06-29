@@ -764,7 +764,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             nwa.start_states_mut().push(start_state);
 
             let transport_modes = reference_terminal_expansion
-                .then(|| terminal_interchangeability.terminal_nwa_transport_modes(tokenizer, &relevant_bytes))
+                .then(|| {
+                    terminal_interchangeability
+                        .combined_terminal_nwa_transport_modes(tokenizer, &relevant_bytes)
+                })
                 .flatten();
             if reference_terminal_expansion {
                 trace_terminal_interchangeability_reference(
