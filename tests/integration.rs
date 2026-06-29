@@ -1354,14 +1354,21 @@ fn direct_glrm_minimized_lowered_schema_collapses_when_tail_token_differs() {
 
 
 #[test]
-fn strict_terminal_interchangeability_reference_matches_baseline_l2p_artifact() {
+fn terminal_interchangeability_minimal_two_byte_counterexample_matches_baseline() {
     let _lock = TI_ENV_LOCK.lock().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
     let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
     let _disable_feature = EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
     let _disable_validation = EnvVarGuard::unset("GLRMASK_VALIDATE_L2P_TERMINAL_INTERCHANGEABILITY");
 
-    // Minimized rotated-residual fixture: one token, two terminal positions.
+    // Minimal known counterexample to literal post-DWA reconstruction.
+    //
+    // The representative-only artifact contains only A. Restoring B by making
+    // transported initial-edge copies cannot recreate the baseline continuation
+    // after A. The old literal reconstruction therefore differs internally on
+    // the terminal word [A, B] for this sole token. The active implementation
+    // must compile successfully because its internal equality gate compares the
+    // complete weighted terminal language against a no-interchange baseline.
     let entries = ["aa"];
     let grammar = r#"
         start: A B
