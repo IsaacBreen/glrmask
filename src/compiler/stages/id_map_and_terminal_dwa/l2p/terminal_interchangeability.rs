@@ -313,10 +313,13 @@ impl<'a> RestrictedDfa<'a> {
 }
 
 impl InterchangeMap {
-    /// Reindex a transported artifact by target residual blocks.  The terminal
-    /// interchange map is a relation between residual partitions, not a raw
-    /// state permutation, so a target block receives one TSID even when it
-    /// contains several raw lexer states.
+    /// Reindex a transported artifact by target residual blocks.
+    ///
+    /// `base` is the ordinary completed id map, possibly with non-singleton
+    /// state classes and with unreachable original states left unmapped. A
+    /// transported copy has one TSID per reachable target residual block. Its
+    /// weights are the push-forward of the ordinary source TSIDs through this
+    /// block correspondence.
     fn transport_id_map(&self, base: &InternalIdMap) -> (InternalIdMap, Vec<Vec<u32>>) {
         let state_count = base.tokenizer_states.original_to_internal.len();
         assert_eq!(
@@ -324,47 +327,42 @@ impl InterchangeMap {
             state_count,
             "interchange map and local ID map have different raw-state domains",
         );
-        assert!(
-            base.tokenizer_states
-                .original_to_internal
-                .iter()
-                .all(|&tsid| tsid != u32::MAX),
-            "interchangeability transport requires every raw lexer state to have a TSID",
-        );
 
         let mut target_block_ids = BTreeMap::<Vec<u32>, u32>::new();
         let mut target_state_to_internal = vec![u32::MAX; state_count];
-        let mut target_internal_for_source = vec![u32::MAX; state_count];
-        for (source, targets) in self.source_state_to_target_states.iter().enumerate() {
-            if targets.is_empty() {
-                continue;
-            }
-            let next = target_block_ids.len() as u32;
-            let target_internal = *target_block_ids.entry(targets.clone()).or_insert(next);
-            target_internal_for_source[source] = target_internal;
-            for &target in targets {
-                let slot = target_state_to_internal
-                    .get_mut(target as usize)
-                    .expect("interchange target state outside local ID-map domain");
-                assert!(
-                    *slot == u32::MAX || *slot == target_internal,
-                    "interchange map assigned one target state to distinct residual blocks",
-                );
-                *slot = target_internal;
-            }
-        }
         let mut source_to_target = vec![BTreeSet::<u32>::new(); base.num_tsids() as usize];
+
         for (source, &source_tsid) in base
             .tokenizer_states
             .original_to_internal
             .iter()
             .enumerate()
         {
-            let target_internal = target_internal_for_source[source];
-            if target_internal != u32::MAX {
-                source_to_target[source_tsid as usize].insert(target_internal);
+            // Ordinary L2P intentionally leaves lexer states with no relevant
+            // token behaviour unmapped. They carry no weight, so their target
+            // residual block stays outside this copied artifact too.
+            if source_tsid == u32::MAX {
+                continue;
+            }
+            let targets = &self.source_state_to_target_states[source];
+            if targets.is_empty() {
+                continue;
+            }
+            let next = target_block_ids.len() as u32;
+            let target_tsid = *target_block_ids.entry(targets.clone()).or_insert(next);
+            source_to_target[source_tsid as usize].insert(target_tsid);
+            for &target in targets {
+                let slot = target_state_to_internal
+                    .get_mut(target as usize)
+                    .expect("interchange target state outside local ID-map domain");
+                assert!(
+                    *slot == u32::MAX || *slot == target_tsid,
+                    "interchange map assigned one target state to distinct residual blocks",
+                );
+                *slot = target_tsid;
             }
         }
+
         let source_to_target = source_to_target
             .into_iter()
             .map(|targets| targets.into_iter().collect())
@@ -607,13 +605,6 @@ impl TerminalInterchangeability {
         self.expand_noninitial_edges(&mut representative_artifact.dwa);
         dump_dwa_if_requested("after_noninitial", &representative_artifact.dwa);
 
-        // The strict reference build deliberately uses raw lexer states as
-        // TSIDs.  In that coordinate system a transported id map is the same
-        // coordinate map; transporting every weight is the required semantic
-        // operation.  Fail rather than silently applying this slow reference
-        // construction to a quotient id map.
-        assert_raw_singleton_tsid_coordinate(&representative_artifact);
-
         let start = representative_artifact.dwa.start_state() as usize;
         let initial_transitions = representative_artifact.dwa.states()[start]
             .transitions
@@ -742,17 +733,6 @@ pub(crate) fn dump_dwa_if_requested(stage: &str, dwa: &DWA) {
             state.final_weight,
         );
     }
-}
-
-fn assert_raw_singleton_tsid_coordinate(artifact: &LocalIdMapTerminalDwa) {
-    let original_to_internal = &artifact.id_map.tokenizer_states.original_to_internal;
-    assert!(
-        original_to_internal
-            .iter()
-            .enumerate()
-            .all(|(state, &tsid)| state as u32 == tsid),
-        "slow terminal-interchangeability expansion requires raw singleton TSIDs",
-    );
 }
 
 fn transport_all_dwa_weights(dwa: &mut DWA, source_to_target_tsids: &[Vec<u32>]) {
