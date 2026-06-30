@@ -274,12 +274,19 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
         global_nwa.set_start_states(global_body.start_states);
         determinize(&global_nwa).expect("merge terminal NWA determinization failed")
     });
-    let dwa = minimize(&pre_minimize);
+    let compact_started_at = Instant::now();
+    let mut mapped_dwa = MappedArtifact::new(minimize(&pre_minimize), global_id_map);
+    mapped_dwa.compact_dimensions_fast();
+    let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
+    let (dwa, id_map) = mapped_dwa.into_parts();
 
     LocalIdMapTerminalDwa {
-        id_map: global_id_map,
+        id_map,
         dwa,
-        profile: TerminalDwaPhaseProfile::default(),
+        profile: TerminalDwaPhaseProfile {
+            compact_ms,
+            ..TerminalDwaPhaseProfile::default()
+        },
     }
 }
 

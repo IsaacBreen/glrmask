@@ -28,6 +28,7 @@ use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use crate::compiler::stages::mapped_artifact::MappedArtifact;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa;
 use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
@@ -426,8 +427,7 @@ fn project_initial_state_map_for_simplified_tokenizer(
 /// 4. Create NWA, seed root nodes
 /// 5. Trie-walk NWA build
 /// 6. Postprocess: always_allowed → collapse → disallowed → prune → canonicalize
-/// 7. Determinize → minimize, unless an enclosing local merge will perform the
-///    exact determinize/minimize pass immediately afterwards.
+/// 7. Determinize → minimize → compact.
 ///
 /// `disallowed_follows` is threaded explicitly for id_map building.
 ///
@@ -450,7 +450,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     shared_disallowed_follow_dfa_cache: Option<&SharedDisallowedFollowDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
-    defer_minimization_to_local_merge: bool,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
@@ -690,7 +689,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         nwa_states_after_prune,
         nwa_states_after_canonicalize,
         dwa_stats_before_compact,
-        dwa_stats_after_compact,
         early_none,
     ) = {
         // ---- Step 2-3: Internal vocab + prefix tree ----
@@ -719,7 +717,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 0usize,
                 0usize,
                 0usize,
-                crate::automata::weighted_u32::dwa::DWA::new(0, 0).stats(),
                 crate::automata::weighted_u32::dwa::DWA::new(0, 0).stats(),
                 true,
             )
@@ -823,8 +820,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let minimize_started_at = Instant::now();
-            let skip_minimize = defer_minimization_to_local_merge
-                || std::env::var("GLRMASK_SKIP_L2P_MINIMIZE")
+            let skip_minimize = std::env::var("GLRMASK_SKIP_L2P_MINIMIZE")
                 .map(|value| {
                     let trimmed = value.trim();
                     trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
@@ -833,7 +829,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let dwa = if skip_minimize { det } else { minimize_owned(det) };
             let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
             let dwa_stats_before_compact = dwa.stats();
-            let dwa_stats_after_compact = dwa.stats();
 
             (
                 dwa,
@@ -855,7 +850,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 nwa_states_after_prune,
                 nwa_states_after_canonicalize,
                 dwa_stats_before_compact,
-                dwa_stats_after_compact,
                 false,
             )
         }
@@ -893,9 +887,21 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 - equiv_profile.exact_reps as f64 / equiv_profile.initial_states_considered as f64)
     };
 
+    let profiling = compile_profile_enabled();
+    let mut mapped_dwa = MappedArtifact::new(dwa, composed_id_map);
+    let compact_started_at = Instant::now();
+    if profiling {
+        mapped_dwa.compact_dimensions_fast_with_stats();
+    } else {
+        mapped_dwa.compact_dimensions_fast();
+    }
+    let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
+    let dwa_stats_after_compact = mapped_dwa.artifact().stats();
+    let (dwa, id_map) = mapped_dwa.into_parts();
+
     if l2p_timing_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} internal_vocab_entries={} initial_states_considered={} max_length_skipped={} max_token_len={} token_len_gt_4={} token_len_gt_8={} token_len_gt_16={} token_len_gt_32={} token_len_gt_64={} prepare_inputs_ms={:.3} byte_class_setup_ms={:.3} token_dedup_ms={:.3} max_length_state_equiv_ms={:.3} vocab_equiv_ms={:.3} exact_state_equiv_ms={:.3} id_map_finalize_ms={:.3} max_length_reps={} exact_reps={} exact_rep_confirmation_used={} fast_sound_id_map_used={} max_length_reduction_pct={:.2} exact_reduction_pct={:.2} simplify_ms={:.3} simplify_cache_hit={} simplified_states={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
+            "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} internal_vocab_entries={} initial_states_considered={} max_length_skipped={} max_token_len={} token_len_gt_4={} token_len_gt_8={} token_len_gt_16={} token_len_gt_32={} token_len_gt_64={} prepare_inputs_ms={:.3} byte_class_setup_ms={:.3} token_dedup_ms={:.3} max_length_state_equiv_ms={:.3} vocab_equiv_ms={:.3} exact_state_equiv_ms={:.3} id_map_finalize_ms={:.3} max_length_reps={} exact_reps={} exact_rep_confirmation_used={} fast_sound_id_map_used={} max_length_reduction_pct={:.2} exact_reduction_pct={:.2} simplify_ms={:.3} simplify_cache_hit={} simplified_states={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} compact_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
             partition_label,
             vocab.entries.len(),
             num_active_terminals,
@@ -945,10 +951,11 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             postprocess_ms,
             determinize_ms,
             minimize_ms,
+            compact_ms,
             dwa_stats_before_compact.states,
-            dwa_stats_before_compact.states,
-            dwa_stats_before_compact.transitions,
-            dwa_stats_before_compact.transition_pairs,
+            dwa_stats_after_compact.states,
+            dwa_stats_after_compact.transitions,
+            dwa_stats_after_compact.transition_pairs,
             dwa_stats_before_compact.interned_ranges,
             dwa_stats_after_compact.interned_ranges,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
@@ -956,7 +963,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     }
 
     let mut output = LocalIdMapTerminalDwa {
-        id_map: composed_id_map,
+        id_map,
         dwa,
         profile: TerminalDwaPhaseProfile {
             id_map_ms: simplify_ms + id_map_ms,
@@ -967,7 +974,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 + postprocess_ms
                 + determinize_ms
                 + minimize_ms,
-            compact_ms: 0.0,
+            compact_ms,
             ..TerminalDwaPhaseProfile::default()
         },
     };
@@ -999,7 +1006,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 shared_disallowed_follow_dfa_cache,
                 flat_trans,
                 initial_state_map,
-                defer_minimization_to_local_merge,
             )
             .expect("terminal interchangeability baseline L2P build unexpectedly returned None")
         };
