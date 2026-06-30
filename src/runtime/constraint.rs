@@ -181,7 +181,6 @@ impl Constraint {
             output_mask_words,
             terminal_self_loop_bytes: Arc::new(std::sync::OnceLock::new()),
             loop_partitions: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
-            continuation_partitions: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 

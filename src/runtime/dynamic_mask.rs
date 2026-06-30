@@ -3,7 +3,7 @@
 //! This implementation intentionally does not consult the parser DWA. It walks
 //! the vocabulary byte trie while advancing the lexer and GLR parser directly.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -17,16 +17,10 @@ use crate::compiler::glr::parser::{
 use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::LeveledGSS;
 use crate::ds::u8set::U8Set;
-use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
+use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::grammar::flat::TerminalID;
 
-use super::artifact::{
-    cache_dynamic_continuation_partition,
-    lookup_dynamic_continuation_partition,
-    Constraint,
-    DynamicContinuationPartition,
-    DynamicMaskVocab,
-};
+use super::artifact::{Constraint, DynamicMaskVocab};
 use super::state::ConstraintState;
 
 type ExclusionMap = BTreeMap<u32, BTreeSet<TerminalID>>;
@@ -242,6 +236,18 @@ struct TraverseWork<'a> {
     exclusions: Exclusions,
 }
 
+/// A terminal finalizer encountered inside a compressed trie edge. The common
+/// no-finalizer path is handled directly; only these rare branches need a
+/// second parser-admission lookup for the remainder of the edge.
+struct SegmentContinuation<'a> {
+    segment: &'a [u8],
+    child: &'a VocabPrefixTreeNode,
+    position: usize,
+    tokenizer_state: u32,
+    gss: ParserStacks,
+    exclusions: Exclusions,
+}
+
 #[inline]
 fn set_mask_bit(buf: &mut [u32], token_id: u32) {
     let word = token_id as usize / 32;
@@ -256,6 +262,15 @@ fn or_mask(buf: &mut [u32], mask: &[u32]) {
     for (target, source) in buf.iter_mut().zip(mask) {
         *target |= *source;
     }
+}
+
+/// Dynamic masks execute a large number of lexer byte steps. Constraint build
+/// already materializes this dense row table for commit-time scanning; use the
+/// same table here instead of binary-searching a sparse DFA row.
+#[inline(always)]
+fn fast_tokenizer_step(constraint: &Constraint, state: u32, byte: u8) -> Option<u32> {
+    let next = constraint.tokenizer_fast_transitions[state as usize][byte as usize];
+    (next != u32::MAX).then_some(next)
 }
 
 fn update_eos_mask(state: &ConstraintState<'_>, buf: &mut [u32]) {
@@ -299,6 +314,132 @@ struct ParserAdmission {
     /// candidate terminal.  This is a much stronger edge filter than merely
     /// testing whether the lexer has *some* transition on the byte.
     candidate_first_bytes: U8Set,
+}
+
+/// The hot no-finalizer traversal keeps one parser GSS unchanged across a
+/// whole trie walk. It does not need the terminal-loop intersection or a
+/// strong GSS reference for pointer-identity validation. Store just the three
+/// fields the walker reads, directly indexed by tokenizer state.
+struct PlainLexerStateInfo {
+    /// Terminal finalizers at this lexer state, already restricted to the
+    /// parser/lexer terminal set of the source residual.
+    candidate_finalizers: Box<[TerminalID]>,
+    /// Whether some source-residual candidate terminal remains reachable.
+    can_continue: bool,
+}
+
+struct PlainAdmission {
+    candidate_terminals: BitSet,
+    any_terminal_admissible: bool,
+    candidate_first_bytes: U8Set,
+    lexer_state_info: Vec<Option<PlainLexerStateInfo>>,
+}
+
+impl PlainAdmission {
+    fn lexer_state_info(
+        &mut self,
+        constraint: &Constraint,
+        tokenizer_state: u32,
+    ) -> &PlainLexerStateInfo {
+        let index = tokenizer_state as usize;
+        if index >= self.lexer_state_info.len() {
+            self.lexer_state_info.resize_with(index + 1, || None);
+        }
+        if self.lexer_state_info[index].is_none() {
+            let candidate_finalizers = constraint
+                .tokenizer
+                .matched_terminal_bitset(tokenizer_state)
+                .iter()
+                .filter(|terminal| self.candidate_terminals.contains(*terminal))
+                .map(|terminal| terminal as TerminalID)
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
+            let can_continue = !constraint
+                .tokenizer
+                .tokens_accessible_from_state(tokenizer_state)
+                .is_disjoint(&self.candidate_terminals);
+            self.lexer_state_info[index] = Some(PlainLexerStateInfo {
+                candidate_finalizers,
+                can_continue,
+            });
+        }
+        self.lexer_state_info[index]
+            .as_ref()
+            .expect("plain lexer-state info disappeared")
+    }
+}
+
+#[derive(Default)]
+struct PlainAdmissionCache {
+    by_tokenizer_state: Vec<Option<PlainAdmission>>,
+}
+
+impl PlainAdmissionCache {
+    fn admission(
+        &mut self,
+        constraint: &Constraint,
+        tokenizer_state: u32,
+        stacks: &ParserStacks,
+    ) -> &mut PlainAdmission {
+        let index = tokenizer_state as usize;
+        if index >= self.by_tokenizer_state.len() {
+            self.by_tokenizer_state.resize_with(index + 1, || None);
+        }
+        if self.by_tokenizer_state[index].is_none() {
+            let future_terminals = constraint.tokenizer.tokens_accessible_from_state(tokenizer_state);
+            let top_states = stacks.peek_values();
+            let mut candidate_terminals = BitSet::empty(future_terminals.len());
+            for terminal in future_terminals.iter() {
+                let terminal = terminal as TerminalID;
+                if Some(terminal) == constraint.ignore_terminal
+                    || top_states
+                        .iter()
+                        .any(|&parser_state| constraint.table.advance_row_allows(parser_state, terminal))
+                {
+                    candidate_terminals.set(terminal as usize);
+                }
+            }
+
+            let any_terminal_admissible = if candidate_terminals.is_empty() {
+                false
+            } else if constraint
+                .ignore_terminal
+                .is_some_and(|terminal| candidate_terminals.contains(terminal as usize))
+            {
+                true
+            } else {
+                let parser_gss = with_empty_accumulators(stacks);
+                stack_may_advance_on_any(&constraint.table, &parser_gss, &candidate_terminals)
+            };
+
+            let mut candidate_first_bytes = U8Set::empty();
+            if !candidate_terminals.is_empty() {
+                for byte in 0..=u8::MAX {
+                    let Some(next_state) = fast_tokenizer_step(constraint, tokenizer_state, byte) else {
+                        continue;
+                    };
+                    let reaches_candidate = !candidate_terminals.is_disjoint(
+                        constraint.tokenizer.tokens_accessible_from_state(next_state),
+                    ) || !candidate_terminals.is_disjoint(
+                        constraint.tokenizer.matched_terminal_bitset(next_state),
+                    );
+                    if reaches_candidate {
+                        candidate_first_bytes.insert(byte);
+                    }
+                }
+            }
+
+            self.by_tokenizer_state[index] = Some(PlainAdmission {
+                candidate_terminals,
+                any_terminal_admissible,
+                candidate_first_bytes,
+                lexer_state_info: Vec::new(),
+            });
+        }
+        self.by_tokenizer_state[index]
+            .as_mut()
+            .expect("plain admission cache entry disappeared")
+    }
 }
 
 #[derive(Default)]
@@ -373,7 +514,7 @@ impl DynamicMaskTraversalCache {
             }
 
             for byte in 0..=u8::MAX {
-                let Some(next_state) = constraint.tokenizer.step(tokenizer_state, byte) else {
+                let Some(next_state) = fast_tokenizer_step(constraint, tokenizer_state, byte) else {
                     continue;
                 };
                 let reaches_candidate = !candidate_terminals.is_disjoint(
@@ -649,7 +790,7 @@ fn raw_continuation_loop_partition<O: DynamicMaskObserver>(
 
     let mut incoming_bytes = FxHashMap::<u32, U8Set>::default();
     for byte in admission.candidate_first_bytes.iter() {
-        if let Some(next_state) = state.constraint.tokenizer.step(tokenizer_state, byte) {
+        if let Some(next_state) = fast_tokenizer_step(state.constraint, tokenizer_state, byte) {
             incoming_bytes.entry(next_state).or_default().insert(byte);
         }
     }
@@ -684,126 +825,103 @@ fn raw_continuation_loop_partition<O: DynamicMaskObserver>(
     best
 }
 
-/// Build (or reuse) an exact token partition for the no-finalization lexer
-/// continuation. A token is safe when consuming all of its bytes reaches a
-/// lexer state from which the unchanged parser stacks can still consume some
-/// terminal. Such a token is admissible regardless of any terminal matches it
-/// may have crossed, because the dynamic semantics retain that continuation as
-/// a separate live path.
-fn direct_continuation_partition<O: DynamicMaskObserver>(
+fn consume_segment_continuations<'a, O: DynamicMaskObserver>(
+    continuations: &mut Vec<SegmentContinuation<'a>>,
+    segment_stack: &mut Vec<(usize, u32, ParserStacks)>,
     state: &ConstraintState<'_>,
     vocab: &DynamicMaskVocab,
-    tokenizer_state: u32,
-    stacks: &ParserStacks,
+    traversal: &mut Vec<TraverseWork<'a>>,
+    initial_tsid: u32,
     cache: &mut DynamicMaskTraversalCache,
     observer: &mut O,
-) -> Option<Arc<DynamicContinuationPartition>> {
-    if let Some(partition) =
-        lookup_dynamic_continuation_partition(vocab, tokenizer_state, stacks)
-    {
-        return Some(partition);
-    }
+) {
+    while let Some(continuation) = continuations.pop() {
+        segment_stack.clear();
+        segment_stack.push((
+            continuation.position,
+            continuation.tokenizer_state,
+            continuation.gss,
+        ));
 
-    let (candidate_terminals, can_enter_loop) = {
-        let admission = cache.parser_admission(
-            state.constraint,
-            vocab,
-            tokenizer_state,
-            stacks,
-            observer,
-        );
-        if admission.candidate_terminals.is_empty() || !admission.any_terminal_admissible {
-            return None;
-        }
-
-        // Building a vocabulary-wide partition is worthwhile only when this
-        // state can enter a real lexer loop. Literal-only states instead stay
-        // on the compact trie path below. This is structural, not a workload
-        // knob.
-        let can_enter_loop = admission.candidate_first_bytes.iter().any(|byte| {
-        state
-            .constraint
-            .tokenizer
-            .step(tokenizer_state, byte)
-            .is_some_and(|next_state| {
-                !state
-                    .constraint
-                    .tokenizer
-                    .self_loop_bytes(next_state)
-                    .is_empty()
-            })
-        });
-        (admission.candidate_terminals.clone(), can_enter_loop)
-    };
-    if !can_enter_loop {
-        return None;
-    }
-
-    let mut safe_mask = vec![0u32; vocab.output_mask_words];
-    // `canonical_tokens` are already lexicographically sorted and bytewise
-    // deduplicated by `build_dynamic_mask_vocab`, so the exception subset is
-    // too. Keep borrowed byte slices and use the presorted trie builder below.
-    let mut exception_entries = Vec::<(usize, &[u8])>::new();
-    let mut safe_canonical_tokens = 0usize;
-    let mut endpoint_allowed = FxHashMap::<u32, bool>::default();
-
-    for (index, &(canonical_token_id, ref bytes)) in vocab.canonical_tokens.iter().enumerate() {
-        let mut end_state = tokenizer_state;
-        let mut reaches_end = true;
-        let mut saw_candidate_match = false;
-        for &byte in bytes.iter() {
-            let Some(next_state) = state.constraint.tokenizer.step(end_state, byte) else {
-                reaches_end = false;
-                break;
-            };
-            end_state = next_state;
-            saw_candidate_match |= !state
-                .constraint
-                .tokenizer
-                .matched_terminal_bitset(end_state)
-                .is_disjoint(&candidate_terminals);
-        }
-
-        let safe = if !reaches_end {
-            false
-        } else if let Some(&allowed) = endpoint_allowed.get(&end_state) {
-            allowed
-        } else {
-            let allowed = token_boundary_allowed(
+        while let Some((position, tokenizer_state, gss)) = segment_stack.pop() {
+            observer.lexer_execution();
+            let admission = cache.parser_admission(
                 state.constraint,
                 vocab,
-                end_state,
-                stacks,
-                cache,
+                tokenizer_state,
+                &gss,
                 observer,
             );
-            endpoint_allowed.insert(end_state, allowed);
-            allowed
-        };
-
-        if safe {
-            safe_canonical_tokens += 1;
-            let token_ids = &vocab.canonical_aliases[index];
-            for &token_id in token_ids.iter() {
-                let word = token_id as usize / 32;
-                debug_assert!(word < safe_mask.len());
-                safe_mask[word] |= 1u32 << (token_id % 32);
+            if admission.candidate_terminals.is_empty() || !admission.any_terminal_admissible {
+                continue;
             }
-        } else if saw_candidate_match {
-            exception_entries.push((canonical_token_id as usize, bytes.as_ref()));
+
+            let candidates = &admission.candidate_terminals;
+            let mut end_state = tokenizer_state;
+            let mut reached_edge_end = true;
+            for (offset, &byte) in continuation.segment[position..].iter().enumerate() {
+                let Some(next_state) = fast_tokenizer_step(state.constraint, end_state, byte) else {
+                    reached_edge_end = false;
+                    break;
+                };
+                end_state = next_state;
+                let next_position = position + offset + 1;
+
+                let finalizers = state.constraint.tokenizer.matched_terminal_bitset(end_state);
+                if !finalizers.is_disjoint(candidates) {
+                    for terminal in finalizers.iter() {
+                        let terminal = terminal as TerminalID;
+                        if !candidates.contains(terminal as usize) {
+                            continue;
+                        }
+                        observer.terminal_match();
+                        let Some(advanced_parser) =
+                            parser_child(state.constraint, &gss, terminal, observer)
+                        else {
+                            continue;
+                        };
+
+                        if next_position == continuation.segment.len() {
+                            let exclusions = with_excluded_terminal(
+                                &continuation.exclusions,
+                                end_state,
+                                terminal,
+                            );
+                            traversal.push(TraverseWork {
+                                node: continuation.child,
+                                tokenizer_state: initial_tsid,
+                                gss: advanced_parser,
+                                exclusions,
+                            });
+                            observer.traversal_push();
+                        } else {
+                            segment_stack.push((next_position, initial_tsid, advanced_parser));
+                        }
+                    }
+                }
+
+                if state
+                    .constraint
+                    .tokenizer
+                    .tokens_accessible_from_state(end_state)
+                    .is_disjoint(candidates)
+                {
+                    reached_edge_end = false;
+                    break;
+                }
+            }
+
+            if reached_edge_end {
+                traversal.push(TraverseWork {
+                    node: continuation.child,
+                    tokenizer_state: end_state,
+                    gss,
+                    exclusions: continuation.exclusions.clone(),
+                });
+                observer.traversal_push();
+            }
         }
     }
-
-    let exception_canonical_tokens = exception_entries.len();
-    let partition = Arc::new(DynamicContinuationPartition {
-        tokenizer_state,
-        stacks: stacks.clone(),
-        safe_mask: Arc::from(safe_mask.into_boxed_slice()),
-        exception_trie: Arc::new(VocabPrefixTree::build_presorted(&exception_entries)),
-        safe_canonical_tokens,
-        exception_canonical_tokens,
-    });
-    Some(cache_dynamic_continuation_partition(vocab, partition))
 }
 
 fn walk_dynamic_from_seed<'a, O: DynamicMaskObserver>(
@@ -815,23 +933,136 @@ fn walk_dynamic_from_seed<'a, O: DynamicMaskObserver>(
     cache: &mut DynamicMaskTraversalCache,
     observer: &mut O,
 ) {
+    // Full parser/exclusion contexts are only necessary after a terminal
+    // finalizer or while exclusions are live. The ordinary no-finalizer path
+    // borrows one unchanged parser context and carries only `(trie node, lexer
+    // state)`, avoiding an Arc/GSS clone and empty exclusion clone for every
+    // vocabulary edge.
+    let mut plain_stack = Vec::<(&'a VocabPrefixTreeNode, u32)>::new();
+    let mut segment_stack = Vec::<(usize, u32, ParserStacks)>::new();
+    let mut continuations = Vec::<SegmentContinuation<'a>>::new();
+
     while let Some(current) = traversal.pop() {
-        observer.work_item();
-        let subtree_action = terminal_loop_subtree(
-            state.constraint,
-            vocab,
-            current.node,
-            current.tokenizer_state,
-            &current.gss,
-            &current.exclusions,
-            cache,
-            observer,
-        );
-        if matches!(subtree_action, TerminalLoopSubtree::MarkAllTokens) {
-            mark_reachable_tokens(vocab, current.node, buf, observer);
+        if current.exclusions.is_empty() {
+            plain_stack.clear();
+            continuations.clear();
+            let mut plain_admissions = PlainAdmissionCache::default();
+            plain_stack.push((current.node, current.tokenizer_state));
+
+            while let Some((node, tokenizer_state)) = plain_stack.pop() {
+                observer.work_item();
+                let admission = plain_admissions.admission(
+                    state.constraint,
+                    tokenizer_state,
+                    &current.gss,
+                );
+
+                if node.has_token()
+                    && (tokenizer_state == initial_tsid
+                        || admission.any_terminal_admissible)
+                {
+                    let canonical_token_id = node.token_id() as u32;
+                    let token_ids = vocab
+                        .token_ids
+                        .get(&canonical_token_id)
+                        .expect("dynamic vocabulary trie node lacks token ids");
+                    for &token_id in token_ids.iter() {
+                        set_mask_bit(buf, token_id);
+                    }
+                }
+
+                if admission.candidate_terminals.is_empty() || !admission.any_terminal_admissible {
+                    continue;
+                }
+                let candidate_first_bytes = admission.candidate_first_bytes;
+
+                for (segment, child) in node.iter_children() {
+                    observer.trie_edge();
+                    debug_assert!(!segment.is_empty());
+                    if !candidate_first_bytes.contains(segment[0]) {
+                        observer.lexer_first_byte_reject();
+                        observer.parser_candidate_first_byte_reject();
+                        continue;
+                    }
+
+                    // There are no exclusions on this path, so do not clone an
+                    // empty map or invoke the generic exclusion machinery.
+                    observer.lexer_execution();
+                    let mut end_state = tokenizer_state;
+                    let mut reached_edge_end = true;
+                    for (offset, &byte) in segment.iter().enumerate() {
+                        let Some(next_state) = fast_tokenizer_step(state.constraint, end_state, byte) else {
+                            reached_edge_end = false;
+                            break;
+                        };
+                        end_state = next_state;
+                        let next_position = offset + 1;
+
+                        let lexer_info = admission.lexer_state_info(state.constraint, end_state);
+                        for &terminal in lexer_info.candidate_finalizers.iter() {
+                            observer.terminal_match();
+                            let Some(advanced_parser) =
+                                parser_child(state.constraint, &current.gss, terminal, observer)
+                            else {
+                                continue;
+                            };
+
+                            if next_position == segment.len() {
+                                let exclusions = with_excluded_terminal(
+                                    &current.exclusions,
+                                    end_state,
+                                    terminal,
+                                );
+                                traversal.push(TraverseWork {
+                                    node: child,
+                                    tokenizer_state: initial_tsid,
+                                    gss: advanced_parser,
+                                    exclusions,
+                                });
+                                observer.traversal_push();
+                            } else {
+                                continuations.push(SegmentContinuation {
+                                    segment,
+                                    child,
+                                    position: next_position,
+                                    tokenizer_state: initial_tsid,
+                                    gss: advanced_parser,
+                                    exclusions: current.exclusions.clone(),
+                                });
+                            }
+                        }
+
+                        if !lexer_info.can_continue {
+                            reached_edge_end = false;
+                            break;
+                        }
+                    }
+
+                    if reached_edge_end {
+                        plain_stack.push((child, end_state));
+                        observer.traversal_push();
+                    }
+                }
+            }
+
+            consume_segment_continuations(
+                &mut continuations,
+                &mut segment_stack,
+                state,
+                vocab,
+                traversal,
+                initial_tsid,
+                cache,
+                observer,
+            );
             continue;
         }
 
+        // Exclusion-carrying paths are much rarer and need their exact
+        // per-edge exclusion-state evolution. Keep the general representation
+        // here; its no-finalizer descendants may later collapse back into the
+        // plain path when all exclusions die.
+        observer.work_item();
         if current.node.has_token()
             && (current.tokenizer_state == initial_tsid
                 || token_boundary_allowed(
@@ -853,14 +1084,8 @@ fn walk_dynamic_from_seed<'a, O: DynamicMaskObserver>(
             }
         }
 
-        if matches!(subtree_action, TerminalLoopSubtree::MarkCurrentNodeOnly) {
-            continue;
-        }
-
-        for (segment, child) in current.node.iter_children() {
-            observer.trie_edge();
-
-            debug_assert!(!segment.is_empty());
+        continuations.clear();
+        {
             let admission = cache.parser_admission(
                 state.constraint,
                 vocab,
@@ -868,68 +1093,37 @@ fn walk_dynamic_from_seed<'a, O: DynamicMaskObserver>(
                 &current.gss,
                 observer,
             );
-            if !admission.candidate_first_bytes.contains(segment[0]) {
-                observer.lexer_first_byte_reject();
-                observer.parser_candidate_first_byte_reject();
+            if admission.candidate_terminals.is_empty() || !admission.any_terminal_admissible {
                 continue;
             }
+            let candidates = &admission.candidate_terminals;
+            let candidate_first_bytes = admission.candidate_first_bytes;
 
-            if current.exclusions.is_empty() {
-                let child_bytes =
-                    U8Set::from_bytes(segment) | U8Set::from_words(*child.subtree_bytes());
-                if matches!(
-                    terminal_loop_bytes(
-                        state.constraint,
-                        vocab,
-                        child_bytes,
-                        current.tokenizer_state,
-                        &current.gss,
-                        &current.exclusions,
-                        cache,
-                        observer,
-                    ),
-                    TerminalLoopSubtree::MarkAllTokens,
-                ) {
-                    observer.terminal_loop_child_mark_all();
-                    mark_reachable_tokens(vocab, child, buf, observer);
+            for (segment, child) in current.node.iter_children() {
+                observer.trie_edge();
+                debug_assert!(!segment.is_empty());
+                if !candidate_first_bytes.contains(segment[0]) {
+                    observer.lexer_first_byte_reject();
+                    observer.parser_candidate_first_byte_reject();
                     continue;
                 }
-            }
 
-            let Some(segment_exclusions) =
-                advance_exclusions(state.constraint, segment, &current.exclusions, observer)
-            else {
-                continue;
-            };
+                let Some(segment_exclusions) =
+                    advance_exclusions(state.constraint, segment, &current.exclusions, observer)
+                else {
+                    continue;
+                };
 
-            let mut segment_queue = VecDeque::new();
-            segment_queue.push_back((0usize, current.tokenizer_state, current.gss.clone()));
-
-            while let Some((position, tokenizer_state, gss)) = segment_queue.pop_front() {
                 observer.lexer_execution();
-                let admission = cache.parser_admission(
-                    state.constraint,
-                    vocab,
-                    tokenizer_state,
-                    &gss,
-                    observer,
-                );
-                if admission.candidate_terminals.is_empty()
-                    || !admission.any_terminal_admissible
-                {
-                    continue;
-                }
-
-                let candidates = &admission.candidate_terminals;
-                let mut end_state = tokenizer_state;
+                let mut end_state = current.tokenizer_state;
                 let mut reached_edge_end = true;
-                for (offset, &byte) in segment[position..].iter().enumerate() {
-                    let Some(next_state) = state.constraint.tokenizer.step(end_state, byte) else {
+                for (offset, &byte) in segment.iter().enumerate() {
+                    let Some(next_state) = fast_tokenizer_step(state.constraint, end_state, byte) else {
                         reached_edge_end = false;
                         break;
                     };
                     end_state = next_state;
-                    let next_position = position + offset + 1;
+                    let next_position = offset + 1;
 
                     let finalizers = state.constraint.tokenizer.matched_terminal_bitset(end_state);
                     if !finalizers.is_disjoint(candidates) {
@@ -940,7 +1134,7 @@ fn walk_dynamic_from_seed<'a, O: DynamicMaskObserver>(
                             }
                             observer.terminal_match();
                             let Some(advanced_parser) =
-                                parser_child(state.constraint, &gss, terminal, observer)
+                                parser_child(state.constraint, &current.gss, terminal, observer)
                             else {
                                 continue;
                             };
@@ -959,11 +1153,14 @@ fn walk_dynamic_from_seed<'a, O: DynamicMaskObserver>(
                                 });
                                 observer.traversal_push();
                             } else {
-                                segment_queue.push_back((
-                                    next_position,
-                                    initial_tsid,
-                                    advanced_parser,
-                                ));
+                                continuations.push(SegmentContinuation {
+                                    segment,
+                                    child,
+                                    position: next_position,
+                                    tokenizer_state: initial_tsid,
+                                    gss: advanced_parser,
+                                    exclusions: segment_exclusions.clone(),
+                                });
                             }
                         }
                     }
@@ -980,34 +1177,27 @@ fn walk_dynamic_from_seed<'a, O: DynamicMaskObserver>(
                 }
 
                 if reached_edge_end {
-                    match terminal_loop_subtree(
-                        state.constraint,
-                        vocab,
-                        child,
-                        end_state,
-                        &gss,
-                        &segment_exclusions,
-                        cache,
-                        observer,
-                    ) {
-                        TerminalLoopSubtree::MarkAllTokens => {
-                            observer.terminal_loop_post_edge_mark_all();
-                            mark_reachable_tokens(vocab, child, buf, observer);
-                        }
-                        TerminalLoopSubtree::CannotSkip
-                        | TerminalLoopSubtree::MarkCurrentNodeOnly => {
-                            traversal.push(TraverseWork {
-                                node: child,
-                                tokenizer_state: end_state,
-                                gss,
-                                exclusions: segment_exclusions.clone(),
-                            });
-                            observer.traversal_push();
-                        }
-                    }
+                    traversal.push(TraverseWork {
+                        node: child,
+                        tokenizer_state: end_state,
+                        gss: current.gss.clone(),
+                        exclusions: segment_exclusions,
+                    });
+                    observer.traversal_push();
                 }
             }
         }
+
+        consume_segment_continuations(
+            &mut continuations,
+            &mut segment_stack,
+            state,
+            vocab,
+            traversal,
+            initial_tsid,
+            cache,
+            observer,
+        );
     }
 }
 
@@ -1020,20 +1210,7 @@ fn fill_mask_dynamic_inner<O: DynamicMaskObserver>(
 
     buf.fill(0);
     let initial_tsid = state.constraint.tokenizer.initial_state();
-    let mut traversal = Vec::<TraverseWork<'_>>::new();
     let mut cache = DynamicMaskTraversalCache::default();
-
-    for (&tokenizer_state, gss) in &state.state {
-        for (stacks, exclusions) in gss.partition_by_accumulator() {
-            traversal.push(TraverseWork {
-                node: &vocab.trie.root,
-                tokenizer_state,
-                gss: stacks,
-                exclusions: exclusions.0,
-            });
-            observer.traversal_push();
-        }
-    }
 
     for (&tokenizer_state, gss) in &state.state {
         for (stacks, exclusions) in gss.partition_by_accumulator() {
@@ -1068,41 +1245,6 @@ fn fill_mask_dynamic_inner<O: DynamicMaskObserver>(
                     continue;
                 }
 
-                if let Some(partition) = direct_continuation_partition(
-                    state,
-                    vocab,
-                    tokenizer_state,
-                    &stacks,
-                    &mut cache,
-                    observer,
-                ) {
-                    let represented_tokens = partition.safe_canonical_tokens
-                        + partition.exception_canonical_tokens;
-                    if represented_tokens < vocab.canonical_tokens.len()
-                        || partition.safe_canonical_tokens > partition.exception_canonical_tokens
-                    {
-                        or_mask(buf, &partition.safe_mask);
-                        if partition.exception_canonical_tokens != 0 {
-                            let mut traversal = vec![TraverseWork {
-                                node: &partition.exception_trie.root,
-                                tokenizer_state,
-                                gss: stacks,
-                                exclusions: exclusions.0,
-                            }];
-                            observer.traversal_push();
-                            walk_dynamic_from_seed(
-                                state,
-                                vocab,
-                                &mut traversal,
-                                initial_tsid,
-                                buf,
-                                &mut cache,
-                                observer,
-                            );
-                        }
-                        continue;
-                    }
-                }
             }
 
             let loop_bytes = if exclusions.0.is_empty() {
