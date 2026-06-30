@@ -7,13 +7,12 @@
 //! their residual-state partitions.
 //!
 //! This is intentionally a validation-first construction: hide
-//! nonrepresentatives before id-map/DWA construction, restore noninitial labels,
-//! make one transported copy per relevant initial replacement, and use the
-//! existing local DWA/id-map merger. The simple restoration is used only when
-//! the transport fixes the lexer reset residual class. Directed subsumption is
-//! deliberately excluded.
+//! nonrepresentatives before id-map/DWA construction; expand surviving
+//! noninitial representative edges in place; make one transported whole-DWA
+//! copy per initial replacement; then use the existing local DWA/id-map merger.
+//! Directed subsumption is deliberately excluded.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
@@ -21,8 +20,9 @@ use super::nwa_builder::TerminalNwaTransportMode;
 use crate::automata::weighted_u32::dwa::DWA;
 use crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_local_id_maps_and_terminal_dwas;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa;
+use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::bitset::BitSet;
-use crate::ds::weight::{shared_rangeset, Weight};
+use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 
 const NO_STATE: u32 = u32::MAX;
@@ -50,8 +50,9 @@ impl OutputBits {
 }
 
 /// Concrete representation of a bijection between residual-state partitions.
-/// A source lexer state maps to every concrete state in its target partition;
-/// the relation is bijective at the partition level.
+/// A source lexer state maps to every concrete state in its target partition.
+/// The target set may be empty if the residual maps only to the synthetic
+/// restricted-DFA sink; weight transport then drops that coordinate.
 #[derive(Clone, Debug)]
 struct InterchangeMap {
     source_state_to_target_states: Vec<Vec<u32>>,
@@ -260,7 +261,7 @@ impl<'a> RestrictedDfa<'a> {
 
         for source in 0..self.real_state_count {
             let mut target_block = None;
-            for target in 0..self.real_state_count {
+            for target in 0..state_count {
                 if combined_blocks[state_count + target] != combined_blocks[source] {
                     continue;
                 }
@@ -305,12 +306,80 @@ impl<'a> RestrictedDfa<'a> {
                 target_states_by_block[target].clone()
             })
             .collect::<Vec<_>>();
-        if source_state_to_target_states.iter().any(Vec::is_empty) {
-            return None;
-        }
         Some(InterchangeMap {
             source_state_to_target_states,
         })
+    }
+}
+
+impl InterchangeMap {
+    /// Reindex a transported artifact by target residual blocks.  The terminal
+    /// interchange map is a relation between residual partitions, not a raw
+    /// state permutation, so a target block receives one TSID even when it
+    /// contains several raw lexer states.
+    fn transport_id_map(&self, base: &InternalIdMap) -> (InternalIdMap, Vec<Vec<u32>>) {
+        let state_count = base.tokenizer_states.original_to_internal.len();
+        assert_eq!(
+            self.source_state_to_target_states.len(),
+            state_count,
+            "interchange map and local ID map have different raw-state domains",
+        );
+        assert!(
+            base.tokenizer_states
+                .original_to_internal
+                .iter()
+                .all(|&tsid| tsid != u32::MAX),
+            "interchangeability transport requires every raw lexer state to have a TSID",
+        );
+
+        let mut target_block_ids = BTreeMap::<Vec<u32>, u32>::new();
+        let mut target_state_to_internal = vec![u32::MAX; state_count];
+        let mut target_internal_for_source = vec![u32::MAX; state_count];
+        for (source, targets) in self.source_state_to_target_states.iter().enumerate() {
+            if targets.is_empty() {
+                continue;
+            }
+            let next = target_block_ids.len() as u32;
+            let target_internal = *target_block_ids.entry(targets.clone()).or_insert(next);
+            target_internal_for_source[source] = target_internal;
+            for &target in targets {
+                let slot = target_state_to_internal
+                    .get_mut(target as usize)
+                    .expect("interchange target state outside local ID-map domain");
+                assert!(
+                    *slot == u32::MAX || *slot == target_internal,
+                    "interchange map assigned one target state to distinct residual blocks",
+                );
+                *slot = target_internal;
+            }
+        }
+        let mut source_to_target = vec![BTreeSet::<u32>::new(); base.num_tsids() as usize];
+        for (source, &source_tsid) in base
+            .tokenizer_states
+            .original_to_internal
+            .iter()
+            .enumerate()
+        {
+            let target_internal = target_internal_for_source[source];
+            if target_internal != u32::MAX {
+                source_to_target[source_tsid as usize].insert(target_internal);
+            }
+        }
+        let source_to_target = source_to_target
+            .into_iter()
+            .map(|targets| targets.into_iter().collect())
+            .collect();
+
+        (
+            InternalIdMap {
+                tokenizer_states: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                    target_state_to_internal,
+                    target_block_ids.len() as u32,
+                ),
+                vocab_tokens: base.vocab_tokens.clone(),
+            },
+            source_to_target,
+        )
     }
 }
 
@@ -364,17 +433,6 @@ impl TerminalInterchangeability {
         for (index, &left) in candidates.iter().enumerate() {
             for &right in &candidates[index + 1..] {
                 if let Some(left_to_right) = restricted.interchange_map(left, right) {
-                    // The current slow DWA-copy construction operates in raw
-                    // TSID coordinates. Until the quotient-to-relation weight
-                    // expansion has its own proof and tests, require a concrete
-                    // bijective lift rather than treating a residual-block
-                    // relation as a raw-state transport.
-                    if restricted
-                        .concrete_swap_automorphism(&left_to_right, left, right)
-                        .is_none()
-                    {
-                        continue;
-                    }
                     assert!(
                         restricted.interchange_map(right, left).is_some(),
                         "terminal interchange map was not symmetric: {left} <-> {right}",
@@ -547,6 +605,7 @@ impl TerminalInterchangeability {
 
         let mut representative_artifact = artifact;
         self.expand_noninitial_edges(&mut representative_artifact.dwa);
+        dump_dwa_if_requested("after_noninitial", &representative_artifact.dwa);
 
         // The strict reference build deliberately uses raw lexer states as
         // TSIDs.  In that coordinate system a transported id map is the same
@@ -577,6 +636,8 @@ impl TerminalInterchangeability {
                     .get(&(representative, replacement))
                     .expect("interchangeability member missing transport map");
                 let mut copy = representative_artifact.clone();
+                let (id_map, source_to_target_tsids) = map.transport_id_map(&copy.id_map);
+                copy.id_map = id_map;
                 let initial = &mut copy.dwa.states_mut()[start].transitions;
                 let removed = initial.remove(&(representative as i32));
                 assert_eq!(
@@ -585,12 +646,18 @@ impl TerminalInterchangeability {
                     "representative initial transition changed before interchange expansion",
                 );
                 initial.insert(replacement as i32, (*destination, weight.clone()));
-                transport_all_dwa_weights(&mut copy.dwa, &map.source_state_to_target_states);
+                transport_all_dwa_weights(&mut copy.dwa, &source_to_target_tsids);
                 copies.push(copy);
             }
         }
 
-        merge_local_id_maps_and_terminal_dwas(copies, num_tokenizer_states as usize, max_token_id)
+        let merged = merge_local_id_maps_and_terminal_dwas(
+            copies,
+            num_tokenizer_states as usize,
+            max_token_id,
+        );
+        dump_dwa_if_requested("after_initial_merge", &merged.dwa);
+        merged
     }
 
     fn expand_noninitial_edges(&self, dwa: &mut DWA) {
@@ -659,6 +726,24 @@ impl TerminalInterchangeability {
 
 }
 
+pub(crate) fn dump_dwa_if_requested(stage: &str, dwa: &DWA) {
+    if std::env::var_os("GLRMASK_DUMP_TI_EXPANSION").is_none() {
+        return;
+    }
+    eprintln!("[terminal-interchangeability][{stage}] start={}", dwa.start_state());
+    for (state_id, state) in dwa.states().iter().enumerate() {
+        let transitions = state
+            .transitions
+            .iter()
+            .map(|(&label, (target, weight))| format!("{label}->{target}:{weight:?}"))
+            .collect::<Vec<_>>();
+        eprintln!(
+            "[terminal-interchangeability][{stage}] state={state_id} final={:?} transitions={transitions:?}",
+            state.final_weight,
+        );
+    }
+}
+
 fn assert_raw_singleton_tsid_coordinate(artifact: &LocalIdMapTerminalDwa) {
     let original_to_internal = &artifact.id_map.tokenizer_states.original_to_internal;
     assert!(
@@ -670,22 +755,26 @@ fn assert_raw_singleton_tsid_coordinate(artifact: &LocalIdMapTerminalDwa) {
     );
 }
 
-fn transport_all_dwa_weights(dwa: &mut DWA, state_transport: &[Vec<u32>]) {
-    let mut cache = BTreeMap::<usize, Weight>::new();
+fn transport_all_dwa_weights(dwa: &mut DWA, source_to_target_tsids: &[Vec<u32>]) {
+    let mut cache = HashMap::<usize, Weight>::new();
     for state in dwa.states_mut() {
         if let Some(final_weight) = &mut state.final_weight {
-            *final_weight = transport_weight(final_weight, state_transport, &mut cache);
+            *final_weight = transport_weight(final_weight, source_to_target_tsids, &mut cache);
+            if final_weight.is_empty() {
+                state.final_weight = None;
+            }
         }
         for (_, weight) in state.transitions.values_mut() {
-            *weight = transport_weight(weight, state_transport, &mut cache);
+            *weight = transport_weight(weight, source_to_target_tsids, &mut cache);
         }
+        state.transitions.retain(|_, (_, weight)| !weight.is_empty());
     }
 }
 
 fn transport_weight(
     weight: &Weight,
-    state_transport: &[Vec<u32>],
-    cache: &mut BTreeMap<usize, Weight>,
+    source_to_target_tsids: &[Vec<u32>],
+    cache: &mut HashMap<usize, Weight>,
 ) -> Weight {
     if weight.is_empty() || weight.is_full() {
         return weight.clone();
@@ -695,17 +784,21 @@ fn transport_weight(
     }
 
     let mut entries = Vec::new();
-    for (source_tsid, targets) in state_transport.iter().enumerate() {
-        let tokens = weight.tokens_for_tsid(source_tsid as u32);
-        if tokens.is_empty() {
-            continue;
-        }
-        let tokens = shared_rangeset(tokens);
-        for &target_tsid in targets {
-            entries.push((target_tsid, tokens.clone()));
+    for (start, end, tokens) in weight
+        .compact_entries()
+        .expect("non-full weights have compact entries")
+    {
+        for source_tsid in start..=end {
+            let targets = source_to_target_tsids
+                .get(source_tsid as usize)
+                .expect("weight refers to source TSID outside transport domain");
+            for &target_tsid in targets {
+                entries.push((target_tsid, tokens.clone()));
+            }
         }
     }
-    let transported = Weight::from_per_tsid_shared(entries);
+    entries.sort_by_key(|(target_tsid, _)| *target_tsid);
+    let transported = Weight::union_sorted_point_entries(entries);
     cache.insert(weight.ptr_key(), transported.clone());
     transported
 }
@@ -740,8 +833,13 @@ impl DisjointSet {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
+
+    use range_set_blaze::RangeSetBlaze;
+
     use super::*;
+    use crate::ds::weight::shared_rangeset;
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::compile::build_regex;
 
@@ -776,6 +874,71 @@ mod tests {
         let duplicated_target = map.source_state_to_target_states[0][0];
         map.source_state_to_target_states[0].push(duplicated_target);
         assert!(dfa.concrete_swap_automorphism(&map, 0, 1).is_none());
+    }
+
+    #[test]
+    fn relation_weight_transport_unions_many_to_one_contributions() {
+        let weight = Weight::from_per_tsid_shared([
+            (
+                0,
+                shared_rangeset(RangeSetBlaze::from_iter([10u32..=10u32])),
+            ),
+            (
+                1,
+                shared_rangeset(RangeSetBlaze::from_iter([20u32..=20u32])),
+            ),
+        ]);
+        let mut cache = HashMap::new();
+        let transported = transport_weight(&weight, &[vec![7], vec![7]], &mut cache);
+        let tokens = transported.tokens_for_tsid(7);
+        assert!(tokens.contains(10));
+        assert!(tokens.contains(20));
+        assert_eq!(tokens.len(), 2);
+    }
+
+    fn two_by_two_partition_plan() -> TerminalInterchangeability {
+        TerminalInterchangeability {
+            original_active: vec![true; 4],
+            active_representatives: vec![true, false, true, false],
+            representative_for: vec![0, 0, 2, 2],
+            members_by_representative: vec![vec![0, 1], vec![1], vec![2, 3], vec![3]],
+            maps_by_representative_member: BTreeMap::new(),
+        }
+    }
+
+    fn disallowed_relation(pairs: &[(usize, usize)]) -> BTreeMap<u32, BitSet> {
+        let mut relation = BTreeMap::new();
+        for &(left, right) in pairs {
+            relation
+                .entry(left as u32)
+                .or_insert_with(|| BitSet::new(4))
+                .set(right);
+        }
+        relation
+    }
+
+    #[test]
+    fn coarse_follow_relations_require_every_concrete_member_pair() {
+        let plan = two_by_two_partition_plan();
+
+        let mut always_allowed = vec![Vec::new(); 4];
+        for left in [0usize, 1] {
+            always_allowed[left].extend([2, 3]);
+        }
+        assert!(plan.coalesced_always_allowed_follows(&always_allowed)[0].contains(&2));
+        always_allowed[1].retain(|&terminal| terminal != 3);
+        assert!(!plan.coalesced_always_allowed_follows(&always_allowed)[0].contains(&2));
+
+        let complete_disallowed = disallowed_relation(&[(0, 2), (0, 3), (1, 2), (1, 3)]);
+        assert!(plan
+            .coalesced_disallowed_follows(&complete_disallowed)
+            .get(&0)
+            .is_some_and(|set| set.contains(2)));
+        let incomplete_disallowed = disallowed_relation(&[(0, 2), (0, 3), (1, 2)]);
+        assert!(!plan
+            .coalesced_disallowed_follows(&incomplete_disallowed)
+            .get(&0)
+            .is_some_and(|set| set.contains(2)));
     }
 
     #[test]
