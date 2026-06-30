@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use crate::ds::bitset::BitSet;
 use rayon::prelude::*;
+use rustc_hash::FxHasher;
+use std::hash::{Hash, Hasher};
 
 const DISABLE_UNIT_REDUCTION_INLINING_ENV: &str = "GLRMASK_DISABLE_UNIT_REDUCTION_INLINING";
 const GLR_TABLE_CONSTRUCTION_ENV: &str = "GLRMASK_GLR_TABLE_CONSTRUCTION";
@@ -865,7 +867,20 @@ fn compute_transfer_items(
     Some(transferred)
 }
 
-type LR1Successor = (Symbol, bool, bool, Arc<LR1ItemSet>);
+type LR1Successor = (Symbol, bool, bool, Arc<LR1ItemSet>, u64);
+
+/// Structural fingerprint of an LR(1) item set. Equal item sets always hash to
+/// the same value; the interner resolves the (rare) collisions with a full
+/// equality check, so this only needs to be a good hash, not perfect.
+fn lr1_item_set_fingerprint(set: &LR1ItemSet) -> u64 {
+    let mut hasher = FxHasher::default();
+    set.len().hash(&mut hasher);
+    for (core, lookaheads) in set {
+        core.hash(&mut hasher);
+        lookaheads.hash(&mut hasher);
+    }
+    hasher.finish()
+}
 
 fn expand_lr1_state(
     source_items: &LR1ItemSet,
@@ -926,7 +941,12 @@ fn expand_lr1_state(
                 kernel
             };
             let target_items = Arc::new(lr1_closure(&adjusted_kernel, grammar, first));
-            (!target_items.is_empty()).then_some((symbol, is_replace, false, target_items))
+            if target_items.is_empty() {
+                None
+            } else {
+                let fingerprint = lr1_item_set_fingerprint(&target_items);
+                Some((symbol, is_replace, false, target_items, fingerprint))
+            }
         })
         .collect()
 }
@@ -949,15 +969,28 @@ fn build_lr1_item_sets(
 
     let mut item_sets = vec![initial.clone()];
     let mut transitions: Vec<BTreeMap<Symbol, (u32, bool, bool)>> = vec![BTreeMap::new()];
-    let mut set_to_id: FxHashMap<Arc<LR1ItemSet>, u32> = FxHashMap::default();
-    set_to_id.insert(initial.clone(), 0);
+    // Intern item sets by structural fingerprint. The fingerprint is computed
+    // in the parallel expansion phase, so the serial interning loop below only
+    // performs cheap `u64` hashing plus a full equality check on the rare
+    // fingerprint collision. Canonical state numbering is unchanged because the
+    // serial loop still visits successors in the old source/symbol order.
+    let mut fingerprint_to_ids: FxHashMap<u64, Vec<u32>> = FxHashMap::default();
+    fingerprint_to_ids
+        .entry(lr1_item_set_fingerprint(&initial))
+        .or_default()
+        .push(0);
     drop(initial);
 
     let mut frontier = vec![0u32];
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let mut expand_ms = 0.0f64;
+    let mut intern_ms = 0.0f64;
     while !frontier.is_empty() {
         // State expansion is independent within a BFS frontier. Interning
         // remains serial below in the old source/symbol order, preserving
         // canonical state numbering and artifact layout.
+        let expand_started_at = profile_enabled.then(std::time::Instant::now);
         let expanded = frontier
             .par_iter()
             .map(|&state_id| {
@@ -965,15 +998,24 @@ fn build_lr1_item_sets(
                 (state_id, successors)
             })
             .collect::<Vec<_>>();
+        if let Some(started_at) = expand_started_at {
+            expand_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
 
+        let intern_started_at = profile_enabled.then(std::time::Instant::now);
         let mut next_frontier = Vec::new();
         for (state_id, successors) in expanded {
-            for (symbol, is_replace, is_forwarded, target_items) in successors {
-                let target_id = if let Some(&existing_id) = set_to_id.get(&target_items) {
+            for (symbol, is_replace, is_forwarded, target_items, fingerprint) in successors {
+                let candidates = fingerprint_to_ids.entry(fingerprint).or_default();
+                let existing = candidates
+                    .iter()
+                    .copied()
+                    .find(|&cand| *item_sets[cand as usize] == *target_items);
+                let target_id = if let Some(existing_id) = existing {
                     existing_id
                 } else {
                     let new_id = item_sets.len() as u32;
-                    set_to_id.insert(target_items.clone(), new_id);
+                    candidates.push(new_id);
                     item_sets.push(target_items);
                     transitions.push(BTreeMap::new());
                     next_frontier.push(new_id);
@@ -982,10 +1024,21 @@ fn build_lr1_item_sets(
                 transitions[state_id as usize].insert(symbol, (target_id, is_replace, is_forwarded));
             }
         }
+        if let Some(started_at) = intern_started_at {
+            intern_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
         frontier = next_frontier;
     }
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][lr1_item_sets] states={} expand_ms={:.3} intern_ms={:.3}",
+            item_sets.len(),
+            expand_ms,
+            intern_ms,
+        );
+    }
 
-    drop(set_to_id);
+    drop(fingerprint_to_ids);
     let item_sets = item_sets
         .into_iter()
         .map(|items| Arc::try_unwrap(items).expect("canonical item set still shared"))
@@ -1306,32 +1359,37 @@ fn build_lr1_table(
 
     let mut pending = pending;
     let goto = goto;
-    for (state_id, items) in item_sets.iter().enumerate() {
-
-        for (item, lookaheads) in items {
-            // Transferred items do not generate reduces.
-            if item.transferred {
-                continue;
-            }
-            let rule = &grammar.rules[item.rule as usize];
-            if item.dot as usize != rule.rhs.len() {
-                continue;
-            }
-
-            for bit in lookaheads.iter_ones() {
-                let lookahead = bit_lookahead(bit, grammar.num_terminals);
-                if item.rule == 0 {
-                    pending[state_id].entry(lookahead).or_default().push_accept();
+    // Each state's pending reduce/accept actions depend only on that state's
+    // items, so populate the rows in parallel. Shifts were already filled in by
+    // `initialize_pending_and_goto`; we only append reduces/accepts here.
+    pending
+        .par_iter_mut()
+        .zip(item_sets.par_iter())
+        .for_each(|(pending_row, items)| {
+            for (item, lookaheads) in items {
+                // Transferred items do not generate reduces.
+                if item.transferred {
+                    continue;
+                }
+                let rule = &grammar.rules[item.rule as usize];
+                if item.dot as usize != rule.rhs.len() {
                     continue;
                 }
 
-                pending[state_id]
-                    .entry(lookahead)
-                    .or_default()
-                    .push_reduce(rule.lhs, item.stack_depth);
+                for bit in lookaheads.iter_ones() {
+                    let lookahead = bit_lookahead(bit, grammar.num_terminals);
+                    if item.rule == 0 {
+                        pending_row.entry(lookahead).or_default().push_accept();
+                        continue;
+                    }
+
+                    pending_row
+                        .entry(lookahead)
+                        .or_default()
+                        .push_reduce(rule.lhs, item.stack_depth);
+                }
             }
-        }
-    }
+        });
 
     // Grouped LR(1) lookahead sets delay scalar fanout until pending-action
     // emission. The old local-forward path is written for scalar LR1 items,
@@ -1549,7 +1607,7 @@ fn build_legacy_row_bisim_table(
     let canonical_ms = canonical_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
     let core_keys_started_at = profile_enabled.then(std::time::Instant::now);
-    let core_keys = item_sets.iter().map(lr1_core_key).collect::<Vec<_>>();
+    let core_keys = item_sets.par_iter().map(lr1_core_key).collect::<Vec<_>>();
     let core_keys_ms = core_keys_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
     let merge_started_at = profile_enabled.then(std::time::Instant::now);
