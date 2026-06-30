@@ -40,7 +40,7 @@ use rustc_hash::FxHashMap;
 use super::grammar_helpers::compute_always_allowed_follows;
 use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhaseProfile};
 use nwa_builder::{
-    build_nwa_via_trie_walk, build_transport_nwa_via_trie_walk, internal_vocab_entries,
+    build_nwa_via_trie_walk, internal_vocab_entries,
     seed_root_nodes,
 };
 use terminal_interchangeability::TerminalInterchangeability;
@@ -744,60 +744,51 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let start_state = nwa.add_state();
             nwa.start_states_mut().push(start_state);
 
-            let transport_modes = reference_terminal_expansion
-                .then(|| terminal_interchangeability.terminal_nwa_transport_modes())
-                .flatten();
             let seed_ms;
 
             // ---- Step 6: Trie-walk NWA build ----
             let trie_build_started_at = Instant::now();
-            let _build_profile = if let Some(modes) = transport_modes.as_deref() {
-                seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
-                build_transport_nwa_via_trie_walk(
-                    tokenizer_for_build,
-                    ignore_terminal,
-                    &mut nwa,
-                    start_state,
-                    leaf_state,
-                    &simplified_id_map,
-                    &full_tree.root,
-                    &mut pm_computer,
-                    analysis_active_terminals,
-                    modes,
-                )
-            } else {
-                let roots = seed_root_nodes(&mut nwa, start_state, &simplified_id_map);
-                seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
-                build_nwa_via_trie_walk(
-                    tokenizer_for_build,
-                    terminal_coloring,
-                    use_terminal_coloring && !reference_terminal_expansion,
-                    ignore_terminal,
-                    &mut nwa,
-                    leaf_state,
-                    simplified_id_map.num_tsids(),
-                    &full_tree.root,
-                    &roots,
-                    &mut pm_computer,
-                    reference_terminal_expansion.then_some(analysis_active_terminals),
-                )
-            };
+            let roots = seed_root_nodes(&mut nwa, start_state, &simplified_id_map);
+            seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+            let _build_profile = build_nwa_via_trie_walk(
+                tokenizer_for_build,
+                terminal_coloring,
+                use_terminal_coloring && !reference_terminal_expansion,
+                ignore_terminal,
+                &mut nwa,
+                leaf_state,
+                simplified_id_map.num_tsids(),
+                &full_tree.root,
+                &roots,
+                &mut pm_computer,
+                reference_terminal_expansion.then_some(analysis_active_terminals),
+            );
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let always_allowed_started_at = Instant::now();
             let always_allowed = compute_always_allowed_follows(grammar);
+            let coarse_always_allowed = reference_terminal_expansion.then(|| {
+                terminal_interchangeability.coalesced_always_allowed_follows(&always_allowed)
+            });
+            let coarse_disallowed_follows = reference_terminal_expansion.then(|| {
+                terminal_interchangeability.coalesced_disallowed_follows(disallowed_follows)
+            });
             let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_build = nwa.states().len();
 
             let collapse_started_at = Instant::now();
-            collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
+            collapse_always_allowed(
+                &mut nwa,
+                coarse_always_allowed.as_deref().unwrap_or(&always_allowed),
+                grammar.num_terminals as usize,
+            );
             let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_collapse = nwa.states().len();
 
             let disallowed_started_at = Instant::now();
             apply_disallowed_follow_constraints(
                 &mut nwa,
-                disallowed_follows,
+                coarse_disallowed_follows.as_ref().unwrap_or(disallowed_follows),
                 grammar.num_terminals as usize,
                 shared_disallowed_follow_dfa_cache,
                 ignore_terminal,
@@ -979,6 +970,25 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         },
     };
 
+    if reference_terminal_expansion {
+        let expansion_started_at = Instant::now();
+        let max_token_id = output.id_map.max_internal_token_id();
+        output = terminal_interchangeability.expand_terminal_dwa_slow(
+            output,
+            tokenizer.num_states(),
+            max_token_id,
+        );
+        output = postprocess_expanded_terminal_dwa(
+            output,
+            grammar,
+            disallowed_follows,
+            ignore_terminal,
+            shared_disallowed_follow_dfa_cache,
+        );
+        output.profile.terminal_dwa_ms +=
+            expansion_started_at.elapsed().as_secs_f64() * 1000.0;
+    }
+
 
     if reference_terminal_expansion && l2p_terminal_interchangeability_validation_enabled() {
         // Rebuild the same local L2P artifact with the feature suppressed, then
@@ -1039,4 +1049,55 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     }
 
     Some(output)
+}
+
+/// The representative NWA receives conservative class-level follow transforms.
+/// After representative expansion and local-artifact merging, run the ordinary
+/// concrete transforms again.  This is intentionally a slow reference path:
+/// rebuild an NWA from the merged DWA, then use the same exact postprocessors
+/// as ordinary L2P before one final determinize/minimize.
+fn postprocess_expanded_terminal_dwa(
+    mut artifact: LocalIdMapTerminalDwa,
+    grammar: &AnalyzedGrammar,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<TerminalID>,
+    shared_disallowed_follow_dfa_cache: Option<&SharedDisallowedFollowDfaCache>,
+) -> LocalIdMapTerminalDwa {
+    let mut nwa = NWA::new(
+        artifact.id_map.num_tsids(),
+        artifact.id_map.max_internal_token_id(),
+    );
+    let state_map = (0..artifact.dwa.states().len())
+        .map(|_| nwa.add_state())
+        .collect::<Vec<_>>();
+    nwa.start_states_mut()
+        .push(state_map[artifact.dwa.start_state() as usize]);
+    for (source, state) in artifact.dwa.states().iter().enumerate() {
+        if let Some(final_weight) = &state.final_weight {
+            nwa.set_final_weight(state_map[source], final_weight.clone());
+        }
+        for (&label, (destination, weight)) in &state.transitions {
+            nwa.add_transition(
+                state_map[source],
+                label,
+                state_map[*destination as usize],
+                weight.clone(),
+            );
+        }
+    }
+
+    let always_allowed = compute_always_allowed_follows(grammar);
+    collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
+    apply_disallowed_follow_constraints(
+        &mut nwa,
+        disallowed_follows,
+        grammar.num_terminals as usize,
+        shared_disallowed_follow_dfa_cache,
+        ignore_terminal,
+    );
+    prune_non_coreachable_states(&mut nwa);
+    canonicalize_acyclic_nwa(&mut nwa);
+    let det = determinize(&nwa).expect("expanded terminal NWA determinization failed");
+    artifact.dwa = minimize_owned(det);
+    artifact
 }

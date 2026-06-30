@@ -18,6 +18,11 @@ use std::collections::BTreeMap;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
 use super::nwa_builder::TerminalNwaTransportMode;
+use crate::automata::weighted_u32::dwa::DWA;
+use crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_local_id_maps_and_terminal_dwas;
+use crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa;
+use crate::ds::bitset::BitSet;
+use crate::ds::weight::{shared_rangeset, Weight};
 use crate::grammar::flat::TerminalID;
 
 const NO_STATE: u32 = u32::MAX;
@@ -359,6 +364,11 @@ impl TerminalInterchangeability {
         for (index, &left) in candidates.iter().enumerate() {
             for &right in &candidates[index + 1..] {
                 if let Some(left_to_right) = restricted.interchange_map(left, right) {
+                    // The current slow DWA-copy construction operates in raw
+                    // TSID coordinates. Until the quotient-to-relation weight
+                    // expansion has its own proof and tests, require a concrete
+                    // bijective lift rather than treating a residual-block
+                    // relation as a raw-state transport.
                     if restricted
                         .concrete_swap_automorphism(&left_to_right, left, right)
                         .is_none()
@@ -452,6 +462,159 @@ impl TerminalInterchangeability {
         self.active_representatives.iter().filter(|&&active| active).count()
     }
 
+    /// A representative pair is coarsely always-allowed only if *every*
+    /// concrete member pair has that relation. This is the conservative relation
+    /// used before representative expansion.
+    pub(crate) fn coalesced_always_allowed_follows(
+        &self,
+        concrete: &[Vec<TerminalID>],
+    ) -> Vec<Vec<TerminalID>> {
+        let terminal_count = self.original_active.len();
+        let mut result = vec![Vec::new(); terminal_count];
+        for representative in 0..terminal_count {
+            if !self.active_representatives[representative] {
+                continue;
+            }
+            let left_members = &self.members_by_representative[representative];
+            for successor in 0..terminal_count {
+                if !self.active_representatives[successor] {
+                    continue;
+                }
+                let right_members = &self.members_by_representative[successor];
+                if left_members.iter().all(|&left| {
+                    concrete.get(left as usize).is_some_and(|follows| {
+                        right_members.iter().all(|right| follows.contains(right))
+                    })
+                }) {
+                    result[representative].push(successor as TerminalID);
+                }
+            }
+        }
+        result
+    }
+
+    /// The conservative pre-expansion disallowed relation. It contains a
+    /// representative pair only when every concrete member pair is disallowed.
+    pub(crate) fn coalesced_disallowed_follows(
+        &self,
+        concrete: &BTreeMap<u32, BitSet>,
+    ) -> BTreeMap<u32, BitSet> {
+        let terminal_count = self.original_active.len();
+        let mut result = BTreeMap::new();
+        for representative in 0..terminal_count {
+            if !self.active_representatives[representative] {
+                continue;
+            }
+            let left_members = &self.members_by_representative[representative];
+            let mut disallowed = BitSet::new(terminal_count);
+            for successor in 0..terminal_count {
+                if !self.active_representatives[successor] {
+                    continue;
+                }
+                let right_members = &self.members_by_representative[successor];
+                if left_members.iter().all(|&left| {
+                    concrete.get(&left).is_some_and(|follows| {
+                        right_members.iter().all(|&right| follows.contains(right as usize))
+                    })
+                }) {
+                    disallowed.set(successor);
+                }
+            }
+            if !disallowed.is_zero() {
+                result.insert(representative as u32, disallowed);
+            }
+        }
+        result
+    }
+
+    /// Slow, validation-first undo of representative substitution.
+    ///
+    /// The representative DWA is already complete.  Later terminal edges do
+    /// not depend on the initial tokenizer state, so they can be expanded in
+    /// place.  Initial edges do depend on it: each replacement therefore gets
+    /// its own whole-DWA copy with every weight transported through that
+    /// representative/member lexer-state map.  Existing local-artifact merge
+    /// machinery then unions the copies in a common ID-map space.
+    pub(crate) fn expand_terminal_dwa_slow(
+        &self,
+        artifact: LocalIdMapTerminalDwa,
+        num_tokenizer_states: u32,
+        max_token_id: u32,
+    ) -> LocalIdMapTerminalDwa {
+        if self.is_identity() {
+            return artifact;
+        }
+
+        let mut representative_artifact = artifact;
+        self.expand_noninitial_edges(&mut representative_artifact.dwa);
+
+        // The strict reference build deliberately uses raw lexer states as
+        // TSIDs.  In that coordinate system a transported id map is the same
+        // coordinate map; transporting every weight is the required semantic
+        // operation.  Fail rather than silently applying this slow reference
+        // construction to a quotient id map.
+        assert_raw_singleton_tsid_coordinate(&representative_artifact);
+
+        let start = representative_artifact.dwa.start_state() as usize;
+        let initial_transitions = representative_artifact.dwa.states()[start]
+            .transitions
+            .clone();
+        let mut copies = vec![representative_artifact.clone()];
+
+        for (representative, members) in self.members_by_representative.iter().enumerate() {
+            if members.len() < 2 {
+                continue;
+            }
+            let representative = representative as TerminalID;
+            let Some((destination, weight)) = initial_transitions.get(&(representative as i32)) else {
+                continue;
+            };
+            for &replacement in members {
+                if replacement == representative {
+                    continue;
+                }
+                let map = self.maps_by_representative_member
+                    .get(&(representative, replacement))
+                    .expect("interchangeability member missing transport map");
+                let mut copy = representative_artifact.clone();
+                let initial = &mut copy.dwa.states_mut()[start].transitions;
+                let removed = initial.remove(&(representative as i32));
+                assert_eq!(
+                    removed.as_ref().map(|(target, _)| *target),
+                    Some(*destination),
+                    "representative initial transition changed before interchange expansion",
+                );
+                initial.insert(replacement as i32, (*destination, weight.clone()));
+                transport_all_dwa_weights(&mut copy.dwa, &map.source_state_to_target_states);
+                copies.push(copy);
+            }
+        }
+
+        merge_local_id_maps_and_terminal_dwas(copies, num_tokenizer_states as usize, max_token_id)
+    }
+
+    fn expand_noninitial_edges(&self, dwa: &mut DWA) {
+        let start = dwa.start_state() as usize;
+        for (state_id, state) in dwa.states_mut().iter_mut().enumerate() {
+            if state_id == start {
+                continue;
+            }
+            let original = state.transitions.clone();
+            for (&label, (destination, weight)) in &original {
+                let Ok(terminal) = TerminalID::try_from(label) else {
+                    continue;
+                };
+                let members = &self.members_by_representative[terminal as usize];
+                if members.len() < 2 || members[0] != terminal {
+                    continue;
+                }
+                for &member in members {
+                    state.transitions.insert(member as i32, (*destination, weight.clone()));
+                }
+            }
+        }
+    }
+
     pub(crate) fn terminal_nwa_transport_modes(&self) -> Option<Vec<TerminalNwaTransportMode>> {
         if self.is_identity() {
             return None;
@@ -494,6 +657,57 @@ impl TerminalInterchangeability {
     }
 
 
+}
+
+fn assert_raw_singleton_tsid_coordinate(artifact: &LocalIdMapTerminalDwa) {
+    let original_to_internal = &artifact.id_map.tokenizer_states.original_to_internal;
+    assert!(
+        original_to_internal
+            .iter()
+            .enumerate()
+            .all(|(state, &tsid)| state as u32 == tsid),
+        "slow terminal-interchangeability expansion requires raw singleton TSIDs",
+    );
+}
+
+fn transport_all_dwa_weights(dwa: &mut DWA, state_transport: &[Vec<u32>]) {
+    let mut cache = BTreeMap::<usize, Weight>::new();
+    for state in dwa.states_mut() {
+        if let Some(final_weight) = &mut state.final_weight {
+            *final_weight = transport_weight(final_weight, state_transport, &mut cache);
+        }
+        for (_, weight) in state.transitions.values_mut() {
+            *weight = transport_weight(weight, state_transport, &mut cache);
+        }
+    }
+}
+
+fn transport_weight(
+    weight: &Weight,
+    state_transport: &[Vec<u32>],
+    cache: &mut BTreeMap<usize, Weight>,
+) -> Weight {
+    if weight.is_empty() || weight.is_full() {
+        return weight.clone();
+    }
+    if let Some(existing) = cache.get(&weight.ptr_key()) {
+        return existing.clone();
+    }
+
+    let mut entries = Vec::new();
+    for (source_tsid, targets) in state_transport.iter().enumerate() {
+        let tokens = weight.tokens_for_tsid(source_tsid as u32);
+        if tokens.is_empty() {
+            continue;
+        }
+        let tokens = shared_rangeset(tokens);
+        for &target_tsid in targets {
+            entries.push((target_tsid, tokens.clone()));
+        }
+    }
+    let transported = Weight::from_per_tsid_shared(entries);
+    cache.insert(weight.ptr_key(), transported.clone());
+    transported
 }
 
 #[derive(Debug)]
