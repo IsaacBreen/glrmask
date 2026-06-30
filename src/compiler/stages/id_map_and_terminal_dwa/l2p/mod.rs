@@ -43,7 +43,7 @@ use nwa_builder::{
     build_nwa_via_trie_walk, internal_vocab_entries,
     seed_root_nodes,
 };
-use terminal_interchangeability::TerminalInterchangeability;
+use terminal_interchangeability::{dump_dwa_if_requested, TerminalInterchangeability};
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
     prune_non_coreachable_states, SharedDisallowedFollowDfaCache,
@@ -468,9 +468,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     // Discover strict interchangeability in the current vocabulary byte
     // partition, with exactly this L2+ phase's terminal outputs observable.
-    // Nonrepresentatives are then hidden by clearing metadata only. The
-    // transport-aware trie walk restores their concrete terminal behavior while
-    // retaining the raw lexer-state coordinate for every segment.
+    // Nonrepresentatives are hidden by clearing metadata only. The completed
+    // representative DWA is expanded afterwards.
     let terminal_interchangeability = if l2p_terminal_interchangeability_enabled() {
         TerminalInterchangeability::build(
             tokenizer,
@@ -648,13 +647,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             equivalence_initial_state_map,
         );
     if reference_terminal_expansion {
-        // Keep the exact raw lexer-state coordinate in the reference artifact.
-        // Each transport mode simulates a different state for the current
-        // terminal segment, while terminal-DWA weights remain indexed by the
-        // actual token-start state. A quotient TSID could merge source states
-        // whose transported continuations differ; singletons avoid that
-        // representational shortcut. The final artifact comparator accepts the
-        // intentionally different id map.
+        // Keep raw lexer states as TSIDs in the reference artifact. The
+        // post-DWA expansion transports weights through the interchange map;
+        // quotient TSIDs would obscure which concrete coordinate each mapped
+        // weight denotes.
         let ids = (0..tokenizer_for_build.num_states()).collect::<Vec<u32>>();
         simplified_id_map.tokenizer_states =
             ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
@@ -970,9 +966,17 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         },
     };
 
+    if !reference_terminal_expansion {
+        dump_dwa_if_requested("baseline_final", &output.dwa);
+    }
     if reference_terminal_expansion {
         let expansion_started_at = Instant::now();
-        let max_token_id = output.id_map.max_internal_token_id();
+        let max_token_id = output
+            .id_map
+            .vocab_tokens
+            .original_to_internal
+            .len()
+            .saturating_sub(1) as u32;
         output = terminal_interchangeability.expand_terminal_dwa_slow(
             output,
             tokenizer.num_states(),
@@ -1086,8 +1090,13 @@ fn postprocess_expanded_terminal_dwa(
         }
     }
 
-    let always_allowed = compute_always_allowed_follows(grammar);
-    collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
+    // `collapse_always_allowed` is a weighted-NWA rewrite: its proof uses the
+    // original NWA's propagated domains. A determinized DWA does not retain
+    // those domains, so reconstructing a fresh NWA here can make the rewrite
+    // spuriously stronger. The conservative class-level collapse already ran
+    // before expansion; the concrete post-pass here performs the exact
+    // disallowed-follow subtraction, whose product construction is independent
+    // of that lost domain information.
     apply_disallowed_follow_constraints(
         &mut nwa,
         disallowed_follows,
@@ -1099,5 +1108,6 @@ fn postprocess_expanded_terminal_dwa(
     canonicalize_acyclic_nwa(&mut nwa);
     let det = determinize(&nwa).expect("expanded terminal NWA determinization failed");
     artifact.dwa = minimize_owned(det);
+    dump_dwa_if_requested("after_concrete_postprocess", &artifact.dwa);
     artifact
 }
