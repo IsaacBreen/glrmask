@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 /// Exact first-byte target profiles computed for L1 state equivalence.
 ///
@@ -1095,9 +1095,17 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         .collect();
 
     let unique_targets_started_at = profile_enabled.then(Instant::now);
-    let mut unique_targets = FxHashSet::<(u8, u32)>::default();
-    for &state in states {
-        for &byte in &nonempty_first_bytes {
+    // Byte-major scan: with a byte-major transition table and the (near-)identity
+    // state list, fixing the first byte and sweeping states is a contiguous read.
+    // A reused per-target bitset (~num_states bits, L1-resident) replaces both the
+    // hashset and a num_states-wide u32 stamp array; scanning its set words yields
+    // the distinct targets already in ascending order, so no per-byte sort or
+    // global sort is needed.
+    let target_words = num_tokenizer_states.div_ceil(64);
+    let mut target_seen = vec![0u64; target_words];
+    let mut unique_targets: Vec<(u8, u32)> = Vec::new();
+    for &byte in &nonempty_first_bytes {
+        for &state in states {
             let target = l1_transition(
                 flat_trans,
                 transitions_by_byte,
@@ -1106,13 +1114,23 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
                 byte,
             );
             if target != dead {
-                unique_targets.insert((byte as u8, target));
+                target_seen[target as usize >> 6] |= 1u64 << (target & 63);
+            }
+        }
+        for word in 0..target_words {
+            let mut bits = target_seen[word];
+            if bits == 0 {
+                continue;
+            }
+            target_seen[word] = 0;
+            let base = (word * 64) as u32;
+            while bits != 0 {
+                let offset = bits.trailing_zeros();
+                unique_targets.push((byte as u8, base + offset));
+                bits &= bits - 1;
             }
         }
     }
-
-    let mut unique_targets: Vec<(u8, u32)> = unique_targets.into_iter().collect();
-    unique_targets.sort_unstable();
     let unique_targets_len = unique_targets.len();
     let unique_targets_ms = unique_targets_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
@@ -1213,161 +1231,141 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         started.elapsed().as_secs_f64() * 1000.0
     });
 
-    // State keys are a fixed-width vector of per-first-byte profile IDs.  The
-    // old representation allocated one Vec per tokenizer state and hashed the
-    // whole Vec into a map.  Materialize the profile lookup densely once, then
-    // use a collision-checked scalar fingerprint for grouping.  Equality is
-    // still the full exact profile vector.
+    // Materialize each state's exact equivalence key as a contiguous row, then
+    // group by a 64-bit fingerprint backed by full row equality. The key is the
+    // per-first-byte profile-id vector, optionally prefixed by the terminal
+    // signature when empty tokens exist. Columns are filled one first byte at a
+    // time through a single reused, state-sized profile column (interned from
+    // the small per-byte target list), so there is no num_slots*num_states dense
+    // profile table to allocate, zero, and stride through under partition-level
+    // memory contention. The byte-major transition column read and the column
+    // write are both contiguous, and exact equality / representative profile
+    // vectors read the same dense key matrix instead of re-walking transitions.
     let state_keys_started_at = profile_enabled.then(Instant::now);
     let mut byte_slots = [u16::MAX; 256];
     for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
         byte_slots[byte] = slot as u16;
     }
-    let mut profile_by_first_byte =
-        vec![0u32; nonempty_first_bytes.len() * num_tokenizer_states];
+    let num_slots = nonempty_first_bytes.len();
+    let mut slot_targets: Vec<Vec<(u32, u32)>> = vec![Vec::new(); num_slots];
     for (&(byte, target), &profile_id) in &target_to_profile_id {
-        let slot = byte_slots[byte as usize];
-        debug_assert_ne!(slot, u16::MAX);
-        profile_by_first_byte[slot as usize * num_tokenizer_states + target as usize] = profile_id;
+        let slot = byte_slots[byte as usize] as usize;
+        debug_assert_ne!(slot, usize::from(u16::MAX));
+        slot_targets[slot].push((target, profile_id));
     }
     let has_empty_tokens = !token_buckets.empty_token_indices.is_empty();
-    let hash_state_key = |&state: &usize| {
-        let mut hash = 0x9e37_79b9_7f4a_7c15u64;
-        if has_empty_tokens {
-            hash ^= state_to_terminal_signature[state] as u64;
-            hash = hash.rotate_left(17).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    let sig_cols = usize::from(has_empty_tokens);
+    let row_width = num_slots + sig_cols;
+    let num_states_in = states.len();
+    let mut keys = vec![0u32; num_states_in.saturating_mul(row_width).max(1)];
+    if has_empty_tokens {
+        for (i, &state) in states.iter().enumerate() {
+            keys[i * row_width] = state_to_terminal_signature[state];
         }
+    }
+    let mut profile_col = vec![0u32; num_tokenizer_states];
+    // Tile over states so a block of rows stays cache-resident while all of its
+    // first-byte columns are filled (the key matrix is written once per tile
+    // rather than re-swept once per first byte). The reused per-byte profile
+    // column is re-interned per tile from the small per-byte target list, which
+    // is far cheaper than either a num_slots*num_states dense table or a full
+    // matrix re-sweep.
+    const FILL_TILE: usize = 512;
+    let mut tile_start = 0;
+    while tile_start < num_states_in {
+        let tile_end = (tile_start + FILL_TILE).min(num_states_in);
         for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
-            let target = l1_transition(
-                flat_trans,
-                transitions_by_byte,
-                num_tokenizer_states,
-                state as u32,
-                byte,
-            );
-            let profile_id = if target == dead {
-                0
+            let col = sig_cols + slot;
+            for &(target, profile_id) in &slot_targets[slot] {
+                profile_col[target as usize] = profile_id;
+            }
+            if let Some(transitions_by_byte) = transitions_by_byte {
+                let tbase = byte * num_tokenizer_states;
+                for i in tile_start..tile_end {
+                    let target = transitions_by_byte[tbase + states[i]];
+                    keys[i * row_width + col] = if target == dead {
+                        0
+                    } else {
+                        profile_col[target as usize]
+                    };
+                }
             } else {
-                profile_by_first_byte[slot * num_tokenizer_states + target as usize]
-            };
-            hash ^= (profile_id as u64)
+                for i in tile_start..tile_end {
+                    let target = flat_trans[states[i] * 256 + byte];
+                    keys[i * row_width + col] = if target == dead {
+                        0
+                    } else {
+                        profile_col[target as usize]
+                    };
+                }
+            }
+            for &(target, _) in &slot_targets[slot] {
+                profile_col[target as usize] = 0;
+            }
+        }
+        tile_start = tile_end;
+    }
+    let row_hash = |row: &[u32]| -> u64 {
+        let mut hash = 0x9e37_79b9_7f4a_7c15u64;
+        for (slot, &value) in row.iter().enumerate() {
+            hash ^= (value as u64)
                 .wrapping_add(0x9e37_79b9_7f4a_7c15)
                 .wrapping_add((slot as u64).wrapping_mul(0x517c_c1b7_2722_0a95));
             hash = hash.rotate_left(17).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         }
         hash
     };
-    let state_key_hashes: Vec<u64> = if rayon::current_num_threads() == 1 {
-        states.iter().map(hash_state_key).collect()
+    let state_key_hashes: Vec<u64> = if rayon::current_num_threads() == 1 || num_states_in < 4096 {
+        (0..num_states_in)
+            .map(|i| row_hash(&keys[i * row_width..i * row_width + row_width]))
+            .collect()
     } else {
-        states.par_iter().map(hash_state_key).collect()
+        (0..num_states_in)
+            .into_par_iter()
+            .map(|i| row_hash(&keys[i * row_width..i * row_width + row_width]))
+            .collect()
     };
     let state_keys_ms = state_keys_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
 
     let group_started_at = profile_enabled.then(Instant::now);
-    let same_state_key = |left: usize, right: usize| {
-        if has_empty_tokens
-            && state_to_terminal_signature[left] != state_to_terminal_signature[right]
-        {
-            return false;
-        }
-        for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
-            let left_target = l1_transition(
-                flat_trans,
-                transitions_by_byte,
-                num_tokenizer_states,
-                left as u32,
-                byte,
-            );
-            let right_target = l1_transition(
-                flat_trans,
-                transitions_by_byte,
-                num_tokenizer_states,
-                right as u32,
-                byte,
-            );
-            let left_profile = if left_target == dead {
-                0
-            } else {
-                profile_by_first_byte[slot * num_tokenizer_states + left_target as usize]
-            };
-            let right_profile = if right_target == dead {
-                0
-            } else {
-                profile_by_first_byte[slot * num_tokenizer_states + right_target as usize]
-            };
-            if left_profile != right_profile {
-                return false;
-            }
-        }
-        true
-    };
-    let mut primary_representative_by_hash = FxHashMap::<u64, usize>::default();
-    let mut collision_representatives_by_hash = FxHashMap::<u64, Vec<usize>>::default();
-    let mut mapping = Vec::<usize>::with_capacity(states.len());
+    let mut representatives_by_hash = FxHashMap::<u64, Vec<usize>>::default();
+    let mut mapping = Vec::<usize>::with_capacity(num_states_in);
+    // Exact-class representatives become the L1 id-map representatives. Preserve
+    // their already-proved first-byte profile vectors (the slot columns of the
+    // key row) so the direct terminal-DWA builder does not repeat the work.
+    let mut representative_profile_ids = FxHashMap::<u32, Arc<[u32]>>::default();
     let mut groups_len = 0usize;
-    for (&state, &hash) in states.iter().zip(&state_key_hashes) {
-        let representative = if let Some(&primary) = primary_representative_by_hash.get(&hash) {
-            if same_state_key(primary, state) {
-                primary
-            } else {
-                let representatives = collision_representatives_by_hash
-                    .entry(hash)
-                    .or_insert_with(|| vec![primary]);
-                if let Some(&existing) = representatives
-                    .iter()
-                    .find(|&&existing| same_state_key(existing, state))
-                {
-                    existing
-                } else {
-                    representatives.push(state);
-                    groups_len += 1;
-                    state
-                }
+    for i in 0..num_states_in {
+        let row = &keys[i * row_width..i * row_width + row_width];
+        let bucket = representatives_by_hash
+            .entry(state_key_hashes[i])
+            .or_default();
+        let mut representative_pos = None;
+        for &rep_pos in bucket.iter() {
+            if &keys[rep_pos * row_width..rep_pos * row_width + row_width] == row {
+                representative_pos = Some(rep_pos);
+                break;
             }
-        } else {
-            primary_representative_by_hash.insert(hash, state);
-            groups_len += 1;
-            state
+        }
+        let representative = match representative_pos {
+            Some(rep_pos) => states[rep_pos],
+            None => {
+                bucket.push(i);
+                groups_len += 1;
+                let representative = states[i];
+                representative_profile_ids
+                    .entry(representative as u32)
+                    .or_insert_with(|| Arc::from(&row[sig_cols..]));
+                representative
+            }
         };
         mapping.push(representative);
     }
     let group_ms = group_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
-
-    // Exact-class representatives become the L1 id-map representatives.
-    // Preserve their already-proved first-byte profile vectors so the direct
-    // terminal-DWA builder does not repeat the same transition and profile-map
-    // lookup work.
-    let mut representative_profile_ids = FxHashMap::<u32, Arc<[u32]>>::default();
-    for &representative in &mapping {
-        representative_profile_ids
-            .entry(representative as u32)
-            .or_insert_with(|| {
-                nonempty_first_bytes
-                    .iter()
-                    .enumerate()
-                    .map(|(slot, &byte)| {
-                        let target = l1_transition(
-                            flat_trans,
-                            transitions_by_byte,
-                            num_tokenizer_states,
-                            representative as u32,
-                            byte,
-                        );
-                        if target == dead {
-                            0
-                        } else {
-                            profile_by_first_byte[slot * num_tokenizer_states + target as usize]
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .into()
-            });
-    }
 
     if let Some(total_started_at) = total_started_at {
         eprintln!(

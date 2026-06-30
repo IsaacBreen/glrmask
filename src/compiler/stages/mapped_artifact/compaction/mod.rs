@@ -1069,21 +1069,34 @@ fn build_exact_tsid_merge_permutation_with_token_remaps(
             continue;
         }
         let mut contexts_by_token_set = HashMap::<Vec<(u32, u32)>, u32>::new();
+        // Inner token-set rangesets are interned, so an identical `Arc` reached
+        // at several tsid ranges within this weight always denotes the same
+        // (remapped) token content. Cache the resolved context per source `Arc`
+        // pointer to skip recomputing the remap key for those repeats; this is
+        // exact and only avoids redundant `rangeset_key` allocations.
+        let mut context_by_source_ptr = HashMap::<usize, u32>::new();
         for (tsid_range, token_set) in weight.0.range_values() {
             let token_set_ptr = Arc::as_ptr(token_set) as usize;
-            let remapped_tokens = if token_context.token_perm_is_identity {
-                token_set.as_ref()
-            } else {
-                token_remaps
-                    .get(&token_set_ptr)
-                    .expect("token plan must remap every source token set")
+            let token_set_context = match context_by_source_ptr.entry(token_set_ptr) {
+                std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let remapped_tokens = if token_context.token_perm_is_identity {
+                        token_set.as_ref()
+                    } else {
+                        token_remaps
+                            .get(&token_set_ptr)
+                            .expect("token plan must remap every source token set")
+                    };
+                    let key = rangeset_key(remapped_tokens);
+                    let resolved = *contexts_by_token_set.entry(key).or_insert_with(|| {
+                        let current = context;
+                        context += 1;
+                        current
+                    });
+                    entry.insert(resolved);
+                    resolved
+                }
             };
-            let key = rangeset_key(remapped_tokens);
-            let token_set_context = *contexts_by_token_set.entry(key).or_insert_with(|| {
-                let current = context;
-                context += 1;
-                current
-            });
             let start = *tsid_range.start();
             let end = (*tsid_range.end()).min(num_tsids.saturating_sub(1) as u32);
             for tsid in start..=end {
