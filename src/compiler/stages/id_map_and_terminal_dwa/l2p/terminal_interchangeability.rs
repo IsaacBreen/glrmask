@@ -20,7 +20,6 @@ use crate::automata::weighted_u32::dwa::DWA;
 use crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_local_id_maps_and_terminal_dwas;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
-use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 
@@ -516,40 +515,6 @@ impl TerminalInterchangeability {
         result
     }
 
-    /// The conservative pre-expansion disallowed relation. It contains a
-    /// representative pair only when every concrete member pair is disallowed.
-    pub(crate) fn coalesced_disallowed_follows(
-        &self,
-        concrete: &BTreeMap<u32, BitSet>,
-    ) -> BTreeMap<u32, BitSet> {
-        let terminal_count = self.original_active.len();
-        let mut result = BTreeMap::new();
-        for representative in 0..terminal_count {
-            if !self.active_representatives[representative] {
-                continue;
-            }
-            let left_members = &self.members_by_representative[representative];
-            let mut disallowed = BitSet::new(terminal_count);
-            for successor in 0..terminal_count {
-                if !self.active_representatives[successor] {
-                    continue;
-                }
-                let right_members = &self.members_by_representative[successor];
-                if left_members.iter().all(|&left| {
-                    concrete.get(&left).is_some_and(|follows| {
-                        right_members.iter().all(|&right| follows.contains(right as usize))
-                    })
-                }) {
-                    disallowed.set(successor);
-                }
-            }
-            if !disallowed.is_zero() {
-                result.insert(representative as u32, disallowed);
-            }
-        }
-        result
-    }
-
     /// Slow, validation-first undo of representative substitution.
     ///
     /// The representative DWA is already complete; only the representative of
@@ -817,19 +782,8 @@ mod tests {
         }
     }
 
-    fn disallowed_relation(pairs: &[(usize, usize)]) -> BTreeMap<u32, BitSet> {
-        let mut relation = BTreeMap::new();
-        for &(left, right) in pairs {
-            relation
-                .entry(left as u32)
-                .or_insert_with(|| BitSet::new(4))
-                .set(right);
-        }
-        relation
-    }
-
     #[test]
-    fn coarse_follow_relations_require_every_concrete_member_pair() {
+    fn coarse_always_allowed_requires_every_concrete_member_pair() {
         let plan = two_by_two_partition_plan();
 
         let mut always_allowed = vec![Vec::new(); 4];
@@ -839,17 +793,6 @@ mod tests {
         assert!(plan.coalesced_always_allowed_follows(&always_allowed)[0].contains(&2));
         always_allowed[1].retain(|&terminal| terminal != 3);
         assert!(!plan.coalesced_always_allowed_follows(&always_allowed)[0].contains(&2));
-
-        let complete_disallowed = disallowed_relation(&[(0, 2), (0, 3), (1, 2), (1, 3)]);
-        assert!(plan
-            .coalesced_disallowed_follows(&complete_disallowed)
-            .get(&0)
-            .is_some_and(|set| set.contains(2)));
-        let incomplete_disallowed = disallowed_relation(&[(0, 2), (0, 3), (1, 2)]);
-        assert!(!plan
-            .coalesced_disallowed_follows(&incomplete_disallowed)
-            .get(&0)
-            .is_some_and(|set| set.contains(2)));
     }
 
     #[test]

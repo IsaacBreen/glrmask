@@ -465,10 +465,11 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         }
     }
 
-    // Discover strict interchangeability in the current vocabulary byte
+    // Discover terminal interchangeability in the current vocabulary byte
     // partition, with exactly this L2+ phase's terminal outputs observable.
-    // Nonrepresentatives are hidden by clearing metadata only. The completed
-    // representative DWA is expanded afterwards.
+    // Nonrepresentatives are hidden from equivalence analysis and the trie walk
+    // via the active-terminal group filter; the completed representative DWA is
+    // expanded back to the full terminal set afterwards.
     let terminal_interchangeability = if l2p_terminal_interchangeability_enabled() {
         TerminalInterchangeability::build(
             tokenizer,
@@ -1065,13 +1066,14 @@ fn postprocess_expanded_terminal_dwa(
         }
     }
 
-    // `collapse_always_allowed` is a weighted-NWA rewrite: its proof uses the
-    // original NWA's propagated domains. A determinized DWA does not retain
-    // those domains, so reconstructing a fresh NWA here can make the rewrite
-    // spuriously stronger. The conservative class-level collapse already ran
-    // before expansion; the concrete post-pass here performs the exact
-    // disallowed-follow subtraction, whose product construction is independent
-    // of that lost domain information.
+    // Only the disallowed-follow subtraction is replayed here. It is exact: its
+    // product construction depends solely on the terminal-label sequence, not on
+    // any per-state propagated domain, so reconstructing a fresh NWA from the
+    // determinized DWA is sound. `collapse_always_allowed` is deliberately not
+    // re-run: it is a state-merge optimization whose proof uses the original
+    // NWA's propagated domains (lost after determinization), and it is purely
+    // size-reducing, so the final determinize/minimize already yields the
+    // canonical minimal DWA without it.
     apply_disallowed_follow_constraints(
         &mut nwa,
         disallowed_follows,
