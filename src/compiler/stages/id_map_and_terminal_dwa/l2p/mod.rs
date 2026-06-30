@@ -487,25 +487,13 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         .iter()
         .filter(|&&active| active)
         .count();
-    // The validation-first interchangeability path keeps the original DFA state
-    // coordinate so scanner transport maps can be applied exactly. It clears
-    // inactive metadata but deliberately does not minimize.
-    let reference_filtered_tokenizer = reference_terminal_expansion.then(|| {
-        tokenizer.deactivate_terminals_without_minimizing(analysis_active_terminals)
-    });
-    let tokenizer_before_simplify = reference_filtered_tokenizer.as_ref().unwrap_or(tokenizer);
+    // Keep the ordinary L2P tokenizer path unchanged. Interchangeability only
+    // narrows the active terminal universe; the normal simplifier, equivalence
+    // analysis, terminal coloring, and cache paths remain authoritative.
+    let tokenizer_before_simplify = tokenizer;
 
-    // The normal path strips inactive terminal metadata and may minimize.
-    // The reference interchangeability path instead uses the metadata-only
-    // filtered tokenizer above, preserving original state IDs for transport.
-    //
-    // Unmapped original states (states with no active-terminal future
-    // under this partition) are filled into a dead class via
-    // `fill_unmapped_with_new_class` after composition, so we always
-    // use the simplified tokenizer.
     let simplify_started_at = Instant::now();
-    let can_skip_simplify = reference_terminal_expansion
-        || l2p_tokenizer_simplify_disabled()
+    let can_skip_simplify = l2p_tokenizer_simplify_disabled()
         || num_analysis_active_terminals == analysis_active_terminals.len();
     let (simplified_tok_storage, simplify_state_map, simplify_cache_hit) = if can_skip_simplify {
         (None, None, false)
@@ -592,9 +580,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // unsimplified partition. Derive its exact byte partition lazily from
     // sparse lexer edges once; simplified tokenizers retain their local cache.
     let shared_base_setup_started_at = Instant::now();
-    let equivalence_vocab_dfa_cache = if reference_terminal_expansion {
-        None
-    } else if use_simplified_tok {
+    let equivalence_vocab_dfa_cache = if use_simplified_tok {
         shared_vocab_dfa_cache
     } else if let (Some(original_cache), Some(transition_cache), Some(flat_trans)) = (
         shared_original_vocab_dfa_cache,
@@ -617,7 +603,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         shared_vocab_dfa_cache
     };
     let shared_base_setup_ms = shared_base_setup_started_at.elapsed().as_secs_f64() * 1000.0;
-    let shared_analysis_dfa_cache = (!use_simplified_tok && !reference_terminal_expansion)
+    let shared_analysis_dfa_cache = (!use_simplified_tok)
         .then_some(shared_original_vocab_analysis_dfa_cache)
         .flatten();
     // Do not remove this note. Do not remove the instruction saying not to
@@ -626,39 +612,26 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // state/vocab equivalence pass must not be bypassed. Do not reintroduce
     // fast-sound, identity, lex-dedup, or similar shortcut id-map paths.
     let fast_sound_id_map_used = false;
-    // Keep equivalence analysis in the same terminal universe as the tokenizer
-    // consumed by the L2P NWA builder.  When simplification is enabled, inactive
-    // terminal bits have already been removed from `tokenizer_for_build`, so no
-    // extra active-group filter is needed.  When simplification is disabled, the
-    // builder still consults full-tokenizer future-terminal sets in several
-    // paths, so filtering equivalence by `active_terminals` would be unsound: it
-    // could merge states that the later NWA construction still distinguishes.
-    let (mut simplified_id_map, equiv_profile) =
+    // The representative build uses the same active terminal universe in the
+    // trie walk and equivalence analysis. With normal simplification this is
+    // redundant; when simplification is disabled it keeps inactive class
+    // members unobservable to both phases.
+    let equivalence_active_groups =
+        reference_terminal_expansion.then_some(analysis_active_terminals);
+    let (simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
             tokenizer_for_build,
             vocab,
             disallowed_follows,
             ignore_terminal,
-            None,
+            equivalence_active_groups,
             equivalence_vocab_dfa_cache,
             shared_analysis_dfa_cache,
             shared_base_setup_ms,
-            if use_simplified_tok || reference_terminal_expansion { None } else { flat_trans },
+            if use_simplified_tok { None } else { flat_trans },
             equivalence_initial_state_map,
         );
-    if reference_terminal_expansion {
-        // Keep raw lexer states as TSIDs in the reference artifact. The
-        // post-DWA expansion transports weights through the interchange map;
-        // quotient TSIDs would obscure which concrete coordinate each mapped
-        // weight denotes.
-        let ids = (0..tokenizer_for_build.num_states()).collect::<Vec<u32>>();
-        simplified_id_map.tokenizer_states =
-            ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-                ids.clone(),
-                ids,
-            );
-    }
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // tsid_fallback is independent of the NWA build / postprocess /
@@ -752,7 +725,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let _build_profile = build_nwa_via_trie_walk(
                 tokenizer_for_build,
                 terminal_coloring,
-                use_terminal_coloring && !reference_terminal_expansion,
+                use_terminal_coloring,
                 ignore_terminal,
                 &mut nwa,
                 leaf_state,
