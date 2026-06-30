@@ -511,6 +511,26 @@ impl TerminalInterchangeability {
     }
 
     pub(crate) fn active_representatives(&self) -> &[bool] { &self.active_representatives }
+
+    /// The direct post-DWA construction clones every noninitial representative
+    /// edge. Those edges restart lexing from the tokenizer's fixed initial
+    /// state, so the construction is exact only when every selected terminal
+    /// interchange map preserves that restart residual.
+    ///
+    /// A broader residual interchange map is still useful information, but it
+    /// requires mode-carrying continuation construction rather than this direct
+    /// post-DWA expansion.
+    pub(crate) fn supports_direct_post_dwa_expansion(
+        &self,
+        tokenizer_initial_state: u32,
+    ) -> bool {
+        self.maps_by_representative_member.values().all(|map| {
+            map.source_state_to_target_states
+                .get(tokenizer_initial_state as usize)
+                .is_some_and(|targets| targets.contains(&tokenizer_initial_state))
+        })
+    }
+
     pub(crate) fn active_terminal_count_before(&self) -> usize {
         self.original_active.iter().filter(|&&active| active).count()
     }
@@ -934,6 +954,7 @@ mod tests {
         let plan = TerminalInterchangeability::build(&tokenizer, &[true, true], &[true; 256], None);
         assert_eq!(plan.active_terminal_count_before(), 2);
         assert_eq!(plan.active_terminal_count_after(), 1);
+        assert!(!plan.supports_direct_post_dwa_expansion(tokenizer.initial_state_id()));
         assert!(plan.terminal_nwa_transport_modes().is_some());
     }
 
