@@ -222,7 +222,11 @@ pub(crate) const GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS_ENV: &str =
     "GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS";
 
 pub(crate) fn split_literal_terminals_enabled() -> bool {
-    match env::var(GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS_ENV) {
+    // Process-fixed knob (the toggle test exercises it via child processes, like
+    // `unanchored_pattern_split_mode`). Cache it so the per-string-terminal call
+    // sites in object/string/lower do not re-read the environment.
+    static VALUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| match env::var(GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS_ENV) {
         Ok(value) => {
             let trimmed = value.trim();
             !trimmed.is_empty()
@@ -232,7 +236,7 @@ pub(crate) fn split_literal_terminals_enabled() -> bool {
                 )
         }
         Err(_) => false,
-    }
+    })
 }
 
 /// Fold additional-property excluded-key add-backs into the shared terminal

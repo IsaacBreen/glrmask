@@ -35,6 +35,8 @@ pub use runtime::{
 };
 pub use vocab::Vocab;
 
+#[doc(hidden)]
+pub use import::__profile_json_schema_import;
 /// Compile a Constraint from a serialized GrammarDef JSON + vocab.
 /// This runs the full compile pipeline (equivalence analysis, terminal DWA, parser DWA).
 pub fn compile_grammar_def_json(grammar_def_json: &str, vocab: &Vocab) -> Result<Constraint> {

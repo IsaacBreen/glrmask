@@ -3,6 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
+use rayon::prelude::*;
 
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr;
@@ -2626,7 +2627,33 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     let mut expr_nfa_rules = 0usize;
     let mut expr_nfa_states = 0usize;
     let mut expr_nfa_transitions = 0usize;
-    for rule in &grammar.rules {
+    // Determinize+minimize the expr-NFA rule bodies that miss the cached
+    // canonical-DFA fast path. `determinize_and_minimize` is a pure method, so
+    // precomputing across cores keeps the serial emit loop below (which assigns
+    // nonterminal/terminal IDs in rule order) byte-for-byte identical.
+    let precomputed_expr_dfas: FxHashMap<usize, DFA> = grammar
+        .rules
+        .par_iter()
+        .enumerate()
+        .filter_map(|(idx, rule)| {
+            if rule.is_terminal {
+                return None;
+            }
+            let GrammarExpr::ExprNFA(expr_nfa) = &rule.expr else {
+                return None;
+            };
+            let hits_fast_path = expr_nfa.is_determinized_and_minimized
+                && expr_nfa
+                    .canonical_dfa
+                    .as_ref()
+                    .is_some_and(|dfa| dfa.is_acyclic());
+            if hits_fast_path {
+                return None;
+            }
+            Some((idx, expr_nfa.determinize_and_minimize()))
+        })
+        .collect();
+    for (rule_index, rule) in grammar.rules.iter().enumerate() {
         let rule_started_at = detail_profile.then(std::time::Instant::now);
         // Terminal rules: convert the entire body to a single Terminal::Expr.
         // Refs to other terminal rules are resolved via Expr::Shared.
@@ -2711,7 +2738,11 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
                     .iter()
                     .map(|state| state.transitions.values().map(Vec::len).sum::<usize>())
                     .sum::<usize>();
-                lowerer.emit_expr_nfa(lhs, expr_nfa)?;
+                if let Some(dfa) = precomputed_expr_dfas.get(&rule_index) {
+                    lowerer.emit_expr_dfa_leftlinear(lhs, expr_nfa, dfa)?;
+                } else {
+                    lowerer.emit_expr_nfa(lhs, expr_nfa)?;
+                }
             }
             _ => {
                 let symbol = lowerer.lower_expr_terminalish(&rule.expr)?;

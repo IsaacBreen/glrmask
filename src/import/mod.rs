@@ -127,6 +127,20 @@ fn compile_from_source(
     Ok(constraint)
 }
 
+/// Profiling-only entry point: runs the JSON-schema import pipeline
+/// (parse → factor → AST lower) without the downstream compile. Hidden from the
+/// public API; used by `examples/profile_glr.rs` to isolate import timings.
+#[doc(hidden)]
+pub fn __profile_json_schema_import(schema_json: &str) -> crate::Result<()> {
+    let grammar = lower_factored_named_grammar(
+        schema_json,
+        "json_schema",
+        parse_json_schema_to_named,
+    )?;
+    std::hint::black_box(&grammar);
+    Ok(())
+}
+
 fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast::NamedGrammar> {
     let json_parse_started_at = emit_import_phase_start("serde_json_from_str");
     let schema: serde_json::Value = serde_json::from_str(schema_json)

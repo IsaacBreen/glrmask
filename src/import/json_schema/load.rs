@@ -1,5 +1,7 @@
 use serde_json::{Map, Value};
 
+use rayon::prelude::*;
+
 use super::ast::{
     AdditionalProperties, ArraySchema, NumberSchema, ObjectSchema, PatternPropertySchema,
     PropertySchema, Schema, SchemaAssertions, SchemaDefinition, SchemaDocument, SchemaKind,
@@ -589,11 +591,23 @@ fn load_schema_array(
     let Some(values) = value.as_array() else {
         return Err(SchemaImportError::at(location, format!("{key} must be an array")));
     };
-    values
-        .iter()
-        .enumerate()
-        .map(|(index, child)| load_schema_at(child, &format!("{location}/{key}/{index}")))
-        .collect()
+    // Loading a schema is a pure function of (value, location): no shared rule
+    // naming or other order-dependent state. Large branch arrays (e.g. a 512-way
+    // `anyOf` catalog) parallelize cleanly; `collect` preserves branch order so
+    // the result is identical to the serial load.
+    if values.len() >= 16 {
+        values
+            .par_iter()
+            .enumerate()
+            .map(|(index, child)| load_schema_at(child, &format!("{location}/{key}/{index}")))
+            .collect()
+    } else {
+        values
+            .iter()
+            .enumerate()
+            .map(|(index, child)| load_schema_at(child, &format!("{location}/{key}/{index}")))
+            .collect()
+    }
 }
 
 fn load_schema_member(
