@@ -5,7 +5,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, OnceLock};
 
 use crate::automata::weighted::nwa::{NWA, NWAState as NWAStateType};
 use crate::grammar::flat::TerminalID;
@@ -583,56 +582,20 @@ pub(crate) fn collapse_always_allowed(
 
 // ─── Disallowed-follow subtraction ───────────────────────────────────────────
 
-/// Per-build cache for the grammar-global disallowed-follow table.
-///
-/// Every L2P partition receives the same `disallowed_follows` table and the same
-/// terminal count. Normalize it once per global terminal-DWA build and let each
-/// partition share the same table.
-#[derive(Default)]
-pub(crate) struct SharedDisallowedFollowDfaCache {
-    normalized: OnceLock<Option<Arc<Vec<BitSet>>>>,
-}
-
-impl SharedDisallowedFollowDfaCache {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    fn get_or_build(
-        &self,
-        num_terminals: usize,
-        disallowed_follows: &BTreeMap<u32, BitSet>,
-    ) -> Option<Arc<Vec<BitSet>>> {
-        self.normalized
-            .get_or_init(|| {
-                let normalized = normalize_disallowed_follows(num_terminals, disallowed_follows);
-                if normalized.iter().all(|bits| bits.is_zero()) {
-                    None
-                } else {
-                    Some(Arc::new(normalized))
-                }
-            })
-            .clone()
-    }
-}
-
 /// Apply disallowed-follow constraints by subtracting a follow-pair DFA from
 /// the NWA. Takes the pre-computed `disallowed_follows` map and `num_terminals`.
+///
+/// The normalized follow table is cheap to recompute and is intentionally not
+/// memoized across builds: a single shared cache cannot represent the different
+/// follow tables used by, e.g., the representative-coalesced interchangeability
+/// pass versus the canonical grammar table, and silently reusing one for the
+/// other corrupts results.
 pub(crate) fn apply_disallowed_follow_constraints(
     nwa: &mut NWA,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     num_terminals: usize,
-    shared_cache: Option<&SharedDisallowedFollowDfaCache>,
     ignore_terminal: Option<TerminalID>,
 ) {
-    if let Some(cache) = shared_cache {
-        let Some(normalized) = cache.get_or_build(num_terminals, disallowed_follows) else {
-            return;
-        };
-        *nwa = subtract_disallowed_follows_direct(nwa, normalized.as_ref(), ignore_terminal);
-        return;
-    }
-
     let normalized = normalize_disallowed_follows(num_terminals, disallowed_follows);
     if normalized.iter().all(|bits| bits.is_zero()) {
         return;
@@ -750,7 +713,6 @@ mod tests {
             &mut nwa,
             &disallowed,
             2,
-            None,
             Some(ignore),
         );
 

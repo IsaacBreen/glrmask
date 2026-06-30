@@ -46,7 +46,7 @@ use nwa_builder::{
 use terminal_interchangeability::{dump_dwa_if_requested, TerminalInterchangeability};
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
-    prune_non_coreachable_states, SharedDisallowedFollowDfaCache,
+    prune_non_coreachable_states,
 };
 
 fn l2p_timing_profile_enabled() -> bool {
@@ -447,7 +447,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     shared_original_vocab_analysis_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_transition_cache: Option<&OnceLock<equivalence_analysis::compat::FlatTransitionCache>>,
     shared_simplify_cache: Option<&SharedSimplifyCache>,
-    shared_disallowed_follow_dfa_cache: Option<&SharedDisallowedFollowDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> Option<LocalIdMapTerminalDwa> {
@@ -480,9 +479,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     } else {
         TerminalInterchangeability::identity(active_terminals)
     };
-    let reference_terminal_expansion = !terminal_interchangeability.is_identity()
-        && terminal_interchangeability
-            .supports_direct_post_dwa_expansion(tokenizer.initial_state_id());
+    let reference_terminal_expansion = !terminal_interchangeability.is_identity();
     let analysis_active_terminals = if reference_terminal_expansion {
         terminal_interchangeability.active_representatives()
     } else {
@@ -745,9 +742,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let coarse_always_allowed = reference_terminal_expansion.then(|| {
                 terminal_interchangeability.coalesced_always_allowed_follows(&always_allowed)
             });
-            let coarse_disallowed_follows = reference_terminal_expansion.then(|| {
-                terminal_interchangeability.coalesced_disallowed_follows(disallowed_follows)
-            });
             let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_build = nwa.states().len();
 
@@ -761,13 +755,18 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let nwa_states_after_collapse = nwa.states().len();
 
             let disallowed_started_at = Instant::now();
-            apply_disallowed_follow_constraints(
-                &mut nwa,
-                coarse_disallowed_follows.as_ref().unwrap_or(disallowed_follows),
-                grammar.num_terminals as usize,
-                shared_disallowed_follow_dfa_cache,
-                ignore_terminal,
-            );
+            // Terminal interchangeability defers ALL disallowed-follow pruning to
+            // after terminal expansion (see `postprocess_expanded_terminal_dwa`),
+            // so the representative build applies no follow constraints here. The
+            // ordinary path applies the canonical grammar follows now.
+            if !reference_terminal_expansion {
+                apply_disallowed_follow_constraints(
+                    &mut nwa,
+                    disallowed_follows,
+                    grammar.num_terminals as usize,
+                    ignore_terminal,
+                );
+            }
             let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_disallowed = nwa.states().len();
 
@@ -966,7 +965,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             grammar,
             disallowed_follows,
             ignore_terminal,
-            shared_disallowed_follow_dfa_cache,
         );
         output.profile.terminal_dwa_ms +=
             expansion_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -996,7 +994,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 shared_original_vocab_analysis_dfa_cache,
                 shared_transition_cache,
                 shared_simplify_cache,
-                shared_disallowed_follow_dfa_cache,
                 flat_trans,
                 initial_state_map,
             )
@@ -1044,7 +1041,6 @@ fn postprocess_expanded_terminal_dwa(
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<TerminalID>,
-    shared_disallowed_follow_dfa_cache: Option<&SharedDisallowedFollowDfaCache>,
 ) -> LocalIdMapTerminalDwa {
     let mut nwa = NWA::new(
         artifact.id_map.num_tsids(),
@@ -1080,7 +1076,6 @@ fn postprocess_expanded_terminal_dwa(
         &mut nwa,
         disallowed_follows,
         grammar.num_terminals as usize,
-        shared_disallowed_follow_dfa_cache,
         ignore_terminal,
     );
     prune_non_coreachable_states(&mut nwa);
