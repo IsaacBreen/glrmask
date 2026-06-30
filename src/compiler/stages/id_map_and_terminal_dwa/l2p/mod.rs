@@ -480,8 +480,14 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     } else {
         TerminalInterchangeability::identity(active_terminals)
     };
-    let reference_terminal_expansion = !terminal_interchangeability.is_identity();
-    let analysis_active_terminals = terminal_interchangeability.active_representatives();
+    let reference_terminal_expansion = !terminal_interchangeability.is_identity()
+        && terminal_interchangeability
+            .supports_direct_post_dwa_expansion(tokenizer.initial_state_id());
+    let analysis_active_terminals = if reference_terminal_expansion {
+        terminal_interchangeability.active_representatives()
+    } else {
+        active_terminals
+    };
     let num_analysis_active_terminals = analysis_active_terminals
         .iter()
         .filter(|&&active| active)
