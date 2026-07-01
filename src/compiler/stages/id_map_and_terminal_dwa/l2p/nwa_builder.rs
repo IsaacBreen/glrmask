@@ -1052,6 +1052,8 @@ mod tests {
     use super::*;
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::compile::build_regex;
+    use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+    use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 
     fn one_terminal_tokenizer() -> Tokenizer {
         let expressions = vec![Expr::U8Seq(b" ".to_vec())];
@@ -1121,12 +1123,72 @@ mod tests {
             "the non-initial ignore match must not become a terminal edge"
         );
     }
+
+    #[test]
+    fn transport_mode_preserves_sibling_outputs_outside_its_swap() {
+        // A swap mode may relabel A <-> B, but C remains an observable output
+        // of the full lexer. Filtering C before the trie walk makes the mode's
+        // lexer language differ from the full swapped-label lexer language.
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"b".to_vec()),
+            Expr::U8Seq(b"c".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let tree = VocabPrefixTree::build(&[(0, b"c".to_vec())]);
+        let state_ids = (0..tokenizer.num_states()).collect::<Vec<_>>();
+        let id_map = InternalIdMap {
+            tokenizer_states:
+                ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+                    state_ids.clone(),
+                    state_ids,
+                ),
+            vocab_tokens: ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+                vec![0],
+                vec![0],
+            ),
+        };
+        let mut possible_matches = PossibleMatchesComputer::new(&tokenizer);
+        let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+        let leaf = nwa.add_state();
+        nwa.set_final_weight(leaf, Weight::all());
+        let start = nwa.add_state();
+        nwa.start_states_mut().push(start);
+        let modes = [TerminalNwaTransportMode {
+            scanner_state_for_original: (0..tokenizer.num_states()).collect(),
+            terminal_map: vec![1, 0, 2],
+        }];
+
+        build_transport_nwa_via_trie_walk(
+            &tokenizer,
+            None,
+            &mut nwa,
+            start,
+            leaf,
+            &id_map,
+            &tree.root,
+            &mut possible_matches,
+            &modes,
+        );
+
+        let root = nwa.states()[start as usize].epsilons[0].0;
+        assert!(
+            nwa.states()[root as usize]
+                .transitions
+                .get(&2)
+                .is_some_and(|edges| edges.iter().any(|(destination, _)| *destination == leaf)),
+            "a mode that swaps A and B must retain the fixed C output"
+        );
+    }
 }
 
 /// One strict-interchangeability scanner mode for the slow reference builder.
-/// `scanner_state_for_original[s]` is the representative-terminal simulator
-/// state used when the actual current lexer state is `s`; `terminal_map` maps
-/// representative labels emitted by that simulator back to concrete terminals.
+/// `scanner_state_for_original[s]` is the full-lexer simulator state used when
+/// the actual current lexer state is `s`; `terminal_map` relabels every raw
+/// output emitted by that simulator back into the original terminal alphabet.
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalNwaTransportMode {
     pub(crate) scanner_state_for_original: Vec<TokenizerState>,
@@ -1369,7 +1431,6 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
     id_map: &InternalIdMap,
     vocab_tree_root: &VocabPrefixTreeNode,
     possible_matches: &mut PossibleMatchesComputer<'a>,
-    active_terminals: &[bool],
     modes: &[TerminalNwaTransportMode],
 ) -> TerminalDwaBuildProfile {
     assert!(!modes.is_empty());
@@ -1410,7 +1471,7 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
         initial_source_states,
         false,
         None,
-        Some(active_terminals.to_vec()),
+        None,
         tokenizer.num_states() as usize,
     );
     let mut builder = TransportNwaBuilder { base, modes };

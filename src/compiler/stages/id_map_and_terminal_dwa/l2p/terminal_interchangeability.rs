@@ -6,12 +6,10 @@
 //! DFA and the DFA with those output labels swapped have a bijection between
 //! their residual-state partitions.
 //!
-//! This is intentionally a validation-first construction: hide
-//! nonrepresentatives before id-map/DWA construction, restore noninitial labels,
-//! make one transported copy per relevant initial replacement, and use the
-//! existing local DWA/id-map merger. The simple restoration is used only when
-//! the transport fixes the lexer reset residual class. Directed subsumption is
-//! deliberately excluded.
+//! This is intentionally a validation-first construction: retain the full
+//! lexer alphabet, make one transported copy per relevant initial replacement,
+//! relabel every output of each transported scanner, and use the existing local
+//! DWA/id-map merger. Directed subsumption is deliberately excluded.
 
 use std::collections::BTreeMap;
 
@@ -459,18 +457,6 @@ impl TerminalInterchangeability {
     }
 
     pub(crate) fn active_representatives(&self) -> &[bool] { &self.active_representatives }
-    pub(crate) fn visible_terminal_labels(&self) -> Vec<bool> {
-        // The L2+ phase may only coalesce terminals selected by its active mask,
-        // but its DWA remains over the complete terminal alphabet. Hide exactly
-        // the concrete members replaced by a class representative; keep every
-        // other terminal visible, including terminals assigned to L1.
-        self.representative_for
-            .iter()
-            .enumerate()
-            .map(|(terminal, &representative)| terminal as TerminalID == representative)
-            .collect()
-    }
-
     pub(crate) fn active_terminal_count_before(&self) -> usize {
         self.original_active.iter().filter(|&&active| active).count()
     }

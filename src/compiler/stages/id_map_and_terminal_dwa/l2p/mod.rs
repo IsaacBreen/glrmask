@@ -471,10 +471,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     }
 
     // Discover terminal interchangeability in the current vocabulary byte
-    // partition, with exactly this L2+ phase's terminal outputs observable.
-    // Nonrepresentatives are hidden from equivalence analysis and the trie walk
-    // via the active-terminal group filter; the completed representative DWA is
-    // expanded back to the full terminal set afterwards.
+    // partition. The L2+ active mask limits which terminals may form a class,
+    // but a transported scanner must retain the complete terminal alphabet.
     let terminal_interchangeability = if l2p_terminal_interchangeability_enabled() {
         TerminalInterchangeability::build(
             tokenizer,
@@ -487,19 +485,16 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     };
     let reference_terminal_expansion = !terminal_interchangeability.is_identity();
     let analysis_active_terminals = terminal_interchangeability.active_representatives();
-    let terminal_nwa_visible_labels = terminal_interchangeability.visible_terminal_labels();
     let num_analysis_active_terminals = analysis_active_terminals
         .iter()
         .filter(|&&active| active)
         .count();
-    // Build the validation artifact in original lexer-state coordinates. The
-    // transport-aware trie walk owns the terminal substitution; minimization or
-    // an ordinary id-map quotient before that walk can lose a surviving,
-    // noninterchangeable initial edge.
-    let reference_filtered_tokenizer = reference_terminal_expansion.then(|| {
-        tokenizer.deactivate_terminals_without_minimizing(&terminal_nwa_visible_labels)
-    });
-    let tokenizer_before_simplify = reference_filtered_tokenizer.as_ref().unwrap_or(tokenizer);
+    // Build the validation artifact in original lexer-state coordinates with
+    // the full terminal alphabet intact. Each transport mode scans a complete
+    // swapped-label lexer and relabels its outputs back to the original
+    // alphabet; deleting sibling class members changes longest-match and
+    // future-terminal behavior.
+    let tokenizer_before_simplify = tokenizer;
 
     let simplify_started_at = Instant::now();
     let can_skip_simplify = reference_terminal_expansion
@@ -624,9 +619,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // state/vocab equivalence pass must not be bypassed. Do not reintroduce
     // fast-sound, identity, lex-dedup, or similar shortcut id-map paths.
     let fast_sound_id_map_used = false;
-    // The reference tokenizer has inactive metadata removed already. Keep the
-    // raw state coordinate intact and let its exact terminal metadata define
-    // the id-map analysis; the transport builder handles label substitution.
+    // Keep the raw state coordinate and complete terminal metadata intact; the
+    // transport builder performs the mode-specific label substitution.
     let (mut simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
@@ -753,7 +747,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                     &simplified_id_map,
                     &full_tree.root,
                     &mut pm_computer,
-                    &terminal_nwa_visible_labels,
                     modes,
                 )
             } else {
