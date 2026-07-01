@@ -495,7 +495,8 @@ fn determinize_impl(
                             weights.push(previous);
                             weights.push(weight);
                             let duplicates = duplicate_weights.get_or_insert_with(FxHashMap::default);
-                            debug_assert!(duplicates.insert(dst, weights).is_none());
+                            let replaced = duplicates.insert(dst, weights);
+                            debug_assert!(replaced.is_none());
                         }
                     }
                 }
@@ -750,6 +751,7 @@ fn determinize_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::automata::weighted_u32::equivalence::find_difference;
     use range_set_blaze::RangeSetBlaze;
 
     fn tokens(values: impl IntoIterator<Item = u32>) -> Weight {
@@ -771,7 +773,7 @@ mod tests {
 
         let fast = determinize_impl(&nwa, true).unwrap();
         let generic = determinize_impl(&nwa, false).unwrap();
-        assert_eq!(bincode::serialize(&fast).unwrap(), bincode::serialize(&generic).unwrap());
+        assert_eq!(find_difference(&fast, &generic).unwrap(), None);
         assert_eq!(fast.eval_word(&[7]), tokens([0, 1]));
     }
     #[test]
@@ -835,8 +837,8 @@ mod tests {
             let fast = determinize_impl(&nwa, true).unwrap();
             let generic = determinize_impl(&nwa, false).unwrap();
             assert_eq!(
-                bincode::serialize(&fast).unwrap(),
-                bincode::serialize(&generic).unwrap(),
+                find_difference(&fast, &generic).unwrap(),
+                None,
                 "case {case}",
             );
         }
@@ -858,7 +860,7 @@ mod tests {
 
         let fast = determinize_impl(&nwa, true).unwrap();
         let generic = determinize_impl(&nwa, false).unwrap();
-        assert_eq!(bincode::serialize(&fast).unwrap(), bincode::serialize(&generic).unwrap());
+        assert_eq!(find_difference(&fast, &generic).unwrap(), None);
         assert_eq!(fast.eval_word(&[5]), tokens([0, 1, 2, 3, 4, 5]));
     }
 
@@ -877,7 +879,7 @@ mod tests {
         let fast = determinize_impl(&nwa, true).unwrap();
         let generic = determinize_impl(&nwa, false).unwrap();
 
-        assert_eq!(bincode::serialize(&fast).unwrap(), bincode::serialize(&generic).unwrap());
+        assert_eq!(find_difference(&fast, &generic).unwrap(), None);
         assert_eq!(fast.eval_word(&[7]), tokens([0, 1]));
         assert_eq!(fast.eval_word(&[8]), tokens([2]));
 
