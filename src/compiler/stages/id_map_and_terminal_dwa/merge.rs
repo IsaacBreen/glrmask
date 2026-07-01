@@ -13,7 +13,7 @@ use rustc_hash::FxHashMap;
 
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::minimize::minimize;
+use crate::automata::weighted::minimize::minimize_owned;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::mapped_artifact::MappedArtifact;
@@ -275,7 +275,7 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
         determinize(&global_nwa).expect("merge terminal NWA determinization failed")
     });
     let compact_started_at = Instant::now();
-    let mut mapped_dwa = MappedArtifact::new(minimize(&pre_minimize), global_id_map);
+    let mut mapped_dwa = MappedArtifact::new(minimize_owned(pre_minimize), global_id_map);
     mapped_dwa.compact_dimensions_fast();
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
     let (dwa, id_map) = mapped_dwa.into_parts();
@@ -387,9 +387,9 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     let minimize_enabled = minimize_merged_terminal_dwa_enabled();
     let minimize_started_at = Instant::now();
     let dwa = if minimize_enabled {
-        minimize(&det)
+        minimize_owned(det)
     } else {
-        det.clone()
+        det
     };
     let minimize_ms = if minimize_enabled {
         minimize_started_at.elapsed().as_secs_f64() * 1000.0
