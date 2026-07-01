@@ -1508,6 +1508,237 @@ fn strict_terminal_interchangeability_reference_validates_one_terminal_position(
 }
 
 #[test]
+fn directed_terminal_subsumption_matches_baseline_l2p_artifact() {
+    let _lock = TI_ENV_LOCK.lock().unwrap();
+    let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+    let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+    let _disable_feature = EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
+    let _disable_validation = EnvVarGuard::unset("GLRMASK_VALIDATE_L2P_TERMINAL_INTERCHANGEABILITY");
+
+    // The current L2P vocabulary partition is just the token `ab`, so x/y are
+    // absent from its byte alphabet but remain valid incoming lexer contexts
+    // through byte prefill. R has the extra incoming residual after x; M does
+    // not. The preserved Y terminal makes the map strictly directed.
+    let entries = ["ab"];
+    let grammar = r#"
+        start: item | Y
+        item: R | M
+        R: /(?:ab|xa)/
+        M: /ab/
+        Y: "y"
+    "#;
+    let baseline = lark(&entries, grammar);
+
+    drop(_disable_feature);
+    drop(_disable_validation);
+    let _enable_feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _assert_equal = EnvVarGuard::set(
+        "GLRMASK_ASSERT_L2P_TERMINAL_INTERCHANGEABILITY_EQUAL",
+        "1",
+    );
+    let expanded = lark(&entries, grammar);
+
+    for prefix in [b"".as_slice(), b"a", b"x", b"xa", b"y", b"ab"] {
+        let observe = |constraint: &Constraint| {
+            let mut state = constraint.start();
+            if state.commit_bytes(prefix).is_err() {
+                return None;
+            }
+            Some((state.is_finished(), allowed(&state.mask())))
+        };
+        assert_eq!(
+            observe(&baseline),
+            observe(&expanded),
+            "directed terminal subsumption changed byte prefix {prefix:?}",
+        );
+    }
+}
+
+#[test]
+fn directed_terminal_subsumption_star_family_matches_baseline_l2p_artifact() {
+    let _lock = TI_ENV_LOCK.lock().unwrap();
+    let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+    let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+    let _disable_feature = EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
+    let _disable_validation = EnvVarGuard::unset("GLRMASK_VALIDATE_L2P_TERMINAL_INTERCHANGEABILITY");
+
+    // Strict interchangeability has three singleton classes here. R has both
+    // incoming-context residuals, while M1 has only x and M2 only y. All three
+    // agree from reset on the `ab` vocabulary partition, so directed
+    // subsumption can use R as a single representative family.
+    let entries = ["ab"];
+    let grammar = r#"
+        start: item item
+        item: R | M1 | M2
+        R: /(?:ab|xa|yb)/
+        M1: /(?:ab|xa)/
+        M2: /(?:ab|yb)/
+    "#;
+    let baseline = lark(&entries, grammar);
+
+    drop(_disable_feature);
+    drop(_disable_validation);
+    let _enable_feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _assert_equal = EnvVarGuard::set(
+        "GLRMASK_ASSERT_L2P_TERMINAL_INTERCHANGEABILITY_EQUAL",
+        "1",
+    );
+    let expanded = lark(&entries, grammar);
+
+    for prefix in [
+        b"".as_slice(),
+        b"a",
+        b"x",
+        b"xa",
+        b"y",
+        b"yb",
+        b"ab",
+        b"abab",
+    ] {
+        let observe = |constraint: &Constraint| {
+            let mut state = constraint.start();
+            if state.commit_bytes(prefix).is_err() {
+                return None;
+            }
+            Some((state.is_finished(), allowed(&state.mask())))
+        };
+        assert_eq!(
+            observe(&baseline),
+            observe(&expanded),
+            "directed star family changed byte prefix {prefix:?}",
+        );
+    }
+}
+
+#[test]
+fn directed_terminal_subsumption_small_family_matrix_matches_baseline_artifact() {
+    let _lock = TI_ENV_LOCK.lock().unwrap();
+    let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+    let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+    let _disable_feature = EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
+    let _disable_validation = EnvVarGuard::unset("GLRMASK_VALIDATE_L2P_TERMINAL_INTERCHANGEABILITY");
+
+    // Exhaust all combinations of these small incoming-context extensions.
+    // Every case has `ab` from reset; x/y exist only as carried lexer contexts.
+    // The enabled compilation performs the exact local terminal-DWA/id-map
+    // comparison itself, while the outer loop also compares observable states.
+    let variants: &[&[&str]] = &[
+        &["ab"],
+        &["ab", "xa"],
+        &["ab", "yb"],
+        &["ab", "xa", "yb"],
+    ];
+    let grammars = variants
+        .iter()
+        .flat_map(|a| {
+            variants.iter().flat_map(move |b| {
+                variants.iter().map(move |c| {
+                    let regex = |words: &[&str]| format!("/(?:{})/", words.join("|"));
+                    format!(
+                        "start: item item\nitem: A | B | C\nA: {}\nB: {}\nC: {}\n",
+                        regex(a),
+                        regex(b),
+                        regex(c),
+                    )
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let baselines = grammars
+        .iter()
+        .map(|grammar| lark(&["ab"], grammar))
+        .collect::<Vec<_>>();
+
+    drop(_disable_feature);
+    drop(_disable_validation);
+    let _enable_feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _assert_equal = EnvVarGuard::set(
+        "GLRMASK_ASSERT_L2P_TERMINAL_INTERCHANGEABILITY_EQUAL",
+        "1",
+    );
+    for (case_index, (grammar, baseline)) in grammars.iter().zip(baselines.iter()).enumerate() {
+        let expanded = lark(&["ab"], grammar);
+        for prefix in [
+            b"".as_slice(),
+            b"a",
+            b"x",
+            b"xa",
+            b"y",
+            b"yb",
+            b"ab",
+            b"abab",
+        ] {
+            let observe = |constraint: &Constraint| {
+                let mut state = constraint.start();
+                if state.commit_bytes(prefix).is_err() {
+                    return None;
+                }
+                Some((state.is_finished(), allowed(&state.mask())))
+            };
+            assert_eq!(
+                observe(baseline),
+                observe(&expanded),
+                "directed family matrix case {case_index} changed byte prefix {prefix:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn directed_terminal_subsumption_with_ignore_matches_baseline_l2p_artifact() {
+    let _lock = TI_ENV_LOCK.lock().unwrap();
+    let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+    let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+    let _disable_feature = EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
+    let _disable_validation = EnvVarGuard::unset("GLRMASK_VALIDATE_L2P_TERMINAL_INTERCHANGEABILITY");
+
+    let entries = ["ab", " ", "ab ", " ab", "x", "y"];
+    let grammar = r#"
+        start: item item
+        item: R | M1 | M2
+        R: /(?:ab|xa|yb)/
+        M1: /(?:ab|xa)/
+        M2: /(?:ab|yb)/
+        WS: / +/
+        %ignore WS
+    "#;
+    let baseline = lark(&entries, grammar);
+
+    drop(_disable_feature);
+    drop(_disable_validation);
+    let _enable_feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _assert_equal = EnvVarGuard::set(
+        "GLRMASK_ASSERT_L2P_TERMINAL_INTERCHANGEABILITY_EQUAL",
+        "1",
+    );
+    let expanded = lark(&entries, grammar);
+
+    for prefix in [
+        b"".as_slice(),
+        b" ",
+        b"a",
+        b"xa",
+        b"yb",
+        b"ab ",
+        b" ab",
+        b"ab ab",
+    ] {
+        let observe = |constraint: &Constraint| {
+            let mut state = constraint.start();
+            if state.commit_bytes(prefix).is_err() {
+                return None;
+            }
+            Some((state.is_finished(), allowed(&state.mask())))
+        };
+        assert_eq!(
+            observe(&baseline),
+            observe(&expanded),
+            "directed family with IGNORE changed byte prefix {prefix:?}",
+        );
+    }
+}
+
+#[test]
 fn transported_terminal_interchangeability_with_ignore_equals_baseline_artifact() {
     let _lock = TI_ENV_LOCK.lock().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");

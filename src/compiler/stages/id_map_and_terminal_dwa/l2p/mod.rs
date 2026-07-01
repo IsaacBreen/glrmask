@@ -73,10 +73,10 @@ impl Drop for SuppressTerminalInterchangeability {
     }
 }
 
-/// Enable the deliberately slow strict terminal-interchangeability reference
-/// construction. It preserves raw lexer-state coordinates, uses a
-/// transport-aware trie walk, and checks the completed local artifact against a
-/// baseline build before returning it.
+/// Enable the deliberately slow exact terminal-subsumption reference
+/// construction. It preserves raw lexer-state coordinates, builds ordinary
+/// representative artifacts, restores directed member transports, and checks
+/// the completed local artifact against a baseline build before returning it.
 fn l2p_terminal_interchangeability_enabled() -> bool {
     if TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH.with(|depth| depth.get() != 0) {
         return false;
@@ -466,8 +466,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         }
     }
 
-    // Discover terminal interchangeability in the current vocabulary byte
-    // partition, with exactly this L2+ phase's terminal outputs observable.
+    // Discover exact directed representative families in the current vocabulary
+    // byte partition, with every active L2+ terminal output observable.
     // Nonrepresentatives are hidden from equivalence analysis and the trie walk
     // via the active-terminal group filter; the completed representative DWA is
     // expanded back to the full terminal set afterwards.
@@ -491,7 +491,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         .iter()
         .filter(|&&active| active)
         .count();
-    // Keep the ordinary L2P tokenizer path unchanged. Interchangeability only
+    // Keep the ordinary L2P tokenizer path unchanged. Directed subsumption only
     // narrows the active terminal universe; the normal simplifier, equivalence
     // analysis, terminal coloring, and cache paths remain authoritative.
     let tokenizer_before_simplify = tokenizer;
@@ -759,9 +759,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let nwa_states_after_collapse = nwa.states().len();
 
             let disallowed_started_at = Instant::now();
-            // Terminal interchangeability defers ALL disallowed-follow pruning to
-            // after terminal expansion (see `postprocess_expanded_terminal_dwa`),
-            // so the representative build applies no follow constraints here. The
+            // Terminal subsumption defers ALL disallowed-follow pruning to after
+            // terminal expansion (see `postprocess_expanded_terminal_dwa`), so
+            // the representative build applies no follow constraints here. The
             // ordinary path applies the canonical grammar follows now.
             if !reference_terminal_expansion {
                 apply_disallowed_follow_constraints(

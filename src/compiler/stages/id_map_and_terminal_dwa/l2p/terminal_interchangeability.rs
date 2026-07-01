@@ -1,16 +1,17 @@
-//! Strict terminal interchangeability for the L2+ terminal-DWA reference path.
+//! Exact directed terminal subsumption for the L2+ terminal-DWA path.
 //!
-//! For one vocabulary partition, interchangeability is computed on the tokenizer
-//! DFA restricted to that partition's bytes. Only terminals active in this L2+
-//! phase are observable. A pair is interchangeable when the original restricted
-//! DFA and the DFA with those output labels swapped have a bijection between
-//! their residual-state partitions.
+//! For one vocabulary partition we compute joint terminal residual rows on the
+//! tokenizer DFA restricted to that partition's bytes. A strict interchangeable
+//! pair has a bijective relabelling of those rows. A directed representative
+//! family is more general: one representative can transport its residual rows
+//! onto each member, while source-only representative contexts contribute no
+//! member weight. A family is certified simultaneously against the exact lexer
+//! view in which all of its nonrepresentative members are hidden.
 //!
-//! This is intentionally a validation-first construction: hide
-//! nonrepresentatives before id-map/DWA construction; expand surviving
-//! noninitial representative edges in place; make one transported whole-DWA
-//! copy per initial replacement; then use the existing local DWA/id-map merger.
-//! Directed subsumption is deliberately excluded.
+//! Construction remains validation-first: build the ordinary
+//! representatives-only artifact, expand noninitial labels, make one
+//! transported whole-DWA copy per initial member substitution, then merge the
+//! local artifacts through the existing exact DWA/id-map merger.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -47,13 +48,216 @@ impl OutputBits {
     }
 }
 
-/// Concrete representation of a bijection between residual-state partitions.
-/// A source lexer state maps to every concrete state in its target partition.
-/// The target set may be empty if the residual maps only to the synthetic
-/// restricted-DFA sink; weight transport then drops that coordinate.
+/// Exact partial transport from representative scanner states to member
+/// scanner states. A source state maps to every concrete target state with the
+/// same transported terminal-residual row. An empty target set denotes
+/// representative-only behaviour; weight transport drops that coordinate.
 #[derive(Clone, Debug)]
 struct InterchangeMap {
     source_state_to_target_states: Vec<Vec<u32>>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TerminalResidualKey {
+    accepting: bool,
+    successor_blocks: Vec<u32>,
+}
+
+/// Exact correlated terminal residuals for one L2P byte partition.
+///
+/// A residual block names the full future match language of one
+/// `(terminal, lexer-state)` pair. Blocks are minimized jointly across all
+/// active terminals, so equal block IDs are comparable across terminal columns.
+/// A scanner-state row is therefore a complete, exact terminal-residual view.
+struct TerminalResidualRows {
+    rows_by_state: Vec<Vec<(TerminalID, u32)>>,
+    initial_state: usize,
+    initial_block_by_terminal: Vec<Option<u32>>,
+    terminal_count: usize,
+}
+
+impl TerminalResidualRows {
+    fn build(restricted: &RestrictedDfa<'_>, terminals: &[TerminalID]) -> Self {
+        let state_count = restricted.state_count();
+        let real_state_count = restricted.real_state_count;
+        let dead_state = restricted.dead_state();
+        let terminal_count = restricted.tokenizer.num_terminals() as usize;
+        let mut terminal_index = vec![usize::MAX; terminal_count];
+        for (index, &terminal) in terminals.iter().enumerate() {
+            terminal_index[terminal as usize] = index;
+        }
+
+        let pairs_per_terminal = state_count;
+        let pair_count = terminals.len() * pairs_per_terminal;
+        let mut accepting = vec![false; pair_count];
+        for state in 0..real_state_count {
+            for terminal in restricted.tokenizer.matched_terminals_iter(state as u32) {
+                let index = terminal_index[terminal as usize];
+                if index != usize::MAX {
+                    accepting[index * pairs_per_terminal + state] = true;
+                }
+            }
+        }
+        let successors = (0..state_count)
+            .map(|state| {
+                (0..restricted.bytes.len())
+                    .map(|slot| restricted.successor(state, slot))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        let mut blocks = accepting
+            .iter()
+            .map(|&accepting| u32::from(accepting))
+            .collect::<Vec<_>>();
+        loop {
+            let mut ids = HashMap::<TerminalResidualKey, u32>::with_capacity(pair_count);
+            let mut next = vec![0u32; pair_count];
+            for terminal_index in 0..terminals.len() {
+                let base = terminal_index * pairs_per_terminal;
+                for state in 0..state_count {
+                    let key = TerminalResidualKey {
+                        accepting: accepting[base + state],
+                        successor_blocks: successors[state]
+                            .iter()
+                            .map(|&target| blocks[base + target])
+                            .collect(),
+                    };
+                    let id = ids.len() as u32;
+                    next[base + state] = *ids.entry(key).or_insert(id);
+                }
+            }
+            if next == blocks {
+                break;
+            }
+            blocks = next;
+        }
+
+        let initial = restricted.tokenizer.initial_state_id() as usize;
+        let mut initial_block_by_terminal = vec![None; terminal_count];
+        let mut rows_by_state = vec![Vec::<(TerminalID, u32)>::new(); real_state_count];
+        for (terminal_index, &terminal) in terminals.iter().enumerate() {
+            let base = terminal_index * pairs_per_terminal;
+            let dead_block = blocks[base + dead_state];
+            if blocks[base + initial] != dead_block {
+                initial_block_by_terminal[terminal as usize] = Some(blocks[base + initial]);
+            }
+            for state in 0..real_state_count {
+                let block = blocks[base + state];
+                if block != dead_block {
+                    rows_by_state[state].push((terminal, block));
+                }
+            }
+        }
+        for row in &mut rows_by_state {
+            row.sort_unstable_by_key(|&(terminal, _)| terminal);
+        }
+        Self {
+            rows_by_state,
+            initial_state: initial,
+            initial_block_by_terminal,
+            terminal_count,
+        }
+    }
+
+    fn reset_residual_groups(
+        &self,
+        candidates: &[TerminalID],
+    ) -> BTreeMap<Option<u32>, Vec<TerminalID>> {
+        let mut groups = BTreeMap::<Option<u32>, Vec<TerminalID>>::new();
+        for &terminal in candidates {
+            groups
+                .entry(self.initial_block_by_terminal[terminal as usize])
+                .or_default()
+                .push(terminal);
+        }
+        groups
+    }
+
+    fn family_maps(
+        &self,
+        representative: TerminalID,
+        members: &[TerminalID],
+    ) -> Option<BTreeMap<TerminalID, InterchangeMap>> {
+        if members.len() < 2 || !members.contains(&representative) {
+            return None;
+        }
+        let mut hidden = vec![false; self.terminal_count];
+        for &member in members {
+            if member != representative {
+                hidden[member as usize] = true;
+            }
+        }
+        let base_rows = self
+            .rows_by_state
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .copied()
+                    .filter(|&(terminal, _)| !hidden[terminal as usize])
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut base_states_by_row = HashMap::<Vec<(TerminalID, u32)>, Vec<u32>>::new();
+        for (state, row) in base_rows.iter().enumerate() {
+            base_states_by_row
+                .entry(row.clone())
+                .or_default()
+                .push(state as u32);
+        }
+
+        let mut maps = BTreeMap::new();
+        for &member in members {
+            if member == representative {
+                continue;
+            }
+            let mut base_state_to_member_states = vec![Vec::<u32>::new(); self.rows_by_state.len()];
+            for (member_state, row) in self.rows_by_state.iter().enumerate() {
+                let mut transformed = Vec::with_capacity(row.len());
+                let mut member_block = None;
+                for &(terminal, block) in row {
+                    if terminal == representative {
+                        continue;
+                    }
+                    if terminal == member {
+                        member_block = Some(block);
+                        continue;
+                    }
+                    if hidden[terminal as usize] {
+                        continue;
+                    }
+                    transformed.push((terminal, block));
+                }
+                // A target lexer state in which this member has no residual
+                // contributes no member weight. It is intentionally outside
+                // the partial transport's image; the identity branch supplies
+                // all non-member behaviour there.
+                let Some(block) = member_block else {
+                    continue;
+                };
+                let insertion = transformed
+                    .binary_search_by_key(&representative, |&(terminal, _)| terminal)
+                    .unwrap_or_else(|index| index);
+                transformed.insert(insertion, (representative, block));
+                let base_states = base_states_by_row.get(&transformed)?;
+                for &base_state in base_states {
+                    base_state_to_member_states[base_state as usize].push(member_state as u32);
+                }
+            }
+            if !base_state_to_member_states[self.initial_state]
+                .contains(&(self.initial_state as u32))
+            {
+                return None;
+            }
+            maps.insert(
+                member,
+                InterchangeMap {
+                    source_state_to_target_states: base_state_to_member_states,
+                },
+            );
+        }
+        Some(maps)
+    }
 }
 
 struct RestrictedDfa<'a> {
@@ -275,6 +479,7 @@ impl<'a> RestrictedDfa<'a> {
             source_state_to_target_states,
         })
     }
+
 }
 
 impl InterchangeMap {
@@ -335,10 +540,15 @@ impl InterchangeMap {
 
         (
             InternalIdMap {
+                // Local-artifact merging requires every raw scanner state to
+                // name a local coordinate.  Directed source-only behaviour has
+                // no transported weight, so put those target states in a fresh
+                // dead class rather than leaving an invalid u32::MAX mapping.
                 tokenizer_states: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
                     target_state_to_internal,
                     target_block_ids.len() as u32,
-                ),
+                )
+                .fill_unmapped_with_new_class(),
                 vocab_tokens: base.vocab_tokens.clone(),
             },
             source_to_target,
@@ -384,86 +594,141 @@ impl TerminalInterchangeability {
         relevant_bytes: &[bool; 256],
         ignore_terminal: Option<TerminalID>,
     ) -> Self {
-        let candidates = active_terminals.iter().enumerate()
+        let candidates = active_terminals
+            .iter()
+            .enumerate()
             .filter_map(|(terminal, &active)| active.then_some(terminal as TerminalID))
             .filter(|&terminal| Some(terminal) != ignore_terminal)
             .collect::<Vec<_>>();
-        if candidates.len() < 2 { return Self::identity(active_terminals); }
+        if candidates.len() < 2 {
+            return Self::identity(active_terminals);
+        }
 
         let restricted = RestrictedDfa::new(tokenizer, active_terminals, relevant_bytes);
-        let mut accepted = BTreeMap::<(TerminalID, TerminalID), InterchangeMap>::new();
-        let mut components = DisjointSet::new(active_terminals.len());
-        for (index, &left) in candidates.iter().enumerate() {
-            for &right in &candidates[index + 1..] {
-                if let Some(left_to_right) = restricted.interchange_map(left, right) {
-                    assert!(
-                        restricted.interchange_map(right, left).is_some(),
-                        "terminal interchange map was not symmetric: {left} <-> {right}",
-                    );
-                    components.union(left as usize, right as usize);
-                    accepted.insert((left, right), left_to_right);
-                }
+        // All active terminals remain observable in the residual row, including
+        // IGNORE. IGNORE is excluded only from representative selection; its
+        // current/future matches still constrain every directed transport.
+        let observable_terminals = active_terminals
+            .iter()
+            .enumerate()
+            .filter_map(|(terminal, &active)| active.then_some(terminal as TerminalID))
+            .collect::<Vec<_>>();
+        let residuals = TerminalResidualRows::build(&restricted, &observable_terminals);
+        let candidate_groups = residuals.reset_residual_groups(&candidates);
+        let mut reset_group_for_terminal = vec![Vec::<TerminalID>::new(); active_terminals.len()];
+        for group in candidate_groups.values() {
+            for &terminal in group {
+                reset_group_for_terminal[terminal as usize] = group.clone();
             }
         }
 
-        let mut groups = BTreeMap::<usize, Vec<TerminalID>>::new();
-        for &terminal in &candidates {
-            groups.entry(components.find(terminal as usize)).or_default().push(terminal);
-        }
-
+        // A family is valid only as a whole. A directed map is never inferred
+        // by transitive closure or a collection of independently certified
+        // pairwise maps. `family_maps` compares the exact joint residual rows
+        // in the one representatives-only lexer view used by expansion.
         let mut result = Self::identity(active_terminals);
-        for members in groups.into_values() {
-            if members.len() < 2 { continue; }
-            // The definition makes this an equivalence relation. Fail closed if
-            // the implementation ever produces only a transitive DSU chain.
-            for (index, &left) in members.iter().enumerate() {
-                for &right in &members[index + 1..] {
-                    assert!(
-                        accepted.contains_key(&(left, right)),
-                        "terminal interchangeability component was not a clique: {left} and {right}",
-                    );
-                }
-            }
-            let representative = *members.iter().min().expect("nonempty component");
-            result.members_by_representative[representative as usize] = members.clone();
-            for &member in &members {
-                result.representative_for[member as usize] = representative;
-                if member != representative {
-                    result.active_representatives[member as usize] = false;
-                    let map = accepted
-                        .get(&(representative, member))
-                        .expect("interchangeability clique pair missing a map")
-                        .clone();
-                    result.maps_by_representative_member.insert((representative, member), map);
-                }
-            }
-        }
-        if std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY").is_some() {
-            for (representative, members) in result.members_by_representative.iter().enumerate() {
-                if members.len() < 2 {
+        let mut remaining = candidates.iter().copied().collect::<BTreeSet<_>>();
+        let mut full_family_attempts = 0usize;
+        let mut incremental_family_attempts = 0usize;
+        let mut certified_members = 0usize;
+        while let Some(&first_remaining) = remaining.iter().next() {
+            let mut best_representative = first_remaining;
+            let mut best_members = vec![first_remaining];
+            let mut best_maps = BTreeMap::<TerminalID, InterchangeMap>::new();
+
+            for &representative in &remaining {
+                let mut pool = reset_group_for_terminal[representative as usize]
+                    .iter()
+                    .copied()
+                    .filter(|member| remaining.contains(member))
+                    .collect::<Vec<_>>();
+                pool.sort_unstable();
+                if pool.len() < 2 {
                     continue;
                 }
-                eprintln!(
-                    "[glrmask/debug][terminal_interchangeability] representative={} members={:?}",
-                    representative,
-                    members,
-                );
-                if std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY_MAPS").is_some() {
-                    for &member in members {
-                        if member == representative as TerminalID {
-                            continue;
+
+                full_family_attempts += 1;
+                let (members, maps) = if let Some(maps) = residuals.family_maps(representative, &pool) {
+                    (pool, maps)
+                } else {
+                    // Greedily grow a locally maximal exact family. Every
+                    // addition revalidates the entire family against the same
+                    // representatives-only row view, so order affects only
+                    // compactness, never correctness.
+                    let mut members = vec![representative];
+                    let mut maps = BTreeMap::<TerminalID, InterchangeMap>::new();
+                    let mut pending = pool
+                        .into_iter()
+                        .filter(|&member| member != representative)
+                        .collect::<Vec<_>>();
+                    let mut made_progress = true;
+                    while made_progress {
+                        made_progress = false;
+                        let mut next_pending = Vec::new();
+                        for member in pending {
+                            let mut proposal = members.clone();
+                            proposal.push(member);
+                            proposal.sort_unstable();
+                            incremental_family_attempts += 1;
+                            if let Some(proposal_maps) = residuals.family_maps(representative, &proposal) {
+                                members = proposal;
+                                maps = proposal_maps;
+                                made_progress = true;
+                            } else {
+                                next_pending.push(member);
+                            }
                         }
-                        let map = result
-                            .maps_by_representative_member
-                            .get(&(representative as TerminalID, member))
-                            .expect("debug transport missing");
-                        eprintln!(
-                            "[glrmask/debug][terminal_interchangeability_transport] representative={} member={} map={:?}",
-                            representative,
-                            member,
-                            map.source_state_to_target_states,
-                        );
+                        pending = next_pending;
                     }
+                    (members, maps)
+                };
+
+                if members.len() > best_members.len()
+                    || (members.len() == best_members.len() && representative < best_representative)
+                {
+                    best_representative = representative;
+                    best_members = members;
+                    best_maps = maps;
+                }
+            }
+
+            for &member in &best_members {
+                remaining.remove(&member);
+            }
+            if best_members.len() < 2 {
+                continue;
+            }
+            certified_members += best_members.len() - 1;
+            result.members_by_representative[best_representative as usize] = best_members.clone();
+            for &member in &best_members {
+                result.representative_for[member as usize] = best_representative;
+                if member != best_representative {
+                    result.active_representatives[member as usize] = false;
+                    result.maps_by_representative_member.insert(
+                        (best_representative, member),
+                        best_maps
+                            .remove(&member)
+                            .expect("certified family member missing its simultaneous transport"),
+                    );
+                }
+            }
+        }
+
+        if std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY").is_some() {
+            eprintln!(
+                "[glrmask/debug][terminal_subsumption] active={} reset_buckets={} full_family_attempts={} incremental_family_attempts={} certified_members={}",
+                candidates.len(),
+                candidate_groups.len(),
+                full_family_attempts,
+                incremental_family_attempts,
+                certified_members,
+            );
+            for (representative, members) in result.members_by_representative.iter().enumerate() {
+                if members.len() >= 2 {
+                    eprintln!(
+                        "[glrmask/debug][terminal_subsumption] representative={} members={:?}",
+                        representative, members,
+                    );
                 }
             }
         }
@@ -599,9 +864,10 @@ impl TerminalInterchangeability {
     }
 
     /// Stage 1 of expansion: clone every noninitial representative edge for each
-    /// member of its interchangeability class, keeping the same destination and
-    /// weight. Edges from the start state are left untouched (handled by the
-    /// transported per-member copies in stage 2).
+    /// member of its reset-equivalent representative family, keeping the same
+    /// destination and weight. Edges from the start state are left untouched
+    /// because their current scanner coordinates require the directed member
+    /// transports built in stage 2.
     fn expand_noninitial_edges(&self, dwa: &mut DWA) {
         let start = dwa.start_state() as usize;
         for (state_id, state) in dwa.states_mut().iter_mut().enumerate() {
@@ -693,34 +959,6 @@ fn transport_weight(
     transported
 }
 
-#[derive(Debug)]
-struct DisjointSet {
-    parent: Vec<usize>,
-    rank: Vec<u8>,
-}
-
-impl DisjointSet {
-    fn new(size: usize) -> Self {
-        Self { parent: (0..size).collect(), rank: vec![0; size] }
-    }
-
-    fn find(&mut self, item: usize) -> usize {
-        if self.parent[item] != item {
-            self.parent[item] = self.find(self.parent[item]);
-        }
-        self.parent[item]
-    }
-
-    fn union(&mut self, left: usize, right: usize) {
-        let mut left = self.find(left);
-        let mut right = self.find(right);
-        if left == right { return; }
-        if self.rank[left] < self.rank[right] { std::mem::swap(&mut left, &mut right); }
-        self.parent[right] = left;
-        if self.rank[left] == self.rank[right] { self.rank[left] += 1; }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -732,6 +970,136 @@ mod tests {
     use crate::ds::weight::shared_rangeset;
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::compile::build_regex;
+
+    #[test]
+    fn directed_subsumption_star_is_larger_than_strict_interchangeability() {
+        // Every terminal recognizes `ab` from lexer reset on the current
+        // `{a,b}` partition. R also carries two distinct incoming-context
+        // residuals. M1 has only the x residual and M2 only the y residual.
+        // The strict relation cannot swap R with either member, nor M1 with
+        // M2, but R can represent the whole directed family.
+        let expressions = vec![
+            Expr::Choice(vec![
+                Expr::U8Seq(b"ab".to_vec()),
+                Expr::U8Seq(b"xa".to_vec()),
+                Expr::U8Seq(b"yb".to_vec()),
+            ]),
+            Expr::Choice(vec![
+                Expr::U8Seq(b"ab".to_vec()),
+                Expr::U8Seq(b"xa".to_vec()),
+            ]),
+            Expr::Choice(vec![
+                Expr::U8Seq(b"ab".to_vec()),
+                Expr::U8Seq(b"yb".to_vec()),
+            ]),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let mut relevant = [false; 256];
+        relevant[b'a' as usize] = true;
+        relevant[b'b' as usize] = true;
+        let dfa = RestrictedDfa::new(&tokenizer, &[true, true, true], &relevant);
+        assert!(dfa.interchange_map(0, 1).is_none());
+        assert!(dfa.interchange_map(0, 2).is_none());
+        assert!(dfa.interchange_map(1, 2).is_none());
+
+        let residuals = TerminalResidualRows::build(&dfa, &[0, 1, 2]);
+        assert!(
+            residuals.family_maps(0, &[0, 1, 2]).is_some(),
+            "R must simultaneously subsume M1 and M2",
+        );
+        let plan = TerminalInterchangeability::build(
+            &tokenizer,
+            &[true, true, true],
+            &relevant,
+            None,
+        );
+        assert_eq!(plan.active_terminal_count_before(), 3);
+        assert_eq!(plan.active_terminal_count_after(), 1);
+        assert_eq!(plan.members_by_representative[0], vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn directed_family_certificate_accepts_the_nonmutual_pair() {
+        let expressions = vec![
+            Expr::Choice(vec![
+                Expr::U8Seq(b"ab".to_vec()),
+                Expr::U8Seq(b"xa".to_vec()),
+            ]),
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"y".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let mut relevant = [false; 256];
+        relevant[b'a' as usize] = true;
+        relevant[b'b' as usize] = true;
+        let dfa = RestrictedDfa::new(&tokenizer, &[true, true, true], &relevant);
+        let residuals = TerminalResidualRows::build(&dfa, &[0, 1, 2]);
+        let maps = residuals
+            .family_maps(0, &[0, 1])
+            .expect("the directed R/M family must have a simultaneous witness");
+        assert_eq!(maps.len(), 1);
+        assert!(maps.contains_key(&1));
+    }
+
+    #[test]
+    fn directed_subsumption_can_project_an_extra_incoming_residual() {
+        // On the current `{a,b}` vocabulary partition, `R` and `M` both
+        // finalize exactly `ab` from lexer reset.  `R` nevertheless has the
+        // additional incoming-context residual `a` after an earlier `x`.
+        // Preserved terminal `Y` prevents the reverse projection from silently
+        // collapsing the context, so this is strictly directed: R subsumes M,
+        // but M does not subsume R.
+        let expressions = vec![
+            Expr::Choice(vec![
+                Expr::U8Seq(b"ab".to_vec()),
+                Expr::U8Seq(b"xa".to_vec()),
+            ]),
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"y".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let mut relevant = [false; 256];
+        relevant[b'a' as usize] = true;
+        relevant[b'b' as usize] = true;
+        let dfa = RestrictedDfa::new(&tokenizer, &[true, true, true], &relevant);
+        let residuals = TerminalResidualRows::build(&dfa, &[0, 1, 2]);
+        let forward = residuals
+            .family_maps(0, &[0, 1])
+            .expect("R must cover M through an exact directed residual map");
+        let mut seen_target_blocks = BTreeSet::<Vec<u32>>::new();
+        assert!(
+            forward[&1]
+                .source_state_to_target_states
+                .iter()
+                .filter(|targets| !targets.is_empty())
+                .any(|targets| !seen_target_blocks.insert(targets.clone())),
+            "the witness must collapse distinct representative contexts",
+        );
+        assert!(
+            residuals.family_maps(1, &[0, 1]).is_none(),
+            "M cannot cover R's additional incoming-context residual",
+        );
+
+        let plan = TerminalInterchangeability::build(
+            &tokenizer,
+            &[true, true, true],
+            &relevant,
+            None,
+        );
+        assert_eq!(plan.active_terminal_count_before(), 3);
+        assert_eq!(plan.active_terminal_count_after(), 2);
+        assert_eq!(plan.members_by_representative[0], vec![0, 1]);
+        assert!(!plan.active_representatives[1]);
+    }
 
     #[test]
     fn rotated_residuals_have_no_interchange_map_because_reset_moves() {
