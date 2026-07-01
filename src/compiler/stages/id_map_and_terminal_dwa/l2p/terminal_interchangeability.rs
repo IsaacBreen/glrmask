@@ -7,20 +7,17 @@
 //! their residual-state partitions.
 //!
 //! This is intentionally a validation-first construction: hide
-//! nonrepresentatives before id-map/DWA construction; expand surviving
-//! noninitial representative edges in place; make one transported whole-DWA
-//! copy per initial replacement; then use the existing local DWA/id-map merger.
-//! Directed subsumption is deliberately excluded.
+//! nonrepresentatives before id-map/DWA construction, restore noninitial labels,
+//! make one transported copy per relevant initial replacement, and use the
+//! existing local DWA/id-map merger. The simple restoration is used only when
+//! the transport fixes the lexer reset residual class. Directed subsumption is
+//! deliberately excluded.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::BTreeMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
-use crate::automata::weighted_u32::dwa::DWA;
-use crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_local_id_maps_and_terminal_dwas;
-use crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa;
-use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
-use crate::ds::weight::Weight;
+use super::nwa_builder::TerminalNwaTransportMode;
 use crate::grammar::flat::TerminalID;
 
 const NO_STATE: u32 = u32::MAX;
@@ -48,9 +45,8 @@ impl OutputBits {
 }
 
 /// Concrete representation of a bijection between residual-state partitions.
-/// A source lexer state maps to every concrete state in its target partition.
-/// The target set may be empty if the residual maps only to the synthetic
-/// restricted-DFA sink; weight transport then drops that coordinate.
+/// A source lexer state maps to every concrete state in its target partition;
+/// the relation is bijective at the partition level.
 #[derive(Clone, Debug)]
 struct InterchangeMap {
     source_state_to_target_states: Vec<Vec<u32>>,
@@ -89,14 +85,6 @@ impl<'a> RestrictedDfa<'a> {
         self.real_state_count
     }
 
-    /// The characterizing "colour" of a state: the active finalizer terminals
-    /// AND the active possible-future finalizer terminals, each relabelled by the
-    /// optional swap. Both components are needed: distinguishing states by which
-    /// terminals they can *still* finalize (not only those they finalize now) is
-    /// what keeps e.g. the lexer reset state (future `{A,B}`) distinct from a
-    /// mid-`A` state (future `{A}`) and a mid-`B` state (future `{B}`) under the
-    /// partition-byte restriction, so terminals that merely share a suffix are
-    /// not wrongly deemed interchangeable.
     fn output(&self, state: usize, swap: Option<(usize, usize)>) -> (OutputBits, OutputBits) {
         if state == self.dead_state() {
             return (
@@ -194,6 +182,56 @@ impl<'a> RestrictedDfa<'a> {
         }
     }
 
+    /// Return a concrete DFA automorphism for this label swap, if the
+    /// residual partition map has a singleton, transition-commuting lift.
+    ///
+    /// The terminal-NWA transport executes concrete lexer states, so a
+    /// quotient-level residual bijection alone is not sufficient here.
+    #[cfg(test)]
+    fn concrete_swap_automorphism(
+        &self,
+        map: &InterchangeMap,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<Vec<u32>> {
+        let mapping = map
+            .source_state_to_target_states
+            .iter()
+            .map(|targets| (targets.len() == 1).then_some(targets[0]))
+            .collect::<Option<Vec<_>>>()?;
+        let mut seen = vec![false; self.real_state_count];
+        for &target in &mapping {
+            let slot = seen.get_mut(target as usize)?;
+            if *slot {
+                return None;
+            }
+            *slot = true;
+        }
+        if seen.iter().any(|&seen| !seen) {
+            return None;
+        }
+
+        let swap = Some((left as usize, right as usize));
+        for source in 0..self.real_state_count {
+            let target = mapping[source] as usize;
+            if self.output(source, None) != self.output(target, swap) {
+                return None;
+            }
+            for slot in 0..self.bytes.len() {
+                let source_next = self.successor(source, slot);
+                let target_next = self.successor(target, slot);
+                if source_next == self.dead_state() {
+                    if target_next != self.dead_state() {
+                        return None;
+                    }
+                } else if target_next != mapping[source_next] as usize {
+                    return None;
+                }
+            }
+        }
+        Some(mapping)
+    }
+
     fn interchange_map(&self, left: TerminalID, right: TerminalID) -> Option<InterchangeMap> {
         let state_count = self.state_count();
         let left = left as usize;
@@ -232,7 +270,7 @@ impl<'a> RestrictedDfa<'a> {
 
         for source in 0..self.real_state_count {
             let mut target_block = None;
-            for target in 0..state_count {
+            for target in 0..self.real_state_count {
                 if combined_blocks[state_count + target] != combined_blocks[source] {
                     continue;
                 }
@@ -277,94 +315,12 @@ impl<'a> RestrictedDfa<'a> {
                 target_states_by_block[target].clone()
             })
             .collect::<Vec<_>>();
-
-        // A valid interchange map must keep the lexer reset state in its own
-        // image. Continuation scanning restarts from the fixed initial state
-        // after every terminal boundary, so the start state must map to a
-        // partition that still contains the start state. Maps that move the
-        // reset residual (e.g. terminals that finalize at different byte
-        // residues) are not valid interchange maps: the two terminals are not
-        // interchangeable, and the construction falls back to an ordinary build.
-        let initial = self.tokenizer.initial_state_id() as usize;
-        if !source_state_to_target_states
-            .get(initial)
-            .is_some_and(|targets| targets.contains(&(initial as u32)))
-        {
+        if source_state_to_target_states.iter().any(Vec::is_empty) {
             return None;
         }
-
         Some(InterchangeMap {
             source_state_to_target_states,
         })
-    }
-}
-
-impl InterchangeMap {
-    /// Reindex a transported artifact by target residual blocks.
-    ///
-    /// `base` is the ordinary completed id map, possibly with non-singleton
-    /// state classes and with unreachable original states left unmapped. A
-    /// transported copy has one TSID per reachable target residual block. Its
-    /// weights are the push-forward of the ordinary source TSIDs through this
-    /// block correspondence.
-    fn transport_id_map(&self, base: &InternalIdMap) -> (InternalIdMap, Vec<Vec<u32>>) {
-        let state_count = base.tokenizer_states.original_to_internal.len();
-        assert_eq!(
-            self.source_state_to_target_states.len(),
-            state_count,
-            "interchange map and local ID map have different raw-state domains",
-        );
-
-        let mut target_block_ids = BTreeMap::<Vec<u32>, u32>::new();
-        let mut target_state_to_internal = vec![u32::MAX; state_count];
-        let mut source_to_target = vec![BTreeSet::<u32>::new(); base.num_tsids() as usize];
-
-        for (source, &source_tsid) in base
-            .tokenizer_states
-            .original_to_internal
-            .iter()
-            .enumerate()
-        {
-            // Ordinary L2P intentionally leaves lexer states with no relevant
-            // token behaviour unmapped. They carry no weight, so their target
-            // residual block stays outside this copied artifact too.
-            if source_tsid == u32::MAX {
-                continue;
-            }
-            let targets = &self.source_state_to_target_states[source];
-            if targets.is_empty() {
-                continue;
-            }
-            let next = target_block_ids.len() as u32;
-            let target_tsid = *target_block_ids.entry(targets.clone()).or_insert(next);
-            source_to_target[source_tsid as usize].insert(target_tsid);
-            for &target in targets {
-                let slot = target_state_to_internal
-                    .get_mut(target as usize)
-                    .expect("interchange target state outside local ID-map domain");
-                assert!(
-                    *slot == u32::MAX || *slot == target_tsid,
-                    "interchange map assigned one target state to distinct residual blocks",
-                );
-                *slot = target_tsid;
-            }
-        }
-
-        let source_to_target = source_to_target
-            .into_iter()
-            .map(|targets| targets.into_iter().collect())
-            .collect();
-
-        (
-            InternalIdMap {
-                tokenizer_states: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
-                    target_state_to_internal,
-                    target_block_ids.len() as u32,
-                ),
-                vocab_tokens: base.vocab_tokens.clone(),
-            },
-            source_to_target,
-        )
     }
 }
 
@@ -412,7 +368,12 @@ impl TerminalInterchangeability {
             .collect::<Vec<_>>();
         if candidates.len() < 2 { return Self::identity(active_terminals); }
 
-        let restricted = RestrictedDfa::new(tokenizer, active_terminals, relevant_bytes);
+        // The L2+ active mask chooses which terminals may be coalesced.  It
+        // does *not* limit the terminal-word alphabet of the local DWA: other
+        // terminal labels can still occur as continuations and must remain
+        // fixed observables of the residual automaton.
+        let observable_terminals = vec![true; active_terminals.len()];
+        let restricted = RestrictedDfa::new(tokenizer, &observable_terminals, relevant_bytes);
         let mut accepted = BTreeMap::<(TerminalID, TerminalID), InterchangeMap>::new();
         let mut components = DisjointSet::new(active_terminals.len());
         for (index, &left) in candidates.iter().enumerate() {
@@ -498,6 +459,17 @@ impl TerminalInterchangeability {
     }
 
     pub(crate) fn active_representatives(&self) -> &[bool] { &self.active_representatives }
+    pub(crate) fn visible_terminal_labels(&self) -> Vec<bool> {
+        // The L2+ phase may only coalesce terminals selected by its active mask,
+        // but its DWA remains over the complete terminal alphabet. Hide exactly
+        // the concrete members replaced by a class representative; keep every
+        // other terminal visible, including terminals assigned to L1.
+        self.representative_for
+            .iter()
+            .enumerate()
+            .map(|(terminal, &representative)| terminal as TerminalID == representative)
+            .collect()
+    }
 
     pub(crate) fn active_terminal_count_before(&self) -> usize {
         self.original_active.iter().filter(|&&active| active).count()
@@ -506,213 +478,48 @@ impl TerminalInterchangeability {
         self.active_representatives.iter().filter(|&&active| active).count()
     }
 
-    /// A representative pair is coarsely always-allowed only if *every*
-    /// concrete member pair has that relation. This is the conservative relation
-    /// used before representative expansion.
-    pub(crate) fn coalesced_always_allowed_follows(
-        &self,
-        concrete: &[Vec<TerminalID>],
-    ) -> Vec<Vec<TerminalID>> {
-        let terminal_count = self.original_active.len();
-        let mut result = vec![Vec::new(); terminal_count];
-        for representative in 0..terminal_count {
-            if !self.active_representatives[representative] {
-                continue;
-            }
-            let left_members = &self.members_by_representative[representative];
-            for successor in 0..terminal_count {
-                if !self.active_representatives[successor] {
-                    continue;
-                }
-                let right_members = &self.members_by_representative[successor];
-                if left_members.iter().all(|&left| {
-                    concrete.get(left as usize).is_some_and(|follows| {
-                        right_members.iter().all(|right| follows.contains(right))
-                    })
-                }) {
-                    result[representative].push(successor as TerminalID);
-                }
-            }
-        }
-        result
-    }
-
-    /// Slow, validation-first undo of representative substitution.
-    ///
-    /// The representative DWA is already complete; only the representative of
-    /// each interchangeability class appears in it. Expansion has two purely
-    /// structural stages and applies no follow constraints (the caller runs the
-    /// concrete disallowed-follow pass once, after this and determinize/minimize):
-    ///
-    /// 1. **Noninitial edges.** Edges that do not leave the start state describe
-    ///    continuations after a terminal boundary, where the lexer has restarted
-    ///    from its fixed initial state. They are independent of which member was
-    ///    chosen, so every noninitial representative edge is cloned in place for
-    ///    each class member (same destination and weight, different label).
-    ///
-    /// 2. **Initial edges.** Edges from the start state depend on the incoming
-    ///    tokenizer state carried across the token boundary. For each member we
-    ///    clone the whole (already noninitial-expanded) artifact, relabel the
-    ///    representative's initial edge to the member, and transport the cloned
-    ///    id map and every transition/final weight through that member's
-    ///    interchange map.
-    ///
-    /// The existing local-artifact merger then unions the representative artifact
-    /// and every transported copy in a common id-map space.
-    pub(crate) fn expand_terminal_dwa_slow(
-        &self,
-        artifact: LocalIdMapTerminalDwa,
-        num_tokenizer_states: u32,
-        max_token_id: u32,
-    ) -> LocalIdMapTerminalDwa {
+    pub(crate) fn terminal_nwa_transport_modes(&self) -> Option<Vec<TerminalNwaTransportMode>> {
         if self.is_identity() {
-            return artifact;
+            return None;
         }
-
-        let mut representative_artifact = artifact;
-        self.expand_noninitial_edges(&mut representative_artifact.dwa);
-        dump_dwa_if_requested("after_noninitial", &representative_artifact.dwa);
-
-        let start = representative_artifact.dwa.start_state() as usize;
-        let initial_transitions = representative_artifact.dwa.states()[start]
-            .transitions
-            .clone();
-        let mut copies = vec![representative_artifact.clone()];
+        let terminal_count = self.original_active.len();
+        let identity_states = (0..self
+            .maps_by_representative_member
+            .values()
+            .next()
+            .map(|map| map.source_state_to_target_states.len())? as u32)
+            .collect::<Vec<_>>();
+        let identity_labels = (0..terminal_count as u32).collect::<Vec<_>>();
+        let mut modes = vec![TerminalNwaTransportMode {
+            scanner_state_for_original: identity_states,
+            terminal_map: identity_labels.clone(),
+        }];
 
         for (representative, members) in self.members_by_representative.iter().enumerate() {
-            if members.len() < 2 {
-                continue;
-            }
             let representative = representative as TerminalID;
-            let Some((destination, weight)) = initial_transitions.get(&(representative as i32)) else {
-                continue;
-            };
             for &member in members {
                 if member == representative {
                     continue;
                 }
-                let map = self
-                    .maps_by_representative_member
-                    .get(&(representative, member))
-                    .expect("interchangeability member missing transport map");
-                let mut copy = representative_artifact.clone();
-                let (id_map, source_to_target_tsids) = map.transport_id_map(&copy.id_map);
-                copy.id_map = id_map;
-                let initial = &mut copy.dwa.states_mut()[start].transitions;
-                let removed = initial.remove(&(representative as i32));
-                assert_eq!(
-                    removed.as_ref().map(|(target, _)| *target),
-                    Some(*destination),
-                    "representative initial transition changed before interchange expansion",
-                );
-                initial.insert(member as i32, (*destination, weight.clone()));
-                transport_all_dwa_weights(&mut copy.dwa, &source_to_target_tsids);
-                copies.push(copy);
+                let map = self.maps_by_representative_member.get(&(representative, member))?;
+                let scanner_state_for_original = map
+                    .source_state_to_target_states
+                    .iter()
+                    .map(|targets| targets.first().copied())
+                    .collect::<Option<Vec<_>>>()?;
+                let mut terminal_map = identity_labels.clone();
+                terminal_map[representative as usize] = member;
+                terminal_map[member as usize] = representative;
+                modes.push(TerminalNwaTransportMode {
+                    scanner_state_for_original,
+                    terminal_map,
+                });
             }
         }
-
-        let merged = merge_local_id_maps_and_terminal_dwas(
-            copies,
-            num_tokenizer_states as usize,
-            max_token_id,
-        );
-        dump_dwa_if_requested("after_initial_merge", &merged.dwa);
-        merged
+        Some(modes)
     }
 
-    /// Stage 1 of expansion: clone every noninitial representative edge for each
-    /// member of its interchangeability class, keeping the same destination and
-    /// weight. Edges from the start state are left untouched (handled by the
-    /// transported per-member copies in stage 2).
-    fn expand_noninitial_edges(&self, dwa: &mut DWA) {
-        let start = dwa.start_state() as usize;
-        for (state_id, state) in dwa.states_mut().iter_mut().enumerate() {
-            if state_id == start {
-                continue;
-            }
-            let original = state.transitions.clone();
-            for (&label, (destination, weight)) in &original {
-                let Ok(terminal) = TerminalID::try_from(label) else {
-                    continue;
-                };
-                let members = &self.members_by_representative[terminal as usize];
-                if members.len() < 2 || members[0] != terminal {
-                    continue;
-                }
-                for &member in members {
-                    state
-                        .transitions
-                        .insert(member as i32, (*destination, weight.clone()));
-                }
-            }
-        }
-    }
-}
 
-pub(crate) fn dump_dwa_if_requested(stage: &str, dwa: &DWA) {
-    if std::env::var_os("GLRMASK_DUMP_TI_EXPANSION").is_none() {
-        return;
-    }
-    eprintln!("[terminal-interchangeability][{stage}] start={}", dwa.start_state());
-    for (state_id, state) in dwa.states().iter().enumerate() {
-        let transitions = state
-            .transitions
-            .iter()
-            .map(|(&label, (target, weight))| format!("{label}->{target}:{weight:?}"))
-            .collect::<Vec<_>>();
-        eprintln!(
-            "[terminal-interchangeability][{stage}] state={state_id} final={:?} transitions={transitions:?}",
-            state.final_weight,
-        );
-    }
-}
-
-fn transport_all_dwa_weights(dwa: &mut DWA, source_to_target_tsids: &[Vec<u32>]) {
-    let mut cache = HashMap::<usize, Weight>::new();
-    for state in dwa.states_mut() {
-        if let Some(final_weight) = &mut state.final_weight {
-            *final_weight = transport_weight(final_weight, source_to_target_tsids, &mut cache);
-            if final_weight.is_empty() {
-                state.final_weight = None;
-            }
-        }
-        for (_, weight) in state.transitions.values_mut() {
-            *weight = transport_weight(weight, source_to_target_tsids, &mut cache);
-        }
-        state.transitions.retain(|_, (_, weight)| !weight.is_empty());
-    }
-}
-
-fn transport_weight(
-    weight: &Weight,
-    source_to_target_tsids: &[Vec<u32>],
-    cache: &mut HashMap<usize, Weight>,
-) -> Weight {
-    if weight.is_empty() || weight.is_full() {
-        return weight.clone();
-    }
-    if let Some(existing) = cache.get(&weight.ptr_key()) {
-        return existing.clone();
-    }
-
-    let mut entries = Vec::new();
-    for (start, end, tokens) in weight
-        .compact_entries()
-        .expect("non-full weights have compact entries")
-    {
-        for source_tsid in start..=end {
-            let targets = source_to_target_tsids
-                .get(source_tsid as usize)
-                .expect("weight refers to source TSID outside transport domain");
-            for &target_tsid in targets {
-                entries.push((target_tsid, tokens.clone()));
-            }
-        }
-    }
-    entries.sort_by_key(|(target_tsid, _)| *target_tsid);
-    let transported = Weight::union_sorted_point_entries(entries);
-    cache.insert(weight.ptr_key(), transported.clone());
-    transported
 }
 
 #[derive(Debug)]
@@ -745,22 +552,13 @@ impl DisjointSet {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::sync::Arc;
-
-    use range_set_blaze::RangeSetBlaze;
-
     use super::*;
-    use crate::ds::weight::shared_rangeset;
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::compile::build_regex;
 
     #[test]
-    fn rotated_residuals_have_no_interchange_map_because_reset_moves() {
-        // A=/a(aaaa)*/ finalizes at residue 1, B=/aaa(aaaa)*/ at residue 3. The
-        // only label swap that is a DFA automorphism is the +2 rotation, which
-        // moves the reset state (0 -> 2). A valid interchange map must keep the
-        // reset state in its own image, so A and B are NOT interchangeable.
+    fn strict_interchange_map_exists_for_rotated_residuals() {
         let expressions = vec![
             Expr::Seq(vec![Expr::U8Seq(b"a".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
             Expr::Seq(vec![Expr::U8Seq(b"aaa".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
@@ -770,55 +568,30 @@ mod tests {
             Some(Arc::from(expressions.into_boxed_slice())),
         );
         let dfa = RestrictedDfa::new(&tokenizer, &[true, true], &[true; 256]);
-        assert!(dfa.interchange_map(0, 1).is_none());
-        assert!(dfa.interchange_map(1, 0).is_none());
+        let forward = dfa.interchange_map(0, 1).expect("rotated map must exist");
+        assert!(dfa.concrete_swap_automorphism(&forward, 0, 1).is_some());
+        assert!(dfa.interchange_map(1, 0).is_some());
     }
 
     #[test]
-    fn relation_weight_transport_unions_many_to_one_contributions() {
-        let weight = Weight::from_per_tsid_shared([
-            (
-                0,
-                shared_rangeset(RangeSetBlaze::from_iter([10u32..=10u32])),
-            ),
-            (
-                1,
-                shared_rangeset(RangeSetBlaze::from_iter([20u32..=20u32])),
-            ),
-        ]);
-        let mut cache = HashMap::new();
-        let transported = transport_weight(&weight, &[vec![7], vec![7]], &mut cache);
-        let tokens = transported.tokens_for_tsid(7);
-        assert!(tokens.contains(10));
-        assert!(tokens.contains(20));
-        assert_eq!(tokens.len(), 2);
-    }
-
-    fn two_by_two_partition_plan() -> TerminalInterchangeability {
-        TerminalInterchangeability {
-            original_active: vec![true; 4],
-            active_representatives: vec![true, false, true, false],
-            representative_for: vec![0, 0, 2, 2],
-            members_by_representative: vec![vec![0, 1], vec![1], vec![2, 3], vec![3]],
-            maps_by_representative_member: BTreeMap::new(),
-        }
+    fn transport_rejects_a_non_singleton_residual_target() {
+        let expressions = vec![
+            Expr::Seq(vec![Expr::U8Seq(b"a".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
+            Expr::Seq(vec![Expr::U8Seq(b"aaa".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let dfa = RestrictedDfa::new(&tokenizer, &[true, true], &[true; 256]);
+        let mut map = dfa.interchange_map(0, 1).expect("rotated map must exist");
+        let duplicated_target = map.source_state_to_target_states[0][0];
+        map.source_state_to_target_states[0].push(duplicated_target);
+        assert!(dfa.concrete_swap_automorphism(&map, 0, 1).is_none());
     }
 
     #[test]
-    fn coarse_always_allowed_requires_every_concrete_member_pair() {
-        let plan = two_by_two_partition_plan();
-
-        let mut always_allowed = vec![Vec::new(); 4];
-        for left in [0usize, 1] {
-            always_allowed[left].extend([2, 3]);
-        }
-        assert!(plan.coalesced_always_allowed_follows(&always_allowed)[0].contains(&2));
-        always_allowed[1].retain(|&terminal| terminal != 3);
-        assert!(!plan.coalesced_always_allowed_follows(&always_allowed)[0].contains(&2));
-    }
-
-    #[test]
-    fn rotated_residuals_do_not_form_an_interchangeable_partition() {
+    fn rotated_residuals_form_an_l2p_terminal_partition() {
         let expressions = vec![
             Expr::Seq(vec![Expr::U8Seq(b"a".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
             Expr::Seq(vec![Expr::U8Seq(b"aaa".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
@@ -829,10 +602,8 @@ mod tests {
         );
         let plan = TerminalInterchangeability::build(&tokenizer, &[true, true], &[true; 256], None);
         assert_eq!(plan.active_terminal_count_before(), 2);
-        // The reset-moving swap is not a valid interchange map, so the two
-        // terminals stay in their own singleton classes (no substitution).
-        assert_eq!(plan.active_terminal_count_after(), 2);
-        assert!(plan.is_identity());
+        assert_eq!(plan.active_terminal_count_after(), 1);
+        assert!(plan.terminal_nwa_transport_modes().is_some());
     }
 
     #[test]

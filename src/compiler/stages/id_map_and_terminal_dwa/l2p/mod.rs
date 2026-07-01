@@ -39,10 +39,10 @@ use rustc_hash::FxHashMap;
 use super::grammar_helpers::compute_always_allowed_follows;
 use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhaseProfile};
 use nwa_builder::{
-    build_nwa_via_trie_walk, internal_vocab_entries,
+    build_nwa_via_trie_walk, build_transport_nwa_via_trie_walk, internal_vocab_entries,
     seed_root_nodes,
 };
-use terminal_interchangeability::{dump_dwa_if_requested, TerminalInterchangeability};
+use terminal_interchangeability::TerminalInterchangeability;
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
     prune_non_coreachable_states,
@@ -51,6 +51,10 @@ use postprocess::{
 fn l2p_timing_profile_enabled() -> bool {
     compile_profile_enabled() || std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
 }
+
+
+
+
 
 thread_local! {
     static TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -482,22 +486,24 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         TerminalInterchangeability::identity(active_terminals)
     };
     let reference_terminal_expansion = !terminal_interchangeability.is_identity();
-    let analysis_active_terminals = if reference_terminal_expansion {
-        terminal_interchangeability.active_representatives()
-    } else {
-        active_terminals
-    };
+    let analysis_active_terminals = terminal_interchangeability.active_representatives();
+    let terminal_nwa_visible_labels = terminal_interchangeability.visible_terminal_labels();
     let num_analysis_active_terminals = analysis_active_terminals
         .iter()
         .filter(|&&active| active)
         .count();
-    // Keep the ordinary L2P tokenizer path unchanged. Interchangeability only
-    // narrows the active terminal universe; the normal simplifier, equivalence
-    // analysis, terminal coloring, and cache paths remain authoritative.
-    let tokenizer_before_simplify = tokenizer;
+    // Build the validation artifact in original lexer-state coordinates. The
+    // transport-aware trie walk owns the terminal substitution; minimization or
+    // an ordinary id-map quotient before that walk can lose a surviving,
+    // noninterchangeable initial edge.
+    let reference_filtered_tokenizer = reference_terminal_expansion.then(|| {
+        tokenizer.deactivate_terminals_without_minimizing(&terminal_nwa_visible_labels)
+    });
+    let tokenizer_before_simplify = reference_filtered_tokenizer.as_ref().unwrap_or(tokenizer);
 
     let simplify_started_at = Instant::now();
-    let can_skip_simplify = l2p_tokenizer_simplify_disabled()
+    let can_skip_simplify = reference_terminal_expansion
+        || l2p_tokenizer_simplify_disabled()
         || num_analysis_active_terminals == analysis_active_terminals.len();
     let (simplified_tok_storage, simplify_state_map, simplify_cache_hit) = if can_skip_simplify {
         (None, None, false)
@@ -584,7 +590,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // unsimplified partition. Derive its exact byte partition lazily from
     // sparse lexer edges once; simplified tokenizers retain their local cache.
     let shared_base_setup_started_at = Instant::now();
-    let equivalence_vocab_dfa_cache = if use_simplified_tok {
+    let equivalence_vocab_dfa_cache = if reference_terminal_expansion {
+        None
+    } else if use_simplified_tok {
         shared_vocab_dfa_cache
     } else if let (Some(original_cache), Some(transition_cache), Some(flat_trans)) = (
         shared_original_vocab_dfa_cache,
@@ -607,7 +615,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         shared_vocab_dfa_cache
     };
     let shared_base_setup_ms = shared_base_setup_started_at.elapsed().as_secs_f64() * 1000.0;
-    let shared_analysis_dfa_cache = (!use_simplified_tok)
+    let shared_analysis_dfa_cache = (!use_simplified_tok && !reference_terminal_expansion)
         .then_some(shared_original_vocab_analysis_dfa_cache)
         .flatten();
     // Do not remove this note. Do not remove the instruction saying not to
@@ -616,26 +624,33 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // state/vocab equivalence pass must not be bypassed. Do not reintroduce
     // fast-sound, identity, lex-dedup, or similar shortcut id-map paths.
     let fast_sound_id_map_used = false;
-    // The representative build uses the same active terminal universe in the
-    // trie walk and equivalence analysis. With normal simplification this is
-    // redundant; when simplification is disabled it keeps inactive class
-    // members unobservable to both phases.
-    let equivalence_active_groups =
-        reference_terminal_expansion.then_some(analysis_active_terminals);
-    let (simplified_id_map, equiv_profile) =
+    // The reference tokenizer has inactive metadata removed already. Keep the
+    // raw state coordinate intact and let its exact terminal metadata define
+    // the id-map analysis; the transport builder handles label substitution.
+    let (mut simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
             tokenizer_for_build,
             vocab,
             disallowed_follows,
             ignore_terminal,
-            equivalence_active_groups,
+            None,
             equivalence_vocab_dfa_cache,
             shared_analysis_dfa_cache,
             shared_base_setup_ms,
-            if use_simplified_tok { None } else { flat_trans },
+            if use_simplified_tok || reference_terminal_expansion { None } else { flat_trans },
             equivalence_initial_state_map,
         );
+    if reference_terminal_expansion {
+        // Each mode scans a residual-equivalent target state while weights stay
+        // indexed by the true token-start state. Do not quotient those starts.
+        let ids = (0..tokenizer_for_build.num_states()).collect::<Vec<u32>>();
+        simplified_id_map.tokenizer_states =
+            ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+                ids.clone(),
+                ids,
+            );
+    }
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // tsid_fallback is independent of the NWA build / postprocess /
@@ -720,57 +735,63 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let start_state = nwa.add_state();
             nwa.start_states_mut().push(start_state);
 
+            let transport_modes = reference_terminal_expansion
+                .then(|| terminal_interchangeability.terminal_nwa_transport_modes())
+                .flatten();
             let seed_ms;
 
             // ---- Step 6: Trie-walk NWA build ----
             let trie_build_started_at = Instant::now();
-            let roots = seed_root_nodes(&mut nwa, start_state, &simplified_id_map);
-            seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
-            let _build_profile = build_nwa_via_trie_walk(
-                tokenizer_for_build,
-                terminal_coloring,
-                use_terminal_coloring,
-                ignore_terminal,
-                &mut nwa,
-                leaf_state,
-                simplified_id_map.num_tsids(),
-                &full_tree.root,
-                &roots,
-                &mut pm_computer,
-                reference_terminal_expansion.then_some(analysis_active_terminals),
-            );
+            let _build_profile = if let Some(modes) = transport_modes.as_deref() {
+                seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+                build_transport_nwa_via_trie_walk(
+                    tokenizer_for_build,
+                    ignore_terminal,
+                    &mut nwa,
+                    start_state,
+                    leaf_state,
+                    &simplified_id_map,
+                    &full_tree.root,
+                    &mut pm_computer,
+                    &terminal_nwa_visible_labels,
+                    modes,
+                )
+            } else {
+                let roots = seed_root_nodes(&mut nwa, start_state, &simplified_id_map);
+                seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+                build_nwa_via_trie_walk(
+                    tokenizer_for_build,
+                    terminal_coloring,
+                    use_terminal_coloring,
+                    ignore_terminal,
+                    &mut nwa,
+                    leaf_state,
+                    simplified_id_map.num_tsids(),
+                    &full_tree.root,
+                    &roots,
+                    &mut pm_computer,
+                    None,
+                )
+            };
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let always_allowed_started_at = Instant::now();
             let always_allowed = compute_always_allowed_follows(grammar);
-            let coarse_always_allowed = reference_terminal_expansion.then(|| {
-                terminal_interchangeability.coalesced_always_allowed_follows(&always_allowed)
-            });
             let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_build = nwa.states().len();
 
             let collapse_started_at = Instant::now();
-            collapse_always_allowed(
-                &mut nwa,
-                coarse_always_allowed.as_deref().unwrap_or(&always_allowed),
-                grammar.num_terminals as usize,
-            );
+            collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
             let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_collapse = nwa.states().len();
 
             let disallowed_started_at = Instant::now();
-            // Terminal interchangeability defers ALL disallowed-follow pruning to
-            // after terminal expansion (see `postprocess_expanded_terminal_dwa`),
-            // so the representative build applies no follow constraints here. The
-            // ordinary path applies the canonical grammar follows now.
-            if !reference_terminal_expansion {
-                apply_disallowed_follow_constraints(
-                    &mut nwa,
-                    disallowed_follows,
-                    grammar.num_terminals as usize,
-                    ignore_terminal,
-                );
-            }
+            apply_disallowed_follow_constraints(
+                &mut nwa,
+                disallowed_follows,
+                grammar.num_terminals as usize,
+                ignore_terminal,
+            );
             let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_disallowed = nwa.states().len();
 
@@ -938,32 +959,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         },
     };
 
-    if !reference_terminal_expansion {
-        dump_dwa_if_requested("baseline_final", &output.dwa);
-    }
-    if reference_terminal_expansion {
-        let expansion_started_at = Instant::now();
-        let max_token_id = output
-            .id_map
-            .vocab_tokens
-            .original_to_internal
-            .len()
-            .saturating_sub(1) as u32;
-        output = terminal_interchangeability.expand_terminal_dwa_slow(
-            output,
-            tokenizer.num_states(),
-            max_token_id,
-        );
-        output = postprocess_expanded_terminal_dwa(
-            output,
-            grammar,
-            disallowed_follows,
-            ignore_terminal,
-        );
-        output.profile.terminal_dwa_ms +=
-            expansion_started_at.elapsed().as_secs_f64() * 1000.0;
-    }
-
 
     if reference_terminal_expansion && l2p_terminal_interchangeability_validation_enabled() {
         // Rebuild the same local L2P artifact with the feature suppressed, then
@@ -1024,60 +1019,4 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     }
 
     Some(output)
-}
-
-/// The representative NWA receives conservative class-level follow transforms.
-/// After representative expansion and local-artifact merging, run the ordinary
-/// concrete transforms again.  This is intentionally a slow reference path:
-/// rebuild an NWA from the merged DWA, then use the same exact postprocessors
-/// as ordinary L2P before one final determinize/minimize.
-fn postprocess_expanded_terminal_dwa(
-    mut artifact: LocalIdMapTerminalDwa,
-    grammar: &AnalyzedGrammar,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-    ignore_terminal: Option<TerminalID>,
-) -> LocalIdMapTerminalDwa {
-    let mut nwa = NWA::new(
-        artifact.id_map.num_tsids(),
-        artifact.id_map.max_internal_token_id(),
-    );
-    let state_map = (0..artifact.dwa.states().len())
-        .map(|_| nwa.add_state())
-        .collect::<Vec<_>>();
-    nwa.start_states_mut()
-        .push(state_map[artifact.dwa.start_state() as usize]);
-    for (source, state) in artifact.dwa.states().iter().enumerate() {
-        if let Some(final_weight) = &state.final_weight {
-            nwa.set_final_weight(state_map[source], final_weight.clone());
-        }
-        for (&label, (destination, weight)) in &state.transitions {
-            nwa.add_transition(
-                state_map[source],
-                label,
-                state_map[*destination as usize],
-                weight.clone(),
-            );
-        }
-    }
-
-    // Only the disallowed-follow subtraction is replayed here. It is exact: its
-    // product construction depends solely on the terminal-label sequence, not on
-    // any per-state propagated domain, so reconstructing a fresh NWA from the
-    // determinized DWA is sound. `collapse_always_allowed` is deliberately not
-    // re-run: it is a state-merge optimization whose proof uses the original
-    // NWA's propagated domains (lost after determinization), and it is purely
-    // size-reducing, so the final determinize/minimize already yields the
-    // canonical minimal DWA without it.
-    apply_disallowed_follow_constraints(
-        &mut nwa,
-        disallowed_follows,
-        grammar.num_terminals as usize,
-        ignore_terminal,
-    );
-    prune_non_coreachable_states(&mut nwa);
-    canonicalize_acyclic_nwa(&mut nwa);
-    let det = determinize(&nwa).expect("expanded terminal NWA determinization failed");
-    artifact.dwa = minimize_owned(det);
-    dump_dwa_if_requested("after_concrete_postprocess", &artifact.dwa);
-    artifact
 }
