@@ -87,6 +87,25 @@ impl BitSet {
         }
     }
 
+    /// Union `other` into this set and return exactly the bits newly added.
+    ///
+    /// This combines the common `other.difference(self)` followed by
+    /// `self.union_with(delta)` pattern into one pass over the words.
+    pub fn union_with_delta(&mut self, other: &BitSet) -> BitSet {
+        self.assert_same_len(other);
+        let mut delta = Self::new(self.len);
+        for ((lhs, delta_word), rhs) in self
+            .words
+            .iter_mut()
+            .zip(delta.words.iter_mut())
+            .zip(&other.words)
+        {
+            *delta_word = *rhs & !*lhs;
+            *lhs |= *rhs;
+        }
+        delta
+    }
+
     pub fn union(&self, other: &Self) -> Self {
         self.assert_same_len(other);
         let mut out = self.clone();
@@ -205,3 +224,29 @@ impl Iterator for BitIter {
     }
 }
 
+
+
+#[cfg(test)]
+mod tests {
+    use super::BitSet;
+
+    #[test]
+    fn union_with_delta_reports_only_new_bits() {
+        let mut left = BitSet::new(130);
+        left.set(0);
+        left.set(64);
+        left.set(129);
+
+        let mut right = BitSet::new(130);
+        right.set(0);
+        right.set(63);
+        right.set(64);
+        right.set(65);
+        right.set(129);
+
+        let delta = left.union_with_delta(&right);
+
+        assert_eq!(delta.iter_ones().collect::<Vec<_>>(), vec![63, 65]);
+        assert_eq!(left.iter_ones().collect::<Vec<_>>(), vec![0, 63, 64, 65, 129]);
+    }
+}
