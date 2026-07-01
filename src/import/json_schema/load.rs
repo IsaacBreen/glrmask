@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde_json::{Map, Value};
 
 use rayon::prelude::*;
@@ -8,6 +10,49 @@ use super::ast::{
     SchemaType, StringSchema,
 };
 use super::error::{ImportResult, SchemaImportError};
+
+/// Raw-document facts needed before typed loading. A single scan avoids
+/// repeatedly walking large schemas that have neither definitions nor refs.
+#[derive(Default)]
+pub(crate) struct DocumentFeatures {
+    pub(crate) has_one_of: bool,
+    has_definitions: bool,
+    has_local_id_alias: bool,
+    ref_pointers: BTreeSet<String>,
+}
+
+pub(crate) fn scan_document_features(root: &Value) -> DocumentFeatures {
+    let mut features = DocumentFeatures::default();
+    scan_document_features_inner(root, true, &mut features);
+    features
+}
+
+fn scan_document_features_inner(value: &Value, is_root: bool, features: &mut DocumentFeatures) {
+    match value {
+        Value::Object(object) => {
+            features.has_one_of |= object.contains_key("oneOf");
+            features.has_definitions |= object.contains_key("$defs") || object.contains_key("definitions");
+            if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+                features.ref_pointers.insert(reference.to_owned());
+            }
+            let has_local_alias = object
+                .get("$id")
+                .or_else(|| object.get("id"))
+                .and_then(Value::as_str)
+                .is_some_and(|alias| alias.starts_with('#') || (is_root && alias.ends_with('#')));
+            features.has_local_id_alias |= has_local_alias;
+            for child in object.values() {
+                scan_document_features_inner(child, false, features);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                scan_document_features_inner(child, false, features);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
 
 fn singleton_all_of_ref_without_siblings(assertions: &SchemaAssertions) -> Option<&str> {
     if assertions.all_of.len() != 1 {
@@ -189,29 +234,39 @@ fn local_id_alias(object: &Map<String, Value>, location: &str) -> Option<String>
 }
 
 pub(crate) fn load_document(root: &Value) -> ImportResult<SchemaDocument> {
+    let features = scan_document_features(root);
+    load_document_with_features(root, &features)
+}
+
+pub(crate) fn load_document_with_features(
+    root: &Value,
+    features: &DocumentFeatures,
+) -> ImportResult<SchemaDocument> {
     let mut definitions = Vec::new();
-    collect_definitions(root, "#", &mut definitions)?;
+    if features.has_definitions {
+        collect_definitions(root, "#", &mut definitions)?;
+    }
 
     // JSON-pointer references are materialized below only if named by a $ref.
     // The independent index is needed solely for explicit local id aliases.
     let mut ref_targets = Vec::new();
-    if contains_local_id_alias(root, true) {
+    if features.has_local_id_alias {
         collect_local_id_aliases(root, "#", &mut ref_targets)?;
     }
 
-    let mut ref_pointers = std::collections::BTreeSet::new();
-    collect_all_ref_pointers(root, &mut ref_pointers);
-    for r in ref_pointers {
-        if r == "#" || !r.starts_with("#/") {
+    for reference in &features.ref_pointers {
+        if reference == "#" || !reference.starts_with("#/") {
             continue;
         }
-        let pointer_path = &r[1..];
-        let exists = definitions.iter().any(|d| d.pointer == r)
-            || ref_targets.iter().any(|d| d.pointer == r);
-        if !exists && let Some(resolved_val) = root.pointer(pointer_path) {
-            let schema = load_schema_at(resolved_val, &r)?;
+        let pointer_path = &reference[1..];
+        let exists = definitions.iter().any(|definition| definition.pointer == *reference)
+            || ref_targets
+                .iter()
+                .any(|definition | definition.pointer == *reference);
+        if !exists && let Some(resolved_value) = root.pointer(pointer_path) {
+            let schema = load_schema_at(resolved_value, reference)?;
             ref_targets.push(SchemaDefinition {
-                pointer: r,
+                pointer: reference.clone(),
                 schema,
             });
         }

@@ -174,6 +174,66 @@ impl<'a> Lowerer<'a> {
         lowerer
     }
 
+    /// Creates an independent lowerer for a disjoint non-recursive schema
+    /// fragment. Its caller merges the emitted rules through
+    /// `append_isolated_rules` after lowering in parallel.
+    pub(crate) fn isolated_fragment_lowerer(&self, next_rule_id: usize) -> Self {
+        let mut lowerer = Self {
+            document: self.document,
+            config: self.config.clone(),
+            rules: Vec::new(),
+            shared_string_exact_rules: BTreeMap::new(),
+            shared_string_upto_rules: BTreeMap::new(),
+            shared_string_upto_close_rules: BTreeMap::new(),
+            shared_string_exact_open_rules: BTreeMap::new(),
+            shared_string_upto_wrapped_rules: BTreeMap::new(),
+            shared_ap_literal_keys: self.shared_ap_literal_keys.clone(),
+            shared_ap_patterns: self.shared_ap_patterns.clone(),
+            shared_ap_base_rule: None,
+            shared_ap_excluded_rule: None,
+            shared_additional_key_colon_local_rules: BTreeMap::new(),
+            shared_ap_pattern_rules: BTreeMap::new(),
+            shared_pattern_overlap_keys: BTreeMap::new(),
+            shared_pattern_overlap_literal_rules: BTreeMap::new(),
+            shared_pattern_appearance_rules: BTreeMap::new(),
+            fixed_object_profile: None,
+            fixed_object_nfa_templates: HashMap::new(),
+            definition_rules: BTreeMap::new(),
+            definition_by_pointer: self.definition_by_pointer.clone(),
+            used_rule_names: BTreeSet::new(),
+            next_rule_id,
+        };
+        lowerer.install_json_builtins();
+        lowerer.next_rule_id = next_rule_id;
+        lowerer
+    }
+
+    /// Merges rules emitted by an isolated lowerer. Every isolated lowerer
+    /// emits the JSON built-ins; equal definitions are coalesced, but a
+    /// conflicting duplicate name is rejected rather than silently changed.
+    pub(crate) fn append_isolated_rules(&mut self, rules: Vec<NamedRule>) -> ImportResult<()> {
+        let mut existing_by_name = HashMap::with_capacity(self.rules.len() + rules.len());
+        for (index, rule) in self.rules.iter().enumerate() {
+            existing_by_name.insert(rule.name.clone(), index);
+        }
+        for rule in rules {
+            if let Some(&index) = existing_by_name.get(&rule.name) {
+                if self.rules[index] != rule {
+                    return Err(SchemaImportError::new(format!(
+                        "isolated JSON Schema lowering produced conflicting rule {:?}",
+                        rule.name
+                    )));
+                }
+                continue;
+            }
+            let index = self.rules.len();
+            self.used_rule_names.insert(rule.name.clone());
+            existing_by_name.insert(rule.name.clone(), index);
+            self.rules.push(rule);
+        }
+        Ok(())
+    }
+
     fn finish(mut self) -> ImportResult<NamedGrammar> {
         let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
         let root_started_at = profile_enabled.then(std::time::Instant::now);
