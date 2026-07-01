@@ -18,11 +18,6 @@ use crate::ds::weight::Weight;
 type Label = i32;
 
 const UNMAPPED: u32 = u32::MAX;
-// Reconstruction reduces large exact weight unions in a bounded tree. 64 is
-// the best measured fan-in for the global terminal-DWA merge: it avoids the
-// additional rounds of 16 while keeping intermediate event sweeps bounded.
-const RECONSTRUCTION_UNION_BATCH_SIZE: usize = 64;
-
 fn weighted_dwa_minimize_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
@@ -2939,23 +2934,13 @@ impl MergedStateBuilder {
 
 }
 
-/// Batch-build a Weight from a Vec of pending weights using a hybrid strategy.
+/// Build a reconstructed weight in one exact multiway sweep.
+///
+/// `Weight::union_all` already has a dedicated event-sweep implementation for
+/// wide unions. Feeding it a tree of bounded intermediate unions adds repeated
+/// sorting, allocation, and range coalescing without reducing the final work.
 fn batch_build_weight(pending: Vec<Weight>) -> Weight {
-    match pending.len() {
-        0 => Weight::empty(),
-        1 => pending.into_iter().next().unwrap(),
-        n if n <= RECONSTRUCTION_UNION_BATCH_SIZE => Weight::union_all(pending.iter()),
-        _ => {
-            let mut current = pending;
-            while current.len() > RECONSTRUCTION_UNION_BATCH_SIZE {
-                current = current
-                    .chunks(RECONSTRUCTION_UNION_BATCH_SIZE)
-                    .map(|chunk| Weight::union_all(chunk.iter()))
-                    .collect();
-            }
-            Weight::union_all(current.iter())
-        }
-    }
+    Weight::union_all(pending.iter())
 }
 
 fn merge_state_into_builder(
@@ -3281,7 +3266,7 @@ pub fn minimize_acyclic_owned(mut pushed: DWA) -> DWA {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_exact_group_summary, final_weights_compatible_on_domain,
+        batch_build_weight, build_exact_group_summary, final_weights_compatible_on_domain,
         memberwise_group_compatible, minimize_acyclic, push_weights,
         sorted_weights_compatible_on_domain,
         sorted_weights_compatible_on_domain_intersection,
@@ -3307,6 +3292,29 @@ mod tests {
                 .copied()
                 .map(|(tsid, ranges)| (tsid, token_set(ranges))),
         )
+    }
+
+    #[test]
+    fn reconstruction_one_sweep_matches_reduction_tree() {
+        let pending: Vec<Weight> = (0..257u32)
+            .map(|index| {
+                Weight::from_per_tsid_token_sets(std::iter::once((
+                    index % 17,
+                    RangeSetBlaze::from_iter(std::iter::once((index % 31)..=(index % 31 + 2))),
+                )))
+            })
+            .collect();
+
+        let direct = batch_build_weight(pending.clone());
+        let mut tree = pending;
+        while tree.len() > 64 {
+            tree = tree
+                .chunks(64)
+                .map(|chunk| Weight::union_all(chunk.iter()))
+                .collect();
+        }
+        let reduction_tree = Weight::union_all(tree.iter());
+        assert_eq!(direct, reduction_tree);
     }
 
     fn assert_disjoint_matches_overlap(weight: &Weight, left: &Weight, right: &Weight) {
