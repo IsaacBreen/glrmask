@@ -12,6 +12,7 @@ use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
 
 use crate::automata::weighted::determinize::determinize;
+use crate::automata::weighted::equivalence::find_difference;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize_owned;
 use crate::automata::weighted::nwa::NWA;
@@ -21,28 +22,25 @@ use crate::ds::weight::Weight;
 
 use super::types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile, compile_profile_enabled};
 
-fn minimize_merged_terminal_dwa_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("GLRMASK_MINIMIZE_MERGED_TERMINAL_DWA")
-            .map(|value| {
-                let trimmed = value.trim();
-                !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-            })
-            .unwrap_or(true)
-    })
+fn merged_terminal_dwa_phase_enabled(variable: &str, default: bool) -> bool {
+    std::env::var(variable)
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(default)
 }
 
-fn compact_merged_terminal_dwa_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("GLRMASK_COMPACT_MERGED_TERMINAL_DWA")
-            .map(|value| {
-                let trimmed = value.trim();
-                !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-            })
-            .unwrap_or(true)
-    })
+fn minimize_merged_terminal_dwa_enabled(default: bool) -> bool {
+    merged_terminal_dwa_phase_enabled("GLRMASK_MINIMIZE_MERGED_TERMINAL_DWA", default)
+}
+
+fn compact_merged_terminal_dwa_enabled(default: bool) -> bool {
+    merged_terminal_dwa_phase_enabled("GLRMASK_COMPACT_MERGED_TERMINAL_DWA", default)
+}
+
+fn assert_direct_global_terminal_dwa_merge_equivalence_enabled() -> bool {
+    std::env::var_os("GLRMASK_ASSERT_DIRECT_GLOBAL_TERMINAL_DWA_MERGE_EQUIVALENCE").is_some()
 }
 
 /// Return whether each source owns a disjoint set of original vocabulary tokens.
@@ -77,6 +75,78 @@ fn inputs_have_disjoint_token_domains(inputs: &[LocalIdMapTerminalDwa], max_toke
     true
 }
 
+/// Token-class remapping used while merging id-map-local weights.
+///
+/// Disjoint global vocabularies are laid out as contiguous source blocks, so
+/// their token mapping is an affine shift rather than a per-token relation.
+enum TokenRemap<'a> {
+    Explicit(&'a [Vec<u32>]),
+    Offset { offset: u32, local_token_count: u32 },
+}
+
+impl TokenRemap<'_> {
+    fn map_tokens(
+        &self,
+        token_key: usize,
+        tokens: &RangeSetBlaze<u32>,
+        token_cache: &mut HashMap<usize, Arc<RangeSetBlaze<u32>>>,
+    ) -> Arc<RangeSetBlaze<u32>> {
+        if let Some(existing) = token_cache.get(&token_key) {
+            return Arc::clone(existing);
+        }
+        let mapped = match self {
+            Self::Offset { offset, .. } => RangeSetBlaze::from_iter(tokens.ranges().map(|range| {
+                let start = (*range.start())
+                    .checked_add(*offset)
+                    .expect("global token offset overflow");
+                let end = (*range.end())
+                    .checked_add(*offset)
+                    .expect("global token offset overflow");
+                start..=end
+            })),
+            Self::Explicit(local_to_global_tokens) => {
+                let mut result = RangeSetBlaze::new();
+                for local_token in tokens.iter() {
+                    if let Some(globals) = local_to_global_tokens.get(local_token as usize) {
+                        for &global_token in globals {
+                            result.insert(global_token);
+                        }
+                    }
+                }
+                result
+            }
+        };
+        let mapped = Arc::new(mapped);
+        token_cache.insert(token_key, Arc::clone(&mapped));
+        mapped
+    }
+
+    fn all_global_tokens(&self) -> RangeSetBlaze<u32> {
+        match self {
+            Self::Offset { offset, local_token_count } => {
+                if *local_token_count == 0 {
+                    RangeSetBlaze::new()
+                } else {
+                    RangeSetBlaze::from_iter(std::iter::once(
+                        *offset..=offset
+                            .checked_add(*local_token_count - 1)
+                            .expect("global token offset overflow"),
+                    ))
+                }
+            }
+            Self::Explicit(local_to_global_tokens) => {
+                let mut all_global_tokens = RangeSetBlaze::new();
+                for globals in *local_to_global_tokens {
+                    for &global_token in globals {
+                        all_global_tokens.insert(global_token);
+                    }
+                }
+                all_global_tokens
+            }
+        }
+    }
+}
+
 /// Remap a deterministic weighted automaton directly, preserving the same
 /// branch-local token domain handling as `remap_nwa_with_maps`.
 fn remap_dwa_with_maps(
@@ -85,15 +155,47 @@ fn remap_dwa_with_maps(
     local_to_global_tokens: &[Vec<u32>],
     global_tsid_count: usize,
 ) {
+    remap_dwa_with_token_remap(
+        dwa,
+        local_to_global_tsids,
+        TokenRemap::Explicit(local_to_global_tokens),
+        global_tsid_count,
+    );
+}
+
+fn remap_dwa_with_token_offset(
+    dwa: &mut DWA,
+    local_to_global_tsids: &[Vec<u32>],
+    token_offset: u32,
+    local_token_count: u32,
+    global_tsid_count: usize,
+) {
+    remap_dwa_with_token_remap(
+        dwa,
+        local_to_global_tsids,
+        TokenRemap::Offset {
+            offset: token_offset,
+            local_token_count,
+        },
+        global_tsid_count,
+    );
+}
+
+fn remap_dwa_with_token_remap(
+    dwa: &mut DWA,
+    local_to_global_tsids: &[Vec<u32>],
+    token_remap: TokenRemap<'_>,
+    global_tsid_count: usize,
+) {
     let mut weight_cache = HashMap::<usize, Weight>::new();
     let mut token_cache = HashMap::<usize, Arc<RangeSetBlaze<u32>>>::new();
 
     for state in dwa.states_mut() {
         if let Some(final_weight) = state.final_weight.as_mut() {
-            *final_weight = remap_weight_cached(
+            *final_weight = remap_weight_cached_with_token_remap(
                 final_weight,
                 local_to_global_tsids,
-                local_to_global_tokens,
+                &token_remap,
                 global_tsid_count,
                 &mut weight_cache,
                 &mut token_cache,
@@ -104,10 +206,10 @@ fn remap_dwa_with_maps(
         }
 
         for (_, weight) in state.transitions.values_mut() {
-            *weight = remap_weight_cached(
+            *weight = remap_weight_cached_with_token_remap(
                 weight,
                 local_to_global_tsids,
-                local_to_global_tokens,
+                &token_remap,
                 global_tsid_count,
                 &mut weight_cache,
                 &mut token_cache,
@@ -194,6 +296,20 @@ fn direct_union_disjoint_token_domain_dwas(inputs: &[DWA]) -> DWA {
     output
 }
 
+fn contiguous_token_offset(local_to_global: &[u32]) -> Option<u32> {
+    let offset = *local_to_global.first()?;
+    if offset == u32::MAX {
+        return None;
+    }
+    local_to_global
+        .iter()
+        .enumerate()
+        .all(|(local, &global)| {
+            global != u32::MAX && offset.checked_add(local as u32) == Some(global)
+        })
+        .then_some(offset)
+}
+
 /// Build the exact deterministic union without subset determinization whenever
 /// the source vocabularies are disjoint.  The generic NWA route remains the
 /// fallback for overlapping domains.
@@ -207,24 +323,81 @@ fn try_merge_disjoint_token_domain_dwas(
         return None;
     }
 
+    let profiling = compile_profile_enabled();
+    let mut build_maps_ms = 0.0;
+    let mut clone_ms = 0.0;
+    let mut remap_ms = 0.0;
     let mut remapped = Vec::with_capacity(inputs.len());
     for (input_index, input) in inputs.iter().enumerate() {
+        let started_at = profiling.then(Instant::now);
         let tsid_map = build_local_to_global_tsid_map(&input.id_map, global_id_map);
-        let token_map = direct_local_to_global_token_maps
-            .and_then(|maps| maps.get(input_index))
-            .map(|direct_map| build_direct_local_to_global_token_map(direct_map))
-            .unwrap_or_else(|| build_local_to_global_token_map(&input.id_map, global_id_map));
+        let direct_token_map = direct_local_to_global_token_maps
+            .and_then(|maps| maps.get(input_index));
+        let token_offset = direct_token_map.and_then(|map| contiguous_token_offset(map));
+        if profiling {
+            let tsid_pairs = tsid_map.iter().map(Vec::len).sum::<usize>();
+            let tsid_one_to_one = tsid_map.iter().filter(|targets| targets.len() == 1).count();
+            let tsid_max_fanout = tsid_map.iter().map(Vec::len).max().unwrap_or(0);
+            eprintln!(
+                "[glrmask/profile][direct_disjoint_terminal_dwa_maps] input={} local_tsids={} tsid_pairs={} tsid_one_to_one={} tsid_max_fanout={} local_tokens={} token_offset={:?}",
+                input_index,
+                tsid_map.len(),
+                tsid_pairs,
+                tsid_one_to_one,
+                tsid_max_fanout,
+                input.id_map.num_internal_tokens(),
+                token_offset,
+            );
+        }
+        if let Some(started_at) = started_at {
+            build_maps_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
+        let started_at = profiling.then(Instant::now);
         let mut dwa = input.dwa.clone();
-        remap_dwa_with_maps(
-            &mut dwa,
-            &tsid_map,
-            &token_map,
-            global_id_map.num_tsids() as usize,
-        );
+        if let Some(started_at) = started_at {
+            clone_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
+        let started_at = profiling.then(Instant::now);
+        if let Some(token_offset) = token_offset {
+            remap_dwa_with_token_offset(
+                &mut dwa,
+                &tsid_map,
+                token_offset,
+                input.id_map.num_internal_tokens(),
+                global_id_map.num_tsids() as usize,
+            );
+        } else {
+            let token_map = direct_token_map
+                .map(|direct_map| build_direct_local_to_global_token_map(direct_map))
+                .unwrap_or_else(|| build_local_to_global_token_map(&input.id_map, global_id_map));
+            remap_dwa_with_maps(
+                &mut dwa,
+                &tsid_map,
+                &token_map,
+                global_id_map.num_tsids() as usize,
+            );
+        }
+        if let Some(started_at) = started_at {
+            remap_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
         remapped.push(dwa);
     }
+    let union_started_at = profiling.then(Instant::now);
+    let result = direct_union_disjoint_token_domain_dwas(&remapped);
+    if let Some(union_started_at) = union_started_at {
+        eprintln!(
+            "[glrmask/profile][direct_disjoint_terminal_dwa_union] inputs={} build_maps_ms={:.3} clone_ms={:.3} remap_ms={:.3} union_ms={:.3} states={} transitions={}",
+            inputs.len(),
+            build_maps_ms,
+            clone_ms,
+            remap_ms,
+            union_started_at.elapsed().as_secs_f64() * 1000.0,
+            result.num_states(),
+            result.num_transitions(),
+        );
+    }
 
-    Some(direct_union_disjoint_token_domain_dwas(&remapped))
+    Some(result)
 }
 
 /// Merge local branch outputs for a single partition into one compacted DWA.
@@ -290,13 +463,45 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
     }
 }
 
+/// Build the ordinary global NWA union and determinize it. This is used only
+/// as an opt-in semantic oracle for the specialized disjoint-domain merge.
+fn generic_global_union_determinization(
+    inputs: &[LocalIdMapTerminalDwa],
+    global_id_map: &InternalIdMap,
+    direct_local_to_global_token_maps: Option<&Vec<Vec<u32>>>,
+) -> DWA {
+    let mut global_nwa = NWA::new(
+        global_id_map.num_tsids(),
+        global_id_map.max_internal_token_id(),
+    );
+    let mut global_body = global_nwa.body();
+    for (input_index, input) in inputs.iter().enumerate() {
+        let mut nwa = input.dwa.to_nwa();
+        let tsid_map = build_local_to_global_tsid_map(&input.id_map, global_id_map);
+        let token_map = direct_local_to_global_token_maps
+            .and_then(|maps| maps.get(input_index))
+            .map(|direct_map| build_direct_local_to_global_token_map(direct_map))
+            .unwrap_or_else(|| build_local_to_global_token_map(&input.id_map, global_id_map));
+        remap_nwa_with_maps(
+            &mut nwa,
+            &tsid_map,
+            &token_map,
+            global_id_map.num_tsids() as usize,
+        );
+        global_body = global_nwa.union_in_place(&nwa, &global_body);
+    }
+    global_nwa.set_start_states(global_body.start_states);
+    determinize(&global_nwa).expect("global terminal NWA reference determinization failed")
+}
+
 /// Merge already-compacted partition outputs into one global DWA.
 ///
-/// Partition-local merges have already minimized their local outputs. By
-/// default the final cross-partition merge also minimizes after determinizing;
-/// `GLRMASK_MINIMIZE_MERGED_TERMINAL_DWA=0` disables that final exact pass for
-/// A/B comparison. The merged result is then compacted before returning unless
-/// `GLRMASK_COMPACT_MERGED_TERMINAL_DWA=0` disables the final compaction pass.
+/// Partition-local merges have already minimized their local outputs. When
+/// global token domains are disjoint, an exact deterministic source-product is
+/// used and remains unminimized/uncompacted by default; this avoids constructing
+/// a large subset DWA only to erase it immediately. Overlapping domains retain
+/// the generic determinize-minimize-compact route. `GLRMASK_MINIMIZE_MERGED_TERMINAL_DWA`
+/// and `GLRMASK_COMPACT_MERGED_TERMINAL_DWA` explicitly override either default.
 pub(crate) fn merge_id_maps_and_terminal_dwas(
     inputs: Vec<LocalIdMapTerminalDwa>,
     num_tokenizer_states: usize,
@@ -320,6 +525,16 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         build_unified_global_id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let remap_and_union_started_at = Instant::now();
+    // The direct product is exact when token domains are disjoint. Unlike the
+    // generic NWA route it keeps source-local deterministic contexts separate,
+    // avoiding a large subset expansion that global minimization later erases.
+    let direct_global = try_merge_disjoint_token_domain_dwas(
+        &inputs,
+        &global_id_map,
+        direct_local_to_global_token_maps.as_ref(),
+        max_token_id,
+    );
+    let used_direct_global = direct_global.is_some();
     let mut global_nwa = NWA::new(
         global_id_map.num_tsids(),
         global_id_map.max_internal_token_id(),
@@ -332,59 +547,84 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     let mut remap_nwa_ms = 0.0;
     let mut union_ms = 0.0;
 
-    for (input_idx, input) in inputs.iter().enumerate() {
-        let started_at = profiling.then(Instant::now);
-        let mut nwa = input.dwa.to_nwa();
-        if let Some(started_at) = started_at {
-            to_nwa_ms += started_at.elapsed().as_secs_f64() * 1000.0;
-        }
+    if direct_global.is_none() {
+        for (input_idx, input) in inputs.iter().enumerate() {
+            let started_at = profiling.then(Instant::now);
+            let mut nwa = input.dwa.to_nwa();
+            if let Some(started_at) = started_at {
+                to_nwa_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+            }
 
-        let started_at = profiling.then(Instant::now);
-        let tsid_map = build_local_to_global_tsid_map(&input.id_map, &global_id_map);
-        if let Some(started_at) = started_at {
-            build_tsid_map_ms += started_at.elapsed().as_secs_f64() * 1000.0;
-        }
+            let started_at = profiling.then(Instant::now);
+            let tsid_map = build_local_to_global_tsid_map(&input.id_map, &global_id_map);
+            if let Some(started_at) = started_at {
+                build_tsid_map_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+            }
 
-        let started_at = profiling.then(Instant::now);
-        let token_map = direct_local_to_global_token_maps
-            .as_ref()
-            .and_then(|maps| maps.get(input_idx))
-            .map(|direct_map| build_direct_local_to_global_token_map(direct_map))
-            .unwrap_or_else(|| build_local_to_global_token_map(&input.id_map, &global_id_map));
-        if let Some(started_at) = started_at {
-            build_token_map_ms += started_at.elapsed().as_secs_f64() * 1000.0;
-        }
+            let started_at = profiling.then(Instant::now);
+            let token_map = direct_local_to_global_token_maps
+                .as_ref()
+                .and_then(|maps| maps.get(input_idx))
+                .map(|direct_map| build_direct_local_to_global_token_map(direct_map))
+                .unwrap_or_else(|| build_local_to_global_token_map(&input.id_map, &global_id_map));
+            if let Some(started_at) = started_at {
+                build_token_map_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+            }
 
-        let started_at = profiling.then(Instant::now);
-        remap_nwa_with_maps(
-            &mut nwa,
-            &tsid_map,
-            &token_map,
-            global_id_map.num_tsids() as usize,
-        );
-        if let Some(started_at) = started_at {
-            remap_nwa_ms += started_at.elapsed().as_secs_f64() * 1000.0;
-        }
+            let started_at = profiling.then(Instant::now);
+            remap_nwa_with_maps(
+                &mut nwa,
+                &tsid_map,
+                &token_map,
+                global_id_map.num_tsids() as usize,
+            );
+            if let Some(started_at) = started_at {
+                remap_nwa_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+            }
 
-        let started_at = profiling.then(Instant::now);
-        global_body = global_nwa.union_in_place(&nwa, &global_body);
-        if let Some(started_at) = started_at {
-            union_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+            let started_at = profiling.then(Instant::now);
+            global_body = global_nwa.union_in_place(&nwa, &global_body);
+            if let Some(started_at) = started_at {
+                union_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+            }
         }
+        global_nwa.set_start_states(global_body.start_states);
     }
-    global_nwa.set_start_states(global_body.start_states);
     let remap_and_union_ms = remap_and_union_started_at.elapsed().as_secs_f64() * 1000.0;
     let nwa_states_before_determinize = global_nwa.num_states();
     let nwa_transitions_before_determinize = global_nwa.num_transitions();
 
     let determinize_started_at = Instant::now();
-    let det = determinize(&global_nwa)
-        .expect("merge terminal NWA determinization failed");
+    let det = direct_global.unwrap_or_else(|| {
+        determinize(&global_nwa).expect("merge terminal NWA determinization failed")
+    });
     let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
     let det_states = det.num_states();
     let det_transitions = det.num_transitions();
 
-    let minimize_enabled = minimize_merged_terminal_dwa_enabled();
+    if used_direct_global && assert_direct_global_terminal_dwa_merge_equivalence_enabled() {
+        let reference = generic_global_union_determinization(
+            &inputs,
+            &global_id_map,
+            direct_local_to_global_token_maps.as_ref(),
+        );
+        let difference = find_difference(&det, &reference)
+            .expect("direct global terminal DWA equivalence requires acyclic inputs");
+        assert!(
+            difference.is_none(),
+            "direct global terminal DWA differs from generic NWA union on labels {:?}",
+            difference,
+        );
+        if profiling {
+            eprintln!("[glrmask/profile][direct_global_terminal_dwa_equivalence] result=equivalent");
+        }
+    }
+
+    // A direct product is already exact. Its slightly larger topology is much
+    // cheaper to construct than generic subset expansion and remains suitable
+    // for the downstream joint reconciliation pass, so do not minimize it by
+    // default. Explicit environment values still override this strategy.
+    let minimize_enabled = minimize_merged_terminal_dwa_enabled(!used_direct_global);
     let minimize_started_at = Instant::now();
     let dwa = if minimize_enabled {
         minimize_owned(det)
@@ -401,7 +641,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     let before_compact_range_counts = profiling.then(|| mapped_dwa.interned_range_counts());
     let before_num_tsids = profiling.then(|| mapped_dwa.id_map().num_tsids());
     let before_num_tokens = profiling.then(|| mapped_dwa.id_map().num_internal_tokens());
-    let compact_enabled = compact_merged_terminal_dwa_enabled();
+    let compact_enabled = compact_merged_terminal_dwa_enabled(!used_direct_global);
     let (compact_report, compact_ms) = if compact_enabled {
         let compact_started_at = Instant::now();
         let compact_report = if profiling {
@@ -452,7 +692,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         );
         eprintln!(
             "[glrmask/profile][merged_terminal_dwa] minimize_enabled={} compact_enabled={} states_before_compact={} transitions_before_compact={} interned_ranges_before_compact={} token_ranges_before_compact={} states_after_compact={} transitions_after_compact={} interned_ranges_after_compact={} token_ranges_after_compact={} tsids_before_compact={} tsids_after_compact={} tokens_before_compact={} tokens_after_compact={} compact_ms={:.3}",
-            minimize_merged_terminal_dwa_enabled(),
+            minimize_enabled,
             compact_enabled,
             before_compact_stats.states,
             before_compact_stats.transitions,
@@ -712,28 +952,38 @@ fn reorder_classes_with_sentinel(
     *reps = new_reps;
 }
 
-/// Map local TSIDs to global TSIDs via original-state lookup.
+/// Map local TSIDs to the global composite TSIDs.
+///
+/// `build_unified_global_id_map` constructs each global TSID from the tuple of
+/// all input-local TSIDs. Therefore any representative original tokenizer
+/// state of a global class identifies the unique local class that owns it.
+/// Iterating global representatives emits each destination once, in ascending
+/// global-ID order, avoiding the old per-input `BTreeSet` aggregation.
 fn build_local_to_global_tsid_map(
     local_id_map: &InternalIdMap,
     global_id_map: &InternalIdMap,
 ) -> Vec<Vec<u32>> {
-    let num_local = local_id_map.num_tsids() as usize;
-    let mut local_to_global = vec![BTreeSet::new(); num_local];
-
-    for (state, &local_tsid) in local_id_map
+    let mut local_to_global = vec![Vec::new(); local_id_map.num_tsids() as usize];
+    for (global_tsid, &representative_state) in global_id_map
         .tokenizer_states
-        .original_to_internal
+        .representative_original_ids
         .iter()
         .enumerate()
     {
-        let global_tsid = global_id_map.tokenizer_states.original_to_internal[state];
-        local_to_global[local_tsid as usize].insert(global_tsid);
-    }
+        let local_tsid = local_id_map.tokenizer_states.original_to_internal
+            [representative_state as usize] as usize;
+        local_to_global[local_tsid].push(global_tsid as u32);
 
+        #[cfg(debug_assertions)]
+        for &original_state in &global_id_map.tokenizer_states.internal_to_originals[global_tsid] {
+            debug_assert_eq!(
+                local_id_map.tokenizer_states.original_to_internal[original_state as usize],
+                local_tsid as u32,
+                "a global composite TSID must refine every local TSID map",
+            );
+        }
+    }
     local_to_global
-        .into_iter()
-        .map(|s| s.into_iter().collect())
-        .collect()
 }
 
 /// Map local internal token classes to global internal token classes.
@@ -834,14 +1084,32 @@ fn remap_weight_cached(
     cache: &mut HashMap<usize, Weight>,
     token_cache: &mut HashMap<usize, Arc<RangeSetBlaze<u32>>>,
 ) -> Weight {
+    remap_weight_cached_with_token_remap(
+        weight,
+        local_to_global_tsids,
+        &TokenRemap::Explicit(local_to_global_tokens),
+        global_tsid_count,
+        cache,
+        token_cache,
+    )
+}
+
+fn remap_weight_cached_with_token_remap(
+    weight: &Weight,
+    local_to_global_tsids: &[Vec<u32>],
+    token_remap: &TokenRemap<'_>,
+    global_tsid_count: usize,
+    cache: &mut HashMap<usize, Weight>,
+    token_cache: &mut HashMap<usize, Arc<RangeSetBlaze<u32>>>,
+) -> Weight {
     let ptr = Arc::as_ptr(&weight.0) as usize;
     if let Some(cached) = cache.get(&ptr) {
         return cached.clone();
     }
-    let remapped = remap_weight_general(
+    let remapped = remap_weight_with_token_remap(
         weight,
         local_to_global_tsids,
-        local_to_global_tokens,
+        token_remap,
         global_tsid_count,
         token_cache,
     );
@@ -849,10 +1117,10 @@ fn remap_weight_cached(
     remapped
 }
 
-fn remap_weight_general(
+fn remap_weight_with_token_remap(
     weight: &Weight,
     local_to_global_tsids: &[Vec<u32>],
-    local_to_global_tokens: &[Vec<u32>],
+    token_remap: &TokenRemap<'_>,
     global_tsid_count: usize,
     token_cache: &mut HashMap<usize, Arc<RangeSetBlaze<u32>>>,
 ) -> Weight {
@@ -861,16 +1129,10 @@ fn remap_weight_general(
     }
 
     if weight.is_full() {
-        let mut all_global_tokens = RangeSetBlaze::new();
-        for globals in local_to_global_tokens {
-            for &global_token in globals {
-                all_global_tokens.insert(global_token);
-            }
-        }
+        let all_global_tokens = token_remap.all_global_tokens();
         if all_global_tokens.is_empty() {
             return Weight::empty();
         }
-
         let mut all_global_tsids = BTreeSet::new();
         for globals in local_to_global_tsids {
             for &global_tsid in globals {
@@ -879,10 +1141,6 @@ fn remap_weight_general(
                 }
             }
         }
-        if all_global_tsids.is_empty() {
-            return Weight::empty();
-        }
-
         return Weight::from_per_tsid_token_sets(
             all_global_tsids
                 .into_iter()
@@ -896,37 +1154,18 @@ fn remap_weight_general(
     use crate::ds::weight::{finalize_weight_map, shared_rangeset};
 
     let mut tokens_by_global_tsid = Vec::<(u32, Arc<RangeSetBlaze<u32>>)>::new();
-
     for (start, end, tokens) in entries {
         let token_key = Arc::as_ptr(&tokens) as usize;
-        let mapped_tokens = if let Some(mapped_tokens) = token_cache.get(&token_key) {
-            mapped_tokens.clone()
-        } else {
-            let mapped_tokens = {
-                let mut result = RangeSetBlaze::new();
-                for local_token in tokens.iter() {
-                    if let Some(globals) = local_to_global_tokens.get(local_token as usize) {
-                        for &g in globals {
-                            result.insert(g);
-                        }
-                    }
-                }
-                Arc::new(result)
-            };
-            token_cache.insert(token_key, mapped_tokens.clone());
-            mapped_tokens
-        };
+        let mapped_tokens = token_remap.map_tokens(token_key, tokens.as_ref(), token_cache);
 
         for local_tsid in start..=end {
             let Some(global_tsids) = local_to_global_tsids.get(local_tsid as usize) else {
                 continue;
             };
             for &global_tsid in global_tsids {
-                let idx = global_tsid as usize;
-                if idx >= global_tsid_count {
-                    continue;
+                if (global_tsid as usize) < global_tsid_count {
+                    tokens_by_global_tsid.push((global_tsid, Arc::clone(&mapped_tokens)));
                 }
-                tokens_by_global_tsid.push((idx as u32, Arc::clone(&mapped_tokens)));
             }
         }
     }
@@ -934,7 +1173,6 @@ fn remap_weight_general(
     if tokens_by_global_tsid.is_empty() {
         return Weight::empty();
     }
-
     tokens_by_global_tsid.sort_unstable_by_key(|(global_tsid, _)| *global_tsid);
 
     let mut merged_by_global_tsid = Vec::<(u32, Arc<RangeSetBlaze<u32>>)>::new();
@@ -950,16 +1188,13 @@ fn remap_weight_general(
         merged_by_global_tsid.push((global_tsid, tokens));
     }
 
-    // Build WeightMap by scanning sparse sorted TSID/token-set entries for contiguous runs.
     use range_set_blaze::RangeMapBlaze;
-
     let mut map = RangeMapBlaze::<u32, Arc<RangeSetBlaze<u32>>>::new();
     let mut run_start: Option<u32> = None;
-    let mut run_end: u32 = 0;
-    let mut run_shared: Option<Arc<RangeSetBlaze<u32>>> = None;
-
+    let mut run_end = 0u32;
+    let mut run_tokens: Option<Arc<RangeSetBlaze<u32>>> = None;
     for (global_tsid, tokens) in merged_by_global_tsid {
-        if let Some(ref current) = run_shared {
+        if let Some(current) = &run_tokens {
             if global_tsid == run_end.wrapping_add(1)
                 && (Arc::ptr_eq(current, &tokens) || current.as_ref() == tokens.as_ref())
             {
@@ -967,21 +1202,20 @@ fn remap_weight_general(
                 continue;
             }
             map.extend_simple(std::iter::once((
-                run_start.unwrap()..=run_end,
+                run_start.expect("run start must exist")..=run_end,
                 Arc::clone(current),
             )));
         }
         run_start = Some(global_tsid);
         run_end = global_tsid;
-        run_shared = Some(tokens);
+        run_tokens = Some(tokens);
     }
-    if let Some(current) = run_shared {
+    if let Some(tokens) = run_tokens {
         map.extend_simple(std::iter::once((
-            run_start.unwrap()..=run_end,
-            current,
+            run_start.expect("run start must exist")..=run_end,
+            tokens,
         )));
     }
-
     finalize_weight_map(map)
 }
 
@@ -1023,6 +1257,96 @@ mod tests {
             frontier = next;
         }
         words
+    }
+
+    fn id_map_with_tsid_partition(
+        original_to_internal: Vec<u32>,
+        representative_original_ids: Vec<u32>,
+    ) -> InternalIdMap {
+        let num_tsids = representative_original_ids.len() as u32;
+        InternalIdMap {
+            tokenizer_states: ManyToOneIdMap::from_original_to_internal_with_representatives(
+                original_to_internal,
+                num_tsids,
+                representative_original_ids,
+            ),
+            vocab_tokens: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                Vec::new(),
+                0,
+            ),
+        }
+    }
+
+    fn reference_local_to_global_tsid_map(
+        local_id_map: &InternalIdMap,
+        global_id_map: &InternalIdMap,
+    ) -> Vec<Vec<u32>> {
+        let mut result = vec![std::collections::BTreeSet::new(); local_id_map.num_tsids() as usize];
+        for (original_state, &local_tsid) in local_id_map
+            .tokenizer_states
+            .original_to_internal
+            .iter()
+            .enumerate()
+        {
+            result[local_tsid as usize]
+                .insert(global_id_map.tokenizer_states.original_to_internal[original_state]);
+        }
+        result
+            .into_iter()
+            .map(|targets| targets.into_iter().collect())
+            .collect()
+    }
+
+    #[test]
+    fn representative_tsid_map_matches_set_reference() {
+        let global = id_map_with_tsid_partition(vec![0, 0, 1, 1, 2, 2], vec![0, 2, 4]);
+        let local = id_map_with_tsid_partition(vec![0, 0, 1, 1, 0, 0], vec![0, 2]);
+
+        assert_eq!(
+            build_local_to_global_tsid_map(&local, &global),
+            reference_local_to_global_tsid_map(&local, &global),
+        );
+    }
+
+    #[test]
+    fn contiguous_token_offset_rejects_unmapped_classes() {
+        assert_eq!(contiguous_token_offset(&[9, 10, 11]), Some(9));
+        assert_eq!(contiguous_token_offset(&[u32::MAX]), None);
+        assert_eq!(contiguous_token_offset(&[9, u32::MAX]), None);
+    }
+
+    #[test]
+    fn affine_token_remap_matches_explicit_token_map() {
+        let weight = Weight::from_per_tsid_token_sets([
+            (0, RangeSetBlaze::from_iter([0..=2, 5..=5])),
+            (1, RangeSetBlaze::from_iter([1..=4])),
+        ]);
+        let tsid_map = vec![vec![1, 3], vec![2]];
+        let explicit = vec![vec![7], vec![8], vec![9], vec![10], vec![11], vec![12]];
+        let mut explicit_cache = HashMap::new();
+        let mut explicit_tokens = HashMap::new();
+        let explicit_result = remap_weight_cached_with_token_remap(
+            &weight,
+            &tsid_map,
+            &TokenRemap::Explicit(&explicit),
+            4,
+            &mut explicit_cache,
+            &mut explicit_tokens,
+        );
+        let mut offset_cache = HashMap::new();
+        let mut offset_tokens = HashMap::new();
+        let offset_result = remap_weight_cached_with_token_remap(
+            &weight,
+            &tsid_map,
+            &TokenRemap::Offset {
+                offset: 7,
+                local_token_count: 6,
+            },
+            4,
+            &mut offset_cache,
+            &mut offset_tokens,
+        );
+        assert_eq!(explicit_result, offset_result);
     }
 
     #[test]
