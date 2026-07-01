@@ -174,6 +174,94 @@ impl TerminalResidualRows {
         groups
     }
 
+    /// Return one partial transport result per nonrepresentative member in this
+    /// exact family view.  `None` means that member cannot be restored from the
+    /// supplied representative while every other member in `members` is hidden.
+    fn family_member_maps(
+        &self,
+        representative: TerminalID,
+        members: &[TerminalID],
+    ) -> Vec<(TerminalID, Option<InterchangeMap>)> {
+        assert!(members.contains(&representative));
+        let mut hidden = vec![false; self.terminal_count];
+        for &member in members {
+            if member != representative {
+                hidden[member as usize] = true;
+            }
+        }
+        let mut base_states_by_row = HashMap::<Vec<(TerminalID, u32)>, Vec<u32>>::new();
+        for (state, row) in self.rows_by_state.iter().enumerate() {
+            let base_row = row
+                .iter()
+                .copied()
+                .filter(|&(terminal, _)| !hidden[terminal as usize])
+                .collect::<Vec<_>>();
+            base_states_by_row
+                .entry(base_row)
+                .or_default()
+                .push(state as u32);
+        }
+
+        members
+            .iter()
+            .copied()
+            .filter(|&member| member != representative)
+            .map(|member| {
+                let mut base_state_to_member_states =
+                    vec![Vec::<u32>::new(); self.rows_by_state.len()];
+                let mut valid = true;
+                for (member_state, row) in self.rows_by_state.iter().enumerate() {
+                    let mut transformed = Vec::with_capacity(row.len());
+                    let mut member_block = None;
+                    for &(terminal, block) in row {
+                        if terminal == representative {
+                            continue;
+                        }
+                        if terminal == member {
+                            member_block = Some(block);
+                            continue;
+                        }
+                        if hidden[terminal as usize] {
+                            continue;
+                        }
+                        transformed.push((terminal, block));
+                    }
+                    // A target lexer state in which this member has no residual
+                    // contributes no member weight. It is intentionally outside
+                    // the partial transport's image; the identity branch supplies
+                    // all non-member behaviour there.
+                    let Some(block) = member_block else {
+                        continue;
+                    };
+                    let insertion = transformed
+                        .binary_search_by_key(&representative, |&(terminal, _)| terminal)
+                        .unwrap_or_else(|index| index);
+                    transformed.insert(insertion, (representative, block));
+                    let Some(base_states) = base_states_by_row.get(&transformed) else {
+                        valid = false;
+                        break;
+                    };
+                    for &base_state in base_states {
+                        base_state_to_member_states[base_state as usize]
+                            .push(member_state as u32);
+                    }
+                }
+                if valid
+                    && !base_state_to_member_states[self.initial_state]
+                        .contains(&(self.initial_state as u32))
+                {
+                    valid = false;
+                }
+                (
+                    member,
+                    valid.then_some(InterchangeMap {
+                        source_state_to_target_states: base_state_to_member_states,
+                    }),
+                )
+            })
+            .collect()
+    }
+
     fn family_maps(
         &self,
         representative: TerminalID,
@@ -182,82 +270,50 @@ impl TerminalResidualRows {
         if members.len() < 2 || !members.contains(&representative) {
             return None;
         }
-        let mut hidden = vec![false; self.terminal_count];
-        for &member in members {
-            if member != representative {
-                hidden[member as usize] = true;
-            }
-        }
-        let base_rows = self
-            .rows_by_state
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .copied()
-                    .filter(|&(terminal, _)| !hidden[terminal as usize])
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let mut base_states_by_row = HashMap::<Vec<(TerminalID, u32)>, Vec<u32>>::new();
-        for (state, row) in base_rows.iter().enumerate() {
-            base_states_by_row
-                .entry(row.clone())
-                .or_default()
-                .push(state as u32);
-        }
-
         let mut maps = BTreeMap::new();
-        for &member in members {
-            if member == representative {
-                continue;
-            }
-            let mut base_state_to_member_states = vec![Vec::<u32>::new(); self.rows_by_state.len()];
-            for (member_state, row) in self.rows_by_state.iter().enumerate() {
-                let mut transformed = Vec::with_capacity(row.len());
-                let mut member_block = None;
-                for &(terminal, block) in row {
-                    if terminal == representative {
-                        continue;
-                    }
-                    if terminal == member {
-                        member_block = Some(block);
-                        continue;
-                    }
-                    if hidden[terminal as usize] {
-                        continue;
-                    }
-                    transformed.push((terminal, block));
-                }
-                // A target lexer state in which this member has no residual
-                // contributes no member weight. It is intentionally outside
-                // the partial transport's image; the identity branch supplies
-                // all non-member behaviour there.
-                let Some(block) = member_block else {
-                    continue;
-                };
-                let insertion = transformed
-                    .binary_search_by_key(&representative, |&(terminal, _)| terminal)
-                    .unwrap_or_else(|index| index);
-                transformed.insert(insertion, (representative, block));
-                let base_states = base_states_by_row.get(&transformed)?;
-                for &base_state in base_states {
-                    base_state_to_member_states[base_state as usize].push(member_state as u32);
-                }
-            }
-            if !base_state_to_member_states[self.initial_state]
-                .contains(&(self.initial_state as u32))
-            {
-                return None;
-            }
-            maps.insert(
-                member,
-                InterchangeMap {
-                    source_state_to_target_states: base_state_to_member_states,
-                },
-            );
+        for (member, map) in self.family_member_maps(representative, members) {
+            maps.insert(member, map?);
         }
         Some(maps)
     }
+
+    /// Return the largest exact family for a fixed representative within one
+    /// reset-residual bucket.
+    ///
+    /// Start with every candidate hidden. Hiding an additional member deletes
+    /// that same terminal column from both the representatives-only rows and
+    /// each transformed member row, so an existing row equality cannot become
+    /// false. Therefore a member that fails while *all* candidates are hidden
+    /// cannot occur in any smaller valid family containing this representative.
+    /// Peeling all such failures and repeating is exact, not a greedy heuristic.
+    fn maximal_family_maps(
+        &self,
+        representative: TerminalID,
+        pool: &[TerminalID],
+    ) -> (Vec<TerminalID>, BTreeMap<TerminalID, InterchangeMap>) {
+        let mut members = pool.to_vec();
+        members.sort_unstable();
+        assert!(members.contains(&representative));
+        loop {
+            if members.len() < 2 {
+                return (vec![representative], BTreeMap::new());
+            }
+            let candidate_maps = self.family_member_maps(representative, &members);
+            let failed = candidate_maps
+                .iter()
+                .filter_map(|&(member, ref map)| map.is_none().then_some(member))
+                .collect::<Vec<_>>();
+            if failed.is_empty() {
+                let maps = candidate_maps
+                    .into_iter()
+                    .map(|(member, map)| (member, map.expect("checked nonempty")))
+                    .collect();
+                return (members, maps);
+            }
+            members.retain(|member| *member == representative || !failed.contains(member));
+        }
+    }
+
 }
 
 struct RestrictedDfa<'a> {
@@ -624,12 +680,11 @@ impl TerminalInterchangeability {
 
         // A family is valid only as a whole. A directed map is never inferred
         // by transitive closure or a collection of independently certified
-        // pairwise maps. `family_maps` compares the exact joint residual rows
-        // in the one representatives-only lexer view used by expansion.
+        // pairwise maps. For each representative, `maximal_family_maps` returns
+        // the largest exact family inside its reset-residual bucket.
         let mut result = Self::identity(active_terminals);
         let mut remaining = candidates.iter().copied().collect::<BTreeSet<_>>();
         let mut full_family_attempts = 0usize;
-        let mut incremental_family_attempts = 0usize;
         let mut certified_members = 0usize;
         while let Some(&first_remaining) = remaining.iter().next() {
             let mut best_representative = first_remaining;
@@ -646,43 +701,8 @@ impl TerminalInterchangeability {
                 if pool.len() < 2 {
                     continue;
                 }
-
                 full_family_attempts += 1;
-                let (members, maps) = if let Some(maps) = residuals.family_maps(representative, &pool) {
-                    (pool, maps)
-                } else {
-                    // Greedily grow a locally maximal exact family. Every
-                    // addition revalidates the entire family against the same
-                    // representatives-only row view, so order affects only
-                    // compactness, never correctness.
-                    let mut members = vec![representative];
-                    let mut maps = BTreeMap::<TerminalID, InterchangeMap>::new();
-                    let mut pending = pool
-                        .into_iter()
-                        .filter(|&member| member != representative)
-                        .collect::<Vec<_>>();
-                    let mut made_progress = true;
-                    while made_progress {
-                        made_progress = false;
-                        let mut next_pending = Vec::new();
-                        for member in pending {
-                            let mut proposal = members.clone();
-                            proposal.push(member);
-                            proposal.sort_unstable();
-                            incremental_family_attempts += 1;
-                            if let Some(proposal_maps) = residuals.family_maps(representative, &proposal) {
-                                members = proposal;
-                                maps = proposal_maps;
-                                made_progress = true;
-                            } else {
-                                next_pending.push(member);
-                            }
-                        }
-                        pending = next_pending;
-                    }
-                    (members, maps)
-                };
-
+                let (members, maps) = residuals.maximal_family_maps(representative, &pool);
                 if members.len() > best_members.len()
                     || (members.len() == best_members.len() && representative < best_representative)
                 {
@@ -708,7 +728,7 @@ impl TerminalInterchangeability {
                         (best_representative, member),
                         best_maps
                             .remove(&member)
-                            .expect("certified family member missing its simultaneous transport"),
+                            .expect("certified family member missing its maximal-family transport"),
                     );
                 }
             }
@@ -716,11 +736,10 @@ impl TerminalInterchangeability {
 
         if std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY").is_some() {
             eprintln!(
-                "[glrmask/debug][terminal_subsumption] active={} reset_buckets={} full_family_attempts={} incremental_family_attempts={} certified_members={}",
+                "[glrmask/debug][terminal_subsumption] active={} reset_buckets={} representative_family_attempts={} certified_members={}",
                 candidates.len(),
                 candidate_groups.len(),
                 full_family_attempts,
-                incremental_family_attempts,
                 certified_members,
             );
             for (representative, members) in result.members_by_representative.iter().enumerate() {
@@ -972,6 +991,63 @@ mod tests {
     use crate::automata::lexer::compile::build_regex;
 
     #[test]
+    fn directed_subsumption_contains_strict_interchangeability_small_matrix() {
+        fn language(words: &[&[u8]]) -> Expr {
+            if words.len() == 1 {
+                Expr::U8Seq(words[0].to_vec())
+            } else {
+                Expr::Choice(
+                    words
+                        .iter()
+                        .map(|word| Expr::U8Seq(word.to_vec()))
+                        .collect(),
+                )
+            }
+        }
+
+        let variants: &[&[&[u8]]] = &[
+            &[b"ab"],
+            &[b"ab", b"xa"],
+            &[b"ab", b"yb"],
+            &[b"ab", b"xa", b"yb"],
+            &[b"aa"],
+        ];
+        let mut relevant = [false; 256];
+        relevant[b'a' as usize] = true;
+        relevant[b'b' as usize] = true;
+        let mut strict_pairs = 0usize;
+
+        for left in variants {
+            for right in variants {
+                let expressions = vec![
+                    language(left),
+                    language(right),
+                    Expr::U8Seq(b"z".to_vec()),
+                ];
+                let tokenizer = build_regex(&expressions).into_tokenizer(
+                    expressions.len() as u32,
+                    Some(Arc::from(expressions.into_boxed_slice())),
+                );
+                let dfa = RestrictedDfa::new(&tokenizer, &[true, true, true], &relevant);
+                if dfa.interchange_map(0, 1).is_none() {
+                    continue;
+                }
+                strict_pairs += 1;
+                let residuals = TerminalResidualRows::build(&dfa, &[0, 1, 2]);
+                assert!(
+                    residuals.family_maps(0, &[0, 1]).is_some(),
+                    "strict witness was not accepted in forward directed form: left={left:?} right={right:?}",
+                );
+                assert!(
+                    residuals.family_maps(1, &[0, 1]).is_some(),
+                    "strict witness was not accepted in reverse directed form: left={left:?} right={right:?}",
+                );
+            }
+        }
+        assert!(strict_pairs > 0, "matrix failed to exercise strict witnesses");
+    }
+
+    #[test]
     fn directed_subsumption_star_is_larger_than_strict_interchangeability() {
         // Every terminal recognizes `ab` from lexer reset on the current
         // `{a,b}` partition. R also carries two distinct incoming-context
@@ -1006,10 +1082,9 @@ mod tests {
         assert!(dfa.interchange_map(1, 2).is_none());
 
         let residuals = TerminalResidualRows::build(&dfa, &[0, 1, 2]);
-        assert!(
-            residuals.family_maps(0, &[0, 1, 2]).is_some(),
-            "R must simultaneously subsume M1 and M2",
-        );
+        let (members, maps) = residuals.maximal_family_maps(0, &[0, 1, 2]);
+        assert_eq!(members, vec![0, 1, 2]);
+        assert_eq!(maps.len(), 2, "R must simultaneously subsume M1 and M2");
         let plan = TerminalInterchangeability::build(
             &tokenizer,
             &[true, true, true],
