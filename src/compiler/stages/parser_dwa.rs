@@ -9,6 +9,7 @@ use crate::Vocab;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{NWA, NwaBody};
+use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::table::GLRTable;
@@ -218,6 +219,7 @@ struct StateSummary {
 #[derive(Debug, Clone)]
 struct StateSummaries {
     states: Vec<StateSummary>,
+    start_states: Vec<u32>,
     unique_bundles: Vec<TerminalBundle>,
     bundle_accepts: Vec<bool>,
 }
@@ -306,29 +308,65 @@ fn parser_dwa_compose_detail_enabled() -> bool {
 }
 
 fn group_terminal_edges_by_target(
-    terminal_dwa: &DWA,
+    terminal_automaton: &TerminalAutomaton,
     grammar: &AnalyzedGrammar,
     state_id: u32,
 ) -> BTreeMap<u32, TerminalBundle> {
-    let Some(state) = terminal_dwa.states().get(state_id as usize) else {
-        return BTreeMap::new();
-    };
-
     let mut bundles_by_target = BTreeMap::<u32, TerminalBundle>::new();
-    for (&label, (target, weight)) in &state.transitions {
-        if label < 0 || label as u32 >= grammar.num_terminals {
-            continue;
+    let mut add = |target: u32, label: i32, weight: &Weight| {
+        if label < 0 || label as u32 >= grammar.num_terminals || weight.is_empty() {
+            return;
         }
-
         bundles_by_target
-            .entry(*target)
+            .entry(target)
             .or_default()
             .entry(label as TerminalID)
             .and_modify(|existing| *existing = existing.union(weight))
             .or_insert_with(|| weight.clone());
+    };
+
+    match terminal_automaton {
+        TerminalAutomaton::Dwa(dwa) => {
+            let Some(state) = dwa.states().get(state_id as usize) else {
+                return bundles_by_target;
+            };
+            for (&label, (target, weight)) in &state.transitions {
+                add(*target, label, weight);
+            }
+        }
+        TerminalAutomaton::TokenDeterministicNwa(nwa) => {
+            let Some(state) = nwa.states().get(state_id as usize) else {
+                return bundles_by_target;
+            };
+            assert!(
+                state.epsilons.is_empty(),
+                "token-deterministic terminal NWA must not contain epsilon edges",
+            );
+            for (&label, branches) in &state.transitions {
+                for (target, weight) in branches {
+                    add(*target, label, weight);
+                }
+            }
+        }
     }
 
     bundles_by_target
+}
+
+fn terminal_state_final_weight(
+    terminal_automaton: &TerminalAutomaton,
+    state_id: usize,
+) -> Option<Weight> {
+    match terminal_automaton {
+        TerminalAutomaton::Dwa(dwa) => dwa
+            .states()
+            .get(state_id)
+            .and_then(|state| state.final_weight.clone()),
+        TerminalAutomaton::TokenDeterministicNwa(nwa) => nwa
+            .states()
+            .get(state_id)
+            .and_then(|state| state.final_weight.clone()),
+    }
 }
 
 fn bundle_signature(bundle: &TerminalBundle) -> BundleSignature {
@@ -353,16 +391,18 @@ fn terminal_bundle_has_acceptance(bundle: &TerminalBundle, templates: &Templates
 }
 
 fn build_state_summaries(
-    terminal_dwa: &DWA,
+    terminal_automaton: &TerminalAutomaton,
     grammar: &AnalyzedGrammar,
     templates: &Templates,
 ) -> StateSummaries {
-    let mut branches_by_state: Vec<Vec<Branch>> = Vec::with_capacity(terminal_dwa.states().len());
+    let state_count = terminal_automaton.num_states();
+    let mut branches_by_state: Vec<Vec<Branch>> = Vec::with_capacity(state_count);
     let mut bundle_ids_by_signature: FxHashMap<BundleSignature, usize> = FxHashMap::default();
     let mut unique_bundles: Vec<TerminalBundle> = Vec::new();
 
-    for (state_id, _state) in terminal_dwa.states().iter().enumerate() {
-        let bundles_by_target = group_terminal_edges_by_target(terminal_dwa, grammar, state_id as u32);
+    for state_id in 0..state_count {
+        let bundles_by_target =
+            group_terminal_edges_by_target(terminal_automaton, grammar, state_id as u32);
         let mut branches = Vec::with_capacity(bundles_by_target.len());
         for (target, bundle) in bundles_by_target {
             let signature = bundle_signature(&bundle);
@@ -384,18 +424,16 @@ fn build_state_summaries(
         .map(|bundle| terminal_bundle_has_acceptance(bundle, templates))
         .collect();
 
-    let states = terminal_dwa
-        .states()
-        .iter()
-        .enumerate()
-        .map(|(state_id, state)| StateSummary {
-            final_weight: state.final_weight.clone(),
+    let states = (0..state_count)
+        .map(|state_id| StateSummary {
+            final_weight: terminal_state_final_weight(terminal_automaton, state_id),
             branches: std::mem::take(&mut branches_by_state[state_id]),
         })
         .collect();
 
     StateSummaries {
         states,
+        start_states: terminal_automaton.start_states(),
         unique_bundles,
         bundle_accepts,
     }
@@ -1883,7 +1921,7 @@ fn append_branch_fragment(
 }
 
 fn build_parser_nwa_from_terminal_dwa(
-    terminal_dwa: &DWA,
+    terminal_dwa: &TerminalAutomaton,
     grammar: &AnalyzedGrammar,
     templates: Templates,
 ) -> Option<(NWA, ParserNwaBuildProfile)> {
@@ -1904,11 +1942,13 @@ fn build_parser_nwa_from_terminal_dwa(
         ..ParserDwaComposeDetailProfile::default()
     };
 
-    if !productive
-        .get(terminal_dwa.start_state() as usize)
+    let productive_start_states: Vec<u32> = summaries
+        .start_states
+        .iter()
         .copied()
-        .unwrap_or(false)
-    {
+        .filter(|state| productive.get(*state as usize).copied().unwrap_or(false))
+        .collect();
+    if productive_start_states.is_empty() {
         return None;
     }
 
@@ -2045,9 +2085,15 @@ fn build_parser_nwa_from_terminal_dwa(
     }
     compose_detail.branch_walk_ms = elapsed_ms(branch_walk_started_at);
 
-    let start = continuation_states[terminal_dwa.start_state() as usize];
-    assert_ne!(start, u32::MAX, "missing parser-DWA start continuation state");
-    arena.set_start_states(vec![start]);
+    let parser_start_states: Vec<u32> = productive_start_states
+        .into_iter()
+        .map(|state| continuation_states[state as usize])
+        .collect();
+    assert!(
+        parser_start_states.iter().all(|state| *state != u32::MAX),
+        "missing parser-DWA start continuation state",
+    );
+    arena.set_start_states(parser_start_states);
     let compose_state_ms = elapsed_ms(graph_started_at);
 
     if compose_detail_enabled {
@@ -2099,7 +2145,7 @@ fn build_parser_nwa_from_terminal_dwa(
 pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
-    terminal_dwa: &DWA,
+    terminal_dwa: &TerminalAutomaton,
     templates: Templates,
     _vocab: &Vocab,
     _id_map: &InternalIdMap,
@@ -2117,7 +2163,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
         if profiling_enabled {
             eprintln!(
                 "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} parser_nwa_built=false pre_minimize_states=0 pre_minimize_transitions=0 post_minimize_states=0 post_minimize_transitions=0 minimize_skipped={} state_prep_ms=0.000 compose_state_ms=0.000 parser_nwa_build_ms=0.000 resolve_negative_ms=0.000 support_determinize_ms=0.000 possible_outgoing_ms=0.000 default_opt_ms=0.000 subtract_final_ms=0.000 fallback_determinize_ms=0.000 minimize_ms=0.000 total_ms={:.3}",
-                terminal_dwa.states().len(),
+                terminal_dwa.num_states(),
                 terminal_dwa_transition_count,
                 terminal_dwa_interned_ranges,
                 minimize_skipped,
@@ -2195,7 +2241,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     if profiling_enabled {
         eprintln!(
             "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} parser_nwa_states={} parser_nwa_start_states={} pre_minimize_states={} pre_minimize_transitions={} post_minimize_states={} post_minimize_transitions={} minimize_skipped={} state_prep_ms={:.3} compose_state_ms={:.3} parser_nwa_build_ms={:.3} resolve_negative_ms={:.3} support_determinize_ms={:.3} possible_outgoing_ms={:.3} default_opt_ms={:.3} subtract_final_ms={:.3} fallback_determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
-            terminal_dwa.states().len(),
+            terminal_dwa.num_states(),
             terminal_dwa_transition_count,
             terminal_dwa_interned_ranges,
             parser_nwa.states().len(),

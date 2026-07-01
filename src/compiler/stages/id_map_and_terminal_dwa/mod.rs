@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
+use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap, MappedArtifact};
 use crate::ds::bitset::BitSet;
@@ -316,7 +317,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     flat_trans: Arc<[u32]>,
     global_max_length_state_map: &ManyToOneIdMap,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
-) -> (MappedArtifact<DWA>, TerminalDwaPhaseProfile) {
+) -> (MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile) {
     let total_started_at = Instant::now();
     let mut profile = TerminalDwaPhaseProfile::default();
 
@@ -589,7 +590,10 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
                 representative_original_ids: Vec::new(),
             },
         };
-        return (MappedArtifact::new(DWA::new(1, 0), empty_map), profile);
+        return (
+            MappedArtifact::new(TerminalAutomaton::Dwa(DWA::new(1, 0)), empty_map),
+            profile,
+        );
     }
 
     let partition_result_finalize_ms =
@@ -599,17 +603,47 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
 
     let did_global_merge = pairs.len() > 1;
     let merge_started_at = Instant::now();
-    let (merged, global_merge_profile) = if !did_global_merge {
+    let token_deterministic_nwa_enabled = std::env::var_os(
+        "GLRMASK_EXPERIMENTAL_TOKEN_DETERMINISTIC_TERMINAL_NWA",
+    )
+    .is_some();
+    let (merged_terminal_automaton, merged_id_map, global_merge_profile) = if !did_global_merge {
         // Single partition — already compacted by partition merge. Skip redundant global compact.
+        let pair = pairs.into_iter().next().unwrap();
         (
-            pairs.into_iter().next().unwrap(),
+            TerminalAutomaton::Dwa(pair.dwa),
+            pair.id_map,
             TerminalDwaPhaseProfile::default(),
         )
+    } else if token_deterministic_nwa_enabled {
+        if let Some((nwa, id_map, merge_profile)) =
+            merge::try_merge_id_maps_and_token_deterministic_nwa(
+                &pairs,
+                num_tokenizer_states,
+                max_token_id,
+            )
+        {
+            (
+                TerminalAutomaton::TokenDeterministicNwa(nwa),
+                id_map,
+                merge_profile,
+            )
+        } else {
+            let merged =
+                merge::merge_id_maps_and_terminal_dwas(pairs, num_tokenizer_states, max_token_id);
+            (
+                TerminalAutomaton::Dwa(merged.dwa),
+                merged.id_map,
+                merged.profile,
+            )
+        }
     } else {
-        let merged =
-            merge::merge_id_maps_and_terminal_dwas(pairs, num_tokenizer_states, max_token_id);
-        let global_merge_profile = merged.profile;
-        (merged, global_merge_profile)
+        let merged = merge::merge_id_maps_and_terminal_dwas(pairs, num_tokenizer_states, max_token_id);
+        (
+            TerminalAutomaton::Dwa(merged.dwa),
+            merged.id_map,
+            merged.profile,
+        )
     };
     let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -673,7 +707,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
         );
     }
 
-    (MappedArtifact::new(merged.dwa, merged.id_map), profile)
+    (MappedArtifact::new(merged_terminal_automaton, merged_id_map), profile)
 }
 
 pub(crate) fn build_id_map_and_terminal_dwa(
@@ -685,7 +719,7 @@ pub(crate) fn build_id_map_and_terminal_dwa(
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
-) -> (MappedArtifact<DWA>, TerminalDwaPhaseProfile, ManyToOneIdMap) {
+) -> (MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile, ManyToOneIdMap) {
     let mut profile = TerminalDwaPhaseProfile::default();
 
     let flat_trans_started_at = Instant::now();
