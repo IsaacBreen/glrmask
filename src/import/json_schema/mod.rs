@@ -22,7 +22,7 @@ use crate::GlrMaskError;
 use crate::import::ast::NamedGrammar;
 
 use self::config::JsonSchemaConfig;
-use self::load::load_document;
+use self::load::{load_document_with_features, scan_document_features};
 use self::lower::lower_document;
 
 /// Convert a JSON Schema value into the project's named grammar AST.
@@ -38,10 +38,13 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
     let total_started_at = profile_enabled.then(std::time::Instant::now);
     let config = JsonSchemaConfig::from_env();
+    // This scan is also reused by typed loading, avoiding separate walks for
+    // oneOf coercion, definitions, local aliases, and references.
+    let document_features = scan_document_features(schema);
     // Coercion is default-on, but the large majority of schemas do not contain
     // oneOf. Preserve the source Value unless there is an actual rewrite.
     let imported_schema: Cow<'_, Value> = if config.coerce_one_of_to_any_of
-        && schema_contains_one_of(schema)
+        && document_features.has_one_of
     {
         Cow::Owned(coerce_one_of_to_any_of_schema(schema))
     } else {
@@ -53,7 +56,8 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
     let load_started_at = profile_enabled.then(std::time::Instant::now);
-    let document = load_document(imported_schema.as_ref()).map_err(GlrMaskError::from)?;
+    let document = load_document_with_features(imported_schema.as_ref(), &document_features)
+        .map_err(GlrMaskError::from)?;
     let load_ms = load_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
@@ -73,13 +77,6 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
     Ok(grammar)
 }
 
-fn schema_contains_one_of(node: &Value) -> bool {
-    match node {
-        Value::Object(object) => object.contains_key("oneOf") || object.values().any(schema_contains_one_of),
-        Value::Array(items) => items.iter().any(schema_contains_one_of),
-        _ => false,
-    }
-}
 
 fn coerce_one_of_to_any_of_schema(schema: &Value) -> Value {
     coerce_one_of_to_any_of_schema_node(schema)

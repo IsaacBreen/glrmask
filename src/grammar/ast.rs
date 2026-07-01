@@ -1461,6 +1461,10 @@ impl<'a> Lowerer<'a> {
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let rules_before = self.rules.len();
         let state_count = dfa.states.len();
+        // Preserve the historical one-symbol edge representation for ordinary
+        // NFAs. Large closed discriminator unions are the only shape where
+        // flattening saves thousands of anonymous wrapper productions.
+        let flatten_sequence_transitions = state_count >= 512;
         let start = dfa.start_state as usize;
         let nts = self.expr_nfa_state_nonterminals(state_count, start, "expr_nfa_prefix", None)?;
         let start_nt = nts[start];
@@ -1499,7 +1503,7 @@ impl<'a> Lowerer<'a> {
                         | GrammarExpr::RawRegex(_)
                         | GrammarExpr::AnyByte
                 );
-                let symbol = if cacheable {
+                let symbols = if cacheable {
                     let cache_slot = reusable_symbols.get_mut(*label as usize).ok_or_else(|| {
                         GlrMaskError::GrammarParse(format!(
                             "ExprNFA transition label {label} is not a valid symbol index"
@@ -1507,19 +1511,21 @@ impl<'a> Lowerer<'a> {
                     })?;
                     if let Some(symbol) = cache_slot {
                         reusable_symbol_cache_hits += 1;
-                        symbol.clone()
+                        vec![symbol.clone()]
                     } else {
                         let symbol = self.lower_expr_terminalish(symbol_expr)?;
                         *cache_slot = Some(symbol.clone());
-                        symbol
+                        vec![symbol]
                     }
+                } else if flatten_sequence_transitions {
+                    self.lower_expr_nfa_transition_symbols(symbol_expr)?
                 } else {
-                    self.lower_expr_terminalish(symbol_expr)?
+                    vec![self.lower_expr_terminalish(symbol_expr)?]
                 };
-                self.rules.push(Rule {
-                    lhs: nts[target],
-                    rhs: vec![Symbol::Nonterminal(nts[state_index]), symbol],
-                });
+                let mut rhs = Vec::with_capacity(1 + symbols.len());
+                rhs.push(Symbol::Nonterminal(nts[state_index]));
+                rhs.extend(symbols);
+                self.rules.push(Rule { lhs: nts[target], rhs });
             }
         }
 
@@ -1561,6 +1567,9 @@ impl<'a> Lowerer<'a> {
         let rules_before = self.rules.len();
         let reindex = reindex_minimized_acyclic_order(dfa);
         let state_count = reindex.old_states_in_new_order.len();
+        // Preserve ordinary ExprNFA grammar structure; only this large-union
+        // case benefits materially from flattening concatenated edge labels.
+        let flatten_sequence_transitions = state_count >= 512;
         let start = reindex.start_state as usize;
         let nts = self.expr_nfa_state_nonterminals(state_count, start, "expr_nfa_prefix", None)?;
         let start_nt = nts[start];
@@ -1596,7 +1605,7 @@ impl<'a> Lowerer<'a> {
                         | GrammarExpr::RawRegex(_)
                         | GrammarExpr::AnyByte
                 );
-                let symbol = if cacheable {
+                let symbols = if cacheable {
                     let cache_slot = reusable_symbols.get_mut(*label as usize).ok_or_else(|| {
                         GlrMaskError::GrammarParse(format!(
                             "ExprNFA transition label {label} is not a valid symbol index"
@@ -1604,18 +1613,23 @@ impl<'a> Lowerer<'a> {
                     })?;
                     if let Some(symbol) = cache_slot {
                         reusable_symbol_cache_hits += 1;
-                        symbol.clone()
+                        vec![symbol.clone()]
                     } else {
                         let symbol = self.lower_expr_terminalish(symbol_expr)?;
                         *cache_slot = Some(symbol.clone());
-                        symbol
+                        vec![symbol]
                     }
+                } else if flatten_sequence_transitions {
+                    self.lower_expr_nfa_transition_symbols(symbol_expr)?
                 } else {
-                    self.lower_expr_terminalish(symbol_expr)?
+                    vec![self.lower_expr_terminalish(symbol_expr)?]
                 };
+                let mut rhs = Vec::with_capacity(1 + symbols.len());
+                rhs.push(Symbol::Nonterminal(nts[state_index]));
+                rhs.extend(symbols);
                 self.rules.push(Rule {
                     lhs: nts[target_state as usize],
-                    rhs: vec![Symbol::Nonterminal(nts[state_index]), symbol],
+                    rhs,
                 });
             }
         }
@@ -1821,6 +1835,28 @@ impl<'a> Lowerer<'a> {
         emit(self, nonterminal, expr)
             .expect("grammar lowering should not fail for internal expression emission");
         Symbol::Nonterminal(nonterminal)
+    }
+
+    /// Lowers an ExprNFA transition label to its grammar RHS.  Sequence labels
+    /// occur heavily in JSON Schema object unions: e.g. `{` + body + `}`.
+    /// Emitting those as a single anonymous nonterminal is language-equivalent
+    /// but creates one extra production per edge.  Flattening is safe because
+    /// an ExprNFA edge already denotes concatenation of its label expression.
+    fn lower_expr_nfa_transition_symbols(
+        &mut self,
+        expr: &GrammarExpr,
+    ) -> Result<Vec<Symbol>, GlrMaskError> {
+        match expr {
+            GrammarExpr::Grouped(inner) => self.lower_expr_nfa_transition_symbols(inner),
+            GrammarExpr::Sequence(parts) => {
+                let mut symbols = Vec::with_capacity(parts.len());
+                for part in parts {
+                    symbols.extend(self.lower_expr_nfa_transition_symbols(part)?);
+                }
+                Ok(symbols)
+            }
+            _ => Ok(vec![self.lower_expr_terminalish(expr)?]),
+        }
     }
 
     fn lower_expr_terminalish(&mut self, expr: &GrammarExpr) -> Result<Symbol, GlrMaskError> {
