@@ -23,256 +23,75 @@ use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 
-const NO_STATE: u32 = u32::MAX;
-
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct OutputBits(Vec<u64>);
-
-impl OutputBits {
-    fn new(words: usize) -> Self { Self(vec![0; words]) }
-    fn set(&mut self, terminal: usize) { self.0[terminal / 64] |= 1u64 << (terminal % 64); }
-
-    fn swap(&self, left: usize, right: usize) -> Self {
-        if left == right { return self.clone(); }
-        let mut result = self.clone();
-        let left_word = left / 64;
-        let right_word = right / 64;
-        let left_mask = 1u64 << (left % 64);
-        let right_mask = 1u64 << (right % 64);
-        if ((self.0[left_word] & left_mask) != 0) != ((self.0[right_word] & right_mask) != 0) {
-            result.0[left_word] ^= left_mask;
-            result.0[right_word] ^= right_mask;
-        }
-        result
-    }
-}
-
-/// Concrete representation of a bijection between residual-state partitions.
-/// A source lexer state maps to every concrete state in its target partition.
-/// The target set may be empty if the residual maps only to the synthetic
-/// restricted-DFA sink; weight transport then drops that coordinate.
+/// A per-source-state map on raw tokenizer states used to transport a copied
+/// terminal-DWA artifact from a representative terminal onto a class member.
+///
+/// Sound interchangeability (see [`RestrictedDfa::interchange_map`]) only ever
+/// produces the identity, so `source_state_to_target_states[s] == [s]`. The
+/// general `Vec<Vec<u32>>` shape is kept only so the transport helpers can stay
+/// unchanged; a non-identity map would be unsound (see the discussion there).
 #[derive(Clone, Debug)]
 struct InterchangeMap {
     source_state_to_target_states: Vec<Vec<u32>>,
 }
 
+/// View of the tokenizer used to decide terminal interchangeability for one
+/// vocabulary partition. Interchangeability depends only on the per-state
+/// matched-terminal sets, so this is deliberately a thin wrapper over the
+/// tokenizer rather than a materialized byte-restricted automaton.
 struct RestrictedDfa<'a> {
     tokenizer: &'a Tokenizer,
-    active_terminals: &'a [bool],
-    bytes: Vec<u8>,
     real_state_count: usize,
-    output_words: usize,
 }
 
 impl<'a> RestrictedDfa<'a> {
     fn new(
         tokenizer: &'a Tokenizer,
-        active_terminals: &'a [bool],
-        relevant_bytes: &[bool; 256],
+        _active_terminals: &'a [bool],
+        _relevant_bytes: &[bool; 256],
     ) -> Self {
         Self {
             tokenizer,
-            active_terminals,
-            bytes: (0..=255u8)
-                .filter(|&byte| relevant_bytes[byte as usize])
-                .collect(),
             real_state_count: tokenizer.num_states() as usize,
-            output_words: (tokenizer.num_terminals() as usize).div_ceil(64),
         }
     }
 
-    fn state_count(&self) -> usize {
-        self.real_state_count + 1
+    /// The set of tokenizer states at which `terminal` is a completed match.
+    fn matched_states(&self, terminal: TerminalID) -> Vec<bool> {
+        let mut matched = vec![false; self.real_state_count];
+        for (state, slot) in matched.iter_mut().enumerate() {
+            *slot = self
+                .tokenizer
+                .matched_terminals_iter(state as u32)
+                .any(|candidate| candidate == terminal);
+        }
+        matched
     }
 
-    fn dead_state(&self) -> usize {
-        self.real_state_count
-    }
-
-    fn output(&self, state: usize, swap: Option<(usize, usize)>) -> OutputBits {
-        if state == self.dead_state() {
-            return OutputBits::new(self.output_words);
-        }
-        let mut output = OutputBits::new(self.output_words);
-        for terminal in self.tokenizer.matched_terminals_iter(state as u32) {
-            if self
-                .active_terminals
-                .get(terminal as usize)
-                .copied()
-                .unwrap_or(false)
-            {
-                output.set(terminal as usize);
-            }
-        }
-        match swap {
-            Some((left, right)) => output.swap(left, right),
-            None => output,
-        }
-    }
-
-    fn successor(&self, state: usize, byte_slot: usize) -> usize {
-        if state == self.dead_state() {
-            return state;
-        }
-        let next = self.tokenizer.get_transition(state as u32, self.bytes[byte_slot]);
-        if next == NO_STATE {
-            self.dead_state()
-        } else {
-            next as usize
-        }
-    }
-
-    fn minimize(&self, swap: Option<(usize, usize)>) -> Vec<u32> {
-        let state_count = self.state_count();
-        let mut blocks = classify_keys((0..state_count).map(|state| self.output(state, swap)));
-        loop {
-            let keys = (0..state_count)
-                .map(|state| {
-                    let successors = (0..self.bytes.len())
-                        .map(|slot| blocks[self.successor(state, slot)])
-                        .collect::<Vec<_>>();
-                    (self.output(state, swap), successors)
-                })
-                .collect::<Vec<_>>();
-            let next = classify_keys(keys);
-            if next == blocks {
-                return blocks;
-            }
-            blocks = next;
-        }
-    }
-
-    fn minimize_original_and_swapped(&self, left: usize, right: usize) -> Vec<u32> {
-        let state_count = self.state_count();
-        let combined_count = state_count * 2;
-        let mut blocks = classify_keys((0..combined_count).map(|combined| {
-            let copy = combined / state_count;
-            let state = combined % state_count;
-            self.output(state, (copy == 1).then_some((left, right)))
-        }));
-        loop {
-            let keys = (0..combined_count)
-                .map(|combined| {
-                    let copy = combined / state_count;
-                    let state = combined % state_count;
-                    let successors = (0..self.bytes.len())
-                        .map(|slot| blocks[copy * state_count + self.successor(state, slot)])
-                        .collect::<Vec<_>>();
-                    (
-                        self.output(state, (copy == 1).then_some((left, right))),
-                        successors,
-                    )
-                })
-                .collect::<Vec<_>>();
-            let next = classify_keys(keys);
-            if next == blocks {
-                return blocks;
-            }
-            blocks = next;
-        }
-    }
-
+    /// Two terminals are interchangeable for this partition iff they are matched
+    /// at exactly the same set of tokenizer states, in which case the interchange
+    /// map is the identity on every state and label-swapping is a verbatim copy.
+    ///
+    /// This is the *only* sound reset-preserving interchange. Terminal-DWA edge
+    /// weights are keyed by the raw incoming tokenizer state, so a valid swap
+    /// map must be a concrete automorphism of the deterministic lexer DFA that
+    /// fixes the reset state. Such an automorphism is necessarily the identity
+    /// on all reachable states: it commutes with the transition function and
+    /// fixes the root, so `phi(delta*(reset, w)) = delta*(reset, w)`. Any coarser
+    /// relation - notably a bisimulation-block correspondence that merges or
+    /// swaps distinct raw states while still fixing the reset *block* - is not a
+    /// concrete automorphism. Transporting weights through it unions the
+    /// distinct token sets of those raw states and over- or under-accepts, which
+    /// is exactly the defect this replaces. Identity on reachable states is
+    /// equivalent to the two terminals having identical matched-state sets.
     fn interchange_map(&self, left: TerminalID, right: TerminalID) -> Option<InterchangeMap> {
-        let state_count = self.state_count();
-        let left = left as usize;
-        let right = right as usize;
-        if left == right {
-            return Some(InterchangeMap {
-                source_state_to_target_states: (0..self.real_state_count)
-                    .map(|state| vec![state as u32])
-                    .collect(),
-            });
-        }
-
-        let combined_blocks = self.minimize_original_and_swapped(left, right);
-        let source_blocks = self.minimize(None);
-        let swapped_blocks = self.minimize(Some((left, right)));
-
-        let source_count = source_blocks
-            .iter()
-            .copied()
-            .max()
-            .map_or(0, |block| block as usize + 1);
-        let target_count = swapped_blocks
-            .iter()
-            .copied()
-            .max()
-            .map_or(0, |block| block as usize + 1);
-        let mut target_states_by_block = vec![Vec::<u32>::new(); target_count];
-        for state in 0..self.real_state_count {
-            target_states_by_block[swapped_blocks[state] as usize].push(state as u32);
-        }
-        let mut source_states_by_block = vec![Vec::<u32>::new(); source_count];
-        for source in 0..self.real_state_count {
-            source_states_by_block[source_blocks[source] as usize].push(source as u32);
-        }
-        let mut source_to_target = vec![None::<u32>; source_count];
-
-        for source in 0..self.real_state_count {
-            let mut target_block = None;
-            for target in 0..state_count {
-                if combined_blocks[state_count + target] != combined_blocks[source] {
-                    continue;
-                }
-                let candidate = swapped_blocks[target];
-                match target_block {
-                    Some(existing) if existing != candidate => return None,
-                    Some(_) => {}
-                    None => target_block = Some(candidate),
-                }
-            }
-            let target_block = target_block?;
-            let source_block = source_blocks[source] as usize;
-            match source_to_target[source_block] {
-                Some(existing) if existing != target_block => return None,
-                Some(_) => {}
-                None => source_to_target[source_block] = Some(target_block),
-            }
-        }
-
-        let mut target_to_source = vec![None::<u32>; target_count];
-        for (source, target) in source_to_target.iter().enumerate() {
-            if source_states_by_block[source].is_empty() {
-                continue;
-            }
-            let target = (*target)? as usize;
-            match target_to_source[target] {
-                Some(existing) if existing != source as u32 => return None,
-                Some(_) => {}
-                None => target_to_source[target] = Some(source as u32),
-            }
-        }
-        if target_to_source.iter().enumerate().any(|(block, source)| {
-            !target_states_by_block[block].is_empty() && source.is_none()
-        }) {
+        if left != right && self.matched_states(left) != self.matched_states(right) {
             return None;
         }
-
-        let source_state_to_target_states = (0..self.real_state_count)
-            .map(|source| {
-                let target = source_to_target[source_blocks[source] as usize]
-                    .expect("checked above") as usize;
-                target_states_by_block[target].clone()
-            })
-            .collect::<Vec<_>>();
-
-        // A valid interchange map must keep the lexer reset state in its own
-        // image. Continuation scanning restarts from the fixed initial state
-        // after every terminal boundary, so the start state must map to a
-        // partition that still contains the start state. Maps that move the
-        // reset residual (e.g. terminals that finalize at different byte
-        // residues) are not valid interchange maps: the two terminals are not
-        // interchangeable, and the construction falls back to an ordinary build.
-        let initial = self.tokenizer.initial_state_id() as usize;
-        if !source_state_to_target_states
-            .get(initial)
-            .is_some_and(|targets| targets.contains(&(initial as u32)))
-        {
-            return None;
-        }
-
         Some(InterchangeMap {
-            source_state_to_target_states,
+            source_state_to_target_states: (0..self.real_state_count)
+                .map(|state| vec![state as u32])
+                .collect(),
         })
     }
 }
@@ -344,17 +163,6 @@ impl InterchangeMap {
             source_to_target,
         )
     }
-}
-
-fn classify_keys<K: Ord>(keys: impl IntoIterator<Item = K>) -> Vec<u32> {
-    let mut ids = BTreeMap::<K, u32>::new();
-    keys
-        .into_iter()
-        .map(|key| {
-            let next = ids.len() as u32;
-            *ids.entry(key).or_insert(next)
-        })
-        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -735,10 +543,10 @@ mod tests {
 
     #[test]
     fn rotated_residuals_have_no_interchange_map_because_reset_moves() {
-        // A=/a(aaaa)*/ finalizes at residue 1, B=/aaa(aaaa)*/ at residue 3. The
-        // only label swap that is a DFA automorphism is the +2 rotation, which
-        // moves the reset state (0 -> 2). A valid interchange map must keep the
-        // reset state in its own image, so A and B are NOT interchangeable.
+        // A=/a(aaaa)*/ is matched at the residue-1 states, B=/aaa(aaaa)*/ at the
+        // residue-3 states. Their matched-state sets differ, so swapping their
+        // labels is not the identity on reachable states: A and B are NOT
+        // interchangeable and the pair has no interchange map.
         let expressions = vec![
             Expr::Seq(vec![Expr::U8Seq(b"a".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
             Expr::Seq(vec![Expr::U8Seq(b"aaa".to_vec()), Expr::Repeat { expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())), min: 0, max: None }]),
@@ -861,38 +669,6 @@ mod tests {
                 expected_futures,
             );
         }
-    }
-
-    #[test]
-    fn restricted_byte_alphabet_omits_unlisted_transitions() {
-        let expressions = vec![
-            Expr::U8Seq(b"a".to_vec()),
-            Expr::Seq(vec![
-                Expr::U8Seq(b"a".to_vec()),
-                Expr::Repeat {
-                    expr: Box::new(Expr::U8Seq(b"z".to_vec())),
-                    min: 0,
-                    max: Some(1),
-                },
-            ]),
-        ];
-        let tokenizer = build_regex(&expressions).into_tokenizer(
-            expressions.len() as u32,
-            Some(Arc::from(expressions.into_boxed_slice())),
-        );
-        let after_a = tokenizer.get_transition(tokenizer.initial_state_id(), b'a');
-        assert_ne!(tokenizer.get_transition(after_a, b'z'), NO_STATE);
-
-        let mut only_a = [false; 256];
-        only_a[b'a' as usize] = true;
-        let restricted = RestrictedDfa::new(&tokenizer, &[true, true], &only_a);
-        assert_eq!(restricted.bytes, vec![b'a']);
-        assert_eq!(restricted.bytes.len(), 1);
-        assert_ne!(restricted.successor(after_a as usize, 0), tokenizer.get_transition(after_a, b'z') as usize);
-
-        let unrestricted = RestrictedDfa::new(&tokenizer, &[true, true], &[true; 256]);
-        assert_eq!(unrestricted.bytes.len(), 256);
-        assert_eq!(unrestricted.successor(after_a as usize, b'z' as usize), tokenizer.get_transition(after_a, b'z') as usize);
     }
 
     #[test]
