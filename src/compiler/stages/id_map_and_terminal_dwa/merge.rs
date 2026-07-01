@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::equivalence::find_difference;
@@ -56,6 +57,10 @@ fn quotient_token_deterministic_terminal_nwa_by_source_enabled() -> bool {
 
 fn refine_token_deterministic_terminal_nwa_after_source_quotient_enabled() -> bool {
     std::env::var_os("GLRMASK_EXPERIMENTAL_REFINE_TOKEN_NWA_AFTER_SOURCE_QUOTIENT").is_some()
+}
+
+fn fast_disjoint_terminal_nwa_id_map_enabled() -> bool {
+    std::env::var_os("GLRMASK_EXPERIMENTAL_FAST_DISJOINT_TERMINAL_NWA_ID_MAP").is_some()
 }
 
 /// Return whether each source owns a disjoint set of original vocabulary tokens.
@@ -574,8 +579,19 @@ pub(crate) fn try_merge_id_maps_and_token_deterministic_nwa(
     let total_started_at = Instant::now();
     let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
     let id_map_started_at = Instant::now();
-    let (global_id_map, direct_local_to_global_token_maps) =
-        build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
+    let (global_id_map, direct_local_to_global_token_maps, precomputed_tsid_maps) =
+        if fast_disjoint_terminal_nwa_id_map_enabled() {
+            let (id_map, direct_maps, tsid_maps) = build_unified_global_id_map_disjoint_fast(
+                &id_map_refs,
+                num_tokenizer_states,
+                max_token_id,
+            );
+            (id_map, Some(direct_maps), Some(tsid_maps))
+        } else {
+            let (id_map, direct_maps) =
+                build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
+            (id_map, direct_maps, None)
+        };
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let remap_started_at = Instant::now();
@@ -586,13 +602,36 @@ pub(crate) fn try_merge_id_maps_and_token_deterministic_nwa(
     );
     let mut state_sources = Vec::<Option<usize>>::new();
     let mut combined_start: Option<u32> = None;
+    let mut tsid_map_ms = 0.0;
+    let mut token_map_ms = 0.0;
+    let mut clone_ms = 0.0;
+    let mut remap_ms = 0.0;
+    let mut to_nwa_ms = 0.0;
+    let mut append_ms = 0.0;
+    let mut fuse_start_ms = 0.0;
     for (input_index, input) in inputs.iter().enumerate() {
-        let tsid_map = build_local_to_global_tsid_map(&input.id_map, &global_id_map);
+        let started_at = profiling.then(Instant::now);
+        let tsid_map = precomputed_tsid_maps
+            .as_ref()
+            .map(|maps| maps[input_index].clone())
+            .unwrap_or_else(|| build_local_to_global_tsid_map(&input.id_map, &global_id_map));
+        if let Some(started_at) = started_at {
+            tsid_map_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
+        let started_at = profiling.then(Instant::now);
         let direct_token_map = direct_local_to_global_token_maps
             .as_ref()
             .and_then(|maps| maps.get(input_index));
         let token_offset = direct_token_map.and_then(|map| contiguous_token_offset(map));
+        if let Some(started_at) = started_at {
+            token_map_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
+        let started_at = profiling.then(Instant::now);
         let mut dwa = input.dwa.clone();
+        if let Some(started_at) = started_at {
+            clone_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
+        let started_at = profiling.then(Instant::now);
         if let Some(token_offset) = token_offset {
             remap_dwa_with_token_offset(
                 &mut dwa,
@@ -612,11 +651,24 @@ pub(crate) fn try_merge_id_maps_and_token_deterministic_nwa(
                 global_id_map.num_tsids() as usize,
             );
         }
+        if let Some(started_at) = started_at {
+            remap_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
+        let started_at = profiling.then(Instant::now);
+        let source_nwa = dwa.to_nwa();
+        if let Some(started_at) = started_at {
+            to_nwa_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
+        let started_at = profiling.then(Instant::now);
         let before_append = global_nwa.num_states() as usize;
-        let body = global_nwa.append_with_body(&dwa.to_nwa());
+        let body = global_nwa.append_with_body(&source_nwa);
+        if let Some(started_at) = started_at {
+            append_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
         state_sources.extend(std::iter::repeat_n(Some(input_index), global_nwa.num_states() as usize - before_append));
         debug_assert_eq!(body.start_states.len(), 1);
         let source_start = body.start_states[0];
+        let started_at = profiling.then(Instant::now);
         if let Some(combined_start) = combined_start {
             let source = global_nwa.states()[source_start as usize].clone();
             if let Some(final_weight) = source.final_weight {
@@ -636,19 +688,38 @@ pub(crate) fn try_merge_id_maps_and_token_deterministic_nwa(
             combined_start = Some(source_start);
             state_sources[source_start as usize] = None;
         }
+        if let Some(started_at) = started_at {
+            fuse_start_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
     }
+    let started_at = profiling.then(Instant::now);
     global_nwa.set_start_states(vec![combined_start.expect("at least one input")]);
     let (mut global_nwa, state_sources) = prune_unreachable_nwa_with_sources(global_nwa, state_sources);
+    let prune_ms = started_at.map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0);
+    let mut source_quotient_ms = 0.0;
+    let mut refine_ms = 0.0;
     if quotient_token_deterministic_terminal_nwa_by_source_enabled() {
+        let started_at = profiling.then(Instant::now);
         global_nwa = quotient_disjoint_source_nwa_owned(global_nwa, &state_sources)
             .expect("token-deterministic source quotient failed");
+        if let Some(started_at) = started_at {
+            source_quotient_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        }
         if refine_token_deterministic_terminal_nwa_after_source_quotient_enabled() {
+            let started_at = profiling.then(Instant::now);
             global_nwa = minimize_token_deterministic_nwa_owned(global_nwa)
                 .expect("token-deterministic refinement after source quotient failed");
+            if let Some(started_at) = started_at {
+                refine_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+            }
         }
     } else if minimize_token_deterministic_terminal_nwa_enabled() {
+        let started_at = profiling.then(Instant::now);
         global_nwa = minimize_token_deterministic_nwa_owned(global_nwa)
             .expect("token-deterministic terminal NWA minimization failed");
+        if let Some(started_at) = started_at {
+            refine_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        }
     }
     debug_assert!(global_nwa.is_acyclic());
     debug_assert!(global_nwa.states().iter().all(|state| state.epsilons.is_empty()));
@@ -676,10 +747,20 @@ pub(crate) fn try_merge_id_maps_and_token_deterministic_nwa(
 
     if profiling {
         eprintln!(
-            "[glrmask/profile][token_deterministic_terminal_nwa_merge] inputs={} id_map_ms={:.3} remap_and_union_ms={:.3} states={} transitions={} total_ms={:.3}",
+            "[glrmask/profile][token_deterministic_terminal_nwa_merge] inputs={} id_map_ms={:.3} remap_and_union_ms={:.3} tsid_map_ms={:.3} token_map_ms={:.3} clone_ms={:.3} remap_ms={:.3} to_nwa_ms={:.3} append_ms={:.3} fuse_start_ms={:.3} prune_ms={:.3} source_quotient_ms={:.3} refine_ms={:.3} states={} transitions={} total_ms={:.3}",
             inputs.len(),
             id_map_ms,
             remap_and_union_ms,
+            tsid_map_ms,
+            token_map_ms,
+            clone_ms,
+            remap_ms,
+            to_nwa_ms,
+            append_ms,
+            fuse_start_ms,
+            prune_ms,
+            source_quotient_ms,
+            refine_ms,
             global_nwa.num_states(),
             global_nwa.num_transitions(),
             total_started_at.elapsed().as_secs_f64() * 1000.0,
@@ -924,6 +1005,108 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
     }
 }
 
+/// Fast exact global map construction for an already-proven disjoint token
+/// partition. The input order and original-state order are deterministic, so
+/// first-seen class IDs are stable for this merge and avoid a costly sort and
+/// relabel pass used only for cross-order canonicalization.
+fn build_unified_global_id_map_disjoint_fast(
+    inputs: &[&InternalIdMap],
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> (InternalIdMap, Vec<Vec<u32>>, Vec<Vec<Vec<u32>>>) {
+    let mut composite_to_class = FxHashMap::<SmallVec<[u32; 8]>, u32>::default();
+    let mut state_o2i = vec![0u32; num_tokenizer_states];
+    let mut state_i2o: Vec<Vec<u32>> = Vec::new();
+    let mut state_reps: Vec<u32> = Vec::new();
+    let mut local_to_global_tsids: Vec<Vec<Vec<u32>>> = inputs
+        .iter()
+        .map(|input| vec![Vec::new(); input.num_tsids() as usize])
+        .collect();
+
+    for state in 0..num_tokenizer_states {
+        let mut composite = SmallVec::<[u32; 8]>::with_capacity(inputs.len());
+        composite.extend(
+            inputs
+                .iter()
+                .map(|input| input.tokenizer_states.original_to_internal[state]),
+        );
+        let next_id = state_i2o.len() as u32;
+        let class = if let Some(&existing) = composite_to_class.get(&composite) {
+            existing
+        } else {
+            let class = next_id;
+            for (input_index, &local_tsid) in composite.iter().enumerate() {
+                local_to_global_tsids[input_index][local_tsid as usize].push(class);
+            }
+            composite_to_class.insert(composite, class);
+            state_i2o.push(Vec::new());
+            state_reps.push(state as u32);
+            class
+        };
+        state_o2i[state] = class;
+        state_i2o[class as usize].push(state as u32);
+    }
+
+    let (vocab_tokens, direct_local_to_global_token_maps) =
+        build_unified_global_token_id_map_assume_disjoint(inputs, max_token_id);
+    (
+        InternalIdMap {
+            tokenizer_states: ManyToOneIdMap {
+                original_to_internal: state_o2i,
+                internal_to_originals: state_i2o,
+                representative_original_ids: state_reps,
+            },
+            vocab_tokens,
+        },
+        direct_local_to_global_token_maps,
+        local_to_global_tsids,
+    )
+}
+
+fn build_unified_global_token_id_map_assume_disjoint(
+    inputs: &[&InternalIdMap],
+    max_token_id: u32,
+) -> (ManyToOneIdMap, Vec<Vec<u32>>) {
+    let mut token_o2i = vec![u32::MAX; max_token_id as usize + 1];
+    let token_class_count: usize = inputs
+        .iter()
+        .map(|input| input.vocab_tokens.internal_to_originals.len())
+        .sum();
+    let mut token_i2o = Vec::with_capacity(token_class_count);
+    let mut token_reps = Vec::with_capacity(token_class_count);
+    let mut direct_local_to_global_token_maps = Vec::with_capacity(inputs.len());
+
+    for input in inputs {
+        let mut local_to_global = vec![u32::MAX; input.num_internal_tokens() as usize];
+        for (local_class, originals) in input.vocab_tokens.internal_to_originals.iter().enumerate() {
+            if originals.is_empty() {
+                continue;
+            }
+            let global_class = token_i2o.len() as u32;
+            local_to_global[local_class] = global_class;
+            token_reps.push(input.vocab_tokens.representative_original_ids[local_class]);
+            token_i2o.push(originals.clone());
+            for &token_id in originals {
+                token_o2i[token_id as usize] = global_class;
+            }
+        }
+        direct_local_to_global_token_maps.push(local_to_global);
+    }
+
+    (
+        ManyToOneIdMap {
+            original_to_internal: token_o2i,
+            internal_to_originals: token_i2o,
+            representative_original_ids: token_reps,
+        },
+        direct_local_to_global_token_maps,
+    )
+}
+
+/// Fast exact global map construction for an already-proven disjoint token
+/// partition. The input order and original-state order are deterministic, so
+/// first-seen class IDs are stable for this merge and avoid a costly sort and
+/// relabel pass used only for cross-order canonicalization.
 fn build_unified_global_id_map(
     inputs: &[&InternalIdMap],
     num_tokenizer_states: usize,
