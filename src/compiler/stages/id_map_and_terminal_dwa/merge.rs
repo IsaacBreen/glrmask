@@ -15,6 +15,9 @@ use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::equivalence::find_difference;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize_owned;
+use crate::automata::weighted::minimize_token_deterministic_nwa::{
+    minimize_token_deterministic_nwa_owned, quotient_disjoint_source_nwa_owned,
+};
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::mapped_artifact::MappedArtifact;
@@ -41,6 +44,18 @@ fn compact_merged_terminal_dwa_enabled(default: bool) -> bool {
 
 fn assert_direct_global_terminal_dwa_merge_equivalence_enabled() -> bool {
     std::env::var_os("GLRMASK_ASSERT_DIRECT_GLOBAL_TERMINAL_DWA_MERGE_EQUIVALENCE").is_some()
+}
+
+fn minimize_token_deterministic_terminal_nwa_enabled() -> bool {
+    std::env::var_os("GLRMASK_EXPERIMENTAL_MINIMIZE_TOKEN_DETERMINISTIC_TERMINAL_NWA").is_some()
+}
+
+fn quotient_token_deterministic_terminal_nwa_by_source_enabled() -> bool {
+    std::env::var_os("GLRMASK_EXPERIMENTAL_QUOTIENT_TOKEN_NWA_BY_SOURCE").is_some()
+}
+
+fn refine_token_deterministic_terminal_nwa_after_source_quotient_enabled() -> bool {
+    std::env::var_os("GLRMASK_EXPERIMENTAL_REFINE_TOKEN_NWA_AFTER_SOURCE_QUOTIENT").is_some()
 }
 
 /// Return whether each source owns a disjoint set of original vocabulary tokens.
@@ -494,6 +509,194 @@ fn generic_global_union_determinization(
     determinize(&global_nwa).expect("global terminal NWA reference determinization failed")
 }
 
+fn prune_unreachable_nwa_with_sources(
+    nwa: NWA,
+    state_sources: Vec<Option<usize>>,
+) -> (NWA, Vec<Option<usize>>) {
+    assert_eq!(state_sources.len(), nwa.states().len());
+    let mut reachable = vec![false; nwa.states().len()];
+    let mut stack = nwa.start_states().to_vec();
+    while let Some(state_id) = stack.pop() {
+        let index = state_id as usize;
+        if index >= reachable.len() || reachable[index] {
+            continue;
+        }
+        reachable[index] = true;
+        let state = &nwa.states()[index];
+        for branches in state.transitions.values() {
+            stack.extend(branches.iter().map(|(target, _)| *target));
+        }
+        stack.extend(state.epsilons.iter().map(|(target, _)| *target));
+    }
+
+    let mut old_to_new = vec![u32::MAX; reachable.len()];
+    let mut states = Vec::new();
+    let mut sources = Vec::new();
+    for (old, &is_reachable) in reachable.iter().enumerate() {
+        if is_reachable {
+            old_to_new[old] = states.len() as u32;
+            states.push(nwa.states()[old].clone());
+            sources.push(state_sources[old]);
+        }
+    }
+    for state in &mut states {
+        for branches in state.transitions.values_mut() {
+            for (target, _) in branches {
+                *target = old_to_new[*target as usize];
+            }
+        }
+        for (target, _) in &mut state.epsilons {
+            *target = old_to_new[*target as usize];
+        }
+    }
+    let starts = nwa
+        .start_states()
+        .iter()
+        .map(|start| old_to_new[*start as usize])
+        .collect();
+    (NWA::from_parts(states, starts), sources)
+}
+
+
+/// Build a global token-deterministic NWA when every source owns a disjoint
+/// vocabulary domain. Multiple branches for one label are then deterministic
+/// with respect to the source token, so parser construction can consume them
+/// directly without materializing a product DWA.
+pub(crate) fn try_merge_id_maps_and_token_deterministic_nwa(
+    inputs: &[LocalIdMapTerminalDwa],
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> Option<(NWA, InternalIdMap, TerminalDwaPhaseProfile)> {
+    if inputs.len() < 2 || !inputs_have_disjoint_token_domains(inputs, max_token_id) {
+        return None;
+    }
+
+    let total_started_at = Instant::now();
+    let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
+    let id_map_started_at = Instant::now();
+    let (global_id_map, direct_local_to_global_token_maps) =
+        build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
+    let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let remap_started_at = Instant::now();
+    let profiling = compile_profile_enabled();
+    let mut global_nwa = NWA::new(
+        global_id_map.num_tsids(),
+        global_id_map.max_internal_token_id(),
+    );
+    let mut state_sources = Vec::<Option<usize>>::new();
+    let mut combined_start: Option<u32> = None;
+    for (input_index, input) in inputs.iter().enumerate() {
+        let tsid_map = build_local_to_global_tsid_map(&input.id_map, &global_id_map);
+        let direct_token_map = direct_local_to_global_token_maps
+            .as_ref()
+            .and_then(|maps| maps.get(input_index));
+        let token_offset = direct_token_map.and_then(|map| contiguous_token_offset(map));
+        let mut dwa = input.dwa.clone();
+        if let Some(token_offset) = token_offset {
+            remap_dwa_with_token_offset(
+                &mut dwa,
+                &tsid_map,
+                token_offset,
+                input.id_map.num_internal_tokens(),
+                global_id_map.num_tsids() as usize,
+            );
+        } else {
+            let token_map = direct_token_map
+                .map(|map| build_direct_local_to_global_token_map(map))
+                .unwrap_or_else(|| build_local_to_global_token_map(&input.id_map, &global_id_map));
+            remap_dwa_with_maps(
+                &mut dwa,
+                &tsid_map,
+                &token_map,
+                global_id_map.num_tsids() as usize,
+            );
+        }
+        let before_append = global_nwa.num_states() as usize;
+        let body = global_nwa.append_with_body(&dwa.to_nwa());
+        state_sources.extend(std::iter::repeat_n(Some(input_index), global_nwa.num_states() as usize - before_append));
+        debug_assert_eq!(body.start_states.len(), 1);
+        let source_start = body.start_states[0];
+        if let Some(combined_start) = combined_start {
+            let source = global_nwa.states()[source_start as usize].clone();
+            if let Some(final_weight) = source.final_weight {
+                let target = &mut global_nwa.states_mut()[combined_start as usize].final_weight;
+                *target = Some(match target.take() {
+                    Some(existing) => existing.union(&final_weight),
+                    None => final_weight,
+                });
+            }
+            for (label, branches) in source.transitions {
+                for (target, weight) in branches {
+                    global_nwa.add_transition(combined_start, label, target, weight);
+                }
+            }
+            assert!(source.epsilons.is_empty(), "source DWA conversion must not create epsilon edges");
+        } else {
+            combined_start = Some(source_start);
+            state_sources[source_start as usize] = None;
+        }
+    }
+    global_nwa.set_start_states(vec![combined_start.expect("at least one input")]);
+    let (mut global_nwa, state_sources) = prune_unreachable_nwa_with_sources(global_nwa, state_sources);
+    if quotient_token_deterministic_terminal_nwa_by_source_enabled() {
+        global_nwa = quotient_disjoint_source_nwa_owned(global_nwa, &state_sources)
+            .expect("token-deterministic source quotient failed");
+        if refine_token_deterministic_terminal_nwa_after_source_quotient_enabled() {
+            global_nwa = minimize_token_deterministic_nwa_owned(global_nwa)
+                .expect("token-deterministic refinement after source quotient failed");
+        }
+    } else if minimize_token_deterministic_terminal_nwa_enabled() {
+        global_nwa = minimize_token_deterministic_nwa_owned(global_nwa)
+            .expect("token-deterministic terminal NWA minimization failed");
+    }
+    debug_assert!(global_nwa.is_acyclic());
+    debug_assert!(global_nwa.states().iter().all(|state| state.epsilons.is_empty()));
+    let remap_and_union_ms = remap_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if assert_direct_global_terminal_dwa_merge_equivalence_enabled() {
+        let reference = generic_global_union_determinization(
+            inputs,
+            &global_id_map,
+            direct_local_to_global_token_maps.as_ref(),
+        );
+        let determinized = determinize(&global_nwa)
+            .expect("token-deterministic terminal NWA assertion determinization failed");
+        let difference = find_difference(&determinized, &reference)
+            .expect("token-deterministic terminal NWA equivalence requires acyclic inputs");
+        assert!(
+            difference.is_none(),
+            "token-deterministic terminal NWA differs from generic NWA union on labels {:?}",
+            difference,
+        );
+        if profiling {
+            eprintln!("[glrmask/profile][token_deterministic_terminal_nwa_equivalence] result=equivalent");
+        }
+    }
+
+    if profiling {
+        eprintln!(
+            "[glrmask/profile][token_deterministic_terminal_nwa_merge] inputs={} id_map_ms={:.3} remap_and_union_ms={:.3} states={} transitions={} total_ms={:.3}",
+            inputs.len(),
+            id_map_ms,
+            remap_and_union_ms,
+            global_nwa.num_states(),
+            global_nwa.num_transitions(),
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    Some((
+        global_nwa,
+        global_id_map,
+        TerminalDwaPhaseProfile {
+            id_map_ms,
+            global_merge_ms: total_started_at.elapsed().as_secs_f64() * 1000.0,
+            ..TerminalDwaPhaseProfile::default()
+        },
+    ))
+}
+
 /// Merge already-compacted partition outputs into one global DWA.
 ///
 /// Partition-local merges have already minimized their local outputs. When
@@ -533,7 +736,7 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         &global_id_map,
         direct_local_to_global_token_maps.as_ref(),
         max_token_id,
-    );
+);
     let used_direct_global = direct_global.is_some();
     let mut global_nwa = NWA::new(
         global_id_map.num_tsids(),

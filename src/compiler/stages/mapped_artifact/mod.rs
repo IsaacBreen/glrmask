@@ -4,6 +4,8 @@ mod compaction;
 mod reconcile;
 
 use crate::automata::weighted_u32::dwa::DWA;
+use crate::automata::weighted_u32::nwa::NWA;
+use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_possible_matches::RuntimePossibleMatchesByTerminal;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::ds::weight::Weight;
@@ -40,6 +42,60 @@ impl WeightRefs for DWA {
             }
         }
         weights
+    }
+}
+
+impl WeightRefs for NWA {
+    fn weight_refs(&self) -> Vec<&Weight> {
+        let mut weights = Vec::new();
+        for state in self.states() {
+            if let Some(weight) = state.final_weight.as_ref() {
+                weights.push(weight);
+            }
+            for branches in state.transitions.values() {
+                for (_, weight) in branches {
+                    weights.push(weight);
+                }
+            }
+            for (_, weight) in &state.epsilons {
+                weights.push(weight);
+            }
+        }
+        weights
+    }
+
+    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
+        let mut weights = Vec::new();
+        for state in self.states_mut() {
+            if let Some(weight) = state.final_weight.as_mut() {
+                weights.push(weight);
+            }
+            for branches in state.transitions.values_mut() {
+                for (_, weight) in branches {
+                    weights.push(weight);
+                }
+            }
+            for (_, weight) in &mut state.epsilons {
+                weights.push(weight);
+            }
+        }
+        weights
+    }
+}
+
+impl WeightRefs for TerminalAutomaton {
+    fn weight_refs(&self) -> Vec<&Weight> {
+        match self {
+            Self::Dwa(dwa) => dwa.weight_refs(),
+            Self::TokenDeterministicNwa(nwa) => nwa.weight_refs(),
+        }
+    }
+
+    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
+        match self {
+            Self::Dwa(dwa) => dwa.weight_refs_mut(),
+            Self::TokenDeterministicNwa(nwa) => nwa.weight_refs_mut(),
+        }
     }
 }
 
