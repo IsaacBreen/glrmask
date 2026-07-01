@@ -4477,20 +4477,33 @@ fn remap_action_to_partition(action: &Action, partition: &[u32]) -> ActionSig {
 }
 
 fn core_classes(core_keys: &[Vec<Item>]) -> Vec<u32> {
-    let mut class_of = vec![0; core_keys.len()];
-    let mut key_to_class: FxHashMap<Vec<Item>, u32> = FxHashMap::default();
-    let mut next = 0u32;
-
+    // Use the first state in each LR(0)-core class as its label. These labels
+    // are sparse, but they let refinement touch only non-singleton classes;
+    // an overwhelmingly LR(0)-unique grammar such as BFCL catalog-512 should
+    // not build and hash row signatures for every singleton state.
+    let mut class_of = Vec::with_capacity(core_keys.len());
+    let mut key_to_representative: FxHashMap<Vec<Item>, u32> = FxHashMap::default();
     for (state, key) in core_keys.iter().enumerate() {
-        let class = *key_to_class.entry(key.clone()).or_insert_with(|| {
-            let id = next;
-            next += 1;
-            id
-        });
-        class_of[state] = class;
+        let representative = *key_to_representative
+            .entry(key.clone())
+            .or_insert(state as u32);
+        class_of.push(representative);
     }
-
     class_of
+}
+
+fn nontrivial_partition_members(partition: &[u32]) -> FxHashMap<u32, Vec<usize>> {
+    let mut members = FxHashMap::<u32, Vec<usize>>::default();
+    for (state, &representative) in partition.iter().enumerate() {
+        if representative == state as u32 {
+            continue;
+        }
+        members
+            .entry(representative)
+            .or_insert_with(|| vec![representative as usize])
+            .push(state);
+    }
+    members
 }
 
 fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<u32> {
@@ -4508,95 +4521,99 @@ fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<
     let mut iteration = 0usize;
 
     loop {
+        let members_by_class = nontrivial_partition_members(&partition);
+        if members_by_class.is_empty() {
+            return partition;
+        }
         iteration += 1;
         let iteration_started_at = profile_detail.then(std::time::Instant::now);
+        let mut active_states = members_by_class
+            .values()
+            .flat_map(|members| members.iter().copied())
+            .collect::<Vec<_>>();
+        active_states.sort_unstable();
 
-        // Each state's row signature (and its fingerprint) is independent of
-        // the others; build them in parallel. The advance row is folded into
-        // the fingerprint and only compared on a fingerprint collision, so the
-        // common all-distinct case never clones an advance BitSet.
-        let signatures: Vec<(u64, RowSignature)> = (0..nstates)
-            .into_par_iter()
-            .map(|state| {
-                let action = table.action[state]
-                    .iter()
-                    .map(|(terminal, action)| {
-                        (terminal, remap_action_to_partition(action, &partition))
-                    })
-                    .collect();
-                let goto = table.goto[state]
-                    .iter()
-                    .map(|(&nt, &(target, replace))| (nt, (partition[target as usize], replace)))
-                    .collect();
-                let signature = RowSignature {
-                    core_class: core_class_of[state],
-                    action,
-                    goto,
-                };
-                let mut hasher = FxHasher::default();
-                signature.hash(&mut hasher);
-                if has_advance_rows {
-                    table.advance[state].hash(&mut hasher);
-                }
-                (hasher.finish(), signature)
-            })
-            .collect();
+        // The initial core partition forbids every singleton state from
+        // merging. Signatures are needed only for the small set of members in
+        // still-nontrivial core classes. Retain parallel work for genuinely
+        // ambiguous grammars, but avoid Rayon setup on the common tiny set.
+        let make_signature = |&state: &usize| {
+            let action = table.action[state]
+                .iter()
+                .map(|(terminal, action)| {
+                    (terminal, remap_action_to_partition(action, &partition))
+                })
+                .collect();
+            let goto = table.goto[state]
+                .iter()
+                .map(|(&nt, &(target, replace))| (nt, (partition[target as usize], replace)))
+                .collect();
+            let signature = RowSignature {
+                core_class: core_class_of[state],
+                action,
+                goto,
+            };
+            let mut hasher = FxHasher::default();
+            signature.hash(&mut hasher);
+            if has_advance_rows {
+                table.advance[state].hash(&mut hasher);
+            }
+            (state, hasher.finish(), signature)
+        };
+        let signatures = if active_states.len() >= 256 {
+            active_states
+                .par_iter()
+                .map(make_signature)
+                .collect::<Vec<_>>()
+        } else {
+            active_states.iter().map(make_signature).collect::<Vec<_>>()
+        };
 
-        // Serial grouping in source-state order preserves the canonical
-        // first-occurrence class numbering. Lookups hash a `u64` fingerprint;
-        // a full signature (and advance) equality check resolves the rare
-        // fingerprint collision.
-        let mut fingerprint_to_classes: FxHashMap<u64, Vec<(usize, u32)>> = FxHashMap::default();
-        let mut next_partition = vec![0u32; nstates];
-        let mut next_id = 0u32;
+        let mut fingerprint_to_classes: FxHashMap<u64, Vec<(usize, u32, RowSignature)>> =
+            FxHashMap::default();
+        let mut next_partition = partition.clone();
         let mut action_entries = 0usize;
         let mut goto_entries = 0usize;
-
-        for state in 0..nstates {
+        for (state, fingerprint, signature) in signatures {
             action_entries += table.action[state].len();
             goto_entries += table.goto[state].len();
-            let (fingerprint, signature) = &signatures[state];
-            let bucket = fingerprint_to_classes.entry(*fingerprint).or_default();
+            let bucket = fingerprint_to_classes.entry(fingerprint).or_default();
             let mut class = None;
-            for &(rep_state, rep_class) in bucket.iter() {
-                if signatures[rep_state].1 == *signature
-                    && (!has_advance_rows || table.advance[rep_state] == table.advance[state])
+            for (rep_state, representative, rep_signature) in bucket.iter() {
+                if core_class_of[*rep_state] == core_class_of[state]
+                    && rep_signature == &signature
+                    && (!has_advance_rows || table.advance[*rep_state] == table.advance[state])
                 {
-                    class = Some(rep_class);
+                    class = Some(*representative);
                     break;
                 }
             }
-            let class = match class {
-                Some(class) => class,
-                None => {
-                    let class = next_id;
-                    next_id += 1;
-                    bucket.push((state, class));
-                    class
-                }
-            };
+            let class = class.unwrap_or_else(|| {
+                let representative = state as u32;
+                bucket.push((state, representative, signature));
+                representative
+            });
             next_partition[state] = class;
         }
 
         let changed = next_partition != partition;
         if let Some(iteration_started_at) = iteration_started_at {
+            let unique_partitions = nstates - nontrivial_partition_members(&next_partition)
+                .values()
+                .map(|members| members.len() - 1)
+                .sum::<usize>();
             eprintln!(
-                "[glrmask/profile][same_core_refine] iteration={} states={} core_classes_ms={:.3} unique_partitions={} action_entries={} goto_entries={} changed={} elapsed_ms={:.3}",
+                "[glrmask/profile][same_core_refine] iteration={} states={} active_states={} core_classes_ms={:.3} unique_partitions={} action_entries={} goto_entries={} changed={} elapsed_ms={:.3}",
                 iteration,
                 nstates,
+                active_states.len(),
                 core_classes_ms,
-                next_id,
+                unique_partitions,
                 action_entries,
                 goto_entries,
                 changed,
                 iteration_started_at.elapsed().as_secs_f64() * 1000.0,
             );
-        }
-        // Refinement only splits classes. Once every state has its own class,
-        // no later pass can change the partition; because classes are assigned
-        // in source-state order, this is also the identity partition.
-        if next_id as usize == nstates {
-            return next_partition;
         }
         if !changed {
             return partition;
@@ -4608,21 +4625,27 @@ fn refine_same_core_partition(table: &GLRTable, core_keys: &[Vec<Item>]) -> Vec<
 pub(super) fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>]) -> GLRTable {
     let partition = refine_same_core_partition(&table, core_keys);
     let nstates = table.num_states as usize;
-    let has_merge = partition
-        .iter()
-        .enumerate()
-        .any(|(state, &group)| group != state as u32);
-    if !has_merge {
-        return table;
-    }
-    let ngroups = partition.iter().copied().max().map(|x| x + 1).unwrap_or(0) as usize;
 
-    let mut representatives = vec![u32::MAX; ngroups];
-    for state in 0..nstates {
-        let group = partition[state] as usize;
-        if representatives[group] == u32::MAX {
-            representatives[group] = state as u32;
-        }
+    // Sparse representative labels keep the refinement cheap. Compact them in
+    // first-source-state order only when a real quotient is needed; this is
+    // the same canonical ordering that the prior dense partition produced.
+    let mut group_to_new: FxHashMap<u32, u32> = FxHashMap::default();
+    let mut representatives = Vec::with_capacity(nstates);
+    let mut mapping = Vec::with_capacity(nstates);
+    for (state, &group) in partition.iter().enumerate() {
+        let new_group = match group_to_new.get(&group) {
+            Some(&existing) => existing,
+            None => {
+                let next = representatives.len() as u32;
+                group_to_new.insert(group, next);
+                representatives.push(state as u32);
+                next
+            }
+        };
+        mapping.push(new_group);
+    }
+    if representatives.len() == nstates {
+        return table;
     }
 
     let action = representatives
@@ -4630,7 +4653,7 @@ pub(super) fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>
         .map(|&rep| {
             table.action[rep as usize]
                 .iter()
-                .map(|(terminal, action)| (terminal, remap_action_targets(action, &partition)))
+                .map(|(terminal, action)| (terminal, remap_action_targets(action, &mapping)))
                 .collect()
         })
         .collect();
@@ -4639,7 +4662,7 @@ pub(super) fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>
         .map(|&rep| {
             table.goto[rep as usize]
                 .iter()
-                .map(|(&nt, &(target, replace))| (nt, (partition[target as usize], replace)))
+                .map(|(&nt, &(target, replace))| (nt, (mapping[target as usize], replace)))
                 .collect()
         })
         .collect();
@@ -4652,16 +4675,16 @@ pub(super) fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>
         Vec::new()
     };
 
-    // Remap forwarded_shifts to use merged state IDs
-    let forwarded_shifts: FxHashSet<(u32, TerminalID)> = table.forwarded_shifts
+    let forwarded_shifts: FxHashSet<(u32, TerminalID)> = table
+        .forwarded_shifts
         .iter()
-        .map(|&(state, terminal)| (partition[state as usize], terminal))
+        .map(|&(state, terminal)| (mapping[state as usize], terminal))
         .collect();
 
     GLRTable {
         action,
         goto,
-        num_states: ngroups as u32,
+        num_states: representatives.len() as u32,
         num_terminals: table.num_terminals,
         num_rules: table.num_rules,
         rules: table.rules,

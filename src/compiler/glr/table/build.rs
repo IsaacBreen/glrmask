@@ -10,7 +10,13 @@ const DISABLE_UNIT_REDUCTION_INLINING_ENV: &str = "GLRMASK_DISABLE_UNIT_REDUCTIO
 const GLR_TABLE_CONSTRUCTION_ENV: &str = "GLRMASK_GLR_TABLE_CONSTRUCTION";
 const UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES_ENV: &str =
     "GLRMASK_UNIT_REDUCTION_INLINE_MAX_PRE_MERGE_STATES";
-const DEFAULT_UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES: u32 = 20_000;
+const ROW_BISIM_MAX_PRE_MERGE_STATES_ENV: &str =
+    "GLRMASK_ROW_BISIM_MAX_PRE_MERGE_STATES";
+// Row quotienting and unit-reduction inlining are representation
+// optimizations. On very large canonical tables their build cost outweighs
+// the small residual reduction in states. Set either cap to 0 to remove it.
+const DEFAULT_UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES: u32 = 10_000;
+const DEFAULT_ROW_BISIM_MAX_PRE_MERGE_STATES: u32 = 10_000;
 
 fn glr_table_construction(default: GlrTableConstruction) -> GlrTableConstruction {
     match std::env::var(GLR_TABLE_CONSTRUCTION_ENV) {
@@ -54,6 +60,22 @@ fn unit_reduction_inlining_max_pre_merge_states() -> Option<u32> {
     }
 }
 
+fn row_bisim_max_pre_merge_states() -> Option<u32> {
+    match std::env::var(ROW_BISIM_MAX_PRE_MERGE_STATES_ENV) {
+        Ok(value) => match value.trim().parse::<u32>() {
+            Ok(0) => None,
+            Ok(parsed) => Some(parsed),
+            Err(_) => Some(DEFAULT_ROW_BISIM_MAX_PRE_MERGE_STATES),
+        },
+        Err(_) => Some(DEFAULT_ROW_BISIM_MAX_PRE_MERGE_STATES),
+    }
+}
+
+fn row_bisim_quotient_enabled(pre_merge_states: u32) -> bool {
+    row_bisim_max_pre_merge_states()
+        .is_none_or(|max_pre_merge_states| pre_merge_states <= max_pre_merge_states)
+}
+
 pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     build_table_with_default_construction(grammar, GlrTableConstruction::ExperimentalCoreMerged)
 }
@@ -85,10 +107,22 @@ pub(super) fn build_table_with_default_construction(
     let construction_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
     let pre_merge_states = table.num_states;
+    let row_bisim_quotient_skip_reason = if construction != GlrTableConstruction::LegacyRowBisim {
+        "construction"
+    } else if !row_bisim_quotient_enabled(pre_merge_states) {
+        "pre_merge_states"
+    } else {
+        "none"
+    };
+    let row_bisim_quotient_enabled = row_bisim_quotient_skip_reason == "none";
     let t2 = std::time::Instant::now();
-    let merge1_started_at = std::time::Instant::now();
-    table.merge_identical_rows();
-    let merge_identical1_ms = merge1_started_at.elapsed().as_secs_f64() * 1000.0;
+    let merge_identical1_ms = if row_bisim_quotient_enabled {
+        let merge1_started_at = std::time::Instant::now();
+        table.merge_identical_rows();
+        merge1_started_at.elapsed().as_secs_f64() * 1000.0
+    } else {
+        0.0
+    };
     // From here on, `action` is allowed to become an optimized execution table
     // containing guarded stack effects. Capture the exact recognizer/admission
     // row support before that lowering so runtime `may_advance` stays a pure
@@ -123,11 +157,21 @@ pub(super) fn build_table_with_default_construction(
     }
     let unit_collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
     let prune_started_at = std::time::Instant::now();
+    let states_before_prune = table.num_states;
     table.prune_unreachable_states();
     let prune_ms = prune_started_at.elapsed().as_secs_f64() * 1000.0;
-    let merge2_started_at = std::time::Instant::now();
-    table.merge_identical_rows();
-    let merge_identical2_ms = merge2_started_at.elapsed().as_secs_f64() * 1000.0;
+    // Without unit inlining, the first quotient is already a fixed point and
+    // rebuilding `advance` is a pure function of each action row. A second
+    // quotient can only reveal something if pruning actually removed states.
+    let merge_identical2_needed = row_bisim_quotient_enabled
+        && (unit_collapse_enabled || table.num_states != states_before_prune);
+    let merge_identical2_ms = if merge_identical2_needed {
+        let merge2_started_at = std::time::Instant::now();
+        table.merge_identical_rows();
+        merge2_started_at.elapsed().as_secs_f64() * 1000.0
+    } else {
+        0.0
+    };
     let merge_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
     let t3 = std::time::Instant::now();
@@ -161,12 +205,14 @@ pub(super) fn build_table_with_default_construction(
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
     {
         eprintln!(
-            "[glrmask/profile][glr_table] construction={:?} lr1_item_sets_ms={:.3} construction_ms={:.3} pre_merge_states={} post_merge_states={} unit_collapse={} unit_collapse_aborted={} unit_collapse_reason={} unit_collapse_skip_reason={} merge_ms={:.3} merge_identical1_ms={:.3} unit_collapse_ms={:.3} prune_ms={:.3} merge_identical2_ms={:.3} stack_shift_canon_ms={:.3}",
+            "[glrmask/profile][glr_table] construction={:?} lr1_item_sets_ms={:.3} construction_ms={:.3} pre_merge_states={} post_merge_states={} row_bisim_quotient={} row_bisim_quotient_skip_reason={} unit_collapse={} unit_collapse_aborted={} unit_collapse_reason={} unit_collapse_skip_reason={} merge_ms={:.3} merge_identical1_ms={:.3} unit_collapse_ms={:.3} prune_ms={:.3} merge_identical2_needed={} merge_identical2_ms={:.3} stack_shift_canon_ms={:.3}",
             construction,
             lr1_ms,
             construction_ms,
             pre_merge_states,
             table.num_states,
+            row_bisim_quotient_enabled,
+            row_bisim_quotient_skip_reason,
             unit_collapse_enabled,
             unit_collapse_report
                 .as_ref()
@@ -180,6 +226,7 @@ pub(super) fn build_table_with_default_construction(
             merge_identical1_ms,
             unit_collapse_ms,
             prune_ms,
+            merge_identical2_needed,
             merge_identical2_ms,
             recog_ms,
         );
@@ -729,11 +776,7 @@ fn union_lookaheads(item_set: &mut LR1ItemSet, core: LR1ItemCore, lookaheads: &B
     let entry = item_set
         .entry(core)
         .or_insert_with(|| BitSet::new(lookaheads.len()));
-    let delta = lookaheads.difference(entry);
-    if !delta.is_empty() {
-        entry.union_with(&delta);
-    }
-    delta
+    entry.union_with_delta(lookaheads)
 }
 
 fn lr1_closure(
@@ -1414,11 +1457,18 @@ fn build_lr1_table(
 // Legacy row-bisimulation merge over canonical LR(1) item sets.
 
 fn lr1_core_key(items: &LR1ItemSet) -> Vec<Item> {
-    let mut core = BTreeSet::new();
+    // `LR1ItemSet` is already ordered by (rule, dot, stack_depth,
+    // transferred). The table-core key deliberately ignores `transferred`, so
+    // adjacent entries can only duplicate after that projection. Avoid the
+    // second BTreeSet allocation used by the old implementation.
+    let mut core = Vec::with_capacity(items.len());
     for item in items.keys() {
-        core.insert(Item::new(item.rule, item.dot, item.stack_depth));
+        let projected = Item::new(item.rule, item.dot, item.stack_depth);
+        if core.last().copied() != Some(projected) {
+            core.push(projected);
+        }
     }
-    core.into_iter().collect()
+    core
 }
 
 fn build_experimental_core_merged_table(
@@ -1612,6 +1662,18 @@ fn build_legacy_row_bisim_table(
     let canonical = build_lr1_table(grammar, item_sets, transitions);
     let canonical_ms = canonical_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+    if !row_bisim_quotient_enabled(canonical.num_states) {
+        if let Some(canonical_ms) = canonical_ms {
+            eprintln!(
+                "[glrmask/profile][glr_legacy_build] canonical_table_ms={:.3} core_keys_ms=0.000 same_core_merge_ms=0.000 pre_merge_states={} post_core_states={} same_core_skip_reason=pre_merge_states",
+                canonical_ms,
+                item_sets.len(),
+                canonical.num_states,
+            );
+        }
+        return canonical;
+    }
+
     let core_keys_started_at = profile_enabled.then(std::time::Instant::now);
     let core_keys = item_sets.par_iter().map(lr1_core_key).collect::<Vec<_>>();
     let core_keys_ms = core_keys_started_at
@@ -1622,7 +1684,7 @@ fn build_legacy_row_bisim_table(
         (canonical_ms, core_keys_ms, merge_started_at)
     {
         eprintln!(
-            "[glrmask/profile][glr_legacy_build] canonical_table_ms={:.3} core_keys_ms={:.3} same_core_merge_ms={:.3} pre_merge_states={} post_core_states={}",
+            "[glrmask/profile][glr_legacy_build] canonical_table_ms={:.3} core_keys_ms={:.3} same_core_merge_ms={:.3} pre_merge_states={} post_core_states={} same_core_skip_reason=none",
             canonical_ms,
             core_keys_ms,
             merge_started_at.elapsed().as_secs_f64() * 1000.0,
