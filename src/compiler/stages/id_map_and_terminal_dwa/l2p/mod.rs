@@ -74,7 +74,7 @@ impl Drop for SuppressTerminalInterchangeability {
     }
 }
 
-/// Enable the deliberately slow strict terminal-interchangeability reference
+/// Enable the deliberately slow terminal-subsumption reference
 /// construction. It preserves raw lexer-state coordinates, uses a
 /// transport-aware trie walk, and checks the completed local artifact against a
 /// baseline build before returning it.
@@ -466,11 +466,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         }
     }
 
-    // Discover strict interchangeability in the current vocabulary byte
-    // partition, with exactly this L2+ phase's terminal outputs observable.
-    // Nonrepresentatives are then hidden by clearing metadata only. The
-    // transport-aware trie walk restores their concrete terminal behavior while
-    // retaining the raw lexer-state coordinate for every segment.
+    // Discover directed terminal subsumption in the current vocabulary byte
+    // partition. Each hidden member gets a representative-only transport mode,
+    // so it needs only an exact one-way residual simulation.
+    // Nonrepresentatives are hidden by clearing metadata only; the
+    // transport-aware trie walk restores them while retaining raw lexer-state
+    // coordinates for every segment.
     let terminal_interchangeability = if l2p_terminal_interchangeability_enabled() {
         TerminalInterchangeability::build(
             tokenizer,
@@ -487,16 +488,16 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         .iter()
         .filter(|&&active| active)
         .count();
-    // The validation-first interchangeability path keeps the original DFA state
-    // coordinate so scanner transport maps can be applied exactly. It clears
-    // inactive metadata but deliberately does not minimize.
+    // The validation-first subsumption path keeps original DFA-state coordinates so
+    // scanner transport maps can be applied exactly. It clears inactive
+    // metadata but deliberately does not minimize.
     let reference_filtered_tokenizer = reference_terminal_expansion.then(|| {
         tokenizer.deactivate_terminals_without_minimizing(analysis_active_terminals)
     });
     let tokenizer_before_simplify = reference_filtered_tokenizer.as_ref().unwrap_or(tokenizer);
 
     // The normal path strips inactive terminal metadata and may minimize.
-    // The reference interchangeability path instead uses the metadata-only
+    // The reference subsumption path instead uses the metadata-only
     // filtered tokenizer above, preserving original state IDs for transport.
     //
     // Unmapped original states (states with no active-terminal future

@@ -1129,8 +1129,8 @@ mod tests {
 /// representative labels emitted by that simulator back to concrete terminals.
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalNwaTransportMode {
-    pub(crate) scanner_state_for_original: Vec<TokenizerState>,
-    pub(crate) terminal_map: Vec<TerminalID>,
+    pub(crate) scanner_state_for_original: Vec<Option<TokenizerState>>,
+    pub(crate) terminal_map: Vec<Option<TerminalID>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -1177,20 +1177,18 @@ struct TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
 }
 
 impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
-    fn mapped_label(&self, mode: usize, terminal: TerminalID) -> TerminalID {
+    fn mapped_label(&self, mode: usize, terminal: TerminalID) -> Option<TerminalID> {
         self.modes[mode]
             .terminal_map
             .get(terminal as usize)
             .copied()
-            .unwrap_or(terminal)
+            .flatten()
     }
 
-    fn reset_context(&self, mode: usize) -> TransportContext {
+    fn reset_context(&self, mode: usize) -> Option<TransportContext> {
         let root = self.base.tokenizer.initial_state_id() as usize;
-        TransportContext {
-            scanner_state: self.modes[mode].scanner_state_for_original[root],
-            mode,
-        }
+        self.modes[mode].scanner_state_for_original[root]
+            .map(|scanner_state| TransportContext { scanner_state, mode })
     }
 
     fn add_future_leaf_token_from_sources(
@@ -1204,9 +1202,12 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
             .possible_future_terminals_for_state(context.scanner_state);
         self.base.profile.future_terminal_additions += (sources.len() * future.len()) as u64;
         for terminal in future {
+            let Some(mapped_label) = self.mapped_label(context.mode, terminal) else {
+                continue;
+            };
             self.base.add_leaf_token_from_sources(
                 sources,
-                self.mapped_label(context.mode, terminal),
+                mapped_label,
                 internal_token_id,
             );
         }
@@ -1260,7 +1261,9 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                     };
                     scan_state = next;
                     for terminal in self.base.tokenizer.matched_terminals_iter(scan_state) {
-                        if self.base.terminal_is_active(terminal) {
+                        if self.base.terminal_is_active(terminal)
+                            && self.mapped_label(context.mode, terminal).is_some()
+                        {
                             match_map.insert(terminal, (index + 1, scan_state));
                         }
                     }
@@ -1291,6 +1294,7 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                 for matched in &matches {
                     let next_offset = offset + matched.width;
                     let mapped_label = self.mapped_label(context.mode, matched.id);
+                    let mapped_label = mapped_label.expect("transport match was filtered before mapping");
                     if next_offset == segment_bytes.len()
                         && child_node.has_token()
                         && !end_state.is_some_and(|state| {
@@ -1323,6 +1327,9 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                     let continuation_contexts = pending.entry(next_offset).or_default();
                     for next_mode in 0..self.modes.len() {
                         let next_context = self.reset_context(next_mode);
+                        let Some(next_context) = next_context else {
+                            continue;
+                        };
                         let destination = ensure_transport_continuation_state(
                             continuation_contexts,
                             next_context,
@@ -1382,6 +1389,10 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
         .enumerate()
     {
         for (mode, transport) in modes.iter().enumerate() {
+            let scanner_state = transport.scanner_state_for_original[representative_state as usize];
+            let Some(scanner_state) = scanner_state else {
+                continue;
+            };
             let root = nwa.add_state();
             let weight = all_token_weight(internal_tsid as u32, id_map.max_internal_token_id());
             nwa.add_epsilon(start_state, root, weight);
@@ -1390,10 +1401,7 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
             }
             initial_source_states[root as usize] = true;
             roots.merge(
-                TransportContext {
-                    scanner_state: transport.scanner_state_for_original[representative_state as usize],
-                    mode,
-                },
+                TransportContext { scanner_state, mode },
                 &[root],
             );
         }
