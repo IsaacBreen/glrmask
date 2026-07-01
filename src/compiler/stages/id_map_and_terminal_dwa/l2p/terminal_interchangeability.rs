@@ -76,6 +76,13 @@ struct TerminalResidualRows {
     terminal_count: usize,
 }
 
+#[derive(Debug)]
+struct RepresentativeFamilyPlan {
+    representative: TerminalID,
+    members: Vec<TerminalID>,
+    maps_by_member: BTreeMap<TerminalID, InterchangeMap>,
+}
+
 impl TerminalResidualRows {
     fn build(restricted: &RestrictedDfa<'_>, terminals: &[TerminalID]) -> Self {
         let state_count = restricted.state_count();
@@ -172,6 +179,236 @@ impl TerminalResidualRows {
                 .push(terminal);
         }
         groups
+    }
+
+    fn base_states_by_visible(
+        &self,
+        visible: &[bool],
+    ) -> HashMap<Vec<(TerminalID, u32)>, Vec<u32>> {
+        let mut result = HashMap::<Vec<(TerminalID, u32)>, Vec<u32>>::new();
+        for (state, row) in self.rows_by_state.iter().enumerate() {
+            let base_row = row
+                .iter()
+                .copied()
+                .filter(|&(terminal, _)| visible[terminal as usize])
+                .collect::<Vec<_>>();
+            result.entry(base_row).or_default().push(state as u32);
+        }
+        result
+    }
+
+    /// Exact transport from one hidden member to one currently visible
+    /// representative. All other visible representative columns remain in the
+    /// residual row, while every hidden column is erased on both sides.
+    fn member_map_in_visible_set(
+        &self,
+        representative: TerminalID,
+        member: TerminalID,
+        visible: &[bool],
+        base_states_by_row: &HashMap<Vec<(TerminalID, u32)>, Vec<u32>>,
+    ) -> Option<InterchangeMap> {
+        assert!(visible[representative as usize]);
+        assert!(!visible[member as usize]);
+        let mut source_state_to_target_states =
+            vec![Vec::<u32>::new(); self.rows_by_state.len()];
+        for (member_state, row) in self.rows_by_state.iter().enumerate() {
+            let mut transformed = Vec::with_capacity(row.len());
+            let mut member_block = None;
+            for &(terminal, block) in row {
+                if terminal == representative {
+                    continue;
+                }
+                if terminal == member {
+                    member_block = Some(block);
+                    continue;
+                }
+                if visible[terminal as usize] {
+                    transformed.push((terminal, block));
+                }
+            }
+            // Member-dead target contexts emit no member weight, so this
+            // partial transport deliberately has no image for them.
+            let Some(block) = member_block else {
+                continue;
+            };
+            let insertion = transformed
+                .binary_search_by_key(&representative, |&(terminal, _)| terminal)
+                .unwrap_or_else(|index| index);
+            transformed.insert(insertion, (representative, block));
+            let base_states = base_states_by_row.get(&transformed)?;
+            for &source_state in base_states {
+                source_state_to_target_states[source_state as usize].push(member_state as u32);
+            }
+        }
+        source_state_to_target_states[self.initial_state]
+            .contains(&(self.initial_state as u32))
+            .then_some(InterchangeMap {
+                source_state_to_target_states,
+            })
+    }
+
+    /// Certify a complete selected representative set for one reset-residual
+    /// bucket. Terminals outside `bucket` remain visible, making this exact for
+    /// the bucket and conservative with respect to other buckets.
+    fn plan_for_representatives(
+        &self,
+        bucket: &[TerminalID],
+        active_terminals: &[bool],
+        representatives: &[TerminalID],
+    ) -> Option<Vec<RepresentativeFamilyPlan>> {
+        let representative_set = representatives.iter().copied().collect::<BTreeSet<_>>();
+        let mut visible = active_terminals.to_vec();
+        for &terminal in bucket {
+            visible[terminal as usize] = representative_set.contains(&terminal);
+        }
+        let base_states_by_row = self.base_states_by_visible(&visible);
+        let mut plans = representatives
+            .iter()
+            .copied()
+            .map(|representative| RepresentativeFamilyPlan {
+                representative,
+                members: vec![representative],
+                maps_by_member: BTreeMap::new(),
+            })
+            .collect::<Vec<_>>();
+        for &member in bucket {
+            if representative_set.contains(&member) {
+                continue;
+            }
+            let mut assigned = false;
+            for plan in &mut plans {
+                if let Some(map) = self.member_map_in_visible_set(
+                    plan.representative,
+                    member,
+                    &visible,
+                    &base_states_by_row,
+                ) {
+                    plan.members.push(member);
+                    plan.maps_by_member.insert(member, map);
+                    assigned = true;
+                    break;
+                }
+            }
+            if !assigned {
+                return None;
+            }
+        }
+        Some(plans)
+    }
+
+    /// A terminal is forced when no other candidate can cover it even after all
+    /// other candidates in this bucket are hidden. Such an edge cannot appear
+    /// in a final plan with more visible representatives.
+    fn forced_representatives(
+        &self,
+        bucket: &[TerminalID],
+        active_terminals: &[bool],
+    ) -> BTreeSet<TerminalID> {
+        let mut forced = BTreeSet::new();
+        for &member in bucket {
+            let mut has_other_coverer = false;
+            for &representative in bucket {
+                if representative == member {
+                    continue;
+                }
+                let mut visible = active_terminals.to_vec();
+                for &terminal in bucket {
+                    visible[terminal as usize] = terminal == representative;
+                }
+                let base_states_by_row = self.base_states_by_visible(&visible);
+                if self
+                    .member_map_in_visible_set(
+                        representative,
+                        member,
+                        &visible,
+                        &base_states_by_row,
+                    )
+                    .is_some()
+                {
+                    has_other_coverer = true;
+                    break;
+                }
+            }
+            if !has_other_coverer {
+                forced.insert(member);
+            }
+        }
+        forced
+    }
+
+    fn search_representative_combinations(
+        &self,
+        bucket: &[TerminalID],
+        active_terminals: &[bool],
+        optional: &[TerminalID],
+        selected: &mut Vec<TerminalID>,
+        start: usize,
+        need: usize,
+    ) -> Option<Vec<RepresentativeFamilyPlan>> {
+        if need == 0 {
+            return self.plan_for_representatives(bucket, active_terminals, selected);
+        }
+        if optional.len().saturating_sub(start) < need {
+            return None;
+        }
+        for index in start..=optional.len() - need {
+            selected.push(optional[index]);
+            if let Some(plan) = self.search_representative_combinations(
+                bucket,
+                active_terminals,
+                optional,
+                selected,
+                index + 1,
+                need - 1,
+            ) {
+                return Some(plan);
+            }
+            selected.pop();
+        }
+        None
+    }
+
+    /// Find a minimum-cardinality representative set for one reset-residual
+    /// bucket. The first successful iterative-deepening level is exact because
+    /// every smaller representative subset has already been checked.
+    fn minimum_representative_plan(
+        &self,
+        bucket: &[TerminalID],
+        active_terminals: &[bool],
+    ) -> Vec<RepresentativeFamilyPlan> {
+        let mut bucket = bucket.to_vec();
+        bucket.sort_unstable();
+        if bucket.len() < 2 {
+            return bucket
+                .into_iter()
+                .map(|representative| RepresentativeFamilyPlan {
+                    representative,
+                    members: vec![representative],
+                    maps_by_member: BTreeMap::new(),
+                })
+                .collect();
+        }
+        let forced = self.forced_representatives(&bucket, active_terminals);
+        let mut selected = forced.iter().copied().collect::<Vec<_>>();
+        let optional = bucket
+            .iter()
+            .copied()
+            .filter(|terminal| !forced.contains(terminal))
+            .collect::<Vec<_>>();
+        for target_count in selected.len().max(1)..=bucket.len() {
+            let need = target_count - selected.len();
+            if let Some(plan) = self.search_representative_combinations(
+                &bucket,
+                active_terminals,
+                &optional,
+                &mut selected,
+                0,
+                need,
+            ) {
+                return plan;
+            }
+        }
+        unreachable!("identity representatives must always be feasible")
     }
 
     /// Return one partial transport result per nonrepresentative member in this
@@ -671,75 +908,48 @@ impl TerminalInterchangeability {
             .collect::<Vec<_>>();
         let residuals = TerminalResidualRows::build(&restricted, &observable_terminals);
         let candidate_groups = residuals.reset_residual_groups(&candidates);
-        let mut reset_group_for_terminal = vec![Vec::<TerminalID>::new(); active_terminals.len()];
-        for group in candidate_groups.values() {
-            for &terminal in group {
-                reset_group_for_terminal[terminal as usize] = group.clone();
-            }
-        }
-
-        // A family is valid only as a whole. A directed map is never inferred
-        // by transitive closure or a collection of independently certified
-        // pairwise maps. For each representative, `maximal_family_maps` returns
-        // the largest exact family inside its reset-residual bucket.
+        // Solve each reset-residual bucket to its minimum representative
+        // cardinality. Other buckets remain visible while a bucket is certified,
+        // which is conservative but keeps every selected local transport valid
+        // after the ordinary global representatives-only build.
         let mut result = Self::identity(active_terminals);
-        let mut remaining = candidates.iter().copied().collect::<BTreeSet<_>>();
-        let mut full_family_attempts = 0usize;
+        let mut buckets_solved = 0usize;
         let mut certified_members = 0usize;
-        while let Some(&first_remaining) = remaining.iter().next() {
-            let mut best_representative = first_remaining;
-            let mut best_members = vec![first_remaining];
-            let mut best_maps = BTreeMap::<TerminalID, InterchangeMap>::new();
-
-            for &representative in &remaining {
-                let mut pool = reset_group_for_terminal[representative as usize]
-                    .iter()
-                    .copied()
-                    .filter(|member| remaining.contains(member))
-                    .collect::<Vec<_>>();
-                pool.sort_unstable();
-                if pool.len() < 2 {
+        let mut representative_count_before = 0usize;
+        let mut representative_count_after = 0usize;
+        for bucket in candidate_groups.values() {
+            representative_count_before += bucket.len();
+            let plans = residuals.minimum_representative_plan(bucket, active_terminals);
+            buckets_solved += 1;
+            representative_count_after += plans.len();
+            for plan in plans {
+                if plan.members.len() < 2 {
                     continue;
                 }
-                full_family_attempts += 1;
-                let (members, maps) = residuals.maximal_family_maps(representative, &pool);
-                if members.len() > best_members.len()
-                    || (members.len() == best_members.len() && representative < best_representative)
-                {
-                    best_representative = representative;
-                    best_members = members;
-                    best_maps = maps;
-                }
-            }
-
-            for &member in &best_members {
-                remaining.remove(&member);
-            }
-            if best_members.len() < 2 {
-                continue;
-            }
-            certified_members += best_members.len() - 1;
-            result.members_by_representative[best_representative as usize] = best_members.clone();
-            for &member in &best_members {
-                result.representative_for[member as usize] = best_representative;
-                if member != best_representative {
-                    result.active_representatives[member as usize] = false;
-                    result.maps_by_representative_member.insert(
-                        (best_representative, member),
-                        best_maps
-                            .remove(&member)
-                            .expect("certified family member missing its maximal-family transport"),
-                    );
+                certified_members += plan.members.len() - 1;
+                result.members_by_representative[plan.representative as usize] =
+                    plan.members.clone();
+                for &member in &plan.members {
+                    result.representative_for[member as usize] = plan.representative;
+                    if member != plan.representative {
+                        result.active_representatives[member as usize] = false;
+                        result.maps_by_representative_member.insert(
+                            (plan.representative, member),
+                            plan.maps_by_member[&member].clone(),
+                        );
+                    }
                 }
             }
         }
 
         if std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY").is_some() {
             eprintln!(
-                "[glrmask/debug][terminal_subsumption] active={} reset_buckets={} representative_family_attempts={} certified_members={}",
+                "[glrmask/debug][terminal_subsumption] active={} reset_buckets={} buckets_solved={} representatives={}=>{} certified_members={}",
                 candidates.len(),
                 candidate_groups.len(),
-                full_family_attempts,
+                buckets_solved,
+                representative_count_before,
+                representative_count_after,
                 certified_members,
             );
             for (representative, members) in result.members_by_representative.iter().enumerate() {
