@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
+use rayon::prelude::*;
+
 use crate::grammar::expr_nfa::{ExprNFA, ExprNfaBuilder};
 use crate::import::ast::{GrammarExpr, Quantifier};
 
@@ -234,6 +236,11 @@ impl AnyOfObjectVariant {
 }
 
 impl<'a> Lowerer<'a> {
+    const PARALLEL_DISCRIMINATOR_PAYLOAD_MIN_CASES: usize = 64;
+    const PARALLEL_DISCRIMINATOR_PAYLOAD_MAX_WORKERS: usize = 4;
+    const ISOLATED_PAYLOAD_RULE_ID_BASE: usize = 1_000_000_000;
+    const ISOLATED_PAYLOAD_RULE_ID_STRIDE: usize = 1_000_000;
+
     pub(crate) fn lower_object(&mut self, schema: &ObjectSchema) -> ImportResult<GrammarExpr> {
         self.lower_object_internal(schema, None, None)
     }
@@ -450,8 +457,12 @@ impl<'a> Lowerer<'a> {
         let payload_key_prefix = self.lower_literal_key_colon_with_prefix(b", ", payload_key);
         let payload_lower_started_at = profile_enabled.then(std::time::Instant::now);
         let mut slow_payloads = profile_enabled.then(Vec::new);
+        let payload_exprs = self.lower_discriminator_payloads(&cases)?;
+        debug_assert_eq!(cases.len(), payload_exprs.len());
 
-        for (discriminator_value, payload_schema) in cases {
+        for ((discriminator_value, payload_schema), payload_expr) in
+            cases.into_iter().zip(payload_exprs)
+        {
             let after_discriminator_value = builder.add_state();
             builder.add_transition(
                 after_discriminator_key,
@@ -459,7 +470,6 @@ impl<'a> Lowerer<'a> {
                 after_discriminator_value,
             );
             let payload_started_at = profile_enabled.then(std::time::Instant::now);
-            let payload_expr = self.lower_schema(payload_schema)?;
             if let (Some(payload_started_at), Some(slow_payloads)) =
                 (payload_started_at, slow_payloads.as_mut())
             {
@@ -520,6 +530,60 @@ impl<'a> Lowerer<'a> {
             );
         }
         Ok(Some(seq(vec![lit("{"), r(&rule_name), lit("}")])) )
+    }
+
+    fn lower_discriminator_payloads(
+        &mut self,
+        cases: &[(String, &Schema)],
+    ) -> ImportResult<Vec<GrammarExpr>> {
+        // The lowerer has intentionally thread-local test compatibility state.
+        // Keep unit tests serial, while production imports can parallelize only
+        // non-recursive payloads whose generated rules are fully self-contained.
+        let can_parallelize = !cfg!(test)
+            && cases.len() >= Self::PARALLEL_DISCRIMINATOR_PAYLOAD_MIN_CASES
+            && !cases
+                .iter()
+                .any(|(_, payload_schema)| Self::schema_contains_any_ref(payload_schema));
+        let worker_count = rayon::current_num_threads()
+            .min(Self::PARALLEL_DISCRIMINATOR_PAYLOAD_MAX_WORKERS)
+            .min(cases.len());
+        if !can_parallelize || worker_count < 2 {
+            return cases
+                .iter()
+                .map(|(_, payload_schema)| self.lower_schema(payload_schema))
+                .collect();
+        }
+
+        let chunk_size = cases.len().div_ceil(worker_count);
+        let isolated = {
+            let parent = &*self;
+            cases
+                .par_chunks(chunk_size)
+                .enumerate()
+                .map(|(chunk_index, chunk)| {
+                    let namespace = Self::ISOLATED_PAYLOAD_RULE_ID_BASE
+                        .checked_add(
+                            Self::ISOLATED_PAYLOAD_RULE_ID_STRIDE
+                                .checked_mul(chunk_index)
+                                .expect("isolated JSON Schema payload namespace overflow"),
+                        )
+                        .expect("isolated JSON Schema payload namespace overflow");
+                    let mut lowerer = parent.isolated_fragment_lowerer(namespace);
+                    let expressions = chunk
+                        .iter()
+                        .map(|(_, payload_schema)| lowerer.lower_schema(payload_schema))
+                        .collect::<ImportResult<Vec<_>>>()?;
+                    Ok::<_, SchemaImportError>((expressions, lowerer.rules))
+                })
+                .collect::<ImportResult<Vec<_>>>()?
+        };
+
+        let mut expressions = Vec::with_capacity(cases.len());
+        for (chunk_expressions, rules) in isolated {
+            self.append_isolated_rules(rules)?;
+            expressions.extend(chunk_expressions);
+        }
+        Ok(expressions)
     }
 
     pub(crate) fn try_lower_open_object_any_of_variants(
