@@ -10,12 +10,52 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use super::dwa::DWA;
+use super::equivalence::find_difference;
 use super::nwa::NWA;
 use crate::ds::weight::{SharedTokenSet, ScopedWeightOpCache, Weight, WeightIntersectionIndex};
 use crate::GlrMaskError;
 
 const MAX_INDEXED_FINAL_PATH_RANGES: usize = 8;
 const MIN_INDEXED_FINAL_WEIGHT_RANGES: usize = 32;
+
+/// Outgoing edges from one NWA state, grouped by the exact shared `Weight`.
+///
+/// For a path weight `p`, every edge in a group contributes `p ∩ w`, so this
+/// computes that intersection once and distributes the immutable result to the
+/// group's distinct labels and destinations.
+#[derive(Clone)]
+struct WeightGroupedTransitions {
+    weight: Weight,
+    edges: Vec<(i32, u32)>,
+}
+
+fn build_weight_grouped_transitions(nwa: &NWA) -> Vec<Vec<WeightGroupedTransitions>> {
+    nwa.states()
+        .iter()
+        .map(|state| {
+            let mut groups = FxHashMap::<usize, usize>::default();
+            let mut result = Vec::<WeightGroupedTransitions>::new();
+            for (&label, targets) in &state.transitions {
+                for (dst, weight) in targets {
+                    let key = weight.ptr_key();
+                    let index = if let Some(&existing) = groups.get(&key) {
+                        existing
+                    } else {
+                        let created = result.len();
+                        groups.insert(key, created);
+                        result.push(WeightGroupedTransitions {
+                            weight: weight.clone(),
+                            edges: Vec::new(),
+                        });
+                        created
+                    };
+                    result[index].edges.push((label, *dst));
+                }
+            }
+            result
+        })
+        .collect()
+}
 
 fn union_state_weight(weights: &mut FxHashMap<u32, Weight>, state_id: u32, add: Weight) {
     if add.is_empty() {
@@ -201,13 +241,51 @@ fn intern_determinized_subset(
     }
 }
 
+fn determinize_profile_enabled() -> bool {
+    std::env::var("GLRMASK_PROFILE_DETERMINIZE")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+}
+
 pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
-    determinize_impl(nwa, true)
+    let profile = determinize_profile_enabled();
+    let dwa = determinize_impl_with_options(nwa, true, true, profile)?;
+
+    if std::env::var_os("GLRMASK_ASSERT_GROUPED_DETERMINIZE_EQUIVALENCE").is_some() {
+        let reference = determinize_impl_with_options(nwa, true, false, false)?;
+        match find_difference(&dwa, &reference)? {
+            Some(word) => {
+                return Err(GlrMaskError::Compilation(format!(
+                    "grouped-weight determinization differs from the ordinary path on labels {word:?}"
+                )));
+            }
+            None if profile => eprintln!(
+                "[glrmask/profile][determinize_grouped_weight_equivalence] result=equivalent"
+            ),
+            None => {}
+        }
+    }
+
+    Ok(dwa)
 }
 
 fn determinize_impl(
     nwa: &NWA,
     direct_single_target_enabled: bool,
+) -> Result<DWA, GlrMaskError> {
+    determinize_impl_with_options(
+        nwa,
+        direct_single_target_enabled,
+        true,
+        determinize_profile_enabled(),
+    )
+}
+
+fn determinize_impl_with_options(
+    nwa: &NWA,
+    direct_single_target_enabled: bool,
+    group_transition_weights: bool,
+    profile: bool,
 ) -> Result<DWA, GlrMaskError> {
     if !nwa.is_acyclic() {
         return Err(GlrMaskError::Compilation(
@@ -215,9 +293,11 @@ fn determinize_impl(
         ));
     }
 
-    let profile = std::env::var("GLRMASK_PROFILE_DETERMINIZE")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let weight_group_build_started_at = profile.then(Instant::now);
+    let weight_grouped_transitions = group_transition_weights.then(|| build_weight_grouped_transitions(nwa));
+    let weight_group_build_ms = weight_group_build_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
     fn canonicalize(subset: &FxHashMap<u32, Weight>) -> Vec<(u32, Weight)> {
         let mut entries: Vec<_> = subset
@@ -291,6 +371,7 @@ fn determinize_impl(
     let mut profile_subset_entries = 0usize;
     let mut profile_max_subset_entries = 0usize;
     let mut profile_raw_transition_visits = 0usize;
+    let mut profile_weight_group_visits = 0usize;
     let mut profile_labels = 0usize;
     let mut profile_target_contributions = 0usize;
     let mut profile_single_contribution_labels = 0usize;
@@ -320,20 +401,38 @@ fn determinize_impl(
         // and parallelized across all states.
         let expand_started_at = profile.then(Instant::now);
 
-        for (nwa_state_id, path_weight) in &subset_entries {
-            let state = &nwa.states()[*nwa_state_id as usize];
-            for (&label, targets) in &state.transitions {
-                for (dst, trans_weight) in targets {
+        if let Some(weight_grouped_transitions) = &weight_grouped_transitions {
+            for (nwa_state_id, path_weight) in &subset_entries {
+                for group in &weight_grouped_transitions[*nwa_state_id as usize] {
                     if profile {
-                        profile_raw_transition_visits += 1;
+                        profile_weight_group_visits += 1;
+                        profile_raw_transition_visits += group.edges.len();
                     }
                     let next_weight = scoped_determinize_weight_cache
-                        .intersection(path_weight, trans_weight);
+                        .intersection(path_weight, &group.weight);
                     if next_weight.is_empty() {
                         continue;
                     }
-
-                    raw_targets.entry(label).or_default().push((*dst, next_weight));
+                    for (label, dst) in &group.edges {
+                        raw_targets.entry(*label).or_default().push((*dst, next_weight.clone()));
+                    }
+                }
+            }
+        } else {
+            for (nwa_state_id, path_weight) in &subset_entries {
+                let state = &nwa.states()[*nwa_state_id as usize];
+                for (&label, targets) in &state.transitions {
+                    for (dst, trans_weight) in targets {
+                        if profile {
+                            profile_raw_transition_visits += 1;
+                        }
+                        let next_weight = scoped_determinize_weight_cache
+                            .intersection(path_weight, trans_weight);
+                        if next_weight.is_empty() {
+                            continue;
+                        }
+                        raw_targets.entry(label).or_default().push((*dst, next_weight));
+                    }
                 }
             }
         }
@@ -709,7 +808,7 @@ fn determinize_impl(
         );
 
         eprintln!(
-            "[glrmask/profile][determinize] nwa_states={} dwa_states={} subset_map_entries={} max_weight_dim={} subset_entries={} max_subset_entries={} raw_transition_visits={} labels={} target_contributions={} single_contribution_labels={} single_contribution_no_epsilon_labels={} direct_single_target_labels={} multi_contribution_single_target_no_epsilon_labels={} multi_contribution_single_target_no_epsilon_contributions={} direct_multi_target_labels={} multi_contribution_all_no_epsilon_labels={} multi_contribution_all_no_epsilon_contributions={} expand_ms={:.3} combine_ms={:.3} edge_union_ms={:.3} closure_ms={:.3} normalize_ms={:.3} canonicalize_ms={:.3} subset_lookup_ms={:.3} final_weights_ms={:.3} final_subsets={} final_subset_entries={} final_entries={} final_nonempty_contributions={} final_max_entries={} final_intersection_ms={:.3} final_union_ms={:.3}",
+            "[glrmask/profile][determinize] nwa_states={} dwa_states={} subset_map_entries={} max_weight_dim={} subset_entries={} max_subset_entries={} raw_transition_visits={} weight_grouped_transitions={} weight_group_build_ms={:.3} weight_group_visits={} labels={} target_contributions={} single_contribution_labels={} single_contribution_no_epsilon_labels={} direct_single_target_labels={} multi_contribution_single_target_no_epsilon_labels={} multi_contribution_single_target_no_epsilon_contributions={} direct_multi_target_labels={} multi_contribution_all_no_epsilon_labels={} multi_contribution_all_no_epsilon_contributions={} expand_ms={:.3} combine_ms={:.3} edge_union_ms={:.3} closure_ms={:.3} normalize_ms={:.3} canonicalize_ms={:.3} subset_lookup_ms={:.3} final_weights_ms={:.3} final_subsets={} final_subset_entries={} final_entries={} final_nonempty_contributions={} final_max_entries={} final_intersection_ms={:.3} final_union_ms={:.3}",
             nwa.states().len(),
             dwa.states().len(),
             subset_map.len(),
@@ -717,6 +816,9 @@ fn determinize_impl(
             profile_subset_entries,
             profile_max_subset_entries,
             profile_raw_transition_visits,
+            group_transition_weights,
+            weight_group_build_ms,
+            profile_weight_group_visits,
             profile_labels,
             profile_target_contributions,
             profile_single_contribution_labels,
@@ -773,7 +875,9 @@ mod tests {
 
         let fast = determinize_impl(&nwa, true).unwrap();
         let generic = determinize_impl(&nwa, false).unwrap();
+        let grouped = determinize_impl_with_options(&nwa, true, true, false).unwrap();
         assert_eq!(find_difference(&fast, &generic).unwrap(), None);
+        assert_eq!(find_difference(&grouped, &generic).unwrap(), None);
         assert_eq!(fast.eval_word(&[7]), tokens([0, 1]));
     }
     #[test]
@@ -836,10 +940,16 @@ mod tests {
 
             let fast = determinize_impl(&nwa, true).unwrap();
             let generic = determinize_impl(&nwa, false).unwrap();
+            let grouped = determinize_impl_with_options(&nwa, true, true, false).unwrap();
             assert_eq!(
                 find_difference(&fast, &generic).unwrap(),
                 None,
                 "case {case}",
+            );
+            assert_eq!(
+                find_difference(&grouped, &generic).unwrap(),
+                None,
+                "grouped case {case}",
             );
         }
     }
@@ -860,7 +970,9 @@ mod tests {
 
         let fast = determinize_impl(&nwa, true).unwrap();
         let generic = determinize_impl(&nwa, false).unwrap();
+        let grouped = determinize_impl_with_options(&nwa, true, true, false).unwrap();
         assert_eq!(find_difference(&fast, &generic).unwrap(), None);
+        assert_eq!(find_difference(&grouped, &generic).unwrap(), None);
         assert_eq!(fast.eval_word(&[5]), tokens([0, 1, 2, 3, 4, 5]));
     }
 
@@ -895,7 +1007,7 @@ mod tests {
 
         let fast = determinize_impl(&multi_destination, true).unwrap();
         let generic = determinize_impl(&multi_destination, false).unwrap();
-        assert_eq!(bincode::serialize(&fast).unwrap(), bincode::serialize(&generic).unwrap());
+        assert_eq!(find_difference(&fast, &generic).unwrap(), None);
         assert_eq!(fast.eval_word(&[9]), tokens([0, 1]));
     }
 }
