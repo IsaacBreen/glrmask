@@ -392,27 +392,26 @@ pub fn minimize_token_deterministic_nwa_owned(mut nwa: NWA) -> Result<NWA, GlrMa
             members_by_new.entry(old_to_new[old_state]).or_default().push(old_state);
         }
         for (new_state, members) in members_by_new {
-            let mut final_weight = Weight::empty();
-            let mut branches = BTreeMap::<(Label, u32), Weight>::new();
+            let mut final_parts = Vec::<Weight>::new();
+            let mut branch_parts = BTreeMap::<(Label, u32), Vec<Weight>>::new();
             for old_state in members {
                 if let Some(weight) = &nwa.states()[old_state].final_weight {
-                    final_weight = final_weight.union(weight);
+                    final_parts.push(weight.clone());
                 }
                 for (&label, source_branches) in &nwa.states()[old_state].transitions {
                     for (target, weight) in source_branches {
                         let target = old_to_new[*target as usize];
                         debug_assert_ne!(target, UNMAPPED);
-                        branches
-                            .entry((label, target))
-                            .and_modify(|existing| *existing = existing.union(weight))
-                            .or_insert_with(|| weight.clone());
+                        branch_parts.entry((label, target)).or_default().push(weight.clone());
                     }
                 }
             }
+            let final_weight = Weight::union_all(final_parts.iter());
             if !final_weight.is_empty() {
                 output.set_final_weight(new_state, final_weight);
             }
-            for ((label, target), weight) in branches {
+            for ((label, target), parts) in branch_parts {
+                let weight = Weight::union_all(parts.iter());
                 if !weight.is_empty() {
                     output.add_transition(new_state, label, target, weight);
                 }
