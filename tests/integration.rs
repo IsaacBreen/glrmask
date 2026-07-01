@@ -1423,7 +1423,7 @@ fn strict_terminal_interchangeability_reference_matches_baseline_l2p_artifact() 
 }
 
 #[test]
-fn directed_terminal_subsumption_reference_validates_one_terminal_position() {
+fn strict_terminal_interchangeability_reference_validates_one_terminal_position() {
     let _lock = TI_ENV_LOCK.lock().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
     let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
@@ -1432,36 +1432,11 @@ fn directed_terminal_subsumption_reference_validates_one_terminal_position() {
         "GLRMASK_ASSERT_L2P_TERMINAL_INTERCHANGEABILITY_EQUAL",
         "1",
     );
-    let entries = ["a", "b", "x", "ab", "xa", "xab", "xx", "z"];
+    let entries = ["a", "aa", "aaa", "aaaa", "aaaaa", "aaaaaa", "x"];
     let grammar = r#"
-        start: R | M
-        R: /x?ab/
-        M: /ab/
-    "#;
-    let _ = lark(&entries, grammar);
-}
-
-#[test]
-fn directed_terminal_subsumption_star_family_matches_baseline_l2p_artifact() {
-    let _lock = TI_ENV_LOCK.lock().unwrap();
-    let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
-    let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
-    let _feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
-    let _assert_equal = EnvVarGuard::set(
-        "GLRMASK_ASSERT_L2P_TERMINAL_INTERCHANGEABILITY_EQUAL",
-        "1",
-    );
-
-    // `R` supplies two separate residuals, `ab` and `ac`; neither member can
-    // supply the other. This exercises restoration from one representative
-    // into two independent member modes.
-    let entries = ["a", "b", "c", "x", "y", "ab", "ac", "xab", "yac", "z"];
-    let grammar = r#"
-        start: item item
-        item: R | AB | AC
-        R: /(?:xab|yac)/
-        AB: /ab/
-        AC: /ac/
+        start: A | B
+        A: /a(?:aaaa)*/
+        B: /aaa(?:aaaa)*/
     "#;
     let _ = lark(&entries, grammar);
 }
