@@ -8,8 +8,9 @@
 //!
 //! This is intentionally a validation-first construction: retain the full
 //! lexer alphabet, make one transported copy per relevant initial replacement,
-//! relabel every output of each transported scanner, and use the existing local
-//! DWA/id-map merger. Directed subsumption is deliberately excluded.
+//! relabel every emitted representative output of each transported scanner, and
+//! use the existing local DWA/id-map merger. Directed subsumption is
+//! deliberately excluded.
 
 use std::collections::BTreeMap;
 
@@ -457,6 +458,19 @@ impl TerminalInterchangeability {
     }
 
     pub(crate) fn active_representatives(&self) -> &[bool] { &self.active_representatives }
+
+    /// Raw labels emitted by the transported trie walk. Nonrepresentatives
+    /// remain visible to the scanner, where they can affect longest-match and
+    /// future-terminal behavior, but their edges are reconstructed through the
+    /// representative edge of the corresponding transport mode.
+    pub(crate) fn visible_output_raw_labels(&self) -> Vec<bool> {
+        self.representative_for
+            .iter()
+            .enumerate()
+            .map(|(terminal, &representative)| terminal as TerminalID == representative)
+            .collect()
+    }
+
     pub(crate) fn active_terminal_count_before(&self) -> usize {
         self.original_active.iter().filter(|&&active| active).count()
     }

@@ -485,6 +485,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     };
     let reference_terminal_expansion = !terminal_interchangeability.is_identity();
     let analysis_active_terminals = terminal_interchangeability.active_representatives();
+    let terminal_nwa_visible_output_labels =
+        terminal_interchangeability.visible_output_raw_labels();
     let num_analysis_active_terminals = analysis_active_terminals
         .iter()
         .filter(|&&active| active)
@@ -747,6 +749,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                     &simplified_id_map,
                     &full_tree.root,
                     &mut pm_computer,
+                    &terminal_nwa_visible_output_labels,
                     modes,
                 )
             } else {
