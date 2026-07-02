@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 
 use super::nwa::{Label, NWA};
 use crate::ds::weight::Weight;
@@ -528,6 +529,7 @@ pub fn quotient_disjoint_source_nwa_owned(
     let input_states = nwa.states().len();
     let input_transitions = nwa.num_transitions();
     let total_started_at = Instant::now();
+    let profile_part_counts = std::env::var_os("GLRMASK_PROFILE_TOKEN_NWA_QUOTIENT_PARTS").is_some();
     let Some(topo) = topo_order(&nwa) else {
         return Err(GlrMaskError::Compilation(
             "source-domain token NWA quotient requires an acyclic epsilon-free automaton".into(),
@@ -550,6 +552,8 @@ pub fn quotient_disjoint_source_nwa_owned(
     let mut grouping_ms = 0.0;
     let mut reconstruction_ms = 0.0;
     let mut branch_part_count = 0usize;
+    let mut branch_part_histogram = [0usize; 8];
+    let mut branch_part_overflow = 0usize;
 
     for candidates in by_height {
         if candidates.is_empty() {
@@ -596,8 +600,8 @@ pub fn quotient_disjoint_source_nwa_owned(
 
         for (members, _, _) in groups {
             let new_state = old_to_new[members[0]];
-            let mut final_parts = Vec::<Weight>::new();
-            let mut branch_parts = BTreeMap::<(Label, u32), Vec<Weight>>::new();
+            let mut final_parts = SmallVec::<[Weight; 4]>::new();
+            let mut branch_parts = FxHashMap::<(Label, u32), SmallVec<[Weight; 4]>>::default();
             for old_state in members {
                 if let Some(weight) = &nwa.states()[old_state].final_weight {
                     final_parts.push(weight.clone());
@@ -608,6 +612,15 @@ pub fn quotient_disjoint_source_nwa_owned(
                         debug_assert_ne!(target, UNMAPPED);
                         branch_parts.entry((label, target)).or_default().push(weight.clone());
                         branch_part_count += 1;
+                    }
+                }
+            }
+            if profile_part_counts {
+                for parts in branch_parts.values() {
+                    if let Some(count) = branch_part_histogram.get_mut(parts.len()) {
+                        *count += 1;
+                    } else {
+                        branch_part_overflow += 1;
                     }
                 }
             }
@@ -639,6 +652,20 @@ pub fn quotient_disjoint_source_nwa_owned(
         })
         .collect();
     output.set_start_states(starts);
+
+    if profile_part_counts {
+        eprintln!(
+            "[glrmask/profile][token_nwa_source_quotient_parts] one={} two={} three={} four={} five={} six={} seven={} overflow={}",
+            branch_part_histogram[1],
+            branch_part_histogram[2],
+            branch_part_histogram[3],
+            branch_part_histogram[4],
+            branch_part_histogram[5],
+            branch_part_histogram[6],
+            branch_part_histogram[7],
+            branch_part_overflow,
+        );
+    }
 
     if profile_enabled() {
         eprintln!(
