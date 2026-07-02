@@ -10,7 +10,7 @@ use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::glr::labels::DEFAULT_LABEL;
+use crate::compiler::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
 use crate::compiler::glr::table::GLRTable;
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::InternalIdMap;
@@ -1680,6 +1680,189 @@ fn dwa_to_nwa(dwa: &DWA) -> NWA {
     nwa
 }
 
+
+fn merge_preimage_target_weight(
+    targets: &mut FxHashMap<u32, Weight>,
+    target: u32,
+    add: Weight,
+) {
+    if add.is_empty() {
+        return;
+    }
+    let entry = targets.entry(target).or_insert_with(Weight::empty);
+    *entry = entry.union(&add);
+}
+
+fn suffix_dwa_step(suffix: &DWA, state_id: u32, label: i32) -> Option<(u32, Weight)> {
+    let state = suffix.states().get(state_id as usize)?;
+    state
+        .transitions
+        .get(&label)
+        .cloned()
+        .or_else(|| state.transitions.get(&DEFAULT_LABEL).cloned())
+}
+
+/// Construct the exact preimage of `suffix` under a normal-form terminal
+/// bundle. A terminal template consumes parser-stack labels with positive or
+/// DEFAULT edges, then only emits negative push labels. The latter are folded
+/// directly into residual states of `suffix`; the returned NWA contains no
+/// negative labels.
+///
+/// This is the local algebra needed for bottom-up compilation over an acyclic
+/// terminal-control DWA. It deliberately returns an NWA because different
+/// bundle tails may reach different suffix residual states; callers choose the
+/// appropriate deterministic union boundary.
+fn preimage_bundle_against_suffix_dwa(bundle: &NWA, suffix: &DWA) -> Option<NWA> {
+    let bundle_state_count = bundle.states().len();
+    if bundle_state_count == 0
+        || suffix.states().is_empty()
+        || (suffix.start_state() as usize) >= suffix.states().len()
+        || !bundle.is_acyclic()
+    {
+        return None;
+    }
+
+    // The residual recurrence follows only epsilon and push edges. A reverse
+    // topological order makes every push suffix available before its prefix.
+    let mut predecessors = vec![Vec::<u32>::new(); bundle_state_count];
+    let mut outdegree = vec![0usize; bundle_state_count];
+    for (source, state) in bundle.states().iter().enumerate() {
+        let mut record = |target: u32, weight: &Weight| {
+            if !weight.is_empty() && (target as usize) < bundle_state_count {
+                predecessors[target as usize].push(source as u32);
+                outdegree[source] += 1;
+            }
+        };
+        for (target, weight) in &state.epsilons {
+            record(*target, weight);
+        }
+        for (&label, targets) in &state.transitions {
+            if !is_negative_label(label) {
+                continue;
+            }
+            for (target, weight) in targets {
+                record(*target, weight);
+            }
+        }
+    }
+
+    let mut worklist = VecDeque::new();
+    for (state_id, &degree) in outdegree.iter().enumerate() {
+        if degree == 0 {
+            worklist.push_back(state_id as u32);
+        }
+    }
+    let mut reverse_topo = Vec::with_capacity(bundle_state_count);
+    while let Some(state_id) = worklist.pop_front() {
+        reverse_topo.push(state_id);
+        for &predecessor in &predecessors[state_id as usize] {
+            outdegree[predecessor as usize] -= 1;
+            if outdegree[predecessor as usize] == 0 {
+                worklist.push_back(predecessor);
+            }
+        }
+    }
+    if reverse_topo.len() != bundle_state_count {
+        return None;
+    }
+
+    // `residuals[u][d]` is the token weight for which a path from bundle state
+    // `u` through only epsilon/push edges leaves the suffix DWA at `d` after
+    // consuming the generated stack prefix (in stack-top order).
+    let mut residuals = vec![FxHashMap::<u32, Weight>::default(); bundle_state_count];
+    for state_id in reverse_topo {
+        let index = state_id as usize;
+        let state = &bundle.states()[index];
+        if let Some(final_weight) = state.final_weight.as_ref() {
+            merge_preimage_target_weight(
+                &mut residuals[index],
+                suffix.start_state(),
+                final_weight.clone(),
+            );
+        }
+
+        for (target, edge_weight) in &state.epsilons {
+            let tail = residuals[*target as usize].clone();
+            for (suffix_state, tail_weight) in tail {
+                let weight = edge_weight.intersection(&tail_weight);
+                merge_preimage_target_weight(&mut residuals[index], suffix_state, weight);
+            }
+        }
+
+        for (&label, targets) in &state.transitions {
+            if !is_negative_label(label) {
+                continue;
+            }
+            let pushed_label = negative_to_positive_label(label);
+            for (target, edge_weight) in targets {
+                let tail = residuals[*target as usize].clone();
+                for (suffix_state, tail_weight) in tail {
+                    let path_weight = edge_weight.intersection(&tail_weight);
+                    if path_weight.is_empty() {
+                        continue;
+                    }
+
+                    // A final suffix state may stop before inspecting this
+                    // pushed label. Keeping the unchanged residual preserves
+                    // those tokens; non-final tokens take the normal DWA step.
+                    if suffix.states()[suffix_state as usize]
+                        .final_weight
+                        .as_ref()
+                        .is_some_and(|weight| !weight.is_empty())
+                    {
+                        merge_preimage_target_weight(
+                            &mut residuals[index],
+                            suffix_state,
+                            path_weight.clone(),
+                        );
+                    }
+                    if let Some((next_state, transition_weight)) =
+                        suffix_dwa_step(suffix, suffix_state, pushed_label)
+                    {
+                        let weight = path_weight.intersection(&transition_weight);
+                        merge_preimage_target_weight(&mut residuals[index], next_state, weight);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut output = NWA::new(0, 0);
+    for _ in 0..bundle_state_count {
+        output.add_state();
+    }
+    output.set_start_states(bundle.start_states().to_vec());
+    for (source, state) in bundle.states().iter().enumerate() {
+        for (target, weight) in &state.epsilons {
+            if !weight.is_empty() {
+                output.add_epsilon(source as u32, *target, weight.clone());
+            }
+        }
+        for (&label, targets) in &state.transitions {
+            if is_negative_label(label) {
+                continue;
+            }
+            for (target, weight) in targets {
+                if !weight.is_empty() {
+                    output.add_transition(source as u32, label, *target, weight.clone());
+                }
+            }
+        }
+    }
+
+    let suffix_offset = output.states().len() as u32;
+    output.append_with_body(&dwa_to_nwa(suffix));
+    for (source, targets) in residuals.into_iter().enumerate() {
+        for (suffix_state, weight) in targets {
+            if !weight.is_empty() {
+                output.add_epsilon(source as u32, suffix_offset + suffix_state, weight);
+            }
+        }
+    }
+
+    Some(output)
+}
+
 fn compute_productive_terminal_states(summaries: &StateSummaries) -> Vec<bool> {
     let states = &summaries.states;
     let mut reverse_edges: Vec<Vec<u32>> = vec![Vec::new(); states.len()];
@@ -2220,4 +2403,89 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     }
 
     minimized
+}
+
+#[cfg(test)]
+mod preimage_tests {
+    use super::*;
+    use crate::automata::weighted::determinize::determinize;
+    use crate::compiler::glr::labels::encode_negative_label;
+
+    fn all() -> Weight {
+        Weight::all()
+    }
+
+    fn pushing_bundle(push: u32) -> NWA {
+        let mut nwa = NWA::new(0, 0);
+        nwa.add_state();
+        nwa.add_state();
+        nwa.set_start_states(vec![0]);
+        nwa.add_transition(0, encode_negative_label(push), 1, all());
+        nwa.set_final_weight(1, all());
+        nwa
+    }
+
+    fn is_final(dwa: &DWA, state_id: u32) -> bool {
+        dwa.states()[state_id as usize]
+            .final_weight
+            .as_ref()
+            .is_some_and(|weight| !weight.is_empty())
+    }
+
+    #[test]
+    fn preimage_cancels_one_generated_push() {
+        let bundle = pushing_bundle(5);
+        let mut suffix = DWA::new(0, 0);
+        suffix.add_state();
+        suffix.add_state();
+        suffix.add_transition(0, 5, 1, all());
+        suffix.set_final_weight(1, all());
+
+        let preimage = preimage_bundle_against_suffix_dwa(&bundle, &suffix)
+            .expect("acyclic normal-form bundle");
+        let result = determinize(&preimage).expect("preimage must determinize");
+        assert!(result.states()[result.start_state() as usize]
+            .final_weight
+            .as_ref()
+            .is_some_and(|weight| !weight.is_empty()));
+    }
+
+    #[test]
+    fn preimage_keeps_required_input_after_push() {
+        let bundle = pushing_bundle(5);
+        let mut suffix = DWA::new(0, 0);
+        for _ in 0..3 {
+            suffix.add_state();
+        }
+        suffix.add_transition(0, 5, 1, all());
+        suffix.add_transition(1, 7, 2, all());
+        suffix.set_final_weight(2, all());
+
+        let result = determinize(
+            &preimage_bundle_against_suffix_dwa(&bundle, &suffix)
+                .expect("acyclic normal-form bundle"),
+        )
+        .expect("preimage must determinize");
+        let start = &result.states()[result.start_state() as usize];
+        assert!(start.final_weight.is_none());
+        let (target, weight) = start.transitions.get(&7).expect("must demand 7");
+        assert!(!weight.is_empty());
+        assert!(is_final(&result, *target));
+        assert!(!start.transitions.contains_key(&5));
+    }
+
+    #[test]
+    fn preimage_allows_suffix_early_acceptance() {
+        let bundle = pushing_bundle(5);
+        let mut suffix = DWA::new(0, 0);
+        suffix.add_state();
+        suffix.set_final_weight(0, all());
+
+        let result = determinize(
+            &preimage_bundle_against_suffix_dwa(&bundle, &suffix)
+                .expect("acyclic normal-form bundle"),
+        )
+        .expect("preimage must determinize");
+        assert!(is_final(&result, result.start_state()));
+    }
 }
