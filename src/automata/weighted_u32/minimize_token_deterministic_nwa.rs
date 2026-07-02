@@ -600,6 +600,68 @@ pub fn quotient_disjoint_source_nwa_owned(
 
         for (members, _, _) in groups {
             let new_state = old_to_new[members[0]];
+            if members.len() == 1 {
+                let state = &nwa.states()[members[0]];
+                if let Some(final_weight) = &state.final_weight {
+                    if !final_weight.is_empty() {
+                        output.set_final_weight(new_state, final_weight.clone());
+                    }
+                }
+                for (&label, source_branches) in &state.transitions {
+                    branch_part_count += source_branches.len();
+                    if source_branches.len() == 1 {
+                        let (target, weight) = &source_branches[0];
+                        let target = old_to_new[*target as usize];
+                        debug_assert_ne!(target, UNMAPPED);
+                        if profile_part_counts {
+                            branch_part_histogram[1] += 1;
+                        }
+                        if !weight.is_empty() {
+                            output.add_transition(new_state, label, target, weight.clone());
+                        }
+                        continue;
+                    }
+
+                    let mut mapped = SmallVec::<[(u32, &Weight); 8]>::new();
+                    for (target, weight) in source_branches {
+                        let target = old_to_new[*target as usize];
+                        debug_assert_ne!(target, UNMAPPED);
+                        mapped.push((target, weight));
+                    }
+                    mapped.sort_unstable_by_key(|(target, _)| *target);
+                    let mut start = 0usize;
+                    while start < mapped.len() {
+                        let target = mapped[start].0;
+                        let mut end = start + 1;
+                        while end < mapped.len() && mapped[end].0 == target {
+                            end += 1;
+                        }
+                        let parts = &mapped[start..end];
+                        let part_count = parts.len();
+                        if profile_part_counts {
+                            if let Some(count) = branch_part_histogram.get_mut(part_count) {
+                                *count += 1;
+                            } else {
+                                branch_part_overflow += 1;
+                            }
+                        }
+                        let weight = if part_count == 1 {
+                            parts[0].1.clone()
+                        } else if part_count >= 3 {
+                            Weight::union_all_direct(parts.iter().map(|(_, weight)| *weight))
+                        } else {
+                            Weight::union_all(parts.iter().map(|(_, weight)| *weight))
+                        };
+                        if !weight.is_empty() {
+                            output.add_transition(new_state, label, target, weight);
+                        }
+                        start = end;
+                    }
+                }
+                group_count += 1;
+                continue;
+            }
+
             let mut final_parts = SmallVec::<[Weight; 4]>::new();
             let mut branch_parts = FxHashMap::<(Label, u32), SmallVec<[Weight; 4]>>::default();
             for old_state in members {

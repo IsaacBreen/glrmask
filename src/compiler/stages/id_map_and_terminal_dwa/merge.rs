@@ -1891,11 +1891,8 @@ fn remap_weight_with_tsid_runs(
             .unwrap_or_else(Weight::empty);
     }
 
-    let Some(entries) = weight.compact_entries() else {
-        return weight.clone();
-    };
-    let mut intervals = SmallVec::<[(u32, u32, Arc<RangeSetBlaze<u32>>); 4]>::new();
-    for (start, end, tokens) in entries {
+    let mut intervals = SmallVec::<[(u32, u32, Arc<RangeSetBlaze<u32>>); 16]>::new();
+    for (start, end, tokens) in weight.range_entries() {
         let token_key = Arc::as_ptr(&tokens) as usize;
         let mapped_tokens = token_remap.map_tokens(token_key, tokens.as_ref(), token_cache);
         if mapped_tokens.is_empty() {
