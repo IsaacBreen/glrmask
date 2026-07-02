@@ -1169,6 +1169,78 @@ struct PointwiseProfile {
     by_tsid: Vec<(u32, Arc<Vec<TokenBehaviorRange>>)>,
 }
 
+/// One constant pointwise behavior over an inclusive TSID interval.
+///
+/// The existing pointwise path expands this interval into one entry per TSID.
+/// That is exact but pathological when a weight is constant across thousands
+/// of compacted tokenizer states. The range form preserves the same partial
+/// behavior function without that expansion.
+#[derive(Clone)]
+struct PointwiseTsidRange {
+    start: u32,
+    end: u32,
+    region: Arc<Vec<TokenBehaviorRange>>,
+}
+
+#[derive(Default)]
+struct PointwiseRangeProfile {
+    /// Sorted, disjoint TSID intervals. Adjacent intervals with the same
+    /// region are coalesced.
+    by_tsid_range: Vec<PointwiseTsidRange>,
+}
+
+#[derive(Default)]
+struct PointwiseRangeBehaviorMap {
+    /// Sorted, disjoint TSID intervals encoding the exact union behavior of a
+    /// merge group.
+    ranges: Vec<PointwiseTsidRange>,
+}
+
+#[derive(Default)]
+struct PointwiseRangeMergeGroup {
+    targets_by_label: FxHashMap<Label, u32>,
+    behavior_by_tsid: PointwiseRangeBehaviorMap,
+    member_classes: Vec<usize>,
+}
+
+fn pointwise_tsid_ranges_enabled() -> bool {
+    std::env::var("GLRMASK_POINTWISE_TSID_RANGES")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
+fn pointwise_tsid_ranges_auto_enabled() -> bool {
+    std::env::var("GLRMASK_POINTWISE_TSID_RANGES")
+        .map(|value| value.trim().eq_ignore_ascii_case("auto"))
+        .unwrap_or(false)
+}
+
+const POINTWISE_TSID_RANGE_MIN_COMPRESSION: usize = 4;
+
+fn push_pointwise_tsid_range(
+    ranges: &mut Vec<PointwiseTsidRange>,
+    start: u32,
+    end: u32,
+    region: Arc<Vec<TokenBehaviorRange>>,
+) {
+    if start > end {
+        return;
+    }
+    if let Some(previous) = ranges.last_mut() {
+        if Arc::ptr_eq(&previous.region, &region)
+            && previous.end != u32::MAX
+            && previous.end + 1 == start
+        {
+            previous.end = end;
+            return;
+        }
+    }
+    ranges.push(PointwiseTsidRange { start, end, region });
+}
+
 const MAX_DENSE_POINTWISE_TSID_SLOTS: usize = 65_536;
 
 #[derive(Clone, Copy)]
@@ -1252,6 +1324,138 @@ impl PointwiseBehaviorMap {
                 .map(|ranges| ranges.len())
                 .sum(),
         }
+    }
+}
+
+impl PointwiseRangeBehaviorMap {
+    fn profile_compatible(&self, profile: &PointwiseRangeProfile) -> bool {
+        let mut existing_index = 0usize;
+        let mut profile_index = 0usize;
+        while existing_index < self.ranges.len() && profile_index < profile.by_tsid_range.len() {
+            let existing = &self.ranges[existing_index];
+            let add = &profile.by_tsid_range[profile_index];
+            if existing.end < add.start {
+                existing_index += 1;
+                continue;
+            }
+            if add.end < existing.start {
+                profile_index += 1;
+                continue;
+            }
+            if !Arc::ptr_eq(&existing.region, &add.region)
+                && !token_behavior_ranges_compatible(existing.region.as_ref(), add.region.as_ref())
+            {
+                return false;
+            }
+            if existing.end <= add.end {
+                existing_index += 1;
+            }
+            if add.end <= existing.end {
+                profile_index += 1;
+            }
+        }
+        true
+    }
+
+    fn merge_profile(
+        &mut self,
+        profile: &PointwiseRangeProfile,
+        regions: &mut PointwiseRegionInterner,
+    ) {
+        let mut merged = Vec::with_capacity(self.ranges.len() + profile.by_tsid_range.len());
+        let mut existing_index = 0usize;
+        let mut profile_index = 0usize;
+        let mut existing = self.ranges.get(existing_index).cloned();
+        let mut add = profile.by_tsid_range.get(profile_index).cloned();
+
+        loop {
+            match (existing.take(), add.take()) {
+                (None, None) => break,
+                (Some(range), None) => {
+                    push_pointwise_tsid_range(&mut merged, range.start, range.end, range.region);
+                    existing_index += 1;
+                    existing = self.ranges.get(existing_index).cloned();
+                }
+                (None, Some(range)) => {
+                    push_pointwise_tsid_range(&mut merged, range.start, range.end, range.region);
+                    profile_index += 1;
+                    add = profile.by_tsid_range.get(profile_index).cloned();
+                }
+                (Some(mut left), Some(mut right)) => {
+                    if left.end < right.start {
+                        push_pointwise_tsid_range(&mut merged, left.start, left.end, left.region);
+                        existing_index += 1;
+                        existing = self.ranges.get(existing_index).cloned();
+                        add = Some(right);
+                        continue;
+                    }
+                    if right.end < left.start {
+                        push_pointwise_tsid_range(&mut merged, right.start, right.end, right.region);
+                        profile_index += 1;
+                        existing = Some(left);
+                        add = profile.by_tsid_range.get(profile_index).cloned();
+                        continue;
+                    }
+
+                    if left.start < right.start {
+                        push_pointwise_tsid_range(
+                            &mut merged,
+                            left.start,
+                            right.start - 1,
+                            Arc::clone(&left.region),
+                        );
+                        left.start = right.start;
+                    } else if right.start < left.start {
+                        push_pointwise_tsid_range(
+                            &mut merged,
+                            right.start,
+                            left.start - 1,
+                            Arc::clone(&right.region),
+                        );
+                        right.start = left.start;
+                    }
+
+                    debug_assert!(
+                        Arc::ptr_eq(&left.region, &right.region)
+                            || token_behavior_ranges_compatible(
+                                left.region.as_ref(),
+                                right.region.as_ref(),
+                            ),
+                        "range profiles must be checked for compatibility before merging",
+                    );
+                    let end = left.end.min(right.end);
+                    let region = if Arc::ptr_eq(&left.region, &right.region) {
+                        left.region.clone()
+                    } else {
+                        regions.intern(overlay_compatible_token_behavior_ranges(
+                            left.region.as_ref(),
+                            right.region.as_ref(),
+                        ))
+                    };
+                    push_pointwise_tsid_range(&mut merged, left.start, end, region);
+
+                    if left.end == end {
+                        existing_index += 1;
+                        existing = self.ranges.get(existing_index).cloned();
+                    } else {
+                        left.start = end + 1;
+                        existing = Some(left);
+                    }
+                    if right.end == end {
+                        profile_index += 1;
+                        add = profile.by_tsid_range.get(profile_index).cloned();
+                    } else {
+                        right.start = end + 1;
+                        add = Some(right);
+                    }
+                }
+            }
+        }
+        self.ranges = merged;
+    }
+
+    fn region_entry_count(&self) -> usize {
+        self.ranges.iter().map(|range| range.region.len()).sum()
     }
 }
 
@@ -1472,6 +1676,91 @@ fn build_pointwise_profile(
         }
     }
     Some(PointwiseProfile { by_tsid })
+}
+
+/// Range-compressed equivalent of [`build_pointwise_profile`].
+///
+/// Every point in one emitted TSID interval observes the same final and
+/// transition token sets, so the token behavior region is constant throughout
+/// that interval. Keeping the interval intact is exact.
+fn build_pointwise_range_profile(
+    domain: &Weight,
+    profile: &ClassProfile,
+    behaviors: &mut PointwiseBehaviorInterner,
+    regions: &mut PointwiseRegionInterner,
+    build_cache: &mut PointwiseRegionBuildCache,
+) -> Option<PointwiseRangeProfile> {
+    if domain.is_full()
+        || profile.final_weight.as_ref().is_some_and(Weight::is_full)
+        || profile.weights.iter().any(|(_, weight)| weight.is_full())
+    {
+        return None;
+    }
+
+    let transitions: Vec<(Label, u32, &Weight)> = profile
+        .weights
+        .iter()
+        .map(|(label, weight)| Some((*label, profile_target_for_label(profile, *label)?, weight)))
+        .collect::<Option<_>>()?;
+    let mut by_tsid_range = Vec::new();
+    for (domain_start, domain_end, domain_tokens) in domain.compact_entries()? {
+        let mut boundaries = vec![u64::from(domain_start), u64::from(domain_end) + 1];
+        if let Some(final_weight) = &profile.final_weight {
+            for (tsid_range, _) in final_weight.0.range_values() {
+                add_tsid_boundary_if_overlapping(
+                    &mut boundaries,
+                    domain_start,
+                    domain_end,
+                    *tsid_range.start(),
+                    *tsid_range.end(),
+                );
+            }
+        }
+        for (_, _, weight) in &transitions {
+            for (tsid_range, _) in weight.0.range_values() {
+                add_tsid_boundary_if_overlapping(
+                    &mut boundaries,
+                    domain_start,
+                    domain_end,
+                    *tsid_range.start(),
+                    *tsid_range.end(),
+                );
+            }
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
+
+        for pair in boundaries.windows(2) {
+            let start64 = pair[0];
+            let next = pair[1];
+            if start64 > u64::from(u32::MAX) || start64 >= next {
+                continue;
+            }
+            let tsid_start = start64 as u32;
+            let tsid_end = (next - 1) as u32;
+            let final_tokens = profile
+                .final_weight
+                .as_ref()
+                .and_then(|weight| weight.0.get(tsid_start))
+                .map(|tokens| tokens.as_ref());
+            let mut active_transitions = Vec::new();
+            for (label, target, weight) in &transitions {
+                if let Some(tokens) = weight.0.get(tsid_start) {
+                    active_transitions.push((*label, *target, tokens.as_ref()));
+                }
+            }
+            let region = build_token_behavior_region(
+                domain_tokens.as_ref(),
+                final_tokens,
+                &active_transitions,
+                behaviors,
+                regions,
+                build_cache,
+            )?;
+            push_pointwise_tsid_range(&mut by_tsid_range, tsid_start, tsid_end, region);
+        }
+    }
+    Some(PointwiseRangeProfile { by_tsid_range })
 }
 
 fn token_behavior_ranges_compatible(
@@ -1708,6 +1997,167 @@ fn try_build_and_color_pointwise(
             groups.len(),
             interner.ids.len(),
             regions.regions.len(),
+            region_entries,
+            region_build_cache.entries.len(),
+            region_build_cache.hits,
+            region_build_cache.misses,
+            profile_build_ms,
+            merge_ms,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+            group_attempts,
+            target_rejects,
+            behavior_rejects,
+        );
+    }
+    Some(coloring)
+}
+
+/// Exact greedy pointwise coloring using TSID intervals rather than one map
+/// entry per TSID. This is equivalent to [`try_build_and_color_pointwise`]; it
+/// changes only the representation of a partial behavior function.
+fn try_build_and_color_pointwise_ranges(
+    candidates: &[usize],
+    class_coloring: &[usize],
+    class_needed_union: &[Weight],
+    class_profiles: &[ClassProfile],
+    profile_enabled: bool,
+) -> Option<Vec<usize>> {
+    let started_at = Instant::now();
+    let mut interner = PointwiseBehaviorInterner::default();
+    let mut regions = PointwiseRegionInterner::default();
+    let mut region_build_cache = PointwiseRegionBuildCache::default();
+    let profile_started_at = Instant::now();
+    let mut pointwise_profiles = Vec::with_capacity(class_profiles.len());
+    for (domain, profile) in class_needed_union.iter().zip(class_profiles) {
+        pointwise_profiles.push(build_pointwise_range_profile(
+            domain,
+            profile,
+            &mut interner,
+            &mut regions,
+            &mut region_build_cache,
+        )?);
+    }
+    let profile_build_ms = profile_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let profile_ranges = pointwise_profiles
+        .iter()
+        .map(|profile| profile.by_tsid_range.len())
+        .sum::<usize>();
+    let profile_tsid_cells = pointwise_profiles
+        .iter()
+        .flat_map(|profile| profile.by_tsid_range.iter())
+        .map(|range| (range.end as usize - range.start as usize) + 1)
+        .sum::<usize>();
+
+    if pointwise_tsid_ranges_auto_enabled()
+        && profile_ranges.saturating_mul(POINTWISE_TSID_RANGE_MIN_COMPRESSION)
+            > profile_tsid_cells
+    {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][weighted_dwa_minimize_pointwise_ranges_fallback] candidates={} classes={} profile_ranges={} profile_tsid_cells={} profile_build_ms={:.3}",
+                candidates.len(),
+                class_profiles.len(),
+                profile_ranges,
+                profile_tsid_cells,
+                profile_build_ms,
+            );
+        }
+        return try_build_and_color_pointwise(
+            candidates,
+            class_coloring,
+            class_needed_union,
+            class_profiles,
+            profile_enabled,
+        );
+    }
+
+    let merge_started_at = Instant::now();
+    let mut groups = Vec::<PointwiseRangeMergeGroup>::new();
+    let mut group_attempts = 0usize;
+    let mut target_rejects = 0usize;
+    let mut behavior_rejects = 0usize;
+    for class in 0..class_profiles.len() {
+        let class_profile = &class_profiles[class];
+        let pointwise_profile = &pointwise_profiles[class];
+        let mut placed = false;
+        for group in &mut groups {
+            group_attempts += 1;
+            if !targets_compatible_with_group_map(&class_profile.targets, &group.targets_by_label) {
+                target_rejects += 1;
+                continue;
+            }
+            if !group.behavior_by_tsid.profile_compatible(pointwise_profile) {
+                behavior_rejects += 1;
+                continue;
+            }
+            #[cfg(debug_assertions)]
+            debug_assert!(memberwise_group_compatible(
+                &class_needed_union[class],
+                class_profile,
+                &group.member_classes,
+                class_needed_union,
+                class_profiles,
+            ));
+            for (label, target) in &class_profile.targets {
+                group.targets_by_label.entry(*label).or_insert(*target);
+            }
+            group
+                .behavior_by_tsid
+                .merge_profile(pointwise_profile, &mut regions);
+            group.member_classes.push(class);
+            placed = true;
+            break;
+        }
+        if !placed {
+            let mut targets_by_label = FxHashMap::default();
+            targets_by_label.reserve(class_profile.targets.len());
+            for (label, target) in &class_profile.targets {
+                targets_by_label.insert(*label, *target);
+            }
+            let mut group = PointwiseRangeMergeGroup {
+                targets_by_label,
+                behavior_by_tsid: PointwiseRangeBehaviorMap::default(),
+                member_classes: vec![class],
+            };
+            group
+                .behavior_by_tsid
+                .merge_profile(pointwise_profile, &mut regions);
+            groups.push(group);
+        }
+    }
+    let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let mut class_to_group = vec![0usize; class_profiles.len()];
+    for (group_id, group) in groups.iter().enumerate() {
+        for &class in &group.member_classes {
+            class_to_group[class] = group_id;
+        }
+    }
+    let coloring = class_coloring
+        .iter()
+        .map(|class| class_to_group[*class])
+        .collect();
+
+    if profile_enabled {
+        let group_tsid_ranges = groups
+            .iter()
+            .map(|group| group.behavior_by_tsid.ranges.len())
+            .sum::<usize>();
+        let region_entries = groups
+            .iter()
+            .map(|group| group.behavior_by_tsid.region_entry_count())
+            .sum::<usize>();
+        eprintln!(
+            "[glrmask/profile][weighted_dwa_minimize_pointwise_ranges] candidates={} classes={} groups={} behaviors={} interned_regions={} profile_ranges={} profile_tsid_cells={} group_tsid_ranges={} regions={} region_build_cache_entries={} region_build_cache_hits={} region_build_cache_misses={} profile_build_ms={:.3} merge_ms={:.3} total_ms={:.3} group_attempts={} target_rejects={} behavior_rejects={}",
+            candidates.len(),
+            class_profiles.len(),
+            groups.len(),
+            interner.ids.len(),
+            regions.regions.len(),
+            profile_ranges,
+            profile_tsid_cells,
+            group_tsid_ranges,
             region_entries,
             region_build_cache.entries.len(),
             region_build_cache.hits,
@@ -2267,13 +2717,24 @@ fn build_and_color_hybrid(
     // TSID/token domain. When that representation is finite, compare against
     // the exact union function of each group instead of revisiting all members.
     // A full sentinel cannot be enumerated, so it retains the generic path.
-    if let Some(coloring) = try_build_and_color_pointwise(
-        candidates,
-        &class_coloring,
-        &class_needed_union,
-        &class_profiles,
-        profile_enabled,
-    ) {
+    let pointwise_coloring = if pointwise_tsid_ranges_enabled() {
+        try_build_and_color_pointwise_ranges(
+            candidates,
+            &class_coloring,
+            &class_needed_union,
+            &class_profiles,
+            profile_enabled,
+        )
+    } else {
+        try_build_and_color_pointwise(
+            candidates,
+            &class_coloring,
+            &class_needed_union,
+            &class_profiles,
+            profile_enabled,
+        )
+    };
+    if let Some(coloring) = pointwise_coloring {
         if profile_enabled {
             eprintln!(
                 "[glrmask/profile][weighted_dwa_minimize_pointwise_preamble] candidates={} classes={} partition_refine_ms={:.3} class_union_ms={:.3} class_profiles_ms={:.3}",
