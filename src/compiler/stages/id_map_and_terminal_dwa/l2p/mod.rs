@@ -94,63 +94,6 @@ fn l2p_terminal_interchangeability_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// The reference path is validation-gated: it may never return an unchecked
-/// transformed terminal DWA. A later production implementation can make this
-/// optional only after it has an independent proof and broader regression data.
-fn l2p_terminal_interchangeability_validation_enabled() -> bool { true }
-
-/// Debug-only analysis hook for reporting terminal interchangeability on every
-/// compiler byte partition, including partitions whose normal L2+ routing uses
-/// only the cheaper L1-style builder. It constructs no terminal DWA.
-pub(crate) fn debug_terminal_interchangeability_partition(
-    partition_label: &str,
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    active_terminals: &[bool],
-    ignore_terminal: Option<TerminalID>,
-    grammar: &AnalyzedGrammar,
-) {
-    if std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY_ALL_PARTITIONS").is_none() {
-        return;
-    }
-
-    let mut relevant_bytes = [false; 256];
-    for bytes in vocab.entries.values() {
-        for &byte in bytes {
-            relevant_bytes[byte as usize] = true;
-        }
-    }
-    let interchangeability = TerminalInterchangeability::build(
-        tokenizer,
-        active_terminals,
-        &relevant_bytes,
-        ignore_terminal,
-    );
-    let mut classes = BTreeMap::<TerminalID, Vec<TerminalID>>::new();
-    for (terminal, representative) in interchangeability.active_assignments() {
-        classes.entry(representative).or_default().push(terminal);
-    }
-    let rendered = classes
-        .into_iter()
-        .map(|(representative, members)| {
-            let members = members
-                .iter()
-                .map(|&terminal| format!("{}:{:?}", terminal, grammar.terminal_display_name(terminal)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("rep={}:{} members=[{}]", representative, grammar.terminal_display_name(representative), members)
-        })
-        .collect::<Vec<_>>()
-        .join("; ");
-    eprintln!(
-        "[glrmask/debug][terminal_interchangeability_full_partition] partition={} active_before={} active_after={} classes={}",
-        partition_label,
-        interchangeability.active_terminal_count_before(),
-        interchangeability.active_terminal_count_after(),
-        rendered,
-    );
-}
-
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct SimplifyCacheKey {
     active_words: Vec<u64>,
@@ -542,47 +485,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         .iter()
         .filter(|&&active| active)
         .count();
-    if std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY_ACTIVE").is_some() {
-        let assignments = terminal_interchangeability
-            .active_assignments()
-            .map(|(terminal, representative)| {
-                format!(
-                    "{}:{:?}->{}:{:?}",
-                    terminal,
-                    grammar.terminal_display_name(terminal),
-                    representative,
-                    grammar.terminal_display_name(representative),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        eprintln!(
-            "[glrmask/debug][terminal_interchangeability_active] partition={} assignments=[{}]",
-            partition_label,
-            assignments,
-        );
-    }
-    if std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY_CLASSES").is_some() {
-        let classes = terminal_interchangeability
-            .nontrivial_classes()
-            .map(|(representative, members)| {
-                let members = members
-                    .iter()
-                    .map(|&terminal| format!("{}:{:?}", terminal, grammar.terminal_display_name(terminal)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("rep={}:{} members=[{}]", representative, grammar.terminal_display_name(representative), members)
-            })
-            .collect::<Vec<_>>();
-        eprintln!(
-            "[glrmask/debug][terminal_interchangeability_classes] partition={} active_before={} active_after={} nontrivial_classes={} classes={}",
-            partition_label,
-            terminal_interchangeability.active_terminal_count_before(),
-            terminal_interchangeability.active_terminal_count_after(),
-            classes.len(),
-            classes.join("; "),
-        );
-    }
     // Build the validation artifact in original lexer-state coordinates with
     // the full terminal alphabet intact. Each transport mode scans a complete
     // swapped-label lexer and relabels its outputs back to the original
@@ -729,70 +631,19 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             if use_simplified_tok || reference_terminal_expansion { None } else { flat_trans },
             equivalence_initial_state_map,
         );
+
+    // Transport modes are indexed by raw tokenizer states. Keep ordinary
+    // equivalence reduction for the baseline path, but retain every raw state
+    // coordinate while constructing the transported reference artifact.
     if reference_terminal_expansion {
-        if l2p_timing_profile_enabled() {
-            let modes = terminal_interchangeability
-                .terminal_nwa_transport_modes(tokenizer.initial_state_id())
-                .expect("nonidentity interchangeability must provide transport modes");
-            let source_classes = &simplified_id_map.tokenizer_states.internal_to_originals;
-            let original_to_class = &simplified_id_map.tokenizer_states.original_to_internal;
-            let mut compatible_pairs = 0usize;
-            let mut incompatible_pairs = 0usize;
-            let mut max_targets_per_class = 0usize;
-            let mut class_compatible_pairs = 0usize;
-            let mut class_incompatible_pairs = 0usize;
-            let mut max_target_classes_per_source_class = 0usize;
-            for mode in &modes {
-                for originals in source_classes {
-                    let mut targets = originals
-                        .iter()
-                        .map(|&source| mode.scanner_state_for_original[source as usize])
-                        .collect::<Vec<_>>();
-                    targets.sort_unstable();
-                    targets.dedup();
-                    max_targets_per_class = max_targets_per_class.max(targets.len());
-                    if targets.len() == 1 {
-                        compatible_pairs += 1;
-                    } else {
-                        incompatible_pairs += 1;
-                    }
-                    let mut target_classes = targets
-                        .iter()
-                        .map(|&target| original_to_class[target as usize])
-                        .collect::<Vec<_>>();
-                    target_classes.sort_unstable();
-                    target_classes.dedup();
-                    max_target_classes_per_source_class =
-                        max_target_classes_per_source_class.max(target_classes.len());
-                    if target_classes.len() == 1 {
-                        class_compatible_pairs += 1;
-                    } else {
-                        class_incompatible_pairs += 1;
-                    }
-                }
-            }
-            eprintln!(
-                "[glrmask/profile][terminal_interchangeability_projection] partition={} modes={} source_classes={} exact_compatible_pairs={} exact_incompatible_pairs={} max_targets_per_class={} quotient_compatible_pairs={} quotient_incompatible_pairs={} max_target_classes_per_source_class={}",
-                partition_label,
-                modes.len(),
-                source_classes.len(),
-                compatible_pairs,
-                incompatible_pairs,
-                max_targets_per_class,
-                class_compatible_pairs,
-                class_incompatible_pairs,
-                max_target_classes_per_source_class,
-            );
-        }
-        // Each mode scans a residual-equivalent target state while weights stay
-        // indexed by the true token-start state. Do not quotient those starts.
-        let ids = (0..tokenizer_for_build.num_states()).collect::<Vec<u32>>();
+        let states = (0..tokenizer_for_build.num_states()).collect::<Vec<u32>>();
         simplified_id_map.tokenizer_states =
             ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-                ids.clone(),
-                ids,
+                states.clone(),
+                states,
             );
     }
+
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // tsid_fallback is independent of the NWA build / postprocess /
@@ -876,7 +727,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             nwa.start_states_mut().push(start_state);
 
             let transport_modes = reference_terminal_expansion
-                .then(|| terminal_interchangeability.terminal_nwa_transport_modes(tokenizer.initial_state_id()))
+                .then(|| terminal_interchangeability.terminal_nwa_transport_modes())
                 .flatten();
             let seed_ms;
 
@@ -1092,7 +943,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         );
     }
 
-    let mut output = LocalIdMapTerminalDwa {
+    let output = LocalIdMapTerminalDwa {
         id_map,
         dwa,
         profile: TerminalDwaPhaseProfile {
@@ -1110,7 +961,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     };
 
 
-    if reference_terminal_expansion && l2p_terminal_interchangeability_validation_enabled() {
+    if reference_terminal_expansion {
         // Rebuild the same local L2P artifact with the feature suppressed, then
         // compare the completed weighted terminal languages after expanding both
         // id maps into original tokenizer-state and token coordinates. This is
@@ -1138,33 +989,13 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             )
             .expect("terminal interchangeability baseline L2P build unexpectedly returned None")
         };
-        match terminal_dwa_equivalence::compare(&baseline, &output) {
-            Ok(()) => {
-                if l2p_timing_profile_enabled() {
-                    eprintln!(
-                        "[glrmask/profile][l2p_terminal_interchangeability_validation] partition={} result=equal",
-                        partition_label,
-                    );
-                }
-            }
-            Err(mismatch) => {
-                if std::env::var_os("GLRMASK_ASSERT_L2P_TERMINAL_INTERCHANGEABILITY_EQUAL").is_some() {
-                    panic!(
-                        "terminal interchangeability candidate differed from baseline: partition={} {}",
-                        partition_label,
-                        mismatch,
-                    );
-                }
-                if l2p_timing_profile_enabled() {
-                    eprintln!(
-                        "[glrmask/profile][l2p_terminal_interchangeability_validation] partition={} result=mismatch {}",
-                        partition_label,
-                        mismatch,
-                    );
-                }
-                output = baseline;
-            }
-        }
+        terminal_dwa_equivalence::compare(&baseline, &output).unwrap_or_else(|mismatch| {
+            panic!(
+                "terminal interchangeability candidate differed from baseline: partition={} {}",
+                partition_label,
+                mismatch,
+            )
+        });
     }
 
     Some(output)

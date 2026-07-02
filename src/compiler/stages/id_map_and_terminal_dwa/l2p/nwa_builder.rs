@@ -1287,7 +1287,7 @@ mod tests {
         );
         let plan = TerminalInterchangeability::build(&tokenizer, &[true, true], &[true; 256], None);
         let modes = plan
-            .terminal_nwa_transport_modes(tokenizer.initial_state_id())
+            .terminal_nwa_transport_modes()
             .expect("duplicate terminals must transport");
         let tree = VocabPrefixTree::build(&[
             (0, b"a".to_vec()),

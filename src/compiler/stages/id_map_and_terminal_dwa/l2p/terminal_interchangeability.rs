@@ -14,8 +14,6 @@
 //! sides.
 
 use std::collections::BTreeMap;
-use std::time::Instant;
-
 use super::nwa_builder::TerminalNwaTransportMode;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
@@ -72,34 +70,24 @@ impl OutputBits {
     }
 }
 
-/// A bijection between the stable terminal-specific state partitions. Every
-/// source state maps to every raw DFA state in its corresponding target class.
+/// The class map for one terminal swap. Each source state points to every raw
+/// tokenizer state in its mapped target class.
 #[derive(Clone, Debug)]
 struct InterchangeMap {
-    source_state_to_target_states: Vec<Vec<u32>>,
+    target_class_for_source_state: Vec<Vec<u32>>,
 }
 
 impl InterchangeMap {
-    /// Select one concrete simulator state per target class. The class carrying
-    /// the lexer reset state deliberately selects that reset state itself; every
-    /// other class selects its smallest raw DFA state. This is only a concrete
-    /// representative of the already established class-to-class transport.
-    fn transport_representatives(&self, lexer_initial_state: u32) -> Option<Vec<u32>> {
-        let root_targets = self
-            .source_state_to_target_states
-            .get(lexer_initial_state as usize)?;
-        if !root_targets.contains(&lexer_initial_state) {
-            return None;
-        }
-
-        self.source_state_to_target_states
+    /// The scanner is implemented over raw tokenizer states, so each mapped
+    /// target class needs one arbitrary raw representative at its entry point.
+    /// This selection has no mathematical significance.
+    fn arbitrary_target_representatives(&self) -> Vec<u32> {
+        self.target_class_for_source_state
             .iter()
-            .map(|targets| {
-                if targets == root_targets {
-                    Some(lexer_initial_state)
-                } else {
-                    targets.first().copied()
-                }
+            .map(|target_class| {
+                *target_class
+                    .first()
+                    .expect("interchangeability map contains an empty target class")
             })
             .collect()
     }
@@ -108,7 +96,6 @@ impl InterchangeMap {
 struct PairCharacterization {
     identity_hashes: Vec<CharacterizationHash>,
     swapped_hashes: Vec<CharacterizationHash>,
-    rounds: usize,
 }
 
 struct RestrictedDfa {
@@ -293,7 +280,6 @@ impl RestrictedDfa {
                 return PairCharacterization {
                     identity_hashes: self.identity_rounds[rounds].clone(),
                     swapped_hashes: swapped_next,
-                    rounds,
                 };
             }
             if same_equality_partition_pair(
@@ -305,7 +291,6 @@ impl RestrictedDfa {
                 return PairCharacterization {
                     identity_hashes: self.identity_rounds[rounds].clone(),
                     swapped_hashes: swapped_next,
-                    rounds,
                 };
             }
             swapped_previous = swapped_next;
@@ -349,49 +334,19 @@ impl RestrictedDfa {
             return None;
         }
 
-        let source_state_to_target_states = (0..self.real_state_count)
+        let target_class_for_source_state = (0..self.real_state_count)
             .map(|source| {
                 target_states_by_class
                     .get(&characterization.identity_hashes[source])
                     .cloned()
             })
             .collect::<Option<Vec<_>>>()?;
-        if source_state_to_target_states.iter().any(Vec::is_empty) {
+        if target_class_for_source_state.iter().any(Vec::is_empty) {
             return None;
         }
         Some(InterchangeMap {
-            source_state_to_target_states,
+            target_class_for_source_state,
         })
-    }
-
-    fn debug_pair_summary(&mut self, left: TerminalID, right: TerminalID) -> String {
-        let characterization = self.characterize_pair(left, right);
-        let identity_classes = characterization.identity_hashes[..self.real_state_count]
-            .iter()
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
-        let swapped_classes = characterization.swapped_hashes[..self.real_state_count]
-            .iter()
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
-        let root_hash_equal = characterization.identity_hashes[self.initial_state]
-            == characterization.swapped_hashes[self.initial_state];
-        let map_exists = self
-            .interchange_map_from_characterization(&characterization)
-            .is_some();
-        format!(
-            "left={} right={} relevant_bytes={} rounds={} identity_classes={} swapped_classes={} root_hash_equal={} exact_map_exists={}",
-            left,
-            right,
-            self.bytes.len(),
-            characterization.rounds,
-            identity_classes,
-            swapped_classes,
-            root_hash_equal,
-            map_exists,
-        )
     }
 }
 
@@ -454,24 +409,17 @@ fn rooted_class_bijection_still_possible(
 
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalInterchangeability {
-    original_active: Vec<bool>,
     active_representatives: Vec<bool>,
     representative_for: Vec<TerminalID>,
-    members_by_representative: Vec<Vec<TerminalID>>,
-    maps_by_representative_member: BTreeMap<(TerminalID, TerminalID), InterchangeMap>,
+    map_for_representative_member: BTreeMap<(TerminalID, TerminalID), InterchangeMap>,
 }
 
 impl TerminalInterchangeability {
-    pub(crate) fn identity(active: &[bool]) -> Self {
-        let terminal_count = active.len();
+    pub(crate) fn identity(active_terminals: &[bool]) -> Self {
         Self {
-            original_active: active.to_vec(),
-            active_representatives: active.to_vec(),
-            representative_for: (0..terminal_count as u32).collect(),
-            members_by_representative: (0..terminal_count as u32)
-                .map(|terminal| vec![terminal])
-                .collect(),
-            maps_by_representative_member: BTreeMap::new(),
+            active_representatives: active_terminals.to_vec(),
+            representative_for: (0..active_terminals.len() as TerminalID).collect(),
+            map_for_representative_member: BTreeMap::new(),
         }
     }
 
@@ -481,7 +429,6 @@ impl TerminalInterchangeability {
         relevant_bytes: &[bool; 256],
         ignore_terminal: Option<TerminalID>,
     ) -> Self {
-        let started_at = Instant::now();
         let candidates = active_terminals
             .iter()
             .enumerate()
@@ -492,142 +439,63 @@ impl TerminalInterchangeability {
             return Self::identity(active_terminals);
         }
 
-        // Only L2+-active terminals are observable. The DFA and its stored
-        // metadata remain untouched; the byte set merely bounds characterize.
-        let mut restricted = RestrictedDfa::new(tokenizer, active_terminals, relevant_bytes);
-        let mut accepted = BTreeMap::<(TerminalID, TerminalID), InterchangeMap>::new();
+        // The tokenizer DFA and its metadata are frozen. `relevant_bytes` only
+        // determines which byte transitions the characterization traverses.
+        let mut dfa = RestrictedDfa::new(tokenizer, active_terminals, relevant_bytes);
+        let mut pair_maps = BTreeMap::<(TerminalID, TerminalID), InterchangeMap>::new();
         let mut components = DisjointSet::new(active_terminals.len());
-        let debug_pair = std::env::var("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY_PAIR")
-            .ok()
-            .and_then(|value| {
-                let (left, right) = value.split_once(',')?;
-                Some((
-                    left.trim().parse::<TerminalID>().ok()?,
-                    right.trim().parse::<TerminalID>().ok()?,
-                ))
-            });
-        if let Some((left, right)) = debug_pair {
-            if active_terminals.get(left as usize).copied().unwrap_or(false)
-                && active_terminals.get(right as usize).copied().unwrap_or(false)
-            {
-                eprintln!(
-                    "[glrmask/debug][terminal_interchangeability_pair] {}",
-                    restricted.debug_pair_summary(left, right),
-                );
-            }
-        }
 
-        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
-        if profile_enabled {
-            eprintln!(
-                "[glrmask/profile][terminal_interchangeability] phase=start active={} pairs={} states={} bytes={}",
-                candidates.len(),
-                candidates.len() * (candidates.len() - 1) / 2,
-                restricted.real_state_count,
-                restricted.bytes.len(),
-            );
-        }
-
-        let mut pair_count = 0usize;
-        let mut skipped_transitive_pairs = 0usize;
+        // Check every pair directly. This is the reference implementation of
+        // the relation; no inferred or composed terminal-pair map is used here.
         for (index, &left) in candidates.iter().enumerate() {
             for &right in &candidates[index + 1..] {
-                // Rooted interchangeability maps are invertible and composable
-                // while preserving the reset class. Once two terminals are in
-                // one component, their direct pair map is already implied.
-                if components.find(left as usize) == components.find(right as usize) {
-                    skipped_transitive_pairs += 1;
-                    continue;
-                }
-                pair_count += 1;
-                if profile_enabled && pair_count % 256 == 0 {
-                    eprintln!(
-                        "[glrmask/profile][terminal_interchangeability] phase=pairs_done active={} checked_pairs={} skipped_transitive_pairs={} elapsed_ms={:.3}",
-                        candidates.len(),
-                        pair_count,
-                        skipped_transitive_pairs,
-                        started_at.elapsed().as_secs_f64() * 1000.0,
-                    );
-                }
-                if let Some(left_to_right) = restricted.interchange_map(left, right) {
+                if let Some(left_to_right) = dfa.interchange_map(left, right) {
                     assert!(
-                        restricted.interchange_map(right, left).is_some(),
-                        "terminal interchange map was not symmetric: {left} <-> {right}",
+                        dfa.interchange_map(right, left).is_some(),
+                        "terminal interchangeability was not symmetric: {left} <-> {right}",
                     );
                     components.union(left as usize, right as usize);
-                    accepted.insert((left, right), left_to_right);
+                    pair_maps.insert((left, right), left_to_right);
                 }
             }
         }
 
-        if profile_enabled {
-            eprintln!(
-                "[glrmask/profile][terminal_interchangeability] active={} checked_pairs={} skipped_transitive_pairs={} accepted_edges={} elapsed_ms={:.3}",
-                candidates.len(),
-                pair_count,
-                skipped_transitive_pairs,
-                accepted.len(),
-                started_at.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-
-        let mut groups = BTreeMap::<usize, Vec<TerminalID>>::new();
+        let mut members_by_component = BTreeMap::<usize, Vec<TerminalID>>::new();
         for &terminal in &candidates {
-            groups
+            members_by_component
                 .entry(components.find(terminal as usize))
                 .or_default()
                 .push(terminal);
         }
 
         let mut result = Self::identity(active_terminals);
-        for members in groups.into_values() {
+        for members in members_by_component.into_values() {
             if members.len() < 2 {
                 continue;
             }
-            // This component is the terminal interchangeability class. Pair
-            // maps compose while preserving the lexer-reset class, so skipped
-            // internal pairs have derived maps and need not be recomputed.
-            let representative = *members.iter().min().expect("nonempty component");
-            result.members_by_representative[representative as usize] = members.clone();
+            // Every pair was checked directly above. Retain this assertion so a
+            // component is accepted only when it is a genuine equivalence class,
+            // not merely a chain of pairwise successes.
+            for (index, &left) in members.iter().enumerate() {
+                for &right in &members[index + 1..] {
+                    assert!(
+                        pair_maps.contains_key(&(left, right)),
+                        "terminal interchangeability component is not a clique: {left} and {right}",
+                    );
+                }
+            }
+            let representative = members[0];
             for &member in &members {
                 result.representative_for[member as usize] = representative;
                 if member != representative {
                     result.active_representatives[member as usize] = false;
-                    let map = accepted
+                    let map = pair_maps
                         .get(&(representative, member))
-                        .expect("interchangeability clique pair missing a map")
+                        .expect("direct representative/member map missing")
                         .clone();
                     result
-                        .maps_by_representative_member
+                        .map_for_representative_member
                         .insert((representative, member), map);
-                }
-            }
-        }
-        if std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY").is_some() {
-            for (representative, members) in result.members_by_representative.iter().enumerate() {
-                if members.len() < 2 {
-                    continue;
-                }
-                eprintln!(
-                    "[glrmask/debug][terminal_interchangeability] representative={} members={:?}",
-                    representative, members,
-                );
-                if std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY_MAPS").is_some() {
-                    for &member in members {
-                        if member == representative as TerminalID {
-                            continue;
-                        }
-                        let map = result
-                            .maps_by_representative_member
-                            .get(&(representative as TerminalID, member))
-                            .expect("debug transport missing");
-                        eprintln!(
-                            "[glrmask/debug][terminal_interchangeability_transport] representative={} member={} map={:?}",
-                            representative,
-                            member,
-                            map.source_state_to_target_states,
-                        );
-                    }
                 }
             }
         }
@@ -635,20 +503,16 @@ impl TerminalInterchangeability {
     }
 
     pub(crate) fn is_identity(&self) -> bool {
-        self.representative_for
-            .iter()
-            .enumerate()
-            .all(|(terminal, &representative)| terminal as TerminalID == representative)
+        self.map_for_representative_member.is_empty()
     }
 
     pub(crate) fn active_representatives(&self) -> &[bool] {
         &self.active_representatives
     }
 
-    /// Raw labels emitted by the transported trie walk. Nonrepresentatives
-    /// remain visible to the scanner, where they can affect longest-match and
-    /// frozen future-finalizer behavior, but their edges are reconstructed
-    /// through the representative edge of the corresponding transport mode.
+    /// Scanner metadata remains visible for every raw terminal. Only edges for
+    /// nonrepresentative active terminals are reconstructed through a transport
+    /// mode rather than emitted directly.
     pub(crate) fn visible_output_raw_labels(&self) -> Vec<bool> {
         self.representative_for
             .iter()
@@ -657,72 +521,26 @@ impl TerminalInterchangeability {
             .collect()
     }
 
-    pub(crate) fn active_terminal_count_before(&self) -> usize {
-        self.original_active.iter().filter(|&&active| active).count()
-    }
-
-    pub(crate) fn active_terminal_count_after(&self) -> usize {
-        self.active_representatives.iter().filter(|&&active| active).count()
-    }
-
-    pub(crate) fn nontrivial_classes(&self) -> impl Iterator<Item = (TerminalID, &[TerminalID])> {
-        self.members_by_representative
-            .iter()
-            .enumerate()
-            .filter(|(_, members)| members.len() > 1)
-            .map(|(representative, members)| (representative as TerminalID, members.as_slice()))
-    }
-
-    pub(crate) fn active_assignments(&self) -> impl Iterator<Item = (TerminalID, TerminalID)> + '_ {
-        self.original_active
-            .iter()
-            .enumerate()
-            .filter(|&(_, &active)| active)
-            .map(|(terminal, _)| {
-                let terminal = terminal as TerminalID;
-                (terminal, self.representative_for[terminal as usize])
-            })
-    }
-
-    pub(crate) fn terminal_nwa_transport_modes(
-        &self,
-        lexer_initial_state: u32,
-    ) -> Option<Vec<TerminalNwaTransportMode>> {
-        if self.is_identity() {
-            return None;
-        }
-        let terminal_count = self.original_active.len();
-        let identity_states = (0..self
-            .maps_by_representative_member
+    pub(crate) fn terminal_nwa_transport_modes(&self) -> Option<Vec<TerminalNwaTransportMode>> {
+        let state_count = self
+            .map_for_representative_member
             .values()
             .next()
-            .map(|map| map.source_state_to_target_states.len())? as u32)
-            .collect::<Vec<_>>();
-        let identity_labels = (0..terminal_count as u32).collect::<Vec<_>>();
+            .map(|map| map.target_class_for_source_state.len())?;
+        let identity_labels = (0..self.representative_for.len() as TerminalID).collect::<Vec<_>>();
         let mut modes = vec![TerminalNwaTransportMode {
-            scanner_state_for_original: identity_states,
+            scanner_state_for_original: (0..state_count as u32).collect(),
             terminal_map: identity_labels.clone(),
         }];
 
-        for (representative, members) in self.members_by_representative.iter().enumerate() {
-            let representative = representative as TerminalID;
-            for &member in members {
-                if member == representative {
-                    continue;
-                }
-                let map = self
-                    .maps_by_representative_member
-                    .get(&(representative, member))?;
-                let scanner_state_for_original =
-                    map.transport_representatives(lexer_initial_state)?;
-                let mut terminal_map = identity_labels.clone();
-                terminal_map[representative as usize] = member;
-                terminal_map[member as usize] = representative;
-                modes.push(TerminalNwaTransportMode {
-                    scanner_state_for_original,
-                    terminal_map,
-                });
-            }
+        for (&(representative, member), map) in &self.map_for_representative_member {
+            let mut terminal_map = identity_labels.clone();
+            terminal_map[representative as usize] = member;
+            terminal_map[member as usize] = representative;
+            modes.push(TerminalNwaTransportMode {
+                scanner_state_for_original: map.arbitrary_target_representatives(),
+                terminal_map,
+            });
         }
         Some(modes)
     }
@@ -814,15 +632,11 @@ mod tests {
         let mut dfa = RestrictedDfa::new(&tokenizer, &[true, true], &[true; 256]);
         let map = dfa.interchange_map(0, 1).expect("identical literals must transport");
         let root = tokenizer.initial_state_id() as usize;
-        assert!(map.source_state_to_target_states[root].contains(&tokenizer.initial_state_id()));
-        assert_eq!(
-            map.transport_representatives(tokenizer.initial_state_id())
-                .expect("rooted transport representatives")[root],
-            tokenizer.initial_state_id(),
-        );
+        assert!(map.target_class_for_source_state[root].contains(&tokenizer.initial_state_id()));
+        let representatives = map.arbitrary_target_representatives();
+        assert!(map.target_class_for_source_state[root].contains(&representatives[root]));
         let plan = TerminalInterchangeability::build(&tokenizer, &[true, true], &[true; 256], None);
-        assert_eq!(plan.active_terminal_count_before(), 2);
-        assert_eq!(plan.active_terminal_count_after(), 1);
+        assert_eq!(plan.active_representatives.iter().filter(|&&active| active).count(), 1);
     }
 
     #[test]
@@ -841,13 +655,8 @@ mod tests {
             &punctuation_only,
             None,
         );
-        assert_eq!(plan.active_terminal_count_after(), 1);
-        let members = plan
-            .nontrivial_classes()
-            .next()
-            .expect("one literal class")
-            .1;
-        assert_eq!(members, &[0, 1, 2, 3]);
+        assert_eq!(plan.active_representatives.iter().filter(|&&active| active).count(), 1);
+        assert_eq!(plan.representative_for, vec![0, 0, 0, 0]);
     }
 
     #[test]
