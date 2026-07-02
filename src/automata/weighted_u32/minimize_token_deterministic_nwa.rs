@@ -530,11 +530,15 @@ pub fn quotient_disjoint_source_nwa_owned(
     let mut output = NWA::new(0, 0);
     let mut group_count = 0usize;
     let mut merged_state_count = 0usize;
+    let mut grouping_ms = 0.0;
+    let mut reconstruction_ms = 0.0;
+    let mut branch_part_count = 0usize;
 
     for candidates in by_height {
         if candidates.is_empty() {
             continue;
         }
+        let grouping_started_at = Instant::now();
         let mut groups = Vec::<(Vec<usize>, FxHashSet<usize>, bool)>::new();
         for candidate in candidates {
             match state_sources[candidate] {
@@ -563,6 +567,8 @@ pub fn quotient_disjoint_source_nwa_owned(
             }
         }
 
+        grouping_ms += grouping_started_at.elapsed().as_secs_f64() * 1000.0;
+        let reconstruction_started_at = Instant::now();
         for (members, _, _) in &groups {
             let new_state = output.add_state();
             for &old_state in members {
@@ -573,33 +579,34 @@ pub fn quotient_disjoint_source_nwa_owned(
 
         for (members, _, _) in groups {
             let new_state = old_to_new[members[0]];
-            let mut final_weight = Weight::empty();
-            let mut branches = BTreeMap::<(Label, u32), Weight>::new();
+            let mut final_parts = Vec::<Weight>::new();
+            let mut branch_parts = BTreeMap::<(Label, u32), Vec<Weight>>::new();
             for old_state in members {
                 if let Some(weight) = &nwa.states()[old_state].final_weight {
-                    final_weight = final_weight.union(weight);
+                    final_parts.push(weight.clone());
                 }
                 for (&label, source_branches) in &nwa.states()[old_state].transitions {
                     for (target, weight) in source_branches {
                         let target = old_to_new[*target as usize];
                         debug_assert_ne!(target, UNMAPPED);
-                        branches
-                            .entry((label, target))
-                            .and_modify(|existing| *existing = existing.union(weight))
-                            .or_insert_with(|| weight.clone());
+                        branch_parts.entry((label, target)).or_default().push(weight.clone());
+                        branch_part_count += 1;
                     }
                 }
             }
+            let final_weight = Weight::union_all(final_parts.iter());
             if !final_weight.is_empty() {
                 output.set_final_weight(new_state, final_weight);
             }
-            for ((label, target), weight) in branches {
+            for ((label, target), parts) in branch_parts {
+                let weight = Weight::union_all(parts.iter());
                 if !weight.is_empty() {
                     output.add_transition(new_state, label, target, weight);
                 }
             }
             group_count += 1;
         }
+        reconstruction_ms += reconstruction_started_at.elapsed().as_secs_f64() * 1000.0;
     }
 
     let starts: Vec<u32> = nwa
@@ -614,11 +621,14 @@ pub fn quotient_disjoint_source_nwa_owned(
 
     if profile_enabled() {
         eprintln!(
-            "[glrmask/profile][token_deterministic_nwa_source_quotient] input_states={} input_transitions={} groups={} merged_states={} output_states={} output_transitions={} total_ms={:.3}",
+            "[glrmask/profile][token_deterministic_nwa_source_quotient] input_states={} input_transitions={} groups={} merged_states={} branch_parts={} grouping_ms={:.3} reconstruction_ms={:.3} output_states={} output_transitions={} total_ms={:.3}",
             input_states,
             input_transitions,
             group_count,
             merged_state_count,
+            branch_part_count,
+            grouping_ms,
+            reconstruction_ms,
             output.num_states(),
             output.num_transitions(),
             total_started_at.elapsed().as_secs_f64() * 1000.0,
