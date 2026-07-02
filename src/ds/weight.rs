@@ -2134,6 +2134,28 @@ impl Weight {
         result
     }
 
+    /// Exact direct multi-way union. This avoids allocating pairwise
+    /// intermediate weights when several complex operands are merged once.
+    pub(crate) fn union_all_direct<'a>(weights: impl IntoIterator<Item = &'a Self>) -> Self {
+        let mut meaningful = SmallVec::<[&Weight; 8]>::new();
+        for weight in weights {
+            if weight.is_full() {
+                return Self::all();
+            }
+            if !weight.is_empty() {
+                meaningful.push(weight);
+            }
+        }
+        meaningful.sort_unstable_by_key(|weight| weight.ptr_key());
+        meaningful.dedup_by_key(|weight| weight.ptr_key());
+        match meaningful.len() {
+            0 => Self::empty(),
+            1 => meaningful[0].clone(),
+            _ => union_all_single_tsid_entries(&meaningful)
+                .unwrap_or_else(|| union_all_multiway(&meaningful)),
+        }
+    }
+
     pub fn intersection(&self, other: &Self) -> Self {
         if self.is_empty() || other.is_empty() {
             return Self::empty();
@@ -2639,11 +2661,13 @@ mod tests {
         ));
 
         let bulk = Weight::union_all(weights.iter());
+        let direct = Weight::union_all_direct(weights.iter());
         let sequential = weights
             .iter()
             .fold(Weight::empty(), |acc, weight| acc.union(weight));
 
         assert_eq!(bulk, sequential);
+        assert_eq!(direct, sequential);
     }
 
     #[test]

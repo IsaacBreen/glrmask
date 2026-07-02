@@ -616,7 +616,11 @@ pub fn quotient_disjoint_source_nwa_owned(
                 output.set_final_weight(new_state, final_weight);
             }
             for ((label, target), parts) in branch_parts {
-                let weight = Weight::union_all(parts.iter());
+                let weight = if parts.len() >= 3 {
+                    Weight::union_all_direct(parts.iter())
+                } else {
+                    Weight::union_all(parts.iter())
+                };
                 if !weight.is_empty() {
                     output.add_transition(new_state, label, target, weight);
                 }
