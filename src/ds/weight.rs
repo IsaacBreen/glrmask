@@ -1915,6 +1915,15 @@ impl Weight {
         )
     }
 
+    /// Borrowed outer-map entries for consumers that do not retain token sets.
+    pub(crate) fn range_entries(
+        &self,
+    ) -> impl Iterator<Item = (u32, u32, &SharedTokenSet)> + '_ {
+        self.0
+            .range_values()
+            .map(|(range, tokens)| (*range.start(), *range.end(), tokens))
+    }
+
     pub fn empty() -> Self {
         EMPTY_WEIGHT.clone()
     }
