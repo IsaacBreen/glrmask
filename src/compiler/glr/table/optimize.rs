@@ -575,6 +575,16 @@ impl GLRTable {
     fn merge_identical_rows_by_partition_refinement(&mut self, profile_detail: bool) {
         let states_before = self.num_states as usize;
         let has_advance_rows = self.advance.len() == states_before;
+        // A direct row fingerprint is exact for the identity partition unless
+        // an action requires target-remap normalization. Canonical LR rows have
+        // only shift/reduce/split/accept actions, so this avoids needless map
+        // lookups during the expensive first quotient pass. Post-unit rows can
+        // contain stack-effect actions and retain the conservative path.
+        let identity_fingerprint_is_exact = self.action.iter().all(|row| {
+            row.values().all(|action| {
+                !matches!(action, Action::StackShifts(_) | Action::GuardedStackShifts(_))
+            })
+        });
         let mut state_to_group = (0..self.num_states).collect::<Vec<_>>();
         let mut representatives = (0..states_before).collect::<Vec<_>>();
         let mut iteration = 0usize;
@@ -593,22 +603,31 @@ impl GLRTable {
             // each other; compute them in parallel. The serial grouping pass
             // below still visits representatives in order, so the canonical
             // first-occurrence group numbering is preserved exactly.
-            // Stack-effect actions compare after target remapping and
-            // normalization. That remains semantically relevant for the
-            // identity partition, so every refinement pass must use the same
-            // remapped representation.
-            let fingerprints: Vec<u64> = representatives
-                .par_iter()
-                .map(|&state| {
-                    let advance = has_advance_rows.then(|| &self.advance[state]);
-                    remapped_row_fingerprint(
-                        &self.action[state],
-                        &self.goto[state],
-                        advance,
-                        &state_to_group,
-                    )
-                })
-                .collect();
+            let fingerprints: Vec<u64> = if iteration == 1 && identity_fingerprint_is_exact {
+                representatives
+                    .par_iter()
+                    .map(|&state| {
+                        row_fingerprint(
+                            &self.action[state],
+                            &self.goto[state],
+                            has_advance_rows.then(|| &self.advance[state]),
+                        )
+                    })
+                    .collect()
+            } else {
+                representatives
+                    .par_iter()
+                    .map(|&state| {
+                        let advance = has_advance_rows.then(|| &self.advance[state]);
+                        remapped_row_fingerprint(
+                            &self.action[state],
+                            &self.goto[state],
+                            advance,
+                            &state_to_group,
+                        )
+                    })
+                    .collect()
+            };
 
             for (group, &state) in representatives.iter().enumerate() {
                 let advance = has_advance_rows.then(|| &self.advance[state]);
