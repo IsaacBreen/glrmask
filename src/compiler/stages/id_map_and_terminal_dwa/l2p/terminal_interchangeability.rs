@@ -46,6 +46,10 @@ impl OutputBits {
     fn cardinality(&self) -> u32 {
         self.0.iter().map(|word| word.count_ones()).sum()
     }
+
+    fn contains(&self, terminal: usize) -> bool {
+        (self.0[terminal / 64] & (1u64 << (terminal % 64))) != 0
+    }
 }
 
 /// A label-renaming invariant of one terminal over the already minimized
@@ -278,6 +282,67 @@ impl<'a> RestrictedDfa<'a> {
         self.terminal_invariants[left as usize] == self.terminal_invariants[right as usize]
     }
 
+    fn debug_pair_summary(&self, left: TerminalID, right: TerminalID) -> String {
+        let invariant_differences = self.terminal_invariants[left as usize]
+            .0
+            .iter()
+            .zip(&self.terminal_invariants[right as usize].0)
+            .enumerate()
+            .filter_map(|(class, (left_counts, right_counts))| {
+                (left_counts != right_counts).then_some(format!(
+                    "class={class} left={left_counts:?} right={right_counts:?}",
+                ))
+            })
+            .collect::<Vec<_>>();
+        let mut alphabetic_bytes = self
+            .bytes
+            .iter()
+            .copied()
+            .filter(u8::is_ascii_alphabetic)
+            .map(char::from)
+            .collect::<Vec<_>>();
+        alphabetic_bytes.sort_unstable();
+        let alphabetic_bytes = alphabetic_bytes.into_iter().collect::<String>();
+        let mut left_companions = BTreeMap::<TerminalID, usize>::new();
+        let mut right_companions = BTreeMap::<TerminalID, usize>::new();
+        for state in 0..self.real_state_count {
+            let (_, future) = self.output(state, None);
+            if future.contains(left as usize) {
+                for terminal in 0..self.active_terminals.len() {
+                    if terminal != left as usize && future.contains(terminal) {
+                        *left_companions.entry(terminal as TerminalID).or_default() += 1;
+                    }
+                }
+            }
+            if future.contains(right as usize) {
+                for terminal in 0..self.active_terminals.len() {
+                    if terminal != right as usize && future.contains(terminal) {
+                        *right_companions.entry(terminal as TerminalID).or_default() += 1;
+                    }
+                }
+            }
+        }
+        let format_companions = |companions: BTreeMap<TerminalID, usize>| {
+            companions
+                .into_iter()
+                .map(|(terminal, states)| format!("{terminal}:{states}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        format!(
+            "left={} right={} relevant_bytes={} relevant_alphabetic={:?} invariant_equal={} invariant_differences=[{}] left_future_companions=[{}] right_future_companions=[{}] exact_map_exists={}",
+            left,
+            right,
+            self.bytes.len(),
+            alphabetic_bytes,
+            invariant_differences.is_empty(),
+            invariant_differences.join("; "),
+            format_companions(left_companions),
+            format_companions(right_companions),
+            self.interchange_map(left, right).is_some(),
+        )
+    }
+
     /// Return a concrete DFA automorphism for this label swap, if the
     /// residual partition map has a singleton, transition-commuting lift.
     ///
@@ -467,6 +532,22 @@ impl TerminalInterchangeability {
         let restricted = RestrictedDfa::new(tokenizer, &observable_terminals, relevant_bytes);
         let mut accepted = BTreeMap::<(TerminalID, TerminalID), InterchangeMap>::new();
         let mut components = DisjointSet::new(active_terminals.len());
+        let debug_pair = std::env::var("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY_PAIR")
+            .ok()
+            .and_then(|value| {
+                let (left, right) = value.split_once(',')?;
+                Some((left.trim().parse::<TerminalID>().ok()?, right.trim().parse::<TerminalID>().ok()?))
+            });
+        if let Some((left, right)) = debug_pair {
+            if active_terminals.get(left as usize).copied().unwrap_or(false)
+                && active_terminals.get(right as usize).copied().unwrap_or(false)
+            {
+                eprintln!(
+                    "[glrmask/debug][terminal_interchangeability_pair] {}",
+                    restricted.debug_pair_summary(left, right),
+                );
+            }
+        }
         let mut pair_count = 0usize;
         let mut invariant_rejections = 0usize;
         let mut exact_checks = 0usize;
@@ -589,6 +670,25 @@ impl TerminalInterchangeability {
     }
     pub(crate) fn active_terminal_count_after(&self) -> usize {
         self.active_representatives.iter().filter(|&&active| active).count()
+    }
+
+    pub(crate) fn nontrivial_classes(&self) -> impl Iterator<Item = (TerminalID, &[TerminalID])> {
+        self.members_by_representative
+            .iter()
+            .enumerate()
+            .filter(|(_, members)| members.len() > 1)
+            .map(|(representative, members)| (representative as TerminalID, members.as_slice()))
+    }
+
+    pub(crate) fn active_assignments(&self) -> impl Iterator<Item = (TerminalID, TerminalID)> + '_ {
+        self.original_active
+            .iter()
+            .enumerate()
+            .filter(|&(_, &active)| active)
+            .map(|(terminal, _)| {
+                let terminal = terminal as TerminalID;
+                (terminal, self.representative_for[terminal as usize])
+            })
     }
 
     pub(crate) fn terminal_nwa_transport_modes(&self) -> Option<Vec<TerminalNwaTransportMode>> {
