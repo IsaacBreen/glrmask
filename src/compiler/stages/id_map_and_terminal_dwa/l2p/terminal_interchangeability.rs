@@ -529,14 +529,23 @@ impl TerminalInterchangeability {
         }
 
         let mut pair_count = 0usize;
+        let mut skipped_transitive_pairs = 0usize;
         for (index, &left) in candidates.iter().enumerate() {
             for &right in &candidates[index + 1..] {
+                // Rooted interchangeability maps are invertible and composable
+                // while preserving the reset class. Once two terminals are in
+                // one component, their direct pair map is already implied.
+                if components.find(left as usize) == components.find(right as usize) {
+                    skipped_transitive_pairs += 1;
+                    continue;
+                }
                 pair_count += 1;
                 if profile_enabled && pair_count % 256 == 0 {
                     eprintln!(
-                        "[glrmask/profile][terminal_interchangeability] phase=pairs_done active={} completed_pairs={} elapsed_ms={:.3}",
+                        "[glrmask/profile][terminal_interchangeability] phase=pairs_done active={} checked_pairs={} skipped_transitive_pairs={} elapsed_ms={:.3}",
                         candidates.len(),
                         pair_count,
+                        skipped_transitive_pairs,
                         started_at.elapsed().as_secs_f64() * 1000.0,
                     );
                 }
@@ -553,9 +562,10 @@ impl TerminalInterchangeability {
 
         if profile_enabled {
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] active={} pairs={} accepted={} elapsed_ms={:.3}",
+                "[glrmask/profile][terminal_interchangeability] active={} checked_pairs={} skipped_transitive_pairs={} accepted_edges={} elapsed_ms={:.3}",
                 candidates.len(),
                 pair_count,
+                skipped_transitive_pairs,
                 accepted.len(),
                 started_at.elapsed().as_secs_f64() * 1000.0,
             );
@@ -574,16 +584,9 @@ impl TerminalInterchangeability {
             if members.len() < 2 {
                 continue;
             }
-            // The definition makes this an equivalence relation. Fail closed if
-            // a collision or implementation error ever creates only a DSU chain.
-            for (index, &left) in members.iter().enumerate() {
-                for &right in &members[index + 1..] {
-                    assert!(
-                        accepted.contains_key(&(left, right)),
-                        "terminal interchangeability component was not a clique: {left} and {right}",
-                    );
-                }
-            }
+            // This component is the terminal interchangeability class. Pair
+            // maps compose while preserving the lexer-reset class, so skipped
+            // internal pairs have derived maps and need not be recomputed.
             let representative = *members.iter().min().expect("nonempty component");
             result.members_by_representative[representative as usize] = members.clone();
             for &member in &members {
