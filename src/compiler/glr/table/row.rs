@@ -61,6 +61,29 @@ impl<K: Copy + Eq + Hash, V: Clone> SparseRow<K, V> {
         }
     }
 
+    /// Construct directly from a sorted, duplicate-free entry vector.
+    ///
+    /// Builders commonly already own such a vector. Re-inserting it through
+    /// `insert` would needlessly perform O(n²) inline duplicate scans and an
+    /// avoidable inline-to-hash-map promotion.
+    pub(crate) fn from_sorted_unique(entries: Vec<(K, V)>) -> Self {
+        if entries.len() <= INLINE_ROW_CAPACITY {
+            Self::Inline(SmallVec::from_vec(entries))
+        } else {
+            Self::Large(entries.into_iter().collect())
+        }
+    }
+
+    /// Consume a hash map without reinserting every entry. Small rows retain
+    /// the compact inline representation; large rows preserve the map.
+    pub(crate) fn from_hash_map(entries: FxHashMap<K, V>) -> Self {
+        if entries.len() <= INLINE_ROW_CAPACITY {
+            Self::Inline(entries.into_iter().collect())
+        } else {
+            Self::Large(entries)
+        }
+    }
+
     pub(crate) fn insert(&mut self, key: K, value: V) -> Option<V> {
         match self {
             Self::Inline(entries) => {

@@ -1,4 +1,5 @@
 use super::*;
+use super::row::SparseRow;
 use std::sync::Arc;
 
 use crate::ds::bitset::BitSet;
@@ -422,13 +423,18 @@ fn finish_table(
                 .collect::<Vec<_>>();
             // Preserve canonical order for stable construction and artifacts.
             entries.sort_unstable_by_key(|(terminal, _)| *terminal);
-            entries
-                .into_iter()
-                .map(|(terminal, pending)| (terminal, pending.finish()))
-                .collect()
+            ActionRow::Sparse(SparseRow::from_sorted_unique(
+                entries
+                    .into_iter()
+                    .map(|(terminal, pending)| (terminal, pending.finish()))
+                    .collect(),
+            ))
         })
         .collect();
-    let goto: Vec<GotoRow> = goto.into_iter().map(IntoIterator::into_iter).map(Iterator::collect).collect();
+    let goto: Vec<GotoRow> = goto
+        .into_iter()
+        .map(SparseRow::from_hash_map)
+        .collect();
     let num_states = action.len() as u32;
 
     GLRTable {
