@@ -14,15 +14,15 @@
 //! sides.
 
 use std::collections::{BTreeMap, hash_map::Entry};
+use std::time::Instant;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use super::nwa_builder::TerminalNwaTransportMode;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::grammar::flat::TerminalID;
 
-const NO_STATE: u32 = u32::MAX;
 const CHARACTERIZATION_DOMAIN: &[u8] =
     b"glrmask terminal interchangeability characterize v1\0";
 const CHARACTERIZATION_SEED: &[u8] =
@@ -73,6 +73,346 @@ impl OutputBits {
     }
 }
 
+/// One observed frozen-output label. The reference only reads these labels
+/// at enabled-byte destinations, so this type is used solely for the global
+/// destination-output closure prefilter below.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct OutputPair {
+    finalizers: OutputBits,
+    future_finalizers: OutputBits,
+}
+
+/// Sparse topology of the byte-restricted raw tokenizer DFA. A missing enabled
+/// transition has the same synthetic dead destination for every raw state.
+/// Keeping only real edges is exact: all omitted bytes share that one default.
+#[derive(Debug)]
+struct RestrictedTopology {
+    bytes: Vec<u8>,
+    edge_offsets: Vec<u32>,
+    edges: Vec<(u8, u32)>,
+    real_state_count: usize,
+    initial_state: usize,
+    max_outdegree: usize,
+}
+
+impl RestrictedTopology {
+    fn new(tokenizer: &Tokenizer, relevant_bytes: &[bool; 256]) -> Self {
+        let bytes = (0..=255u8)
+            .filter(|&byte| relevant_bytes[byte as usize])
+            .collect::<Vec<_>>();
+        let real_state_count = tokenizer.num_states() as usize;
+        let mut edge_offsets = Vec::with_capacity(real_state_count + 2);
+        let mut edges = Vec::new();
+        let mut max_outdegree = 0usize;
+        edge_offsets.push(0);
+        for state in 0..real_state_count {
+            let start = edges.len();
+            for (byte, target) in tokenizer.transitions_from(state as u32) {
+                if relevant_bytes[byte as usize] {
+                    edges.push((byte, target));
+                }
+            }
+            max_outdegree = max_outdegree.max(edges.len() - start);
+            edge_offsets.push(edges.len() as u32);
+        }
+        // Synthetic dead has no real edges: every enabled byte loops to itself.
+        edge_offsets.push(edges.len() as u32);
+        Self {
+            bytes,
+            edge_offsets,
+            edges,
+            real_state_count,
+            initial_state: tokenizer.initial_state_id() as usize,
+            max_outdegree,
+        }
+    }
+
+    fn state_count(&self) -> usize {
+        self.real_state_count + 1
+    }
+
+    fn dead_state(&self) -> usize {
+        self.real_state_count
+    }
+
+    fn edges_from(&self, state: usize) -> &[(u8, u32)] {
+        let start = self.edge_offsets[state] as usize;
+        let end = self.edge_offsets[state + 1] as usize;
+        &self.edges[start..end]
+    }
+
+    fn destination_for_byte(&self, state: usize, byte: u8) -> usize {
+        if state == self.dead_state() {
+            return state;
+        }
+        self.edges_from(state)
+            .binary_search_by_key(&byte, |(edge_byte, _)| *edge_byte)
+            .ok()
+            .map(|index| self.edges_from(state)[index].1 as usize)
+            .unwrap_or_else(|| self.dead_state())
+    }
+
+    fn observed_destinations(&self) -> Vec<bool> {
+        let mut observed = vec![false; self.state_count()];
+        for &(_, destination) in &self.edges {
+            observed[destination as usize] = true;
+        }
+        observed
+    }
+}
+
+/// The frozen-output observation made by the root-reachable part of the
+/// byte-restricted DFA for one terminal. State IDs are deliberately kept rather
+/// than quotienting or transforming the tokenizer: terminal interchangeability
+/// uses the original DFA and its original metadata.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RootOutputSignature {
+    finalizer_states: Box<[u32]>,
+    future_finalizer_states: Box<[u32]>,
+}
+
+/// Partition candidate terminals by a necessary-and-sufficient condition for
+/// the root part of the pair characterization.
+///
+/// Let `R` be the states reachable from the lexer initial state using enabled
+/// bytes, and let `D = δ(R, bytes)` be the observed destination states. The
+/// identity and swapped sides start at the same root and have the same byte
+/// transition function, so induction on enabled-byte words makes each state in
+/// `D` compare with itself. At such a state, swapping `left` and `right` leaves
+/// either frozen output set unchanged exactly when the two terminals have equal
+/// membership in that set. Thus the root hashes can agree at every refinement
+/// depth exactly when both terminals have equal finalizer and frozen-future
+/// membership over every state in `D`.
+fn rooted_candidate_groups(
+    tokenizer: &Tokenizer,
+    candidates: &[TerminalID],
+    topology: &RestrictedTopology,
+) -> (Vec<Vec<TerminalID>>, usize) {
+    let state_count = topology.real_state_count;
+    let mut reachable = vec![false; state_count];
+    reachable[topology.initial_state] = true;
+    let mut worklist = vec![topology.initial_state];
+    while let Some(state) = worklist.pop() {
+        for &(_, destination) in topology.edges_from(state) {
+            let destination = destination as usize;
+            if !reachable[destination] {
+                reachable[destination] = true;
+                worklist.push(destination);
+            }
+        }
+    }
+
+    // `characterize` observes outputs on destinations, not current states.
+    let mut observed = vec![false; state_count];
+    for (state, &is_reachable) in reachable.iter().enumerate() {
+        if is_reachable {
+            for &(_, destination) in topology.edges_from(state) {
+                observed[destination as usize] = true;
+            }
+        }
+    }
+
+    let mut is_candidate = vec![false; tokenizer.num_terminals() as usize];
+    for &terminal in candidates {
+        is_candidate[terminal as usize] = true;
+    }
+    let mut finalizer_states = vec![Vec::<u32>::new(); is_candidate.len()];
+    let mut future_finalizer_states = vec![Vec::<u32>::new(); is_candidate.len()];
+    for (state, &is_observed) in observed.iter().enumerate() {
+        if !is_observed {
+            continue;
+        }
+        for terminal in tokenizer.matched_terminals_iter(state as u32) {
+            if is_candidate[terminal as usize] {
+                finalizer_states[terminal as usize].push(state as u32);
+            }
+        }
+        for terminal in tokenizer.possible_future_terminals_iter(state as u32) {
+            if is_candidate[terminal as usize] {
+                future_finalizer_states[terminal as usize].push(state as u32);
+            }
+        }
+    }
+
+    let mut groups = BTreeMap::<RootOutputSignature, Vec<TerminalID>>::new();
+    for &terminal in candidates {
+        let terminal = terminal as usize;
+        groups
+            .entry(RootOutputSignature {
+                finalizer_states: std::mem::take(&mut finalizer_states[terminal])
+                    .into_boxed_slice(),
+                future_finalizer_states: std::mem::take(
+                    &mut future_finalizer_states[terminal],
+                )
+                .into_boxed_slice(),
+            })
+            .or_default()
+            .push(terminal as TerminalID);
+    }
+    (
+        groups.into_values().collect(),
+        observed.into_iter().filter(|&value| value).count(),
+    )
+}
+
+/// A terminal's support across a terminal-name-independent structural
+/// partition. It is only a rejection invariant; the full checker decides.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct StructuralOutputSignature {
+    finalizer_support: Box<[u64]>,
+    future_finalizer_support: Box<[u64]>,
+}
+
+const STRUCTURAL_REFINEMENT_ROUNDS: usize = 2;
+
+/// Mix one invariant structural component into a deterministic 64-bit
+/// fingerprint. Equal tuples always have equal fingerprints. A collision only
+/// coarsens the prefilter and therefore cannot reject a valid pair.
+#[inline]
+fn mix_structural_fingerprint(mut state: u64, component: u64) -> u64 {
+    state ^= component.wrapping_add(0x9e37_79b9_7f4a_7c15).rotate_left(17);
+    state = state.wrapping_mul(0x517c_c1b7_2722_0a95);
+    state ^ (state >> 29)
+}
+
+/// Compute structural support signatures using a sparse canonical form of the
+/// reference tuple. At a given round, every missing byte has the common dead
+/// component `(hash(dead), 0, 0)`. The full tuple is therefore determined by
+/// the enabled-byte keys whose component differs from that default. Omitting
+/// default entries preserves tuple equality exactly.
+fn structural_candidate_signatures(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+    candidates: &[TerminalID],
+    topology: &RestrictedTopology,
+) -> (Vec<StructuralOutputSignature>, usize) {
+    let state_count = topology.state_count();
+    let dead_state = topology.dead_state();
+    let mut finalizer_counts = vec![0u64; state_count];
+    let mut future_finalizer_counts = vec![0u64; state_count];
+    for state in 0..topology.real_state_count {
+        finalizer_counts[state] = tokenizer
+            .matched_terminals_iter(state as u32)
+            .filter(|&terminal| active_terminals[terminal as usize])
+            .count() as u64;
+        future_finalizer_counts[state] = tokenizer
+            .possible_future_terminals_iter(state as u32)
+            .filter(|&terminal| active_terminals[terminal as usize])
+            .count() as u64;
+    }
+
+    let mut fingerprints = vec![0x6a09_e667_f3bc_c909; state_count];
+    for _ in 0..STRUCTURAL_REFINEMENT_ROUNDS {
+        let default_fingerprint = fingerprints[dead_state];
+        let mut next = Vec::with_capacity(state_count);
+        for state in 0..state_count {
+            let mut fingerprint = mix_structural_fingerprint(
+                0xbb67_ae85_84ca_a73b,
+                topology.bytes.len() as u64,
+            );
+            for &(byte, destination) in topology.edges_from(state) {
+                let destination = destination as usize;
+                if fingerprints[destination] == default_fingerprint
+                    && finalizer_counts[destination] == 0
+                    && future_finalizer_counts[destination] == 0
+                {
+                    continue;
+                }
+                fingerprint = mix_structural_fingerprint(fingerprint, byte as u64);
+                fingerprint = mix_structural_fingerprint(fingerprint, fingerprints[destination]);
+                fingerprint = mix_structural_fingerprint(fingerprint, finalizer_counts[destination]);
+                fingerprint = mix_structural_fingerprint(
+                    fingerprint,
+                    future_finalizer_counts[destination],
+                );
+            }
+            next.push(fingerprint);
+        }
+        fingerprints = next;
+    }
+
+    let mut color_ids = FxHashMap::<u64, u32>::default();
+    let mut colors = Vec::with_capacity(state_count);
+    for fingerprint in fingerprints {
+        let next = color_ids.len() as u32;
+        colors.push(*color_ids.entry(fingerprint).or_insert(next));
+    }
+    let color_count = color_ids.len();
+    let words = color_count.div_ceil(64);
+
+    let mut candidate_index_by_terminal = vec![usize::MAX; active_terminals.len()];
+    for (candidate_index, &terminal) in candidates.iter().enumerate() {
+        candidate_index_by_terminal[terminal as usize] = candidate_index;
+    }
+    let mut finalizer_support = vec![vec![0u64; words]; candidates.len()];
+    let mut future_finalizer_support = vec![vec![0u64; words]; candidates.len()];
+    for (state, &is_observed) in topology.observed_destinations().iter().enumerate() {
+        if !is_observed || state == dead_state {
+            continue;
+        }
+        let color = colors[state] as usize;
+        let word = color / 64;
+        let mask = 1u64 << (color % 64);
+        for terminal in tokenizer.matched_terminals_iter(state as u32) {
+            let candidate_index = candidate_index_by_terminal[terminal as usize];
+            if candidate_index != usize::MAX {
+                finalizer_support[candidate_index][word] |= mask;
+            }
+        }
+        for terminal in tokenizer.possible_future_terminals_iter(state as u32) {
+            let candidate_index = candidate_index_by_terminal[terminal as usize];
+            if candidate_index != usize::MAX {
+                future_finalizer_support[candidate_index][word] |= mask;
+            }
+        }
+    }
+
+    (
+        finalizer_support
+            .into_iter()
+            .zip(future_finalizer_support)
+            .map(|(finalizer_support, future_finalizer_support)| StructuralOutputSignature {
+                finalizer_support: finalizer_support.into_boxed_slice(),
+                future_finalizer_support: future_finalizer_support.into_boxed_slice(),
+            })
+            .collect(),
+        color_count,
+    )
+}
+
+/// Refine root candidates by the global structural invariant. Singletons need
+/// no direct terminal-pair check.
+fn refine_candidate_groups_by_structure(
+    root_groups: Vec<Vec<TerminalID>>,
+    candidates: &[TerminalID],
+    signatures: &[StructuralOutputSignature],
+) -> Vec<Vec<TerminalID>> {
+    let terminal_count = candidates
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |terminal| terminal as usize + 1);
+    let mut candidate_index_by_terminal = vec![usize::MAX; terminal_count];
+    for (candidate_index, &terminal) in candidates.iter().enumerate() {
+        candidate_index_by_terminal[terminal as usize] = candidate_index;
+    }
+
+    let mut groups = Vec::new();
+    for root_group in root_groups {
+        let mut by_signature = BTreeMap::<StructuralOutputSignature, Vec<TerminalID>>::new();
+        for terminal in root_group {
+            let candidate_index = candidate_index_by_terminal[terminal as usize];
+            debug_assert_ne!(candidate_index, usize::MAX);
+            by_signature
+                .entry(signatures[candidate_index].clone())
+                .or_default()
+                .push(terminal);
+        }
+        groups.extend(by_signature.into_values().filter(|group| group.len() >= 2));
+    }
+    groups
+}
+
 /// The class map for one terminal swap. Each source state points to every raw
 /// tokenizer state in its mapped target class.
 #[derive(Clone, Debug)]
@@ -102,13 +442,15 @@ struct PairCharacterization {
 }
 
 struct InterchangeabilityDfa {
-    bytes: Vec<u8>,
-    destinations: Vec<usize>,
-    real_state_count: usize,
-    initial_state: usize,
+    topology: RestrictedTopology,
     empty_output: OutputBits,
     finalizers: Vec<OutputBits>,
     future_finalizers: Vec<OutputBits>,
+    observed_output_pairs: Vec<OutputPair>,
+    observed_output_pair_lookup: FxHashMap<OutputPair, u32>,
+    observed_output_pair_ids_by_terminal: Vec<Vec<u32>>,
+    observed_output_pair_marks: Vec<u32>,
+    observed_output_pair_mark_epoch: u32,
     identity_rounds: Vec<Vec<CharacterizationHash>>,
     signature_capacity: usize,
 }
@@ -119,11 +461,19 @@ impl InterchangeabilityDfa {
         observed_terminals: &[bool],
         relevant_bytes: &[bool; 256],
     ) -> Self {
-        let bytes = (0..=255u8)
-            .filter(|&byte| relevant_bytes[byte as usize])
-            .collect::<Vec<_>>();
-        let real_state_count = tokenizer.num_states() as usize;
-        let state_count = real_state_count + 1;
+        Self::from_topology(
+            tokenizer,
+            observed_terminals,
+            RestrictedTopology::new(tokenizer, relevant_bytes),
+        )
+    }
+
+    fn from_topology(
+        tokenizer: &Tokenizer,
+        observed_terminals: &[bool],
+        topology: RestrictedTopology,
+    ) -> Self {
+        let state_count = topology.state_count();
         let output_words = (tokenizer.num_terminals() as usize).div_ceil(64);
         let terminal_bits = |terminals: Vec<TerminalID>| {
             let mut bits = OutputBits::new(output_words);
@@ -141,68 +491,90 @@ impl InterchangeabilityDfa {
         let finalizers = (0..tokenizer.num_states())
             .map(|state| terminal_bits(tokenizer.matched_terminals_iter(state).collect()))
             .collect::<Vec<_>>();
-        // These are the tokenizer's original, frozen future-finalizer sets. The
-        // enabled-byte set below deliberately does not modify or recompute them.
+        // These are the tokenizer's original, frozen future-finalizer sets.
         let future_finalizers = (0..tokenizer.num_states())
-            .map(|state| {
-                terminal_bits(tokenizer.possible_future_terminals_iter(state).collect())
-            })
+            .map(|state| terminal_bits(tokenizer.possible_future_terminals_iter(state).collect()))
             .collect::<Vec<_>>();
-        let destinations = (0..state_count)
-            .flat_map(|state| {
-                bytes.iter().map(move |&byte| {
-                    if state == real_state_count {
-                        return state;
+
+        let observed_destinations = topology.observed_destinations();
+        let mut observed_output_pairs = Vec::<OutputPair>::new();
+        let mut observed_output_pair_lookup = FxHashMap::<OutputPair, u32>::default();
+        for state in 0..topology.real_state_count {
+            if !observed_destinations[state] {
+                continue;
+            }
+            let pair = OutputPair {
+                finalizers: finalizers[state].clone(),
+                future_finalizers: future_finalizers[state].clone(),
+            };
+            if !observed_output_pair_lookup.contains_key(&pair) {
+                let id = observed_output_pairs.len() as u32;
+                observed_output_pair_lookup.insert(pair.clone(), id);
+                observed_output_pairs.push(pair);
+            }
+        }
+        let mut observed_output_pair_ids_by_terminal =
+            vec![Vec::<u32>::new(); observed_terminals.len()];
+        for (id, pair) in observed_output_pairs.iter().enumerate() {
+            for outputs in [&pair.finalizers, &pair.future_finalizers] {
+                for (word_index, &word) in outputs.0.iter().enumerate() {
+                    let mut word = word;
+                    while word != 0 {
+                        let bit = word.trailing_zeros() as usize;
+                        let terminal = word_index * 64 + bit;
+                        if observed_terminals.get(terminal).copied().unwrap_or(false) {
+                            observed_output_pair_ids_by_terminal[terminal].push(id as u32);
+                        }
+                        word &= word - 1;
                     }
-                    let destination = tokenizer.get_transition(state as u32, byte);
-                    if destination == NO_STATE {
-                        real_state_count
-                    } else {
-                        destination as usize
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
+                }
+            }
+        }
         let empty_output = OutputBits::new(output_words);
         let signature_capacity = CHARACTERIZATION_DOMAIN.len()
             + 4
-            + bytes.len()
-                * (1 + blake3::OUT_LEN + 8 + 2 * output_words * size_of::<u64>());
+            + topology.max_outdegree
+                * (1 + blake3::OUT_LEN + 2 * output_words * size_of::<u64>());
         let seed = CharacterizationHash::seed();
-
+        let observed_output_pair_count = observed_output_pair_lookup.len();
         Self {
-            bytes,
-            destinations,
-            real_state_count,
-            initial_state: tokenizer.initial_state_id() as usize,
+            topology,
             empty_output,
             finalizers,
             future_finalizers,
+            observed_output_pairs,
+            observed_output_pair_lookup,
+            observed_output_pair_ids_by_terminal,
+            observed_output_pair_marks: vec![0; observed_output_pair_count],
+            observed_output_pair_mark_epoch: 0,
             identity_rounds: vec![vec![seed; state_count]],
             signature_capacity,
         }
     }
 
     fn state_count(&self) -> usize {
-        self.real_state_count + 1
+        self.topology.state_count()
     }
 
     fn dead_state(&self) -> usize {
-        self.real_state_count
+        self.topology.dead_state()
     }
 
-    /// This does not transform the lexer. It only supplies the absent
-    /// destination while evaluating an enabled byte transition in
-    /// `characterize`.
+    /// This does not transform the lexer. It supplies the absent destination
+    /// while evaluating an enabled byte transition in `characterize`.
     fn destination_for_slot(&self, state: usize, byte_slot: usize) -> usize {
-        self.destinations[state * self.bytes.len() + byte_slot]
+        self.topology
+            .destination_for_byte(state, self.topology.bytes[byte_slot])
     }
 
     fn output_at<'a>(&'a self, outputs: &'a [OutputBits], state: usize) -> &'a OutputBits {
         outputs.get(state).unwrap_or(&self.empty_output)
     }
 
-    /// Hash a complete characterization tuple in one buffered BLAKE3 call.
+    /// Hash the canonical sparse form of one reference characterization tuple.
+    /// Missing byte transitions have the common dead component. A byte is
+    /// recorded exactly when its component differs from that default, so two
+    /// full tuples are equal iff their sparse forms are equal.
     fn characterize_round(
         &self,
         previous: &[CharacterizationHash],
@@ -212,29 +584,32 @@ impl InterchangeabilityDfa {
         debug_assert_eq!(previous.len(), self.state_count());
         let mut next = Vec::with_capacity(self.state_count());
         let mut tuple = Vec::with_capacity(self.signature_capacity);
-        let output_word_count = self.empty_output.0.len() as u32;
+        let dead_state = self.dead_state();
+        let default_hash = previous[dead_state];
         for state in 0..self.state_count() {
             tuple.clear();
             tuple.extend_from_slice(CHARACTERIZATION_DOMAIN);
-            tuple.extend_from_slice(&(self.bytes.len() as u32).to_le_bytes());
-            for byte_slot in 0..self.bytes.len() {
-                let destination = self.destination_for_slot(state, byte_slot);
-                tuple.push(self.bytes[byte_slot]);
+            tuple.extend_from_slice(&(self.topology.bytes.len() as u32).to_le_bytes());
+            for &(byte, destination) in self.topology.edges_from(state) {
+                let destination = destination as usize;
+                let finalizers = self.output_at(finalizers, destination);
+                let future_finalizers = self.output_at(future_finalizers, destination);
+                if previous[destination] == default_hash
+                    && finalizers == &self.empty_output
+                    && future_finalizers == &self.empty_output
+                {
+                    continue;
+                }
+                tuple.push(byte);
                 tuple.extend_from_slice(&previous[destination].0);
-                tuple.extend_from_slice(&output_word_count.to_le_bytes());
-                self.output_at(finalizers, destination).append_to(&mut tuple);
-                tuple.extend_from_slice(&output_word_count.to_le_bytes());
-                self.output_at(future_finalizers, destination)
-                    .append_to(&mut tuple);
+                finalizers.append_to(&mut tuple);
+                future_finalizers.append_to(&mut tuple);
             }
             next.push(CharacterizationHash(*blake3::hash(&tuple).as_bytes()));
         }
         next
     }
 
-    /// The identity-side recurrence is independent of the terminal pair, so it
-    /// is cached by depth. This cache leaves the raw DFA and its frozen metadata
-    /// untouched; it only avoids repeating the same recurrence.
     fn ensure_identity_round(&mut self, round: usize) {
         while self.identity_rounds.len() <= round {
             let previous_index = self.identity_rounds.len() - 1;
@@ -247,9 +622,47 @@ impl InterchangeabilityDfa {
         }
     }
 
-    /// Compute the terminal-specific partitions by iterating the supplied hash
-    /// recurrence. The raw digests need not stabilize on a cycle; the induced
-    /// equality partition over both tagged sides does.
+    /// The set of output pairs visible on enabled-byte destinations is closed
+    /// under every valid interchange. This filter is exact as a rejection
+    /// condition: it does not accept a pair, it only avoids an impossible full
+    /// characterization.
+    fn observed_output_pair_set_is_swap_closed(
+        &mut self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> bool {
+        let left = left as usize;
+        let right = right as usize;
+        self.observed_output_pair_mark_epoch = self.observed_output_pair_mark_epoch.wrapping_add(1);
+        if self.observed_output_pair_mark_epoch == 0 {
+            self.observed_output_pair_marks.fill(0);
+            self.observed_output_pair_mark_epoch = 1;
+        }
+        let epoch = self.observed_output_pair_mark_epoch;
+        let swap = Some((left, right));
+        for ids in [
+            &self.observed_output_pair_ids_by_terminal[left],
+            &self.observed_output_pair_ids_by_terminal[right],
+        ] {
+            for &id in ids {
+                let id = id as usize;
+                if self.observed_output_pair_marks[id] == epoch {
+                    continue;
+                }
+                self.observed_output_pair_marks[id] = epoch;
+                let pair = &self.observed_output_pairs[id];
+                let swapped = OutputPair {
+                    finalizers: pair.finalizers.mapped(swap),
+                    future_finalizers: pair.future_finalizers.mapped(swap),
+                };
+                if !self.observed_output_pair_lookup.contains_key(&swapped) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     fn characterize_pair(&mut self, left: TerminalID, right: TerminalID) -> PairCharacterization {
         let state_count = self.state_count();
         let swap = Some((left as usize, right as usize));
@@ -267,18 +680,25 @@ impl InterchangeabilityDfa {
 
         for rounds in 1..=state_count * 2 {
             self.ensure_identity_round(rounds);
+            if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() && rounds % 256 == 0 {
+                eprintln!(
+                    "[glrmask/profile][terminal_interchangeability] exact_pair={}<> {} rounds={} identity_rounds={}",
+                    left,
+                    right,
+                    rounds,
+                    self.identity_rounds.len(),
+                );
+            }
             let swapped_next = self.characterize_round(
                 &swapped_previous,
                 &swapped_finalizers,
                 &swapped_future_finalizers,
             );
-            // A root mismatch or one-sided current class cannot be repaired by
-            // later refinement: the common seed partition only ever splits.
             if !rooted_class_bijection_still_possible(
                 &self.identity_rounds[rounds],
                 &swapped_next,
-                self.initial_state,
-                self.real_state_count,
+                self.topology.initial_state,
+                self.topology.real_state_count,
             ) {
                 return PairCharacterization {
                     identity_hashes: self.identity_rounds[rounds].clone(),
@@ -298,7 +718,6 @@ impl InterchangeabilityDfa {
             }
             swapped_previous = swapped_next;
         }
-
         panic!(
             "terminal interchangeability characterization did not stabilize within {} rounds",
             state_count * 2,
@@ -314,15 +733,15 @@ impl InterchangeabilityDfa {
         &self,
         characterization: &PairCharacterization,
     ) -> Option<InterchangeMap> {
-        if characterization.identity_hashes[self.initial_state]
-            != characterization.swapped_hashes[self.initial_state]
+        if characterization.identity_hashes[self.topology.initial_state]
+            != characterization.swapped_hashes[self.topology.initial_state]
         {
             return None;
         }
 
         let mut source_classes = BTreeMap::<CharacterizationHash, ()>::new();
         let mut target_states_by_class = BTreeMap::<CharacterizationHash, Vec<u32>>::new();
-        for state in 0..self.real_state_count {
+        for state in 0..self.topology.real_state_count {
             source_classes.insert(characterization.identity_hashes[state], ());
             target_states_by_class
                 .entry(characterization.swapped_hashes[state])
@@ -337,7 +756,7 @@ impl InterchangeabilityDfa {
             return None;
         }
 
-        let target_class_for_source_state = (0..self.real_state_count)
+        let target_class_for_source_state = (0..self.topology.real_state_count)
             .map(|source| {
                 target_states_by_class
                     .get(&characterization.identity_hashes[source])
@@ -365,8 +784,8 @@ fn same_equality_partition_pair(
     debug_assert_eq!(identity_previous.len(), swapped_previous.len());
     debug_assert_eq!(identity_previous.len(), identity_next.len());
     debug_assert_eq!(identity_previous.len(), swapped_next.len());
-    let mut previous_to_next = BTreeMap::<CharacterizationHash, CharacterizationHash>::new();
-    let mut next_to_previous = BTreeMap::<CharacterizationHash, CharacterizationHash>::new();
+    let mut previous_to_next = FxHashMap::<CharacterizationHash, CharacterizationHash>::default();
+    let mut next_to_previous = FxHashMap::<CharacterizationHash, CharacterizationHash>::default();
     for (&old, &new) in identity_previous
         .iter()
         .zip(identity_next)
@@ -399,14 +818,10 @@ fn rooted_class_bijection_still_possible(
     if identity[initial_state] != swapped[initial_state] {
         return false;
     }
-    let identity_classes = identity[..real_state_count]
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    let swapped_classes = swapped[..real_state_count]
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
+    let mut identity_classes = FxHashSet::<CharacterizationHash>::default();
+    let mut swapped_classes = FxHashSet::<CharacterizationHash>::default();
+    identity_classes.extend(identity[..real_state_count].iter().copied());
+    swapped_classes.extend(swapped[..real_state_count].iter().copied());
     identity_classes == swapped_classes
 }
 
@@ -442,65 +857,103 @@ impl TerminalInterchangeability {
             return Self::identity(active_terminals);
         }
 
-        // The tokenizer DFA and its metadata are frozen. `relevant_bytes` only
-        // determines which byte transitions the characterization traverses.
-        let mut dfa = InterchangeabilityDfa::new(tokenizer, active_terminals, relevant_bytes);
-        let mut pair_maps = BTreeMap::<(TerminalID, TerminalID), InterchangeMap>::new();
-        let mut components = DisjointSet::new(active_terminals.len());
+        let started_at = Instant::now();
+        let topology = RestrictedTopology::new(tokenizer, relevant_bytes);
+        let topology_edge_count = topology.edges.len();
+        let topology_max_outdegree = topology.max_outdegree;
+        let topology_byte_count = topology.bytes.len();
+        let (root_candidate_groups, root_observed_states) =
+            rooted_candidate_groups(tokenizer, &candidates, &topology);
+        let root_candidate_pairs = root_candidate_groups
+            .iter()
+            .map(|group| group.len() * group.len().saturating_sub(1) / 2)
+            .sum::<usize>();
+        if root_candidate_pairs == 0 {
+            return Self::identity(active_terminals);
+        }
 
-        // Check every pair directly. This is the reference implementation of
-        // the relation; no inferred or composed terminal-pair map is used here.
-        for (index, &left) in candidates.iter().enumerate() {
-            for &right in &candidates[index + 1..] {
-                if let Some(left_to_right) = dfa.interchange_map(left, right) {
-                    assert!(
-                        dfa.interchange_map(right, left).is_some(),
-                        "terminal interchangeability was not symmetric: {left} <-> {right}",
-                    );
-                    components.union(left as usize, right as usize);
-                    pair_maps.insert((left, right), left_to_right);
-                }
+        let (structural_signatures, structural_color_count) = structural_candidate_signatures(
+            tokenizer,
+            active_terminals,
+            &candidates,
+            &topology,
+        );
+        let candidate_groups = refine_candidate_groups_by_structure(
+            root_candidate_groups,
+            &candidates,
+            &structural_signatures,
+        );
+        let exact_candidate_pairs = candidate_groups
+            .iter()
+            .map(|group| group.len() * group.len().saturating_sub(1) / 2)
+            .sum::<usize>();
+        if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+            let mut group_size_histogram = BTreeMap::<usize, usize>::new();
+            for group in &candidate_groups {
+                *group_size_histogram.entry(group.len()).or_default() += 1;
             }
+            eprintln!(
+                "[glrmask/profile][terminal_interchangeability] active={} selected_bytes={} sparse_edges={} max_outdegree={} root_observed_states={} root_candidate_pairs={} structural_colors={} structural_candidate_groups={} exact_candidate_pairs={} group_size_histogram={:?} filter_ms={:.3}",
+                candidates.len(),
+                topology_byte_count,
+                topology_edge_count,
+                topology_max_outdegree,
+                root_observed_states,
+                root_candidate_pairs,
+                structural_color_count,
+                candidate_groups.len(),
+                exact_candidate_pairs,
+                group_size_histogram,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        if exact_candidate_pairs == 0 {
+            return Self::identity(active_terminals);
         }
 
-        let mut members_by_component = BTreeMap::<usize, Vec<TerminalID>>::new();
-        for &terminal in &candidates {
-            members_by_component
-                .entry(components.find(terminal as usize))
-                .or_default()
-                .push(terminal);
-        }
-
+        let mut dfa = InterchangeabilityDfa::from_topology(tokenizer, active_terminals, topology);
         let mut result = Self::identity(active_terminals);
-        for members in members_by_component.into_values() {
-            if members.len() < 2 {
-                continue;
-            }
-            // Every pair was checked directly above. Retain this assertion so a
-            // component is accepted only when it is a genuine equivalence class,
-            // not merely a chain of pairwise successes.
-            for (index, &left) in members.iter().enumerate() {
-                for &right in &members[index + 1..] {
-                    assert!(
-                        pair_maps.contains_key(&(left, right)),
-                        "terminal interchangeability component is not a clique: {left} and {right}",
-                    );
+        let mut output_pair_rejections = 0usize;
+        let mut direct_exact_checks = 0usize;
+        let mut accepted_representative_members = 0usize;
+
+        // Accepted terminal swaps are automorphisms. Therefore (a b) and
+        // (b c) imply (a c) by conjugation, so interchangeability is an
+        // equivalence relation. Partition each candidate group by pivots,
+        // keeping only the representative-to-member maps transport requires.
+        for initial_group in candidate_groups {
+            let mut unresolved = initial_group;
+            while !unresolved.is_empty() {
+                let representative = unresolved[0];
+                let mut next_unresolved = Vec::with_capacity(unresolved.len().saturating_sub(1));
+                for &terminal in &unresolved[1..] {
+                    if !dfa.observed_output_pair_set_is_swap_closed(representative, terminal) {
+                        output_pair_rejections += 1;
+                        next_unresolved.push(terminal);
+                        continue;
+                    }
+                    direct_exact_checks += 1;
+                    if let Some(map) = dfa.interchange_map(representative, terminal) {
+                        accepted_representative_members += 1;
+                        result.representative_for[terminal as usize] = representative;
+                        result.active_representatives[terminal as usize] = false;
+                        result.map_for_representative_member.insert((representative, terminal), map);
+                    } else {
+                        next_unresolved.push(terminal);
+                    }
                 }
+                unresolved = next_unresolved;
             }
-            let representative = members[0];
-            for &member in &members {
-                result.representative_for[member as usize] = representative;
-                if member != representative {
-                    result.active_representatives[member as usize] = false;
-                    let map = pair_maps
-                        .get(&(representative, member))
-                        .expect("direct representative/member map missing")
-                        .clone();
-                    result
-                        .map_for_representative_member
-                        .insert((representative, member), map);
-                }
-            }
+        }
+
+        if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+            eprintln!(
+                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} direct_exact_checks={} accepted_representative_members={} total_ms={:.3}",
+                output_pair_rejections,
+                direct_exact_checks,
+                accepted_representative_members,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
         }
         result
     }
@@ -670,43 +1123,6 @@ impl TerminalInterchangeability {
     }
 }
 
-#[derive(Debug)]
-struct DisjointSet {
-    parent: Vec<usize>,
-    rank: Vec<u8>,
-}
-
-impl DisjointSet {
-    fn new(size: usize) -> Self {
-        Self {
-            parent: (0..size).collect(),
-            rank: vec![0; size],
-        }
-    }
-
-    fn find(&mut self, item: usize) -> usize {
-        if self.parent[item] != item {
-            self.parent[item] = self.find(self.parent[item]);
-        }
-        self.parent[item]
-    }
-
-    fn union(&mut self, left: usize, right: usize) {
-        let mut left = self.find(left);
-        let mut right = self.find(right);
-        if left == right {
-            return;
-        }
-        if self.rank[left] < self.rank[right] {
-            std::mem::swap(&mut left, &mut right);
-        }
-        self.parent[right] = left;
-        if self.rank[left] == self.rank[right] {
-            self.rank[left] += 1;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -853,9 +1269,36 @@ mod tests {
         let mut only_a = [false; 256];
         only_a[b'a' as usize] = true;
         let restricted = InterchangeabilityDfa::new(&tokenizer, &[true, true], &only_a);
-        assert_eq!(restricted.bytes, vec![b'a']);
+        assert_eq!(restricted.topology.bytes, vec![b'a']);
         assert_eq!(restricted.destination_for_slot(after_a, 0), restricted.dead_state());
         assert!(restricted.output_at(&restricted.future_finalizers, after_a).contains(1));
+    }
+
+    #[test]
+    fn unobserved_outputs_do_not_split_structural_prefilter() {
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"bb".to_vec()),
+        ]);
+        let active = vec![true, true];
+        let candidates = vec![0, 1];
+        let mut only_x = [false; 256];
+        only_x[b'x' as usize] = true;
+
+        // No raw terminal-output state is an enabled-byte destination. The
+        // reference consequently observes only the synthetic dead output.
+        let topology = RestrictedTopology::new(&tokenizer, &only_x);
+        let (root_groups, _) = rooted_candidate_groups(&tokenizer, &candidates, &topology);
+        let (structural_signatures, _) =
+            structural_candidate_signatures(&tokenizer, &active, &candidates, &topology);
+        let filtered_groups =
+            refine_candidate_groups_by_structure(root_groups, &candidates, &structural_signatures);
+        assert!(group_contains_pair(&filtered_groups, 0, 1));
+
+        let mut dfa = InterchangeabilityDfa::new(&tokenizer, &active, &only_x);
+        assert!(dfa.interchange_map(0, 1).is_some());
+        let plan = TerminalInterchangeability::build(&tokenizer, &active, &only_x, None);
+        assert_eq!(plan.active_representatives.iter().filter(|&&active| active).count(), 1);
     }
 
     #[test]
@@ -867,6 +1310,61 @@ mod tests {
         ]);
         let mut dfa = InterchangeabilityDfa::new(&tokenizer, &[true, false, true], &[true; 256]);
         assert!(dfa.interchange_map(0, 2).is_some());
+    }
+
+    fn group_contains_pair(groups: &[Vec<TerminalID>], left: TerminalID, right: TerminalID) -> bool {
+        groups.iter().any(|group| {
+            group.contains(&left) && group.contains(&right)
+        })
+    }
+
+    #[test]
+    fn exact_prefilters_never_reject_a_reference_interchange_pair() {
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"same".to_vec()),
+            Expr::U8Seq(b"same".to_vec()),
+            Expr::U8Seq(b"different".to_vec()),
+            Expr::U8Seq(b"differs".to_vec()),
+        ]);
+        let active = vec![true; 4];
+        let candidates = (0..4).collect::<Vec<TerminalID>>();
+        let relevant_bytes = [true; 256];
+        let topology = RestrictedTopology::new(&tokenizer, &relevant_bytes);
+        let (root_groups, _) = rooted_candidate_groups(&tokenizer, &candidates, &topology);
+        let (structural_signatures, _) = structural_candidate_signatures(
+            &tokenizer,
+            &active,
+            &candidates,
+            &topology,
+        );
+        let filtered_groups = refine_candidate_groups_by_structure(
+            root_groups.clone(),
+            &candidates,
+            &structural_signatures,
+        );
+        let mut dfa = InterchangeabilityDfa::new(&tokenizer, &active, &relevant_bytes);
+        for (index, &left) in candidates.iter().enumerate() {
+            for &right in &candidates[index + 1..] {
+                if let Some(left_to_right) = dfa.interchange_map(left, right) {
+                    let right_to_left = dfa
+                        .interchange_map(right, left)
+                        .expect("the same transposition must produce the same map");
+                    assert!(
+                        group_contains_pair(&root_groups, left, right),
+                        "root prefilter rejected exact pair {left} <-> {right}",
+                    );
+                    assert!(
+                        group_contains_pair(&filtered_groups, left, right),
+                        "structural prefilter rejected exact pair {left} <-> {right}",
+                    );
+                    assert_eq!(
+                        left_to_right.target_class_for_source_state,
+                        right_to_left.target_class_for_source_state,
+                        "the reversed pair call must be operationally identical",
+                    );
+                }
+            }
+        }
     }
 
     #[test]
