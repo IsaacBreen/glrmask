@@ -478,6 +478,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         TerminalInterchangeability::identity(active_terminals)
     };
     let reference_terminal_expansion = !terminal_interchangeability.is_identity();
+    let mut transport_modes = reference_terminal_expansion
+        .then(|| terminal_interchangeability.terminal_nwa_transport_modes())
+        .flatten();
     let analysis_active_terminals = terminal_interchangeability.active_representatives();
     let terminal_nwa_visible_output_labels =
         terminal_interchangeability.visible_output_raw_labels();
@@ -632,16 +635,18 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             equivalence_initial_state_map,
         );
 
-    // Transport modes are indexed by raw tokenizer states. Keep ordinary
-    // equivalence reduction for the baseline path, but retain every raw state
-    // coordinate while constructing the transported reference artifact.
-    if reference_terminal_expansion {
-        let states = (0..tokenizer_for_build.num_states()).collect::<Vec<u32>>();
-        simplified_id_map.tokenizer_states =
-            ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-                states.clone(),
-                states,
-            );
+    // Transport modes are indexed by raw lexer states, but they only observe
+    // the ordinary terminal-DWA quotient of each mapped destination. Preserve
+    // the coarsest exact refinement of that quotient across every mode rather
+    // than restoring one internal state ID per raw lexer state.
+    if let Some(modes) = transport_modes.as_mut() {
+        let transport_coordinate_map = {
+            let ordinary_state_map = &simplified_id_map.tokenizer_states;
+            terminal_interchangeability
+                .canonicalize_transport_mode_states(modes, ordinary_state_map);
+            terminal_interchangeability.transport_coordinate_quotient(ordinary_state_map, modes)
+        };
+        simplified_id_map.tokenizer_states = transport_coordinate_map;
     }
 
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -726,9 +731,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let start_state = nwa.add_state();
             nwa.start_states_mut().push(start_state);
 
-            let transport_modes = reference_terminal_expansion
-                .then(|| terminal_interchangeability.terminal_nwa_transport_modes())
-                .flatten();
             let seed_ms;
 
             // ---- Step 6: Trie-walk NWA build ----
