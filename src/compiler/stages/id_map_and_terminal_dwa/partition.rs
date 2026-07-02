@@ -117,6 +117,26 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         }
     }
 
+    if std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY_ROUTING").is_some() {
+        eprintln!(
+            "[glrmask/debug][terminal_interchangeability_routing] partition={} zero={} l1={} l2p={} force_all_l2p={}",
+            partition_label,
+            num_zero,
+            num_one,
+            num_two_plus,
+            force_all_l2p,
+        );
+    }
+
+    super::l2p::debug_terminal_interchangeability_partition(
+        partition_label,
+        tokenizer,
+        vocab,
+        &l2p_mask,
+        ignore_terminal,
+        grammar,
+    );
+
     let use_l2p_vocab_split = has_l2p && split_l2p_vocab_enabled();
     let l2p_vocab_split = use_l2p_vocab_split.then(|| {
         split_vocab_for_active_l2p_terminals(

@@ -99,6 +99,58 @@ fn l2p_terminal_interchangeability_enabled() -> bool {
 /// optional only after it has an independent proof and broader regression data.
 fn l2p_terminal_interchangeability_validation_enabled() -> bool { true }
 
+/// Debug-only analysis hook for reporting terminal interchangeability on every
+/// compiler byte partition, including partitions whose normal L2+ routing uses
+/// only the cheaper L1-style builder. It constructs no terminal DWA.
+pub(crate) fn debug_terminal_interchangeability_partition(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    active_terminals: &[bool],
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+) {
+    if std::env::var_os("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY_ALL_PARTITIONS").is_none() {
+        return;
+    }
+
+    let mut relevant_bytes = [false; 256];
+    for bytes in vocab.entries.values() {
+        for &byte in bytes {
+            relevant_bytes[byte as usize] = true;
+        }
+    }
+    let interchangeability = TerminalInterchangeability::build(
+        tokenizer,
+        active_terminals,
+        &relevant_bytes,
+        ignore_terminal,
+    );
+    let mut classes = BTreeMap::<TerminalID, Vec<TerminalID>>::new();
+    for (terminal, representative) in interchangeability.active_assignments() {
+        classes.entry(representative).or_default().push(terminal);
+    }
+    let rendered = classes
+        .into_iter()
+        .map(|(representative, members)| {
+            let members = members
+                .iter()
+                .map(|&terminal| format!("{}:{:?}", terminal, grammar.terminal_display_name(terminal)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("rep={}:{} members=[{}]", representative, grammar.terminal_display_name(representative), members)
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    eprintln!(
+        "[glrmask/debug][terminal_interchangeability_full_partition] partition={} active_before={} active_after={} classes={}",
+        partition_label,
+        interchangeability.active_terminal_count_before(),
+        interchangeability.active_terminal_count_after(),
+        rendered,
+    );
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct SimplifyCacheKey {
     active_words: Vec<u64>,
