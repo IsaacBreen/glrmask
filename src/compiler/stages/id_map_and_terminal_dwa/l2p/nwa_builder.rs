@@ -1273,35 +1273,22 @@ mod tests {
 
     #[test]
     fn compact_transport_output_filter_preserves_the_baseline_language() {
-        // These are genuinely interchangeable under the relaxed residual
-        // criterion. Raw nonrepresentatives remain present in the lexer
-        // metadata, but their output edges are redundant: the transport mode
-        // using its representative edge supplies the corresponding member
-        // label. Output filtering must therefore preserve the ordinary NWA.
+        // These duplicate literals are rooted-interchangeable. Raw
+        // nonrepresentatives remain present in the lexer metadata, but their
+        // output edges are redundant: the transport mode using its
+        // representative edge supplies the corresponding member label.
         let expressions = vec![
-            Expr::Seq(vec![
-                Expr::U8Seq(b"a".to_vec()),
-                Expr::Repeat {
-                    expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())),
-                    min: 0,
-                    max: None,
-                },
-            ]),
-            Expr::Seq(vec![
-                Expr::U8Seq(b"aaa".to_vec()),
-                Expr::Repeat {
-                    expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())),
-                    min: 0,
-                    max: None,
-                },
-            ]),
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"a".to_vec()),
         ];
         let tokenizer = build_regex(&expressions).into_tokenizer(
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
         );
         let plan = TerminalInterchangeability::build(&tokenizer, &[true, true], &[true; 256], None);
-        let modes = plan.terminal_nwa_transport_modes().expect("rotated terminals must transport");
+        let modes = plan
+            .terminal_nwa_transport_modes(tokenizer.initial_state_id())
+            .expect("duplicate terminals must transport");
         let tree = VocabPrefixTree::build(&[
             (0, b"a".to_vec()),
             (1, b"aaa".to_vec()),

@@ -680,7 +680,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     if reference_terminal_expansion {
         if l2p_timing_profile_enabled() {
             let modes = terminal_interchangeability
-                .terminal_nwa_transport_modes()
+                .terminal_nwa_transport_modes(tokenizer.initial_state_id())
                 .expect("nonidentity interchangeability must provide transport modes");
             let source_classes = &simplified_id_map.tokenizer_states.internal_to_originals;
             let original_to_class = &simplified_id_map.tokenizer_states.original_to_internal;
@@ -824,7 +824,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             nwa.start_states_mut().push(start_state);
 
             let transport_modes = reference_terminal_expansion
-                .then(|| terminal_interchangeability.terminal_nwa_transport_modes())
+                .then(|| terminal_interchangeability.terminal_nwa_transport_modes(tokenizer.initial_state_id()))
                 .flatten();
             let seed_ms;
 
