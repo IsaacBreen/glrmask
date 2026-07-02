@@ -1052,6 +1052,14 @@ mod tests {
     use super::*;
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::compile::build_regex;
+    use crate::automata::weighted::determinize::determinize;
+    use crate::automata::weighted::minimize::minimize_owned;
+    use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+    use crate::compiler::stages::id_map_and_terminal_dwa::l2p::terminal_interchangeability::TerminalInterchangeability;
+    use crate::compiler::stages::id_map_and_terminal_dwa::types::{
+        LocalIdMapTerminalDwa, TerminalDwaPhaseProfile,
+    };
+    use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 
     fn one_terminal_tokenizer() -> Tokenizer {
         let expressions = vec![Expr::U8Seq(b" ".to_vec())];
@@ -1121,12 +1129,200 @@ mod tests {
             "the non-initial ignore match must not become a terminal edge"
         );
     }
+
+    #[test]
+    fn transport_mode_preserves_sibling_outputs_outside_its_swap() {
+        // A swap mode may relabel A <-> B, but C remains an observable output
+        // of the full lexer. Filtering C before the trie walk makes the mode's
+        // lexer language differ from the full swapped-label lexer language.
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"b".to_vec()),
+            Expr::U8Seq(b"c".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let tree = VocabPrefixTree::build(&[(0, b"c".to_vec())]);
+        let state_ids = (0..tokenizer.num_states()).collect::<Vec<_>>();
+        let id_map = InternalIdMap {
+            tokenizer_states:
+                ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+                    state_ids.clone(),
+                    state_ids,
+                ),
+            vocab_tokens: ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+                vec![0],
+                vec![0],
+            ),
+        };
+        let mut possible_matches = PossibleMatchesComputer::new(&tokenizer);
+        let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+        let leaf = nwa.add_state();
+        nwa.set_final_weight(leaf, Weight::all());
+        let start = nwa.add_state();
+        nwa.start_states_mut().push(start);
+        let modes = [TerminalNwaTransportMode {
+            scanner_state_for_original: (0..tokenizer.num_states()).collect(),
+            terminal_map: vec![1, 0, 2],
+        }];
+
+        build_transport_nwa_via_trie_walk(
+            &tokenizer,
+            None,
+            &mut nwa,
+            start,
+            leaf,
+            &id_map,
+            &tree.root,
+            &mut possible_matches,
+            &[true, false, true],
+            &modes,
+        );
+
+        let root = nwa.states()[start as usize].epsilons[0].0;
+        assert!(
+            nwa.states()[root as usize]
+                .transitions
+                .get(&2)
+                .is_some_and(|edges| edges.iter().any(|(destination, _)| *destination == leaf)),
+            "a mode that swaps A and B must retain the fixed C output"
+        );
+    }
+
+    fn singleton_id_map(num_tokenizer_states: u32, num_tokens: usize) -> InternalIdMap {
+        let tokenizer_states = (0..num_tokenizer_states).collect::<Vec<_>>();
+        let vocab_tokens = (0..num_tokens as u32).collect::<Vec<_>>();
+        InternalIdMap {
+            tokenizer_states:
+                ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+                    tokenizer_states.clone(),
+                    tokenizer_states,
+                ),
+            vocab_tokens: ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+                vocab_tokens.clone(),
+                vocab_tokens,
+            ),
+        }
+    }
+
+    fn finish_test_artifact(nwa: &NWA, id_map: InternalIdMap) -> LocalIdMapTerminalDwa {
+        LocalIdMapTerminalDwa {
+            id_map,
+            dwa: minimize_owned(determinize(nwa).expect("test NWA must determinize")),
+            profile: TerminalDwaPhaseProfile::default(),
+        }
+    }
+
+    fn build_baseline_test_artifact(
+        tokenizer: &Tokenizer,
+        tree: &VocabPrefixTree,
+        id_map: &InternalIdMap,
+    ) -> LocalIdMapTerminalDwa {
+        let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
+        let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+        let leaf = nwa.add_state();
+        nwa.set_final_weight(leaf, Weight::all());
+        let start = nwa.add_state();
+        nwa.start_states_mut().push(start);
+        let roots = seed_root_nodes(&mut nwa, start, id_map);
+        build_nwa_via_trie_walk(
+            tokenizer,
+            &TerminalColoring::identity(tokenizer.num_terminals() as usize),
+            false,
+            None,
+            &mut nwa,
+            leaf,
+            id_map.num_tsids(),
+            &tree.root,
+            &roots,
+            &mut possible_matches,
+            None,
+        );
+        finish_test_artifact(&nwa, id_map.clone())
+    }
+
+    fn build_transport_test_artifact(
+        tokenizer: &Tokenizer,
+        tree: &VocabPrefixTree,
+        id_map: &InternalIdMap,
+        visible_output_raw_labels: &[bool],
+        modes: &[TerminalNwaTransportMode],
+    ) -> LocalIdMapTerminalDwa {
+        let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
+        let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+        let leaf = nwa.add_state();
+        nwa.set_final_weight(leaf, Weight::all());
+        let start = nwa.add_state();
+        nwa.start_states_mut().push(start);
+        build_transport_nwa_via_trie_walk(
+            tokenizer,
+            None,
+            &mut nwa,
+            start,
+            leaf,
+            id_map,
+            &tree.root,
+            &mut possible_matches,
+            visible_output_raw_labels,
+            modes,
+        );
+        finish_test_artifact(&nwa, id_map.clone())
+    }
+
+    #[test]
+    fn compact_transport_output_filter_preserves_the_baseline_language() {
+        // These duplicate literals are rooted-interchangeable. Raw
+        // nonrepresentatives remain present in the lexer metadata, but their
+        // output edges are redundant: the transport mode using its
+        // representative edge supplies the corresponding member label.
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"a".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let plan = TerminalInterchangeability::build(&tokenizer, &[true, true], &[true; 256], None);
+        let modes = plan
+            .terminal_nwa_transport_modes()
+            .expect("duplicate terminals must transport");
+        let tree = VocabPrefixTree::build(&[
+            (0, b"a".to_vec()),
+            (1, b"aaa".to_vec()),
+            (2, b"aaaaa".to_vec()),
+            (3, b"aaaaaaa".to_vec()),
+        ]);
+        let id_map = singleton_id_map(tokenizer.num_states(), 4);
+        let baseline = build_baseline_test_artifact(&tokenizer, &tree, &id_map);
+        let full = build_transport_test_artifact(
+            &tokenizer,
+            &tree,
+            &id_map,
+            &[true, true],
+            &modes,
+        );
+        super::super::terminal_dwa_equivalence::compare(&baseline, &full)
+            .expect("full raw-output transport must reproduce the ordinary NWA");
+
+        let compact = build_transport_test_artifact(
+            &tokenizer,
+            &tree,
+            &id_map,
+            &plan.visible_output_raw_labels(),
+            &modes,
+        );
+        super::super::terminal_dwa_equivalence::compare(&baseline, &compact)
+            .expect("raw-edge filtering must preserve the completed terminal language");
+    }
 }
 
 /// One strict-interchangeability scanner mode for the slow reference builder.
-/// `scanner_state_for_original[s]` is the representative-terminal simulator
-/// state used when the actual current lexer state is `s`; `terminal_map` maps
-/// representative labels emitted by that simulator back to concrete terminals.
+/// `scanner_state_for_original[s]` is the full-lexer simulator state used when
+/// the actual current lexer state is `s`; `terminal_map` relabels every raw
+/// output emitted by that simulator back into the original terminal alphabet.
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalNwaTransportMode {
     pub(crate) scanner_state_for_original: Vec<TokenizerState>,
@@ -1174,6 +1370,7 @@ impl IntoIterator for NodesByTransportContext {
 struct TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
     base: TerminalNwaBuilder<'tok, 'pm, 'nwa>,
     modes: &'m [TerminalNwaTransportMode],
+    visible_output_raw_labels: &'m [bool],
 }
 
 impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
@@ -1183,6 +1380,13 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
             .get(terminal as usize)
             .copied()
             .unwrap_or(terminal)
+    }
+
+    fn emits_raw_label(&self, terminal: TerminalID) -> bool {
+        self.visible_output_raw_labels
+            .get(terminal as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     fn reset_context(&self, mode: usize) -> TransportContext {
@@ -1202,8 +1406,11 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
         let future = self
             .base
             .possible_future_terminals_for_state(context.scanner_state);
-        self.base.profile.future_terminal_additions += (sources.len() * future.len()) as u64;
         for terminal in future {
+            if !self.emits_raw_label(terminal) {
+                continue;
+            }
+            self.base.profile.future_terminal_additions += sources.len() as u64;
             self.base.add_leaf_token_from_sources(
                 sources,
                 self.mapped_label(context.mode, terminal),
@@ -1260,7 +1467,7 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                     };
                     scan_state = next;
                     for terminal in self.base.tokenizer.matched_terminals_iter(scan_state) {
-                        if self.base.terminal_is_active(terminal) {
+                        if self.emits_raw_label(terminal) {
                             match_map.insert(terminal, (index + 1, scan_state));
                         }
                     }
@@ -1369,7 +1576,7 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
     id_map: &InternalIdMap,
     vocab_tree_root: &VocabPrefixTreeNode,
     possible_matches: &mut PossibleMatchesComputer<'a>,
-    active_terminals: &[bool],
+    visible_output_raw_labels: &[bool],
     modes: &[TerminalNwaTransportMode],
 ) -> TerminalDwaBuildProfile {
     assert!(!modes.is_empty());
@@ -1410,10 +1617,14 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
         initial_source_states,
         false,
         None,
-        Some(active_terminals.to_vec()),
+        None,
         tokenizer.num_states() as usize,
     );
-    let mut builder = TransportNwaBuilder { base, modes };
+    let mut builder = TransportNwaBuilder {
+        base,
+        modes,
+        visible_output_raw_labels,
+    };
     builder.build_from_trie(vocab_tree_root, &roots);
     builder.base.flush_transition_buffer();
     builder.base.profile
