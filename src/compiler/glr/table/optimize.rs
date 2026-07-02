@@ -1,6 +1,7 @@
 use super::*;
 use crate::ds::bitset::BitSet;
 use rayon::prelude::*;
+use smallvec::{smallvec, SmallVec};
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 
@@ -26,6 +27,16 @@ const DEFAULT_UNIT_INLINE_WORK_MAX_ITERATIONS: usize = 64;
 const DEFAULT_UNIT_INLINE_WORK_MAX_CELLS: usize = 2_000_000;
 const DEFAULT_UNIT_INLINE_WORK_MAX_SYNTHETIC_STATES: usize = 4_096;
 const DEFAULT_UNIT_INLINE_WORK_MAX_STACK_EFFECT_VISITS: usize = 100_000;
+
+// Most unit-inlining states are singleton constituents. Keeping those
+// inline avoids thousands of tiny BTreeSet allocations before any synthetic
+// merged state is actually needed. Subsets remain sorted and deduplicated.
+type StateSubset = SmallVec<[u32; 2]>;
+// Runtime predecessors are always kept sorted and deduplicated. Most parser
+// states have at most a couple of predecessors, so an inline vector avoids
+// the per-state tree allocation and pointer chasing of BTreeSet.
+type PredecessorSet = SmallVec<[u32; 2]>;
+type RuntimePredecessors = Vec<PredecessorSet>;
 
 fn stack_shift_predecessor_canonicalization_enabled() -> bool {
     !env_flag_enabled(DISABLE_STACK_SHIFT_PREDECESSOR_CANONICALIZATION_ENV, false)
@@ -90,6 +101,74 @@ pub(super) struct UnitReductionInliningReport {
     pub(super) synthetic_states: usize,
     pub(super) stack_effect_visits: usize,
     pub(super) elapsed_ms: f64,
+    pub(super) changed_original_states: Vec<u32>,
+}
+
+struct UnitInlineUndo {
+    original_num_states: u32,
+    original_action_len: usize,
+    original_goto_len: usize,
+    original_advance_len: usize,
+    original_cells: FxHashMap<(usize, TerminalID), Option<Action>>,
+    original_advance_rows: FxHashMap<usize, BitSet>,
+}
+
+impl UnitInlineUndo {
+    fn new(table: &GLRTable) -> Self {
+        Self {
+            original_num_states: table.num_states,
+            original_action_len: table.action.len(),
+            original_goto_len: table.goto.len(),
+            original_advance_len: table.advance.len(),
+            original_cells: FxHashMap::default(),
+            original_advance_rows: FxHashMap::default(),
+        }
+    }
+
+    fn record_cell(&mut self, table: &GLRTable, state: usize, tid: TerminalID) {
+        if state >= self.original_num_states as usize {
+            return;
+        }
+        self.original_cells
+            .entry((state, tid))
+            .or_insert_with(|| table.action[state].get(&tid).cloned());
+        if self.original_advance_len == self.original_action_len {
+            self.original_advance_rows
+                .entry(state)
+                .or_insert_with(|| table.advance[state].clone());
+        }
+    }
+
+    fn changed_original_states(&self) -> Vec<u32> {
+        let mut states = self
+            .original_cells
+            .keys()
+            .map(|&(state, _)| state as u32)
+            .collect::<Vec<_>>();
+        states.sort_unstable();
+        states.dedup();
+        states
+    }
+
+    fn rollback(self, table: &mut GLRTable) {
+        table.action.truncate(self.original_action_len);
+        table.goto.truncate(self.original_goto_len);
+        table.advance.truncate(self.original_advance_len);
+        table.num_states = self.original_num_states;
+        for ((state, tid), action) in self.original_cells {
+            match action {
+                Some(action) => {
+                    table.action[state].insert(tid, action);
+                }
+                None => {
+                    table.action[state].remove(&tid);
+                }
+            }
+        }
+        for (state, advance) in self.original_advance_rows {
+            table.advance[state] = advance;
+        }
+    }
 }
 
 struct UnitInlineBudget {
@@ -184,6 +263,7 @@ impl UnitInlineBudget {
             synthetic_states: self.synthetic_states(),
             stack_effect_visits: self.stack_effect_visits(),
             elapsed_ms: self.started_at.elapsed().as_secs_f64() * 1000.0,
+            changed_original_states: Vec::new(),
         }
     }
 
@@ -513,6 +593,10 @@ impl GLRTable {
             // each other; compute them in parallel. The serial grouping pass
             // below still visits representatives in order, so the canonical
             // first-occurrence group numbering is preserved exactly.
+            // Stack-effect actions compare after target remapping and
+            // normalization. That remains semantically relevant for the
+            // identity partition, so every refinement pass must use the same
+            // remapped representation.
             let fingerprints: Vec<u64> = representatives
                 .par_iter()
                 .map(|&state| {
@@ -670,6 +754,278 @@ impl GLRTable {
     }
 
 
+    /// Incrementally coarsen an already-minimized table after a local row
+    /// mutation. Rows not changed and not reverse-dependent on a newly merged
+    /// target cannot become equivalent, so only the dirty frontier is tested.
+    ///
+    /// Callers must use this only after an exact full quotient. The method is
+    /// exact under that precondition and returns false when no quotient occurs.
+    pub(super) fn merge_identical_rows_from_dirty(&mut self, dirty: &[u32]) -> bool {
+        let nstates = self.num_states as usize;
+        if dirty.is_empty() || nstates <= 1 || dirty.iter().any(|&state| state as usize >= nstates) {
+            return false;
+        }
+        let profile_detail = std::env::var("GLRMASK_PROFILE_GLR_ROW_MERGE_DETAIL")
+            .map(|value| value == "1")
+            .unwrap_or(false);
+        let has_advance_rows = self.advance.len() == nstates;
+        let setup_started_at = profile_detail.then(std::time::Instant::now);
+        let reverse_started_at = profile_detail.then(std::time::Instant::now);
+
+        let mut reverse = vec![SmallVec::<[u32; 2]>::new(); nstates];
+        let mut targets = Vec::new();
+        for state in 0..nstates {
+            targets.clear();
+            for action in self.action[state].values() {
+                collect_action_targets(action, &mut targets);
+            }
+            targets.extend(self.goto[state].values().map(|&(target, _)| target));
+            targets.sort_unstable();
+            targets.dedup();
+            for target in &targets {
+                reverse[*target as usize].push(state as u32);
+            }
+        }
+
+        let reverse_ms = reverse_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let init_started_at = profile_detail.then(std::time::Instant::now);
+        let mut parent = (0..nstates as u32).collect::<Vec<_>>();
+        // The exact quotient starts with singleton classes. Keep those
+        // inline: only the handful of classes that actually merge need spill
+        // storage.
+        let mut members: Vec<SmallVec<[u32; 1]>> = (0..nstates as u32)
+            .map(|state| smallvec![state])
+            .collect();
+        let mut target_group = parent.clone();
+        let mut active = dirty.iter().copied().collect::<BTreeSet<_>>();
+        let mut merged_any = false;
+        let mut iteration = 0usize;
+
+        fn find(parent: &mut [u32], mut state: u32) -> u32 {
+            while parent[state as usize] != state {
+                let next = parent[state as usize];
+                let root = parent[next as usize];
+                parent[state as usize] = root;
+                state = next;
+            }
+            state
+        }
+
+        // Post-unit rows can contain stack-effect actions whose canonical
+        // identity form is produced by target remapping. Unlike ordinary
+        // shifts, their direct hash is not a safe candidate fingerprint even
+        // under the identity map, so retain the remapped representation here.
+        let mut fingerprint_by_state = (0..nstates)
+            .into_par_iter()
+            .map(|state| {
+                remapped_row_fingerprint(
+                    &self.action[state],
+                    &self.goto[state],
+                    has_advance_rows.then(|| &self.advance[state]),
+                    &target_group,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut fingerprints = FxHashMap::<u64, SmallVec<[u32; 1]>>::default();
+        for (state, &fingerprint) in fingerprint_by_state.iter().enumerate() {
+            fingerprints.entry(fingerprint).or_default().push(state as u32);
+        }
+        let mut representative_count = nstates;
+        let mut first_iteration = true;
+        if let Some(setup_started_at) = setup_started_at {
+            let total_ms = setup_started_at.elapsed().as_secs_f64() * 1000.0;
+            eprintln!(
+                "[glrmask/profile][row_merge_incremental_setup] states={} dirty={} reverse_ms={:.3} init_ms={:.3} total_ms={:.3}",
+                nstates,
+                dirty.len(),
+                reverse_ms,
+                total_ms - reverse_ms,
+                total_ms,
+            );
+        }
+
+        while !active.is_empty() {
+            iteration += 1;
+            let iteration_started_at = profile_detail.then(std::time::Instant::now);
+            let active_now = std::mem::take(&mut active);
+            let active_count = active_now.len();
+            let mut active_representatives = BTreeSet::new();
+            for state in active_now {
+                active_representatives.insert(find(&mut parent, state));
+            }
+
+            if !first_iteration {
+                for &state in &active_representatives {
+                    if parent[state as usize] != state {
+                        continue;
+                    }
+                    let old_fingerprint = fingerprint_by_state[state as usize];
+                    let remove_bucket = {
+                        let bucket = fingerprints
+                            .get_mut(&old_fingerprint)
+                            .expect("representative has a fingerprint bucket");
+                        bucket.retain(|entry| *entry != state);
+                        bucket.is_empty()
+                    };
+                    if remove_bucket {
+                        fingerprints.remove(&old_fingerprint);
+                    }
+                    let fingerprint = remapped_row_fingerprint(
+                        &self.action[state as usize],
+                        &self.goto[state as usize],
+                        has_advance_rows.then(|| &self.advance[state as usize]),
+                        &target_group,
+                    );
+                    fingerprint_by_state[state as usize] = fingerprint;
+                    fingerprints.entry(fingerprint).or_default().push(state);
+                }
+            }
+            first_iteration = false;
+
+            let mut pairs = Vec::new();
+            let mut comparisons = 0usize;
+            for state in active_representatives {
+                if parent[state as usize] != state {
+                    continue;
+                }
+                let fingerprint = fingerprint_by_state[state as usize];
+                let Some(candidates) = fingerprints.get(&fingerprint) else {
+                    continue;
+                };
+                for &candidate in candidates {
+                    let candidate = find(&mut parent, candidate);
+                    if candidate == state {
+                        continue;
+                    }
+                    comparisons += 1;
+                    if rows_equal_after_remap(
+                        &self.action[state as usize],
+                        &self.goto[state as usize],
+                        has_advance_rows.then(|| &self.advance[state as usize]),
+                        &self.action[candidate as usize],
+                        &self.goto[candidate as usize],
+                        has_advance_rows.then(|| &self.advance[candidate as usize]),
+                        &target_group,
+                    ) {
+                        pairs.push((state, candidate));
+                    }
+                }
+            }
+
+            let mut next_active = BTreeSet::new();
+            let mut merged_groups = 0usize;
+            for (left, right) in pairs {
+                let left = find(&mut parent, left);
+                let right = find(&mut parent, right);
+                if left == right {
+                    continue;
+                }
+                let (winner, loser) = if left < right { (left, right) } else { (right, left) };
+                let loser_fingerprint = fingerprint_by_state[loser as usize];
+                let remove_bucket = {
+                    let bucket = fingerprints
+                        .get_mut(&loser_fingerprint)
+                        .expect("losing representative has a fingerprint bucket");
+                    bucket.retain(|entry| *entry != loser);
+                    bucket.is_empty()
+                };
+                if remove_bucket {
+                    fingerprints.remove(&loser_fingerprint);
+                }
+                let loser_members = std::mem::take(&mut members[loser as usize]);
+                for member in loser_members {
+                    parent[member as usize] = winner;
+                    target_group[member as usize] = winner;
+                    for &source in &reverse[member as usize] {
+                        next_active.insert(find(&mut parent, source));
+                    }
+                    members[winner as usize].push(member);
+                }
+                representative_count -= 1;
+                merged_groups += 1;
+                merged_any = true;
+            }
+
+            if let Some(iteration_started_at) = iteration_started_at {
+                eprintln!(
+                    "[glrmask/profile][row_merge_incremental] iteration={} representatives={} active={} comparisons={} merged_groups={} elapsed_ms={:.3}",
+                    iteration,
+                    representative_count + merged_groups,
+                    active_count,
+                    comparisons,
+                    merged_groups,
+                    iteration_started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            if merged_groups == 0 {
+                break;
+            }
+            active = next_active;
+        }
+
+        if !merged_any {
+            return false;
+        }
+
+        let apply_started_at = profile_detail.then(std::time::Instant::now);
+        let representatives = (0..nstates as u32)
+            .filter(|&state| parent[state as usize] == state)
+            .collect::<Vec<_>>();
+        let mut final_mapping = vec![0u32; nstates];
+        for (new_state, &representative) in representatives.iter().enumerate() {
+            for &member in &members[representative as usize] {
+                final_mapping[member as usize] = new_state as u32;
+            }
+        }
+
+        let old_action = std::mem::take(&mut self.action);
+        let old_goto = std::mem::take(&mut self.goto);
+        let mut old_advance = has_advance_rows.then(|| {
+            std::mem::take(&mut self.advance)
+                .into_iter()
+                .map(Some)
+                .collect::<Vec<_>>()
+        });
+        let mut new_action = Vec::with_capacity(representatives.len());
+        let mut new_goto = Vec::with_capacity(representatives.len());
+        let mut new_advance = Vec::with_capacity(representatives.len());
+        for (state, (mut action_row, mut goto_row)) in old_action.into_iter().zip(old_goto).enumerate() {
+            if parent[state] != state as u32 {
+                continue;
+            }
+            remap_action_row_targets_in_place(&mut action_row, &final_mapping);
+            remap_goto_row_targets_in_place(&mut goto_row, &final_mapping);
+            new_action.push(action_row);
+            new_goto.push(goto_row);
+            if let Some(old_advance) = &mut old_advance {
+                new_advance.push(old_advance[state].take().expect("kept state has advance row"));
+            }
+        }
+        self.action = new_action;
+        self.goto = new_goto;
+        if has_advance_rows {
+            self.advance = new_advance;
+        }
+        self.forwarded_shifts = self
+            .forwarded_shifts
+            .iter()
+            .map(|&(state, terminal)| (final_mapping[state as usize], terminal))
+            .collect();
+        self.num_states = representatives.len() as u32;
+        if let Some(apply_started_at) = apply_started_at {
+            eprintln!(
+                "[glrmask/profile][row_merge_incremental_apply] states_before={} states_after={} apply_ms={:.3}",
+                nstates,
+                self.num_states,
+                apply_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        true
+    }
+
+
     pub(super) fn prune_unreachable_states(&mut self) {
         if self.num_states == 0 {
             return;
@@ -745,53 +1101,33 @@ impl GLRTable {
     pub(super) fn collapse_sr_unit_reductions_with_compatible_gotos(
         &mut self,
     ) -> UnitReductionInliningReport {
-        // Keep the original only as an abort rollback. Moving it out of
-        // `self` avoids cloning the complete table twice on the usual
-        // successful path; `work` is the sole mutable copy.
-        let original = std::mem::replace(
-            self,
-            Self {
-                action: Vec::new(),
-                goto: Vec::new(),
-                num_states: 0,
-                num_terminals: 0,
-                num_rules: 0,
-                rules: Vec::new(),
-                nonterminal_display_names: Vec::new(),
-                construction: GlrTableConstruction::default(),
-                admission_policy: AdmissionPolicy::default(),
-                advance: Vec::new(),
-                forwarded_shifts: FxHashSet::default(),
-                guarded_shift_index: Vec::new(),
-            },
-        );
         let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
-        let clone_started_at = profile_enabled.then(std::time::Instant::now);
-        let mut work = original.clone();
-        let clone_ms = clone_started_at
+        let journal_started_at = profile_enabled.then(std::time::Instant::now);
+        let mut undo = UnitInlineUndo::new(self);
+        let journal_ms = journal_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
         let inner_started_at = profile_enabled.then(std::time::Instant::now);
         let budget = UnitInlineBudget::from_env();
-        work.collapse_sr_unit_reductions_with_compatible_gotos_inner(&budget);
-        let report = budget.report();
+        self.collapse_sr_unit_reductions_with_compatible_gotos_inner(&budget, &mut undo);
+        let mut report = budget.report();
         let inner_ms = inner_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
         if report.aborted {
-            *self = original;
+            undo.rollback(self);
         } else {
-            *self = work;
+            report.changed_original_states = undo.changed_original_states();
         }
-        if let (Some(clone_ms), Some(inner_ms)) = (clone_ms, inner_ms) {
+        if let (Some(journal_ms), Some(inner_ms)) = (journal_ms, inner_ms) {
             eprintln!(
-                "[glrmask/profile][unit_reduction_inlining] outcome={} reason={} iterations={} cells={} synthetic_states={} stack_effect_visits={} clone_ms={:.3} inner_ms={:.3} elapsed_ms={:.3} max_ms={} max_iterations={} max_cells={} max_synthetic_states={} max_stack_effect_visits={}",
+                "[glrmask/profile][unit_reduction_inlining] outcome={} reason={} iterations={} cells={} synthetic_states={} stack_effect_visits={} journal_ms={:.3} inner_ms={:.3} elapsed_ms={:.3} max_ms={} max_iterations={} max_cells={} max_synthetic_states={} max_stack_effect_visits={}",
                 if report.aborted { "aborted" } else { "committed" },
                 report.reason.unwrap_or("none"),
                 report.iterations,
                 report.cells,
                 report.synthetic_states,
                 report.stack_effect_visits,
-                clone_ms,
+                journal_ms,
                 inner_ms,
                 report.elapsed_ms,
                 budget.max_ms,
@@ -807,28 +1143,34 @@ impl GLRTable {
     fn collapse_sr_unit_reductions_with_compatible_gotos_inner(
         &mut self,
         budget: &UnitInlineBudget,
+        undo: &mut UnitInlineUndo,
     ) {
         let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let original_num_states = self.num_states;
-        let mut constituent_sets: Vec<BTreeSet<u32>> = (0..self.num_states)
-            .map(|state| BTreeSet::from([state]))
+        let mut constituent_sets: Vec<StateSubset> = (0..self.num_states)
+            .map(|state| smallvec![state])
             .collect();
-        let mut subset_to_state: FxHashMap<Vec<u32>, u32> = (0..self.num_states)
-            .map(|state| (vec![state], state))
-            .collect();
+        // Singleton subsets map directly to their state ID, so only synthetic
+        // (multi-state) subsets need hash-map entries.
+        let mut subset_to_state: FxHashMap<Vec<u32>, u32> = FxHashMap::default();
         let mut failed_subsets: FxHashSet<Vec<u32>> = FxHashSet::default();
         let mut dirty_original_states: BTreeSet<u32> = BTreeSet::new();
+        let mut cached_predecessors: Option<RuntimePredecessors> = None;
+        let mut next_worklist: Option<Vec<UnitInlineCell>> = None;
+        let mut dependencies = UnitInlineDependencies::default();
 
         loop {
             if !budget.record_iteration() {
                 break;
             }
             let iteration = budget.iterations();
+            let worklist = next_worklist.take();
+            let using_worklist = worklist.is_some();
             let cells_before = budget.cells();
             let visits_before = budget.stack_effect_visits();
             let refresh_started_at = profile_enabled.then(std::time::Instant::now);
-            if !dirty_original_states.is_empty() {
+            if !using_worklist && !dirty_original_states.is_empty() {
                 refresh_merged_states_depending_on(
                     self,
                     original_num_states,
@@ -848,113 +1190,206 @@ impl GLRTable {
                 .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
                 .unwrap_or(0.0);
             let predecessors_started_at = profile_enabled.then(std::time::Instant::now);
-            let predecessors = build_runtime_state_predecessors(self, original_num_states, &constituent_sets);
-            let predecessors_ms = predecessors_started_at
-                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-                .unwrap_or(0.0);
+            if !using_worklist {
+                cached_predecessors = Some(build_runtime_state_predecessors(
+                    self,
+                    original_num_states,
+                    &constituent_sets,
+                ));
+            }
+            let predecessors = cached_predecessors
+                .as_ref()
+                .expect("first unit-inlining pass constructs predecessors");
+            let predecessors_ms = if using_worklist {
+                0.0
+            } else {
+                predecessors_started_at
+                    .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                    .unwrap_or(0.0)
+            };
             // The scan below computes updates against a stable snapshot of the
             // current original rows for this iteration. Delayed synthetic
             // states may be appended, but existing rows are not mutated until
             // after the scan.
             let nstates = original_num_states as usize;
+            let worklist_cells = worklist.as_ref().map(|cells| {
+                cells.iter().copied().collect::<FxHashSet<UnitInlineCell>>()
+            });
+            let synthetic_states_before_scan = self.num_states;
             let mut pending_updates: Vec<(usize, TerminalID, CellUpdate)> = Vec::new();
             let scan_started_at = profile_enabled.then(std::time::Instant::now);
 
             // Phase 1 (parallel, read-only): stack-shift inlining is a pure
             // function of the stable table snapshot and the predecessors graph.
-            // Compute it for every cell across all cores. Each task uses a
-            // private depth cache and a private (uncontended) budget; counts are
-            // folded back below so the global work cap still holds. This mirrors
-            // the per-cell stack-shift attempt the serial scan performed first,
-            // so committed results are identical.
-            let per_state: Vec<(Vec<(TerminalID, Option<Action>)>, UnitInlineBudget)> = {
+            // Schedule only states that actually have a candidate cell. The old
+            // implementation spawned a task, a local cache, and a child budget
+            // for every state, even though most rows contain only shifts.
+            let candidate_states = if let Some(cells) = &worklist_cells {
+                let mut states = cells
+                    .iter()
+                    .map(|&(state, _)| state as usize)
+                    .collect::<Vec<_>>();
+                states.sort_unstable();
+                states.dedup();
+                states
+            } else {
+                (0..nstates)
+                    .filter(|&state| {
+                        self.action[state]
+                            .iter()
+                            .any(|(_, action)| action_has_inlinable_reductions(action))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let stack_phase_started_at = profile_enabled.then(std::time::Instant::now);
+            let per_state: Vec<(
+                usize,
+                Vec<(TerminalID, StackInlineAttempt)>,
+                Vec<(UnitInlineCell, UnitInlineCell)>,
+                UnitInlineBudget,
+            )> = {
                 let table: &GLRTable = self;
                 let predecessors = &predecessors;
-                (0..nstates)
-                    .into_par_iter()
-                    .map(|state| {
+                candidate_states
+                    .par_iter()
+                    .map(|&state| {
                         let local_budget = budget.child();
-                        let mut local_depth_cache: FxHashMap<(u32, u32), Option<BTreeSet<u32>>> =
+                        let mut local_depth_cache: FxHashMap<(u32, u32), Option<StateSubset>> =
                             FxHashMap::default();
+                        let mut reads = Vec::new();
                         let rows = table.action[state]
                             .iter()
+                            .filter(|(tid, action)| {
+                                action_has_inlinable_reductions(action)
+                                    && worklist_cells.as_ref().is_none_or(|cells| {
+                                        cells.contains(&(state as u32, *tid))
+                                    })
+                            })
                             .map(|(tid, action)| {
                                 let inlined = if local_budget.is_aborted() {
-                                    None
+                                    StackInlineAttempt {
+                                        action: None,
+                                        outcome: StackInlineOutcomeKind::TraversalFailed,
+                                    }
+                                } else if is_trivial_origin_dependent_one_push(
+                                    table,
+                                    predecessors,
+                                    state as u32,
+                                    tid,
+                                    action,
+                                    &mut reads,
+                                ) {
+                                    StackInlineAttempt {
+                                        action: None,
+                                        outcome: StackInlineOutcomeKind::TrivialOriginDependentOnePush,
+                                    }
                                 } else {
-                                    try_inline_action_to_stack_shifts(
+                                    try_inline_action_to_stack_shifts_detailed(
                                         table,
                                         predecessors,
                                         state as u32,
                                         tid,
                                         action,
                                         &mut local_depth_cache,
+                                        &mut reads,
                                         &local_budget,
                                     )
                                 };
                                 (tid, inlined)
                             })
                             .collect();
-                        (rows, local_budget)
+                        (state, rows, reads, local_budget)
                     })
                     .collect()
             };
 
-            let mut stack_shift_results: Vec<Vec<(TerminalID, Option<Action>)>> =
-                Vec::with_capacity(nstates);
-            for (rows, local_budget) in per_state {
-                budget.fold_in(&local_budget);
-                stack_shift_results.push(rows);
-            }
-
-            // Phase 2 (serial): apply stack-shift results in canonical order and
-            // run unit-reduction inlining (which may synthesize shared states)
-            // for the remaining cells, exactly as the original wrapper did after
-            // a `None` stack-shift result.
+            let stack_phase_ms = stack_phase_started_at
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+            let unit_phase_started_at = profile_enabled.then(std::time::Instant::now);
+            let mut stack_effect_candidates = 0usize;
+            let mut unit_candidates = 0usize;
+            let mut stack_effect_resolved = 0usize;
+            let mut stack_effect_updates = 0usize;
+            let mut unit_updates = 0usize;
+            let mut candidate_kind_counts = [0usize; StackInlineCandidateKind::COUNT];
+            let mut resolved_kind_counts = [0usize; StackInlineCandidateKind::COUNT];
+            let mut direct_unit_candidates = 0usize;
+            let mut direct_unit_resolved = 0usize;
+            let mut stack_outcome_counts = [0usize; StackInlineOutcomeKind::COUNT];
+            // Phase 2 (serial): apply stack-shift results in canonical state
+            // order and run unit-reduction inlining (which may synthesize
+            // shared states). `candidate_states` is sorted and Rayon preserves
+            // indexed-iterator collection order.
             if !budget.is_aborted() {
-                'scan: for state in 0..nstates {
-                    // Inlining may synthesize states through `&mut self`, so take
-                    // a compact snapshot of the row before the analysis.
-                    let actions: Vec<(TerminalID, Action)> = self.action[state]
-                        .iter()
-                        .map(|(tid, action)| (tid, action.clone()))
-                        .collect();
-                    let row_stack_shifts = &stack_shift_results[state];
-                    for (cell_index, (tid, action)) in actions.into_iter().enumerate() {
-                        debug_assert_eq!(row_stack_shifts[cell_index].0, tid);
+                'scan: for (state, row_stack_shifts, reads, local_budget) in per_state {
+                    budget.fold_in(&local_budget);
+                    dependencies.record_reads(reads);
+                    if budget.is_aborted() {
+                        break 'scan;
+                    }
+                    for (tid, stack_attempt) in row_stack_shifts {
+                        let StackInlineAttempt {
+                            action: stack_inlined,
+                            outcome: stack_outcome,
+                        } = stack_attempt;
+                        let Some(action) = self.action[state].get(&tid).cloned() else {
+                            continue;
+                        };
+                        stack_effect_candidates += 1;
+                        stack_outcome_counts[stack_outcome.index()] += 1;
+                        let candidate_kind = stack_inline_candidate_kind(&action);
+                        candidate_kind_counts[candidate_kind.index()] += 1;
+                        let is_unit_candidate = action_needs_unit_reduction_inlining(&action);
+                        unit_candidates += usize::from(is_unit_candidate);
+                        let is_direct_unit_candidate = profile_enabled
+                            && matches!(
+                                &action,
+                                Action::Reduce(nonterminal, 1)
+                                    if unit_reduce_destination(
+                                        self,
+                                        predecessors,
+                                        state as u32,
+                                        *nonterminal,
+                                    )
+                                    .is_some()
+                            );
+                        direct_unit_candidates += usize::from(is_direct_unit_candidate);
+                        let resolved_by_stack_effect = stack_inlined.is_some();
+                        direct_unit_resolved += usize::from(
+                            is_direct_unit_candidate && resolved_by_stack_effect,
+                        );
+                        stack_effect_resolved += usize::from(resolved_by_stack_effect);
+                        if resolved_by_stack_effect {
+                            resolved_kind_counts[candidate_kind.index()] += 1;
+                        }
                         if !budget.record_cell() {
                             break 'scan;
                         }
 
-                        let update = if let Some(inlined) = row_stack_shifts[cell_index].1.clone() {
+                        let update = if let Some(inlined) = stack_inlined {
                             Some(CellUpdate::Set(inlined))
-                        } else {
-                            match &action {
-                                Action::Split {
-                                    shift: Some(_),
-                                    accept: false,
-                                    ..
-                                }
-                                | Action::Shift(_, _) => {
-                                    let mut visiting = BTreeSet::new();
-                                    match try_inline_unit_reductions_for_cell_inner(
-                                        self,
-                                        &predecessors,
-                                        state as u32,
-                                        tid,
-                                        &action,
-                                        &mut constituent_sets,
-                                        &mut subset_to_state,
-                                        &mut failed_subsets,
-                                        &mut visiting,
-                                        budget,
-                                    ) {
-                                        Ok(update) => update,
-                                        Err(()) => continue,
-                                    }
-                                }
-                                _ => None,
+                        } else if is_unit_candidate {
+                            let mut visiting = BTreeSet::new();
+                            match try_inline_unit_reductions_for_cell_inner(
+                                self,
+                                predecessors,
+                                state as u32,
+                                tid,
+                                &action,
+                                &mut constituent_sets,
+                                &mut subset_to_state,
+                                &mut failed_subsets,
+                                &mut visiting,
+                                (state as u32, tid),
+                                &mut dependencies,
+                                budget,
+                            ) {
+                                Ok(update) => update,
+                                Err(()) => continue,
                             }
+                        } else {
+                            None
                         };
                         if budget.is_aborted() {
                             break 'scan;
@@ -962,9 +1397,19 @@ impl GLRTable {
 
                         match update {
                             Some(CellUpdate::Set(new_action)) if new_action != action => {
+                                if resolved_by_stack_effect {
+                                    stack_effect_updates += 1;
+                                } else {
+                                    unit_updates += 1;
+                                }
                                 pending_updates.push((state, tid, CellUpdate::Set(new_action)));
                             }
                             Some(CellUpdate::Remove) => {
+                                if resolved_by_stack_effect {
+                                    stack_effect_updates += 1;
+                                } else {
+                                    unit_updates += 1;
+                                }
                                 pending_updates.push((state, tid, CellUpdate::Remove));
                             }
                             _ => {}
@@ -973,18 +1418,34 @@ impl GLRTable {
                 }
             }
 
+
+            let unit_phase_ms = unit_phase_started_at
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
             if pending_updates.is_empty() || budget.is_aborted() {
                 if profile_enabled {
                     eprintln!(
-                        "[glrmask/profile][unit_reduction_inlining_iteration] iteration={} refresh_ms={:.3} predecessors_ms={:.3} scan_ms={:.3} apply_ms=0.000 scanned_cells={} stack_effect_visits={} pending_updates={} terminal={}",
+                        "[glrmask/profile][unit_reduction_inlining_iteration] iteration={} refresh_ms={:.3} predecessors_ms={:.3} stack_phase_ms={:.3} unit_phase_ms={:.3} scan_ms={:.3} apply_ms=0.000 candidates={} unit_candidates={} stack_resolved={} stack_updates={} unit_updates={} kinds={:?} resolved_kinds={:?} direct_unit_candidates={} direct_unit_resolved={} outcomes={:?} scanned_cells={} stack_effect_visits={} pending_updates={} terminal={}",
                         iteration,
                         refresh_ms,
                         predecessors_ms,
+                        stack_phase_ms,
+                        unit_phase_ms,
                         scan_started_at
                             .expect("profile start exists when profiling is enabled")
                             .elapsed()
                             .as_secs_f64()
                             * 1000.0,
+                        stack_effect_candidates,
+                        unit_candidates,
+                        stack_effect_resolved,
+                        stack_effect_updates,
+                        unit_updates,
+                        candidate_kind_counts,
+                        resolved_kind_counts,
+                        direct_unit_candidates,
+                        direct_unit_resolved,
+                        stack_outcome_counts,
                         budget.cells() - cells_before,
                         budget.stack_effect_visits() - visits_before,
                         pending_updates.len(),
@@ -999,12 +1460,23 @@ impl GLRTable {
                 .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
                 .unwrap_or(0.0);
             let apply_started_at = profile_enabled.then(std::time::Instant::now);
+            let mut changed_cells = Vec::with_capacity(update_count);
+            let mut predecessor_edges_changed = 0usize;
             for (state, tid, update) in pending_updates {
+                undo.record_cell(self, state, tid);
+                let old_action = self.action[state].get(&tid).cloned();
                 match update {
                     CellUpdate::Set(new_action) => {
+                        predecessor_edges_changed += usize::from(
+                            old_action
+                                .as_ref()
+                                .and_then(runtime_predecessor_transition)
+                                != runtime_predecessor_transition(&new_action),
+                        );
                         self.action[state].insert(tid, new_action);
                     }
                     CellUpdate::Remove => {
+                        predecessor_edges_changed += usize::from(old_action.as_ref().and_then(runtime_predecessor_transition).is_some());
                         self.action[state].remove(&tid);
                         if self.advance.len() == self.num_states as usize
                             && let Some(bit) = self.terminal_bit(tid)
@@ -1014,19 +1486,41 @@ impl GLRTable {
                     }
                 }
                 dirty_original_states.insert(state as u32);
+                changed_cells.push((state as u32, tid));
+            }
+            let can_use_worklist = predecessor_edges_changed == 0
+                && self.num_states == synthetic_states_before_scan
+                && self.num_states == original_num_states;
+            if can_use_worklist {
+                next_worklist = Some(dependencies.worklist_for_changes(changed_cells.iter().copied()));
+            } else {
+                cached_predecessors = None;
+                next_worklist = None;
             }
             if profile_enabled {
                 eprintln!(
-                    "[glrmask/profile][unit_reduction_inlining_iteration] iteration={} refresh_ms={:.3} predecessors_ms={:.3} scan_ms={:.3} apply_ms={:.3} scanned_cells={} stack_effect_visits={} pending_updates={} terminal=continue",
+                    "[glrmask/profile][unit_reduction_inlining_iteration] iteration={} refresh_ms={:.3} predecessors_ms={:.3} stack_phase_ms={:.3} unit_phase_ms={:.3} scan_ms={:.3} apply_ms={:.3} candidates={} unit_candidates={} stack_resolved={} stack_updates={} unit_updates={} kinds={:?} resolved_kinds={:?} direct_unit_candidates={} direct_unit_resolved={} outcomes={:?} scanned_cells={} stack_effect_visits={} pending_updates={} terminal=continue",
                     iteration,
                     refresh_ms,
                     predecessors_ms,
+                    stack_phase_ms,
+                    unit_phase_ms,
                     scan_ms,
                     apply_started_at
                         .expect("profile start exists when profiling is enabled")
                         .elapsed()
                         .as_secs_f64()
                         * 1000.0,
+                    stack_effect_candidates,
+                    unit_candidates,
+                    stack_effect_resolved,
+                    stack_effect_updates,
+                    unit_updates,
+                    candidate_kind_counts,
+                    resolved_kind_counts,
+                    direct_unit_candidates,
+                    direct_unit_resolved,
+                    stack_outcome_counts,
                     budget.cells() - cells_before,
                     budget.stack_effect_visits() - visits_before,
                     update_count,
@@ -2157,6 +2651,115 @@ fn unordered_row_hash<K: Hash, V: Hash>(entries: impl Iterator<Item = (K, V)>, l
     (sum, mixed_xor ^ (len as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
 }
 
+fn remapped_stack_shift_cmp(
+    left: &StackShift,
+    right: &StackShift,
+    mapping: &[u32],
+) -> std::cmp::Ordering {
+    left.pop.cmp(&right.pop).then_with(|| {
+        left.pushes
+            .iter()
+            .map(|&state| mapping[state as usize])
+            .cmp(right.pushes.iter().map(|&state| mapping[state as usize]))
+    })
+}
+
+/// `remap_action_targets` normalizes `StackShifts` after target IDs coalesce.
+/// Keep that exact set semantics without allocating a remapped `Action` for
+/// every row-fingerprint/equality probe.
+fn normalized_remapped_stack_shifts<'a>(
+    shifts: &'a [StackShift],
+    mapping: &[u32],
+) -> SmallVec<[&'a StackShift; 2]> {
+    let mut normalized = shifts.iter().collect::<SmallVec<[&StackShift; 2]>>();
+    normalized.sort_unstable_by(|left, right| remapped_stack_shift_cmp(left, right, mapping));
+    normalized.dedup_by(|left, right| {
+        remapped_stack_shift_cmp(*left, *right, mapping) == std::cmp::Ordering::Equal
+    });
+    normalized
+}
+
+fn remapped_stack_shifts_hash(shifts: &[StackShift], mapping: &[u32]) -> u64 {
+    let normalized = normalized_remapped_stack_shifts(shifts, mapping);
+    let mut h = FxHasher::default();
+    4u8.hash(&mut h);
+    normalized.len().hash(&mut h);
+    for shift in normalized {
+        shift.pop.hash(&mut h);
+        shift.pushes.len().hash(&mut h);
+        for &target in &shift.pushes {
+            mapping[target as usize].hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+fn remapped_stack_shifts_equal(
+    left: &[StackShift],
+    right: &[StackShift],
+    mapping: &[u32],
+) -> bool {
+    let left = normalized_remapped_stack_shifts(left, mapping);
+    let right = normalized_remapped_stack_shifts(right, mapping);
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.pop == right.pop
+                && left
+                    .pushes
+                    .iter()
+                    .map(|&target| mapping[target as usize])
+                    .eq(right.pushes.iter().map(|&target| mapping[target as usize]))
+        })
+}
+
+#[inline]
+fn remapped_action_hash(action: &Action, mapping: &[u32]) -> u64 {
+    let mut h = FxHasher::default();
+    match action {
+        Action::Shift(target, replace) => {
+            0u8.hash(&mut h);
+            mapping[*target as usize].hash(&mut h);
+            replace.hash(&mut h);
+        }
+        Action::Reduce(nt, len) => {
+            1u8.hash(&mut h);
+            nt.hash(&mut h);
+            len.hash(&mut h);
+        }
+        Action::Split { shift, reduces, accept } => {
+            2u8.hash(&mut h);
+            shift.map(|(target, replace)| (mapping[target as usize], replace)).hash(&mut h);
+            reduces.hash(&mut h);
+            accept.hash(&mut h);
+        }
+        Action::Accept => 3u8.hash(&mut h),
+        Action::StackShifts(shifts) => return remapped_stack_shifts_hash(shifts, mapping),
+        Action::GuardedStackShifts(_) => {
+            return unordered_entry_hash(&remap_action_targets(action, mapping));
+        }
+    }
+    h.finish()
+}
+
+#[inline]
+fn actions_equal_after_remap(left: &Action, right: &Action, mapping: &[u32]) -> bool {
+    match (left, right) {
+        (Action::Shift(lt, lr), Action::Shift(rt, rr)) => lr == rr && mapping[*lt as usize] == mapping[*rt as usize],
+        (Action::Reduce(ln, ll), Action::Reduce(rn, rl)) => ln == rn && ll == rl,
+        (Action::Split { shift: ls, reduces: lrs, accept: la }, Action::Split { shift: rs, reduces: rrs, accept: ra }) => {
+            ls.map(|(target, replace)| (mapping[target as usize], replace)) == rs.map(|(target, replace)| (mapping[target as usize], replace)) && lrs == rrs && la == ra
+        }
+        (Action::Accept, Action::Accept) => true,
+        (Action::StackShifts(left), Action::StackShifts(right)) => {
+            remapped_stack_shifts_equal(left, right, mapping)
+        }
+        (Action::GuardedStackShifts(_), Action::GuardedStackShifts(_)) => {
+            remap_action_targets(left, mapping) == remap_action_targets(right, mapping)
+        }
+        _ => false,
+    }
+}
+
 fn row_fingerprint(
     action_row: &ActionRow,
     goto_row: &GotoRow,
@@ -2191,7 +2794,7 @@ fn remapped_row_fingerprint(
 ) -> u64 {
     let (action_sum, action_xor) = unordered_row_hash(
         action_row.iter().map(|(terminal, action)| {
-            (terminal, remap_action_targets(action, state_to_group))
+            (terminal, remapped_action_hash(action, state_to_group))
         }),
         action_row.len(),
     );
@@ -2246,10 +2849,9 @@ fn rows_equal_after_remap(
         && action_a.len() == action_b.len()
         && goto_a.len() == goto_b.len()
         && action_a.iter().all(|(terminal, action)| {
-            action_b.get(&terminal).is_some_and(|other| {
-                remap_action_targets(action, state_to_group)
-                    == remap_action_targets(other, state_to_group)
-            })
+            action_b
+                .get(&terminal)
+                .is_some_and(|other| actions_equal_after_remap(action, other, state_to_group))
         })
         && goto_a.iter().all(|(&nonterminal, &(target, replace))| {
             goto_b.get(&nonterminal).is_some_and(|&(other_target, other_replace)| {
@@ -2266,6 +2868,31 @@ fn push_reachable_state(state: u32, reachable: &mut [bool], stack: &mut Vec<u32>
     if !*slot {
         *slot = true;
         stack.push(state);
+    }
+}
+
+fn collect_action_targets(action: &Action, out: &mut Vec<u32>) {
+    match action {
+        Action::Shift(target, _) => out.push(*target),
+        Action::StackShifts(shifts) => {
+            for shift in shifts {
+                out.extend(shift.pushes.iter().copied());
+            }
+        }
+        Action::GuardedStackShifts(shifts) => {
+            for shift in shifts {
+                for guard in &shift.guards {
+                    out.extend(guard.states.iter().copied());
+                }
+                out.extend(shift.pushes.iter().copied());
+            }
+        }
+        Action::Split { shift, .. } => {
+            if let Some((target, _)) = shift {
+                out.push(*target);
+            }
+        }
+        Action::Reduce(_, _) | Action::Accept => {}
     }
 }
 
@@ -2306,58 +2933,228 @@ enum CellUpdate {
     Remove,
 }
 
+/// Only actions that contain at least one non-accepting reduction can change
+/// under stack-effect or unit-reduction inlining. In particular, a plain shift
+/// has no reduction to resolve and the recursive unit inliner must return it
+/// unchanged, so visiting it is pure overhead.
+fn action_has_inlinable_reductions(action: &Action) -> bool {
+    match action {
+        Action::Reduce(_, _) => true,
+        Action::Split {
+            reduces,
+            accept: false,
+            ..
+        } => !reduces.is_empty(),
+        _ => false,
+    }
+}
+
+/// The unit-reduction pass adds work beyond stack-effect inlining only when an
+/// action has both a shift and a unit reduction. A reduction-only action is
+/// either handled by the stack-effect pass or cannot gain a shift by this
+/// phase; this matches the old dispatch exactly.
+#[derive(Clone, Copy)]
+enum StackInlineCandidateKind {
+    ReduceZero,
+    ReduceOne,
+    ReduceMany,
+    Split,
+}
+
+impl StackInlineCandidateKind {
+    const COUNT: usize = 4;
+
+    fn index(self) -> usize {
+        match self {
+            Self::ReduceZero => 0,
+            Self::ReduceOne => 1,
+            Self::ReduceMany => 2,
+            Self::Split => 3,
+        }
+    }
+}
+
+fn stack_inline_candidate_kind(action: &Action) -> StackInlineCandidateKind {
+    match action {
+        Action::Reduce(_, 0) => StackInlineCandidateKind::ReduceZero,
+        Action::Reduce(_, 1) => StackInlineCandidateKind::ReduceOne,
+        Action::Reduce(_, _) => StackInlineCandidateKind::ReduceMany,
+        Action::Split { .. } => StackInlineCandidateKind::Split,
+        _ => unreachable!("only stack-inlining candidates are classified"),
+    }
+}
+
+fn action_needs_unit_reduction_inlining(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Split {
+            shift: Some(_),
+            reduces,
+            accept: false,
+        } if !reduces.is_empty()
+    )
+}
+
+type UnitInlineCell = (u32, TerminalID);
+
+#[derive(Default)]
+struct UnitInlineDependencies {
+    reverse: FxHashMap<UnitInlineCell, Vec<UnitInlineCell>>,
+}
+
+impl UnitInlineDependencies {
+    fn record_read(&mut self, owner: UnitInlineCell, read: UnitInlineCell) {
+        if owner != read {
+            self.reverse.entry(read).or_default().push(owner);
+        }
+    }
+
+    fn record_reads(&mut self, reads: impl IntoIterator<Item = (UnitInlineCell, UnitInlineCell)>) {
+        for (owner, read) in reads {
+            self.record_read(owner, read);
+        }
+    }
+
+    fn worklist_for_changes(&self, changed: impl IntoIterator<Item = UnitInlineCell>) -> Vec<UnitInlineCell> {
+        let mut queued = FxHashSet::default();
+        for changed_cell in changed {
+            queued.insert(changed_cell);
+            if let Some(dependents) = self.reverse.get(&changed_cell) {
+                queued.extend(dependents.iter().copied());
+            }
+        }
+        let mut worklist = queued.into_iter().collect::<Vec<_>>();
+        worklist.sort_unstable();
+        worklist
+    }
+}
+
+/// A cheap sufficient test for the common rejected stack-effect shape:
+/// reducing one symbol and then taking only non-forwarded replace shifts. The
+/// general stack-effect evaluator would classify this as origin-dependent with
+/// one pushed state and deliberately leave the reduce untouched, so skipping
+/// it is semantically exact. Every action row inspected here is recorded for
+/// fixed-point invalidation because a later rewrite can make the shortcut
+/// inapplicable.
+fn is_trivial_origin_dependent_one_push(
+    table: &GLRTable,
+    predecessors: &[PredecessorSet],
+    state: u32,
+    tid: TerminalID,
+    action: &Action,
+    dependencies: &mut Vec<(UnitInlineCell, UnitInlineCell)>,
+) -> bool {
+    let Action::Reduce(nonterminal, 1) = action else {
+        return false;
+    };
+    let owner = (state, tid);
+    let mut saw_effect = false;
+    for &predecessor in &predecessors[state as usize] {
+        let Some((next_state, _)) = table.goto[predecessor as usize].get(nonterminal).copied() else {
+            continue;
+        };
+        let Some(next_action) = table.action[next_state as usize].get(&tid) else {
+            continue;
+        };
+        dependencies.push((owner, (next_state, tid)));
+        let is_replace_shift = match next_action {
+            Action::Shift(_, replace) => {
+                *replace && !table.forwarded_shifts.contains(&(next_state, tid))
+            }
+            Action::Split {
+                shift: Some((_, replace)),
+                reduces,
+                accept: false,
+            } => {
+                reduces.is_empty()
+                    && *replace
+                    && !table.forwarded_shifts.contains(&(next_state, tid))
+            }
+            _ => false,
+        };
+        if !is_replace_shift {
+            return false;
+        }
+        saw_effect = true;
+    }
+    saw_effect
+}
+
+fn runtime_predecessor_transition(action: &Action) -> Option<(u32, bool)> {
+    match action {
+        Action::Shift(target, replace) => Some((*target, *replace)),
+        Action::Split { shift: Some((target, replace)), .. } => Some((*target, *replace)),
+        _ => None,
+    }
+}
+
 fn build_runtime_state_predecessors(
     table: &GLRTable,
     original_num_states: u32,
-    constituent_sets: &[BTreeSet<u32>],
-) -> Vec<BTreeSet<u32>> {
-    let mut predecessors = vec![BTreeSet::new(); table.num_states as usize];
+    constituent_sets: &[StateSubset],
+) -> RuntimePredecessors {
+    let mut predecessors = vec![PredecessorSet::new(); table.num_states as usize];
 
+    // Collect direct non-replace edges first, then normalize each compact row
+    // once. This preserves the sorted set iteration used by the old BTreeSet
+    // implementation without paying a tree insertion for every edge.
     for src in 0..table.num_states as usize {
         for action in table.action[src].values() {
             match action {
                 Action::Shift(dst, false) => {
-                    predecessors[*dst as usize].extend(constituent_sets[src].iter().copied());
+                    predecessors[*dst as usize].extend_from_slice(&constituent_sets[src]);
                 }
                 Action::Split { shift: Some((dst, false)), .. } => {
-                    predecessors[*dst as usize].extend(constituent_sets[src].iter().copied());
+                    predecessors[*dst as usize].extend_from_slice(&constituent_sets[src]);
                 }
                 _ => {}
             }
         }
         for &(dst, replace) in table.goto[src].values() {
             if !replace {
-                predecessors[dst as usize].extend(constituent_sets[src].iter().copied());
+                predecessors[dst as usize].extend_from_slice(&constituent_sets[src]);
             }
         }
     }
+    for predecessors_for_state in &mut predecessors {
+        predecessors_for_state.sort_unstable();
+        predecessors_for_state.dedup();
+    }
 
+    // Replacement edges inherit the predecessor set of their source.  Rows
+    // stay sorted between passes, so each propagation has deterministic set
+    // semantics and the fixed point matches the old BTreeSet version exactly.
     let mut changed = true;
     while changed {
         changed = false;
         for src in 0..original_num_states as usize {
             let src_preds = predecessors[src].clone();
             for action in table.action[src].values() {
-                match action {
-                    Action::Shift(dst, true) => {
-                        let before = predecessors[*dst as usize].len();
-                        predecessors[*dst as usize].extend(src_preds.iter().copied());
-                        changed |= predecessors[*dst as usize].len() != before;
-                    }
-                    Action::Split { shift: Some((dst, true)), .. } => {
-                        let before = predecessors[*dst as usize].len();
-                        predecessors[*dst as usize].extend(src_preds.iter().copied());
-                        changed |= predecessors[*dst as usize].len() != before;
-                    }
-                    _ => {}
-                }
+                let destination = match action {
+                    Action::Shift(dst, true) => Some(*dst),
+                    Action::Split { shift: Some((dst, true)), .. } => Some(*dst),
+                    _ => None,
+                };
+                let Some(dst) = destination else {
+                    continue;
+                };
+                let destination_preds = &mut predecessors[dst as usize];
+                let before = destination_preds.len();
+                destination_preds.extend_from_slice(&src_preds);
+                destination_preds.sort_unstable();
+                destination_preds.dedup();
+                changed |= destination_preds.len() != before;
             }
             for &(dst, replace) in table.goto[src].values() {
-                if replace {
-                    let before = predecessors[dst as usize].len();
-                    predecessors[dst as usize].extend(src_preds.iter().copied());
-                    changed |= predecessors[dst as usize].len() != before;
+                if !replace {
+                    continue;
                 }
+                let destination_preds = &mut predecessors[dst as usize];
+                let before = destination_preds.len();
+                destination_preds.extend_from_slice(&src_preds);
+                destination_preds.sort_unstable();
+                destination_preds.dedup();
+                changed |= destination_preds.len() != before;
             }
         }
     }
@@ -2365,18 +3162,20 @@ fn build_runtime_state_predecessors(
     predecessors
 }
 
-fn subset_key(subset: &BTreeSet<u32>) -> Vec<u32> {
+fn subset_key(subset: &StateSubset) -> Vec<u32> {
     subset.iter().copied().collect()
 }
 
 fn union_state_subsets(
     states: impl IntoIterator<Item = u32>,
-    constituent_sets: &[BTreeSet<u32>],
-) -> BTreeSet<u32> {
-    let mut out = BTreeSet::new();
+    constituent_sets: &[StateSubset],
+) -> StateSubset {
+    let mut out = StateSubset::new();
     for state in states {
-        out.extend(constituent_sets[state as usize].iter().copied());
+        out.extend_from_slice(&constituent_sets[state as usize]);
     }
+    out.sort_unstable();
+    out.dedup();
     out
 }
 
@@ -2385,7 +3184,7 @@ fn merge_shift_into_pending(
     target: u32,
     replace: bool,
     table: &mut GLRTable,
-    constituent_sets: &mut Vec<BTreeSet<u32>>,
+    constituent_sets: &mut Vec<StateSubset>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
     budget: &UnitInlineBudget,
@@ -2421,7 +3220,7 @@ fn merge_action_into_pending(
     pending: &mut PendingAction,
     action: &Action,
     table: &mut GLRTable,
-    constituent_sets: &mut Vec<BTreeSet<u32>>,
+    constituent_sets: &mut Vec<StateSubset>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
     budget: &UnitInlineBudget,
@@ -2477,8 +3276,8 @@ fn merge_action_into_pending(
 
 fn build_merged_action_row(
     table: &mut GLRTable,
-    subset: &BTreeSet<u32>,
-    constituent_sets: &mut Vec<BTreeSet<u32>>,
+    subset: &StateSubset,
+    constituent_sets: &mut Vec<StateSubset>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
     budget: &UnitInlineBudget,
@@ -2519,8 +3318,8 @@ fn build_merged_action_row(
 
 fn build_merged_goto_row(
     table: &mut GLRTable,
-    subset: &BTreeSet<u32>,
-    constituent_sets: &mut Vec<BTreeSet<u32>>,
+    subset: &StateSubset,
+    constituent_sets: &mut Vec<StateSubset>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
     budget: &UnitInlineBudget,
@@ -2538,7 +3337,7 @@ fn build_merged_goto_row(
             return Err(());
         }
         let mut replace: Option<bool> = None;
-        let mut target_subset = BTreeSet::new();
+        let mut target_subset = StateSubset::new();
         let mut saw_target = false;
 
         for &state in subset {
@@ -2549,7 +3348,7 @@ fn build_merged_goto_row(
                     Some(existing) if existing == is_replace => {}
                     Some(_) => return Err(()),
                 }
-                target_subset.extend(constituent_sets[target as usize].iter().copied());
+                target_subset.extend_from_slice(&constituent_sets[target as usize]);
             }
         }
 
@@ -2557,6 +3356,10 @@ fn build_merged_goto_row(
             continue;
         }
 
+        target_subset.sort_unstable();
+        target_subset.dedup();
+        target_subset.sort_unstable();
+        target_subset.dedup();
         let merged_target = ensure_subset_state(
             table,
             &target_subset,
@@ -2571,7 +3374,7 @@ fn build_merged_goto_row(
     Ok(row)
 }
 
-fn union_advance_rows(table: &GLRTable, subset: &BTreeSet<u32>) -> BitSet {
+fn union_advance_rows(table: &GLRTable, subset: &StateSubset) -> BitSet {
     let mut out = BitSet::new(table.num_terminals as usize + 1);
     if table.advance.len() == table.num_states as usize {
         for &state in subset {
@@ -2596,15 +3399,15 @@ fn union_advance_rows(table: &GLRTable, subset: &BTreeSet<u32>) -> BitSet {
 
 fn ensure_subset_state(
     table: &mut GLRTable,
-    subset: &BTreeSet<u32>,
-    constituent_sets: &mut Vec<BTreeSet<u32>>,
+    subset: &StateSubset,
+    constituent_sets: &mut Vec<StateSubset>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
     budget: &UnitInlineBudget,
 ) -> Result<u32, ()> {
     debug_assert!(!subset.is_empty());
     if subset.len() == 1 {
-        return Ok(*subset.iter().next().unwrap());
+        return Ok(subset[0]);
     }
 
     let key = subset_key(subset);
@@ -2675,7 +3478,7 @@ fn ensure_subset_state(
 fn refresh_merged_states_depending_on(
     table: &mut GLRTable,
     original_num_states: u32,
-    constituent_sets: &mut Vec<BTreeSet<u32>>,
+    constituent_sets: &mut Vec<StateSubset>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
     dirty_original_states: &BTreeSet<u32>,
@@ -2689,7 +3492,10 @@ fn refresh_merged_states_depending_on(
         // Merged-state rows depend only on their flattened original
         // constituents, so only subsets intersecting changed original rows
         // need to be rebuilt.
-        if constituent_sets[state].is_disjoint(dirty_original_states) {
+        if !constituent_sets[state]
+            .iter()
+            .any(|member| dirty_original_states.contains(member))
+        {
             state += 1;
             continue;
         }
@@ -2729,7 +3535,7 @@ fn refresh_merged_states_depending_on(
 
 fn unit_reduce_destination(
     table: &GLRTable,
-    predecessors: &[BTreeSet<u32>],
+    predecessors: &[PredecessorSet],
     state: u32,
     lhs: NonterminalID,
 ) -> Option<u32> {
@@ -2780,23 +3586,25 @@ enum ReduceFrameResult {
 }
 
 fn states_at_depth<'a>(
-    predecessors: &[BTreeSet<u32>],
+    predecessors: &[PredecessorSet],
     origin_state: u32,
     depth: u32,
-    cache: &'a mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
+    cache: &'a mut FxHashMap<(u32, u32), Option<StateSubset>>,
     budget: &UnitInlineBudget,
-) -> Option<&'a BTreeSet<u32>> {
+) -> Option<&'a StateSubset> {
     let cache_key = (origin_state, depth);
     if !cache.contains_key(&cache_key) {
-        let mut states = BTreeSet::from([origin_state]);
+        let mut states = smallvec![origin_state];
         for _ in 0..depth {
             if !budget.record_stack_effect_visit() {
                 return None;
             }
-            let mut next = BTreeSet::new();
+            let mut next = StateSubset::new();
             for state in states {
-                next.extend(predecessors.get(state as usize)?.iter().copied());
+                next.extend_from_slice(predecessors.get(state as usize)?);
             }
+            next.sort_unstable();
+            next.dedup();
             if next.is_empty() {
                 cache.insert(cache_key, None);
                 return None;
@@ -2881,12 +3689,12 @@ fn stack_effect_action_tag(action: &Action) -> u8 {
 
 fn apply_reduce_to_frame(
     table: &GLRTable,
-    predecessors: &[BTreeSet<u32>],
+    predecessors: &[PredecessorSet],
     origin_state: u32,
     mut frame: StackEffectFrame,
     nt: NonterminalID,
     len: u32,
-    states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
+    states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<StateSubset>>,
     budget: &UnitInlineBudget,
 ) -> Option<ReduceFrameResult> {
     pop_frame(&mut frame, len);
@@ -2894,7 +3702,7 @@ fn apply_reduce_to_frame(
     let mut origin_dependent = false;
     let direct_goto_from;
     let goto_froms = if let Some(&state) = frame.pushes.last() {
-        direct_goto_from = BTreeSet::from([state]);
+        direct_goto_from = smallvec![state];
         &direct_goto_from
     } else {
         origin_dependent = true;
@@ -2999,14 +3807,15 @@ fn compose_guarded_shift_with_frame(
 
 fn stack_effects_for_action(
     table: &GLRTable,
-    predecessors: &[BTreeSet<u32>],
+    predecessors: &[PredecessorSet],
     origin_state: u32,
     tid: TerminalID,
     state: u32,
     action: &Action,
     frame: StackEffectFrame,
-    states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
+    states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<StateSubset>>,
     visiting: &mut FxHashSet<StackEffectVisitKey>,
+    dependencies: &mut Vec<(UnitInlineCell, UnitInlineCell)>,
     budget: &UnitInlineBudget,
 ) -> Option<StackEffectResult> {
     if !budget.record_stack_effect_visit() {
@@ -3080,6 +3889,7 @@ fn stack_effects_for_action(
                     let Some(next) = table.action[next_state as usize].get(&tid) else {
                         continue;
                     };
+                    dependencies.push(((origin_state, tid), (next_state, tid)));
                     let next_result = stack_effects_for_action(
                         table,
                         predecessors,
@@ -3090,6 +3900,7 @@ fn stack_effects_for_action(
                         frame,
                         states_at_depth_cache,
                         visiting,
+                        dependencies,
                         budget,
                     )?;
                     origin_dependent |= next_result.origin_dependent;
@@ -3112,6 +3923,7 @@ fn stack_effects_for_action(
                         frame.clone(),
                         states_at_depth_cache,
                         visiting,
+                        dependencies,
                         budget,
                     )?;
                     origin_dependent |= shift_result.origin_dependent;
@@ -3129,6 +3941,7 @@ fn stack_effects_for_action(
                         frame.clone(),
                         states_at_depth_cache,
                         visiting,
+                        dependencies,
                         budget,
                     )?;
                     origin_dependent |= reduce_result.origin_dependent;
@@ -3191,15 +4004,48 @@ fn stack_effect_action(table: &GLRTable, mut effects: Vec<GuardedStackShift>) ->
     Some(Action::GuardedStackShifts(effects))
 }
 
-fn try_inline_action_to_stack_shifts(
+#[derive(Clone, Copy, Debug)]
+enum StackInlineOutcomeKind {
+    NotCandidate,
+    TraversalFailed,
+    EmptyEffects,
+    OriginDependentOnePush,
+    TrivialOriginDependentOnePush,
+    CannotRepresent,
+    Inlined,
+}
+
+impl StackInlineOutcomeKind {
+    const COUNT: usize = 7;
+
+    fn index(self) -> usize {
+        match self {
+            Self::NotCandidate => 0,
+            Self::TraversalFailed => 1,
+            Self::EmptyEffects => 2,
+            Self::OriginDependentOnePush => 3,
+            Self::TrivialOriginDependentOnePush => 4,
+            Self::CannotRepresent => 5,
+            Self::Inlined => 6,
+        }
+    }
+}
+
+struct StackInlineAttempt {
+    action: Option<Action>,
+    outcome: StackInlineOutcomeKind,
+}
+
+fn try_inline_action_to_stack_shifts_detailed(
     table: &GLRTable,
-    predecessors: &[BTreeSet<u32>],
+    predecessors: &[PredecessorSet],
     state: u32,
     tid: TerminalID,
     action: &Action,
-    states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<BTreeSet<u32>>>,
+    states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<StateSubset>>,
+    dependencies: &mut Vec<(UnitInlineCell, UnitInlineCell)>,
     budget: &UnitInlineBudget,
-) -> Option<Action> {
+) -> StackInlineAttempt {
     let has_reductions = match action {
         Action::Reduce(..) => true,
         Action::Split {
@@ -3210,10 +4056,13 @@ fn try_inline_action_to_stack_shifts(
         _ => false,
     };
     if !has_reductions {
-        return None;
+        return StackInlineAttempt {
+            action: None,
+            outcome: StackInlineOutcomeKind::NotCandidate,
+        };
     }
 
-    let result = stack_effects_for_action(
+    let Some(result) = stack_effects_for_action(
         table,
         predecessors,
         state,
@@ -3227,20 +4076,64 @@ fn try_inline_action_to_stack_shifts(
         },
         states_at_depth_cache,
         &mut FxHashSet::default(),
+        dependencies,
         budget,
-    )?;
+    ) else {
+        return StackInlineAttempt {
+            action: None,
+            outcome: StackInlineOutcomeKind::TraversalFailed,
+        };
+    };
     let effects = result.effects;
     if result.origin_dependent
         && matches!(action, Action::Reduce(_, 1))
         && !effects.is_empty()
         && effects.iter().all(|effect| effect.pushes.len() == 1)
     {
-        return None;
+        return StackInlineAttempt {
+            action: None,
+            outcome: StackInlineOutcomeKind::OriginDependentOnePush,
+        };
     }
     if effects.is_empty() {
-        return None;
+        return StackInlineAttempt {
+            action: None,
+            outcome: StackInlineOutcomeKind::EmptyEffects,
+        };
     }
-    stack_effect_action(table, effects)
+    match stack_effect_action(table, effects) {
+        Some(action) => StackInlineAttempt {
+            action: Some(action),
+            outcome: StackInlineOutcomeKind::Inlined,
+        },
+        None => StackInlineAttempt {
+            action: None,
+            outcome: StackInlineOutcomeKind::CannotRepresent,
+        },
+    }
+}
+
+fn try_inline_action_to_stack_shifts(
+    table: &GLRTable,
+    predecessors: &[PredecessorSet],
+    state: u32,
+    tid: TerminalID,
+    action: &Action,
+    states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<StateSubset>>,
+    dependencies: &mut Vec<(UnitInlineCell, UnitInlineCell)>,
+    budget: &UnitInlineBudget,
+) -> Option<Action> {
+    try_inline_action_to_stack_shifts_detailed(
+        table,
+        predecessors,
+        state,
+        tid,
+        action,
+        states_at_depth_cache,
+        dependencies,
+        budget,
+    )
+    .action
 }
 
 fn normalize_stack_shifts(shifts: &mut Vec<StackShift>) {
@@ -3415,6 +4308,103 @@ mod tests {
             row_fingerprint(&action_left, &goto_left, None),
             row_fingerprint(&action_right, &goto_right, None),
         );
+    }
+
+    #[test]
+    fn incremental_row_merge_matches_full_quotient_for_noncanonical_stack_shifts() {
+        let mut action = vec![ActionRow::default(); 4];
+        action[0].insert(
+            0,
+            Action::StackShifts(vec![
+                StackShift {
+                    pop: 2,
+                    pushes: vec![2],
+                },
+                StackShift {
+                    pop: 1,
+                    pushes: vec![3],
+                },
+            ]),
+        );
+        // Initially distinct from state 0, so the starting table is already
+        // fully exact-minimized before the local mutation below.
+        action[1].insert(
+            0,
+            Action::StackShifts(vec![
+                StackShift {
+                    pop: 1,
+                    pushes: vec![3],
+                },
+                StackShift {
+                    pop: 2,
+                    pushes: vec![3],
+                },
+            ]),
+        );
+        action[2].insert(0, Action::Shift(2, false));
+        action[3].insert(0, Action::Accept);
+
+        let table = GLRTable {
+            action,
+            goto: vec![GotoRow::default(); 4],
+            num_states: 4,
+            num_terminals: 1,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            construction: GlrTableConstruction::LegacyRowBisim,
+            admission_policy: AdmissionPolicy::RowPresenceExact,
+            advance: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+            guarded_shift_index: Vec::new(),
+        };
+
+        let mut base = table.clone();
+        base.merge_identical_rows();
+        assert_eq!(base.num_states, 4);
+
+        // Stack-effect equality remaps and normalizes alternatives. The two
+        // rows are exact equals under the identity map, while their direct
+        // Action hashes differ because their alternative order differs.
+        base.action[1].insert(
+            0,
+            Action::StackShifts(vec![
+                StackShift {
+                    pop: 1,
+                    pushes: vec![3],
+                },
+                StackShift {
+                    pop: 2,
+                    pushes: vec![2],
+                },
+            ]),
+        );
+        let identity = (0..base.num_states).collect::<Vec<_>>();
+        assert!(rows_equal_after_remap(
+            &base.action[0],
+            &base.goto[0],
+            None,
+            &base.action[1],
+            &base.goto[1],
+            None,
+            &identity,
+        ));
+        assert_ne!(
+            row_fingerprint(&base.action[0], &base.goto[0], None),
+            row_fingerprint(&base.action[1], &base.goto[1], None),
+        );
+
+        let mut expected = base.clone();
+        expected.merge_identical_rows();
+        assert_eq!(expected.num_states, 3);
+
+        let mut incremental = base;
+        assert!(incremental.merge_identical_rows_from_dirty(&[1]));
+        assert_eq!(incremental.num_states, expected.num_states);
+        assert_eq!(incremental.action, expected.action);
+        assert_eq!(incremental.goto, expected.goto);
+        assert_eq!(incremental.advance, expected.advance);
+        assert_eq!(incremental.forwarded_shifts, expected.forwarded_shifts);
     }
 
     #[test]
@@ -3674,8 +4664,8 @@ mod tests {
         table.action.resize(6, ActionRow::default());
         table.goto.resize(6, GotoRow::default());
 
-        let mut predecessors = vec![BTreeSet::new(); 6];
-        predecessors[5] = BTreeSet::from([1, 2]);
+        let mut predecessors = vec![PredecessorSet::new(); 6];
+        predecessors[5] = smallvec![1, 2];
         let budget = UnitInlineBudget::from_env();
 
         let result = apply_reduce_to_frame(
@@ -3730,8 +4720,8 @@ mod tests {
         table.action.resize(6, ActionRow::default());
         table.goto.resize(6, GotoRow::default());
 
-        let mut predecessors = vec![BTreeSet::new(); 6];
-        predecessors[5] = BTreeSet::from([1, 2]);
+        let mut predecessors = vec![PredecessorSet::new(); 6];
+        predecessors[5] = smallvec![1, 2];
         let budget = UnitInlineBudget::from_env();
 
         let result = apply_reduce_to_frame(
@@ -3766,6 +4756,131 @@ mod tests {
     }
 
     #[test]
+    fn in_place_action_target_remap_matches_copy_remap() {
+        let mapping = vec![3, 0, 2, 1, 4, 5];
+        let actions = vec![
+            Action::Shift(1, false),
+            Action::Reduce(7, 2),
+            Action::Split {
+                shift: Some((3, true)),
+                reduces: vec![(4, 1), (5, 2)],
+                accept: false,
+            },
+            Action::StackShifts(vec![
+                StackShift {
+                    pop: 1,
+                    pushes: vec![0, 3],
+                },
+                StackShift {
+                    pop: 1,
+                    pushes: vec![0, 1],
+                },
+            ]),
+            Action::GuardedStackShifts(vec![GuardedStackShift {
+                guards: vec![StackShiftGuard {
+                    pop: 1,
+                    states: vec![0, 3],
+                }],
+                pop: 2,
+                pushes: vec![1, 4],
+            }]),
+            Action::Accept,
+        ];
+        for action in actions {
+            let expected = remap_action_targets(&action, &mapping);
+            let mut actual = action;
+            remap_action_targets_in_place(&mut actual, &mapping);
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn trivial_origin_dependent_one_push_shortcut_matches_generic_refusal() {
+        let mut action = vec![ActionRow::default(); 6];
+        action[3].insert(0, Action::Shift(5, true));
+        action[4].insert(0, Action::Shift(5, true));
+        let mut goto = vec![GotoRow::default(); 6];
+        goto[1].insert(10, (3, false));
+        goto[2].insert(10, (4, false));
+        let table = GLRTable {
+            action,
+            goto,
+            num_states: 6,
+            num_terminals: 1,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            construction: GlrTableConstruction::LegacyRowBisim,
+            admission_policy: AdmissionPolicy::RowPresenceExact,
+            advance: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+            guarded_shift_index: Vec::new(),
+        };
+        let mut predecessors = vec![PredecessorSet::new(); 6];
+        predecessors[0] = smallvec![1, 2];
+        let reduce = Action::Reduce(10, 1);
+        let mut shortcut_reads = Vec::new();
+        assert!(is_trivial_origin_dependent_one_push(
+            &table,
+            &predecessors,
+            0,
+            0,
+            &reduce,
+            &mut shortcut_reads,
+        ));
+        assert_eq!(shortcut_reads, vec![((0, 0), (3, 0)), ((0, 0), (4, 0))]);
+
+        let budget = UnitInlineBudget::from_env();
+        let generic = try_inline_action_to_stack_shifts_detailed(
+            &table,
+            &predecessors,
+            0,
+            0,
+            &reduce,
+            &mut FxHashMap::default(),
+            &mut Vec::new(),
+            &budget,
+        );
+        assert!(generic.action.is_none());
+        assert!(matches!(
+            generic.outcome,
+            StackInlineOutcomeKind::OriginDependentOnePush
+        ));
+    }
+
+    #[test]
+    fn trivial_origin_dependent_one_push_shortcut_rejects_nonreplace_continuation() {
+        let mut action = vec![ActionRow::default(); 4];
+        action[3].insert(0, Action::Shift(3, false));
+        let mut goto = vec![GotoRow::default(); 4];
+        goto[1].insert(10, (3, false));
+        let table = GLRTable {
+            action,
+            goto,
+            num_states: 4,
+            num_terminals: 1,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            construction: GlrTableConstruction::LegacyRowBisim,
+            admission_policy: AdmissionPolicy::RowPresenceExact,
+            advance: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+            guarded_shift_index: Vec::new(),
+        };
+        let mut predecessors = vec![PredecessorSet::new(); 4];
+        predecessors[0].push(1);
+        assert!(!is_trivial_origin_dependent_one_push(
+            &table,
+            &predecessors,
+            0,
+            0,
+            &Action::Reduce(10, 1),
+            &mut Vec::new(),
+        ));
+    }
+
+    #[test]
     fn inline_action_to_stack_shifts_keeps_multishift_replacement_reduce_chain() {
         let mut action = vec![ActionRow::default(); 5];
         action[2].insert(
@@ -3795,8 +4910,8 @@ mod tests {
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
         };
-        let mut predecessors = vec![BTreeSet::new(); 5];
-        predecessors[2].insert(1);
+        let mut predecessors = vec![PredecessorSet::new(); 5];
+        predecessors[2].push(1);
         let budget = UnitInlineBudget::from_env();
 
         let action = table.action(2, 0).expect("expected split action");
@@ -3807,6 +4922,7 @@ mod tests {
             0,
             action,
             &mut FxHashMap::default(),
+            &mut Vec::new(),
             &budget,
         );
 
@@ -3858,8 +4974,8 @@ mod tests {
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
         };
-        let mut predecessors = vec![BTreeSet::new(); 6];
-        predecessors[2].insert(1);
+        let mut predecessors = vec![PredecessorSet::new(); 6];
+        predecessors[2].push(1);
         let budget = UnitInlineBudget::from_env();
 
         let action = table.action(2, 0).expect("expected split action");
@@ -3870,6 +4986,7 @@ mod tests {
             0,
             action,
             &mut FxHashMap::default(),
+            &mut Vec::new(),
             &budget,
         );
 
@@ -3916,8 +5033,8 @@ mod tests {
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
         };
-        let mut predecessors = vec![BTreeSet::new(); 9];
-        predecessors[2].extend([1, 6]);
+        let mut predecessors = vec![PredecessorSet::new(); 9];
+        predecessors[2].extend_from_slice(&[1, 6]);
         let budget = UnitInlineBudget::from_env();
 
         let action = table.action(2, 0).expect("expected reduce action");
@@ -3928,6 +5045,7 @@ mod tests {
             0,
             action,
             &mut FxHashMap::default(),
+            &mut Vec::new(),
             &budget,
         );
 
@@ -3977,8 +5095,8 @@ mod tests {
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
         };
-        let mut predecessors = vec![BTreeSet::new(); 4];
-        predecessors[2].insert(1);
+        let mut predecessors = vec![PredecessorSet::new(); 4];
+        predecessors[2].push(1);
 
         assert_eq!(unit_reduce_destination(&table, &predecessors, 2, 10), None);
     }
@@ -4228,14 +5346,16 @@ mod tests {
 
 fn try_inline_unit_reductions_for_cell_inner(
     table: &mut GLRTable,
-    predecessors: &[BTreeSet<u32>],
+    predecessors: &[PredecessorSet],
     state: u32,
     tid: TerminalID,
     action: &Action,
-    constituent_sets: &mut Vec<BTreeSet<u32>>,
+    constituent_sets: &mut Vec<StateSubset>,
     subset_to_state: &mut FxHashMap<Vec<u32>, u32>,
     failed_subsets: &mut FxHashSet<Vec<u32>>,
     visiting: &mut BTreeSet<(u32, TerminalID)>,
+    owner: UnitInlineCell,
+    dependencies: &mut UnitInlineDependencies,
     budget: &UnitInlineBudget,
 ) -> Result<Option<CellUpdate>, ()> {
     if !budget.record_stack_effect_visit() {
@@ -4281,6 +5401,7 @@ fn try_inline_unit_reductions_for_cell_inner(
             continue;
         };
 
+        dependencies.record_read(owner, (reduce_dst, tid));
         match table.action[reduce_dst as usize].get(&tid).cloned() {
             None => {
                 pending.push_reduce(lhs, pop_len);
@@ -4296,6 +5417,8 @@ fn try_inline_unit_reductions_for_cell_inner(
                     subset_to_state,
                     failed_subsets,
                     visiting,
+                    owner,
+                    dependencies,
                     budget,
                 )? {
                     Some(CellUpdate::Set(action)) => Some(action),
@@ -4335,9 +5458,47 @@ fn try_inline_unit_reductions_for_cell_inner(
 }
 
 fn remap_action_row_targets_in_place(action_row: &mut ActionRow, mapping: &[u32]) {
-    action_row.for_each_value_mut(|action| {
-        *action = remap_action_targets(action, mapping);
-    });
+    action_row.for_each_value_mut(|action| remap_action_targets_in_place(action, mapping));
+}
+
+/// Remap action targets without cloning reductions, shift lists, or guarded
+/// alternatives. This is used while compacting a quotient; it preserves the
+/// exact normalization performed by `remap_action_targets` for actions whose
+/// target IDs can collide after a merge.
+fn remap_action_targets_in_place(action: &mut Action, mapping: &[u32]) {
+    match action {
+        Action::Shift(target, _) => {
+            *target = mapping[*target as usize];
+        }
+        Action::StackShifts(shifts) => {
+            for shift in shifts.iter_mut() {
+                for target in &mut shift.pushes {
+                    *target = mapping[*target as usize];
+                }
+            }
+            normalize_stack_shifts(shifts);
+        }
+        Action::GuardedStackShifts(shifts) => {
+            for shift in shifts.iter_mut() {
+                for guard in shift.guards.iter_mut() {
+                    for state in &mut guard.states {
+                        *state = mapping[*state as usize];
+                    }
+                    guard.states.sort_unstable();
+                    guard.states.dedup();
+                }
+                for target in &mut shift.pushes {
+                    *target = mapping[*target as usize];
+                }
+            }
+        }
+        Action::Reduce(_, _) | Action::Accept => {}
+        Action::Split { shift, .. } => {
+            if let Some((target, _)) = shift {
+                *target = mapping[*target as usize];
+            }
+        }
+    }
 }
 
 fn remap_goto_row_targets_in_place(goto_row: &mut GotoRow, mapping: &[u32]) {

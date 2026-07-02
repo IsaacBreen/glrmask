@@ -12,11 +12,10 @@ const UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES_ENV: &str =
     "GLRMASK_UNIT_REDUCTION_INLINE_MAX_PRE_MERGE_STATES";
 const ROW_BISIM_MAX_PRE_MERGE_STATES_ENV: &str =
     "GLRMASK_ROW_BISIM_MAX_PRE_MERGE_STATES";
-// Row quotienting and unit-reduction inlining are representation
-// optimizations. On very large canonical tables their build cost outweighs
-// the small residual reduction in states. Set either cap to 0 to remove it.
-const DEFAULT_UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES: u32 = 10_000;
-const DEFAULT_ROW_BISIM_MAX_PRE_MERGE_STATES: u32 = 10_000;
+const SAME_CORE_MAX_PRE_MERGE_STATES_ENV: &str =
+    "GLRMASK_SAME_CORE_MAX_PRE_MERGE_STATES";
+const INCREMENTAL_ROW_MERGE_ENV: &str = "GLRMASK_INCREMENTAL_ROW_MERGE";
+const DEFAULT_SAME_CORE_MAX_PRE_MERGE_STATES: u32 = 4_096;
 
 fn glr_table_construction(default: GlrTableConstruction) -> GlrTableConstruction {
     match std::env::var(GLR_TABLE_CONSTRUCTION_ENV) {
@@ -49,14 +48,19 @@ fn unit_reduction_inlining_enabled() -> bool {
     !env_flag_enabled(DISABLE_UNIT_REDUCTION_INLINING_ENV)
 }
 
+fn incremental_row_merge_enabled() -> bool {
+    env_flag_enabled(INCREMENTAL_ROW_MERGE_ENV)
+}
+
+
 fn unit_reduction_inlining_max_pre_merge_states() -> Option<u32> {
     match std::env::var(UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES_ENV) {
         Ok(value) => match value.trim().parse::<u32>() {
             Ok(0) => None,
             Ok(parsed) => Some(parsed),
-            Err(_) => Some(DEFAULT_UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES),
+            Err(_) => None,
         },
-        Err(_) => Some(DEFAULT_UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES),
+        Err(_) => None,
     }
 }
 
@@ -65,14 +69,31 @@ fn row_bisim_max_pre_merge_states() -> Option<u32> {
         Ok(value) => match value.trim().parse::<u32>() {
             Ok(0) => None,
             Ok(parsed) => Some(parsed),
-            Err(_) => Some(DEFAULT_ROW_BISIM_MAX_PRE_MERGE_STATES),
+            Err(_) => None,
         },
-        Err(_) => Some(DEFAULT_ROW_BISIM_MAX_PRE_MERGE_STATES),
+        Err(_) => None,
     }
 }
 
 fn row_bisim_quotient_enabled(pre_merge_states: u32) -> bool {
     row_bisim_max_pre_merge_states()
+        .is_none_or(|max_pre_merge_states| pre_merge_states <= max_pre_merge_states)
+}
+
+
+fn same_core_max_pre_merge_states() -> Option<u32> {
+    match std::env::var(SAME_CORE_MAX_PRE_MERGE_STATES_ENV) {
+        Ok(value) => match value.trim().parse::<u32>() {
+            Ok(0) => None,
+            Ok(parsed) => Some(parsed),
+            Err(_) => Some(DEFAULT_SAME_CORE_MAX_PRE_MERGE_STATES),
+        },
+        Err(_) => Some(DEFAULT_SAME_CORE_MAX_PRE_MERGE_STATES),
+    }
+}
+
+fn same_core_quotient_enabled(pre_merge_states: u32) -> bool {
+    same_core_max_pre_merge_states()
         .is_none_or(|max_pre_merge_states| pre_merge_states <= max_pre_merge_states)
 }
 
@@ -167,7 +188,21 @@ pub(super) fn build_table_with_default_construction(
         && (unit_collapse_enabled || table.num_states != states_before_prune);
     let merge_identical2_ms = if merge_identical2_needed {
         let merge2_started_at = std::time::Instant::now();
-        table.merge_identical_rows();
+        let use_incremental = incremental_row_merge_enabled()
+            && table.num_states == states_before_prune
+            && unit_collapse_report.as_ref().is_some_and(|report| {
+                !report.aborted
+                    && report.synthetic_states == 0
+                    && !report.changed_original_states.is_empty()
+            });
+        if use_incremental {
+            let report = unit_collapse_report
+                .as_ref()
+                .expect("incremental post-unit merge requires its report");
+            table.merge_identical_rows_from_dirty(&report.changed_original_states);
+        } else {
+            table.merge_identical_rows();
+        }
         merge2_started_at.elapsed().as_secs_f64() * 1000.0
     } else {
         0.0
@@ -175,13 +210,19 @@ pub(super) fn build_table_with_default_construction(
     let merge_ms = t2.elapsed().as_secs_f64() * 1000.0;
 
     let t3 = std::time::Instant::now();
+    let stack_shift_canon_started_at = std::time::Instant::now();
     // The downstream parser and template builders already merge equivalent
     // artifacts. Running the recognizer-only equivalence pass here costs more
     // on large schemas than it saves in later phases.
     if construction == GlrTableConstruction::LegacyRowBisim {
         table.canonicalize_stack_shift_predecessors();
+    }
+    let stack_shift_canon_ms = stack_shift_canon_started_at.elapsed().as_secs_f64() * 1000.0;
+    let suffix_quotient_started_at = std::time::Instant::now();
+    if construction == GlrTableConstruction::LegacyRowBisim {
         table.quotient_recognizer_stack_suffixes();
     }
+    let suffix_quotient_ms = suffix_quotient_started_at.elapsed().as_secs_f64() * 1000.0;
     let recog_ms = t3.elapsed().as_secs_f64() * 1000.0;
     let _ = (
         lr1_ms,
@@ -205,7 +246,7 @@ pub(super) fn build_table_with_default_construction(
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
     {
         eprintln!(
-            "[glrmask/profile][glr_table] construction={:?} lr1_item_sets_ms={:.3} construction_ms={:.3} pre_merge_states={} post_merge_states={} row_bisim_quotient={} row_bisim_quotient_skip_reason={} unit_collapse={} unit_collapse_aborted={} unit_collapse_reason={} unit_collapse_skip_reason={} merge_ms={:.3} merge_identical1_ms={:.3} unit_collapse_ms={:.3} prune_ms={:.3} merge_identical2_needed={} merge_identical2_ms={:.3} stack_shift_canon_ms={:.3}",
+            "[glrmask/profile][glr_table] construction={:?} lr1_item_sets_ms={:.3} construction_ms={:.3} pre_merge_states={} post_merge_states={} row_bisim_quotient={} row_bisim_quotient_skip_reason={} unit_collapse={} unit_collapse_aborted={} unit_collapse_reason={} unit_collapse_skip_reason={} merge_ms={:.3} merge_identical1_ms={:.3} unit_collapse_ms={:.3} prune_ms={:.3} merge_identical2_needed={} merge_identical2_ms={:.3} stack_shift_canon_ms={:.3} suffix_quotient_ms={:.3}",
             construction,
             lr1_ms,
             construction_ms,
@@ -228,7 +269,8 @@ pub(super) fn build_table_with_default_construction(
             prune_ms,
             merge_identical2_needed,
             merge_identical2_ms,
-            recog_ms,
+            stack_shift_canon_ms,
+            suffix_quotient_ms,
         );
     }
 
@@ -370,8 +412,7 @@ fn finish_table(
             let mut entries = by_terminal
                 .into_iter()
                 .collect::<Vec<_>>();
-            // `BTreeMap` used to provide this order implicitly. Retain it so
-            // SparseRow insertion and serialized table bytes are unchanged.
+            // Preserve canonical order for stable construction and artifacts.
             entries.sort_unstable_by_key(|(terminal, _)| *terminal);
             entries
                 .into_iter()
@@ -772,6 +813,46 @@ fn first_bitsets(grammar: &AnalyzedGrammar) -> Vec<BitSet> {
     grammar.first.clone()
 }
 
+struct RuleSuffixFirst {
+    first: Vec<BitSet>,
+    nullable: Vec<bool>,
+}
+
+/// FIRST and nullability for every suffix of every RHS. LR(1) closure visits
+/// the same `(rule, dot + 1)` suffixes many times across successor kernels;
+/// compute those grammar-only facts once rather than rescanning each suffix.
+fn rule_suffix_first_sets(grammar: &AnalyzedGrammar) -> Vec<RuleSuffixFirst> {
+    grammar
+        .rules
+        .iter()
+        .map(|rule| {
+            let len = rule.rhs.len();
+            let mut first = (0..=len)
+                .map(|_| BitSet::new(grammar.num_terminals as usize + 1))
+                .collect::<Vec<_>>();
+            let mut nullable = vec![false; len + 1];
+            nullable[len] = true;
+            for index in (0..len).rev() {
+                match rule.rhs[index] {
+                    Symbol::Terminal(terminal) => {
+                        first[index].set(terminal as usize);
+                    }
+                    Symbol::Nonterminal(nonterminal) => {
+                        first[index] = grammar.first[nonterminal as usize].clone();
+                        let nonterminal_nullable = grammar.nullable.contains(&nonterminal);
+                        if nonterminal_nullable {
+                            let following_first = first[index + 1].clone();
+                            first[index].union_with(&following_first);
+                        }
+                        nullable[index] = nonterminal_nullable && nullable[index + 1];
+                    }
+                }
+            }
+            RuleSuffixFirst { first, nullable }
+        })
+        .collect()
+}
+
 fn union_lookaheads(item_set: &mut LR1ItemSet, core: LR1ItemCore, lookaheads: &BitSet) -> BitSet {
     let entry = item_set
         .entry(core)
@@ -780,13 +861,15 @@ fn union_lookaheads(item_set: &mut LR1ItemSet, core: LR1ItemCore, lookaheads: &B
 }
 
 fn lr1_closure(
-    items: &LR1ItemSet,
+    mut result: LR1ItemSet,
     grammar: &AnalyzedGrammar,
-    first: &[BitSet],
+    suffix_first: &[RuleSuffixFirst],
 ) -> LR1ItemSet {
     let rules = &grammar.rules;
-    let mut result = items.clone();
-    let mut queue: VecDeque<(LR1ItemCore, BitSet)> = items
+    // Every caller constructs its kernel solely to close it. Consume that
+    // kernel directly instead of cloning its ordered map and lookahead bitsets
+    // before the fixed point starts.
+    let mut queue: VecDeque<(LR1ItemCore, BitSet)> = result
         .iter()
         .map(|(core, lookaheads)| (*core, lookaheads.clone()))
         .collect();
@@ -797,23 +880,32 @@ fn lr1_closure(
             continue;
         }
         if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
-            let rhs = &rules[item.rule as usize].rhs;
-            let beta = &rhs[(item.dot as usize + 1)..];
-
-            let lookaheads = first_of_sequence_bits(
-                beta,
-                &lookahead_delta,
-                &first,
-                &grammar.nullable,
-                grammar.num_terminals,
-            );
-
-            for &i in &grammar.rules_by_lhs[*nt as usize] {
-                let sd = grammar.rules[i as usize].rhs.len() as u32;
-                let new_item = LR1ItemCore::new(i, 0, sd);
-                let delta = union_lookaheads(&mut result, new_item, &lookaheads);
-                if !delta.is_empty() {
-                    queue.push_back((new_item, delta));
+            let suffix = &suffix_first[item.rule as usize];
+            let suffix_index = item.dot as usize + 1;
+            let base_lookaheads = &suffix.first[suffix_index];
+            if suffix.nullable[suffix_index] {
+                let mut propagated_lookaheads = base_lookaheads.clone();
+                propagated_lookaheads.union_with(&lookahead_delta);
+                for &i in &grammar.rules_by_lhs[*nt as usize] {
+                    let sd = grammar.rules[i as usize].rhs.len() as u32;
+                    let new_item = LR1ItemCore::new(i, 0, sd);
+                    let delta = union_lookaheads(
+                        &mut result,
+                        new_item,
+                        &propagated_lookaheads,
+                    );
+                    if !delta.is_empty() {
+                        queue.push_back((new_item, delta));
+                    }
+                }
+            } else {
+                for &i in &grammar.rules_by_lhs[*nt as usize] {
+                    let sd = grammar.rules[i as usize].rhs.len() as u32;
+                    let new_item = LR1ItemCore::new(i, 0, sd);
+                    let delta = union_lookaheads(&mut result, new_item, base_lookaheads);
+                    if !delta.is_empty() {
+                        queue.push_back((new_item, delta));
+                    }
                 }
             }
         }
@@ -934,10 +1026,13 @@ fn lr1_item_set_fingerprint(set: &LR1ItemSet) -> u64 {
 fn expand_lr1_state(
     source_items: &LR1ItemSet,
     grammar: &AnalyzedGrammar,
-    first: &[BitSet],
+    suffix_first: &[RuleSuffixFirst],
 ) -> Vec<LR1Successor> {
     let rules = &grammar.rules;
-    let mut kernels: BTreeMap<Symbol, LR1ItemSet> = BTreeMap::new();
+    // Accumulate by hash, then restore the existing canonical symbol order
+    // before closure/interner traversal. This avoids tree maintenance in the
+    // hot expansion path without changing successor or state numbering.
+    let mut kernels: FxHashMap<Symbol, LR1ItemSet> = FxHashMap::default();
     for (item, lookaheads) in source_items {
         if item.transferred {
             if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
@@ -961,6 +1056,8 @@ fn expand_lr1_state(
         }
     }
 
+    let mut kernels = kernels.into_iter().collect::<Vec<_>>();
+    kernels.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
     kernels
         .into_iter()
         .filter_map(|(symbol, kernel)| {
@@ -989,7 +1086,7 @@ fn expand_lr1_state(
             } else {
                 kernel
             };
-            let target_items = Arc::new(lr1_closure(&adjusted_kernel, grammar, first));
+            let target_items = Arc::new(lr1_closure(adjusted_kernel, grammar, suffix_first));
             if target_items.is_empty() {
                 None
             } else {
@@ -1005,7 +1102,7 @@ fn build_lr1_item_sets(
 ) -> (Vec<LR1ItemSet>, Vec<BTreeMap<Symbol, (u32, bool, bool)>>) {
     let rules = &grammar.rules;
     let lookahead_len = grammar.num_terminals as usize + 1;
-    let first = first_bitsets(grammar);
+    let suffix_first = rule_suffix_first_sets(grammar);
 
     let initial = Arc::new({
         let mut s = LR1ItemSet::new();
@@ -1013,7 +1110,7 @@ fn build_lr1_item_sets(
         let mut lookaheads = BitSet::new(lookahead_len);
         lookaheads.set(lookahead_bit(EOF, grammar.num_terminals));
         s.insert(LR1ItemCore::new(0, 0, sd), lookaheads);
-        lr1_closure(&s, grammar, &first)
+        lr1_closure(s, grammar, &suffix_first)
     });
 
     let mut item_sets = vec![initial.clone()];
@@ -1043,7 +1140,11 @@ fn build_lr1_item_sets(
         let expanded = frontier
             .par_iter()
             .map(|&state_id| {
-                let successors = expand_lr1_state(&item_sets[state_id as usize], grammar, &first);
+                let successors = expand_lr1_state(
+                    &item_sets[state_id as usize],
+                    grammar,
+                    &suffix_first,
+                );
                 (state_id, successors)
             })
             .collect::<Vec<_>>();
@@ -1401,13 +1502,20 @@ fn build_lr1_table(
     item_sets: &[LR1ItemSet],
     transitions: &[BTreeMap<Symbol, (u32, bool, bool)>],
 ) -> GLRTable {
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let init_started_at = profile_enabled.then(std::time::Instant::now);
     let (pending, goto, forwarded_shifts) = initialize_pending_and_goto(transitions);
+    let init_ms = init_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
     // Replace flags are now carried in the transitions map from
     // build_lr1_item_sets, so we don't need to recompute them here.
 
     let mut pending = pending;
     let goto = goto;
+    let reductions_started_at = profile_enabled.then(std::time::Instant::now);
     // Each state's pending reduce/accept actions depend only on that state's
     // items, so populate the rows in parallel. Shifts were already filled in by
     // `initialize_pending_and_goto`; we only append reduces/accepts here.
@@ -1439,19 +1547,32 @@ fn build_lr1_table(
                 }
             }
         });
+    let reductions_ms = reductions_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
     // Grouped LR(1) lookahead sets delay scalar fanout until pending-action
     // emission. The old local-forward path is written for scalar LR1 items,
     // so keep replace handling conservative here rather than approximating.
-
-    finish_table(
+    let finish_started_at = profile_enabled.then(std::time::Instant::now);
+    let table = finish_table(
         grammar,
         pending,
         goto,
         forwarded_shifts,
         GlrTableConstruction::LegacyRowBisim,
         AdmissionPolicy::RowPresenceExact,
-    )
+    );
+    if let Some(finish_started_at) = finish_started_at {
+        eprintln!(
+            "[glrmask/profile][lr1_table] init_ms={:.3} reductions_ms={:.3} finish_ms={:.3} states={}",
+            init_ms,
+            reductions_ms,
+            finish_started_at.elapsed().as_secs_f64() * 1000.0,
+            table.num_states,
+        );
+    }
+    table
 }
 
 // Legacy row-bisimulation merge over canonical LR(1) item sets.
@@ -1662,7 +1783,7 @@ fn build_legacy_row_bisim_table(
     let canonical = build_lr1_table(grammar, item_sets, transitions);
     let canonical_ms = canonical_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
-    if !row_bisim_quotient_enabled(canonical.num_states) {
+    if !same_core_quotient_enabled(canonical.num_states) {
         if let Some(canonical_ms) = canonical_ms {
             eprintln!(
                 "[glrmask/profile][glr_legacy_build] canonical_table_ms={:.3} core_keys_ms=0.000 same_core_merge_ms=0.000 pre_merge_states={} post_core_states={} same_core_skip_reason=pre_merge_states",
