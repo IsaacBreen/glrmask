@@ -98,7 +98,7 @@ struct PairCharacterization {
     swapped_hashes: Vec<CharacterizationHash>,
 }
 
-struct RestrictedDfa {
+struct InterchangeabilityDfa {
     bytes: Vec<u8>,
     destinations: Vec<usize>,
     real_state_count: usize,
@@ -110,7 +110,7 @@ struct RestrictedDfa {
     signature_capacity: usize,
 }
 
-impl RestrictedDfa {
+impl InterchangeabilityDfa {
     fn new(
         tokenizer: &Tokenizer,
         observed_terminals: &[bool],
@@ -441,7 +441,7 @@ impl TerminalInterchangeability {
 
         // The tokenizer DFA and its metadata are frozen. `relevant_bytes` only
         // determines which byte transitions the characterization traverses.
-        let mut dfa = RestrictedDfa::new(tokenizer, active_terminals, relevant_bytes);
+        let mut dfa = InterchangeabilityDfa::new(tokenizer, active_terminals, relevant_bytes);
         let mut pair_maps = BTreeMap::<(TerminalID, TerminalID), InterchangeMap>::new();
         let mut components = DisjointSet::new(active_terminals.len());
 
@@ -619,7 +619,7 @@ mod tests {
                 },
             ]),
         ]);
-        let mut dfa = RestrictedDfa::new(&tokenizer, &[true, true], &[true; 256]);
+        let mut dfa = InterchangeabilityDfa::new(&tokenizer, &[true, true], &[true; 256]);
         assert!(dfa.interchange_map(0, 1).is_none());
     }
 
@@ -629,7 +629,7 @@ mod tests {
             Expr::U8Seq(b"same".to_vec()),
             Expr::U8Seq(b"same".to_vec()),
         ]);
-        let mut dfa = RestrictedDfa::new(&tokenizer, &[true, true], &[true; 256]);
+        let mut dfa = InterchangeabilityDfa::new(&tokenizer, &[true, true], &[true; 256]);
         let map = dfa.interchange_map(0, 1).expect("identical literals must transport");
         let root = tokenizer.initial_state_id() as usize;
         assert!(map.target_class_for_source_state[root].contains(&tokenizer.initial_state_id()));
@@ -668,7 +668,7 @@ mod tests {
         let after_a = tokenizer.get_transition(tokenizer.initial_state_id(), b'a') as usize;
         let mut only_a = [false; 256];
         only_a[b'a' as usize] = true;
-        let restricted = RestrictedDfa::new(&tokenizer, &[true, true], &only_a);
+        let restricted = InterchangeabilityDfa::new(&tokenizer, &[true, true], &only_a);
         assert_eq!(restricted.bytes, vec![b'a']);
         assert_eq!(restricted.destination_for_slot(after_a, 0), restricted.dead_state());
         assert!(restricted.output_at(&restricted.future_finalizers, after_a).contains(1));
@@ -681,7 +681,7 @@ mod tests {
             Expr::U8Seq(b"b".to_vec()),
             Expr::U8Seq(b"a".to_vec()),
         ]);
-        let mut dfa = RestrictedDfa::new(&tokenizer, &[true, false, true], &[true; 256]);
+        let mut dfa = InterchangeabilityDfa::new(&tokenizer, &[true, false, true], &[true; 256]);
         assert!(dfa.interchange_map(0, 2).is_some());
     }
 
