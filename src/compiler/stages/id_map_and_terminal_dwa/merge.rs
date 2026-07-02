@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use crate::automata::weighted::determinize::determinize;
@@ -25,6 +25,8 @@ use crate::compiler::stages::mapped_artifact::MappedArtifact;
 use crate::ds::weight::Weight;
 
 use super::types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile, compile_profile_enabled};
+
+type RemapCache<T> = FxHashMap<usize, T>;
 
 fn merged_terminal_dwa_phase_enabled(variable: &str, default: bool) -> bool {
     std::env::var(variable)
@@ -79,6 +81,78 @@ fn select_primary_token_nwa_tsid_source(inputs: &[LocalIdMapTerminalDwa]) -> Opt
     })
 }
 
+fn token_nwa_tsid_source_order(source_count: usize) -> Option<Vec<usize>> {
+    let value = std::env::var("GLRMASK_EXPERIMENTAL_TOKEN_NWA_TSID_ORDER").ok()?;
+    let order: Vec<usize> = value
+        .split(',')
+        .map(|part| part.trim().parse::<usize>().ok())
+        .collect::<Option<_>>()?;
+    let mut seen = vec![false; source_count];
+    if order.len() != source_count
+        || order.iter().any(|&source| source >= source_count || std::mem::replace(&mut seen[source], true))
+    {
+        return None;
+    }
+    Some(order)
+}
+
+#[derive(Default)]
+struct TokenNwaRemapDetail {
+    unique_weights: usize,
+    full_weights: usize,
+    compact_entries: usize,
+    local_tsid_visits: usize,
+    global_tsid_expansions: usize,
+    max_local_entry_span: usize,
+    max_global_entry_expansion: usize,
+}
+
+fn profile_token_nwa_remap_detail(
+    dwa: &DWA,
+    local_to_global_tsids: &[Vec<u32>],
+) -> TokenNwaRemapDetail {
+    let mut detail = TokenNwaRemapDetail::default();
+    let mut seen = FxHashSet::<usize>::default();
+    let mut inspect = |weight: &Weight| {
+        if weight.is_empty() || !seen.insert(weight.ptr_key()) {
+            return;
+        }
+        detail.unique_weights += 1;
+        if weight.is_full() {
+            detail.full_weights += 1;
+            detail.global_tsid_expansions += local_to_global_tsids.iter().map(Vec::len).sum::<usize>();
+            return;
+        }
+        let Some(entries) = weight.compact_entries() else {
+            return;
+        };
+        detail.compact_entries += entries.len();
+        for (start, end, _) in entries {
+            let span = end.saturating_sub(start) as usize + 1;
+            detail.local_tsid_visits += span;
+            detail.max_local_entry_span = detail.max_local_entry_span.max(span);
+            let mut entry_expansion = 0usize;
+            for local_tsid in start..=end {
+                let expansion = local_to_global_tsids
+                    .get(local_tsid as usize)
+                    .map_or(0, Vec::len);
+                detail.global_tsid_expansions += expansion;
+                entry_expansion += expansion;
+            }
+            detail.max_global_entry_expansion = detail.max_global_entry_expansion.max(entry_expansion);
+        }
+    };
+    for state in dwa.states() {
+        if let Some(final_weight) = &state.final_weight {
+            inspect(final_weight);
+        }
+        for (_, weight) in state.transitions.values() {
+            inspect(weight);
+        }
+    }
+    detail
+}
+
 /// Return whether each source owns a disjoint set of original vocabulary tokens.
 ///
 /// After remapping, this is stronger than a representation detail: every
@@ -125,7 +199,7 @@ impl TokenRemap<'_> {
         &self,
         token_key: usize,
         tokens: &RangeSetBlaze<u32>,
-        token_cache: &mut HashMap<usize, Arc<RangeSetBlaze<u32>>>,
+        token_cache: &mut RemapCache<Arc<RangeSetBlaze<u32>>>,
     ) -> Arc<RangeSetBlaze<u32>> {
         if let Some(existing) = token_cache.get(&token_key) {
             return Arc::clone(existing);
@@ -183,6 +257,27 @@ impl TokenRemap<'_> {
     }
 }
 
+fn build_local_to_global_tsid_runs(
+    local_to_global_tsids: &[Vec<u32>],
+) -> Vec<SmallVec<[(u32, u32); 1]>> {
+    local_to_global_tsids
+        .iter()
+        .map(|globals| {
+            let mut runs = SmallVec::<[(u32, u32); 1]>::new();
+            for &global_tsid in globals {
+                if let Some((_, end)) = runs.last_mut() {
+                    if global_tsid == end.saturating_add(1) {
+                        *end = global_tsid;
+                        continue;
+                    }
+                }
+                runs.push((global_tsid, global_tsid));
+            }
+            runs
+        })
+        .collect()
+}
+
 /// Remap a deterministic weighted automaton directly, preserving the same
 /// branch-local token domain handling as `remap_nwa_with_maps`.
 fn remap_dwa_with_maps(
@@ -224,8 +319,9 @@ fn remap_dwa_with_token_remap(
     global_tsid_count: usize,
 ) {
     let profile = compile_profile_enabled();
-    let mut weight_cache = HashMap::<usize, Weight>::new();
-    let mut token_cache = HashMap::<usize, Arc<RangeSetBlaze<u32>>>::new();
+    let local_to_global_tsid_runs = build_local_to_global_tsid_runs(local_to_global_tsids);
+    let mut weight_cache = RemapCache::<Weight>::default();
+    let mut token_cache = RemapCache::<Arc<RangeSetBlaze<u32>>>::default();
     let mut weights_seen = 0usize;
     let input_states = dwa.num_states();
     let input_transitions = dwa.num_transitions();
@@ -233,9 +329,10 @@ fn remap_dwa_with_token_remap(
     for state in dwa.states_mut() {
         if let Some(final_weight) = state.final_weight.as_mut() {
             weights_seen += 1;
-            *final_weight = remap_weight_cached_with_token_remap(
+            *final_weight = remap_weight_cached_with_tsid_runs(
                 final_weight,
                 local_to_global_tsids,
+                &local_to_global_tsid_runs,
                 &token_remap,
                 global_tsid_count,
                 &mut weight_cache,
@@ -248,9 +345,10 @@ fn remap_dwa_with_token_remap(
 
         for (_, weight) in state.transitions.values_mut() {
             weights_seen += 1;
-            *weight = remap_weight_cached_with_token_remap(
+            *weight = remap_weight_cached_with_tsid_runs(
                 weight,
                 local_to_global_tsids,
+                &local_to_global_tsid_runs,
                 &token_remap,
                 global_tsid_count,
                 &mut weight_cache,
@@ -303,8 +401,8 @@ fn remap_dwa_with_contiguous_tsid_blocks_offset(
         offset: token_offset,
         local_token_count,
     };
-    let mut weight_cache = HashMap::<usize, Weight>::new();
-    let mut token_cache = HashMap::<usize, Arc<RangeSetBlaze<u32>>>::new();
+    let mut weight_cache = RemapCache::<Weight>::default();
+    let mut token_cache = RemapCache::<Arc<RangeSetBlaze<u32>>>::default();
     for state in dwa.states_mut() {
         if let Some(final_weight) = state.final_weight.as_mut() {
             *final_weight = remap_weight_with_contiguous_tsid_blocks_cached(
@@ -335,8 +433,8 @@ fn remap_weight_with_contiguous_tsid_blocks_cached(
     weight: &Weight,
     blocks: &[(u32, u32)],
     token_remap: &TokenRemap<'_>,
-    cache: &mut HashMap<usize, Weight>,
-    token_cache: &mut HashMap<usize, Arc<RangeSetBlaze<u32>>>,
+    cache: &mut RemapCache<Weight>,
+    token_cache: &mut RemapCache<Arc<RangeSetBlaze<u32>>>,
 ) -> Weight {
     let key = Arc::as_ptr(&weight.0) as usize;
     if let Some(existing) = cache.get(&key) {
@@ -351,7 +449,7 @@ fn remap_weight_with_contiguous_tsid_blocks(
     weight: &Weight,
     blocks: &[(u32, u32)],
     token_remap: &TokenRemap<'_>,
-    token_cache: &mut HashMap<usize, Arc<RangeSetBlaze<u32>>>,
+    token_cache: &mut RemapCache<Arc<RangeSetBlaze<u32>>>,
 ) -> Weight {
     use crate::ds::weight::finalize_weight_map;
     use range_set_blaze::RangeMapBlaze;
@@ -770,6 +868,9 @@ pub(crate) fn try_merge_id_maps_and_token_deterministic_nwa(
     let mut fuse_start_ms = 0.0;
     for (input_index, input) in inputs.iter().enumerate() {
         let tsid_map = &all_tsid_maps[input_index];
+        let remap_detail = std::env::var_os("GLRMASK_PROFILE_TOKEN_NWA_REMAP_DETAIL")
+            .is_some()
+            .then(|| profile_token_nwa_remap_detail(&input.dwa, tsid_map));
         let started_at = profiling.then(Instant::now);
         let direct_token_map = direct_local_to_global_token_maps
             .as_ref()
@@ -857,6 +958,19 @@ pub(crate) fn try_merge_id_maps_and_token_deterministic_nwa(
                 tsid_runs,
                 tsid_max_fanout,
                 elapsed_ms,
+            );
+        }
+        if let Some(detail) = remap_detail {
+            eprintln!(
+                "[glrmask/profile][token_nwa_remap_detail] input={} unique_weights={} full_weights={} compact_entries={} local_tsid_visits={} global_tsid_expansions={} max_local_entry_span={} max_global_entry_expansion={}",
+                input_index,
+                detail.unique_weights,
+                detail.full_weights,
+                detail.compact_entries,
+                detail.local_tsid_visits,
+                detail.global_tsid_expansions,
+                detail.max_local_entry_span,
+                detail.max_global_entry_expansion,
             );
         }
         let started_at = profiling.then(Instant::now);
@@ -1248,12 +1362,25 @@ fn build_unified_global_id_map_disjoint_fast(
         state_i2o[class as usize].push(state as u32);
     }
 
-    if let Some(primary_source) = primary_source.filter(|source| *source < inputs.len()) {
+    let source_order = token_nwa_tsid_source_order(inputs.len()).or_else(|| {
+        primary_source
+            .filter(|source| *source < inputs.len())
+            .map(|primary| {
+                std::iter::once(primary)
+                    .chain((0..inputs.len()).filter(move |&source| source != primary))
+                    .collect()
+            })
+    });
+    if let Some(source_order) = source_order {
         let mut order: Vec<usize> = (0..class_keys.len()).collect();
         order.sort_unstable_by(|&left, &right| {
-            class_keys[left][primary_source]
-                .cmp(&class_keys[right][primary_source])
-                .then_with(|| class_keys[left].cmp(&class_keys[right]))
+            for &source in &source_order {
+                let comparison = class_keys[left][source].cmp(&class_keys[right][source]);
+                if !comparison.is_eq() {
+                    return comparison;
+                }
+            }
+            left.cmp(&right)
         });
         let mut old_to_new = vec![0u32; class_keys.len()];
         for (new_id, &old_id) in order.iter().enumerate() {
@@ -1652,8 +1779,8 @@ fn remap_nwa_with_maps(
     local_to_global_tokens: &[Vec<u32>],
     global_tsid_count: usize,
 ) {
-    let mut weight_cache = HashMap::<usize, Weight>::new();
-    let mut token_cache = HashMap::<usize, Arc<RangeSetBlaze<u32>>>::new();
+    let mut weight_cache = RemapCache::<Weight>::default();
+    let mut token_cache = RemapCache::<Arc<RangeSetBlaze<u32>>>::default();
 
     for state in  nwa.states_mut() {
         if let Some(final_weight) = state.final_weight.as_mut() {
@@ -1705,8 +1832,8 @@ fn remap_weight_cached(
     local_to_global_tsids: &[Vec<u32>],
     local_to_global_tokens: &[Vec<u32>],
     global_tsid_count: usize,
-    cache: &mut HashMap<usize, Weight>,
-    token_cache: &mut HashMap<usize, Arc<RangeSetBlaze<u32>>>,
+    cache: &mut RemapCache<Weight>,
+    token_cache: &mut RemapCache<Arc<RangeSetBlaze<u32>>>,
 ) -> Weight {
     remap_weight_cached_with_token_remap(
         weight,
@@ -1718,13 +1845,120 @@ fn remap_weight_cached(
     )
 }
 
+fn remap_weight_cached_with_tsid_runs(
+    weight: &Weight,
+    local_to_global_tsids: &[Vec<u32>],
+    local_to_global_tsid_runs: &[SmallVec<[(u32, u32); 1]>],
+    token_remap: &TokenRemap<'_>,
+    global_tsid_count: usize,
+    cache: &mut RemapCache<Weight>,
+    token_cache: &mut RemapCache<Arc<RangeSetBlaze<u32>>>,
+) -> Weight {
+    let ptr = Arc::as_ptr(&weight.0) as usize;
+    if let Some(cached) = cache.get(&ptr) {
+        return cached.clone();
+    }
+    let remapped = remap_weight_with_tsid_runs(
+        weight,
+        local_to_global_tsids,
+        local_to_global_tsid_runs,
+        token_remap,
+        global_tsid_count,
+        token_cache,
+    );
+    cache.insert(ptr, remapped.clone());
+    remapped
+}
+
+fn remap_weight_with_tsid_runs(
+    weight: &Weight,
+    local_to_global_tsids: &[Vec<u32>],
+    local_to_global_tsid_runs: &[SmallVec<[(u32, u32); 1]>],
+    token_remap: &TokenRemap<'_>,
+    global_tsid_count: usize,
+    token_cache: &mut RemapCache<Arc<RangeSetBlaze<u32>>>,
+) -> Weight {
+    if weight.is_empty() {
+        return weight.clone();
+    }
+    if weight.is_full() {
+        let all_global_tokens = token_remap.all_global_tokens();
+        let Some(last_global_tsid) = global_tsid_count.checked_sub(1).map(|count| count as u32) else {
+            return Weight::empty();
+        };
+        return (!all_global_tokens.is_empty())
+            .then(|| Weight::from_uniform(0..=last_global_tsid, all_global_tokens))
+            .unwrap_or_else(Weight::empty);
+    }
+
+    let Some(entries) = weight.compact_entries() else {
+        return weight.clone();
+    };
+    let mut intervals = SmallVec::<[(u32, u32, Arc<RangeSetBlaze<u32>>); 4]>::new();
+    for (start, end, tokens) in entries {
+        let token_key = Arc::as_ptr(&tokens) as usize;
+        let mapped_tokens = token_remap.map_tokens(token_key, tokens.as_ref(), token_cache);
+        if mapped_tokens.is_empty() {
+            continue;
+        }
+        for local_tsid in start..=end {
+            let Some(runs) = local_to_global_tsid_runs.get(local_tsid as usize) else {
+                continue;
+            };
+            for &(global_start, global_end) in runs {
+                intervals.push((global_start, global_end, Arc::clone(&mapped_tokens)));
+            }
+        }
+    }
+    if intervals.is_empty() {
+        return Weight::empty();
+    }
+    intervals.sort_unstable_by_key(|(start, _, _)| *start);
+
+    // A global refinement class has one local class for this source, so these
+    // intervals are disjoint. Keep the old generic path as an exact fallback
+    // if a caller ever supplies a non-partition map.
+    for pair in intervals.windows(2) {
+        if pair[0].1 >= pair[1].0 {
+            return remap_weight_with_token_remap(
+                weight,
+                local_to_global_tsids,
+                token_remap,
+                global_tsid_count,
+                token_cache,
+            );
+        }
+    }
+
+    use crate::ds::weight::finalize_weight_map;
+    use range_set_blaze::RangeMapBlaze;
+    let mut map = RangeMapBlaze::<u32, Arc<RangeSetBlaze<u32>>>::new();
+    let mut run_start = intervals[0].0;
+    let mut run_end = intervals[0].1;
+    let mut run_tokens = Arc::clone(&intervals[0].2);
+    for (start, end, tokens) in intervals.into_iter().skip(1) {
+        if start == run_end.saturating_add(1)
+            && (Arc::ptr_eq(&run_tokens, &tokens) || run_tokens.as_ref() == tokens.as_ref())
+        {
+            run_end = end;
+        } else {
+            map.extend_simple(std::iter::once((run_start..=run_end, run_tokens)));
+            run_start = start;
+            run_end = end;
+            run_tokens = tokens;
+        }
+    }
+    map.extend_simple(std::iter::once((run_start..=run_end, run_tokens)));
+    finalize_weight_map(map)
+}
+
 fn remap_weight_cached_with_token_remap(
     weight: &Weight,
     local_to_global_tsids: &[Vec<u32>],
     token_remap: &TokenRemap<'_>,
     global_tsid_count: usize,
-    cache: &mut HashMap<usize, Weight>,
-    token_cache: &mut HashMap<usize, Arc<RangeSetBlaze<u32>>>,
+    cache: &mut RemapCache<Weight>,
+    token_cache: &mut RemapCache<Arc<RangeSetBlaze<u32>>>,
 ) -> Weight {
     let ptr = Arc::as_ptr(&weight.0) as usize;
     if let Some(cached) = cache.get(&ptr) {
@@ -1746,7 +1980,7 @@ fn remap_weight_with_token_remap(
     local_to_global_tsids: &[Vec<u32>],
     token_remap: &TokenRemap<'_>,
     global_tsid_count: usize,
-    token_cache: &mut HashMap<usize, Arc<RangeSetBlaze<u32>>>,
+    token_cache: &mut RemapCache<Arc<RangeSetBlaze<u32>>>,
 ) -> Weight {
     if weight.is_empty() {
         return weight.clone();
@@ -1754,22 +1988,16 @@ fn remap_weight_with_token_remap(
 
     if weight.is_full() {
         let all_global_tokens = token_remap.all_global_tokens();
+        let Some(last_global_tsid) = global_tsid_count.checked_sub(1).map(|count| count as u32) else {
+            return Weight::empty();
+        };
         if all_global_tokens.is_empty() {
             return Weight::empty();
         }
-        let mut all_global_tsids = BTreeSet::new();
-        for globals in local_to_global_tsids {
-            for &global_tsid in globals {
-                if (global_tsid as usize) < global_tsid_count {
-                    all_global_tsids.insert(global_tsid);
-                }
-            }
-        }
-        return Weight::from_per_tsid_token_sets(
-            all_global_tsids
-                .into_iter()
-                .map(|global_tsid| (global_tsid, all_global_tokens.clone())),
-        );
+        // Every global TSID contains exactly one local TSID for this source.
+        // Hence local `all` covers the complete global TSID domain even when
+        // individual local classes are interleaved in that global ordering.
+        return Weight::from_uniform(0..=last_global_tsid, all_global_tokens);
     }
 
     let Some(entries) = weight.compact_entries() else {
@@ -1947,8 +2175,8 @@ mod tests {
         ]);
         let tsid_map = vec![vec![1, 3], vec![2]];
         let explicit = vec![vec![7], vec![8], vec![9], vec![10], vec![11], vec![12]];
-        let mut explicit_cache = HashMap::new();
-        let mut explicit_tokens = HashMap::new();
+        let mut explicit_cache = RemapCache::default();
+        let mut explicit_tokens = RemapCache::default();
         let explicit_result = remap_weight_cached_with_token_remap(
             &weight,
             &tsid_map,
@@ -1957,8 +2185,8 @@ mod tests {
             &mut explicit_cache,
             &mut explicit_tokens,
         );
-        let mut offset_cache = HashMap::new();
-        let mut offset_tokens = HashMap::new();
+        let mut offset_cache = RemapCache::default();
+        let mut offset_tokens = RemapCache::default();
         let offset_result = remap_weight_cached_with_token_remap(
             &weight,
             &tsid_map,
@@ -1971,6 +2199,60 @@ mod tests {
             &mut offset_tokens,
         );
         assert_eq!(explicit_result, offset_result);
+    }
+
+    #[test]
+    fn interval_remap_matches_generic_and_overlapping_fallback() {
+        let weight = Weight::from_per_tsid_token_sets([
+            (0, RangeSetBlaze::from_iter([0..=1])),
+            (1, RangeSetBlaze::from_iter([2..=3])),
+        ]);
+        let token_remap = TokenRemap::Offset {
+            offset: 10,
+            local_token_count: 4,
+        };
+
+        for tsid_map in [vec![vec![2, 4], vec![0, 1, 3]], vec![vec![0], vec![0]]] {
+            let runs = build_local_to_global_tsid_runs(&tsid_map);
+            let mut generic_tokens = RemapCache::default();
+            let generic = remap_weight_with_token_remap(
+                &weight,
+                &tsid_map,
+                &token_remap,
+                5,
+                &mut generic_tokens,
+            );
+            let mut interval_tokens = RemapCache::default();
+            let interval = remap_weight_with_tsid_runs(
+                &weight,
+                &tsid_map,
+                &runs,
+                &token_remap,
+                5,
+                &mut interval_tokens,
+            );
+            assert_eq!(interval, generic);
+        }
+    }
+
+    #[test]
+    fn full_weight_remap_covers_uniform_global_tsid_domain() {
+        let tsid_map = vec![vec![2, 4], vec![0, 1, 3]];
+        let mut cache = RemapCache::default();
+        let mut token_cache = RemapCache::default();
+        let remapped = remap_weight_cached_with_token_remap(
+            &Weight::all(),
+            &tsid_map,
+            &TokenRemap::Offset {
+                offset: 10,
+                local_token_count: 3,
+            },
+            5,
+            &mut cache,
+            &mut token_cache,
+        );
+        let expected = Weight::from_uniform(0..=4, RangeSetBlaze::from_iter([10..=12]));
+        assert_eq!(remapped, expected);
     }
 
     #[test]
