@@ -1272,6 +1272,63 @@ mod tests {
     }
 
     #[test]
+    fn transport_shares_one_nwa_root_per_actual_tsid() {
+        // A large class makes the old reference builder allocate one root per
+        // (actual TSID, mode). The quotient-union builder must retain the
+        // exact language while allocating roots only for actual TSIDs.
+        let expressions = (0..16)
+            .map(|_| Expr::U8Seq(b"a".to_vec()))
+            .collect::<Vec<_>>();
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let plan = TerminalInterchangeability::build(
+            &tokenizer,
+            &vec![true; tokenizer.num_terminals() as usize],
+            &[true; 256],
+            None,
+        );
+        let modes = plan
+            .terminal_nwa_transport_modes()
+            .expect("duplicate terminals must transport");
+        assert!(modes.len() >= 16, "the test requires many transport modes");
+
+        let tree = VocabPrefixTree::build(&[
+            (0, b"a".to_vec()),
+            (1, b"aa".to_vec()),
+            (2, b"aaa".to_vec()),
+            (3, b"aaaa".to_vec()),
+        ]);
+        let id_map = singleton_id_map(tokenizer.num_states(), 4);
+        let mut possible_matches = PossibleMatchesComputer::new(&tokenizer);
+        let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+        let leaf = nwa.add_state();
+        nwa.set_final_weight(leaf, Weight::all());
+        let start = nwa.add_state();
+        nwa.start_states_mut().push(start);
+
+        build_transport_nwa_via_trie_walk(
+            &tokenizer,
+            None,
+            &mut nwa,
+            start,
+            leaf,
+            &id_map,
+            &tree.root,
+            &mut possible_matches,
+            &plan.visible_output_raw_labels(),
+            &modes,
+        );
+
+        assert_eq!(
+            nwa.states()[start as usize].epsilons.len(),
+            id_map.num_tsids() as usize,
+            "transport modes must share each actual tokenizer-state root"
+        );
+    }
+
+    #[test]
     fn compact_transport_output_filter_preserves_the_baseline_language() {
         // These duplicate literals are rooted-interchangeable. Raw
         // nonrepresentatives remain present in the lexer metadata, but their
@@ -1319,20 +1376,25 @@ mod tests {
     }
 }
 
-/// One strict-interchangeability scanner mode for the slow reference builder.
-/// `scanner_state_for_original[s]` is the full-lexer simulator state used when
-/// the actual current lexer state is `s`; `terminal_map` relabels every raw
-/// output emitted by that simulator back into the original terminal alphabet.
+/// One strict-interchangeability scanner mode. `scanner_state_for_original[s]`
+/// is the full-lexer simulator state used when the actual current lexer state is
+/// `s`; `terminal_map` relabels every raw output emitted by that simulator back
+/// into the original terminal alphabet.
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalNwaTransportMode {
     pub(crate) scanner_state_for_original: Vec<TokenizerState>,
     pub(crate) terminal_map: Vec<TerminalID>,
 }
 
+/// A scanner context is a raw lexer state together with the set of terminal
+/// permutations that reached it. The parser/NWA state is deliberately *not*
+/// duplicated for every permutation: all modes have the same parser-side
+/// weight, so the exact union is represented by one NWA source with one context
+/// per distinct raw scanner state.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct TransportContext {
     scanner_state: TokenizerState,
-    mode: usize,
+    mode_set: usize,
 }
 
 #[derive(Clone, Default)]
@@ -1349,8 +1411,8 @@ impl NodesByTransportContext {
         self.entries.entry(context).or_default().extend_from_slice(nodes);
     }
 
-    fn first(&self, context: TransportContext) -> Option<NwaState> {
-        self.entries.get(&context).and_then(|nodes| nodes.first().copied())
+    fn first_any(&self) -> Option<NwaState> {
+        self.entries.values().find_map(|nodes| nodes.first().copied())
     }
 
     fn push_one(&mut self, context: TransportContext, node: NwaState) {
@@ -1367,21 +1429,102 @@ impl IntoIterator for NodesByTransportContext {
     }
 }
 
+/// Interns subsets of transport modes and gives their exact raw-output label
+/// expansion. Modes that enter the same raw scanner state are grouped because
+/// a DFA continuation from that point is identical; only their output labels
+/// differ.
+struct TransportModePlanner<'m> {
+    modes: &'m [TerminalNwaTransportMode],
+    mode_set_ids: BTreeMap<Vec<usize>, usize>,
+    mode_sets: Vec<Box<[usize]>>,
+    mapped_labels: Vec<FxHashMap<TerminalID, SmallVec<[TerminalID; 4]>>>,
+}
+
+impl<'m> TransportModePlanner<'m> {
+    fn new(modes: &'m [TerminalNwaTransportMode]) -> Self {
+        assert!(!modes.is_empty());
+        Self {
+            modes,
+            mode_set_ids: BTreeMap::new(),
+            mode_sets: Vec::new(),
+            mapped_labels: Vec::new(),
+        }
+    }
+
+    fn intern_mode_set(&mut self, mut modes: Vec<usize>) -> usize {
+        modes.sort_unstable();
+        modes.dedup();
+        if let Some(&id) = self.mode_set_ids.get(&modes) {
+            return id;
+        }
+        let id = self.mode_sets.len();
+        self.mode_set_ids.insert(modes.clone(), id);
+        self.mode_sets.push(modes.into_boxed_slice());
+        self.mapped_labels.push(FxHashMap::default());
+        id
+    }
+
+    /// Partition all modes by the raw scanner state they choose for one actual
+    /// lexer state. Within one bucket the byte scan is exactly shared; the
+    /// output labels are the union of the bucket's terminal maps.
+    fn contexts_for_original_state(
+        &mut self,
+        original_state: TokenizerState,
+    ) -> SmallVec<[TransportContext; 4]> {
+        let mut modes_by_scanner_state = BTreeMap::<TokenizerState, Vec<usize>>::new();
+        for (mode, transport) in self.modes.iter().enumerate() {
+            let scanner_state = *transport
+                .scanner_state_for_original
+                .get(original_state as usize)
+                .expect("transport mode missing original tokenizer state");
+            modes_by_scanner_state
+                .entry(scanner_state)
+                .or_default()
+                .push(mode);
+        }
+        modes_by_scanner_state
+            .into_iter()
+            .map(|(scanner_state, modes)| TransportContext {
+                scanner_state,
+                mode_set: self.intern_mode_set(modes),
+            })
+            .collect()
+    }
+
+    fn mapped_labels_for(
+        &mut self,
+        mode_set: usize,
+        terminal: TerminalID,
+    ) -> SmallVec<[TerminalID; 4]> {
+        if let Some(labels) = self.mapped_labels[mode_set].get(&terminal) {
+            return labels.clone();
+        }
+        let mut labels = SmallVec::<[TerminalID; 4]>::new();
+        for &mode in &self.mode_sets[mode_set] {
+            let mapped = self.modes[mode]
+                .terminal_map
+                .get(terminal as usize)
+                .copied()
+                .unwrap_or(terminal);
+            labels.push(mapped);
+        }
+        labels.sort_unstable();
+        labels.dedup();
+        self.mapped_labels[mode_set].insert(terminal, labels.clone());
+        labels
+    }
+}
+
 struct TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
     base: TerminalNwaBuilder<'tok, 'pm, 'nwa>,
-    modes: &'m [TerminalNwaTransportMode],
+    transport: TransportModePlanner<'m>,
+    /// After every terminal boundary every transport mode is available again.
+    /// This vector partitions those modes by their reset scanner state.
+    reset_contexts: SmallVec<[TransportContext; 4]>,
     visible_output_raw_labels: &'m [bool],
 }
 
 impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
-    fn mapped_label(&self, mode: usize, terminal: TerminalID) -> TerminalID {
-        self.modes[mode]
-            .terminal_map
-            .get(terminal as usize)
-            .copied()
-            .unwrap_or(terminal)
-    }
-
     fn emits_raw_label(&self, terminal: TerminalID) -> bool {
         self.visible_output_raw_labels
             .get(terminal as usize)
@@ -1389,12 +1532,8 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
             .unwrap_or(false)
     }
 
-    fn reset_context(&self, mode: usize) -> TransportContext {
-        let root = self.base.tokenizer.initial_state_id() as usize;
-        TransportContext {
-            scanner_state: self.modes[mode].scanner_state_for_original[root],
-            mode,
-        }
+    fn mapped_labels(&mut self, context: TransportContext, terminal: TerminalID) -> SmallVec<[TerminalID; 4]> {
+        self.transport.mapped_labels_for(context.mode_set, terminal)
     }
 
     fn add_future_leaf_token_from_sources(
@@ -1410,12 +1549,13 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
             if !self.emits_raw_label(terminal) {
                 continue;
             }
-            self.base.profile.future_terminal_additions += sources.len() as u64;
-            self.base.add_leaf_token_from_sources(
-                sources,
-                self.mapped_label(context.mode, terminal),
-                internal_token_id,
-            );
+            let mapped_labels = self.mapped_labels(context, terminal);
+            self.base.profile.future_terminal_additions +=
+                (sources.len() * mapped_labels.len()) as u64;
+            for mapped_label in mapped_labels {
+                self.base
+                    .add_leaf_token_from_sources(sources, mapped_label, internal_token_id);
+            }
         }
     }
 
@@ -1497,7 +1637,7 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
 
                 for matched in &matches {
                     let next_offset = offset + matched.width;
-                    let mapped_label = self.mapped_label(context.mode, matched.id);
+                    let mapped_labels = self.mapped_labels(context, matched.id);
                     if next_offset == segment_bytes.len()
                         && child_node.has_token()
                         && !end_state.is_some_and(|state| {
@@ -1506,12 +1646,15 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                                 .contains(&matched.id)
                         })
                     {
-                        self.base.profile.match_transition_additions += source_nodes.len() as u64;
-                        self.base.add_leaf_token_from_sources(
-                            &source_nodes,
-                            mapped_label,
-                            leaf_token_id,
-                        );
+                        self.base.profile.match_transition_additions +=
+                            (source_nodes.len() * mapped_labels.len()) as u64;
+                        for mapped_label in &mapped_labels {
+                            self.base.add_leaf_token_from_sources(
+                                &source_nodes,
+                                *mapped_label,
+                                leaf_token_id,
+                            );
+                        }
                     }
 
                     let Some(weight) = self.base.continuation_weight_for_match(
@@ -1527,15 +1670,21 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                         continue;
                     }
 
+                    // A terminal boundary resets the actual lexer. Every
+                    // transport mode is available for the next terminal, so one
+                    // NWA continuation state carries their exact union; it is
+                    // merely attached to each distinct reset scanner context.
                     let continuation_contexts = pending.entry(next_offset).or_default();
-                    for next_mode in 0..self.modes.len() {
-                        let next_context = self.reset_context(next_mode);
-                        let destination = ensure_transport_continuation_state(
-                            continuation_contexts,
-                            next_context,
-                            self.base.nwa,
-                        );
-                        self.base.profile.match_transition_additions += source_nodes.len() as u64;
+                    let destination = ensure_transport_continuation_state(
+                        continuation_contexts,
+                        self.base.nwa,
+                    );
+                    for &next_context in &self.reset_contexts {
+                        continuation_contexts.push_one(next_context, destination);
+                    }
+                    self.base.profile.match_transition_additions +=
+                        (source_nodes.len() * mapped_labels.len()) as u64;
+                    for mapped_label in mapped_labels {
                         self.base.add_match_from_sources(
                             &source_nodes,
                             mapped_label,
@@ -1553,14 +1702,15 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
 
 fn ensure_transport_continuation_state(
     pending: &mut NodesByTransportContext,
-    context: TransportContext,
     nwa: &mut NWA,
 ) -> NwaState {
-    if let Some(existing) = pending.first(context) {
+    if let Some(existing) = pending.first_any() {
         return existing;
     }
     let state = nwa.add_state();
-    pending.push_one(context, state);
+    // The caller immediately attaches this state to the complete reset-mode
+    // partition. Keeping the helper context-free prevents one identical NFA
+    // union state from being cloned per terminal interchangeability mode.
     state
 }
 
@@ -1582,29 +1732,29 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
     assert!(!modes.is_empty());
     let mut roots = NodesByTransportContext::default();
     let mut initial_source_states = Vec::<bool>::new();
+    let mut transport = TransportModePlanner::new(modes);
 
     for (internal_tsid, representative_state) in id_map
         .tokenizer_states
         .iter_representative_ids()
         .enumerate()
     {
-        for (mode, transport) in modes.iter().enumerate() {
-            let root = nwa.add_state();
-            let weight = all_token_weight(internal_tsid as u32, id_map.max_internal_token_id());
-            nwa.add_epsilon(start_state, root, weight);
-            if root as usize >= initial_source_states.len() {
-                initial_source_states.resize(root as usize + 1, false);
-            }
-            initial_source_states[root as usize] = true;
-            roots.merge(
-                TransportContext {
-                    scanner_state: transport.scanner_state_for_original[representative_state as usize],
-                    mode,
-                },
-                &[root],
-            );
+        // All transport modes start from the same parser-side condition for
+        // this actual tokenizer state. A single NWA root therefore represents
+        // their exact union; contexts retain only the distinct raw scanner
+        // continuations needed to discover the next terminal boundary.
+        let root = nwa.add_state();
+        let weight = all_token_weight(internal_tsid as u32, id_map.max_internal_token_id());
+        nwa.add_epsilon(start_state, root, weight);
+        if root as usize >= initial_source_states.len() {
+            initial_source_states.resize(root as usize + 1, false);
+        }
+        initial_source_states[root as usize] = true;
+        for context in transport.contexts_for_original_state(representative_state) {
+            roots.merge(context, &[root]);
         }
     }
+    let reset_contexts = transport.contexts_for_original_state(tokenizer.initial_state_id());
 
     let base = TerminalNwaBuilder::new(
         tokenizer,
@@ -1622,7 +1772,8 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
     );
     let mut builder = TransportNwaBuilder {
         base,
-        modes,
+        transport,
+        reset_contexts,
         visible_output_raw_labels,
     };
     builder.build_from_trie(vocab_tree_root, &roots);

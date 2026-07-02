@@ -13,10 +13,13 @@
 //! interchange map. The initial lexer state must occur in the same class on both
 //! sides.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, hash_map::Entry};
+
+use rustc_hash::FxHashMap;
 use super::nwa_builder::TerminalNwaTransportMode;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
+use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::grammar::flat::TerminalID;
 
 const NO_STATE: u32 = u32::MAX;
@@ -521,6 +524,127 @@ impl TerminalInterchangeability {
             .collect()
     }
 
+    /// Replace each mapped raw scanner state with the representative of its
+    /// ordinary exact terminal-DWA class. The transport map's label permutation
+    /// is unchanged, and ordinary-equivalent scanner states admit exactly the
+    /// same vocabulary continuations under that fixed permutation. This makes
+    /// context sharing depend on semantic scanner destinations rather than
+    /// incidental raw DFA state identities.
+    pub(crate) fn canonicalize_transport_mode_states(
+        &self,
+        modes: &mut [TerminalNwaTransportMode],
+        ordinary_state_map: &ManyToOneIdMap,
+    ) {
+        let state_count = ordinary_state_map.original_to_internal.len();
+        for mode in modes {
+            assert_eq!(
+                mode.scanner_state_for_original.len(),
+                state_count,
+                "transport mode state domain must match ordinary state quotient",
+            );
+            for scanner_state in &mut mode.scanner_state_for_original {
+                let raw = *scanner_state as usize;
+                let internal = ordinary_state_map
+                    .original_to_internal
+                    .get(raw)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                if internal != u32::MAX {
+                    *scanner_state = ordinary_state_map
+                        .representative_original_id_for_internal(internal)
+                        .expect("ordinary state quotient missing representative");
+                }
+            }
+        }
+    }
+
+    /// Refine an exact ordinary terminal-DWA state quotient only where a
+    /// transport mode observes a different quotient destination. For a raw
+    /// state `s`, the signature is
+    /// `(Q(m_0(s)), Q(m_1(s)), …)`, where `Q` is the ordinary exact state map
+    /// and `m_i` is a scanner transport. States with equal signatures remain
+    /// interchangeable for every transported output: each mode starts from
+    /// ordinary-equivalent scanner states and then applies the same fixed label
+    /// permutation.
+    ///
+    /// The signature is *not* materialized. Starting from one class, each mode
+    /// exactly refines the current partition by the next `Q(m_i(s))` value. The
+    /// resulting class ID is therefore an exact canonical encoding of the full
+    /// vector, while scratch space stays O(number of raw lexer states) rather
+    /// than O(states × modes).
+    pub(crate) fn transport_coordinate_quotient(
+        &self,
+        ordinary_state_map: &ManyToOneIdMap,
+        modes: &[TerminalNwaTransportMode],
+    ) -> ManyToOneIdMap {
+        assert!(!modes.is_empty(), "transport coordinate quotient needs a mode");
+        let state_count = ordinary_state_map.original_to_internal.len();
+        let mut class_for_state = vec![0u32; state_count];
+        let mut next_class_for_state = vec![0u32; state_count];
+        let mut class_for_pair = FxHashMap::<(u32, u64), u32>::default();
+
+        for mode in modes {
+            assert_eq!(
+                mode.scanner_state_for_original.len(),
+                state_count,
+                "transport mode state domain must match ordinary state quotient",
+            );
+            class_for_pair.clear();
+            let mut next_class_count = 0u32;
+
+            for (source_state, (&prior_class, &target_state)) in class_for_state
+                .iter()
+                .zip(mode.scanner_state_for_original.iter())
+                .enumerate()
+            {
+                let target_state = target_state as usize;
+                let mapped = ordinary_state_map
+                    .original_to_internal
+                    .get(target_state)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                // Unmapped targets are outside the ordinary quotient's proof
+                // domain. Keep their raw identity distinct rather than merging
+                // them by accident.
+                let target_key = if mapped == u32::MAX {
+                    (1u64 << 32) | target_state as u64
+                } else {
+                    mapped as u64
+                };
+                let class = match class_for_pair.entry((prior_class, target_key)) {
+                    Entry::Occupied(entry) => *entry.get(),
+                    Entry::Vacant(entry) => {
+                        let class = next_class_count;
+                        next_class_count += 1;
+                        entry.insert(class);
+                        class
+                    }
+                };
+                next_class_for_state[source_state] = class;
+            }
+            std::mem::swap(&mut class_for_state, &mut next_class_for_state);
+        }
+
+        let class_count = class_for_state
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |class| class as usize + 1);
+        let mut representatives = vec![u32::MAX; class_count];
+        for (state, &class) in class_for_state.iter().enumerate() {
+            let representative = &mut representatives[class as usize];
+            if *representative == u32::MAX {
+                *representative = state as u32;
+            }
+        }
+
+        ManyToOneIdMap::from_original_to_internal_with_representatives(
+            class_for_state,
+            class_count as u32,
+            representatives,
+        )
+    }
+
     pub(crate) fn terminal_nwa_transport_modes(&self) -> Option<Vec<TerminalNwaTransportMode>> {
         let state_count = self
             .map_for_representative_member
@@ -597,6 +721,66 @@ mod tests {
             terminal_count,
             Some(Arc::from(expressions.into_boxed_slice())),
         )
+    }
+
+    #[test]
+    fn transport_coordinate_quotient_matches_full_mode_signature() {
+        let ordinary = ManyToOneIdMap::from_original_to_internal_with_representatives(
+            vec![0, 0, 1, 1, 2, 2, 3],
+            4,
+            vec![0, 2, 4, 6],
+        );
+        let modes = vec![
+            TerminalNwaTransportMode {
+                scanner_state_for_original: vec![0, 1, 2, 3, 4, 5, 6],
+                terminal_map: vec![0],
+            },
+            TerminalNwaTransportMode {
+                scanner_state_for_original: vec![1, 0, 3, 2, 5, 4, 6],
+                terminal_map: vec![0],
+            },
+            TerminalNwaTransportMode {
+                scanner_state_for_original: vec![2, 3, 0, 1, 6, 6, 4],
+                terminal_map: vec![0],
+            },
+        ];
+        let plan = TerminalInterchangeability::identity(&[true]);
+        let quotient = plan.transport_coordinate_quotient(&ordinary, &modes);
+
+        let signatures = (0..ordinary.original_to_internal.len())
+            .map(|source| {
+                modes
+                    .iter()
+                    .map(|mode| {
+                        ordinary.original_to_internal
+                            [mode.scanner_state_for_original[source] as usize]
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        for left in 0..signatures.len() {
+            for right in 0..signatures.len() {
+                assert_eq!(
+                    quotient.original_to_internal[left] == quotient.original_to_internal[right],
+                    signatures[left] == signatures[right],
+                    "signature quotient disagreed for states {left} and {right}",
+                );
+            }
+        }
+
+        let mut canonical_modes = modes.clone();
+        plan.canonicalize_transport_mode_states(&mut canonical_modes, &ordinary);
+        let canonical_quotient = plan.transport_coordinate_quotient(&ordinary, &canonical_modes);
+        for left in 0..signatures.len() {
+            for right in 0..signatures.len() {
+                assert_eq!(
+                    quotient.original_to_internal[left] == quotient.original_to_internal[right],
+                    canonical_quotient.original_to_internal[left]
+                        == canonical_quotient.original_to_internal[right],
+                    "canonical transport changed the quotient for states {left} and {right}",
+                );
+            }
+        }
     }
 
     #[test]
