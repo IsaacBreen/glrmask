@@ -4330,6 +4330,96 @@ mod tests {
     }
 
     #[test]
+    fn incremental_row_merge_matches_full_quotient_on_small_generated_tables() {
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            *seed
+        }
+
+        fn action(seed: &mut u64, nstates: u32) -> Action {
+            match next(seed) % 5 {
+                0 => Action::Shift((next(seed) % nstates as u64) as u32, next(seed) & 1 != 0),
+                1 => Action::Reduce((next(seed) % 3) as u32, (next(seed) % 3) as u32),
+                2 => Action::Split {
+                    shift: (next(seed) & 1 != 0)
+                        .then(|| ((next(seed) % nstates as u64) as u32, next(seed) & 1 != 0)),
+                    reduces: vec![((next(seed) % 3) as u32, (next(seed) % 3) as u32)],
+                    accept: next(seed) & 1 != 0,
+                },
+                3 => Action::StackShifts(vec![
+                    StackShift {
+                        pop: (next(seed) % 3) as u32,
+                        pushes: vec![(next(seed) % nstates as u64) as u32],
+                    },
+                    StackShift {
+                        pop: (next(seed) % 3) as u32,
+                        pushes: vec![(next(seed) % nstates as u64) as u32],
+                    },
+                ]),
+                _ => Action::Accept,
+            }
+        }
+
+        let mut seed = 0xA3B1_C2D3_E4F5_6789u64;
+        for _case in 0..128 {
+            let nstates = 6usize;
+            let mut action_rows = vec![ActionRow::default(); nstates];
+            let mut goto_rows = vec![GotoRow::default(); nstates];
+            for state in 0..nstates {
+                for terminal in 0..3 {
+                    if next(&mut seed) % 4 != 0 {
+                        action_rows[state].insert(terminal, action(&mut seed, nstates as u32));
+                    }
+                }
+                for nonterminal in 0..3 {
+                    if next(&mut seed) & 1 != 0 {
+                        goto_rows[state].insert(
+                            nonterminal,
+                            ((next(&mut seed) % nstates as u64) as u32, next(&mut seed) & 1 != 0),
+                        );
+                    }
+                }
+            }
+
+            let mut base = GLRTable {
+                action: action_rows,
+                goto: goto_rows,
+                num_states: nstates as u32,
+                num_terminals: 3,
+                num_rules: 0,
+                rules: Vec::new(),
+                nonterminal_display_names: Vec::new(),
+                construction: GlrTableConstruction::LegacyRowBisim,
+                admission_policy: AdmissionPolicy::RowPresenceExact,
+                advance: Vec::new(),
+                forwarded_shifts: FxHashSet::default(),
+                guarded_shift_index: Vec::new(),
+            };
+            base.merge_identical_rows();
+            if base.num_states == 0 {
+                continue;
+            }
+
+            let dirty = (next(&mut seed) % base.num_states as u64) as u32;
+            let terminal = (next(&mut seed) % 3) as u32;
+            base.action[dirty as usize].insert(terminal, action(&mut seed, base.num_states));
+
+            let mut expected = base.clone();
+            expected.merge_identical_rows();
+            let mut incremental = base;
+            incremental.merge_identical_rows_from_dirty(&[dirty]);
+
+            assert_eq!(incremental.num_states, expected.num_states);
+            assert_eq!(incremental.action, expected.action);
+            assert_eq!(incremental.goto, expected.goto);
+            assert_eq!(incremental.advance, expected.advance);
+            assert_eq!(incremental.forwarded_shifts, expected.forwarded_shifts);
+        }
+    }
+
+    #[test]
     fn incremental_row_merge_matches_full_quotient_for_noncanonical_stack_shifts() {
         let mut action = vec![ActionRow::default(); 4];
         action[0].insert(

@@ -49,7 +49,15 @@ fn unit_reduction_inlining_enabled() -> bool {
 }
 
 fn incremental_row_merge_enabled() -> bool {
-    env_flag_enabled(INCREMENTAL_ROW_MERGE_ENV)
+    // The incremental path is exact after the preceding full quotient and
+    // avoids re-refining unaffected rows. Keep it on by default; callers can
+    // explicitly set 0/false/no/off to force the full second quotient.
+    std::env::var(INCREMENTAL_ROW_MERGE_ENV)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(true)
 }
 
 
