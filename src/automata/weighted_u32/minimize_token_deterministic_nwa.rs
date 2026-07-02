@@ -191,23 +191,25 @@ fn push_weights(nwa: &mut NWA, topo: &[usize]) -> (Vec<Weight>, PushProfile) {
     (reachable, profile)
 }
 
-fn raw_needed_weights(nwa: &NWA, topo: &[usize]) -> (Vec<Weight>, PushProfile) {
-    let mut needed = vec![Weight::empty(); nwa.states().len()];
-    let mut profile = PushProfile::default();
-    for &state_id in topo.iter().rev() {
-        let state = &nwa.states()[state_id];
-        let mut parts = Vec::with_capacity(
-            state.transitions.values().map(Vec::len).sum::<usize>() + usize::from(state.final_weight.is_some()),
-        );
-        if let Some(final_weight) = &state.final_weight {
-            parts.push(final_weight.clone());
-        }
-        for branches in state.transitions.values() {
-            parts.extend(branches.iter().map(|(_, weight)| weight.clone()));
-        }
-        needed[state_id] = union_unique_weights(parts, &mut profile);
+fn raw_needed_weight(state: &super::nwa::NWAState, profile: &mut PushProfile) -> Weight {
+    let mut parts = Vec::with_capacity(
+        state.transitions.values().map(Vec::len).sum::<usize>() + usize::from(state.final_weight.is_some()),
+    );
+    if let Some(final_weight) = &state.final_weight {
+        parts.push(final_weight.clone());
     }
-    (needed, profile)
+    for branches in state.transitions.values() {
+        parts.extend(branches.iter().map(|(_, weight)| weight.clone()));
+    }
+    union_unique_weights(parts, profile)
+}
+
+fn has_raw_needed_weight(state: &super::nwa::NWAState) -> bool {
+    state.final_weight.as_ref().is_some_and(|weight| !weight.is_empty())
+        || state
+            .transitions
+            .values()
+            .any(|branches| branches.iter().any(|(_, weight)| !weight.is_empty()))
 }
 
 fn heights(nwa: &NWA, topo: &[usize]) -> Vec<usize> {
@@ -294,22 +296,6 @@ fn profiles_match_on_domain(left: &BranchProfile, right: &BranchProfile, domain:
     }
 }
 
-fn states_compatible(
-    nwa: &NWA,
-    left: usize,
-    right: usize,
-    needed: &[Weight],
-    profiles: &[BranchProfile],
-) -> bool {
-    let domain = needed[left].intersection(&needed[right]);
-    domain.is_empty()
-        || (final_weight_matches(
-            nwa.states()[left].final_weight.as_ref(),
-            nwa.states()[right].final_weight.as_ref(),
-            &domain,
-        ) && profiles_match_on_domain(&profiles[left], &profiles[right], &domain))
-}
-
 /// Minimize an acyclic NWA that is deterministic over `(label, token)`.
 ///
 /// The output retains that property. It intentionally does not introduce a
@@ -326,17 +312,25 @@ pub fn minimize_token_deterministic_nwa_owned(mut nwa: NWA) -> Result<NWA, GlrMa
     let reachable = reachable_from_starts(&nwa);
     let skip_push = std::env::var_os("GLRMASK_EXPERIMENTAL_ASSUME_TOKEN_NWA_TRIMMED").is_some();
     let push_started_at = Instant::now();
-    let (needed, push_profile) = if skip_push {
-        raw_needed_weights(&nwa, &topo)
+    let (mut needed, mut push_profile) = if skip_push {
+        (vec![None; nwa.states().len()], PushProfile::default())
     } else {
-        push_weights(&mut nwa, &topo)
+        let (weights, profile) = push_weights(&mut nwa, &topo);
+        (weights.into_iter().map(Some).collect(), profile)
     };
     let push_ms = push_started_at.elapsed().as_secs_f64() * 1000.0;
     let heights = heights(&nwa, &topo);
     let max_height = heights.iter().copied().max().unwrap_or(0);
     let mut by_height = vec![Vec::<usize>::new(); max_height + 1];
     for (state_id, &height) in heights.iter().enumerate() {
-        if reachable[state_id] && !needed[state_id].is_empty() {
+        let is_live = if skip_push {
+            has_raw_needed_weight(&nwa.states()[state_id])
+        } else {
+            needed[state_id]
+                .as_ref()
+                .is_some_and(|weight| !weight.is_empty())
+        };
+        if reachable[state_id] && is_live {
             by_height[height].push(state_id);
         }
     }
@@ -349,32 +343,55 @@ pub fn minimize_token_deterministic_nwa_owned(mut nwa: NWA) -> Result<NWA, GlrMa
         if candidates.is_empty() {
             continue;
         }
-        let profile_started_at = Instant::now();
-        let mut profiles = vec![BTreeMap::new(); nwa.states().len()];
-        for &state_id in &candidates {
-            profiles[state_id] = branch_profile(&nwa, state_id, &old_to_new);
-        }
-        let profile_ms = profile_started_at.elapsed().as_secs_f64() * 1000.0;
-
-        let color_started_at = Instant::now();
-        let mut groups = Vec::<Vec<usize>>::new();
-        for &candidate in &candidates {
-            let mut placed = false;
-            for group in &mut groups {
-                if group.iter().all(|&member| {
-                    states_compatible(&nwa, candidate, member, &needed, &profiles)
-                }) {
-                    group.push(candidate);
-                    placed = true;
-                    break;
+        let (profiles, groups) = if candidates.len() == 1 {
+            (vec![BTreeMap::new(); nwa.states().len()], vec![vec![candidates[0]]])
+        } else {
+            if skip_push {
+                for &state_id in &candidates {
+                    needed[state_id] = Some(raw_needed_weight(&nwa.states()[state_id], &mut push_profile));
                 }
             }
-            if !placed {
-                groups.push(vec![candidate]);
+            let profile_started_at = Instant::now();
+            let mut profiles = vec![BTreeMap::new(); nwa.states().len()];
+            for &state_id in &candidates {
+                profiles[state_id] = branch_profile(&nwa, state_id, &old_to_new);
             }
-        }
-        let color_ms = color_started_at.elapsed().as_secs_f64() * 1000.0;
-        color_ms_total += profile_ms + color_ms;
+            let profile_ms = profile_started_at.elapsed().as_secs_f64() * 1000.0;
+
+            let color_started_at = Instant::now();
+            let mut groups = Vec::<Vec<usize>>::new();
+            for &candidate in &candidates {
+                let mut placed = false;
+                for group in &mut groups {
+                    if group.iter().all(|&member| {
+                        let left = needed[candidate].as_ref().expect("candidate domain must exist");
+                        let right = needed[member].as_ref().expect("member domain must exist");
+                        let domain = left.intersection(right);
+                        domain.is_empty()
+                            || (final_weight_matches(
+                                nwa.states()[candidate].final_weight.as_ref(),
+                                nwa.states()[member].final_weight.as_ref(),
+                                &domain,
+                            ) && profiles_match_on_domain(
+                                &profiles[candidate],
+                                &profiles[member],
+                                &domain,
+                            ))
+                    }) {
+                        group.push(candidate);
+                        placed = true;
+                        break;
+                    }
+                }
+                if !placed {
+                    groups.push(vec![candidate]);
+                }
+            }
+            let color_ms = color_started_at.elapsed().as_secs_f64() * 1000.0;
+            color_ms_total += profile_ms + color_ms;
+            (profiles, groups)
+        };
+        let _ = profiles;
 
         for group in groups {
             let new_state = output.add_state();
