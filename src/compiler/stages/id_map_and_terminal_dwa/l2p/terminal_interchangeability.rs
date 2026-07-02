@@ -16,8 +16,6 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use blake3::Hasher;
-
 use super::nwa_builder::TerminalNwaTransportMode;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
@@ -42,9 +40,7 @@ impl CharacterizationHash {
 struct OutputBits(Vec<u64>);
 
 impl OutputBits {
-    fn new(words: usize) -> Self {
-        Self(vec![0; words])
-    }
+    fn new(words: usize) -> Self { Self(vec![0; words]) }
 
     fn set(&mut self, terminal: usize) {
         self.0[terminal / 64] |= 1u64 << (terminal % 64);
@@ -55,52 +51,24 @@ impl OutputBits {
         (self.0[terminal / 64] & (1u64 << (terminal % 64))) != 0
     }
 
-    fn update_mapped(
-        &self,
-        hasher: &mut Hasher,
-        swap: Option<(usize, usize)>,
-    ) {
-        hasher.update(&(self.0.len() as u32).to_le_bytes());
-        for (word_index, &word) in self.0.iter().enumerate() {
-            hasher.update(&self.mapped_word(word_index, word, swap).to_le_bytes());
-        }
-    }
-
-    fn mapped_word(
-        &self,
-        word_index: usize,
-        word: u64,
-        swap: Option<(usize, usize)>,
-    ) -> u64 {
-        let Some((left, right)) = swap else {
-            return word;
-        };
-        if left == right {
-            return word;
-        }
-
+    fn mapped(&self, swap: Option<(usize, usize)>) -> Self {
+        let Some((left, right)) = swap else { return self.clone(); };
+        if left == right { return self.clone(); }
         let left_word = left / 64;
         let right_word = right / 64;
-        if word_index != left_word && word_index != right_word {
-            return word;
-        }
-
         let left_mask = 1u64 << (left % 64);
         let right_mask = 1u64 << (right % 64);
         let left_present = (self.0[left_word] & left_mask) != 0;
         let right_present = (self.0[right_word] & right_mask) != 0;
-        if left_present == right_present {
-            return word;
-        }
+        if left_present == right_present { return self.clone(); }
+        let mut words = self.0.clone();
+        words[left_word] ^= left_mask;
+        words[right_word] ^= right_mask;
+        Self(words)
+    }
 
-        let mut mapped = word;
-        if word_index == left_word {
-            mapped ^= left_mask;
-        }
-        if word_index == right_word {
-            mapped ^= right_mask;
-        }
-        mapped
+    fn append_to(&self, output: &mut Vec<u8>) {
+        for &word in &self.0 { output.extend_from_slice(&word.to_le_bytes()); }
     }
 }
 
@@ -143,22 +111,29 @@ struct PairCharacterization {
     rounds: usize,
 }
 
-struct RestrictedDfa<'a> {
-    tokenizer: &'a Tokenizer,
+struct RestrictedDfa {
     bytes: Vec<u8>,
+    destinations: Vec<usize>,
     real_state_count: usize,
+    initial_state: usize,
     empty_output: OutputBits,
     finalizers: Vec<OutputBits>,
     future_finalizers: Vec<OutputBits>,
+    identity_rounds: Vec<Vec<CharacterizationHash>>,
+    signature_capacity: usize,
 }
 
-impl<'a> RestrictedDfa<'a> {
+impl RestrictedDfa {
     fn new(
-        tokenizer: &'a Tokenizer,
+        tokenizer: &Tokenizer,
         observed_terminals: &[bool],
         relevant_bytes: &[bool; 256],
     ) -> Self {
+        let bytes = (0..=255u8)
+            .filter(|&byte| relevant_bytes[byte as usize])
+            .collect::<Vec<_>>();
         let real_state_count = tokenizer.num_states() as usize;
+        let state_count = real_state_count + 1;
         let output_words = (tokenizer.num_terminals() as usize).div_ceil(64);
         let terminal_bits = |terminals: Vec<TerminalID>| {
             let mut bits = OutputBits::new(output_words);
@@ -175,24 +150,46 @@ impl<'a> RestrictedDfa<'a> {
         };
         let finalizers = (0..tokenizer.num_states())
             .map(|state| terminal_bits(tokenizer.matched_terminals_iter(state).collect()))
-            .collect();
+            .collect::<Vec<_>>();
         // These are the tokenizer's original, frozen future-finalizer sets. The
-        // enabled byte set below deliberately does not modify or recompute them.
+        // enabled-byte set below deliberately does not modify or recompute them.
         let future_finalizers = (0..tokenizer.num_states())
             .map(|state| {
                 terminal_bits(tokenizer.possible_future_terminals_iter(state).collect())
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let destinations = (0..state_count)
+            .flat_map(|state| {
+                bytes.iter().map(move |&byte| {
+                    if state == real_state_count {
+                        return state;
+                    }
+                    let destination = tokenizer.get_transition(state as u32, byte);
+                    if destination == NO_STATE {
+                        real_state_count
+                    } else {
+                        destination as usize
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let empty_output = OutputBits::new(output_words);
+        let signature_capacity = CHARACTERIZATION_DOMAIN.len()
+            + 4
+            + bytes.len()
+                * (1 + blake3::OUT_LEN + 8 + 2 * output_words * size_of::<u64>());
+        let seed = CharacterizationHash::seed();
 
         Self {
-            tokenizer,
-            bytes: (0..=255u8)
-                .filter(|&byte| relevant_bytes[byte as usize])
-                .collect(),
+            bytes,
+            destinations,
             real_state_count,
-            empty_output: OutputBits::new(output_words),
+            initial_state: tokenizer.initial_state_id() as usize,
+            empty_output,
             finalizers,
             future_finalizers,
+            identity_rounds: vec![vec![seed; state_count]],
+            signature_capacity,
         }
     }
 
@@ -204,78 +201,114 @@ impl<'a> RestrictedDfa<'a> {
         self.real_state_count
     }
 
-    /// This does not transform the lexer. It only represents the absent
-    /// destination while evaluating the given byte transition in `characterize`.
-    fn destination(&self, state: usize, byte: u8) -> usize {
-        if state == self.dead_state() {
-            return state;
-        }
-        let destination = self.tokenizer.get_transition(state as u32, byte);
-        if destination == NO_STATE {
-            self.dead_state()
-        } else {
-            destination as usize
-        }
+    /// This does not transform the lexer. It only supplies the absent
+    /// destination while evaluating an enabled byte transition in
+    /// `characterize`.
+    fn destination_for_slot(&self, state: usize, byte_slot: usize) -> usize {
+        self.destinations[state * self.bytes.len() + byte_slot]
     }
 
-    fn finalizers_at(&self, state: usize) -> &OutputBits {
-        self.finalizers.get(state).unwrap_or(&self.empty_output)
+    fn output_at<'a>(&'a self, outputs: &'a [OutputBits], state: usize) -> &'a OutputBits {
+        outputs.get(state).unwrap_or(&self.empty_output)
     }
 
-    fn future_finalizers_at(&self, state: usize) -> &OutputBits {
-        self.future_finalizers
-            .get(state)
-            .unwrap_or(&self.empty_output)
-    }
-
-    fn characterize_next(
+    /// Hash a complete characterization tuple in one buffered BLAKE3 call.
+    fn characterize_round(
         &self,
-        state: usize,
-        swap: Option<(usize, usize)>,
         previous: &[CharacterizationHash],
-    ) -> CharacterizationHash {
+        finalizers: &[OutputBits],
+        future_finalizers: &[OutputBits],
+    ) -> Vec<CharacterizationHash> {
         debug_assert_eq!(previous.len(), self.state_count());
-        let mut hasher = Hasher::new();
-        hasher.update(CHARACTERIZATION_DOMAIN);
-        hasher.update(&(self.bytes.len() as u32).to_le_bytes());
-        for &byte in &self.bytes {
-            let destination = self.destination(state, byte);
-            hasher.update(&[byte]);
-            hasher.update(&previous[destination].0);
-            self.finalizers_at(destination)
-                .update_mapped(&mut hasher, swap);
-            self.future_finalizers_at(destination)
-                .update_mapped(&mut hasher, swap);
+        let mut next = Vec::with_capacity(self.state_count());
+        let mut tuple = Vec::with_capacity(self.signature_capacity);
+        let output_word_count = self.empty_output.0.len() as u32;
+        for state in 0..self.state_count() {
+            tuple.clear();
+            tuple.extend_from_slice(CHARACTERIZATION_DOMAIN);
+            tuple.extend_from_slice(&(self.bytes.len() as u32).to_le_bytes());
+            for byte_slot in 0..self.bytes.len() {
+                let destination = self.destination_for_slot(state, byte_slot);
+                tuple.push(self.bytes[byte_slot]);
+                tuple.extend_from_slice(&previous[destination].0);
+                tuple.extend_from_slice(&output_word_count.to_le_bytes());
+                self.output_at(finalizers, destination).append_to(&mut tuple);
+                tuple.extend_from_slice(&output_word_count.to_le_bytes());
+                self.output_at(future_finalizers, destination)
+                    .append_to(&mut tuple);
+            }
+            next.push(CharacterizationHash(*blake3::hash(&tuple).as_bytes()));
         }
-        CharacterizationHash(*hasher.finalize().as_bytes())
+        next
     }
 
-    /// Compute the pair of terminal-specific partitions by iterating the user's
-    /// characterization recurrence. The raw digests need not stabilize on a
-    /// cycle; the equality partition over both tagged sides does.
-    fn characterize_pair(&self, left: TerminalID, right: TerminalID) -> PairCharacterization {
+    /// The identity-side recurrence is independent of the terminal pair, so it
+    /// is cached by depth. This cache leaves the raw DFA and its frozen metadata
+    /// untouched; it only avoids repeating the same recurrence.
+    fn ensure_identity_round(&mut self, round: usize) {
+        while self.identity_rounds.len() <= round {
+            let previous_index = self.identity_rounds.len() - 1;
+            let next = self.characterize_round(
+                &self.identity_rounds[previous_index],
+                &self.finalizers,
+                &self.future_finalizers,
+            );
+            self.identity_rounds.push(next);
+        }
+    }
+
+    /// Compute the terminal-specific partitions by iterating the supplied hash
+    /// recurrence. The raw digests need not stabilize on a cycle; the induced
+    /// equality partition over both tagged sides does.
+    fn characterize_pair(&mut self, left: TerminalID, right: TerminalID) -> PairCharacterization {
         let state_count = self.state_count();
-        let seed = CharacterizationHash::seed();
-        let mut previous = vec![seed; state_count * 2];
         let swap = Some((left as usize, right as usize));
+        let swapped_finalizers = self
+            .finalizers
+            .iter()
+            .map(|outputs| outputs.mapped(swap))
+            .collect::<Vec<_>>();
+        let swapped_future_finalizers = self
+            .future_finalizers
+            .iter()
+            .map(|outputs| outputs.mapped(swap))
+            .collect::<Vec<_>>();
+        let mut swapped_previous = self.identity_rounds[0].clone();
 
         for rounds in 1..=state_count * 2 {
-            let mut next = Vec::with_capacity(state_count * 2);
-            for state in 0..state_count {
-                next.push(self.characterize_next(state, None, &previous[..state_count]));
-            }
-            for state in 0..state_count {
-                next.push(self.characterize_next(state, swap, &previous[state_count..]));
-            }
-
-            if same_equality_partition(&previous, &next) {
+            self.ensure_identity_round(rounds);
+            let swapped_next = self.characterize_round(
+                &swapped_previous,
+                &swapped_finalizers,
+                &swapped_future_finalizers,
+            );
+            // A root mismatch or one-sided current class cannot be repaired by
+            // later refinement: the common seed partition only ever splits.
+            if !rooted_class_bijection_still_possible(
+                &self.identity_rounds[rounds],
+                &swapped_next,
+                self.initial_state,
+                self.real_state_count,
+            ) {
                 return PairCharacterization {
-                    identity_hashes: next[..state_count].to_vec(),
-                    swapped_hashes: next[state_count..].to_vec(),
+                    identity_hashes: self.identity_rounds[rounds].clone(),
+                    swapped_hashes: swapped_next,
                     rounds,
                 };
             }
-            previous = next;
+            if same_equality_partition_pair(
+                &self.identity_rounds[rounds - 1],
+                &swapped_previous,
+                &self.identity_rounds[rounds],
+                &swapped_next,
+            ) {
+                return PairCharacterization {
+                    identity_hashes: self.identity_rounds[rounds].clone(),
+                    swapped_hashes: swapped_next,
+                    rounds,
+                };
+            }
+            swapped_previous = swapped_next;
         }
 
         panic!(
@@ -284,7 +317,7 @@ impl<'a> RestrictedDfa<'a> {
         );
     }
 
-    fn interchange_map(&self, left: TerminalID, right: TerminalID) -> Option<InterchangeMap> {
+    fn interchange_map(&mut self, left: TerminalID, right: TerminalID) -> Option<InterchangeMap> {
         let characterization = self.characterize_pair(left, right);
         self.interchange_map_from_characterization(&characterization)
     }
@@ -293,9 +326,8 @@ impl<'a> RestrictedDfa<'a> {
         &self,
         characterization: &PairCharacterization,
     ) -> Option<InterchangeMap> {
-        let initial_state = self.tokenizer.initial_state_id() as usize;
-        if characterization.identity_hashes[initial_state]
-            != characterization.swapped_hashes[initial_state]
+        if characterization.identity_hashes[self.initial_state]
+            != characterization.swapped_hashes[self.initial_state]
         {
             return None;
         }
@@ -332,9 +364,8 @@ impl<'a> RestrictedDfa<'a> {
         })
     }
 
-    fn debug_pair_summary(&self, left: TerminalID, right: TerminalID) -> String {
+    fn debug_pair_summary(&mut self, left: TerminalID, right: TerminalID) -> String {
         let characterization = self.characterize_pair(left, right);
-        let initial_state = self.tokenizer.initial_state_id() as usize;
         let identity_classes = characterization.identity_hashes[..self.real_state_count]
             .iter()
             .copied()
@@ -345,8 +376,8 @@ impl<'a> RestrictedDfa<'a> {
             .copied()
             .collect::<std::collections::BTreeSet<_>>()
             .len();
-        let root_hash_equal = characterization.identity_hashes[initial_state]
-            == characterization.swapped_hashes[initial_state];
+        let root_hash_equal = characterization.identity_hashes[self.initial_state]
+            == characterization.swapped_hashes[self.initial_state];
         let map_exists = self
             .interchange_map_from_characterization(&characterization)
             .is_some();
@@ -365,16 +396,24 @@ impl<'a> RestrictedDfa<'a> {
 }
 
 /// Equality of characterization digests represents a partition, not a required
-/// fixed digest value. The partition is stable exactly when the two digest
-/// vectors induce the same equivalence relation.
-fn same_equality_partition(
-    previous: &[CharacterizationHash],
-    next: &[CharacterizationHash],
+/// fixed digest value. The partition is stable exactly when the two tagged sides
+/// induce the same equivalence relation in consecutive rounds.
+fn same_equality_partition_pair(
+    identity_previous: &[CharacterizationHash],
+    swapped_previous: &[CharacterizationHash],
+    identity_next: &[CharacterizationHash],
+    swapped_next: &[CharacterizationHash],
 ) -> bool {
-    debug_assert_eq!(previous.len(), next.len());
+    debug_assert_eq!(identity_previous.len(), swapped_previous.len());
+    debug_assert_eq!(identity_previous.len(), identity_next.len());
+    debug_assert_eq!(identity_previous.len(), swapped_next.len());
     let mut previous_to_next = BTreeMap::<CharacterizationHash, CharacterizationHash>::new();
     let mut next_to_previous = BTreeMap::<CharacterizationHash, CharacterizationHash>::new();
-    for (&old, &new) in previous.iter().zip(next) {
+    for (&old, &new) in identity_previous
+        .iter()
+        .zip(identity_next)
+        .chain(swapped_previous.iter().zip(swapped_next))
+    {
         if previous_to_next
             .get(&old)
             .is_some_and(|&existing| existing != new)
@@ -388,6 +427,29 @@ fn same_equality_partition(
         next_to_previous.insert(new, old);
     }
     true
+}
+
+/// A valid eventual map needs its root class and every current left class to
+/// have a matching right class. Since characterization starts from the common
+/// seed and only refines, a failure here can never be repaired later.
+fn rooted_class_bijection_still_possible(
+    identity: &[CharacterizationHash],
+    swapped: &[CharacterizationHash],
+    initial_state: usize,
+    real_state_count: usize,
+) -> bool {
+    if identity[initial_state] != swapped[initial_state] {
+        return false;
+    }
+    let identity_classes = identity[..real_state_count]
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let swapped_classes = swapped[..real_state_count]
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    identity_classes == swapped_classes
 }
 
 #[derive(Clone, Debug)]
@@ -432,7 +494,7 @@ impl TerminalInterchangeability {
 
         // Only L2+-active terminals are observable. The DFA and its stored
         // metadata remain untouched; the byte set merely bounds characterize.
-        let restricted = RestrictedDfa::new(tokenizer, active_terminals, relevant_bytes);
+        let mut restricted = RestrictedDfa::new(tokenizer, active_terminals, relevant_bytes);
         let mut accepted = BTreeMap::<(TerminalID, TerminalID), InterchangeMap>::new();
         let mut components = DisjointSet::new(active_terminals.len());
         let debug_pair = std::env::var("GLRMASK_DEBUG_TERMINAL_INTERCHANGEABILITY_PAIR")
@@ -455,10 +517,29 @@ impl TerminalInterchangeability {
             }
         }
 
+        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][terminal_interchangeability] phase=start active={} pairs={} states={} bytes={}",
+                candidates.len(),
+                candidates.len() * (candidates.len() - 1) / 2,
+                restricted.real_state_count,
+                restricted.bytes.len(),
+            );
+        }
+
         let mut pair_count = 0usize;
         for (index, &left) in candidates.iter().enumerate() {
             for &right in &candidates[index + 1..] {
                 pair_count += 1;
+                if profile_enabled && pair_count % 256 == 0 {
+                    eprintln!(
+                        "[glrmask/profile][terminal_interchangeability] phase=pairs_done active={} completed_pairs={} elapsed_ms={:.3}",
+                        candidates.len(),
+                        pair_count,
+                        started_at.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
                 if let Some(left_to_right) = restricted.interchange_map(left, right) {
                     assert!(
                         restricted.interchange_map(right, left).is_some(),
@@ -470,7 +551,7 @@ impl TerminalInterchangeability {
             }
         }
 
-        if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+        if profile_enabled {
             eprintln!(
                 "[glrmask/profile][terminal_interchangeability] active={} pairs={} accepted={} elapsed_ms={:.3}",
                 candidates.len(),
@@ -717,7 +798,7 @@ mod tests {
                 },
             ]),
         ]);
-        let dfa = RestrictedDfa::new(&tokenizer, &[true, true], &[true; 256]);
+        let mut dfa = RestrictedDfa::new(&tokenizer, &[true, true], &[true; 256]);
         assert!(dfa.interchange_map(0, 1).is_none());
     }
 
@@ -727,7 +808,7 @@ mod tests {
             Expr::U8Seq(b"same".to_vec()),
             Expr::U8Seq(b"same".to_vec()),
         ]);
-        let dfa = RestrictedDfa::new(&tokenizer, &[true, true], &[true; 256]);
+        let mut dfa = RestrictedDfa::new(&tokenizer, &[true, true], &[true; 256]);
         let map = dfa.interchange_map(0, 1).expect("identical literals must transport");
         let root = tokenizer.initial_state_id() as usize;
         assert!(map.source_state_to_target_states[root].contains(&tokenizer.initial_state_id()));
@@ -777,8 +858,8 @@ mod tests {
         only_a[b'a' as usize] = true;
         let restricted = RestrictedDfa::new(&tokenizer, &[true, true], &only_a);
         assert_eq!(restricted.bytes, vec![b'a']);
-        assert_eq!(restricted.destination(after_a, b'a'), restricted.dead_state());
-        assert!(restricted.future_finalizers_at(after_a).contains(1));
+        assert_eq!(restricted.destination_for_slot(after_a, 0), restricted.dead_state());
+        assert!(restricted.output_at(&restricted.future_finalizers, after_a).contains(1));
     }
 
     #[test]
@@ -788,7 +869,7 @@ mod tests {
             Expr::U8Seq(b"b".to_vec()),
             Expr::U8Seq(b"a".to_vec()),
         ]);
-        let dfa = RestrictedDfa::new(&tokenizer, &[true, false, true], &[true; 256]);
+        let mut dfa = RestrictedDfa::new(&tokenizer, &[true, false, true], &[true; 256]);
         assert!(dfa.interchange_map(0, 2).is_some());
     }
 
@@ -798,7 +879,7 @@ mod tests {
         let b = CharacterizationHash([2; blake3::OUT_LEN]);
         let x = CharacterizationHash([9; blake3::OUT_LEN]);
         let y = CharacterizationHash([10; blake3::OUT_LEN]);
-        assert!(same_equality_partition(&[a, a, b], &[x, x, y]));
-        assert!(!same_equality_partition(&[a, a, b], &[x, y, y]));
+        assert!(same_equality_partition_pair(&[a, a, b], &[a, a, b], &[x, x, y], &[x, x, y]));
+        assert!(!same_equality_partition_pair(&[a, a, b], &[a, a, b], &[x, y, y], &[x, y, y]));
     }
 }
