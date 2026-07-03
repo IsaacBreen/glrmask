@@ -38,6 +38,20 @@ impl TerminalColoring {
 pub(crate) struct TerminalDwaBuildProfile {
     pub(crate) future_terminal_additions: u64,
     pub(crate) match_transition_additions: u64,
+    /// TI-only: time spent interning scanner-mode subsets while constructing
+    /// transport contexts. This is profile-gated and remains zero otherwise.
+    pub(crate) transport_mode_set_intern_ms: f64,
+    /// TI-only: time spent grouping transport modes by scanner destination.
+    pub(crate) transport_context_plan_ms: f64,
+    /// TI-only: time spent constructing and looking up transported output labels.
+    pub(crate) transport_output_remap_ms: f64,
+    pub(crate) transport_output_remap_cache_hits: u64,
+    pub(crate) transport_output_remap_cache_misses: u64,
+    pub(crate) transport_root_count: u64,
+    pub(crate) transport_context_count: u64,
+    pub(crate) transport_root_seed_ms: f64,
+    pub(crate) transport_trie_walk_ms: f64,
+    pub(crate) transport_flush_ms: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

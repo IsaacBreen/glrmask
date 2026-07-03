@@ -5,6 +5,7 @@
 
 use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
@@ -1272,6 +1273,39 @@ mod tests {
     }
 
     #[test]
+    fn transport_output_remap_cache_reuses_deduplicated_mode_outputs() {
+        // The cache must not collapse distinct remapped labels, but repeated
+        // lookups for the same exact (mode-set, raw-output) pair must avoid
+        // rebuilding the small union. This is the inner expansion factoring
+        // rule used by the transport trie walk.
+        let modes = vec![
+            TerminalNwaTransportMode {
+                scanner_state_for_original: vec![0, 0],
+                terminal_map: vec![1, 0, 2],
+            },
+            TerminalNwaTransportMode {
+                scanner_state_for_original: vec![0, 0],
+                terminal_map: vec![2, 1, 0],
+            },
+            TerminalNwaTransportMode {
+                scanner_state_for_original: vec![0, 0],
+                terminal_map: vec![1, 2, 0],
+            },
+        ];
+        let mut planner = TransportModePlanner::new(&modes);
+        let contexts = planner.contexts_for_original_state(0);
+        assert_eq!(contexts.len(), 1, "equal scanner destinations must share a context");
+
+        let mode_set = contexts[0].mode_set;
+        let first = planner.mapped_labels_for(mode_set, 0).to_vec();
+        let second = planner.mapped_labels_for(mode_set, 0).to_vec();
+        assert_eq!(first, vec![1, 2]);
+        assert_eq!(second, first);
+        assert_eq!(planner.profile.transport_output_remap_cache_misses, 1);
+        assert_eq!(planner.profile.transport_output_remap_cache_hits, 1);
+    }
+
+    #[test]
     fn transport_shares_one_nwa_root_per_actual_tsid() {
         // A large class makes the old reference builder allocate one root per
         // (actual TSID, mode). The quotient-union builder must retain the
@@ -1429,6 +1463,12 @@ impl IntoIterator for NodesByTransportContext {
     }
 }
 
+fn transport_timing_enabled() -> bool {
+    std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+}
+
 /// Interns subsets of transport modes and gives their exact raw-output label
 /// expansion. Modes that enter the same raw scanner state are grouped because
 /// a DFA continuation from that point is identical; only their output labels
@@ -1438,6 +1478,8 @@ struct TransportModePlanner<'m> {
     mode_set_ids: BTreeMap<Vec<usize>, usize>,
     mode_sets: Vec<Box<[usize]>>,
     mapped_labels: Vec<FxHashMap<TerminalID, SmallVec<[TerminalID; 4]>>>,
+    profile: TerminalDwaBuildProfile,
+    timing_enabled: bool,
 }
 
 impl<'m> TransportModePlanner<'m> {
@@ -1448,19 +1490,31 @@ impl<'m> TransportModePlanner<'m> {
             mode_set_ids: BTreeMap::new(),
             mode_sets: Vec::new(),
             mapped_labels: Vec::new(),
+            profile: TerminalDwaBuildProfile::default(),
+            timing_enabled: transport_timing_enabled(),
         }
     }
 
-    fn intern_mode_set(&mut self, mut modes: Vec<usize>) -> usize {
-        modes.sort_unstable();
-        modes.dedup();
+    fn elapsed_ms(started_at: Option<Instant>) -> f64 {
+        started_at.map_or(0.0, |started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+    }
+
+    fn intern_mode_set(&mut self, modes: Vec<usize>) -> usize {
+        // `contexts_for_original_state` visits transport modes through
+        // `enumerate`, so these sets are already sorted and unique. Avoiding a
+        // redundant sort/dedup is exact and keeps this inner planning step
+        // linear in the number of modes.
+        debug_assert!(modes.windows(2).all(|pair| pair[0] < pair[1]));
+        let started_at = self.timing_enabled.then(Instant::now);
         if let Some(&id) = self.mode_set_ids.get(&modes) {
+            self.profile.transport_mode_set_intern_ms += Self::elapsed_ms(started_at);
             return id;
         }
         let id = self.mode_sets.len();
         self.mode_set_ids.insert(modes.clone(), id);
         self.mode_sets.push(modes.into_boxed_slice());
         self.mapped_labels.push(FxHashMap::default());
+        self.profile.transport_mode_set_intern_ms += Self::elapsed_ms(started_at);
         id
     }
 
@@ -1471,6 +1525,7 @@ impl<'m> TransportModePlanner<'m> {
         &mut self,
         original_state: TokenizerState,
     ) -> SmallVec<[TransportContext; 4]> {
+        let started_at = self.timing_enabled.then(Instant::now);
         let mut modes_by_scanner_state = BTreeMap::<TokenizerState, Vec<usize>>::new();
         for (mode, transport) in self.modes.iter().enumerate() {
             let scanner_state = *transport
@@ -1482,36 +1537,42 @@ impl<'m> TransportModePlanner<'m> {
                 .or_default()
                 .push(mode);
         }
-        modes_by_scanner_state
-            .into_iter()
-            .map(|(scanner_state, modes)| TransportContext {
+        let mut contexts = SmallVec::<[TransportContext; 4]>::new();
+        for (scanner_state, modes) in modes_by_scanner_state {
+            contexts.push(TransportContext {
                 scanner_state,
                 mode_set: self.intern_mode_set(modes),
-            })
-            .collect()
+            });
+        }
+        self.profile.transport_context_count += contexts.len() as u64;
+        self.profile.transport_context_plan_ms += Self::elapsed_ms(started_at);
+        contexts
     }
 
-    fn mapped_labels_for(
-        &mut self,
-        mode_set: usize,
-        terminal: TerminalID,
-    ) -> SmallVec<[TerminalID; 4]> {
-        if let Some(labels) = self.mapped_labels[mode_set].get(&terminal) {
-            return labels.clone();
+    fn mapped_labels_for(&mut self, mode_set: usize, terminal: TerminalID) -> &[TerminalID] {
+        let started_at = self.timing_enabled.then(Instant::now);
+        if self.mapped_labels[mode_set].contains_key(&terminal) {
+            self.profile.transport_output_remap_cache_hits += 1;
+        } else {
+            self.profile.transport_output_remap_cache_misses += 1;
+            let mut labels = SmallVec::<[TerminalID; 4]>::new();
+            for &mode in &self.mode_sets[mode_set] {
+                let mapped = self.modes[mode]
+                    .terminal_map
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(terminal);
+                labels.push(mapped);
+            }
+            labels.sort_unstable();
+            labels.dedup();
+            self.mapped_labels[mode_set].insert(terminal, labels);
         }
-        let mut labels = SmallVec::<[TerminalID; 4]>::new();
-        for &mode in &self.mode_sets[mode_set] {
-            let mapped = self.modes[mode]
-                .terminal_map
-                .get(terminal as usize)
-                .copied()
-                .unwrap_or(terminal);
-            labels.push(mapped);
-        }
-        labels.sort_unstable();
-        labels.dedup();
-        self.mapped_labels[mode_set].insert(terminal, labels.clone());
-        labels
+        self.profile.transport_output_remap_ms += Self::elapsed_ms(started_at);
+        self.mapped_labels[mode_set]
+            .get(&terminal)
+            .expect("transport output-label cache entry must exist")
+            .as_slice()
     }
 }
 
@@ -1532,10 +1593,6 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
             .unwrap_or(false)
     }
 
-    fn mapped_labels(&mut self, context: TransportContext, terminal: TerminalID) -> SmallVec<[TerminalID; 4]> {
-        self.transport.mapped_labels_for(context.mode_set, terminal)
-    }
-
     fn add_future_leaf_token_from_sources(
         &mut self,
         sources: &[NwaState],
@@ -1549,10 +1606,10 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
             if !self.emits_raw_label(terminal) {
                 continue;
             }
-            let mapped_labels = self.mapped_labels(context, terminal);
+            let mapped_labels = self.transport.mapped_labels_for(context.mode_set, terminal);
             self.base.profile.future_terminal_additions +=
                 (sources.len() * mapped_labels.len()) as u64;
-            for mapped_label in mapped_labels {
+            for &mapped_label in mapped_labels {
                 self.base
                     .add_leaf_token_from_sources(sources, mapped_label, internal_token_id);
             }
@@ -1637,7 +1694,7 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
 
                 for matched in &matches {
                     let next_offset = offset + matched.width;
-                    let mapped_labels = self.mapped_labels(context, matched.id);
+                    let mapped_labels = self.transport.mapped_labels_for(context.mode_set, matched.id);
                     if next_offset == segment_bytes.len()
                         && child_node.has_token()
                         && !end_state.is_some_and(|state| {
@@ -1648,10 +1705,10 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                     {
                         self.base.profile.match_transition_additions +=
                             (source_nodes.len() * mapped_labels.len()) as u64;
-                        for mapped_label in &mapped_labels {
+                        for &mapped_label in mapped_labels {
                             self.base.add_leaf_token_from_sources(
                                 &source_nodes,
-                                *mapped_label,
+                                mapped_label,
                                 leaf_token_id,
                             );
                         }
@@ -1684,7 +1741,7 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                     }
                     self.base.profile.match_transition_additions +=
                         (source_nodes.len() * mapped_labels.len()) as u64;
-                    for mapped_label in mapped_labels {
+                    for &mapped_label in mapped_labels {
                         self.base.add_match_from_sources(
                             &source_nodes,
                             mapped_label,
@@ -1730,9 +1787,12 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
     modes: &[TerminalNwaTransportMode],
 ) -> TerminalDwaBuildProfile {
     assert!(!modes.is_empty());
+    let timing_enabled = transport_timing_enabled();
+    let root_seed_started_at = timing_enabled.then(Instant::now);
     let mut roots = NodesByTransportContext::default();
     let mut initial_source_states = Vec::<bool>::new();
     let mut transport = TransportModePlanner::new(modes);
+    let mut root_count = 0u64;
 
     for (internal_tsid, representative_state) in id_map
         .tokenizer_states
@@ -1744,6 +1804,7 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
         // their exact union; contexts retain only the distinct raw scanner
         // continuations needed to discover the next terminal boundary.
         let root = nwa.add_state();
+        root_count += 1;
         let weight = all_token_weight(internal_tsid as u32, id_map.max_internal_token_id());
         nwa.add_epsilon(start_state, root, weight);
         if root as usize >= initial_source_states.len() {
@@ -1755,6 +1816,9 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
         }
     }
     let reset_contexts = transport.contexts_for_original_state(tokenizer.initial_state_id());
+    let root_seed_ms = root_seed_started_at.map_or(0.0, |started_at| {
+        started_at.elapsed().as_secs_f64() * 1000.0
+    });
 
     let base = TerminalNwaBuilder::new(
         tokenizer,
@@ -1776,7 +1840,27 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
         reset_contexts,
         visible_output_raw_labels,
     };
+    let trie_walk_started_at = timing_enabled.then(Instant::now);
     builder.build_from_trie(vocab_tree_root, &roots);
+    builder.base.profile.transport_trie_walk_ms = trie_walk_started_at.map_or(0.0, |started_at| {
+        started_at.elapsed().as_secs_f64() * 1000.0
+    });
+
+    let flush_started_at = timing_enabled.then(Instant::now);
     builder.base.flush_transition_buffer();
-    builder.base.profile
+    builder.base.profile.transport_flush_ms = flush_started_at.map_or(0.0, |started_at| {
+        started_at.elapsed().as_secs_f64() * 1000.0
+    });
+
+    let planner_profile = builder.transport.profile;
+    let profile = &mut builder.base.profile;
+    profile.transport_mode_set_intern_ms = planner_profile.transport_mode_set_intern_ms;
+    profile.transport_context_plan_ms = planner_profile.transport_context_plan_ms;
+    profile.transport_output_remap_ms = planner_profile.transport_output_remap_ms;
+    profile.transport_output_remap_cache_hits = planner_profile.transport_output_remap_cache_hits;
+    profile.transport_output_remap_cache_misses = planner_profile.transport_output_remap_cache_misses;
+    profile.transport_root_count = root_count;
+    profile.transport_context_count = planner_profile.transport_context_count;
+    profile.transport_root_seed_ms = root_seed_ms;
+    *profile
 }

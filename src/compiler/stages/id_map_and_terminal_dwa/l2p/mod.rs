@@ -199,9 +199,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         TerminalInterchangeability::identity(active_terminals)
     };
     let reference_terminal_expansion = !terminal_interchangeability.is_identity();
+    let transport_mode_setup_started_at = Instant::now();
     let mut transport_modes = reference_terminal_expansion
         .then(|| terminal_interchangeability.terminal_nwa_transport_modes())
         .flatten();
+    let transport_mode_setup_ms = transport_mode_setup_started_at.elapsed().as_secs_f64() * 1000.0;
+    let transport_mode_count = transport_modes.as_ref().map_or(0, Vec::len);
     let analysis_active_terminals = terminal_interchangeability.active_representatives();
     let terminal_nwa_visible_output_labels =
         terminal_interchangeability.visible_output_raw_labels();
@@ -272,14 +275,39 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // the ordinary terminal-DWA quotient of each mapped destination. Preserve
     // the coarsest exact refinement of that quotient across every mode rather
     // than restoring one internal state ID per raw lexer state.
+    let transport_tsids_before_coordinate = simplified_id_map.num_tsids();
+    let mut transport_mode_canonicalize_ms = 0.0;
+    let mut transport_coordinate_quotient_ms = 0.0;
     if let Some(modes) = transport_modes.as_mut() {
         let transport_coordinate_map = {
             let ordinary_state_map = &simplified_id_map.tokenizer_states;
+            let canonicalize_started_at = Instant::now();
             terminal_interchangeability
                 .canonicalize_transport_mode_states(modes, ordinary_state_map);
-            terminal_interchangeability.transport_coordinate_quotient(ordinary_state_map, modes)
+            transport_mode_canonicalize_ms =
+                canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
+            let quotient_started_at = Instant::now();
+            let quotient =
+                terminal_interchangeability.transport_coordinate_quotient(ordinary_state_map, modes);
+            transport_coordinate_quotient_ms =
+                quotient_started_at.elapsed().as_secs_f64() * 1000.0;
+            quotient
         };
         simplified_id_map.tokenizer_states = transport_coordinate_map;
+    }
+    let transport_tsids_after_coordinate = simplified_id_map.num_tsids();
+
+    if reference_terminal_expansion && l2p_timing_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][ti_coordinate] partition={} modes={} mode_setup_ms={:.3} canonicalize_mode_targets_ms={:.3} coordinate_quotient_ms={:.3} tsids_before={} tsids_after={}",
+            partition_label,
+            transport_mode_count,
+            transport_mode_setup_ms,
+            transport_mode_canonicalize_ms,
+            transport_coordinate_quotient_ms,
+            transport_tsids_before_coordinate,
+            transport_tsids_after_coordinate,
+        );
     }
 
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -368,7 +396,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
             // ---- Step 6: Trie-walk NWA build ----
             let trie_build_started_at = Instant::now();
-            let _build_profile = if let Some(modes) = transport_modes.as_deref() {
+            let build_profile = if let Some(modes) = transport_modes.as_deref() {
                 seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
                 build_transport_nwa_via_trie_walk(
                     tokenizer_for_build,
@@ -400,6 +428,24 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 )
             };
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
+            if reference_terminal_expansion && l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][ti_transport_nwa] partition={} modes={} roots={} scanner_contexts={} root_seed_ms={:.3} context_plan_ms={:.3} mode_set_intern_ms={:.3} output_remap_ms={:.3} output_remap_cache_hits={} output_remap_cache_misses={} trie_walk_ms={:.3} flush_ms={:.3} terminal_nwa_build_ms={:.3}",
+                    partition_label,
+                    transport_mode_count,
+                    build_profile.transport_root_count,
+                    build_profile.transport_context_count,
+                    build_profile.transport_root_seed_ms,
+                    build_profile.transport_context_plan_ms,
+                    build_profile.transport_mode_set_intern_ms,
+                    build_profile.transport_output_remap_ms,
+                    build_profile.transport_output_remap_cache_hits,
+                    build_profile.transport_output_remap_cache_misses,
+                    build_profile.transport_trie_walk_ms,
+                    build_profile.transport_flush_ms,
+                    trie_build_ms,
+                );
+            }
 
             let always_allowed_started_at = Instant::now();
             let always_allowed = compute_always_allowed_follows(grammar);
