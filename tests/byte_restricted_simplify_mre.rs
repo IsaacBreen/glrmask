@@ -1,7 +1,5 @@
 //! Minimal TI-off reproducer for byte-restricted L2P tokenizer simplification.
 //!
-//! Run explicitly while the bug is outstanding:
-//! `cargo test --test byte_restricted_simplify_mre -- --ignored --nocapture`
 
 use glrmask::{Constraint, Vocab};
 
@@ -19,7 +17,6 @@ fn contains(mask: &[u32], token: u32) -> bool {
 /// where this specific partition-local continuation machinery is not used.
 /// Terminal interchangeability is explicitly disabled.
 #[test]
-#[ignore = "known byte-restricted L2P simplification bug"]
 fn byte_restricted_l2p_must_admit_a_cross_partition_partial_token() {
     unsafe {
         std::env::set_var("GLRMASK_FORCE_ALL_L2P", "1");
