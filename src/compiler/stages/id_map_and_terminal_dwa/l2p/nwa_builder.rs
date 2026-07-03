@@ -1301,8 +1301,7 @@ mod tests {
         let second = planner.mapped_labels_for(mode_set, 0).to_vec();
         assert_eq!(first, vec![1, 2]);
         assert_eq!(second, first);
-        assert_eq!(planner.profile.transport_output_remap_cache_misses, 1);
-        assert_eq!(planner.profile.transport_output_remap_cache_hits, 1);
+        assert_eq!(planner.mapped_labels[mode_set].len(), 1);
     }
 
     #[test]
@@ -1507,14 +1506,18 @@ impl<'m> TransportModePlanner<'m> {
         debug_assert!(modes.windows(2).all(|pair| pair[0] < pair[1]));
         let started_at = self.timing_enabled.then(Instant::now);
         if let Some(&id) = self.mode_set_ids.get(&modes) {
-            self.profile.transport_mode_set_intern_ms += Self::elapsed_ms(started_at);
+            if self.timing_enabled {
+                self.profile.transport_mode_set_intern_ms += Self::elapsed_ms(started_at);
+            }
             return id;
         }
         let id = self.mode_sets.len();
         self.mode_set_ids.insert(modes.clone(), id);
         self.mode_sets.push(modes.into_boxed_slice());
         self.mapped_labels.push(FxHashMap::default());
-        self.profile.transport_mode_set_intern_ms += Self::elapsed_ms(started_at);
+        if self.timing_enabled {
+            self.profile.transport_mode_set_intern_ms += Self::elapsed_ms(started_at);
+        }
         id
     }
 
@@ -1544,17 +1547,23 @@ impl<'m> TransportModePlanner<'m> {
                 mode_set: self.intern_mode_set(modes),
             });
         }
-        self.profile.transport_context_count += contexts.len() as u64;
-        self.profile.transport_context_plan_ms += Self::elapsed_ms(started_at);
+        if self.timing_enabled {
+            self.profile.transport_context_count += contexts.len() as u64;
+            self.profile.transport_context_plan_ms += Self::elapsed_ms(started_at);
+        }
         contexts
     }
 
     fn mapped_labels_for(&mut self, mode_set: usize, terminal: TerminalID) -> &[TerminalID] {
         let started_at = self.timing_enabled.then(Instant::now);
         if self.mapped_labels[mode_set].contains_key(&terminal) {
-            self.profile.transport_output_remap_cache_hits += 1;
+            if self.timing_enabled {
+                self.profile.transport_output_remap_cache_hits += 1;
+            }
         } else {
-            self.profile.transport_output_remap_cache_misses += 1;
+            if self.timing_enabled {
+                self.profile.transport_output_remap_cache_misses += 1;
+            }
             let mut labels = SmallVec::<[TerminalID; 4]>::new();
             for &mode in &self.mode_sets[mode_set] {
                 let mapped = self.modes[mode]
@@ -1568,7 +1577,9 @@ impl<'m> TransportModePlanner<'m> {
             labels.dedup();
             self.mapped_labels[mode_set].insert(terminal, labels);
         }
-        self.profile.transport_output_remap_ms += Self::elapsed_ms(started_at);
+        if self.timing_enabled {
+            self.profile.transport_output_remap_ms += Self::elapsed_ms(started_at);
+        }
         self.mapped_labels[mode_set]
             .get(&terminal)
             .expect("transport output-label cache entry must exist")
