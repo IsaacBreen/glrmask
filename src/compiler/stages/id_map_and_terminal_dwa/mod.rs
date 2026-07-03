@@ -491,23 +491,17 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     let partition_vocab_ms = partition_vocab_started_at.elapsed().as_secs_f64() * 1000.0;
     profile.id_map_ms += partition_vocab_ms;
 
-    // Lazily-initialized shared compact transition table cache.
-    // The first partition to reach vocab_build_dfa will build the cache from
-    // its simplified tokenizer's FlatDfa (same transitions as original when
-    // minimize is skipped). Subsequent partitions reuse it, skipping the
-    // ~120ms transpose + byte-class computation each (~480ms CPU saved).
-    // The cache validates state counts, so it's safely ignored when simplify
-    // changes the DFA (reducing state count via minimization).
+    // Lazily-initialized shared compact transition table cache over the one
+    // raw lexer DFA used by every L2P partition. Subsequent partitions reuse
+    // it, avoiding repeated transpose and byte-class computation.
     let shared_cache_setup_started_at = Instant::now();
     let shared_vocab_dfa_cache = l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
-    // A dedicated original-tokenizer cache prevents a simplified partition
-    // from occupying the transition base needed by unsimplified L2P work.
+    // Shared raw-tokenizer cache for L2P vocabulary equivalence.
     let shared_original_vocab_dfa_cache =
         l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
     let shared_original_vocab_analysis_dfa_cache =
         l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache::default();
     let shared_transition_cache = OnceLock::new();
-    let shared_simplify_cache = l2p::SharedSimplifyCache::default();
     let shared_cache_setup_ms =
         shared_cache_setup_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -533,7 +527,6 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             Some(&shared_original_vocab_dfa_cache),
             Some(&shared_original_vocab_analysis_dfa_cache),
             Some(&shared_transition_cache),
-            Some(&shared_simplify_cache),
             Some(&shared_classify_cache),
         )
         .map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));

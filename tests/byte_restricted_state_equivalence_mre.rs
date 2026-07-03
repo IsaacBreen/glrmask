@@ -1,4 +1,4 @@
-//! Minimal TI-off reproducer for byte-restricted L2P tokenizer simplification.
+//! Minimal TI-off reproducer for byte-restricted L2P state equivalence.
 //!
 
 use glrmask::{Constraint, Vocab};
@@ -17,12 +17,11 @@ fn contains(mask: &[u32], token: u32) -> bool {
 /// where this specific partition-local continuation machinery is not used.
 /// Terminal interchangeability is explicitly disabled.
 #[test]
-fn byte_restricted_l2p_must_admit_a_cross_partition_partial_token() {
+fn byte_restricted_state_equivalence_must_admit_a_cross_partition_partial_token() {
     unsafe {
         std::env::set_var("GLRMASK_FORCE_ALL_L2P", "1");
         std::env::set_var("GLRMASK_SPLIT_L2P_VOCAB", "0");
         std::env::set_var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "0");
-        std::env::set_var("GLRMASK_L2P_DISABLE_TOKENIZER_SIMPLIFY", "0");
     }
 
     // Exactly one grammar terminal, and exactly the two necessary tokens.

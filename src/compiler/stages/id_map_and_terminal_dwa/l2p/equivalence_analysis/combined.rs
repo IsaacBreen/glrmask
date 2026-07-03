@@ -211,10 +211,12 @@ pub(crate) struct CombinedEquivalenceProfile {
     pub(crate) prepare_inputs_ms: f64,
     pub(crate) byte_class_setup_ms: f64,
     pub(crate) token_dedup_ms: f64,
+    pub(crate) restricted_observation_state_equiv_ms: f64,
     pub(crate) max_length_state_equiv_ms: f64,
     pub(crate) vocab_equiv_ms: f64,
     pub(crate) exact_state_equiv_ms: f64,
     pub(crate) id_map_finalize_ms: f64,
+    pub(crate) restricted_observation_reps: usize,
     pub(crate) max_length_reps: usize,
     pub(crate) exact_reps: usize,
     pub(crate) exact_rep_confirmation_used: bool,
@@ -383,10 +385,8 @@ fn analyze_equivalences_impl(
     let token_path_disallowed_follows =
         ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal);
     let effective_disallowed = &token_path_disallowed_follows;
-    // Only use shared flat_trans when state count matches the (possibly
-    // simplified) tokenizer. If simplify_for_terminals minimized the DFA,
-    // the original flat_trans has different state numbering and must be
-    // discarded.
+    // The raw tokenizer is the only lexer coordinate in L2P. Retain the
+    // compatibility check defensively, since this cache is shared by callers.
     let compatible_flat_trans = flat_trans.filter(|ft| {
         ft.len() == tokenizer.num_states() as usize * 256
     });
@@ -557,10 +557,12 @@ fn analyze_equivalences_impl(
             prepare_inputs_ms,
             byte_class_setup_ms,
             token_dedup_ms,
+            restricted_observation_state_equiv_ms: pipeline_profile.restricted_observation_state_equiv_ms,
             max_length_state_equiv_ms: pipeline_profile.max_length_state_equiv_ms,
             vocab_equiv_ms,
             exact_state_equiv_ms,
             id_map_finalize_ms,
+            restricted_observation_reps: pipeline_profile.restricted_observation_reps,
             max_length_reps: pipeline_profile.max_length_reps,
             exact_reps,
             exact_rep_confirmation_used,

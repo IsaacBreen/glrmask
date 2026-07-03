@@ -17,8 +17,7 @@ mod terminal_interchangeability;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -27,7 +26,7 @@ use crate::automata::weighted::minimize::minimize_owned;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
-use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::compiler::stages::mapped_artifact::MappedArtifact;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa;
 use crate::ds::bitset::BitSet;
@@ -35,7 +34,6 @@ use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
-use rustc_hash::FxHashMap;
 
 use super::grammar_helpers::compute_always_allowed_follows;
 use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhaseProfile};
@@ -94,118 +92,6 @@ fn l2p_terminal_interchangeability_enabled() -> bool {
         .unwrap_or(false)
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct SimplifyCacheKey {
-    active_words: Vec<u64>,
-    relevant_words: [u64; 4],
-}
-
-#[derive(Default)]
-pub(crate) struct SharedSimplifyCache {
-    entries: Mutex<FxHashMap<SimplifyCacheKey, Arc<SimplifyCacheEntry>>>,
-}
-
-struct SimplifyCacheEntry {
-    result: Mutex<Option<Result<Arc<(Tokenizer, ManyToOneIdMap)>, Arc<str>>>>,
-    ready: Condvar,
-}
-
-impl SimplifyCacheEntry {
-    fn new() -> Self {
-        Self {
-            result: Mutex::new(None),
-            ready: Condvar::new(),
-        }
-    }
-}
-
-impl SharedSimplifyCache {
-    fn key(active_terminals: &[bool], relevant_bytes: &[bool; 256]) -> SimplifyCacheKey {
-        let mut active_words = vec![0u64; active_terminals.len().div_ceil(64)];
-        for (idx, &active) in active_terminals.iter().enumerate() {
-            if active {
-                active_words[idx >> 6] |= 1u64 << (idx & 63);
-            }
-        }
-
-        let mut relevant_words = [0u64; 4];
-        for (idx, &relevant) in relevant_bytes.iter().enumerate() {
-            if relevant {
-                relevant_words[idx >> 6] |= 1u64 << (idx & 63);
-            }
-        }
-
-        SimplifyCacheKey {
-            active_words,
-            relevant_words,
-        }
-    }
-
-    fn simplify_for_terminals(
-        &self,
-        tokenizer: &Tokenizer,
-        active_terminals: &[bool],
-        relevant_bytes: &[bool; 256],
-    ) -> (Tokenizer, ManyToOneIdMap, bool) {
-        let key = Self::key(active_terminals, relevant_bytes);
-        let (entry, owns_compute) = {
-            let mut entries = self.entries.lock().unwrap();
-            if let Some(entry) = entries.get(&key) {
-                (entry.clone(), false)
-            } else {
-                let entry = Arc::new(SimplifyCacheEntry::new());
-                entries.insert(key, entry.clone());
-                (entry, true)
-            }
-        };
-
-        if owns_compute {
-            match catch_unwind(AssertUnwindSafe(|| {
-                Arc::new(tokenizer.simplify_for_terminals(active_terminals, Some(relevant_bytes)))
-            })) {
-                Ok(computed) => {
-                    *entry.result.lock().unwrap() = Some(Ok(computed.clone()));
-                    entry.ready.notify_all();
-                    return (computed.0.clone(), computed.1.clone(), false);
-                }
-                Err(payload) => {
-                    *entry.result.lock().unwrap() =
-                        Some(Err("tokenizer.simplify_for_terminals panicked".into()));
-                    entry.ready.notify_all();
-                    resume_unwind(payload);
-                }
-            }
-        }
-
-        let mut result = entry.result.lock().unwrap();
-        loop {
-            match result.as_ref() {
-                Some(Ok(cached)) => {
-                    return (cached.0.clone(), cached.1.clone(), true);
-                }
-                Some(Err(message)) => {
-                    panic!("{message}");
-                }
-                None => {
-                    result = entry.ready.wait(result).unwrap();
-                }
-            }
-        }
-    }
-}
-
-fn project_initial_state_map_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("GLRMASK_L2P_PROJECT_INITIAL_STATE_MAP")
-            .map(|value| {
-                let trimmed = value.trim();
-                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
-            })
-            .unwrap_or(true)
-    })
-}
-
 #[derive(Clone, Copy)]
 struct L2PTokenLengthStats {
     max_len: usize,
@@ -249,158 +135,6 @@ fn l2p_token_length_stats(vocab: &Vocab) -> L2PTokenLengthStats {
     stats
 }
 
-struct ProjectInitialStateMapProfile {
-    used: bool,
-    reason: &'static str,
-    simplified_state_count: usize,
-    projected_simplified_states: usize,
-    unmapped_simplified_states_before_fill: usize,
-    projected_initial_classes_before_compaction: usize,
-    projected_initial_classes_after_compaction: usize,
-    dead_class_added: bool,
-}
-
-impl ProjectInitialStateMapProfile {
-    fn unused(reason: &'static str, simplified_state_count: usize) -> Self {
-        Self {
-            used: false,
-            reason,
-            simplified_state_count,
-            projected_simplified_states: 0,
-            unmapped_simplified_states_before_fill: 0,
-            projected_initial_classes_before_compaction: 0,
-            projected_initial_classes_after_compaction: 0,
-            dead_class_added: false,
-        }
-    }
-}
-
-fn project_initial_state_map_for_simplified_tokenizer(
-    initial_state_map: &ManyToOneIdMap,
-    simplify_state_map: &ManyToOneIdMap,
-) -> (Option<ManyToOneIdMap>, ProjectInitialStateMapProfile) {
-    let simplified_state_count = simplify_state_map.num_internal_ids() as usize;
-    if simplified_state_count == 0 {
-        return (
-            None,
-            ProjectInitialStateMapProfile::unused("empty_simplified", simplified_state_count),
-        );
-    }
-
-    let mut projected = vec![u32::MAX; simplified_state_count];
-    let mut has_projected_state = false;
-
-    for (original_state, &simplified_state) in
-        simplify_state_map.original_to_internal.iter().enumerate()
-    {
-        if simplified_state == u32::MAX {
-            continue;
-        }
-
-        let initial_class = initial_state_map
-            .original_to_internal
-            .get(original_state)
-            .copied()
-            .unwrap_or(u32::MAX);
-        if initial_class == u32::MAX {
-            continue;
-        }
-
-        let slot = &mut projected[simplified_state as usize];
-        if *slot == u32::MAX {
-            *slot = initial_class;
-            has_projected_state = true;
-        } else if *slot != initial_class {
-            let projected_simplified_states = projected
-                .iter()
-                .filter(|&&initial_class| initial_class != u32::MAX)
-                .count();
-            let projected_initial_classes_before_compaction = projected
-                .iter()
-                .copied()
-                .filter(|&initial_class| initial_class != u32::MAX)
-                .collect::<std::collections::BTreeSet<_>>()
-                .len();
-            let unmapped_simplified_states_before_fill =
-                simplified_state_count.saturating_sub(projected_simplified_states);
-            return (
-                None,
-                ProjectInitialStateMapProfile {
-                    used: false,
-                    reason: "mixed_initial_class",
-                    simplified_state_count,
-                    projected_simplified_states,
-                    unmapped_simplified_states_before_fill,
-                    projected_initial_classes_before_compaction,
-                    projected_initial_classes_after_compaction: 0,
-                    dead_class_added: false,
-                },
-            );
-        }
-    }
-
-    if !has_projected_state {
-        return (
-            None,
-            ProjectInitialStateMapProfile::unused("no_projected_states", simplified_state_count),
-        );
-    }
-
-    let projected_simplified_states = projected
-        .iter()
-        .filter(|&&initial_class| initial_class != u32::MAX)
-        .count();
-    let projected_initial_classes_before_compaction = projected
-        .iter()
-        .copied()
-        .filter(|&initial_class| initial_class != u32::MAX)
-        .collect::<std::collections::BTreeSet<_>>()
-        .len();
-    let unmapped_simplified_states_before_fill =
-        simplified_state_count.saturating_sub(projected_simplified_states);
-
-    let mut remapped_classes = vec![u32::MAX; initial_state_map.num_internal_ids() as usize];
-    let mut next_class = 0u32;
-    let compacted_projected: Vec<u32> = projected
-        .into_iter()
-        .map(|initial_class| {
-            if initial_class == u32::MAX {
-                return u32::MAX;
-            }
-            let slot = &mut remapped_classes[initial_class as usize];
-            if *slot == u32::MAX {
-                *slot = next_class;
-                next_class += 1;
-            }
-            *slot
-        })
-        .collect();
-
-    let dead_class_added = compacted_projected
-        .iter()
-        .any(|&initial_class| initial_class == u32::MAX);
-    let projected_initial_classes_after_compaction = next_class as usize;
-    (
-        Some(
-            ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
-                compacted_projected,
-                next_class,
-            )
-            .fill_unmapped_with_new_class(),
-        ),
-        ProjectInitialStateMapProfile {
-            used: true,
-            reason: "used",
-            simplified_state_count,
-            projected_simplified_states,
-            unmapped_simplified_states_before_fill,
-            projected_initial_classes_before_compaction,
-            projected_initial_classes_after_compaction,
-            dead_class_added,
-        },
-    )
-}
-
 /// Build an L2+ id_map and terminal DWA for the given vocab and terminal set.
 ///
 /// Builds its own id_map via `InternalIdMap::build_with_group_filter` (full DFA-
@@ -433,7 +167,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     shared_original_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_original_vocab_analysis_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_transition_cache: Option<&OnceLock<equivalence_analysis::compat::FlatTransitionCache>>,
-    shared_simplify_cache: Option<&SharedSimplifyCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> Option<LocalIdMapTerminalDwa> {
@@ -473,96 +206,16 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         .iter()
         .filter(|&&active| active)
         .count();
-    // Build the validation artifact in original lexer-state coordinates with
-    // the full terminal alphabet intact. Each transport mode scans a complete
-    // swapped-label lexer and relabels its outputs back to the original
-    // alphabet; deleting sibling class members changes longest-match and
-    // future-terminal behavior.
-    let tokenizer_before_simplify = tokenizer;
+    let tokenizer_for_build = tokenizer;
+    let equivalence_initial_state_map = initial_state_map;
 
-    // L2P keeps one raw lexer-state coordinate. Do not quotient a
-    // byte-restricted lexer here and then thread a second coordinate through
-    // equivalence, TI transport, and final-artifact expansion.
-    let simplified_tok_storage: Option<Tokenizer> = None;
-    let simplify_state_map: Option<ManyToOneIdMap> = None;
-    let simplify_cache_hit = false;
-    let simplify_ms = 0.0;
-    let use_simplified_tok = false;
-    let tokenizer_for_build = tokenizer_before_simplify;
-    let _ = shared_simplify_cache;
-    let candidate_unmapped_original_states = simplify_state_map.as_ref().map_or(0, |state_map| {
-        state_map
-            .original_to_internal
-            .iter()
-            .filter(|&&state| state == u32::MAX)
-            .count()
-    });
-    let projection_enabled = project_initial_state_map_enabled();
-    let (projected_initial_state_map, projection_profile) = if !projection_enabled {
-        (
-            None,
-            ProjectInitialStateMapProfile::unused(
-                "env_disabled",
-                simplify_state_map
-                    .as_ref()
-                    .map(|simplified| simplified.num_internal_ids() as usize)
-                    .unwrap_or(0),
-            ),
-        )
-    } else if initial_state_map.is_none() {
-        (
-            None,
-            ProjectInitialStateMapProfile::unused(
-                "no_initial_map",
-                simplify_state_map
-                    .as_ref()
-                    .map(|simplified| simplified.num_internal_ids() as usize)
-                    .unwrap_or(0),
-            ),
-        )
-    } else if simplify_state_map.is_none() {
-        (
-            None,
-            ProjectInitialStateMapProfile::unused("no_simplify_map", 0),
-        )
-    } else {
-        project_initial_state_map_for_simplified_tokenizer(
-            initial_state_map.expect("checked above"),
-            simplify_state_map.as_ref().expect("checked above"),
-        )
-    };
-    let equivalence_initial_state_map = if use_simplified_tok {
-        projected_initial_state_map.as_ref()
-    } else {
-        initial_state_map
-    };
-    if compile_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][l2p_projection] partition={} projection_enabled={} simplify_branch_active={} projected_initial_state_map_used={} reason={} simplified_state_count={} projected_simplified_states={} unmapped_simplified_states_before_fill={} projected_initial_classes_before_compaction={} projected_initial_classes_after_compaction={} dead_class_added={}",
-            partition_label,
-            projection_enabled,
-            use_simplified_tok,
-            projection_profile.used,
-            projection_profile.reason,
-            projection_profile.simplified_state_count,
-            projection_profile.projected_simplified_states,
-            projection_profile.unmapped_simplified_states_before_fill,
-            projection_profile.projected_initial_classes_before_compaction,
-            projection_profile.projected_initial_classes_after_compaction,
-            projection_profile.dead_class_added,
-        );
-    }
-
-    // ---- Step 1: Equivalence analysis (on simplified tokenizer) ----
+    // ---- Step 1: Equivalence analysis (raw tokenizer state IDs) ----
     let id_map_started_at = Instant::now();
-    // The original tokenizer has a single transition relation across every
-    // unsimplified partition. Derive its exact byte partition lazily from
-    // sparse lexer edges once; simplified tokenizers retain their local cache.
+    // Every L2P partition shares the raw tokenizer transition relation.
+    // Derive its exact byte partition lazily from sparse lexer edges once.
     let shared_base_setup_started_at = Instant::now();
     let equivalence_vocab_dfa_cache = if reference_terminal_expansion {
         None
-    } else if use_simplified_tok {
-        shared_vocab_dfa_cache
     } else if let (Some(original_cache), Some(transition_cache), Some(flat_trans)) = (
         shared_original_vocab_dfa_cache,
         shared_transition_cache,
@@ -584,7 +237,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         shared_vocab_dfa_cache
     };
     let shared_base_setup_ms = shared_base_setup_started_at.elapsed().as_secs_f64() * 1000.0;
-    let shared_analysis_dfa_cache = (!use_simplified_tok && !reference_terminal_expansion)
+    let shared_analysis_dfa_cache = (!reference_terminal_expansion)
         .then_some(shared_original_vocab_analysis_dfa_cache)
         .flatten();
     // Do not remove this note. Do not remove the instruction saying not to
@@ -608,7 +261,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             equivalence_vocab_dfa_cache,
             shared_analysis_dfa_cache,
             shared_base_setup_ms,
-            if use_simplified_tok || reference_terminal_expansion { None } else { flat_trans },
+            if reference_terminal_expansion { None } else { flat_trans },
             equivalence_initial_state_map,
         );
 
@@ -818,18 +471,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     if early_none {
         return None;
     }
-    let composed_id_map = if use_simplified_tok {
-        InternalIdMap {
-            tokenizer_states: simplify_state_map
-                .as_ref()
-                .expect("simplify_state_map missing for simplified tokenizer")
-                .compose(&simplified_id_map.tokenizer_states)
-                .fill_unmapped_with_new_class(),
-            vocab_tokens: simplified_id_map.vocab_tokens.clone(),
-        }
-    } else {
-        simplified_id_map.clone()
-    };
+    let composed_id_map = simplified_id_map.clone();
     let postprocess_ms =
         always_allowed_ms + collapse_ms + disallowed_ms + prune_ms + canonicalize_ms;
     let max_length_reduction_pct = if equiv_profile.initial_states_considered == 0 {
@@ -862,7 +504,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     if l2p_timing_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} internal_vocab_entries={} initial_states_considered={} max_length_skipped={} max_token_len={} token_len_gt_4={} token_len_gt_8={} token_len_gt_16={} token_len_gt_32={} token_len_gt_64={} prepare_inputs_ms={:.3} byte_class_setup_ms={:.3} token_dedup_ms={:.3} max_length_state_equiv_ms={:.3} vocab_equiv_ms={:.3} exact_state_equiv_ms={:.3} id_map_finalize_ms={:.3} max_length_reps={} exact_reps={} exact_rep_confirmation_used={} fast_sound_id_map_used={} max_length_reduction_pct={:.2} exact_reduction_pct={:.2} simplify_ms={:.3} simplify_cache_hit={} simplified_states={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} compact_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
+            "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} internal_vocab_entries={} initial_states_considered={} max_length_skipped={} max_token_len={} token_len_gt_4={} token_len_gt_8={} token_len_gt_16={} token_len_gt_32={} token_len_gt_64={} prepare_inputs_ms={:.3} byte_class_setup_ms={:.3} token_dedup_ms={:.3} max_length_state_equiv_ms={:.3} vocab_equiv_ms={:.3} exact_state_equiv_ms={:.3} id_map_finalize_ms={:.3} max_length_reps={} exact_reps={} exact_rep_confirmation_used={} fast_sound_id_map_used={} max_length_reduction_pct={:.2} exact_reduction_pct={:.2} restricted_observation_state_equiv_ms={:.3} restricted_observation_reps={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} compact_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
             partition_label,
             vocab.entries.len(),
             num_active_terminals,
@@ -890,9 +532,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             fast_sound_id_map_used,
             max_length_reduction_pct,
             exact_reduction_pct,
-            simplify_ms,
-            simplify_cache_hit,
-            tokenizer_for_build.num_states(),
+            equiv_profile.restricted_observation_state_equiv_ms,
+            equiv_profile.restricted_observation_reps,
             id_map_ms,
             0.0,
             vocab_tree_ms,
@@ -927,7 +568,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         id_map,
         dwa,
         profile: TerminalDwaPhaseProfile {
-            id_map_ms: simplify_ms + id_map_ms,
+            id_map_ms,
             terminal_dwa_ms: vocab_tree_ms
                 + possible_matches_ms
                 + seed_ms
@@ -963,7 +604,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 shared_original_vocab_dfa_cache,
                 shared_original_vocab_analysis_dfa_cache,
                 shared_transition_cache,
-                shared_simplify_cache,
                 flat_trans,
                 initial_state_map,
             )

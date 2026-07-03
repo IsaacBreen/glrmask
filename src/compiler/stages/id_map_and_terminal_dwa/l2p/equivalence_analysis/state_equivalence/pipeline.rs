@@ -9,18 +9,21 @@ use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
 use super::identity_state_map;
 use super::max_length::{self, MaxLengthMode};
+use super::restricted_observation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StateEquivalencePassKind {
+    RestrictedObservation,
     MaxLength,
 }
 
 impl StateEquivalencePassKind {
     fn parse(value: &str) -> Result<Self, String> {
         match value.trim() {
+            "restricted_observation" => Ok(Self::RestrictedObservation),
             "max_length" => Ok(Self::MaxLength),
             other => Err(format!(
-                "unknown state-equivalence pass `{other}`; expected one of: max_length"
+                "unknown state-equivalence pass `{other}`; expected one of: restricted_observation, max_length"
             )),
         }
     }
@@ -49,6 +52,8 @@ pub(crate) struct StateEquivalencePassProfile {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct StateEquivalencePipelineProfile {
     pub pass_profiles: Vec<StateEquivalencePassProfile>,
+    pub restricted_observation_state_equiv_ms: f64,
+    pub restricted_observation_reps: usize,
     pub max_length_skipped: bool,
     pub max_length_state_equiv_ms: f64,
     pub max_length_reps: usize,
@@ -90,18 +95,37 @@ pub(crate) fn resolve_global_pipeline_config(
     } else {
         &[][..]
     };
-    resolve_pipeline_config("GLRMASK_GLOBAL_STATE_EQUIV_PASSES", default_passes)
+    let mut config = resolve_pipeline_config("GLRMASK_GLOBAL_STATE_EQUIV_PASSES", default_passes);
+    // Restricted observation depends on a local L2P vocabulary partition and
+    // is deliberately unavailable to the global pipeline.
+    config
+        .passes
+        .retain(|kind| !matches!(kind, StateEquivalencePassKind::RestrictedObservation));
+    config
 }
 
 pub(crate) fn resolve_l2p_pipeline_config(
     default_include_max_length: bool,
 ) -> StateEquivalencePipelineConfig {
     let default_passes = if default_include_max_length {
-        &[StateEquivalencePassKind::MaxLength][..]
+        &[
+            StateEquivalencePassKind::RestrictedObservation,
+            StateEquivalencePassKind::MaxLength,
+        ][..]
     } else {
-        &[][..]
+        &[StateEquivalencePassKind::RestrictedObservation][..]
     };
-    resolve_pipeline_config("GLRMASK_L2P_STATE_EQUIV_PASSES", default_passes)
+    let mut config = resolve_pipeline_config("GLRMASK_L2P_STATE_EQUIV_PASSES", default_passes);
+    // This is the coordinate-preserving replacement for L2P tokenizer
+    // simplification, so it is mandatory and always precedes every optional
+    // pass, including an environment-selected max-length pass.
+    config
+        .passes
+        .retain(|kind| !matches!(kind, StateEquivalencePassKind::RestrictedObservation));
+    config
+        .passes
+        .insert(0, StateEquivalencePassKind::RestrictedObservation);
+    config
 }
 
 pub(crate) fn run_state_equivalence_pipeline(
@@ -122,18 +146,38 @@ pub(crate) fn run_state_equivalence_pipeline(
             .passes
             .iter()
             .any(|kind| matches!(kind, StateEquivalencePassKind::MaxLength)),
+        restricted_observation_reps: current_state_map.num_internal_ids() as usize,
         max_length_reps: current_state_map.num_internal_ids() as usize,
         ..StateEquivalencePipelineProfile::default()
     };
+    let statistic = max_length::compute_statistic(vocab);
 
     for kind in &config.passes {
         match *kind {
+            StateEquivalencePassKind::RestrictedObservation => {
+                assert!(
+                    matches!(scope, StateEquivalenceScope::L2p),
+                    "restricted-observation state equivalence is L2P-only",
+                );
+                let started_at = Instant::now();
+                current_state_map = restricted_observation::compute_state_map(
+                    tokenizer,
+                    statistic.relevant_bytes(),
+                    Some(&current_state_map),
+                    active_groups,
+                    kbounded_byte_to_class,
+                );
+                record_restricted_observation_profile(
+                    &mut profile,
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                    current_state_map.num_internal_ids() as usize,
+                );
+            }
             StateEquivalencePassKind::MaxLength => {
                 let mode = match scope {
                     StateEquivalenceScope::Global => MaxLengthMode::StableByteRestricted,
                     StateEquivalenceScope::L2p => MaxLengthMode::KBoundedByteRestricted,
                 };
-                let statistic = max_length::compute_statistic(vocab);
                 let started_at = Instant::now();
                 current_state_map = max_length::compute_state_map(
                     tokenizer,
@@ -156,6 +200,22 @@ pub(crate) fn run_state_equivalence_pipeline(
     }
 
     (current_state_map, profile)
+}
+
+fn record_restricted_observation_profile(
+    profile: &mut StateEquivalencePipelineProfile,
+    elapsed_ms: f64,
+    representative_count: usize,
+) {
+    profile.restricted_observation_state_equiv_ms = elapsed_ms;
+    profile.restricted_observation_reps = representative_count;
+    profile.pass_profiles.push(StateEquivalencePassProfile {
+        kind: StateEquivalencePassKind::RestrictedObservation,
+        name: "restricted_observation",
+        elapsed_ms,
+        representative_count,
+        skipped: false,
+    });
 }
 
 fn record_max_length_profile(

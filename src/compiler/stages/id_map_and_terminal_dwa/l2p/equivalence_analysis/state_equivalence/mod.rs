@@ -2,6 +2,7 @@ use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
 pub(crate) mod max_length;
 pub(crate) mod pipeline;
+pub(crate) mod restricted_observation;
 
 pub(crate) use pipeline::{
     resolve_global_pipeline_config, resolve_l2p_pipeline_config, run_state_equivalence_pipeline,
