@@ -214,7 +214,7 @@ fn l2p_tokenizer_simplify_disabled() -> bool {
                 let trimmed = value.trim();
                 trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
             })
-            .unwrap_or(true)
+            .unwrap_or(false)
     })
 }
 
@@ -493,9 +493,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let tokenizer_before_simplify = tokenizer;
 
     let simplify_started_at = Instant::now();
-    let can_skip_simplify = reference_terminal_expansion
-        || l2p_tokenizer_simplify_disabled()
-        || num_analysis_active_terminals == analysis_active_terminals.len();
+    // Simplification is the partition-local lexer quotient. It must run for
+    // nontrivial TI classes and byte-restricted partitions alike. The only
+    // bypass is an explicit diagnostic opt-out.
+    let can_skip_simplify = l2p_tokenizer_simplify_disabled();
     let (simplified_tok_storage, simplify_state_map, simplify_cache_hit) = if can_skip_simplify {
         (None, None, false)
     } else if let Some(cache) = shared_simplify_cache {
