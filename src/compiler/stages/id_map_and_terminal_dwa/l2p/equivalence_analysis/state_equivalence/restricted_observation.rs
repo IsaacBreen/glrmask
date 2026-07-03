@@ -10,6 +10,7 @@
 use std::time::Instant;
 
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -29,8 +30,8 @@ fn signature_fingerprint_step(mut hash: u64, word: u64) -> u64 {
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct TargetLabels {
-    finalizers: Vec<u32>,
-    future_finalizers: Vec<u32>,
+    finalizers: SmallVec<[u32; 4]>,
+    future_finalizers: SmallVec<[u32; 4]>,
 }
 
 #[inline]
@@ -48,20 +49,17 @@ fn target_label_ids(tokenizer: &Tokenizer, active_groups: Option<&[bool]>) -> Ve
     let mut ids_by_labels = FxHashMap::<TargetLabels, u32>::default();
 
     for state in 0..tokenizer.num_states() as usize {
-        let mut finalizers = tokenizer
+        // Tokenizer terminal iterators traverse the backing BitSet, which is
+        // ascending and duplicate-free. Preserve that canonical order without
+        // per-state sorting or heap allocation for the usual tiny label sets.
+        let finalizers = tokenizer
             .matched_terminals_iter(state as u32)
             .filter(|&terminal| terminal_is_active(terminal, active_groups))
-            .collect::<Vec<_>>();
-        let mut future_finalizers = tokenizer
+            .collect::<SmallVec<[u32; 4]>>();
+        let future_finalizers = tokenizer
             .possible_future_terminals_iter(state as u32)
             .filter(|&terminal| terminal_is_active(terminal, active_groups))
-            .collect::<Vec<_>>();
-        // Lexer iterators are normally ordered, but make the observation
-        // canonical at this boundary rather than relying on that detail.
-        finalizers.sort_unstable();
-        finalizers.dedup();
-        future_finalizers.sort_unstable();
-        future_finalizers.dedup();
+            .collect::<SmallVec<[u32; 4]>>();
 
         let next = ids_by_labels.len() as u32;
         let id = *ids_by_labels
@@ -217,9 +215,37 @@ pub(crate) fn compute_state_map(
     }
     let observation_cache_ms = observation_cache_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    // Each refinement only splits the preceding classes. Refining within a
-    // class is therefore equivalent to retaining the previous class in every
-    // signature, while settled singleton classes need no more observation.
+    // Inverse links use original candidate IDs only; this is not a second
+    // tokenizer coordinate.
+    let reverse_cache_started_at = Instant::now();
+    let mut reverse_offsets = vec![0usize; num_candidates + 1];
+    for &observation in &observed_targets {
+        if observation != 0 {
+            let target = (observation as u32 - 1) as usize;
+            reverse_offsets[target + 1] += 1;
+        }
+    }
+    for candidate in 1..=num_candidates {
+        reverse_offsets[candidate] += reverse_offsets[candidate - 1];
+    }
+    let mut reverse_cursor = reverse_offsets[..num_candidates].to_vec();
+    let mut reverse_sources = vec![0u32; reverse_offsets[num_candidates]];
+    for source in 0..num_candidates {
+        let observation_start = source * observation_width;
+        for &observation in &observed_targets[observation_start..observation_start + observation_width] {
+            if observation != 0 {
+                let target = (observation as u32 - 1) as usize;
+                let slot = reverse_cursor[target];
+                reverse_sources[slot] = source as u32;
+                reverse_cursor[target] += 1;
+            }
+        }
+    }
+    let reverse_cache_ms = reverse_cache_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    // Each refinement only splits the preceding classes. A class can change
+    // only when one of its observations enters a class split in the preceding
+    // round, so untouched classes retain their exact prior signature.
     let refinement_started_at = Instant::now();
     let mut current_classes = vec![0u32; num_candidates];
     let mut next_classes = vec![0u32; num_candidates];
@@ -232,14 +258,17 @@ pub(crate) fn compute_state_map(
     let mut refinement_rounds = 0usize;
     let mut refined_candidate_visits = 0usize;
     let mut refined_class_visits = 0usize;
+    let mut dirty_classes = vec![0usize];
+    let mut dirty_flags = vec![true];
 
-    for _ in 0..num_candidates {
+    while !dirty_classes.is_empty() {
         refinement_rounds += 1;
         next_classes.copy_from_slice(&current_classes);
-        let class_count_at_start = class_members.len();
-        let mut split_any = false;
+        let mut moved_candidates = Vec::new();
+        let current_dirty_classes = std::mem::take(&mut dirty_classes);
 
-        for class in 0..class_count_at_start {
+        for class in current_dirty_classes {
+            dirty_flags[class] = false;
             if class_members[class].len() <= 1 {
                 continue;
             }
@@ -312,12 +341,15 @@ pub(crate) fn compute_state_map(
             }
 
             debug_assert!(!retained_members.is_empty());
-            split_any |= !split_members.is_empty();
             class_members[class] = retained_members;
+            for members in &split_members {
+                moved_candidates.extend(members.iter().copied());
+            }
             class_members.extend(split_members);
+            dirty_flags.resize(class_members.len(), false);
         }
 
-        if !split_any {
+        if moved_candidates.is_empty() {
             let refinement_ms = refinement_started_at.elapsed().as_secs_f64() * 1000.0;
             let map_materialize_started_at = Instant::now();
             let result = map_from_candidate_classes(
@@ -346,10 +378,48 @@ pub(crate) fn compute_state_map(
             }
             return result;
         }
+
+        for target in moved_candidates {
+            for &source in &reverse_sources[reverse_offsets[target]..reverse_offsets[target + 1]] {
+                let source = source as usize;
+                let source_class = next_classes[source] as usize;
+                if class_members[source_class].len() > 1 && !dirty_flags[source_class] {
+                    dirty_flags[source_class] = true;
+                    dirty_classes.push(source_class);
+                }
+            }
+        }
         std::mem::swap(&mut current_classes, &mut next_classes);
     }
 
-    unreachable!("restricted-observation partition refinement did not stabilize");
+    let refinement_ms = refinement_started_at.elapsed().as_secs_f64() * 1000.0;
+    let map_materialize_started_at = Instant::now();
+    let result = map_from_candidate_classes(
+        &candidate_members,
+        &candidate_representatives,
+        &current_classes,
+        num_states,
+    );
+    let map_materialize_ms = map_materialize_started_at.elapsed().as_secs_f64() * 1000.0;
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][restricted_observation] states={} candidates={} active_bytes={} target_label_classes={} target_labels_ms={:.3} candidate_partition_ms={:.3} observation_cache_ms={:.3} reverse_cache_ms={:.3} refinement_ms={:.3} map_materialize_ms={:.3} rounds={} reps={} total_ms={:.3}",
+            num_states,
+            num_candidates,
+            active_bytes.len(),
+            target_label_classes,
+            target_labels_ms,
+            candidate_partition_ms,
+            observation_cache_ms,
+            reverse_cache_ms,
+            refinement_ms,
+            map_materialize_ms,
+            refinement_rounds,
+            class_members.len(),
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    result
 }
 
 #[cfg(test)]
