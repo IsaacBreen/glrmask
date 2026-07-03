@@ -28,47 +28,84 @@ fn signature_fingerprint_step(mut hash: u64, word: u64) -> u64 {
     hash
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TargetLabels {
     finalizers: SmallVec<[u32; 4]>,
     future_finalizers: SmallVec<[u32; 4]>,
 }
 
-#[inline]
-fn terminal_is_active(terminal: u32, active_groups: Option<&[bool]>) -> bool {
-    active_groups.map_or(true, |groups| {
-        groups
-            .get(terminal as usize)
-            .copied()
-            .unwrap_or(false)
-    })
-}
-
 fn target_label_ids(tokenizer: &Tokenizer, active_groups: Option<&[bool]>) -> Vec<u32> {
-    let mut ids = vec![0u32; tokenizer.num_states() as usize];
-    let mut ids_by_labels = FxHashMap::<TargetLabels, u32>::default();
+    let num_states = tokenizer.num_states() as usize;
+    let mut ids = vec![0u32; num_states];
+    let mut labels = Vec::<TargetLabels>::new();
+    let mut first_by_fingerprint = FxHashMap::<u64, usize>::default();
+    first_by_fingerprint.reserve(num_states / 2);
+    let mut next_same_fingerprint = Vec::<usize>::new();
 
-    for state in 0..tokenizer.num_states() as usize {
+    for state in 0..num_states {
         // Tokenizer terminal iterators traverse the backing BitSet, which is
         // ascending and duplicate-free. Preserve that canonical order without
         // per-state sorting or heap allocation for the usual tiny label sets.
-        let finalizers = tokenizer
-            .matched_terminals_iter(state as u32)
-            .filter(|&terminal| terminal_is_active(terminal, active_groups))
-            .collect::<SmallVec<[u32; 4]>>();
-        let future_finalizers = tokenizer
-            .possible_future_terminals_iter(state as u32)
-            .filter(|&terminal| terminal_is_active(terminal, active_groups))
-            .collect::<SmallVec<[u32; 4]>>();
+        let mut finalizers = SmallVec::<[u32; 4]>::new();
+        let mut future_finalizers = SmallVec::<[u32; 4]>::new();
+        let mut fingerprint = 0x4d5f_3a17_9b28_c6e1_u64;
 
-        let next = ids_by_labels.len() as u32;
-        let id = *ids_by_labels
-            .entry(TargetLabels {
+        match active_groups {
+            Some(groups) => {
+                for terminal in tokenizer.matched_terminals_iter(state as u32) {
+                    if groups.get(terminal as usize).copied().unwrap_or(false) {
+                        finalizers.push(terminal);
+                        fingerprint = signature_fingerprint_step(fingerprint, terminal as u64);
+                    }
+                }
+                fingerprint = signature_fingerprint_step(fingerprint, u64::MAX);
+                for terminal in tokenizer.possible_future_terminals_iter(state as u32) {
+                    if groups.get(terminal as usize).copied().unwrap_or(false) {
+                        future_finalizers.push(terminal);
+                        fingerprint = signature_fingerprint_step(fingerprint, terminal as u64);
+                    }
+                }
+            }
+            None => {
+                for terminal in tokenizer.matched_terminals_iter(state as u32) {
+                    finalizers.push(terminal);
+                    fingerprint = signature_fingerprint_step(fingerprint, terminal as u64);
+                }
+                fingerprint = signature_fingerprint_step(fingerprint, u64::MAX);
+                for terminal in tokenizer.possible_future_terminals_iter(state as u32) {
+                    future_finalizers.push(terminal);
+                    fingerprint = signature_fingerprint_step(fingerprint, terminal as u64);
+                }
+            }
+        }
+
+        let mut matching = first_by_fingerprint
+            .get(&fingerprint)
+            .copied()
+            .unwrap_or(NO_CANDIDATE);
+        while matching != NO_CANDIDATE {
+            let previous = &labels[matching];
+            if previous.finalizers == finalizers
+                && previous.future_finalizers == future_finalizers
+            {
+                break;
+            }
+            matching = next_same_fingerprint[matching];
+        }
+
+        let id = if matching != NO_CANDIDATE {
+            matching
+        } else {
+            let id = labels.len();
+            let previous = first_by_fingerprint.insert(fingerprint, id);
+            labels.push(TargetLabels {
                 finalizers,
                 future_finalizers,
-            })
-            .or_insert(next);
-        ids[state] = id;
+            });
+            next_same_fingerprint.push(previous.unwrap_or(NO_CANDIDATE));
+            id
+        };
+        ids[state] = id as u32;
     }
 
     ids
@@ -199,7 +236,14 @@ pub(crate) fn compute_state_map(
     let observation_cache_started_at = Instant::now();
     let observation_width = active_bytes.len();
     let mut observed_targets = vec![0u64; num_candidates * observation_width];
+    // Count inverse edges while materializing the observation cache. A source
+    // only needs one revisit when a destination candidate splits, even if
+    // several observed bytes lead to that destination.
+    debug_assert!(num_candidates < u32::MAX as usize);
+    let mut reverse_offsets = vec![0usize; num_candidates + 1];
+    let mut reverse_seen = vec![0u32; num_candidates];
     for (candidate, &state) in candidate_representatives.iter().enumerate() {
+        let source_marker = candidate as u32 + 1;
         let observation_start = candidate * observation_width;
         for (slot, &byte) in active_bytes.iter().enumerate() {
             let target = tokenizer.get_transition(state as u32, byte);
@@ -209,8 +253,12 @@ pub(crate) fn compute_state_map(
             let target_candidate = raw_to_candidate[target as usize];
             debug_assert_ne!(target_candidate, NO_CANDIDATE);
             let labels = target_labels[target as usize] as u64 + 1;
-            let target_candidate = target_candidate as u64 + 1;
-            observed_targets[observation_start + slot] = (labels << 32) | target_candidate;
+            observed_targets[observation_start + slot] =
+                (labels << 32) | (target_candidate as u64 + 1);
+            if reverse_seen[target_candidate] != source_marker {
+                reverse_seen[target_candidate] = source_marker;
+                reverse_offsets[target_candidate + 1] += 1;
+            }
         }
     }
     let observation_cache_ms = observation_cache_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -218,26 +266,24 @@ pub(crate) fn compute_state_map(
     // Inverse links use original candidate IDs only; this is not a second
     // tokenizer coordinate.
     let reverse_cache_started_at = Instant::now();
-    let mut reverse_offsets = vec![0usize; num_candidates + 1];
-    for &observation in &observed_targets {
-        if observation != 0 {
-            let target = (observation as u32 - 1) as usize;
-            reverse_offsets[target + 1] += 1;
-        }
-    }
     for candidate in 1..=num_candidates {
         reverse_offsets[candidate] += reverse_offsets[candidate - 1];
     }
     let mut reverse_cursor = reverse_offsets[..num_candidates].to_vec();
     let mut reverse_sources = vec![0u32; reverse_offsets[num_candidates]];
+    reverse_seen.fill(0);
     for source in 0..num_candidates {
+        let source_marker = source as u32 + 1;
         let observation_start = source * observation_width;
         for &observation in &observed_targets[observation_start..observation_start + observation_width] {
             if observation != 0 {
                 let target = (observation as u32 - 1) as usize;
-                let slot = reverse_cursor[target];
-                reverse_sources[slot] = source as u32;
-                reverse_cursor[target] += 1;
+                if reverse_seen[target] != source_marker {
+                    reverse_seen[target] = source_marker;
+                    let slot = reverse_cursor[target];
+                    reverse_sources[slot] = source as u32;
+                    reverse_cursor[target] += 1;
+                }
             }
         }
     }
