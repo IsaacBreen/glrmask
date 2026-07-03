@@ -1055,7 +1055,6 @@ mod tests {
     use crate::automata::weighted::determinize::determinize;
     use crate::automata::weighted::minimize::minimize_owned;
     use crate::compiler::stages::equiv_types::ManyToOneIdMap;
-    use crate::compiler::stages::id_map_and_terminal_dwa::l2p::terminal_interchangeability::TerminalInterchangeability;
     use crate::compiler::stages::id_map_and_terminal_dwa::types::{
         LocalIdMapTerminalDwa, TerminalDwaPhaseProfile,
     };
@@ -1243,80 +1242,7 @@ mod tests {
         finish_test_artifact(&nwa, id_map.clone())
     }
 
-    fn build_transport_test_artifact(
-        tokenizer: &Tokenizer,
-        tree: &VocabPrefixTree,
-        id_map: &InternalIdMap,
-        visible_output_raw_labels: &[bool],
-        modes: &[TerminalNwaTransportMode],
-    ) -> LocalIdMapTerminalDwa {
-        let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
-        let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
-        let leaf = nwa.add_state();
-        nwa.set_final_weight(leaf, Weight::all());
-        let start = nwa.add_state();
-        nwa.start_states_mut().push(start);
-        build_transport_nwa_via_trie_walk(
-            tokenizer,
-            None,
-            &mut nwa,
-            start,
-            leaf,
-            id_map,
-            &tree.root,
-            &mut possible_matches,
-            visible_output_raw_labels,
-            modes,
-        );
-        finish_test_artifact(&nwa, id_map.clone())
-    }
 
-    #[test]
-    fn compact_transport_output_filter_preserves_the_baseline_language() {
-        // These duplicate literals are rooted-interchangeable. Raw
-        // nonrepresentatives remain present in the lexer metadata, but their
-        // output edges are redundant: the transport mode using its
-        // representative edge supplies the corresponding member label.
-        let expressions = vec![
-            Expr::U8Seq(b"a".to_vec()),
-            Expr::U8Seq(b"a".to_vec()),
-        ];
-        let tokenizer = build_regex(&expressions).into_tokenizer(
-            expressions.len() as u32,
-            Some(Arc::from(expressions.into_boxed_slice())),
-        );
-        let plan = TerminalInterchangeability::build(&tokenizer, &[true, true], &[true; 256], None);
-        let modes = plan
-            .terminal_nwa_transport_modes()
-            .expect("duplicate terminals must transport");
-        let tree = VocabPrefixTree::build(&[
-            (0, b"a".to_vec()),
-            (1, b"aaa".to_vec()),
-            (2, b"aaaaa".to_vec()),
-            (3, b"aaaaaaa".to_vec()),
-        ]);
-        let id_map = singleton_id_map(tokenizer.num_states(), 4);
-        let baseline = build_baseline_test_artifact(&tokenizer, &tree, &id_map);
-        let full = build_transport_test_artifact(
-            &tokenizer,
-            &tree,
-            &id_map,
-            &[true, true],
-            &modes,
-        );
-        super::super::terminal_dwa_equivalence::compare(&baseline, &full)
-            .expect("full raw-output transport must reproduce the ordinary NWA");
-
-        let compact = build_transport_test_artifact(
-            &tokenizer,
-            &tree,
-            &id_map,
-            &plan.visible_output_raw_labels(),
-            &modes,
-        );
-        super::super::terminal_dwa_equivalence::compare(&baseline, &compact)
-            .expect("raw-edge filtering must preserve the completed terminal language");
-    }
 }
 
 /// One strict-interchangeability scanner mode for the slow reference builder.
