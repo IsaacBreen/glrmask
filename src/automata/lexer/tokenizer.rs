@@ -608,7 +608,18 @@ impl Tokenizer {
             }
         }
 
-        let (minimized, state_mapping) = dfa.minimize_with_state_mapping();
+        // Pruned transitions describe only this partition's vocabulary bytes.
+        // Future-terminal labels remain observations of the full lexer, since
+        // another partition may supply the continuation byte after a token
+        // ends inside a terminal.
+        if transitions_pruned {
+            dfa.mask_possible_futures(&active_bitset);
+        }
+        let (minimized, state_mapping) = if transitions_pruned {
+            dfa.minimize_with_state_mapping_preserving_all_states_and_possible_futures()
+        } else {
+            dfa.minimize_with_state_mapping()
+        };
         let post_minimize_states = minimized.num_states();
 
         (
