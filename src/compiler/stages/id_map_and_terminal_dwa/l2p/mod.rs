@@ -206,18 +206,6 @@ fn project_initial_state_map_enabled() -> bool {
     })
 }
 
-fn l2p_tokenizer_simplify_disabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("GLRMASK_L2P_DISABLE_TOKENIZER_SIMPLIFY")
-            .map(|value| {
-                let trimmed = value.trim();
-                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
-            })
-            .unwrap_or(false)
-    })
-}
-
 #[derive(Clone, Copy)]
 struct L2PTokenLengthStats {
     max_len: usize,
@@ -492,27 +480,16 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // future-terminal behavior.
     let tokenizer_before_simplify = tokenizer;
 
-    let simplify_started_at = Instant::now();
-    // Simplification is the partition-local lexer quotient. It must run for
-    // nontrivial TI classes and byte-restricted partitions alike. The only
-    // bypass is an explicit diagnostic opt-out.
-    let can_skip_simplify = l2p_tokenizer_simplify_disabled();
-    let (simplified_tok_storage, simplify_state_map, simplify_cache_hit) = if can_skip_simplify {
-        (None, None, false)
-    } else if let Some(cache) = shared_simplify_cache {
-        let (tok, map, cache_hit) =
-            cache.simplify_for_terminals(tokenizer_before_simplify, analysis_active_terminals, &relevant_bytes);
-        (Some(tok), Some(map), cache_hit)
-    } else {
-        let (tok, map) = tokenizer_before_simplify
-            .simplify_for_terminals(analysis_active_terminals, Some(&relevant_bytes));
-        (Some(tok), Some(map), false)
-    };
-    let simplify_ms = simplify_started_at.elapsed().as_secs_f64() * 1000.0;
-    let use_simplified_tok = simplified_tok_storage.is_some();
-    let tokenizer_for_build = simplified_tok_storage
-        .as_ref()
-        .unwrap_or(tokenizer_before_simplify);
+    // L2P keeps one raw lexer-state coordinate. Do not quotient a
+    // byte-restricted lexer here and then thread a second coordinate through
+    // equivalence, TI transport, and final-artifact expansion.
+    let simplified_tok_storage: Option<Tokenizer> = None;
+    let simplify_state_map: Option<ManyToOneIdMap> = None;
+    let simplify_cache_hit = false;
+    let simplify_ms = 0.0;
+    let use_simplified_tok = false;
+    let tokenizer_for_build = tokenizer_before_simplify;
+    let _ = shared_simplify_cache;
     let candidate_unmapped_original_states = simplify_state_map.as_ref().map_or(0, |state_map| {
         state_map
             .original_to_internal
