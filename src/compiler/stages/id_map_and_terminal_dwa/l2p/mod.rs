@@ -593,8 +593,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // state/vocab equivalence pass must not be bypassed. Do not reintroduce
     // fast-sound, identity, lex-dedup, or similar shortcut id-map paths.
     let fast_sound_id_map_used = false;
-    // Keep the raw state coordinate and complete terminal metadata intact; the
-    // transport builder performs the mode-specific label substitution.
+    // Keep raw lexer-state coordinates for the final scanner, but restrict
+    // equivalence observations to this L2P partition's active terminals. With
+    // TI enabled this is the representative mask, so all three equivalence
+    // passes ignore class members replaced by their representatives.
     let (mut simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
@@ -602,7 +604,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             vocab,
             disallowed_follows,
             ignore_terminal,
-            None,
+            Some(analysis_active_terminals),
             equivalence_vocab_dfa_cache,
             shared_analysis_dfa_cache,
             shared_base_setup_ms,
