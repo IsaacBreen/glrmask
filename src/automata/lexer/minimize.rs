@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::ds::bitset::BitSet;
 use crate::ds::char_transitions::CharTransitions;
@@ -43,36 +43,6 @@ fn partition_by_finalizers(dfa: &DFA) -> (Vec<u32>, Vec<Vec<u32>>) {
 }
 
 /// Refine finalizer classes by frozen future-terminal observations.
-fn refine_partition_by_possible_futures(
-    dfa: &DFA,
-    blocks: Vec<Vec<u32>>,
-) -> (Vec<u32>, Vec<Vec<u32>>) {
-    let mut refined = Vec::with_capacity(blocks.len());
-    for block in blocks {
-        if block.len() <= 1 {
-            refined.push(block);
-            continue;
-        }
-        let mut by_future = rustc_hash::FxHashMap::default();
-        for state in block {
-            by_future
-                .entry(dfa.possible_future_group_ids(state).clone())
-                .or_insert_with(Vec::new)
-                .push(state);
-        }
-        let mut groups = by_future.into_values().collect::<Vec<Vec<u32>>>();
-        groups.sort_unstable_by_key(|group| group[0]);
-        refined.extend(groups);
-    }
-    let mut partition = vec![0u32; dfa.num_states() as usize];
-    for (class, block) in refined.iter().enumerate() {
-        for &state in block {
-            partition[state as usize] = class as u32;
-        }
-    }
-    (partition, refined)
-}
-
 fn clear_possible_futures_for_minimization(dfa: &mut DFA) {
     let empty = BitSet::new(dfa.num_groups());
     dfa.mask_possible_futures(&empty);
@@ -507,74 +477,20 @@ fn compute_tarjan_scc_ids(adj: &[Vec<usize>]) -> (Vec<u32>, u32) {
 }
 
 impl DFA {
-    /// Count distinct (transitions, finalizers) fingerprints via FxHasher.
-    /// This is a LOWER bound on the number of truly distinct states (hash
-    /// collisions can only reduce the count). Useful for predicting whether
-    /// minimize would produce any reduction.
-    pub(super) fn distinct_fingerprint_count(&self) -> usize {
-        let n = self.states().len();
-        if n <= 1 {
-            return n;
-        }
-
-        let states = self.states();
-        let mut seen = FxHashSet::default();
-        seen.reserve(n);
-        for state in states {
-            let mut hasher = rustc_hash::FxHasher::default();
-            for (byte, &target) in state.transitions.iter() {
-                hasher.write_u8(byte);
-                hasher.write_u32(target);
-            }
-            hasher.write_u8(0xFF);
-            hasher.write_usize(state.transitions.len());
-            state.finalizers.hash(&mut hasher);
-            seen.insert(hasher.finish());
-        }
-
-        seen.len()
-    }
-
     /// Minimize this DFA using Hopcroft's algorithm.
     /// Returns a new, minimized DFA.  State 0 remains the start state.
     pub(super) fn minimize(&self) -> DFA {
-        self.minimize_impl(true, false).0
+        self.minimize_impl(true).0
     }
 
     /// Minimize this DFA and return the mapping from original states to
     /// minimized states.  `mapping[old_state] = new_state`.
     /// Unreachable original states map to `u32::MAX`.
     pub(super) fn minimize_with_state_mapping(&self) -> (DFA, Vec<u32>) {
-        self.minimize_impl(true, false)
+        self.minimize_impl(true)
     }
 
-    /// Minimize while preserving current future-terminal labels as frozen observations.
-    pub(super) fn minimize_with_state_mapping_preserving_possible_futures(
-        &self,
-    ) -> (DFA, Vec<u32>) {
-        self.minimize_impl(true, true)
-    }
-
-    /// Byte-restricted partition DFAs are entered from raw lexer continuation
-    /// states produced by other partitions. Retain every original state while
-    /// also preserving its frozen future-terminal observation label.
-    pub(super) fn minimize_with_state_mapping_preserving_all_states_and_possible_futures(
-        &self,
-    ) -> (DFA, Vec<u32>) {
-        self.minimize_impl(false, true)
-    }
-
-    /// Minimize this DFA and return the mapping from original states to
-    /// minimized states without first dropping states unreachable from state 0.
-    ///
-    /// This is useful when callers still need mappings for continuation states
-    /// that are only reachable after resuming from inside a partially matched
-    /// terminal.
-    pub(super) fn minimize_with_state_mapping_preserve_all_states(&self) -> (DFA, Vec<u32>) {
-        self.minimize_impl(false, false)
-    }
-
-    fn minimize_impl(&self, drop_unreachable: bool, preserve_possible_futures: bool) -> (DFA, Vec<u32>) {
+    fn minimize_impl(&self, drop_unreachable: bool) -> (DFA, Vec<u32>) {
         let orig_n = self.states().len();
         if orig_n == 0 {
             return (self.clone(), Vec::new());
@@ -586,9 +502,7 @@ impl DFA {
         } else {
             (0..orig_n as u32).collect()
         };
-        if !preserve_possible_futures {
-            clear_possible_futures_for_minimization(&mut working);
-        }
+        clear_possible_futures_for_minimization(&mut working);
         let n = working.states().len();
 
         if n <= 1 {
@@ -597,19 +511,11 @@ impl DFA {
         }
 
         let (partition, blocks) = partition_by_finalizers(&working);
-        let (partition, blocks) = if preserve_possible_futures {
-            refine_partition_by_possible_futures(&working, blocks)
-        } else {
-            (partition, blocks)
-        };
         let mut minimality_check_blocks = blocks.clone();
 
         match topology_prerefine_partition(&working, &partition) {
             TopologyPrerefine::AlreadyMinimal(blocks) => {
-                let (result, block_map) = working.rebuild_from_blocks_with_mapping_and_future_mode(
-                    blocks,
-                    preserve_possible_futures,
-                );
+                let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
                 let composed = compose_mappings(&old_to_working, &block_map);
                 return (result, composed);
             }
@@ -634,10 +540,7 @@ impl DFA {
 
         let blocks = hopcroft_refine_partition(&working, partition, blocks);
 
-        let (result, block_map) = working.rebuild_from_blocks_with_mapping_and_future_mode(
-                    blocks,
-                    preserve_possible_futures,
-                );
+        let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
         let composed = compose_mappings(&old_to_working, &block_map);
         (result, composed)
     }
@@ -820,15 +723,7 @@ impl DFA {
     }
 
     /// Like `rebuild_from_blocks` but also returns old→new state mapping.
-    fn rebuild_from_blocks_with_mapping(&self, partition_blocks: Vec<Vec<u32>>) -> (DFA, Vec<u32>) {
-        self.rebuild_from_blocks_with_mapping_and_future_mode(partition_blocks, false)
-    }
-
-    fn rebuild_from_blocks_with_mapping_and_future_mode(
-        &self,
-        mut partition_blocks: Vec<Vec<u32>>,
-        preserve_possible_futures: bool,
-    ) -> (DFA, Vec<u32>) {
+    fn rebuild_from_blocks_with_mapping(&self, mut partition_blocks: Vec<Vec<u32>>) -> (DFA, Vec<u32>) {
         let n = self.states().len();
         let mut state_mapping = vec![0u32; n];
 
@@ -851,7 +746,6 @@ impl DFA {
         let num_groups = self.num_groups();
         let mut result = DFA::new(0);
         result.ensure_group_capacity(num_groups);
-        // Copy group_id_to_u8set
         for gid in 0..num_groups {
             result.set_group_u8set(gid as u32, self.group_id_to_u8set(gid as u32).clone());
         }
@@ -869,19 +763,12 @@ impl DFA {
                 .map(|(byte, &old_next)| (byte, state_mapping[old_next as usize]))
                 .collect();
             new_state.transitions = CharTransitions::from_sorted_entries(entries);
-            if preserve_possible_futures {
-                result.set_possible_future_group_ids(
-                    new_id,
-                    self.possible_future_group_ids(representative as u32).clone(),
-                );
-            }
         }
 
-        if !preserve_possible_futures {
-            result.recompute_possible_futures();
-        }
+        result.recompute_possible_futures();
         (result, state_mapping)
     }
+
 }
 
 /// Compose two state mappings: first[i] → second[first[i]].

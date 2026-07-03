@@ -35,6 +35,10 @@ impl MaxLengthStatistic {
     pub(crate) fn relevant_byte_count(&self) -> usize {
         self.relevant_bytes.iter().filter(|&&active| active).count()
     }
+
+    pub(crate) fn relevant_bytes(&self) -> &[bool; 256] {
+        &self.relevant_bytes
+    }
 }
 
 #[inline(always)]
@@ -140,7 +144,7 @@ fn byte_is_relevant(byte: usize, relevant_bytes: Option<&[bool; 256]>) -> bool {
     relevant_bytes.map_or(true, |bytes| bytes[byte])
 }
 
-fn active_byte_representatives(
+pub(crate) fn active_byte_representatives(
     relevant_bytes: Option<&[bool; 256]>,
     byte_to_class: Option<&[u8; 256]>,
 ) -> Vec<u8> {

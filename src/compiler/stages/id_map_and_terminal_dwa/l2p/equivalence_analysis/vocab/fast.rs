@@ -261,8 +261,8 @@ impl SharedVocabDfaBase {
     }
 
     /// Check full compatibility: state count AND transition hash must match.
-    /// Two DFAs with the same state count but different transitions (e.g. from
-    /// different simplify_for_terminals outcomes) must not share the cache.
+    /// Two DFAs with the same state count but different transitions must not
+    /// share the cache.
     pub fn is_compatible_with_dfa(&self, dfa: &super::super::compat::FlatDfa) -> bool {
         let num_dfa_states = dfa.states.len();
         if self.trans_by_class.len() != self.num_classes * num_dfa_states
@@ -282,8 +282,8 @@ pub type SharedVocabDfaCache = std::sync::OnceLock<SharedVocabDfaBase>;
 
 /// Stage-local cache for the immutable, full vocabulary-equivalence DFA.
 ///
-/// It is valid only for unsimplified tokenizer views with the same ignored
-/// terminal context. The key is intentionally local to a terminal-DWA stage,
+/// It is valid only for raw-tokenizer views with the same ignored terminal
+/// context. The key is intentionally local to a terminal-DWA stage,
 /// where the source DFA and base disallowed-follows relation are fixed.
 #[derive(Default)]
 pub struct SharedVocabAnalysisDfaCache {
@@ -565,8 +565,6 @@ fn build_dfa_with_group_filter(
     let num_dfa_states = dfa.states.len();
 
     // Use shared base if available and compatible, otherwise compute from scratch.
-    // When simplify_for_terminals minimizes the DFA (changing transitions),
-    // the shared base may be incompatible and must be skipped.
     let compatible_shared_base = shared_base.filter(|base| {
         base.is_compatible_with_dfa(dfa)
     });
