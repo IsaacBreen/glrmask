@@ -53,12 +53,9 @@ fn l2p_timing_profile_enabled() -> bool {
     compile_profile_enabled() || std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
 }
 
-/// Diagnostic-only reconstruction of the superseded representative-only core.
-/// It deliberately omits the transport reconstruction so the regression can
-/// show the exact information that core compression loses.
-fn l2p_representative_core_mre_enabled() -> bool {
-    std::env::var_os("GLRMASK_TI_REPRESENTATIVE_CORE_MRE").is_some()
-}
+
+
+
 
 thread_local! {
     static TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -729,9 +726,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let start_state = nwa.add_state();
             nwa.start_states_mut().push(start_state);
 
-            let representative_core_mre = reference_terminal_expansion
-                && l2p_representative_core_mre_enabled();
-            let transport_modes = (!representative_core_mre)
+            let transport_modes = reference_terminal_expansion
                 .then(|| terminal_interchangeability.terminal_nwa_transport_modes())
                 .flatten();
             let seed_ms;
@@ -766,7 +761,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                     &full_tree.root,
                     &roots,
                     &mut pm_computer,
-                    representative_core_mre.then_some(analysis_active_terminals),
+                    None,
                 )
             };
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -964,6 +959,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             ..TerminalDwaPhaseProfile::default()
         },
     };
+
 
     if reference_terminal_expansion {
         // Rebuild the same local L2P artifact with the feature suppressed, then
