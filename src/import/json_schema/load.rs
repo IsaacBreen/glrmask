@@ -1069,3 +1069,42 @@ fn read_string_keyword(object: &Map<String, Value>, key: &str, location: &str) -
 pub(crate) fn escape_pointer_segment(segment: &str) -> String {
     segment.replace('~', "~0").replace('/', "~1")
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use serde_json::json;
+
+    use super::scan_document_features;
+
+    #[test]
+    fn document_feature_scan_detects_nested_loading_shortcuts() {
+        let schema = json!({
+            "$defs": {
+                "value": {"type": "string"}
+            },
+            "properties": {
+                "payload": {
+                    "oneOf": [
+                        {"$ref": "#/$defs/value"},
+                        {"$id": "#nested", "$ref": "#/properties/payload"}
+                    ]
+                }
+            }
+        });
+
+        let features = scan_document_features(&schema);
+
+        assert!(features.has_one_of);
+        assert!(features.has_definitions);
+        assert!(features.has_local_id_alias);
+        assert_eq!(
+            features.ref_pointers,
+            BTreeSet::from([
+                "#/$defs/value".to_owned(),
+                "#/properties/payload".to_owned(),
+            ]),
+        );
+    }
+}
