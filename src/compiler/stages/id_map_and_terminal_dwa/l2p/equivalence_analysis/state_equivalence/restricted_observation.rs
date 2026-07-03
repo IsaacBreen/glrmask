@@ -7,6 +7,8 @@
 //! enabled).  Future-terminal labels are read from the original DFA and never
 //! recomputed after restricting bytes.
 
+use std::time::Instant;
+
 use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::Lexer;
@@ -16,6 +18,14 @@ use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use super::max_length::active_byte_representatives;
 
 const NO_CANDIDATE: usize = usize::MAX;
+
+#[inline]
+fn signature_fingerprint_step(mut hash: u64, word: u64) -> u64 {
+    hash ^= word.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    hash = hash.rotate_left(27).wrapping_mul(0x3c79_ac49_2ba7_b653);
+    hash ^= hash >> 33;
+    hash
+}
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct TargetLabels {
@@ -165,62 +175,178 @@ pub(crate) fn compute_state_map(
     active_groups: Option<&[bool]>,
     byte_to_class: Option<&[u8; 256]>,
 ) -> ManyToOneIdMap {
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+    let total_started_at = Instant::now();
     let num_states = tokenizer.num_states() as usize;
     if num_states == 0 {
         return ManyToOneIdMap::from_original_to_internal_allowing_unmapped(Vec::new(), 0);
     }
 
     let active_bytes = active_byte_representatives(Some(relevant_bytes), byte_to_class);
+    let target_labels_started_at = Instant::now();
     let target_labels = target_label_ids(tokenizer, active_groups);
+    let target_labels_ms = target_labels_started_at.elapsed().as_secs_f64() * 1000.0;
+    let target_label_classes = target_labels
+        .iter()
+        .copied()
+        .max()
+        .map_or(0usize, |label| label as usize + 1);
+
+    let candidate_partition_started_at = Instant::now();
     let (candidate_members, candidate_representatives, raw_to_candidate) =
         candidate_partition(num_states, initial_state_map);
+    let candidate_partition_ms = candidate_partition_started_at.elapsed().as_secs_f64() * 1000.0;
     let num_candidates = candidate_representatives.len();
 
-    // At depth zero every candidate has the same recursive characterization.
-    // Each refinement prefixes the previous class, making the partition
-    // monotone while its hash-table key remains the complete collision-safe
-    // signature.
+    let observation_cache_started_at = Instant::now();
+    let observation_width = active_bytes.len();
+    let mut observed_targets = vec![0u64; num_candidates * observation_width];
+    for (candidate, &state) in candidate_representatives.iter().enumerate() {
+        let observation_start = candidate * observation_width;
+        for (slot, &byte) in active_bytes.iter().enumerate() {
+            let target = tokenizer.get_transition(state as u32, byte);
+            if target == u32::MAX {
+                continue;
+            }
+            let target_candidate = raw_to_candidate[target as usize];
+            debug_assert_ne!(target_candidate, NO_CANDIDATE);
+            let labels = target_labels[target as usize] as u64 + 1;
+            let target_candidate = target_candidate as u64 + 1;
+            observed_targets[observation_start + slot] = (labels << 32) | target_candidate;
+        }
+    }
+    let observation_cache_ms = observation_cache_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    // Each refinement only splits the preceding classes. Refining within a
+    // class is therefore equivalent to retaining the previous class in every
+    // signature, while settled singleton classes need no more observation.
+    let refinement_started_at = Instant::now();
     let mut current_classes = vec![0u32; num_candidates];
-    let mut current_class_count = usize::from(num_candidates != 0);
-    let mut signature = vec![0u64; 1 + active_bytes.len()];
+    let mut next_classes = vec![0u32; num_candidates];
+    let mut class_members = vec![(0..num_candidates).collect::<Vec<_>>()];
+    let signature_width = observation_width;
+    let mut signatures = vec![0u64; num_candidates * signature_width];
+    let mut first_candidate_by_fingerprint = FxHashMap::<u64, usize>::default();
+    first_candidate_by_fingerprint.reserve(num_candidates);
+    let mut next_same_fingerprint = vec![NO_CANDIDATE; num_candidates];
+    let mut refinement_rounds = 0usize;
+    let mut refined_candidate_visits = 0usize;
+    let mut refined_class_visits = 0usize;
 
     for _ in 0..num_candidates {
-        let mut next_classes = vec![0u32; num_candidates];
-        let mut classes_by_signature = FxHashMap::<Vec<u64>, u32>::default();
+        refinement_rounds += 1;
+        next_classes.copy_from_slice(&current_classes);
+        let class_count_at_start = class_members.len();
+        let mut split_any = false;
 
-        for (candidate, &state) in candidate_representatives.iter().enumerate() {
-            signature[0] = current_classes[candidate] as u64;
-            for (slot, &byte) in active_bytes.iter().enumerate() {
-                let target = tokenizer.get_transition(state as u32, byte);
-                signature[slot + 1] = if target == u32::MAX {
-                    0
-                } else {
-                    let target_candidate = raw_to_candidate[target as usize];
-                    debug_assert_ne!(target_candidate, NO_CANDIDATE);
-                    let target_class = current_classes[target_candidate] as u64 + 1;
-                    let labels = target_labels[target as usize] as u64 + 1;
-                    (labels << 32) | target_class
-                };
+        for class in 0..class_count_at_start {
+            if class_members[class].len() <= 1 {
+                continue;
             }
 
-            let next_class = classes_by_signature.len() as u32;
-            let class = *classes_by_signature
-                .entry(signature.clone())
-                .or_insert(next_class);
-            next_classes[candidate] = class;
+            let members = std::mem::take(&mut class_members[class]);
+            refined_candidate_visits += members.len();
+            refined_class_visits += 1;
+            let new_class_base = class_members.len();
+            let mut retained_members = Vec::with_capacity(members.len());
+            let mut split_members = Vec::<Vec<usize>>::new();
+            first_candidate_by_fingerprint.clear();
+
+            for candidate in members {
+                let signature_start = candidate * signature_width;
+                let signature_end = signature_start + signature_width;
+                let observation_start = candidate * observation_width;
+                let mut fingerprint = 0x9e37_79b9_7f4a_7c15_u64 ^ signature_width as u64;
+
+                for slot in 0..observation_width {
+                    let observation = observed_targets[observation_start + slot];
+                    let signature_word = if observation == 0 {
+                        0
+                    } else {
+                        let target_candidate = (observation as u32 - 1) as usize;
+                        let target_class = current_classes[target_candidate] as u64 + 1;
+                        (observation & 0xffff_ffff_0000_0000) | target_class
+                    };
+                    signatures[signature_start + slot] = signature_word;
+                    fingerprint = signature_fingerprint_step(fingerprint, signature_word);
+                }
+
+                let matching_candidate = {
+                    let mut matching_candidate = first_candidate_by_fingerprint
+                        .get(&fingerprint)
+                        .copied()
+                        .unwrap_or(NO_CANDIDATE);
+                    while matching_candidate != NO_CANDIDATE {
+                        let matching_start = matching_candidate * signature_width;
+                        if signatures[signature_start..signature_end]
+                            == signatures[matching_start..matching_start + signature_width]
+                        {
+                            break;
+                        }
+                        matching_candidate = next_same_fingerprint[matching_candidate];
+                    }
+                    matching_candidate
+                };
+
+                let next_class = if matching_candidate != NO_CANDIDATE {
+                    next_classes[matching_candidate] as usize
+                } else {
+                    let next_class = if retained_members.is_empty() {
+                        class
+                    } else {
+                        let next_class = new_class_base + split_members.len();
+                        split_members.push(Vec::new());
+                        next_class
+                    };
+                    let previous = first_candidate_by_fingerprint.insert(fingerprint, candidate);
+                    next_same_fingerprint[candidate] = previous.unwrap_or(NO_CANDIDATE);
+                    next_class
+                };
+
+                next_classes[candidate] = next_class as u32;
+                if next_class == class {
+                    retained_members.push(candidate);
+                } else {
+                    split_members[next_class - new_class_base].push(candidate);
+                }
+            }
+
+            debug_assert!(!retained_members.is_empty());
+            split_any |= !split_members.is_empty();
+            class_members[class] = retained_members;
+            class_members.extend(split_members);
         }
 
-        let next_class_count = classes_by_signature.len();
-        if next_class_count == current_class_count {
-            return map_from_candidate_classes(
+        if !split_any {
+            let refinement_ms = refinement_started_at.elapsed().as_secs_f64() * 1000.0;
+            let map_materialize_started_at = Instant::now();
+            let result = map_from_candidate_classes(
                 &candidate_members,
                 &candidate_representatives,
                 &current_classes,
                 num_states,
             );
+            let map_materialize_ms = map_materialize_started_at.elapsed().as_secs_f64() * 1000.0;
+            if profile_enabled {
+                eprintln!(
+                    "[glrmask/profile][restricted_observation] states={} candidates={} active_bytes={} target_label_classes={} target_labels_ms={:.3} candidate_partition_ms={:.3} observation_cache_ms={:.3} refinement_ms={:.3} map_materialize_ms={:.3} rounds={} reps={} total_ms={:.3}",
+                    num_states,
+                    num_candidates,
+                    active_bytes.len(),
+                    target_label_classes,
+                    target_labels_ms,
+                    candidate_partition_ms,
+                    observation_cache_ms,
+                    refinement_ms,
+                    map_materialize_ms,
+                    refinement_rounds,
+                    class_members.len(),
+                    total_started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            return result;
         }
-        current_classes = next_classes;
-        current_class_count = next_class_count;
+        std::mem::swap(&mut current_classes, &mut next_classes);
     }
 
     unreachable!("restricted-observation partition refinement did not stabilize");
@@ -244,6 +370,74 @@ mod tests {
 
     fn class_of(map: &ManyToOneIdMap, state: u32) -> u32 {
         map.original_to_internal[state as usize]
+    }
+
+    fn reference_state_map(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        initial_state_map: Option<&ManyToOneIdMap>,
+        active_groups: Option<&[bool]>,
+        byte_to_class: Option<&[u8; 256]>,
+    ) -> ManyToOneIdMap {
+        let num_states = tokenizer.num_states() as usize;
+        let active_bytes = active_byte_representatives(Some(relevant_bytes), byte_to_class);
+        let target_labels = target_label_ids(tokenizer, active_groups);
+        let (candidate_members, candidate_representatives, raw_to_candidate) =
+            candidate_partition(num_states, initial_state_map);
+        let num_candidates = candidate_representatives.len();
+        let mut current_classes = vec![0u32; num_candidates];
+        let mut current_class_count = usize::from(num_candidates != 0);
+        let mut signature = vec![0u64; 1 + active_bytes.len()];
+
+        for _ in 0..num_candidates {
+            let mut next_classes = vec![0u32; num_candidates];
+            let mut classes_by_signature = FxHashMap::<Vec<u64>, u32>::default();
+
+            for (candidate, &state) in candidate_representatives.iter().enumerate() {
+                signature[0] = current_classes[candidate] as u64;
+                for (slot, &byte) in active_bytes.iter().enumerate() {
+                    let target = tokenizer.get_transition(state as u32, byte);
+                    signature[slot + 1] = if target == u32::MAX {
+                        0
+                    } else {
+                        let target_candidate = raw_to_candidate[target as usize];
+                        let target_class = current_classes[target_candidate] as u64 + 1;
+                        let labels = target_labels[target as usize] as u64 + 1;
+                        (labels << 32) | target_class
+                    };
+                }
+                let next_class = classes_by_signature.len() as u32;
+                next_classes[candidate] = *classes_by_signature
+                    .entry(signature.clone())
+                    .or_insert(next_class);
+            }
+
+            let next_class_count = classes_by_signature.len();
+            if next_class_count == current_class_count {
+                return map_from_candidate_classes(
+                    &candidate_members,
+                    &candidate_representatives,
+                    &current_classes,
+                    num_states,
+                );
+            }
+            current_classes = next_classes;
+            current_class_count = next_class_count;
+        }
+        unreachable!()
+    }
+
+    fn assert_same_partition(left: &ManyToOneIdMap, right: &ManyToOneIdMap) {
+        assert_eq!(left.original_to_internal.len(), right.original_to_internal.len());
+        for state in 0..left.original_to_internal.len() {
+            for other in 0..left.original_to_internal.len() {
+                assert_eq!(
+                    left.original_to_internal[state] == left.original_to_internal[other],
+                    right.original_to_internal[state] == right.original_to_internal[other],
+                    "states {state} and {other} differ",
+                );
+            }
+        }
     }
 
     #[test]
@@ -293,5 +487,52 @@ mod tests {
             class_of(&no_byte_observation, after_b),
             "without c in the byte set the future labels are not reached by the recurrence",
         );
+    }
+
+    #[test]
+    fn class_local_refinement_matches_dense_reference() {
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"abx".to_vec()),
+            Expr::U8Seq(b"aby".to_vec()),
+            Expr::U8Seq(b"acx".to_vec()),
+            Expr::U8Seq(b"acy".to_vec()),
+            Expr::U8Seq(b"bbx".to_vec()),
+            Expr::U8Seq(b"bby".to_vec()),
+        ]);
+        let mut bytes = [false; 256];
+        for &byte in b"abcxy" {
+            bytes[byte as usize] = true;
+        }
+        let mut byte_to_class = [0u8; 256];
+        for byte in 0..256 {
+            byte_to_class[byte] = byte as u8;
+        }
+        let raw_groups = (0..tokenizer.num_states())
+            .map(|state| state % 3)
+            .collect::<Vec<_>>();
+        let initial = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(raw_groups, 3);
+        let active = [true, false, true, false, true, true];
+
+        for initial_state_map in [None, Some(&initial)] {
+            for active_groups in [None, Some(active.as_slice())] {
+                for byte_classes in [None, Some(&byte_to_class)] {
+                    let reference = reference_state_map(
+                        &tokenizer,
+                        &bytes,
+                        initial_state_map,
+                        active_groups,
+                        byte_classes,
+                    );
+                    let actual = compute_state_map(
+                        &tokenizer,
+                        &bytes,
+                        initial_state_map,
+                        active_groups,
+                        byte_classes,
+                    );
+                    assert_same_partition(&reference, &actual);
+                }
+            }
+        }
     }
 }
