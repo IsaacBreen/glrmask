@@ -127,7 +127,19 @@ fn target_label_ids(tokenizer: &Tokenizer, active_groups: Option<&[bool]>) -> Ve
 fn candidate_partition(
     num_states: usize,
     initial_state_map: Option<&ManyToOneIdMap>,
-) -> (Vec<Vec<u32>>, Vec<usize>, Vec<usize>) {
+) -> (Option<Vec<Vec<u32>>>, Vec<usize>, Option<Vec<usize>>) {
+    let identity_map = initial_state_map.is_none_or(|map| {
+        map.original_to_internal.len() == num_states
+            && map
+                .original_to_internal
+                .iter()
+                .enumerate()
+                .all(|(raw, &candidate)| candidate == raw as u32)
+    });
+    if identity_map {
+        return (None, (0..num_states).collect(), None);
+    }
+
     let mut members = Vec::<Vec<u32>>::new();
     let mut representatives = Vec::<usize>::new();
     let mut raw_to_candidate = vec![NO_CANDIDATE; num_states];
@@ -164,11 +176,11 @@ fn candidate_partition(
         members.push(vec![raw as u32]);
     }
 
-    (members, representatives, raw_to_candidate)
+    (Some(members), representatives, Some(raw_to_candidate))
 }
 
 fn map_from_candidate_classes(
-    candidate_members: &[Vec<u32>],
+    candidate_members: Option<&[Vec<u32>]>,
     candidate_representatives: &[usize],
     candidate_classes: &[u32],
     num_states: usize,
@@ -178,6 +190,14 @@ fn map_from_candidate_classes(
         .copied()
         .max()
         .map_or(0, |class| class + 1);
+    let Some(candidate_members) = candidate_members else {
+        debug_assert_eq!(candidate_classes.len(), num_states);
+        return ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+            candidate_classes.to_vec(),
+            num_classes,
+        );
+    };
+
     let mut original_to_internal = vec![u32::MAX; num_states];
     let mut internal_to_originals = vec![Vec::new(); num_classes as usize];
     let mut representative_original_ids = vec![u32::MAX; num_classes as usize];
@@ -251,23 +271,44 @@ pub(crate) fn compute_state_map(
     // exactly those signature words when a destination candidate changes
     // class, rather than rebuilding all words of every affected source.
     let mut reverse_offsets = vec![0usize; num_candidates + 1];
-    for (candidate, &state) in candidate_representatives.iter().enumerate() {
-        let observation_start = candidate * observation_width;
-        for (slot, &byte) in active_bytes.iter().enumerate() {
-            let target = tokenizer.get_transition(state as u32, byte);
-            if target == u32::MAX {
-                continue;
+    if let Some(raw_to_candidate) = raw_to_candidate.as_deref() {
+        for (candidate, &state) in candidate_representatives.iter().enumerate() {
+            let observation_start = candidate * observation_width;
+            for (slot, &byte) in active_bytes.iter().enumerate() {
+                let target = tokenizer.get_transition(state as u32, byte);
+                if target == u32::MAX {
+                    continue;
+                }
+                let target_candidate = raw_to_candidate[target as usize];
+                debug_assert_ne!(target_candidate, NO_CANDIDATE);
+                let labels = target_labels[target as usize] as u64 + 1;
+                let observation = (labels << 32) | (target_candidate as u64 + 1);
+                observed_targets[observation_start + slot] = observation;
+                let signature_word = (labels << 32) | 1;
+                signatures[observation_start + slot] = signature_word;
+                signature_fingerprints[candidate] ^=
+                    signature_slot_fingerprint(slot, signature_word);
+                reverse_offsets[target_candidate + 1] += 1;
             }
-            let target_candidate = raw_to_candidate[target as usize];
-            debug_assert_ne!(target_candidate, NO_CANDIDATE);
-            let labels = target_labels[target as usize] as u64 + 1;
-            let observation = (labels << 32) | (target_candidate as u64 + 1);
-            observed_targets[observation_start + slot] = observation;
-            let signature_word = (labels << 32) | 1;
-            signatures[observation_start + slot] = signature_word;
-            signature_fingerprints[candidate] ^=
-                signature_slot_fingerprint(slot, signature_word);
-            reverse_offsets[target_candidate + 1] += 1;
+        }
+    } else {
+        for (candidate, &state) in candidate_representatives.iter().enumerate() {
+            let observation_start = candidate * observation_width;
+            for (slot, &byte) in active_bytes.iter().enumerate() {
+                let target = tokenizer.get_transition(state as u32, byte);
+                if target == u32::MAX {
+                    continue;
+                }
+                let target_candidate = target as usize;
+                let labels = target_labels[target_candidate] as u64 + 1;
+                let observation = (labels << 32) | (target_candidate as u64 + 1);
+                observed_targets[observation_start + slot] = observation;
+                let signature_word = (labels << 32) | 1;
+                signatures[observation_start + slot] = signature_word;
+                signature_fingerprints[candidate] ^=
+                    signature_slot_fingerprint(slot, signature_word);
+                reverse_offsets[target_candidate + 1] += 1;
+            }
         }
     }
     let observation_cache_ms = observation_cache_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -390,7 +431,7 @@ pub(crate) fn compute_state_map(
             let refinement_ms = refinement_started_at.elapsed().as_secs_f64() * 1000.0;
             let map_materialize_started_at = Instant::now();
             let result = map_from_candidate_classes(
-                &candidate_members,
+                candidate_members.as_deref(),
                 &candidate_representatives,
                 &current_classes,
                 num_states,
@@ -443,7 +484,7 @@ pub(crate) fn compute_state_map(
     let refinement_ms = refinement_started_at.elapsed().as_secs_f64() * 1000.0;
     let map_materialize_started_at = Instant::now();
     let result = map_from_candidate_classes(
-        &candidate_members,
+        candidate_members.as_deref(),
         &candidate_representatives,
         &current_classes,
         num_states,
@@ -518,7 +559,10 @@ mod tests {
                     signature[slot + 1] = if target == u32::MAX {
                         0
                     } else {
-                        let target_candidate = raw_to_candidate[target as usize];
+                        let target_candidate = raw_to_candidate.as_ref().map_or(
+                            target as usize,
+                            |raw_to_candidate| raw_to_candidate[target as usize],
+                        );
                         let target_class = current_classes[target_candidate] as u64 + 1;
                         let labels = target_labels[target as usize] as u64 + 1;
                         (labels << 32) | target_class
@@ -533,7 +577,7 @@ mod tests {
             let next_class_count = classes_by_signature.len();
             if next_class_count == current_class_count {
                 return map_from_candidate_classes(
-                    &candidate_members,
+                    candidate_members.as_deref(),
                     &candidate_representatives,
                     &current_classes,
                     num_states,
