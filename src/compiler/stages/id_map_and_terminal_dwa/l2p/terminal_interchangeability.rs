@@ -14,10 +14,11 @@
 //! sides.
 
 use std::collections::{BTreeMap, hash_map::Entry};
+use std::sync::Arc;
 use std::time::Instant;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use super::nwa_builder::TerminalNwaTransportMode;
+use super::nwa_builder::{TerminalNwaTransportMode, TransportScannerStateMap};
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
@@ -107,8 +108,8 @@ struct CanonicalRound {
 /// The quotient does not merge tokenizer states; it is only a cached view used
 /// to certify a terminal-swap automorphism before materializing its raw map.
 struct CanonicalQuotient {
-    class_for_state: Vec<u32>,
-    representative_by_class: Vec<u32>,
+    class_for_state: Arc<[u32]>,
+    representative_by_class: Arc<[u32]>,
     class_by_signature: FxHashMap<CanonicalSignature, u32>,
     reverse_predecessors: Vec<Vec<u32>>,
     /// Identity class labels, projected onto stable quotient representatives,
@@ -514,17 +515,31 @@ fn refine_candidate_groups_by_structure(
 /// under one terminal swap. The exact characterization establishes a mapped
 /// target class; all downstream consumers have always selected only that
 /// class's first raw state, so retaining the whole class is redundant.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 struct InterchangeMap {
-    target_representative_for_source_state: Vec<u32>,
+    scanner_state_map: TransportScannerStateMap,
 }
 
+impl PartialEq for InterchangeMap {
+    fn eq(&self, other: &Self) -> bool {
+        self.scanner_state_map.len() == other.scanner_state_map.len()
+            && (0..self.scanner_state_map.len()).all(|state| {
+                self.scanner_state_map.scanner_state(state as u32)
+                    == other.scanner_state_map.scanner_state(state as u32)
+            })
+    }
+}
+
+impl Eq for InterchangeMap {}
+
 impl InterchangeMap {
-    /// The scanner is implemented over raw tokenizer states, so each mapped
-    /// target class needs one arbitrary raw representative at its entry point.
-    /// This selection has no mathematical significance.
-    fn arbitrary_target_representatives(&self) -> Vec<u32> {
-        self.target_representative_for_source_state.clone()
+    fn scanner_state_map(&self) -> TransportScannerStateMap {
+        self.scanner_state_map.clone()
+    }
+
+    #[cfg(test)]
+    fn materialized_scanner_states(&self) -> Arc<[u32]> {
+        self.scanner_state_map.materialized()
     }
 }
 
@@ -1038,8 +1053,8 @@ impl InterchangeabilityDfa {
         );
 
         self.canonical_quotient = Some(CanonicalQuotient {
-            class_for_state,
-            representative_by_class,
+            class_for_state: class_for_state.into(),
+            representative_by_class: representative_by_class.into(),
             class_by_signature,
             reverse_predecessors,
             identity_classes_by_round,
@@ -1170,23 +1185,44 @@ impl InterchangeabilityDfa {
         if swapped_classes.len() != class_count {
             return None;
         }
-        let mut target_representative_by_identity_class = vec![None; class_count];
-        for state in 0..self.topology.real_state_count {
-            let target_identity_class = swapped_classes[quotient.class_for_state[state] as usize] as usize;
-            if target_identity_class >= class_count {
+        // Invert the stable quotient-level class permutation rather than
+        // scanning every raw state once merely to rediscover its first class
+        // representative. The later raw-state expansion remains exact.
+        let mut source_class_for_target_class = vec![u32::MAX; class_count];
+        for source_class in 0..class_count {
+            // The synthetic dead state may have its own quotient class. The
+            // old raw-state scan never visited it, so keep that same domain.
+            if quotient.representative_by_class[source_class] as usize
+                >= self.topology.real_state_count
+            {
+                continue;
+            }
+            let target_class = swapped_classes[source_class] as usize;
+            if target_class >= class_count
+                || quotient.representative_by_class[target_class] as usize
+                    >= self.topology.real_state_count
+                || source_class_for_target_class[target_class] != u32::MAX
+            {
                 return None;
             }
-            target_representative_by_identity_class[target_identity_class]
-                .get_or_insert(state as u32);
+            source_class_for_target_class[target_class] = source_class as u32;
         }
-        let target_representative_for_source_state = (0..self.topology.real_state_count)
-            .map(|source| {
-                target_representative_by_identity_class
-                    [quotient.class_for_state[source] as usize]
+        let source_class_for_target_deviations = source_class_for_target_class
+            .iter()
+            .enumerate()
+            .filter_map(|(target_class, &source_class)| {
+                (source_class != u32::MAX && source_class != target_class as u32)
+                    .then_some((target_class as u32, source_class))
             })
-            .collect::<Option<Vec<_>>>()?;
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         Some(InterchangeMap {
-            target_representative_for_source_state,
+            scanner_state_map: TransportScannerStateMap::Quotient {
+                state_count: self.topology.real_state_count,
+                class_for_original: Arc::clone(&quotient.class_for_state),
+                representative_for_class: Arc::clone(&quotient.representative_by_class),
+                source_class_for_target_deviations,
+            },
         })
     }
 
@@ -1645,7 +1681,7 @@ impl InterchangeabilityDfa {
             .map(|source| target_representative_by_class.get(&identity_classes[source]).copied())
             .collect::<Option<Vec<_>>>()?;
         Some(InterchangeMap {
-            target_representative_for_source_state,
+            scanner_state_map: TransportScannerStateMap::Explicit(target_representative_for_source_state.into()),
         })
     }
 
@@ -1809,7 +1845,7 @@ impl InterchangeabilityDfa {
             })
             .collect::<Option<Vec<_>>>()?;
         Some(InterchangeMap {
-            target_representative_for_source_state,
+            scanner_state_map: TransportScannerStateMap::Explicit(target_representative_for_source_state.into()),
         })
     }
 }
@@ -1976,11 +2012,17 @@ impl TerminalInterchangeability {
             return Self::identity(active_terminals);
         }
 
-        let started_at = Instant::now();
+        let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let started_at = profile_timing.then(Instant::now);
+        let topology_started_at = profile_timing.then(Instant::now);
         let topology = RestrictedTopology::new(tokenizer, relevant_bytes);
+        let topology_ms = topology_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
         let topology_edge_count = topology.edges.len();
         let topology_max_outdegree = topology.max_outdegree;
         let topology_byte_count = topology.bytes.len();
+        let candidate_filter_started_at = profile_timing.then(Instant::now);
         let (root_candidate_groups, root_observed_states) =
             rooted_candidate_groups(tokenizer, &candidates, &topology);
         let root_candidate_pairs = root_candidate_groups
@@ -2006,13 +2048,16 @@ impl TerminalInterchangeability {
             .iter()
             .map(|group| group.len() * group.len().saturating_sub(1) / 2)
             .sum::<usize>();
-        if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+        let candidate_filter_ms = candidate_filter_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        if profile_timing {
             let mut group_size_histogram = BTreeMap::<usize, usize>::new();
             for group in &candidate_groups {
                 *group_size_histogram.entry(group.len()).or_default() += 1;
             }
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] active={} selected_bytes={} sparse_edges={} max_outdegree={} root_observed_states={} root_candidate_pairs={} structural_colors={} structural_candidate_groups={} exact_candidate_pairs={} group_size_histogram={:?} filter_ms={:.3}",
+                "[glrmask/profile][terminal_interchangeability] active={} selected_bytes={} sparse_edges={} max_outdegree={} root_observed_states={} root_candidate_pairs={} structural_colors={} structural_candidate_groups={} exact_candidate_pairs={} group_size_histogram={:?} topology_ms={:.3} root_structural_filter_ms={:.3}",
                 candidates.len(),
                 topology_byte_count,
                 topology_edge_count,
@@ -2023,7 +2068,8 @@ impl TerminalInterchangeability {
                 candidate_groups.len(),
                 exact_candidate_pairs,
                 group_size_histogram,
-                started_at.elapsed().as_secs_f64() * 1000.0,
+                topology_ms,
+                candidate_filter_ms,
             );
         }
         if exact_candidate_pairs == 0 {
@@ -2037,6 +2083,11 @@ impl TerminalInterchangeability {
         let mut first_round_rejections = 0usize;
         let mut direct_exact_checks = 0usize;
         let mut accepted_representative_members = 0usize;
+        let mut output_pair_filter_ns = 0u64;
+        let mut frozen_output_ns = 0u64;
+        let mut first_round_ns = 0u64;
+        let mut exact_map_ns = 0u64;
+        let mut accepted_map_storage_ns = 0u64;
 
         // Accepted terminal swaps are automorphisms. Therefore (a b) and
         // (b c) imply (a c) by conjugation, so interchangeability is an
@@ -2048,26 +2099,55 @@ impl TerminalInterchangeability {
                 let representative = unresolved[0];
                 let mut next_unresolved = Vec::with_capacity(unresolved.len().saturating_sub(1));
                 for &terminal in &unresolved[1..] {
-                    if !dfa.observed_output_pair_set_is_swap_closed(representative, terminal) {
+                    let output_pair_started_at = profile_timing.then(Instant::now);
+                    let output_pair_is_closed =
+                        dfa.observed_output_pair_set_is_swap_closed(representative, terminal);
+                    if let Some(started_at) = output_pair_started_at {
+                        output_pair_filter_ns += started_at.elapsed().as_nanos() as u64;
+                    }
+                    if !output_pair_is_closed {
                         output_pair_rejections += 1;
                         next_unresolved.push(terminal);
                         continue;
                     }
-                    let map = if dfa.swap_preserves_all_frozen_outputs(representative, terminal) {
+                    let frozen_output_started_at = profile_timing.then(Instant::now);
+                    let preserves_frozen_outputs =
+                        dfa.swap_preserves_all_frozen_outputs(representative, terminal);
+                    if let Some(started_at) = frozen_output_started_at {
+                        frozen_output_ns += started_at.elapsed().as_nanos() as u64;
+                    }
+                    let map = if preserves_frozen_outputs {
                         output_invariant_checks += 1;
                         Some(dfa.canonical_identity_map())
-                    } else if !dfa.canonical_round_one_still_possible(representative, terminal) {
-                        first_round_rejections += 1;
-                        None
                     } else {
-                        direct_exact_checks += 1;
-                        dfa.interchange_map(representative, terminal)
+                        let first_round_started_at = profile_timing.then(Instant::now);
+                        let first_round_possible =
+                            dfa.canonical_round_one_still_possible(representative, terminal);
+                        if let Some(started_at) = first_round_started_at {
+                            first_round_ns += started_at.elapsed().as_nanos() as u64;
+                        }
+                        if !first_round_possible {
+                            first_round_rejections += 1;
+                            None
+                        } else {
+                            direct_exact_checks += 1;
+                            let exact_map_started_at = profile_timing.then(Instant::now);
+                            let map = dfa.interchange_map(representative, terminal);
+                            if let Some(started_at) = exact_map_started_at {
+                                exact_map_ns += started_at.elapsed().as_nanos() as u64;
+                            }
+                            map
+                        }
                     };
                     if let Some(map) = map {
+                        let storage_started_at = profile_timing.then(Instant::now);
                         accepted_representative_members += 1;
                         result.representative_for[terminal as usize] = representative;
                         result.active_representatives[terminal as usize] = false;
                         result.map_for_representative_member.insert((representative, terminal), map);
+                        if let Some(started_at) = storage_started_at {
+                            accepted_map_storage_ns += started_at.elapsed().as_nanos() as u64;
+                        }
                     } else {
                         next_unresolved.push(terminal);
                     }
@@ -2076,13 +2156,18 @@ impl TerminalInterchangeability {
             }
         }
 
-        if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+        if profile_timing {
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_invariant_checks={} first_round_rejections={} direct_exact_checks={} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
+                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_invariant_checks={} first_round_rejections={} direct_exact_checks={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
                 output_pair_rejections,
                 output_invariant_checks,
                 first_round_rejections,
                 direct_exact_checks,
+                output_pair_filter_ns as f64 / 1_000_000.0,
+                frozen_output_ns as f64 / 1_000_000.0,
+                first_round_ns as f64 / 1_000_000.0,
+                exact_map_ns as f64 / 1_000_000.0,
+                accepted_map_storage_ns as f64 / 1_000_000.0,
                 dfa.quotient_certified,
                 dfa.sparse_quotient_certified,
                 dfa.sparse_quotient_cone_classes_total as f64
@@ -2092,7 +2177,9 @@ impl TerminalInterchangeability {
                 dfa.sparse_quotient_refinement_ns as f64 / 1_000_000.0,
                 dfa.sparse_quotient_map_ns as f64 / 1_000_000.0,
                 accepted_representative_members,
-                started_at.elapsed().as_secs_f64() * 1000.0,
+                started_at
+                    .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                    .unwrap_or(0.0),
             );
         }
         result
@@ -2125,34 +2212,52 @@ impl TerminalInterchangeability {
         original: &BTreeMap<u32, BitSet>,
         num_terminals: usize,
     ) -> BTreeMap<u32, BitSet> {
-        let mut members_of: BTreeMap<TerminalID, Vec<TerminalID>> = BTreeMap::new();
-        for (terminal, &representative) in self.representative_for.iter().enumerate() {
-            members_of
-                .entry(representative)
-                .or_default()
-                .push(terminal as TerminalID);
+        // A representative pair is coalesced precisely when every raw member
+        // pair is disallowed. Count the original sparse relation by its
+        // representative endpoints, then retain exactly the pairs whose count
+        // equals the Cartesian product of the two class sizes. This is the same
+        // predicate as the direct nested all() scan, but does no work for class
+        // pairs absent from the grammar's (usually sparse) follow table.
+        let representative_count = self.representative_for.len();
+        let mut members_per_representative = vec![0usize; representative_count];
+        for &representative in &self.representative_for {
+            members_per_representative[representative as usize] += 1;
         }
 
-        let disallowed_pair = |predecessor: TerminalID, successor: TerminalID| -> bool {
-            original
-                .get(&(predecessor as u32))
-                .is_some_and(|bits| bits.contains(successor as usize))
-        };
+        let mut disallowed_member_pairs = FxHashMap::<(TerminalID, TerminalID), usize>::default();
+        for (&predecessor, successors) in original {
+            let predecessor = predecessor as usize;
+            let Some(&representative_predecessor) = self.representative_for.get(predecessor) else {
+                continue;
+            };
+            for successor in successors.iter_ones() {
+                let Some(&representative_successor) = self.representative_for.get(successor) else {
+                    continue;
+                };
+                *disallowed_member_pairs
+                    .entry((representative_predecessor, representative_successor))
+                    .or_default() += 1;
+            }
+        }
 
         let mut coalesced = BTreeMap::new();
-        for (&representative_predecessor, members_predecessor) in &members_of {
-            let mut bits = BitSet::new(num_terminals);
-            for (&representative_successor, members_successor) in &members_of {
-                let every_pair_disallowed = members_predecessor.iter().all(|&predecessor| {
-                    members_successor
-                        .iter()
-                        .all(|&successor| disallowed_pair(predecessor, successor))
-                });
-                if every_pair_disallowed {
-                    bits.set(representative_successor as usize);
-                }
+        for (representative, &member_count) in members_per_representative.iter().enumerate() {
+            if member_count > 0 {
+                coalesced.insert(representative as u32, BitSet::new(num_terminals));
             }
-            coalesced.insert(representative_predecessor as u32, bits);
+        }
+        for ((representative_predecessor, representative_successor), disallowed_count) in
+            disallowed_member_pairs
+        {
+            let predecessor_member_count =
+                members_per_representative[representative_predecessor as usize];
+            let successor_member_count = members_per_representative[representative_successor as usize];
+            if disallowed_count == predecessor_member_count * successor_member_count {
+                coalesced
+                    .get_mut(&(representative_predecessor as u32))
+                    .expect("representative class must have a coalesced follow row")
+                    .set(representative_successor as usize);
+            }
         }
         coalesced
     }
@@ -2186,7 +2291,7 @@ impl TerminalInterchangeability {
                 state_count,
                 "transport mode state domain must match ordinary state quotient",
             );
-            for scanner_state in &mut mode.scanner_state_for_original {
+            for scanner_state in mode.scanner_state_for_original.make_explicit_mut() {
                 let raw = *scanner_state as usize;
                 let internal = ordinary_state_map
                     .original_to_internal
@@ -2238,7 +2343,7 @@ impl TerminalInterchangeability {
 
             for (source_state, (&prior_class, &target_state)) in class_for_state
                 .iter()
-                .zip(mode.scanner_state_for_original.iter())
+                .zip(mode.scanner_state_for_original.materialized().iter())
                 .enumerate()
             {
                 let target_state = target_state as usize;
@@ -2294,20 +2399,16 @@ impl TerminalInterchangeability {
             .map_for_representative_member
             .values()
             .next()
-            .map(|map| map.target_representative_for_source_state.len())?;
-        let identity_labels = (0..self.representative_for.len() as TerminalID).collect::<Vec<_>>();
+            .map(|map| map.scanner_state_map.len())?;
         let mut modes = vec![TerminalNwaTransportMode {
-            scanner_state_for_original: (0..state_count as u32).collect(),
-            terminal_map: identity_labels.clone(),
+            scanner_state_for_original: TransportScannerStateMap::Explicit((0..state_count as u32).collect::<Vec<_>>().into()),
+            terminal_swap: None,
         }];
 
         for (&(representative, member), map) in &self.map_for_representative_member {
-            let mut terminal_map = identity_labels.clone();
-            terminal_map[representative as usize] = member;
-            terminal_map[member as usize] = representative;
             modes.push(TerminalNwaTransportMode {
-                scanner_state_for_original: map.arbitrary_target_representatives(),
-                terminal_map,
+                scanner_state_for_original: map.scanner_state_map(),
+                terminal_swap: Some((representative, member)),
             });
         }
         Some(modes)
@@ -2331,6 +2432,65 @@ mod tests {
     }
 
     #[test]
+    fn sparse_coalesced_disallowed_follows_matches_direct_member_pair_predicate() {
+        fn direct(
+            plan: &TerminalInterchangeability,
+            original: &BTreeMap<u32, BitSet>,
+            num_terminals: usize,
+        ) -> BTreeMap<u32, BitSet> {
+            let mut members_of: BTreeMap<TerminalID, Vec<TerminalID>> = BTreeMap::new();
+            for (terminal, &representative) in plan.representative_for.iter().enumerate() {
+                members_of
+                    .entry(representative)
+                    .or_default()
+                    .push(terminal as TerminalID);
+            }
+            let mut result = BTreeMap::new();
+            for (&predecessor_representative, predecessors) in &members_of {
+                let mut bits = BitSet::new(num_terminals);
+                for (&successor_representative, successors) in &members_of {
+                    if predecessors.iter().all(|&predecessor| {
+                        successors.iter().all(|&successor| {
+                            original
+                                .get(&(predecessor as u32))
+                                .is_some_and(|bits| bits.contains(successor as usize))
+                        })
+                    }) {
+                        bits.set(successor_representative as usize);
+                    }
+                }
+                result.insert(predecessor_representative as u32, bits);
+            }
+            result
+        }
+
+        let plan = TerminalInterchangeability {
+            active_representatives: vec![true, false, true, false, true, true],
+            representative_for: vec![0, 0, 2, 2, 4, 5],
+            map_for_representative_member: BTreeMap::new(),
+        };
+        let mut original = BTreeMap::new();
+        let row = |successors: &[usize]| {
+            let mut bits = BitSet::new(6);
+            for &successor in successors {
+                bits.set(successor);
+            }
+            bits
+        };
+        // Class 0 -> class 2 is fully forbidden (four raw pairs); the other
+        // examples are only partially forbidden and must not be coalesced.
+        original.insert(0, row(&[2, 3, 4]));
+        original.insert(1, row(&[2, 3]));
+        original.insert(2, row(&[0, 1]));
+        original.insert(3, row(&[0]));
+
+        assert_eq!(
+            plan.coalesced_disallowed_follows(&original, 6),
+            direct(&plan, &original, 6),
+        );
+    }
+
+    #[test]
     fn transport_coordinate_quotient_matches_full_mode_signature() {
         let ordinary = ManyToOneIdMap::from_original_to_internal_with_representatives(
             vec![0, 0, 1, 1, 2, 2, 3],
@@ -2339,16 +2499,16 @@ mod tests {
         );
         let modes = vec![
             TerminalNwaTransportMode {
-                scanner_state_for_original: vec![0, 1, 2, 3, 4, 5, 6],
-                terminal_map: vec![0],
+                scanner_state_for_original: TransportScannerStateMap::Explicit(vec![0, 1, 2, 3, 4, 5, 6].into()),
+                terminal_swap: None,
             },
             TerminalNwaTransportMode {
-                scanner_state_for_original: vec![1, 0, 3, 2, 5, 4, 6],
-                terminal_map: vec![0],
+                scanner_state_for_original: TransportScannerStateMap::Explicit(vec![1, 0, 3, 2, 5, 4, 6].into()),
+                terminal_swap: None,
             },
             TerminalNwaTransportMode {
-                scanner_state_for_original: vec![2, 3, 0, 1, 6, 6, 4],
-                terminal_map: vec![0],
+                scanner_state_for_original: TransportScannerStateMap::Explicit(vec![2, 3, 0, 1, 6, 6, 4].into()),
+                terminal_swap: None,
             },
         ];
         let plan = TerminalInterchangeability::identity(&[true]);
@@ -2360,7 +2520,7 @@ mod tests {
                     .iter()
                     .map(|mode| {
                         ordinary.original_to_internal
-                            [mode.scanner_state_for_original[source] as usize]
+                            [mode.scanner_state_for_original.scanner_state(source as u32) as usize]
                     })
                     .collect::<Vec<_>>()
             })
@@ -2423,9 +2583,9 @@ mod tests {
         let mut dfa = InterchangeabilityDfa::new(&tokenizer, &[true, true], &[true; 256]);
         let map = dfa.interchange_map(0, 1).expect("identical literals must transport");
         let root = tokenizer.initial_state_id() as usize;
-        assert_eq!(map.target_representative_for_source_state[root], tokenizer.initial_state_id());
-        let representatives = map.arbitrary_target_representatives();
-        assert_eq!(map.target_representative_for_source_state[root], representatives[root]);
+        assert_eq!(map.scanner_state_map.scanner_state(root as u32), tokenizer.initial_state_id());
+        let representatives = map.materialized_scanner_states();
+        assert_eq!(map.scanner_state_map.scanner_state(root as u32), representatives[root]);
         let plan = TerminalInterchangeability::build(&tokenizer, &[true, true], &[true; 256], None);
         assert_eq!(plan.active_representatives.iter().filter(|&&active| active).count(), 1);
     }
@@ -2468,7 +2628,7 @@ mod tests {
         assert_eq!(optimized, reference);
         assert!(
             optimized
-                .target_representative_for_source_state
+                .materialized_scanner_states()
                 .iter()
                 .enumerate()
                 .any(|(state, &target)| target != state as u32),
@@ -2579,8 +2739,8 @@ mod tests {
                         "first-round prefilter rejected exact pair {left} <-> {right}",
                     );
                     assert_eq!(
-                        left_to_right.target_representative_for_source_state,
-                        right_to_left.target_representative_for_source_state,
+                        left_to_right.materialized_scanner_states(),
+                        right_to_left.materialized_scanner_states(),
                         "the reversed pair call must be operationally identical",
                     );
                 }

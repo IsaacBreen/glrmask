@@ -5,6 +5,7 @@
 
 use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
@@ -1164,8 +1165,8 @@ mod tests {
         let start = nwa.add_state();
         nwa.start_states_mut().push(start);
         let modes = [TerminalNwaTransportMode {
-            scanner_state_for_original: (0..tokenizer.num_states()).collect(),
-            terminal_map: vec![1, 0, 2],
+            scanner_state_for_original: TransportScannerStateMap::Explicit((0..tokenizer.num_states()).collect::<Vec<_>>().into()),
+            terminal_swap: Some((0, 1)),
         }];
 
         build_transport_nwa_via_trie_walk(
@@ -1376,14 +1377,87 @@ mod tests {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum TransportScannerStateMap {
+    Explicit(Arc<[TokenizerState]>),
+    Quotient {
+        state_count: usize,
+        class_for_original: Arc<[u32]>,
+        representative_for_class: Arc<[TokenizerState]>,
+        source_class_for_target_deviations: Box<[(u32, u32)]>,
+    },
+}
+
+impl TransportScannerStateMap {
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Explicit(states) => states.len(),
+            Self::Quotient { state_count, .. } => *state_count,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn scanner_state(&self, original_state: TokenizerState) -> TokenizerState {
+        match self {
+            Self::Explicit(states) => states[original_state as usize],
+            Self::Quotient {
+                class_for_original,
+                representative_for_class,
+                source_class_for_target_deviations,
+                ..
+            } => {
+                let target_class = class_for_original[original_state as usize];
+                let source_class = source_class_for_target_deviations
+                    .binary_search_by_key(&target_class, |&(target, _)| target)
+                    .map(|index| source_class_for_target_deviations[index].1)
+                    .unwrap_or(target_class);
+                representative_for_class[source_class as usize]
+            }
+        }
+    }
+
+    pub(crate) fn materialized(&self) -> Arc<[TokenizerState]> {
+        match self {
+            Self::Explicit(states) => Arc::clone(states),
+            Self::Quotient { state_count, .. } => (0..*state_count)
+                .map(|state| self.scanner_state(state as TokenizerState))
+                .collect::<Vec<_>>()
+                .into(),
+        }
+    }
+
+    pub(crate) fn make_explicit_mut(&mut self) -> &mut [TokenizerState] {
+        if !matches!(self, Self::Explicit(_)) {
+            *self = Self::Explicit(self.materialized());
+        }
+        match self {
+            Self::Explicit(states) => Arc::make_mut(states),
+            Self::Quotient { .. } => unreachable!("transport map was just materialized"),
+        }
+    }
+}
+
 /// One strict-interchangeability scanner mode. `scanner_state_for_original[s]`
 /// is the full-lexer simulator state used when the actual current lexer state is
-/// `s`; `terminal_map` relabels every raw output emitted by that simulator back
-/// into the original terminal alphabet.
+/// `s`. Terminal relabelling is always either identity or one transposition;
+/// storing that swap directly avoids cloning a full terminal-alphabet map for
+/// every representative/member mode.
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalNwaTransportMode {
-    pub(crate) scanner_state_for_original: Vec<TokenizerState>,
-    pub(crate) terminal_map: Vec<TerminalID>,
+    pub(crate) scanner_state_for_original: TransportScannerStateMap,
+    pub(crate) terminal_swap: Option<(TerminalID, TerminalID)>,
+}
+
+impl TerminalNwaTransportMode {
+    #[inline]
+    pub(crate) fn mapped_terminal(&self, terminal: TerminalID) -> TerminalID {
+        match self.terminal_swap {
+            Some((left, right)) if terminal == left => right,
+            Some((left, right)) if terminal == right => left,
+            _ => terminal,
+        }
+    }
 }
 
 /// A scanner context is a raw lexer state together with the set of terminal
@@ -1473,10 +1547,9 @@ impl<'m> TransportModePlanner<'m> {
     ) -> SmallVec<[TransportContext; 4]> {
         let mut modes_by_scanner_state = BTreeMap::<TokenizerState, Vec<usize>>::new();
         for (mode, transport) in self.modes.iter().enumerate() {
-            let scanner_state = *transport
+            let scanner_state = transport
                 .scanner_state_for_original
-                .get(original_state as usize)
-                .expect("transport mode missing original tokenizer state");
+                .scanner_state(original_state);
             modes_by_scanner_state
                 .entry(scanner_state)
                 .or_default()
@@ -1501,12 +1574,7 @@ impl<'m> TransportModePlanner<'m> {
         }
         let mut labels = SmallVec::<[TerminalID; 4]>::new();
         for &mode in &self.mode_sets[mode_set] {
-            let mapped = self.modes[mode]
-                .terminal_map
-                .get(terminal as usize)
-                .copied()
-                .unwrap_or(terminal);
-            labels.push(mapped);
+            labels.push(self.modes[mode].mapped_terminal(terminal));
         }
         labels.sort_unstable();
         labels.dedup();

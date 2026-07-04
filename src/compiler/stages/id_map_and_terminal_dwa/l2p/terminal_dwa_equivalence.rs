@@ -6,11 +6,15 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt::Write as _;
+use std::sync::Arc;
+use std::time::Instant;
 
+use range_set_blaze::RangeSetBlaze;
+use rustc_hash::FxHashMap;
 use crate::automata::weighted_u32::dwa::DWA;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa;
-use crate::ds::weight::Weight;
+use crate::ds::weight::{shared_rangeset, SharedTokenSet, Weight};
 
 /// A concrete witness proving two terminal DWAs disagree on the completed
 /// (original-coordinate) terminal language. `word` is the sequence of terminal
@@ -61,23 +65,54 @@ pub(crate) fn find_mismatch(
     baseline: &LocalIdMapTerminalDwa,
     candidate: &LocalIdMapTerminalDwa,
 ) -> Option<MismatchWitness> {
-    let states = original_domain(
+    let started_at = Instant::now();
+    let differs = symbolic_mismatch_exists(baseline, candidate);
+    if comparator_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][terminal_dwa_equivalence] symbolic_ms={:.3} differs={}",
+            started_at.elapsed().as_secs_f64() * 1000.0,
+            differs,
+        );
+    }
+    if !differs {
+        return None;
+    }
+    // The symbolic pass above establishes that a disagreement exists. Re-run
+    // the coordinate search only on failure so callers retain the concrete,
+    // deterministic witness used by the existing diagnostics.
+    find_mismatch_by_coordinate_search(baseline, candidate)
+        .or_else(|| panic!("symbolic terminal-DWA comparison found a mismatch without a witness"))
+}
+
+fn comparator_profile_enabled() -> bool {
+    std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some_and(|value| value == "1")
+}
+
+fn find_mismatch_by_coordinate_search(
+    baseline: &LocalIdMapTerminalDwa,
+    candidate: &LocalIdMapTerminalDwa,
+) -> Option<MismatchWitness> {
+    // The completed-language predicate only depends on each artifact's
+    // internal coordinates.  A many-to-one id map can leave thousands of
+    // original states (and hundreds of original tokens) with the exact same
+    // pair of internal coordinates in the reference and candidate artifacts.
+    // Compare one earliest original representative for every such pair rather
+    // than re-running the entire product-DWA search for every duplicate.
+    let states = coordinate_domain(
         &baseline.id_map.tokenizer_states.original_to_internal,
         &candidate.id_map.tokenizer_states.original_to_internal,
     );
-    let tokens = original_domain(
+    let tokens = coordinate_domain(
         &baseline.id_map.vocab_tokens.original_to_internal,
         &candidate.id_map.vocab_tokens.original_to_internal,
     );
-    for original_state in states {
-        for original_token in tokens.iter().copied() {
+    for state in states.iter().copied() {
+        for token in tokens.iter().copied() {
             if let Some(witness) = find_mismatch_for_pair(
                 &baseline.dwa,
-                &baseline.id_map,
                 &candidate.dwa,
-                &candidate.id_map,
-                original_state,
-                original_token,
+                state,
+                token,
             ) {
                 return Some(witness);
             }
@@ -90,12 +125,374 @@ fn dump_witness_enabled() -> bool {
     std::env::var_os("GLRMASK_TI_DUMP_WITNESS").is_some_and(|value| value == "1")
 }
 
-fn original_domain(left: &[u32], right: &[u32]) -> BTreeSet<u32> {
-    left.iter()
-        .enumerate()
-        .chain(right.iter().enumerate())
-        .filter_map(|(original, &internal)| (internal != u32::MAX).then_some(original as u32))
-        .collect()
+#[derive(Debug, Clone, Copy)]
+struct CoordinateRepresentative {
+    original: u32,
+    baseline_internal: u32,
+    candidate_internal: u32,
+}
+
+/// Earliest original representative for every `(baseline_internal,
+/// candidate_internal)` coordinate pair. `u32::MAX` is the id-map sentinel for
+/// an original coordinate absent from one artifact; it is retained so a
+/// one-sided coordinate remains checked exactly once.
+fn coordinate_domain(left: &[u32], right: &[u32]) -> Vec<CoordinateRepresentative> {
+    let mut seen = BTreeSet::new();
+    let mut result = Vec::new();
+    for original in 0..left.len().max(right.len()) {
+        let baseline_internal = left.get(original).copied().unwrap_or(u32::MAX);
+        let candidate_internal = right.get(original).copied().unwrap_or(u32::MAX);
+        if baseline_internal == u32::MAX && candidate_internal == u32::MAX {
+            continue;
+        }
+        if seen.insert((baseline_internal, candidate_internal)) {
+            result.push(CoordinateRepresentative {
+                original: original as u32,
+                baseline_internal,
+                candidate_internal,
+            });
+        }
+    }
+    result
+}
+
+/// Dense symbolic coordinates for the exact joint original domain. A class is
+/// one distinct pair of baseline/candidate internal ids and carries the first
+/// original coordinate that realizes it. These are exactly the coordinate
+/// classes enumerated by the slow witness search, but compacted to dense ids so
+/// a `Weight` can represent a region of their Cartesian product directly.
+struct JointCoordinateDomain {
+    representatives: Vec<CoordinateRepresentative>,
+    classes_for_baseline_internal: Vec<Vec<u32>>,
+    classes_for_candidate_internal: Vec<Vec<u32>>,
+}
+
+impl JointCoordinateDomain {
+    fn new(baseline: &[u32], candidate: &[u32]) -> Self {
+        let representatives = coordinate_domain(baseline, candidate);
+        let mut classes_for_baseline_internal = Vec::new();
+        let mut classes_for_candidate_internal = Vec::new();
+        for (class, representative) in representatives.iter().enumerate() {
+            push_joint_class(
+                &mut classes_for_baseline_internal,
+                representative.baseline_internal,
+                class as u32,
+            );
+            push_joint_class(
+                &mut classes_for_candidate_internal,
+                representative.candidate_internal,
+                class as u32,
+            );
+        }
+        Self {
+            representatives,
+            classes_for_baseline_internal,
+            classes_for_candidate_internal,
+        }
+    }
+}
+
+fn push_joint_class(groups: &mut Vec<Vec<u32>>, internal: u32, class: u32) {
+    if internal == u32::MAX {
+        return;
+    }
+    if groups.len() <= internal as usize {
+        groups.resize_with(internal as usize + 1, Vec::new);
+    }
+    groups[internal as usize].push(class);
+}
+
+#[derive(Clone, Copy)]
+enum CoordinateSide {
+    Baseline,
+    Candidate,
+}
+
+/// Lazily expand one artifact's compact weights into the common joint
+/// coordinate domain. Expansion is cached by interned weight/token-set pointer,
+/// so each unique compact relation is converted at most once.
+struct WeightLift {
+    source_state_for_joint_class: Vec<u32>,
+    classes_for_source_state: Vec<Vec<u32>>,
+    classes_for_source_token: Vec<Vec<u32>>,
+    full_weight: Weight,
+    lifted_weights: FxHashMap<usize, Weight>,
+    lifted_token_sets: FxHashMap<usize, SharedTokenSet>,
+}
+
+impl WeightLift {
+    fn new(
+        state_domain: &JointCoordinateDomain,
+        token_domain: &JointCoordinateDomain,
+        side: CoordinateSide,
+    ) -> Self {
+        let source_state_for_joint_class = state_domain
+            .representatives
+            .iter()
+            .map(|representative| match side {
+                CoordinateSide::Baseline => representative.baseline_internal,
+                CoordinateSide::Candidate => representative.candidate_internal,
+            })
+            .collect::<Vec<_>>();
+        let source_token_for_joint_class = token_domain
+            .representatives
+            .iter()
+            .map(|representative| match side {
+                CoordinateSide::Baseline => representative.baseline_internal,
+                CoordinateSide::Candidate => representative.candidate_internal,
+            })
+            .collect::<Vec<_>>();
+        let classes_for_source_state = match side {
+            CoordinateSide::Baseline => state_domain.classes_for_baseline_internal.clone(),
+            CoordinateSide::Candidate => state_domain.classes_for_candidate_internal.clone(),
+        };
+        let classes_for_source_token = match side {
+            CoordinateSide::Baseline => token_domain.classes_for_baseline_internal.clone(),
+            CoordinateSide::Candidate => token_domain.classes_for_candidate_internal.clone(),
+        };
+        let source_defined_tokens: RangeSetBlaze<u32> = source_token_for_joint_class
+            .iter()
+            .enumerate()
+            .filter_map(|(class, &internal)| (internal != u32::MAX).then_some(class as u32..=class as u32))
+            .collect();
+        let source_defined_tokens = shared_rangeset(source_defined_tokens);
+        let full_weight = Weight::from_per_tsid_shared(
+            source_state_for_joint_class
+                .iter()
+                .enumerate()
+                .filter(|&(_, &internal)| internal != u32::MAX)
+                .map(|(class, _)| (class as u32, Arc::clone(&source_defined_tokens))),
+        );
+        Self {
+            source_state_for_joint_class,
+            classes_for_source_state,
+            classes_for_source_token,
+            full_weight,
+            lifted_weights: FxHashMap::default(),
+            lifted_token_sets: FxHashMap::default(),
+        }
+    }
+
+    fn lift_token_set(&mut self, source_tokens: &SharedTokenSet) -> SharedTokenSet {
+        let key = Arc::as_ptr(source_tokens) as usize;
+        if let Some(mapped) = self.lifted_token_sets.get(&key) {
+            return Arc::clone(mapped);
+        }
+        let mut classes = Vec::new();
+        for source_token in source_tokens.iter() {
+            if let Some(mapped) = self.classes_for_source_token.get(source_token as usize) {
+                classes.extend_from_slice(mapped);
+            }
+        }
+        classes.sort_unstable();
+        classes.dedup();
+        let mapped: RangeSetBlaze<u32> = classes
+            .into_iter()
+            .map(|class| class..=class)
+            .collect();
+        let mapped = shared_rangeset(mapped);
+        self.lifted_token_sets.insert(key, Arc::clone(&mapped));
+        mapped
+    }
+
+    fn lift_weight(&mut self, weight: &Weight) -> Weight {
+        if weight.is_empty() {
+            return Weight::empty();
+        }
+        if weight.is_full() {
+            return self.full_weight.clone();
+        }
+        let key = weight.ptr_key();
+        if let Some(lifted) = self.lifted_weights.get(&key) {
+            return lifted.clone();
+        }
+        let mut tokens_for_joint_state = vec![None; self.source_state_for_joint_class.len()];
+        for (start, end, source_tokens) in weight.range_entries() {
+            let lifted_tokens = self.lift_token_set(source_tokens);
+            if lifted_tokens.is_empty() {
+                continue;
+            }
+            for source_state in start..=end {
+                let Some(classes) = self.classes_for_source_state.get(source_state as usize) else {
+                    continue;
+                };
+                for &class in classes {
+                    tokens_for_joint_state[class as usize] = Some(Arc::clone(&lifted_tokens));
+                }
+            }
+        }
+        let lifted = Weight::from_per_tsid_shared(
+            tokens_for_joint_state
+                .into_iter()
+                .enumerate()
+                .filter_map(|(state, tokens)| tokens.map(|tokens| (state as u32, tokens))),
+        );
+        self.lifted_weights.insert(key, lifted.clone());
+        lifted
+    }
+}
+
+#[derive(Clone)]
+struct SymbolicPendingRegion {
+    baseline_state: Option<u32>,
+    candidate_state: Option<u32>,
+    region: Weight,
+}
+
+fn symbolic_product_index(
+    baseline_state: Option<u32>,
+    candidate_state: Option<u32>,
+    candidate_width: usize,
+) -> usize {
+    baseline_state.map_or(0, |state| state as usize + 1) * candidate_width
+        + candidate_state.map_or(0, |state| state as usize + 1)
+}
+
+fn symbolic_mismatch_exists(
+    baseline: &LocalIdMapTerminalDwa,
+    candidate: &LocalIdMapTerminalDwa,
+) -> bool {
+    let state_domain = JointCoordinateDomain::new(
+        &baseline.id_map.tokenizer_states.original_to_internal,
+        &candidate.id_map.tokenizer_states.original_to_internal,
+    );
+    let token_domain = JointCoordinateDomain::new(
+        &baseline.id_map.vocab_tokens.original_to_internal,
+        &candidate.id_map.vocab_tokens.original_to_internal,
+    );
+    if state_domain.representatives.is_empty() || token_domain.representatives.is_empty() {
+        return false;
+    }
+
+    let all_tokens: RangeSetBlaze<u32> = (0..token_domain.representatives.len() as u32)
+        .map(|token| token..=token)
+        .collect();
+    let universe = Weight::from_uniform(
+        0..=state_domain.representatives.len() as u32 - 1,
+        all_tokens,
+    );
+    let mut baseline_lift = WeightLift::new(&state_domain, &token_domain, CoordinateSide::Baseline);
+    let mut candidate_lift = WeightLift::new(&state_domain, &token_domain, CoordinateSide::Candidate);
+
+    let candidate_width = candidate.dwa.states().len() + 1;
+    let mut reached_regions = vec![
+        Weight::empty();
+        (baseline.dwa.states().len() + 1) * candidate_width
+    ];
+    let mut pending = VecDeque::new();
+    enqueue_symbolic_region(
+        Some(baseline.dwa.start_state()),
+        Some(candidate.dwa.start_state()),
+        universe,
+        candidate_width,
+        &mut reached_regions,
+        &mut pending,
+    );
+
+    while let Some(SymbolicPendingRegion {
+        baseline_state,
+        candidate_state,
+        region,
+    }) = pending.pop_front()
+    {
+        let baseline_final = baseline_state
+            .and_then(|state| baseline.dwa.states().get(state as usize))
+            .and_then(|state| state.final_weight.as_ref())
+            .map(|weight| baseline_lift.lift_weight(weight))
+            .unwrap_or_else(Weight::empty);
+        let candidate_final = candidate_state
+            .and_then(|state| candidate.dwa.states().get(state as usize))
+            .and_then(|state| state.final_weight.as_ref())
+            .map(|weight| candidate_lift.lift_weight(weight))
+            .unwrap_or_else(Weight::empty);
+        if restricted_weights_differ(&region, &baseline_final, &candidate_final) {
+            return true;
+        }
+
+        for_each_union_label(
+            &baseline.dwa,
+            baseline_state,
+            &candidate.dwa,
+            candidate_state,
+            |label| {
+                let baseline_edge = baseline_state
+                    .and_then(|state| baseline.dwa.states().get(state as usize))
+                    .and_then(|state| state.transitions.get(&label));
+                let candidate_edge = candidate_state
+                    .and_then(|state| candidate.dwa.states().get(state as usize))
+                    .and_then(|state| state.transitions.get(&label));
+                let baseline_weight = baseline_edge
+                    .map(|(_, weight)| baseline_lift.lift_weight(weight))
+                    .unwrap_or_else(Weight::empty);
+                let candidate_weight = candidate_edge
+                    .map(|(_, weight)| candidate_lift.lift_weight(weight))
+                    .unwrap_or_else(Weight::empty);
+                let baseline_enabled = region.intersection(&baseline_weight);
+                let candidate_enabled = region.intersection(&candidate_weight);
+                let both_enabled = baseline_enabled.intersection(&candidate_enabled);
+                let baseline_only = baseline_enabled.difference(&candidate_enabled);
+                let candidate_only = candidate_enabled.difference(&baseline_enabled);
+                let baseline_target = baseline_edge.map(|(target, _)| *target);
+                let candidate_target = candidate_edge.map(|(target, _)| *target);
+                enqueue_symbolic_region(
+                    baseline_target,
+                    candidate_target,
+                    both_enabled,
+                    candidate_width,
+                    &mut reached_regions,
+                    &mut pending,
+                );
+                enqueue_symbolic_region(
+                    baseline_target,
+                    None,
+                    baseline_only,
+                    candidate_width,
+                    &mut reached_regions,
+                    &mut pending,
+                );
+                enqueue_symbolic_region(
+                    None,
+                    candidate_target,
+                    candidate_only,
+                    candidate_width,
+                    &mut reached_regions,
+                    &mut pending,
+                );
+            },
+        );
+    }
+    false
+}
+
+fn restricted_weights_differ(region: &Weight, left: &Weight, right: &Weight) -> bool {
+    let left_enabled = region.intersection(left);
+    let right_enabled = region.intersection(right);
+    !left_enabled.difference(&right_enabled).is_empty()
+        || !right_enabled.difference(&left_enabled).is_empty()
+}
+
+fn enqueue_symbolic_region(
+    baseline_state: Option<u32>,
+    candidate_state: Option<u32>,
+    incoming: Weight,
+    candidate_width: usize,
+    reached_regions: &mut [Weight],
+    pending: &mut VecDeque<SymbolicPendingRegion>,
+) {
+    if incoming.is_empty() {
+        return;
+    }
+    let index = symbolic_product_index(baseline_state, candidate_state, candidate_width);
+    let delta = incoming.difference(&reached_regions[index]);
+    if delta.is_empty() {
+        return;
+    }
+    reached_regions[index] = reached_regions[index].union(&delta);
+    pending.push_back(SymbolicPendingRegion {
+        baseline_state,
+        candidate_state,
+        region: delta,
+    });
 }
 
 fn outgoing_labels(dwa: &DWA, state: Option<u32>) -> Vec<i32> {
@@ -105,104 +502,178 @@ fn outgoing_labels(dwa: &DWA, state: Option<u32>) -> Vec<i32> {
         .unwrap_or_default()
 }
 
-fn accepts_final(dwa: &DWA, map: &InternalIdMap, state: Option<u32>, s: u32, t: u32) -> bool {
+fn accepts_final(dwa: &DWA, state: Option<u32>, s: u32, t: u32) -> bool {
     state
         .and_then(|id| dwa.states().get(id as usize))
         .and_then(|node| node.final_weight.as_ref())
-        .is_some_and(|weight| contains(weight, map, s, t))
+        .is_some_and(|weight| contains_internal(weight, s, t))
 }
 
-fn enabled_target(dwa: &DWA, map: &InternalIdMap, state: Option<u32>, label: i32, s: u32, t: u32) -> Option<u32> {
+fn enabled_target(dwa: &DWA, state: Option<u32>, label: i32, s: u32, t: u32) -> Option<u32> {
     let state = state?;
     let (target, weight) = dwa.states()[state as usize].transitions.get(&label)?;
-    contains(weight, map, s, t).then_some(*target)
+    contains_internal(weight, s, t).then_some(*target)
 }
 
-fn contains(weight: &Weight, map: &InternalIdMap, s: u32, t: u32) -> bool {
-    let Some(&si) = map.tokenizer_states.original_to_internal.get(s as usize) else {
-        return false;
-    };
-    let Some(&ti) = map.vocab_tokens.original_to_internal.get(t as usize) else {
-        return false;
-    };
+/// Exact membership without cloning the token set returned by
+/// `Weight::tokens_for_tsid`. This comparator can execute the same edge query
+/// millions of times on BFCL-512, so the clone dominates otherwise.
+fn contains_internal(weight: &Weight, si: u32, ti: u32) -> bool {
     si != u32::MAX
         && ti != u32::MAX
-        && (weight.is_full() || weight.tokens_for_tsid(si).contains(ti))
+        && (weight.is_full()
+            || weight
+                .range_entries()
+                .any(|(start, end, tokens)| start <= si && si <= end && tokens.contains(ti)))
 }
 
 fn find_mismatch_for_pair(
     baseline: &DWA,
-    baseline_map: &InternalIdMap,
     candidate: &DWA,
-    candidate_map: &InternalIdMap,
-    original_state: u32,
-    original_token: u32,
+    state: CoordinateRepresentative,
+    token: CoordinateRepresentative,
 ) -> Option<MismatchWitness> {
-    let mut pending = VecDeque::from([(
-        Some(baseline.start_state()),
-        Some(candidate.start_state()),
-        Vec::<i32>::new(),
-    )]);
-    let mut seen = BTreeSet::<(Option<u32>, Option<u32>)>::new();
+    #[derive(Clone, Copy)]
+    struct SearchNode {
+        baseline_state: Option<u32>,
+        candidate_state: Option<u32>,
+        parent: Option<usize>,
+        incoming_label: Option<i32>,
+    }
 
-    while let Some((baseline_state, candidate_state, word)) = pending.pop_front() {
-        if !seen.insert((baseline_state, candidate_state)) {
-            continue;
-        }
+    let candidate_width = candidate.states().len() + 1;
+    let pair_index = |baseline_state: Option<u32>, candidate_state: Option<u32>| {
+        baseline_state.map_or(0, |state| state as usize + 1) * candidate_width
+            + candidate_state.map_or(0, |state| state as usize + 1)
+    };
+    let mut nodes = vec![SearchNode {
+        baseline_state: Some(baseline.start_state()),
+        candidate_state: Some(candidate.start_state()),
+        parent: None,
+        incoming_label: None,
+    }];
+    let mut pending = VecDeque::from([0usize]);
+    let mut seen = vec![false; (baseline.states().len() + 1) * candidate_width];
+    seen[pair_index(Some(baseline.start_state()), Some(candidate.start_state()))] = true;
+
+    while let Some(node_index) = pending.pop_front() {
+        let SearchNode {
+            baseline_state,
+            candidate_state,
+            ..
+        } = nodes[node_index];
         let baseline_accepts = accepts_final(
             baseline,
-            baseline_map,
             baseline_state,
-            original_state,
-            original_token,
+            state.baseline_internal,
+            token.baseline_internal,
         );
         let candidate_accepts = accepts_final(
             candidate,
-            candidate_map,
             candidate_state,
-            original_state,
-            original_token,
+            state.candidate_internal,
+            token.candidate_internal,
         );
         if baseline_accepts != candidate_accepts {
+            let mut word = Vec::new();
+            let mut current = node_index;
+            while let Some(parent) = nodes[current].parent {
+                word.push(nodes[current]
+                    .incoming_label
+                    .expect("non-root search node must have an incoming label"));
+                current = parent;
+            }
+            word.reverse();
             return Some(MismatchWitness {
-                original_state,
-                original_token,
+                original_state: state.original,
+                original_token: token.original,
                 word,
                 baseline_accepts,
                 candidate_accepts,
             });
         }
 
-        let labels = outgoing_labels(baseline, baseline_state)
-            .into_iter()
-            .chain(outgoing_labels(candidate, candidate_state))
-            .collect::<BTreeSet<_>>();
-        for label in labels {
+        for_each_union_label(baseline, baseline_state, candidate, candidate_state, |label| {
             let next_baseline = enabled_target(
                 baseline,
-                baseline_map,
                 baseline_state,
                 label,
-                original_state,
-                original_token,
+                state.baseline_internal,
+                token.baseline_internal,
             );
             let next_candidate = enabled_target(
                 candidate,
-                candidate_map,
                 candidate_state,
                 label,
-                original_state,
-                original_token,
+                state.candidate_internal,
+                token.candidate_internal,
             );
             if next_baseline.is_none() && next_candidate.is_none() {
-                continue;
+                return;
             }
-            let mut next_word = word.clone();
-            next_word.push(label);
-            pending.push_back((next_baseline, next_candidate, next_word));
-        }
+            let next_index = pair_index(next_baseline, next_candidate);
+            if seen[next_index] {
+                return;
+            }
+            seen[next_index] = true;
+            nodes.push(SearchNode {
+                baseline_state: next_baseline,
+                candidate_state: next_candidate,
+                parent: Some(node_index),
+                incoming_label: Some(label),
+            });
+            pending.push_back(nodes.len() - 1);
+        });
     }
     None
+}
+
+/// Visit the sorted union of raw outgoing labels without allocating a
+/// `BTreeSet` for every product-DWA node.
+fn for_each_union_label(
+    baseline: &DWA,
+    baseline_state: Option<u32>,
+    candidate: &DWA,
+    candidate_state: Option<u32>,
+    mut visit: impl FnMut(i32),
+) {
+    let mut baseline_labels = baseline_state
+        .and_then(|state| baseline.states().get(state as usize))
+        .into_iter()
+        .flat_map(|state| state.transitions.keys());
+    let mut candidate_labels = candidate_state
+        .and_then(|state| candidate.states().get(state as usize))
+        .into_iter()
+        .flat_map(|state| state.transitions.keys());
+    let mut next_baseline = baseline_labels.next().copied();
+    let mut next_candidate = candidate_labels.next().copied();
+
+    loop {
+        match (next_baseline, next_candidate) {
+            (Some(left), Some(right)) if left < right => {
+                visit(left);
+                next_baseline = baseline_labels.next().copied();
+            }
+            (Some(left), Some(right)) if right < left => {
+                visit(right);
+                next_candidate = candidate_labels.next().copied();
+            }
+            (Some(label), Some(_)) => {
+                visit(label);
+                next_baseline = baseline_labels.next().copied();
+                next_candidate = candidate_labels.next().copied();
+            }
+            (Some(label), None) => {
+                visit(label);
+                next_baseline = baseline_labels.next().copied();
+            }
+            (None, Some(label)) => {
+                visit(label);
+                next_candidate = candidate_labels.next().copied();
+            }
+            (None, None) => return,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -338,10 +809,12 @@ fn render_trace(
 ) {
     let s = witness.original_state;
     let t = witness.original_token;
+    let internal_s = map.tokenizer_states.original_to_internal.get(s as usize).copied().unwrap_or(u32::MAX);
+    let internal_t = map.vocab_tokens.original_to_internal.get(t as usize).copied().unwrap_or(u32::MAX);
     let mut state: Option<u32> = Some(dwa.start_state());
     let _ = writeln!(out, "  [{name}] start state = {state:?}");
     for (step, &label) in witness.word.iter().enumerate() {
-        let next = enabled_target(dwa, map, state, label, s, t);
+        let next = enabled_target(dwa, state, label, internal_s, internal_t);
         let raw_target = state
             .and_then(|id| dwa.states().get(id as usize))
             .and_then(|node| node.transitions.get(&label).map(|(target, _)| *target));
@@ -354,6 +827,11 @@ fn render_trace(
             break;
         }
     }
+    let accepts_final = |dwa: &DWA, map: &InternalIdMap, state: Option<u32>, s: u32, t: u32| {
+        let si = map.tokenizer_states.original_to_internal.get(s as usize).copied().unwrap_or(u32::MAX);
+        let ti = map.vocab_tokens.original_to_internal.get(t as usize).copied().unwrap_or(u32::MAX);
+        state.and_then(|id| dwa.states().get(id as usize)).and_then(|node| node.final_weight.as_ref()).is_some_and(|weight| contains_internal(weight, si, ti))
+    };
     let accepts = accepts_final(dwa, map, state, s, t);
     let final_weight = state
         .and_then(|id| dwa.states().get(id as usize))

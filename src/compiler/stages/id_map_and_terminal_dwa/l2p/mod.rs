@@ -188,6 +188,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // Discover terminal interchangeability in the current vocabulary byte
     // partition. The L2+ active mask limits which terminals may form a class,
     // but a transported scanner must retain the complete terminal alphabet.
+    let ti_profile_timing = l2p_timing_profile_enabled();
+    let ti_discovery_started_at = ti_profile_timing.then(Instant::now);
     let terminal_interchangeability = if l2p_terminal_interchangeability_enabled() {
         TerminalInterchangeability::build(
             tokenizer,
@@ -198,10 +200,17 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     } else {
         TerminalInterchangeability::identity(active_terminals)
     };
+    let ti_discovery_ms = ti_discovery_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
     let reference_terminal_expansion = !terminal_interchangeability.is_identity();
+    let transport_modes_started_at = ti_profile_timing.then(Instant::now);
     let mut transport_modes = reference_terminal_expansion
         .then(|| terminal_interchangeability.terminal_nwa_transport_modes())
         .flatten();
+    let ti_transport_modes_ms = transport_modes_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
     let analysis_active_terminals = terminal_interchangeability.active_representatives();
     // Equivalence analysis observes only TI representatives, so it must use a
     // follow table coalesced over each class: a representative-labeled follow is
@@ -210,10 +219,33 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // wrongly collapses a state whose only distinguishing continuation is a
     // member terminal (e.g. CLASS after SPACE), merging tokens that differ. The
     // original per-member table is still applied to the transport-expanded DWA.
+    let coalesced_disallowed_follows_started_at = ti_profile_timing.then(Instant::now);
     let coalesced_disallowed_follows = reference_terminal_expansion.then(|| {
         terminal_interchangeability
             .coalesced_disallowed_follows(disallowed_follows, grammar.num_terminals as usize)
     });
+    let ti_coalesced_disallowed_follows_ms = coalesced_disallowed_follows_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    // Deliberately process-scoped profiling escape hatch. It is only enabled
+    // by an exact partition label, prints all discovery/plan measurements that
+    // precede equivalence and transport expansion, then exits before a known
+    // slow downstream build can obscure those figures.
+    if std::env::var("GLRMASK_PROFILE_L2P_EXIT_AFTER_TI_DISCOVERY")
+        .ok()
+        .as_deref()
+        == Some(partition_label)
+    {
+        eprintln!(
+            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} discovery_ms={:.3} transport_modes_ms={:.3} coalesced_disallowed_follows_ms={:.3} early_exit=after_ti_discovery",
+            partition_label,
+            reference_terminal_expansion,
+            ti_discovery_ms,
+            ti_transport_modes_ms,
+            ti_coalesced_disallowed_follows_ms,
+        );
+        std::process::exit(0);
+    }
     let equivalence_disallowed_follows = coalesced_disallowed_follows
         .as_ref()
         .unwrap_or(disallowed_follows);
@@ -286,14 +318,34 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // the ordinary terminal-DWA quotient of each mapped destination. Preserve
     // the coarsest exact refinement of that quotient across every mode rather
     // than restoring one internal state ID per raw lexer state.
+    let mut ti_canonicalize_transport_modes_ms = 0.0;
+    let mut ti_transport_coordinate_quotient_ms = 0.0;
     if let Some(modes) = transport_modes.as_mut() {
-        let transport_coordinate_map = {
-            let ordinary_state_map = &simplified_id_map.tokenizer_states;
-            terminal_interchangeability
-                .canonicalize_transport_mode_states(modes, ordinary_state_map);
-            terminal_interchangeability.transport_coordinate_quotient(ordinary_state_map, modes)
-        };
+        let ordinary_state_map = &simplified_id_map.tokenizer_states;
+        let canonicalize_started_at = ti_profile_timing.then(Instant::now);
+        terminal_interchangeability.canonicalize_transport_mode_states(modes, ordinary_state_map);
+        ti_canonicalize_transport_modes_ms = canonicalize_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let quotient_started_at = ti_profile_timing.then(Instant::now);
+        let transport_coordinate_map =
+            terminal_interchangeability.transport_coordinate_quotient(ordinary_state_map, modes);
+        ti_transport_coordinate_quotient_ms = quotient_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
         simplified_id_map.tokenizer_states = transport_coordinate_map;
+    }
+    if ti_profile_timing {
+        eprintln!(
+            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} discovery_ms={:.3} transport_modes_ms={:.3} coalesced_disallowed_follows_ms={:.3} canonicalize_transport_modes_ms={:.3} transport_coordinate_quotient_ms={:.3}",
+            partition_label,
+            reference_terminal_expansion,
+            ti_discovery_ms,
+            ti_transport_modes_ms,
+            ti_coalesced_disallowed_follows_ms,
+            ti_canonicalize_transport_modes_ms,
+            ti_transport_coordinate_quotient_ms,
+        );
     }
 
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
