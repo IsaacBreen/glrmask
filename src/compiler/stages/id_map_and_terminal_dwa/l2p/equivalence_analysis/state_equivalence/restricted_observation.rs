@@ -42,6 +42,11 @@ struct TargetLabels {
     future_finalizers: SmallVec<[u32; 4]>,
 }
 
+enum ReverseEdges {
+    Compact(Vec<u32>),
+    Wide(Vec<u64>),
+}
+
 fn target_label_ids(tokenizer: &Tokenizer, active_groups: Option<&[bool]>) -> Vec<u32> {
     let num_states = tokenizer.num_states() as usize;
     let mut ids = vec![0u32; num_states];
@@ -326,22 +331,43 @@ pub(crate) fn compute_state_map(
         reverse_offsets[candidate] += reverse_offsets[candidate - 1];
     }
     let mut reverse_cursor = reverse_offsets[..num_candidates].to_vec();
-    let mut reverse_edges = vec![0u64; reverse_offsets[num_candidates]];
-    for source in 0..num_candidates {
-        let observation_start = source * observation_width;
-        for (slot, &observation) in observed_targets
-            [observation_start..observation_start + observation_width]
-            .iter()
-            .enumerate()
-        {
-            if observation != 0 {
-                let target = (observation - 1) as usize;
-                let edge = reverse_cursor[target];
-                reverse_edges[edge] = (source as u64) << 8 | slot as u64;
-                reverse_cursor[target] += 1;
+    let reverse_edges = if num_candidates <= (u32::MAX >> 8) as usize {
+        let mut edges = vec![0u32; reverse_offsets[num_candidates]];
+        for source in 0..num_candidates {
+            let observation_start = source * observation_width;
+            for (slot, &observation) in observed_targets
+                [observation_start..observation_start + observation_width]
+                .iter()
+                .enumerate()
+            {
+                if observation != 0 {
+                    let target = (observation - 1) as usize;
+                    let edge = reverse_cursor[target];
+                    edges[edge] = (source as u32) << 8 | slot as u32;
+                    reverse_cursor[target] += 1;
+                }
             }
         }
-    }
+        ReverseEdges::Compact(edges)
+    } else {
+        let mut edges = vec![0u64; reverse_offsets[num_candidates]];
+        for source in 0..num_candidates {
+            let observation_start = source * observation_width;
+            for (slot, &observation) in observed_targets
+                [observation_start..observation_start + observation_width]
+                .iter()
+                .enumerate()
+            {
+                if observation != 0 {
+                    let target = (observation - 1) as usize;
+                    let edge = reverse_cursor[target];
+                    edges[edge] = (source as u64) << 8 | slot as u64;
+                    reverse_cursor[target] += 1;
+                }
+            }
+        }
+        ReverseEdges::Wide(edges)
+    };
     let reverse_cache_ms = reverse_cache_started_at.elapsed().as_secs_f64() * 1000.0;
     // Each refinement only splits the preceding classes. A class can change
     // only when one of its observations enters a class split in the preceding
@@ -463,24 +489,52 @@ pub(crate) fn compute_state_map(
             return result;
         }
 
-        for target in moved_candidates {
-            let target_class = next_classes[target] as u64 + 1;
-            for &edge in &reverse_edges[reverse_offsets[target]..reverse_offsets[target + 1]] {
-                let source = (edge >> 8) as usize;
-                let slot = (edge & 0xff) as usize;
-                let signature_index = source * signature_width + slot;
-                let old_word = signatures[signature_index];
-                let new_word = (old_word & 0xffff_ffff_0000_0000) | target_class;
-                debug_assert_ne!(old_word, 0);
-                debug_assert_ne!(old_word, new_word);
-                signatures[signature_index] = new_word;
-                signature_fingerprints[source] ^=
-                    signature_slot_fingerprint(slot, old_word)
-                        ^ signature_slot_fingerprint(slot, new_word);
-                let source_class = next_classes[source] as usize;
-                if class_members[source_class].len() > 1 && !dirty_flags[source_class] {
-                    dirty_flags[source_class] = true;
-                    dirty_classes.push(source_class);
+        match &reverse_edges {
+            ReverseEdges::Compact(edges) => {
+                for &target in &moved_candidates {
+                    let target_class = next_classes[target] as u64 + 1;
+                    for &compact_edge in edges[reverse_offsets[target]..reverse_offsets[target + 1]].iter() {
+                        let edge = compact_edge as u64;
+                        let source = (edge >> 8) as usize;
+                        let slot = (edge & 0xff) as usize;
+                        let signature_index = source * signature_width + slot;
+                        let old_word = signatures[signature_index];
+                        let new_word = (old_word & 0xffff_ffff_0000_0000) | target_class;
+                        debug_assert_ne!(old_word, 0);
+                        debug_assert_ne!(old_word, new_word);
+                        signatures[signature_index] = new_word;
+                        signature_fingerprints[source] ^=
+                            signature_slot_fingerprint(slot, old_word)
+                                ^ signature_slot_fingerprint(slot, new_word);
+                        let source_class = next_classes[source] as usize;
+                        if class_members[source_class].len() > 1 && !dirty_flags[source_class] {
+                            dirty_flags[source_class] = true;
+                            dirty_classes.push(source_class);
+                        }
+                    }
+                }
+            }
+            ReverseEdges::Wide(edges) => {
+                for &target in &moved_candidates {
+                    let target_class = next_classes[target] as u64 + 1;
+                    for &edge in edges[reverse_offsets[target]..reverse_offsets[target + 1]].iter() {
+                        let source = (edge >> 8) as usize;
+                        let slot = (edge & 0xff) as usize;
+                        let signature_index = source * signature_width + slot;
+                        let old_word = signatures[signature_index];
+                        let new_word = (old_word & 0xffff_ffff_0000_0000) | target_class;
+                        debug_assert_ne!(old_word, 0);
+                        debug_assert_ne!(old_word, new_word);
+                        signatures[signature_index] = new_word;
+                        signature_fingerprints[source] ^=
+                            signature_slot_fingerprint(slot, old_word)
+                                ^ signature_slot_fingerprint(slot, new_word);
+                        let source_class = next_classes[source] as usize;
+                        if class_members[source_class].len() > 1 && !dirty_flags[source_class] {
+                            dirty_flags[source_class] = true;
+                            dirty_classes.push(source_class);
+                        }
+                    }
                 }
             }
         }
