@@ -28,6 +28,14 @@ fn signature_fingerprint_step(mut hash: u64, word: u64) -> u64 {
     hash
 }
 
+#[inline]
+fn signature_slot_fingerprint(slot: usize, word: u64) -> u64 {
+    signature_fingerprint_step(
+        0xd6e8_feb8_6659_fd93_u64 ^ (slot as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
+        word,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TargetLabels {
     finalizers: SmallVec<[u32; 4]>,
@@ -235,15 +243,15 @@ pub(crate) fn compute_state_map(
 
     let observation_cache_started_at = Instant::now();
     let observation_width = active_bytes.len();
+    let signature_width = observation_width;
     let mut observed_targets = vec![0u64; num_candidates * observation_width];
-    // Count inverse edges while materializing the observation cache. A source
-    // only needs one revisit when a destination candidate splits, even if
-    // several observed bytes lead to that destination.
-    debug_assert!(num_candidates < u32::MAX as usize);
+    let mut signatures = vec![0u64; num_candidates * signature_width];
+    let mut signature_fingerprints = vec![0u64; num_candidates];
+    // Keep every observed source-slot edge. The refinement cache below updates
+    // exactly those signature words when a destination candidate changes
+    // class, rather than rebuilding all words of every affected source.
     let mut reverse_offsets = vec![0usize; num_candidates + 1];
-    let mut reverse_seen = vec![0u32; num_candidates];
     for (candidate, &state) in candidate_representatives.iter().enumerate() {
-        let source_marker = candidate as u32 + 1;
         let observation_start = candidate * observation_width;
         for (slot, &byte) in active_bytes.iter().enumerate() {
             let target = tokenizer.get_transition(state as u32, byte);
@@ -253,12 +261,13 @@ pub(crate) fn compute_state_map(
             let target_candidate = raw_to_candidate[target as usize];
             debug_assert_ne!(target_candidate, NO_CANDIDATE);
             let labels = target_labels[target as usize] as u64 + 1;
-            observed_targets[observation_start + slot] =
-                (labels << 32) | (target_candidate as u64 + 1);
-            if reverse_seen[target_candidate] != source_marker {
-                reverse_seen[target_candidate] = source_marker;
-                reverse_offsets[target_candidate + 1] += 1;
-            }
+            let observation = (labels << 32) | (target_candidate as u64 + 1);
+            observed_targets[observation_start + slot] = observation;
+            let signature_word = (labels << 32) | 1;
+            signatures[observation_start + slot] = signature_word;
+            signature_fingerprints[candidate] ^=
+                signature_slot_fingerprint(slot, signature_word);
+            reverse_offsets[target_candidate + 1] += 1;
         }
     }
     let observation_cache_ms = observation_cache_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -270,25 +279,23 @@ pub(crate) fn compute_state_map(
         reverse_offsets[candidate] += reverse_offsets[candidate - 1];
     }
     let mut reverse_cursor = reverse_offsets[..num_candidates].to_vec();
-    let mut reverse_sources = vec![0u32; reverse_offsets[num_candidates]];
-    reverse_seen.fill(0);
+    let mut reverse_edges = vec![0u64; reverse_offsets[num_candidates]];
     for source in 0..num_candidates {
-        let source_marker = source as u32 + 1;
         let observation_start = source * observation_width;
-        for &observation in &observed_targets[observation_start..observation_start + observation_width] {
+        for (slot, &observation) in observed_targets
+            [observation_start..observation_start + observation_width]
+            .iter()
+            .enumerate()
+        {
             if observation != 0 {
                 let target = (observation as u32 - 1) as usize;
-                if reverse_seen[target] != source_marker {
-                    reverse_seen[target] = source_marker;
-                    let slot = reverse_cursor[target];
-                    reverse_sources[slot] = source as u32;
-                    reverse_cursor[target] += 1;
-                }
+                let edge = reverse_cursor[target];
+                reverse_edges[edge] = (source as u64) << 8 | slot as u64;
+                reverse_cursor[target] += 1;
             }
         }
     }
     let reverse_cache_ms = reverse_cache_started_at.elapsed().as_secs_f64() * 1000.0;
-
     // Each refinement only splits the preceding classes. A class can change
     // only when one of its observations enters a class split in the preceding
     // round, so untouched classes retain their exact prior signature.
@@ -296,8 +303,6 @@ pub(crate) fn compute_state_map(
     let mut current_classes = vec![0u32; num_candidates];
     let mut next_classes = vec![0u32; num_candidates];
     let mut class_members = vec![(0..num_candidates).collect::<Vec<_>>()];
-    let signature_width = observation_width;
-    let mut signatures = vec![0u64; num_candidates * signature_width];
     let mut first_candidate_by_fingerprint = FxHashMap::<u64, usize>::default();
     first_candidate_by_fingerprint.reserve(num_candidates);
     let mut next_same_fingerprint = vec![NO_CANDIDATE; num_candidates];
@@ -330,21 +335,7 @@ pub(crate) fn compute_state_map(
             for candidate in members {
                 let signature_start = candidate * signature_width;
                 let signature_end = signature_start + signature_width;
-                let observation_start = candidate * observation_width;
-                let mut fingerprint = 0x9e37_79b9_7f4a_7c15_u64 ^ signature_width as u64;
-
-                for slot in 0..observation_width {
-                    let observation = observed_targets[observation_start + slot];
-                    let signature_word = if observation == 0 {
-                        0
-                    } else {
-                        let target_candidate = (observation as u32 - 1) as usize;
-                        let target_class = current_classes[target_candidate] as u64 + 1;
-                        (observation & 0xffff_ffff_0000_0000) | target_class
-                    };
-                    signatures[signature_start + slot] = signature_word;
-                    fingerprint = signature_fingerprint_step(fingerprint, signature_word);
-                }
+                let fingerprint = signature_fingerprints[candidate];
 
                 let matching_candidate = {
                     let mut matching_candidate = first_candidate_by_fingerprint
@@ -426,8 +417,19 @@ pub(crate) fn compute_state_map(
         }
 
         for target in moved_candidates {
-            for &source in &reverse_sources[reverse_offsets[target]..reverse_offsets[target + 1]] {
-                let source = source as usize;
+            let target_class = next_classes[target] as u64 + 1;
+            for &edge in &reverse_edges[reverse_offsets[target]..reverse_offsets[target + 1]] {
+                let source = (edge >> 8) as usize;
+                let slot = (edge & 0xff) as usize;
+                let signature_index = source * signature_width + slot;
+                let old_word = signatures[signature_index];
+                let new_word = (old_word & 0xffff_ffff_0000_0000) | target_class;
+                debug_assert_ne!(old_word, 0);
+                debug_assert_ne!(old_word, new_word);
+                signatures[signature_index] = new_word;
+                signature_fingerprints[source] ^=
+                    signature_slot_fingerprint(slot, old_word)
+                        ^ signature_slot_fingerprint(slot, new_word);
                 let source_class = next_classes[source] as usize;
                 if class_members[source_class].len() > 1 && !dirty_flags[source_class] {
                     dirty_flags[source_class] = true;
