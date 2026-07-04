@@ -264,6 +264,11 @@ pub(crate) fn compute_state_map(
     let observation_cache_started_at = Instant::now();
     let observation_width = active_bytes.len();
     let signature_width = observation_width;
+    debug_assert!(observation_width < u16::MAX as usize);
+    let mut active_byte_slots = [u16::MAX; 256];
+    for (slot, &byte) in active_bytes.iter().enumerate() {
+        active_byte_slots[byte as usize] = slot as u16;
+    }
     let mut observed_targets = vec![0u64; num_candidates * observation_width];
     let mut signatures = vec![0u64; num_candidates * signature_width];
     let mut signature_fingerprints = vec![0u64; num_candidates];
@@ -274,11 +279,12 @@ pub(crate) fn compute_state_map(
     if let Some(raw_to_candidate) = raw_to_candidate.as_deref() {
         for (candidate, &state) in candidate_representatives.iter().enumerate() {
             let observation_start = candidate * observation_width;
-            for (slot, &byte) in active_bytes.iter().enumerate() {
-                let target = tokenizer.get_transition(state as u32, byte);
-                if target == u32::MAX {
+            for (byte, target) in tokenizer.transitions_from(state as u32) {
+                let slot = active_byte_slots[byte as usize];
+                if slot == u16::MAX {
                     continue;
                 }
+                let slot = slot as usize;
                 let target_candidate = raw_to_candidate[target as usize];
                 debug_assert_ne!(target_candidate, NO_CANDIDATE);
                 let labels = target_labels[target as usize] as u64 + 1;
@@ -294,11 +300,12 @@ pub(crate) fn compute_state_map(
     } else {
         for (candidate, &state) in candidate_representatives.iter().enumerate() {
             let observation_start = candidate * observation_width;
-            for (slot, &byte) in active_bytes.iter().enumerate() {
-                let target = tokenizer.get_transition(state as u32, byte);
-                if target == u32::MAX {
+            for (byte, target) in tokenizer.transitions_from(state as u32) {
+                let slot = active_byte_slots[byte as usize];
+                if slot == u16::MAX {
                     continue;
                 }
+                let slot = slot as usize;
                 let target_candidate = target as usize;
                 let labels = target_labels[target_candidate] as u64 + 1;
                 let observation = (labels << 32) | (target_candidate as u64 + 1);
