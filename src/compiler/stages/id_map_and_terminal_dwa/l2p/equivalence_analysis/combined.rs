@@ -1,5 +1,6 @@
 use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::Write as _;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -512,6 +513,19 @@ fn analyze_equivalences_impl(
     final_state_representatives.sort_unstable();
     final_state_representatives.dedup();
 
+    if std::env::var_os("GLRMASK_TI_DUMP_VOCAB_INPUTS").is_some_and(|v| v == "1") {
+        dump_vocab_equivalence_inputs(
+            partition_label,
+            &tokenizer_view,
+            active_groups,
+            &prepared,
+            &dedup,
+            &pre_state_map,
+            &representative_states,
+            &final_state_representatives,
+        );
+    }
+
     let vocab_equiv_started_at = Instant::now();
     let dedup_vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
         &tokenizer_view,
@@ -568,6 +582,156 @@ fn analyze_equivalences_impl(
             exact_rep_confirmation_used,
         },
     )
+}
+
+fn render_dump_byte(b: u8) -> String {
+    if b == b' ' {
+        "' '".to_string()
+    } else if b.is_ascii_graphic() {
+        format!("'{}'", b as char)
+    } else {
+        format!("0x{b:02x}")
+    }
+}
+
+/// Opt-in dump (`GLRMASK_TI_DUMP_VOCAB_INPUTS=1`) of every input that vocabulary
+/// equivalence receives for this partition: the (restricted-annotation)
+/// tokenizer view, the active terminal mask, the partition tokens and bytes, and
+/// the state-equivalence merge that has already collapsed tokenizer states before
+/// tokens are classified. Intended for the compact TI MRE; verbose for BFCL.
+#[allow(clippy::too_many_arguments)]
+fn dump_vocab_equivalence_inputs(
+    partition_label: &str,
+    tokenizer_view: &TokenizerView,
+    active_groups: Option<&[bool]>,
+    prepared: &PreparedEquivalenceInputs<'_>,
+    dedup: &TokenDedup<'_>,
+    pre_state_map: &ManyToOneIdMap,
+    representative_states: &[usize],
+    final_state_representatives: &[usize],
+) {
+    let dfa = tokenizer_view.dfa();
+    let mut out = String::new();
+    let _ = writeln!(out, "===== GLRMASK_TI_DUMP_VOCAB_INPUTS =====");
+    let _ = writeln!(out, "partition_label = {partition_label}");
+
+    match active_groups {
+        None => {
+            let _ = writeln!(out, "active_groups = None (every terminal observed)");
+        }
+        Some(ag) => {
+            let active: Vec<usize> = ag
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &a)| a.then_some(i))
+                .collect();
+            let inactive: Vec<usize> = ag
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &a)| (!a).then_some(i))
+                .collect();
+            let _ = writeln!(out, "active terminals observed by vocab = {active:?}");
+            let _ = writeln!(
+                out,
+                "inactive terminals hidden from vocab (TI representatives absorbed these) = {inactive:?}"
+            );
+        }
+    }
+
+    let _ = writeln!(out, "vocab tokens ({}):", prepared.token_ids.len());
+    for (bytes, &tid) in prepared.token_bytes.iter().zip(prepared.token_ids.iter()) {
+        let rendered = bytes
+            .iter()
+            .map(|&b| render_dump_byte(b))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let _ = writeln!(out, "  token {tid} = {bytes:?}  [{rendered}]");
+    }
+    let mut partition_bytes: BTreeSet<u8> = BTreeSet::new();
+    for bytes in &prepared.token_bytes {
+        partition_bytes.extend(bytes.iter().copied());
+    }
+    let _ = writeln!(
+        out,
+        "partition bytes = [{}]",
+        partition_bytes
+            .iter()
+            .map(|&b| render_dump_byte(b))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let _ = writeln!(
+        out,
+        "token dedup: {} representative token(s), original_to_repr = {:?}",
+        dedup.representative_token_bytes.len(),
+        dedup.original_to_repr
+    );
+
+    let _ = writeln!(
+        out,
+        "tokenizer view (finalizers/futures filtered to observed terminals): start_state = {}, num_states = {}",
+        dfa.start_state,
+        dfa.states.len()
+    );
+    let trans = &dfa.transitions;
+    for (sid, state) in dfa.states.iter().enumerate() {
+        let dead = state.possible_future_group_ids.is_empty();
+        let mut by_target: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+        for b in 0u16..256 {
+            let target = trans[sid * 256 + b as usize];
+            by_target.entry(target).or_default().push(b as u8);
+        }
+        let else_target = by_target
+            .iter()
+            .max_by_key(|(_, bytes)| bytes.len())
+            .map(|(&t, _)| t);
+        let _ = writeln!(
+            out,
+            "  state {sid}{}: finalizes terminals {:?}, future terminals {:?}",
+            if dead { " [dead-end]" } else { "" },
+            state.finalizers,
+            state.possible_future_group_ids
+        );
+        for (&target, bytes) in by_target.iter() {
+            if Some(target) == else_target {
+                continue;
+            }
+            let rendered = bytes
+                .iter()
+                .map(|&b| render_dump_byte(b))
+                .collect::<Vec<_>>()
+                .join(",");
+            let _ = writeln!(out, "      on [{rendered}] -> state {target}");
+        }
+        if let Some(t) = else_target {
+            let _ = writeln!(out, "      (all other bytes) -> state {t}");
+        }
+    }
+
+    let _ = writeln!(out, "state equivalence merge feeding vocab equivalence:");
+    let _ = writeln!(
+        out,
+        "  partition initial states (prepared.initial_states) = {:?}",
+        prepared.initial_states
+    );
+    let _ = writeln!(out, "  initial_state -> final_state_representative:");
+    for (&init, &rep) in prepared.initial_states.iter().zip(representative_states.iter()) {
+        let _ = writeln!(out, "    {init} -> {rep}");
+    }
+    let _ = writeln!(
+        out,
+        "  distinct final_state_representatives (== vocab initial_states) = {final_state_representatives:?}"
+    );
+    let _ = writeln!(
+        out,
+        "  pre-refinement state classes ({}):",
+        pre_state_map.internal_to_originals.len()
+    );
+    for (internal, originals) in pre_state_map.internal_to_originals.iter().enumerate() {
+        let _ = writeln!(out, "    pre-class {internal} <- states {originals:?}");
+    }
+    let _ = writeln!(out, "===== END GLRMASK_TI_DUMP_VOCAB_INPUTS =====");
+    eprintln!("{out}");
 }
 
 #[cfg(test)]

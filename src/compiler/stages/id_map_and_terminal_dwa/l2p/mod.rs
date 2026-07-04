@@ -253,6 +253,48 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // equivalence observations to this L2P partition's active terminals. With
     // TI enabled this is the representative mask, so all three equivalence
     // passes ignore class members replaced by their representatives.
+    if std::env::var_os("GLRMASK_TI_DUMP_VOCAB_INPUTS").is_some_and(|v| v == "1") {
+        let mut out = String::new();
+        out.push_str("===== GLRMASK_TI_DUMP_TERMINALS =====\n");
+        out.push_str(&format!("partition_label = {}\n", partition_label));
+        out.push_str(&format!(
+            "reference_terminal_expansion (TI active) = {}\n",
+            reference_terminal_expansion
+        ));
+        let names: Vec<String> = (0..active_terminals.len() as TerminalID)
+            .map(|t| grammar.terminal_display_name(t).to_string())
+            .collect();
+        out.push_str("terminals (id: name  full_active / observed-by-equivalence):\n");
+        for t in 0..active_terminals.len() {
+            let full = active_terminals[t];
+            let observed = analysis_active_terminals.get(t).copied().unwrap_or(false);
+            let rep = terminal_interchangeability.representative_for()[t];
+            let marker = if rep as usize == t { "" } else { " (member)" };
+            out.push_str(&format!(
+                "  {t}: {}  full_active={full} observed={observed} representative={} ({}){marker}\n",
+                names[t],
+                rep,
+                names.get(rep as usize).map(String::as_str).unwrap_or("?"),
+            ));
+        }
+        // TI classes: representative -> members
+        let mut classes: std::collections::BTreeMap<TerminalID, Vec<TerminalID>> =
+            std::collections::BTreeMap::new();
+        for (t, &rep) in terminal_interchangeability.representative_for().iter().enumerate() {
+            classes.entry(rep).or_default().push(t as TerminalID);
+        }
+        out.push_str("TI classes (representative -> members):\n");
+        for (rep, members) in &classes {
+            if members.len() > 1 || *rep as usize != members[0] as usize {
+                out.push_str(&format!(
+                    "  rep {rep} ({}) <- {members:?}\n",
+                    names.get(*rep as usize).map(String::as_str).unwrap_or("?")
+                ));
+            }
+        }
+        out.push_str("===== END GLRMASK_TI_DUMP_TERMINALS =====\n");
+        eprintln!("{out}");
+    }
     let (mut simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
@@ -621,4 +663,64 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     }
 
     Some(output)
+}
+
+#[cfg(test)]
+mod ti_mre_tests {
+    use std::{env, ffi::OsString, sync::Mutex};
+
+    use crate::{Constraint, Vocab};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = env::var_os(key);
+            unsafe {
+                env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => unsafe {
+                    env::set_var(self.key, value);
+                },
+                None => unsafe {
+                    env::remove_var(self.key);
+                },
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "known TI correctness failure: representative-only vocabulary equivalence loses a member continuation"]
+    fn representative_only_vocab_equivalence_mre() {
+        // `b" _"` completes SPACE then is a live prefix of CLASS. With TI
+        // enabled, CLASS is hidden behind FROM during equivalence analysis,
+        // causing it to be merged with `b" !"`; later terminal expansion
+        // cannot recover the discarded vocabulary distinction.
+        let grammar = r#"
+start S;
+t V ::= /.+/;
+t SPACE ::= " ";
+t FROM ::= /_a_/;
+t CLASS ::= /_b_/;
+nt S ::= FROM V | SPACE V SPACE CLASS;
+"#;
+        let vocab = Vocab::new(vec![(0, b" !".to_vec()), (1, b" _".to_vec())], None);
+
+        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+        Constraint::from_glrm_grammar(grammar, &vocab)
+            .expect("TI must preserve the completed terminal-DWA language");
+    }
 }

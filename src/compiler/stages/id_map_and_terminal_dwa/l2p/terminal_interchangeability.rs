@@ -82,6 +82,102 @@ struct OutputPair {
     future_finalizers: OutputBits,
 }
 
+/// One exact component of the sparse characterization tuple. The output id
+/// names an immutable pair of frozen destination-output sets. Class ids are
+/// only equality labels within one round; hash-map equality still compares the
+/// complete tuple, so this avoids cryptographic hashing without relying on hash
+/// collisions for semantics.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CanonicalComponent {
+    byte: u8,
+    previous_class: u32,
+    output: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CanonicalSignature(Vec<CanonicalComponent>);
+
+struct CanonicalRound {
+    classes: Vec<u32>,
+    signatures: FxHashMap<CanonicalSignature, u32>,
+}
+
+/// Stable identity characterization collapsed to its exact state quotient.
+/// The quotient does not merge tokenizer states; it is only a cached view used
+/// to certify a terminal-swap automorphism before materializing its raw map.
+struct CanonicalQuotient {
+    class_for_state: Vec<u32>,
+    representative_by_class: Vec<u32>,
+    class_by_signature: FxHashMap<CanonicalSignature, u32>,
+    reverse_predecessors: Vec<Vec<u32>>,
+    /// Identity class labels, projected onto stable quotient representatives,
+    /// for rounds 0 through the identity fixed point.
+    identity_classes_by_round: Vec<Vec<u32>>,
+    /// Multiplicity of each identity class at the matching round. This lets a
+    /// sparse swapped update prove class-set equality without scanning every
+    /// quotient class.
+    identity_class_counts_by_round: Vec<Vec<u32>>,
+    /// At the identity fixed point, the preceding class partition maps
+    /// bijectively to the next one. Sparse swapped rows must respect this map.
+    stable_previous_to_next: Vec<u32>,
+    stable_next_to_previous: Vec<u32>,
+}
+
+/// Per-swap output-label relabelling. The immutable base ids represent the
+/// original frozen output pairs; ids allocated after `base_count` are local to
+/// this swap and compare equal only to the same full mapped pair.
+struct SwappedOutputIds<'a> {
+    base_pairs: &'a [OutputPair],
+    base_lookup: &'a FxHashMap<OutputPair, u32>,
+    left: usize,
+    right: usize,
+    mapped: Vec<u32>,
+    local: FxHashMap<OutputPair, u32>,
+}
+
+impl<'a> SwappedOutputIds<'a> {
+    fn new(
+        base_pairs: &'a [OutputPair],
+        base_lookup: &'a FxHashMap<OutputPair, u32>,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Self {
+        Self {
+            base_pairs,
+            base_lookup,
+            left: left as usize,
+            right: right as usize,
+            mapped: vec![u32::MAX; base_pairs.len()],
+            local: FxHashMap::default(),
+        }
+    }
+
+    fn id(&mut self, output: u32) -> u32 {
+        let index = output as usize;
+        let cached = self.mapped[index];
+        if cached != u32::MAX {
+            return cached;
+        }
+        let mapped = OutputPair {
+            finalizers: self.base_pairs[index]
+                .finalizers
+                .mapped(Some((self.left, self.right))),
+            future_finalizers: self.base_pairs[index]
+                .future_finalizers
+                .mapped(Some((self.left, self.right))),
+        };
+        let id = if let Some(&base) = self.base_lookup.get(&mapped) {
+            base
+        } else {
+            let base_count = self.base_pairs.len() as u32;
+            let next = base_count + self.local.len() as u32;
+            *self.local.entry(mapped).or_insert(next)
+        };
+        self.mapped[index] = id;
+        id
+    }
+}
+
 /// Sparse topology of the byte-restricted raw tokenizer DFA. A missing enabled
 /// transition has the same synthetic dead destination for every raw state.
 /// Keeping only real edges is exact: all omitted bytes share that one default.
@@ -413,11 +509,13 @@ fn refine_candidate_groups_by_structure(
     groups
 }
 
-/// The class map for one terminal swap. Each source state points to every raw
-/// tokenizer state in its mapped target class.
-#[derive(Clone, Debug)]
+/// The selected raw tokenizer-state representative for every source state
+/// under one terminal swap. The exact characterization establishes a mapped
+/// target class; all downstream consumers have always selected only that
+/// class's first raw state, so retaining the whole class is redundant.
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct InterchangeMap {
-    target_class_for_source_state: Vec<Vec<u32>>,
+    target_representative_for_source_state: Vec<u32>,
 }
 
 impl InterchangeMap {
@@ -425,14 +523,7 @@ impl InterchangeMap {
     /// target class needs one arbitrary raw representative at its entry point.
     /// This selection has no mathematical significance.
     fn arbitrary_target_representatives(&self) -> Vec<u32> {
-        self.target_class_for_source_state
-            .iter()
-            .map(|target_class| {
-                *target_class
-                    .first()
-                    .expect("interchangeability map contains an empty target class")
-            })
-            .collect()
+        self.target_representative_for_source_state.clone()
     }
 }
 
@@ -451,7 +542,37 @@ struct InterchangeabilityDfa {
     observed_output_pair_ids_by_terminal: Vec<Vec<u32>>,
     observed_output_pair_marks: Vec<u32>,
     observed_output_pair_mark_epoch: u32,
+    /// Exact terminal columns over the frozen state outputs. When two columns
+    /// coincide in both output families, swapping their terminal labels leaves
+    /// every destination output unchanged and therefore needs no refinement.
+    finalizer_states_by_terminal: Vec<Vec<u32>>,
+    future_finalizer_states_by_terminal: Vec<Vec<u32>>,
     identity_rounds: Vec<Vec<CharacterizationHash>>,
+    /// Canonical, collision-free characterization cache used by the hot path.
+    /// It describes the same raw restricted topology as `identity_rounds` and
+    /// never merges or rewrites tokenizer states.
+    output_pairs: Vec<OutputPair>,
+    output_pair_lookup: FxHashMap<OutputPair, u32>,
+    output_pair_by_state: Vec<u32>,
+    /// Reverse enabled-byte edges, used only by the exact first-round
+    /// rejection prefilter. Each changed frozen output can affect only these
+    /// source rows in the characterization tuple.
+    reverse_predecessors: Vec<Vec<u32>>,
+    canonical_rounds: Vec<CanonicalRound>,
+    canonical_round_one_class_counts: Option<Vec<u32>>,
+    canonical_round_one_source_marks: Vec<u32>,
+    canonical_round_one_source_mark_epoch: u32,
+    canonical_round_one_affected_sources: Vec<u32>,
+    canonical_quotient: Option<CanonicalQuotient>,
+    quotient_certified: usize,
+    sparse_quotient_certified: usize,
+    sparse_quotient_cone_classes_total: usize,
+    sparse_quotient_cone_classes_max: usize,
+    sparse_quotient_cone_ns: u64,
+    sparse_quotient_refinement_ns: u64,
+    sparse_quotient_map_ns: u64,
+    canonical_stable_round: Option<usize>,
+    canonical_identity_map: Option<InterchangeMap>,
     signature_capacity: usize,
 }
 
@@ -530,7 +651,67 @@ impl InterchangeabilityDfa {
                 }
             }
         }
+        let mut finalizer_states_by_terminal = vec![Vec::<u32>::new(); observed_terminals.len()];
+        let mut future_finalizer_states_by_terminal = vec![Vec::<u32>::new(); observed_terminals.len()];
+        for (state, outputs) in finalizers.iter().enumerate() {
+            for (word_index, &word) in outputs.0.iter().enumerate() {
+                let mut word = word;
+                while word != 0 {
+                    let bit = word.trailing_zeros() as usize;
+                    let terminal = word_index * 64 + bit;
+                    if terminal < finalizer_states_by_terminal.len() {
+                        finalizer_states_by_terminal[terminal].push(state as u32);
+                    }
+                    word &= word - 1;
+                }
+            }
+        }
+        for (state, outputs) in future_finalizers.iter().enumerate() {
+            for (word_index, &word) in outputs.0.iter().enumerate() {
+                let mut word = word;
+                while word != 0 {
+                    let bit = word.trailing_zeros() as usize;
+                    let terminal = word_index * 64 + bit;
+                    if terminal < future_finalizer_states_by_terminal.len() {
+                        future_finalizer_states_by_terminal[terminal].push(state as u32);
+                    }
+                    word &= word - 1;
+                }
+            }
+        }
         let empty_output = OutputBits::new(output_words);
+        let empty_pair = OutputPair {
+            finalizers: empty_output.clone(),
+            future_finalizers: empty_output.clone(),
+        };
+        let mut output_pairs = vec![empty_pair.clone()];
+        let mut output_pair_lookup = FxHashMap::<OutputPair, u32>::default();
+        output_pair_lookup.insert(empty_pair, 0);
+        let mut output_pair_by_state = Vec::with_capacity(state_count);
+        for state in 0..topology.real_state_count {
+            let pair = OutputPair {
+                finalizers: finalizers[state].clone(),
+                future_finalizers: future_finalizers[state].clone(),
+            };
+            let id = match output_pair_lookup.entry(pair) {
+                Entry::Occupied(entry) => *entry.get(),
+                Entry::Vacant(entry) => {
+                    let id = output_pairs.len() as u32;
+                    output_pairs.push(entry.key().clone());
+                    entry.insert(id);
+                    id
+                }
+            };
+            output_pair_by_state.push(id);
+        }
+        // The synthetic dead destination has the all-empty frozen output.
+        output_pair_by_state.push(0);
+        let mut reverse_predecessors = vec![Vec::<u32>::new(); topology.real_state_count];
+        for source in 0..topology.real_state_count {
+            for &(_, destination) in topology.edges_from(source) {
+                reverse_predecessors[destination as usize].push(source as u32);
+            }
+        }
         let signature_capacity = CHARACTERIZATION_DOMAIN.len()
             + 4
             + topology.max_outdegree
@@ -547,7 +728,31 @@ impl InterchangeabilityDfa {
             observed_output_pair_ids_by_terminal,
             observed_output_pair_marks: vec![0; observed_output_pair_count],
             observed_output_pair_mark_epoch: 0,
+            finalizer_states_by_terminal,
+            future_finalizer_states_by_terminal,
             identity_rounds: vec![vec![seed; state_count]],
+            output_pairs,
+            output_pair_lookup,
+            output_pair_by_state,
+            reverse_predecessors,
+            canonical_rounds: vec![CanonicalRound {
+                classes: vec![0; state_count],
+                signatures: FxHashMap::default(),
+            }],
+            canonical_round_one_class_counts: None,
+            canonical_round_one_source_marks: vec![0; state_count - 1],
+            canonical_round_one_source_mark_epoch: 0,
+            canonical_round_one_affected_sources: Vec::new(),
+            canonical_quotient: None,
+            quotient_certified: 0,
+            sparse_quotient_certified: 0,
+            sparse_quotient_cone_classes_total: 0,
+            sparse_quotient_cone_classes_max: 0,
+            sparse_quotient_cone_ns: 0,
+            sparse_quotient_refinement_ns: 0,
+            sparse_quotient_map_ns: 0,
+            canonical_stable_round: None,
+            canonical_identity_map: None,
             signature_capacity,
         }
     }
@@ -622,6 +827,827 @@ impl InterchangeabilityDfa {
         }
     }
 
+    fn canonical_identity_signature(
+        &self,
+        state: usize,
+        previous: &[u32],
+    ) -> CanonicalSignature {
+        let default_class = previous[self.dead_state()];
+        let mut components = Vec::with_capacity(self.topology.edges_from(state).len());
+        for &(byte, destination) in self.topology.edges_from(state) {
+            let destination = destination as usize;
+            let output = self.output_pair_by_state[destination];
+            if previous[destination] == default_class && output == 0 {
+                continue;
+            }
+            components.push(CanonicalComponent {
+                byte,
+                previous_class: previous[destination],
+                output,
+            });
+        }
+        CanonicalSignature(components)
+    }
+
+    fn canonical_swapped_signature(
+        &self,
+        state: usize,
+        previous: &[u32],
+        outputs: &mut SwappedOutputIds<'_>,
+    ) -> CanonicalSignature {
+        let default_class = previous[self.dead_state()];
+        let mut components = Vec::with_capacity(self.topology.edges_from(state).len());
+        for &(byte, destination) in self.topology.edges_from(state) {
+            let destination = destination as usize;
+            let output = outputs.id(self.output_pair_by_state[destination]);
+            if previous[destination] == default_class && output == 0 {
+                continue;
+            }
+            components.push(CanonicalComponent {
+                byte,
+                previous_class: previous[destination],
+                output,
+            });
+        }
+        CanonicalSignature(components)
+    }
+
+    fn canonical_identity_round(&self, previous: &[u32]) -> CanonicalRound {
+        let mut signatures = FxHashMap::<CanonicalSignature, u32>::default();
+        let mut classes = Vec::with_capacity(self.state_count());
+        for state in 0..self.state_count() {
+            let signature = self.canonical_identity_signature(state, previous);
+            let next = signatures.len() as u32;
+            let class = *signatures.entry(signature).or_insert(next);
+            classes.push(class);
+        }
+        CanonicalRound {
+            classes,
+            signatures,
+        }
+    }
+
+    fn ensure_canonical_identity_round(&mut self, round: usize) {
+        while self.canonical_rounds.len() <= round {
+            let started_at = Instant::now();
+            let previous = self
+                .canonical_rounds
+                .last()
+                .expect("round zero is always present")
+                .classes
+                .clone();
+            let next = self.canonical_identity_round(&previous);
+            if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+                eprintln!(
+                    "[glrmask/profile][terminal_interchangeability] canonical_identity_round={} classes={} elapsed_ms={:.3}",
+                    self.canonical_rounds.len(),
+                    next.signatures.len(),
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            self.canonical_rounds.push(next);
+        }
+    }
+
+    fn ensure_canonical_identity_stable_round(&mut self) -> usize {
+        if let Some(round) = self.canonical_stable_round {
+            return round;
+        }
+        let state_count = self.state_count();
+        for round in 1..=state_count * 2 {
+            self.ensure_canonical_identity_round(round);
+            if same_equality_partition_u32(
+                &self.canonical_rounds[round - 1].classes,
+                &self.canonical_rounds[round].classes,
+            ) {
+                self.canonical_stable_round = Some(round);
+                return round;
+            }
+        }
+        panic!(
+            "canonical terminal interchangeability characterization did not stabilize within {} rounds",
+            state_count * 2,
+        );
+    }
+
+    fn ensure_canonical_quotient(&mut self) {
+        if self.canonical_quotient.is_some() {
+            return;
+        }
+        let stable_round = self.ensure_canonical_identity_stable_round();
+        let class_for_state = self.canonical_rounds[stable_round].classes.clone();
+        let class_count = self.canonical_rounds[stable_round].signatures.len();
+        debug_assert_eq!(
+            class_count,
+            class_for_state.iter().copied().max().map_or(0, |class| class as usize + 1),
+        );
+
+        let mut representative_by_class = vec![u32::MAX; class_count];
+        for (state, &class) in class_for_state.iter().enumerate() {
+            let representative = &mut representative_by_class[class as usize];
+            if *representative == u32::MAX {
+                *representative = state as u32;
+            }
+        }
+        debug_assert!(
+            representative_by_class
+                .iter()
+                .all(|&representative| representative != u32::MAX),
+        );
+
+        let mut class_by_signature = FxHashMap::<CanonicalSignature, u32>::default();
+        let mut reverse_predecessors = vec![Vec::<u32>::new(); class_count];
+        for (class, &representative) in representative_by_class.iter().enumerate() {
+            let state = representative as usize;
+            let signature = self.canonical_identity_signature(state, &class_for_state);
+            if let Some(previous) = class_by_signature.insert(signature, class as u32) {
+                assert_eq!(
+                    previous, class as u32,
+                    "stable terminal-interchangeability quotient must have unique class signatures",
+                );
+            }
+            for &(_, destination) in self.topology.edges_from(state) {
+                let destination_class = class_for_state[destination as usize] as usize;
+                reverse_predecessors[destination_class].push(class as u32);
+            }
+        }
+        for predecessors in &mut reverse_predecessors {
+            predecessors.sort_unstable();
+            predecessors.dedup();
+        }
+        debug_assert_eq!(class_by_signature.len(), class_count);
+
+        let mut identity_classes_by_round = Vec::with_capacity(stable_round + 1);
+        let mut identity_class_counts_by_round = Vec::with_capacity(stable_round + 1);
+        for round in 0..=stable_round {
+            let identity_classes = representative_by_class
+                .iter()
+                .map(|&state| self.canonical_rounds[round].classes[state as usize])
+                .collect::<Vec<_>>();
+            let class_count_at_round = self.canonical_rounds[round]
+                .classes
+                .iter()
+                .copied()
+                .max()
+                .map_or(0, |class| class as usize + 1);
+            let mut counts = vec![0u32; class_count_at_round];
+            for (quotient_class, &class) in identity_classes.iter().enumerate() {
+                if (representative_by_class[quotient_class] as usize) < self.topology.real_state_count {
+                    counts[class as usize] += 1;
+                }
+            }
+            identity_classes_by_round.push(identity_classes);
+            identity_class_counts_by_round.push(counts);
+        }
+
+        let stable_previous = &identity_classes_by_round[stable_round - 1];
+        let stable_next = &identity_classes_by_round[stable_round];
+        let stable_previous_class_count = self.canonical_rounds[stable_round - 1]
+            .classes
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |class| class as usize + 1);
+        let stable_next_class_count = self.canonical_rounds[stable_round]
+            .classes
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |class| class as usize + 1);
+        let mut stable_previous_to_next = vec![u32::MAX; stable_previous_class_count];
+        let mut stable_next_to_previous = vec![u32::MAX; stable_next_class_count];
+        for (&previous, &next) in stable_previous.iter().zip(stable_next) {
+            let previous_target = &mut stable_previous_to_next[previous as usize];
+            if *previous_target == u32::MAX {
+                *previous_target = next;
+            } else {
+                assert_eq!(*previous_target, next, "stable TI quotient split an identity class");
+            }
+            let next_source = &mut stable_next_to_previous[next as usize];
+            if *next_source == u32::MAX {
+                *next_source = previous;
+            } else {
+                assert_eq!(*next_source, previous, "stable TI quotient merged identity classes");
+            }
+        }
+        assert!(
+            stable_previous_to_next.iter().all(|&target| target != u32::MAX)
+                && stable_next_to_previous.iter().all(|&source| source != u32::MAX),
+            "stable TI quotient omitted an identity class",
+        );
+
+        self.canonical_quotient = Some(CanonicalQuotient {
+            class_for_state,
+            representative_by_class,
+            class_by_signature,
+            reverse_predecessors,
+            identity_classes_by_round,
+            identity_class_counts_by_round,
+            stable_previous_to_next,
+            stable_next_to_previous,
+        });
+    }
+
+    fn canonical_quotient_swapped_signature(
+        &self,
+        quotient: &CanonicalQuotient,
+        class: usize,
+        previous: &[u32],
+        outputs: &mut SwappedOutputIds<'_>,
+    ) -> CanonicalSignature {
+        let state = quotient.representative_by_class[class] as usize;
+        let default_class = previous[quotient.class_for_state[self.dead_state()] as usize];
+        let mut components = Vec::with_capacity(self.topology.edges_from(state).len());
+        for &(byte, destination) in self.topology.edges_from(state) {
+            let destination = destination as usize;
+            let output = outputs.id(self.output_pair_by_state[destination]);
+            let previous_class = previous[quotient.class_for_state[destination] as usize];
+            if previous_class == default_class && output == 0 {
+                continue;
+            }
+            components.push(CanonicalComponent {
+                byte,
+                previous_class,
+                output,
+            });
+        }
+        CanonicalSignature(components)
+    }
+
+    fn quotient_identity_classes_at_round<'a>(
+        &self,
+        quotient: &'a CanonicalQuotient,
+        round: usize,
+    ) -> &'a [u32] {
+        quotient
+            .identity_classes_by_round
+            .get(round)
+            .expect("identity quotient round must be cached")
+    }
+
+    fn quotient_rooted_class_set_still_possible(
+        &self,
+        quotient: &CanonicalQuotient,
+        identity: &[u32],
+        swapped: &[u32],
+    ) -> bool {
+        let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
+        if identity[root_class] != swapped[root_class] {
+            return false;
+        }
+        let mut identity_set = FxHashSet::<u32>::default();
+        let mut swapped_set = FxHashSet::<u32>::default();
+        for (class, &representative) in quotient.representative_by_class.iter().enumerate() {
+            if representative as usize >= self.topology.real_state_count {
+                continue;
+            }
+            identity_set.insert(identity[class]);
+            swapped_set.insert(swapped[class]);
+        }
+        identity_set == swapped_set
+    }
+
+    /// Non-cone quotient classes retain their identity labels, so equality of
+    /// complete identity and swapped class sets reduces to labels whose final
+    /// occurrence lies inside the cone.
+    fn sparse_quotient_rooted_class_set_still_possible(
+        &self,
+        quotient: &CanonicalQuotient,
+        identity: &[u32],
+        identity_counts: &[u32],
+        swapped: &[u32],
+        cone_classes: &[usize],
+    ) -> bool {
+        let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
+        if identity[root_class] != swapped[root_class] {
+            return false;
+        }
+
+        let mut changed_counts = FxHashMap::<u32, u32>::default();
+        let mut introduced_or_retained = FxHashSet::<u32>::default();
+        for &class in cone_classes {
+            let before = identity[class];
+            let after = swapped[class];
+            if after as usize >= identity_counts.len() {
+                return false;
+            }
+            *changed_counts.entry(before).or_default() += 1;
+            introduced_or_retained.insert(after);
+        }
+        changed_counts.into_iter().all(|(class, changed)| {
+            changed < identity_counts[class as usize]
+                || introduced_or_retained.contains(&class)
+        })
+    }
+
+    /// At the stable identity round the old-to-new class map is bijective.
+    /// Outside the cone the paired rows are identity rows, so only the changed
+    /// cone rows need checking to prove paired partition stability.
+    fn sparse_quotient_pair_is_stable(
+        &self,
+        quotient: &CanonicalQuotient,
+        swapped_previous: &[u32],
+        swapped_next: &[u32],
+        cone_classes: &[usize],
+    ) -> bool {
+        cone_classes.iter().all(|&class| {
+            let previous = swapped_previous[class] as usize;
+            let next = swapped_next[class] as usize;
+            previous < quotient.stable_previous_to_next.len()
+                && next < quotient.stable_next_to_previous.len()
+                && quotient.stable_previous_to_next[previous] == next as u32
+                && quotient.stable_next_to_previous[next] == previous as u32
+        })
+    }
+
+    fn quotient_interchange_map_from_classes(
+        &self,
+        quotient: &CanonicalQuotient,
+        swapped_classes: &[u32],
+    ) -> Option<InterchangeMap> {
+        let class_count = quotient.representative_by_class.len();
+        if swapped_classes.len() != class_count {
+            return None;
+        }
+        let mut target_representative_by_identity_class = vec![None; class_count];
+        for state in 0..self.topology.real_state_count {
+            let target_identity_class = swapped_classes[quotient.class_for_state[state] as usize] as usize;
+            if target_identity_class >= class_count {
+                return None;
+            }
+            target_representative_by_identity_class[target_identity_class]
+                .get_or_insert(state as u32);
+        }
+        let target_representative_for_source_state = (0..self.topology.real_state_count)
+            .map(|source| {
+                target_representative_by_identity_class
+                    [quotient.class_for_state[source] as usize]
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(InterchangeMap {
+            target_representative_for_source_state,
+        })
+    }
+
+    /// Evaluate the exact paired characterization on the already-stable
+    /// identity quotient.  Stable quotient classes are congruent for every
+    /// later swapped round, so one representative per class produces the same
+    /// partition relation as the raw computation.  A failed quotient proof is
+    /// inconclusive and falls back to the raw exact refinement below.
+    fn canonical_quotient_affected_cone(
+        &self,
+        quotient: &CanonicalQuotient,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> (Vec<bool>, Vec<usize>) {
+        let mut in_cone = vec![false; quotient.representative_by_class.len()];
+        let mut cone_classes = Vec::<usize>::new();
+        let mut worklist = Vec::<u32>::new();
+        for destinations in [
+            &self.finalizer_states_by_terminal[left as usize],
+            &self.future_finalizer_states_by_terminal[left as usize],
+            &self.finalizer_states_by_terminal[right as usize],
+            &self.future_finalizer_states_by_terminal[right as usize],
+        ] {
+            for &destination in destinations {
+                for &source in &self.reverse_predecessors[destination as usize] {
+                    let class = quotient.class_for_state[source as usize] as usize;
+                    if !in_cone[class] {
+                        in_cone[class] = true;
+                        cone_classes.push(class);
+                        worklist.push(class as u32);
+                    }
+                }
+            }
+        }
+        while let Some(class) = worklist.pop() {
+            for &predecessor in &quotient.reverse_predecessors[class as usize] {
+                let predecessor = predecessor as usize;
+                if !in_cone[predecessor] {
+                    in_cone[predecessor] = true;
+                    cone_classes.push(predecessor);
+                    worklist.push(predecessor as u32);
+                }
+            }
+        }
+        (in_cone, cone_classes)
+    }
+
+    /// Exact sparse quotient evaluation. Outside the backward cone of every
+    /// relabelled frozen output, the swapped characterization is identical to
+    /// the identity at every round. Only the cone needs recomputation.
+    fn canonical_sparse_quotient_interchange_map(
+        &mut self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<InterchangeMap> {
+        let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let stable_round = self.ensure_canonical_identity_stable_round();
+        self.ensure_canonical_quotient();
+        let pair_started_at = profile_timing.then(Instant::now);
+        let result = {
+            let quotient = self
+                .canonical_quotient
+                .as_ref()
+                .expect("canonical quotient initialized");
+            debug_assert_eq!(
+                quotient.class_by_signature.len(),
+                quotient.representative_by_class.len(),
+            );
+            let cone_started_at = profile_timing.then(Instant::now);
+            let (in_cone, cone_classes) =
+                self.canonical_quotient_affected_cone(quotient, left, right);
+            let cone_size = cone_classes.len();
+            if let Some(started_at) = cone_started_at {
+                self.sparse_quotient_cone_ns += started_at.elapsed().as_nanos() as u64;
+            }
+            if cone_size == 0 {
+                let identity = (0..quotient.representative_by_class.len())
+                    .map(|class| class as u32)
+                    .collect::<Vec<_>>();
+                self.quotient_interchange_map_from_classes(quotient, &identity)
+                    .map(|map| (map, cone_size))
+            } else {
+                let mut swapped_previous = vec![0u32; quotient.representative_by_class.len()];
+                let mut outputs = SwappedOutputIds::new(
+                    &self.output_pairs,
+                    &self.output_pair_lookup,
+                    left,
+                    right,
+                );
+                let mut found = None;
+                for round in 1..=stable_round {
+                    let identity_next = self.quotient_identity_classes_at_round(quotient, round);
+                    let identity_counts = &quotient.identity_class_counts_by_round[round];
+                    let identity = &self.canonical_rounds[round];
+                    let mut local = FxHashMap::<CanonicalSignature, u32>::default();
+                    let local_base = identity.signatures.len() as u32;
+                    let mut swapped_next = identity_next.to_vec();
+                    for &source_class in &cone_classes {
+                        let signature = self.canonical_quotient_swapped_signature(
+                            quotient,
+                            source_class,
+                            &swapped_previous,
+                            &mut outputs,
+                        );
+                        let swapped_class =
+                            if let Some(&identity_class) = identity.signatures.get(&signature) {
+                                identity_class
+                            } else {
+                                let next = local_base + local.len() as u32;
+                                *local.entry(signature).or_insert(next)
+                            };
+                        swapped_next[source_class] = swapped_class;
+                    }
+                    if !self.sparse_quotient_rooted_class_set_still_possible(
+                        quotient,
+                        identity_next,
+                        identity_counts,
+                        &swapped_next,
+                        &cone_classes,
+                    ) {
+                        return None;
+                    }
+                    // Materialization uses stable identity class labels, so
+                    // accept only at the identity partition fixed point.
+                    if round == stable_round
+                        && self.sparse_quotient_pair_is_stable(
+                            quotient,
+                            &swapped_previous,
+                            &swapped_next,
+                            &cone_classes,
+                        )
+                    {
+                        let map_started_at = profile_timing.then(Instant::now);
+                        found = self
+                            .quotient_interchange_map_from_classes(quotient, &swapped_next)
+                            .map(|map| (map, cone_size));
+                        if let Some(started_at) = map_started_at {
+                            self.sparse_quotient_map_ns += started_at.elapsed().as_nanos() as u64;
+                        }
+                        break;
+                    }
+                    swapped_previous = swapped_next;
+                }
+                found
+            }
+        };
+        if profile_timing {
+            if let Some(started_at) = pair_started_at {
+                self.sparse_quotient_refinement_ns += started_at.elapsed().as_nanos() as u64;
+            }
+        }
+        if let Some((map, cone_size)) = result {
+            self.sparse_quotient_certified += 1;
+            self.sparse_quotient_cone_classes_total += cone_size;
+            self.sparse_quotient_cone_classes_max =
+                self.sparse_quotient_cone_classes_max.max(cone_size);
+            return Some(map);
+        }
+        None
+    }
+
+    fn canonical_quotient_interchange_map(
+        &mut self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<InterchangeMap> {
+        self.canonical_sparse_quotient_interchange_map(left, right)
+            .or_else(|| self.canonical_full_quotient_interchange_map(left, right))
+    }
+
+    fn canonical_full_quotient_interchange_map(
+        &mut self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<InterchangeMap> {
+        let stable_round = self.ensure_canonical_identity_stable_round();
+        self.ensure_canonical_quotient();
+        let quotient = self
+            .canonical_quotient
+            .as_ref()
+            .expect("canonical quotient initialized");
+        let mut swapped_previous = vec![0u32; quotient.representative_by_class.len()];
+        let mut outputs = SwappedOutputIds::new(
+            &self.output_pairs,
+            &self.output_pair_lookup,
+            left,
+            right,
+        );
+        for round in 1..=stable_round {
+            let identity_previous = self.quotient_identity_classes_at_round(quotient, round - 1);
+            let identity_next = self.quotient_identity_classes_at_round(quotient, round);
+            let identity = &self.canonical_rounds[round];
+            let mut local = FxHashMap::<CanonicalSignature, u32>::default();
+            let local_base = identity.signatures.len() as u32;
+            let mut swapped_next = Vec::with_capacity(quotient.representative_by_class.len());
+            for class in 0..quotient.representative_by_class.len() {
+                let signature = self.canonical_quotient_swapped_signature(
+                    quotient,
+                    class,
+                    &swapped_previous,
+                    &mut outputs,
+                );
+                let class = if let Some(&identity_class) = identity.signatures.get(&signature) {
+                    identity_class
+                } else {
+                    let next = local_base + local.len() as u32;
+                    *local.entry(signature).or_insert(next)
+                };
+                swapped_next.push(class);
+            }
+            if !self.quotient_rooted_class_set_still_possible(
+                quotient,
+                &identity_next,
+                &swapped_next,
+            ) {
+                return None;
+            }
+            if same_equality_partition_pair_u32(
+                &identity_previous,
+                &swapped_previous,
+                &identity_next,
+                &swapped_next,
+            ) {
+                let map = self.quotient_interchange_map_from_classes(quotient, &swapped_next)?;
+                self.quotient_certified += 1;
+                return Some(map);
+            }
+            swapped_previous = swapped_next;
+        }
+        None
+    }
+
+    fn canonical_swapped_round(
+        &self,
+        previous: &[u32],
+        identity: &CanonicalRound,
+        outputs: &mut SwappedOutputIds<'_>,
+    ) -> Vec<u32> {
+        let mut local = FxHashMap::<CanonicalSignature, u32>::default();
+        let local_base = identity.signatures.len() as u32;
+        let mut classes = Vec::with_capacity(self.state_count());
+        for state in 0..self.state_count() {
+            let signature = self.canonical_swapped_signature(state, previous, outputs);
+            let class = if let Some(&identity_class) = identity.signatures.get(&signature) {
+                identity_class
+            } else {
+                let next = local_base + local.len() as u32;
+                *local.entry(signature).or_insert(next)
+            };
+            classes.push(class);
+        }
+        classes
+    }
+
+    /// Exact necessary first-round condition for a terminal swap. Round one
+    /// depends only on frozen destination outputs, so a swap can change only
+    /// source rows with an enabled edge into a state mentioning either terminal.
+    /// All other rows keep their cached identity class. This never accepts a
+    /// pair by itself; it only rejects a pair whose first characterization
+    /// partition cannot be rooted-bijective.
+    fn canonical_round_one_still_possible(
+        &mut self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> bool {
+        self.ensure_canonical_identity_round(1);
+        if self.canonical_round_one_class_counts.is_none() {
+            let class_count = self.canonical_rounds[1].signatures.len();
+            let mut counts = vec![0u32; class_count];
+            for &class in &self.canonical_rounds[1].classes[..self.topology.real_state_count] {
+                counts[class as usize] += 1;
+            }
+            self.canonical_round_one_class_counts = Some(counts);
+        }
+
+        self.canonical_round_one_source_mark_epoch =
+            self.canonical_round_one_source_mark_epoch.wrapping_add(1);
+        if self.canonical_round_one_source_mark_epoch == 0 {
+            self.canonical_round_one_source_marks.fill(0);
+            self.canonical_round_one_source_mark_epoch = 1;
+        }
+        let epoch = self.canonical_round_one_source_mark_epoch;
+        self.canonical_round_one_affected_sources.clear();
+        for destinations in [
+            &self.finalizer_states_by_terminal[left as usize],
+            &self.future_finalizer_states_by_terminal[left as usize],
+            &self.finalizer_states_by_terminal[right as usize],
+            &self.future_finalizer_states_by_terminal[right as usize],
+        ] {
+            for &destination in destinations {
+                for &source in &self.reverse_predecessors[destination as usize] {
+                    let source = source as usize;
+                    if self.canonical_round_one_source_marks[source] != epoch {
+                        self.canonical_round_one_source_marks[source] = epoch;
+                        self.canonical_round_one_affected_sources.push(source as u32);
+                    }
+                }
+            }
+        }
+
+        // Move the scratch list out while comparing exact cached signatures so
+        // immutable borrows of the DFA do not conflict with scratch reuse.
+        let affected_sources = std::mem::take(&mut self.canonical_round_one_affected_sources);
+        let identity = &self.canonical_rounds[1];
+        let identity_counts = self
+            .canonical_round_one_class_counts
+            .as_ref()
+            .expect("first-round counts initialized");
+        let mut changed_by_identity_class = FxHashMap::<u32, u32>::default();
+        let mut added_identity_classes = FxHashSet::<u32>::default();
+        let mut swapped_root_class = identity.classes[self.topology.initial_state];
+        let mut outputs = SwappedOutputIds::new(
+            &self.output_pairs,
+            &self.output_pair_lookup,
+            left,
+            right,
+        );
+        for &source in &affected_sources {
+            let source = source as usize;
+            let identity_class = identity.classes[source];
+            *changed_by_identity_class.entry(identity_class).or_default() += 1;
+            let signature = self.canonical_swapped_signature(
+                source,
+                &self.canonical_rounds[0].classes,
+                &mut outputs,
+            );
+            let Some(&swapped_class) = identity.signatures.get(&signature) else {
+                self.canonical_round_one_affected_sources = affected_sources;
+                return false;
+            };
+            added_identity_classes.insert(swapped_class);
+            if source == self.topology.initial_state {
+                swapped_root_class = swapped_class;
+            }
+        }
+        self.canonical_round_one_affected_sources = affected_sources;
+
+        if swapped_root_class != identity.classes[self.topology.initial_state] {
+            return false;
+        }
+        changed_by_identity_class.into_iter().all(|(class, changed)| {
+            changed < identity_counts[class as usize] || added_identity_classes.contains(&class)
+        })
+    }
+
+    /// Collision-free exact refinement. This deliberately recomputes every
+    /// raw restricted state each round: an earlier incremental cone shortcut
+    /// was not a sufficient proof of cross-side partition stabilization.
+    fn canonical_interchange_map(&mut self, left: TerminalID, right: TerminalID) -> Option<InterchangeMap> {
+        if let Some(map) = self.canonical_quotient_interchange_map(left, right) {
+            return Some(map);
+        }
+        let pair_started_at = Instant::now();
+        let profile_pair = std::env::var_os("GLRMASK_PROFILE_L2P_TI_CANONICAL_PAIRS").is_some();
+        let stable_round = self.ensure_canonical_identity_stable_round();
+        let mut outputs = SwappedOutputIds::new(
+            &self.output_pairs,
+            &self.output_pair_lookup,
+            left,
+            right,
+        );
+        let mut swapped_previous = self.canonical_rounds[0].classes.clone();
+        for round in 1..=stable_round {
+            let identity_previous = &self.canonical_rounds[round - 1].classes;
+            let identity = &self.canonical_rounds[round];
+            let swapped_next = self.canonical_swapped_round(
+                &swapped_previous,
+                identity,
+                &mut outputs,
+            );
+            if !rooted_class_set_still_possible_u32(
+                &identity.classes,
+                &swapped_next,
+                self.topology.initial_state,
+                self.topology.real_state_count,
+            ) {
+                if profile_pair {
+                    eprintln!(
+                        "[glrmask/profile][terminal_interchangeability] canonical_pair={}<>{} outcome=class_set_mismatch round={} elapsed_ms={:.3}",
+                        left,
+                        right,
+                        round,
+                        pair_started_at.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                return None;
+            }
+            if same_equality_partition_pair_u32(
+                identity_previous,
+                &swapped_previous,
+                &identity.classes,
+                &swapped_next,
+            ) {
+                if profile_pair {
+                    eprintln!(
+                        "[glrmask/profile][terminal_interchangeability] canonical_pair={}<>{} outcome=stable round={} elapsed_ms={:.3}",
+                        left,
+                        right,
+                        round,
+                        pair_started_at.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                return self.interchange_map_from_classes(&identity.classes, &swapped_next);
+            }
+            swapped_previous = swapped_next;
+        }
+        drop(outputs);
+        self.reference_interchange_map(left, right)
+    }
+
+    fn canonical_identity_map(&mut self) -> InterchangeMap {
+        if let Some(map) = &self.canonical_identity_map {
+            return map.clone();
+        }
+        let round = self.ensure_canonical_identity_stable_round();
+        let map = self
+            .interchange_map_from_classes(
+                &self.canonical_rounds[round].classes,
+                &self.canonical_rounds[round].classes,
+            )
+            .expect("identity canonical characterization must map every class to itself");
+        self.canonical_identity_map = Some(map.clone());
+        map
+    }
+
+    fn interchange_map_from_classes(
+        &self,
+        identity_classes: &[u32],
+        swapped_classes: &[u32],
+    ) -> Option<InterchangeMap> {
+        debug_assert_eq!(identity_classes.len(), self.state_count());
+        debug_assert_eq!(swapped_classes.len(), self.state_count());
+        if identity_classes[self.topology.initial_state]
+            != swapped_classes[self.topology.initial_state]
+        {
+            return None;
+        }
+
+        let mut target_representative_by_class = BTreeMap::<u32, u32>::new();
+        let mut source_classes = BTreeMap::<u32, ()>::new();
+        for state in 0..self.topology.real_state_count {
+            source_classes.insert(identity_classes[state], ());
+            target_representative_by_class
+                .entry(swapped_classes[state])
+                .or_insert(state as u32);
+        }
+        if source_classes.len() != target_representative_by_class.len()
+            || source_classes
+                .keys()
+                .any(|class| !target_representative_by_class.contains_key(class))
+        {
+            return None;
+        }
+
+        let target_representative_for_source_state = (0..self.topology.real_state_count)
+            .map(|source| target_representative_by_class.get(&identity_classes[source]).copied())
+            .collect::<Option<Vec<_>>>()?;
+        Some(InterchangeMap {
+            target_representative_for_source_state,
+        })
+    }
+
     /// The set of output pairs visible on enabled-byte destinations is closed
     /// under every valid interchange. This filter is exact as a rejection
     /// condition: it does not accept a pair, it only avoids an impossible full
@@ -661,6 +1687,14 @@ impl InterchangeabilityDfa {
             }
         }
         true
+    }
+
+    fn swap_preserves_all_frozen_outputs(&self, left: TerminalID, right: TerminalID) -> bool {
+        let left = left as usize;
+        let right = right as usize;
+        self.finalizer_states_by_terminal[left] == self.finalizer_states_by_terminal[right]
+            && self.future_finalizer_states_by_terminal[left]
+                == self.future_finalizer_states_by_terminal[right]
     }
 
     fn characterize_pair(&mut self, left: TerminalID, right: TerminalID) -> PairCharacterization {
@@ -725,6 +1759,17 @@ impl InterchangeabilityDfa {
     }
 
     fn interchange_map(&mut self, left: TerminalID, right: TerminalID) -> Option<InterchangeMap> {
+        if self.swap_preserves_all_frozen_outputs(left, right) {
+            return Some(self.canonical_identity_map());
+        }
+        self.canonical_interchange_map(left, right)
+    }
+
+    fn reference_interchange_map(
+        &mut self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<InterchangeMap> {
         let characterization = self.characterize_pair(left, right);
         self.interchange_map_from_characterization(&characterization)
     }
@@ -740,34 +1785,30 @@ impl InterchangeabilityDfa {
         }
 
         let mut source_classes = BTreeMap::<CharacterizationHash, ()>::new();
-        let mut target_states_by_class = BTreeMap::<CharacterizationHash, Vec<u32>>::new();
+        let mut target_representative_by_class = BTreeMap::<CharacterizationHash, u32>::new();
         for state in 0..self.topology.real_state_count {
             source_classes.insert(characterization.identity_hashes[state], ());
-            target_states_by_class
+            target_representative_by_class
                 .entry(characterization.swapped_hashes[state])
-                .or_default()
-                .push(state as u32);
+                .or_insert(state as u32);
         }
-        if source_classes.len() != target_states_by_class.len()
+        if source_classes.len() != target_representative_by_class.len()
             || source_classes
                 .keys()
-                .any(|hash| !target_states_by_class.contains_key(hash))
+                .any(|hash| !target_representative_by_class.contains_key(hash))
         {
             return None;
         }
 
-        let target_class_for_source_state = (0..self.topology.real_state_count)
+        let target_representative_for_source_state = (0..self.topology.real_state_count)
             .map(|source| {
-                target_states_by_class
+                target_representative_by_class
                     .get(&characterization.identity_hashes[source])
-                    .cloned()
+                    .copied()
             })
             .collect::<Option<Vec<_>>>()?;
-        if target_class_for_source_state.iter().any(Vec::is_empty) {
-            return None;
-        }
         Some(InterchangeMap {
-            target_class_for_source_state,
+            target_representative_for_source_state,
         })
     }
 }
@@ -804,6 +1845,83 @@ fn same_equality_partition_pair(
         next_to_previous.insert(new, old);
     }
     true
+}
+
+/// Equality of integer class ids denotes a partition within a single
+/// refinement side. The concrete ids may change between rounds; only the
+/// induced equality relation matters.
+fn same_equality_partition_u32(previous: &[u32], next: &[u32]) -> bool {
+    debug_assert_eq!(previous.len(), next.len());
+    let mut previous_to_next = FxHashMap::<u32, u32>::default();
+    let mut next_to_previous = FxHashMap::<u32, u32>::default();
+    for (&old, &new) in previous.iter().zip(next) {
+        if previous_to_next
+            .get(&old)
+            .is_some_and(|&existing| existing != new)
+            || next_to_previous
+                .get(&new)
+                .is_some_and(|&existing| existing != old)
+        {
+            return false;
+        }
+        previous_to_next.insert(old, new);
+        next_to_previous.insert(new, old);
+    }
+    true
+}
+
+/// Integer-class counterpart of `same_equality_partition_pair`. Class ids are
+/// shared across the identity and relabelled sides exactly when their complete
+/// sparse signatures are equal, so the combined refinement must induce one
+/// coherent old-to-new partition map across both sides.
+fn same_equality_partition_pair_u32(
+    identity_previous: &[u32],
+    swapped_previous: &[u32],
+    identity_next: &[u32],
+    swapped_next: &[u32],
+) -> bool {
+    debug_assert_eq!(identity_previous.len(), swapped_previous.len());
+    debug_assert_eq!(identity_previous.len(), identity_next.len());
+    debug_assert_eq!(identity_previous.len(), swapped_next.len());
+    let mut previous_to_next = FxHashMap::<u32, u32>::default();
+    let mut next_to_previous = FxHashMap::<u32, u32>::default();
+    for (&old, &new) in identity_previous
+        .iter()
+        .zip(identity_next)
+        .chain(swapped_previous.iter().zip(swapped_next))
+    {
+        if previous_to_next
+            .get(&old)
+            .is_some_and(|&existing| existing != new)
+            || next_to_previous
+                .get(&new)
+                .is_some_and(|&existing| existing != old)
+        {
+            return false;
+        }
+        previous_to_next.insert(old, new);
+        next_to_previous.insert(new, old);
+    }
+    true
+}
+
+/// Canonical class ids are shared with the identity side exactly when their
+/// full sparse signatures are equal. A missing root match or class-set member
+/// can never be restored by a later refinement because partitions only split.
+fn rooted_class_set_still_possible_u32(
+    identity: &[u32],
+    swapped: &[u32],
+    initial_state: usize,
+    real_state_count: usize,
+) -> bool {
+    if identity[initial_state] != swapped[initial_state] {
+        return false;
+    }
+    let mut identity_classes = FxHashSet::<u32>::default();
+    let mut swapped_classes = FxHashSet::<u32>::default();
+    identity_classes.extend(identity[..real_state_count].iter().copied());
+    swapped_classes.extend(swapped[..real_state_count].iter().copied());
+    identity_classes == swapped_classes
 }
 
 /// A valid eventual map needs its root class and every current left class to
@@ -914,6 +2032,8 @@ impl TerminalInterchangeability {
         let mut dfa = InterchangeabilityDfa::from_topology(tokenizer, active_terminals, topology);
         let mut result = Self::identity(active_terminals);
         let mut output_pair_rejections = 0usize;
+        let mut output_invariant_checks = 0usize;
+        let mut first_round_rejections = 0usize;
         let mut direct_exact_checks = 0usize;
         let mut accepted_representative_members = 0usize;
 
@@ -932,8 +2052,17 @@ impl TerminalInterchangeability {
                         next_unresolved.push(terminal);
                         continue;
                     }
-                    direct_exact_checks += 1;
-                    if let Some(map) = dfa.interchange_map(representative, terminal) {
+                    let map = if dfa.swap_preserves_all_frozen_outputs(representative, terminal) {
+                        output_invariant_checks += 1;
+                        Some(dfa.canonical_identity_map())
+                    } else if !dfa.canonical_round_one_still_possible(representative, terminal) {
+                        first_round_rejections += 1;
+                        None
+                    } else {
+                        direct_exact_checks += 1;
+                        dfa.interchange_map(representative, terminal)
+                    };
+                    if let Some(map) = map {
                         accepted_representative_members += 1;
                         result.representative_for[terminal as usize] = representative;
                         result.active_representatives[terminal as usize] = false;
@@ -948,9 +2077,19 @@ impl TerminalInterchangeability {
 
         if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} direct_exact_checks={} accepted_representative_members={} total_ms={:.3}",
+                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_invariant_checks={} first_round_rejections={} direct_exact_checks={} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
                 output_pair_rejections,
+                output_invariant_checks,
+                first_round_rejections,
                 direct_exact_checks,
+                dfa.quotient_certified,
+                dfa.sparse_quotient_certified,
+                dfa.sparse_quotient_cone_classes_total as f64
+                    / dfa.sparse_quotient_certified.max(1) as f64,
+                dfa.sparse_quotient_cone_classes_max,
+                dfa.sparse_quotient_cone_ns as f64 / 1_000_000.0,
+                dfa.sparse_quotient_refinement_ns as f64 / 1_000_000.0,
+                dfa.sparse_quotient_map_ns as f64 / 1_000_000.0,
                 accepted_representative_members,
                 started_at.elapsed().as_secs_f64() * 1000.0,
             );
@@ -964,6 +2103,14 @@ impl TerminalInterchangeability {
 
     pub(crate) fn active_representatives(&self) -> &[bool] {
         &self.active_representatives
+    }
+
+    /// Per-terminal representative assignment: `representative_for[t]` is the
+    /// terminal whose scanner behavior absorbs `t` under interchangeability
+    /// (equal to `t` for representatives / identity terminals). Exposed for
+    /// diagnostic dumps.
+    pub(crate) fn representative_for(&self) -> &[TerminalID] {
+        &self.representative_for
     }
 
     /// Scanner metadata remains visible for every raw terminal. Only edges for
@@ -1103,7 +2250,7 @@ impl TerminalInterchangeability {
             .map_for_representative_member
             .values()
             .next()
-            .map(|map| map.target_class_for_source_state.len())?;
+            .map(|map| map.target_representative_for_source_state.len())?;
         let identity_labels = (0..self.representative_for.len() as TerminalID).collect::<Vec<_>>();
         let mut modes = vec![TerminalNwaTransportMode {
             scanner_state_for_original: (0..state_count as u32).collect(),
@@ -1232,9 +2379,9 @@ mod tests {
         let mut dfa = InterchangeabilityDfa::new(&tokenizer, &[true, true], &[true; 256]);
         let map = dfa.interchange_map(0, 1).expect("identical literals must transport");
         let root = tokenizer.initial_state_id() as usize;
-        assert!(map.target_class_for_source_state[root].contains(&tokenizer.initial_state_id()));
+        assert_eq!(map.target_representative_for_source_state[root], tokenizer.initial_state_id());
         let representatives = map.arbitrary_target_representatives();
-        assert!(map.target_class_for_source_state[root].contains(&representatives[root]));
+        assert_eq!(map.target_representative_for_source_state[root], representatives[root]);
         let plan = TerminalInterchangeability::build(&tokenizer, &[true, true], &[true; 256], None);
         assert_eq!(plan.active_representatives.iter().filter(|&&active| active).count(), 1);
     }
@@ -1257,6 +2404,32 @@ mod tests {
         );
         assert_eq!(plan.active_representatives.iter().filter(|&&active| active).count(), 1);
         assert_eq!(plan.representative_for, vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn unobserved_byte_nonidentity_map_matches_hash_reference() {
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"b".to_vec()),
+        ]);
+        let mut relevant_bytes = [false; 256];
+        relevant_bytes[b'c' as usize] = true;
+        let mut dfa = InterchangeabilityDfa::new(&tokenizer, &[true, true], &relevant_bytes);
+        let optimized = dfa
+            .interchange_map(0, 1)
+            .expect("unobserved terminals must transport");
+        let reference = dfa
+            .reference_interchange_map(0, 1)
+            .expect("hash reference must transport the same pair");
+        assert_eq!(optimized, reference);
+        assert!(
+            optimized
+                .target_representative_for_source_state
+                .iter()
+                .enumerate()
+                .any(|(state, &target)| target != state as u32),
+            "the MRE requires a nonidentity raw scanner map",
+        );
     }
 
     #[test]
@@ -1357,12 +2530,29 @@ mod tests {
                         group_contains_pair(&filtered_groups, left, right),
                         "structural prefilter rejected exact pair {left} <-> {right}",
                     );
+                    assert!(
+                        dfa.canonical_round_one_still_possible(left, right),
+                        "first-round prefilter rejected exact pair {left} <-> {right}",
+                    );
                     assert_eq!(
-                        left_to_right.target_class_for_source_state,
-                        right_to_left.target_class_for_source_state,
+                        left_to_right.target_representative_for_source_state,
+                        right_to_left.target_representative_for_source_state,
                         "the reversed pair call must be operationally identical",
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_sparse_quotient_matches_hash_reference_for_all_pairs() {
+        let tokenizer = tokenizer(vec![Expr::U8Seq(b"same".to_vec()), Expr::U8Seq(b"same".to_vec()), Expr::U8Seq(b"sample".to_vec()), Expr::U8Seq(b"simple".to_vec()), Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"ab".to_vec()), Expr::U8Seq(b"b".to_vec()), Expr::U8Seq(b"ba".to_vec())]);
+        let active = vec![true; 8];
+        for left in 0..active.len() as TerminalID {
+            for right in left + 1..active.len() as TerminalID {
+                let mut canonical = InterchangeabilityDfa::new(&tokenizer, &active, &[true; 256]);
+                let mut reference = InterchangeabilityDfa::new(&tokenizer, &active, &[true; 256]);
+                assert_eq!(canonical.interchange_map(left, right), reference.reference_interchange_map(left, right), "canonical refinement disagreed with hash reference for {left} <-> {right}");
             }
         }
     }
@@ -1375,5 +2565,23 @@ mod tests {
         let y = CharacterizationHash([10; blake3::OUT_LEN]);
         assert!(same_equality_partition_pair(&[a, a, b], &[a, a, b], &[x, x, y], &[x, x, y]));
         assert!(!same_equality_partition_pair(&[a, a, b], &[a, a, b], &[x, y, y], &[x, y, y]));
+    }
+
+    #[test]
+    fn combined_integer_partition_stability_rejects_cross_side_split() {
+        assert!(same_equality_partition_pair_u32(
+            &[0, 0, 1],
+            &[0, 0, 1],
+            &[4, 4, 5],
+            &[4, 4, 5],
+        ));
+        // Each side is individually stable, but the shared old class `0`
+        // refines differently across sides. This cannot certify a transport.
+        assert!(!same_equality_partition_pair_u32(
+            &[0, 0],
+            &[0, 0],
+            &[4, 4],
+            &[4, 5],
+        ));
     }
 }
