@@ -24,6 +24,7 @@ struct WalkFrame {
 
 struct StateBatchScratch {
     walk_frames: Vec<WalkFrame>,
+    live_ranges: Vec<(usize, usize)>,
     positions: Vec<i32>,
     active_bits: Vec<u64>,
     changes: Vec<(usize, i32)>,
@@ -33,6 +34,7 @@ impl StateBatchScratch {
     fn new(num_groups: usize) -> Self {
         Self {
             walk_frames: Vec::new(),
+            live_ranges: Vec::new(),
             positions: vec![-1; num_groups],
             active_bits: vec![0u64; bit_words(num_groups)],
             changes: Vec::new(),
@@ -882,7 +884,9 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                     let mut hash_delta: u128 = 0;
                     let state_ct_base = (state as usize) * num_bc;
 
-                    let mut live_ranges: Vec<(usize, usize)> = Vec::new();
+                    let scratch = lease.scratch_mut();
+                    let live_ranges = &mut scratch.live_ranges;
+                    live_ranges.clear();
 
                     if batch_empty_range.0 < batch_empty_range.1 {
                         live_ranges.push(batch_empty_range);
@@ -903,13 +907,12 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                             live_ranges.push((range_start, range_end));
                         }
                     }
-                    let scratch = lease.scratch_mut();
                     let walk_frames = &mut scratch.walk_frames;
                     let positions = &mut scratch.positions;
                     let active_bits = &mut scratch.active_bits;
                     let changes = &mut scratch.changes;
 
-                    for (range_start, range_end) in live_ranges {
+                    for (range_start, range_end) in live_ranges.iter().copied() {
                         if range_start >= range_end {
                             continue;
                         }
