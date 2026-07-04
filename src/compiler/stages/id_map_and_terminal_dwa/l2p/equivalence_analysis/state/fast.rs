@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use rayon::prelude::*;
 
-use super::super::compat::TokenizerView;
+use super::super::compat::{FlatDfaState, TokenizerView};
 use super::super::vocab::fast::SharedVocabDfaBase;
 use crate::ds::bitset::BitSet;
 
@@ -217,6 +217,18 @@ struct TokenSuffixHashes {
     hashes: Vec<u128>,
 }
 
+struct FutureGroupHashTable {
+    state_to_future_group: Vec<u32>,
+    hashes_by_context: Vec<Vec<u128>>,
+}
+
+impl FutureGroupHashTable {
+    #[inline(always)]
+    fn get(&self, context: usize, state: usize) -> u128 {
+        self.hashes_by_context[context][self.state_to_future_group[state] as usize]
+    }
+}
+
 impl TokenSuffixHashes {
     #[inline(always)]
     fn get(&self, context: usize, pos: usize) -> u128 {
@@ -225,13 +237,29 @@ impl TokenSuffixHashes {
 }
 
 fn build_future_group_hashes_by_context(
-    dfa_future_groups: &[Vec<usize>],
+    dfa_states: &[FlatDfaState],
     follow_contexts: &FollowContextTable,
-) -> Vec<Vec<u128>> {
-    (0..follow_contexts.num_contexts())
+) -> FutureGroupHashTable {
+    debug_assert!(dfa_states.len() < u32::MAX as usize);
+    let mut state_to_future_group = Vec::with_capacity(dfa_states.len());
+    let mut unique_future_groups = Vec::<&[usize]>::new();
+    let mut group_to_id = std::collections::HashMap::<&[usize], u32>::new();
+    group_to_id.reserve(dfa_states.len() / 2);
+
+    for state in dfa_states {
+        let future_groups = state.possible_future_group_ids.as_slice();
+        let next = unique_future_groups.len() as u32;
+        let group_id = *group_to_id.entry(future_groups).or_insert_with(|| {
+            unique_future_groups.push(future_groups);
+            next
+        });
+        state_to_future_group.push(group_id);
+    }
+
+    let hashes_by_context = (0..follow_contexts.num_contexts())
         .map(|context| {
             let disallowed = &follow_contexts.disallowed_by_context[context];
-            dfa_future_groups
+            unique_future_groups
                 .iter()
                 .map(|future_groups| {
                     if disallowed.is_zero() {
@@ -242,7 +270,12 @@ fn build_future_group_hashes_by_context(
                 })
                 .collect()
         })
-        .collect()
+        .collect();
+
+    FutureGroupHashTable {
+        state_to_future_group,
+        hashes_by_context,
+    }
 }
 
 fn hash_suffix_node(
@@ -251,7 +284,7 @@ fn hash_suffix_node(
     nodes: &[SuffixNode],
     token_len: usize,
     follow_contexts: &FollowContextTable,
-    future_group_hashes_by_context: &[Vec<u128>],
+    future_group_hashes_by_context: &FutureGroupHashTable,
     memo: &mut [u128],
     ready: &mut [bool],
 ) -> u128 {
@@ -273,7 +306,7 @@ fn hash_suffix_node(
         Some(state) => mix_tagged(
             0x51A7_E000_0000_0001,
             0xF070_F070_F070_F070,
-            future_group_hashes_by_context[context][state],
+            future_group_hashes_by_context.get(context, state),
         ),
         None => mix_u128(DEAD_NODE_TAG),
     };
@@ -312,7 +345,7 @@ fn hash_suffix_node(
 fn build_token_suffix_hashes(
     nodes: Vec<SuffixNode>,
     follow_contexts: &FollowContextTable,
-    future_group_hashes_by_context: &[Vec<u128>],
+    future_group_hashes_by_context: &FutureGroupHashTable,
 ) -> TokenSuffixHashes {
     let len = nodes.len();
     let num_contexts = follow_contexts.num_contexts();
@@ -346,7 +379,7 @@ fn hash_trellis_node_from_positions(
     positions: &[i32],
     active_bits: &[u64],
     token_len: usize,
-    future_group_hashes: &[u128],
+    future_group_hashes: &FutureGroupHashTable,
     follow_contexts: &FollowContextTable,
     suffix_hashes: Option<&TokenSuffixHashes>,
 ) -> u128 {
@@ -362,7 +395,7 @@ fn hash_trellis_node_from_positions(
         Some(state) => mix_tagged(
             0x51A7_E000_0000_0001,
             0xF070_F070_F070_F070,
-            future_group_hashes[state],
+            future_group_hashes.get(0, state),
         ),
         None => mix_u128(DEAD_NODE_TAG),
     };
@@ -417,8 +450,7 @@ fn build_start_state_suffix_nodes(
     dfa_transitions: &[u32],
     byte_to_class: &[u8; 256],
     num_bc: usize,
-    dfa_finalizers: &[Vec<usize>],
-    state_has_future: &[bool],
+    dfa_states: &[FlatDfaState],
     skip_groups: &[bool],
     positions: &mut [i32],
     active_bits: &mut [u64],
@@ -433,7 +465,7 @@ fn build_start_state_suffix_nodes(
     for pos in (0..len).rev() {
         let mut current = tokenizer_start;
         let mut current_ct_base = current * num_bc;
-        let mut done = !state_has_future[current];
+        let mut done = dfa_states[current].possible_future_group_ids.is_empty();
 
         for (offset, &byte) in token[pos..].iter().enumerate() {
             if done {
@@ -447,7 +479,7 @@ fn build_start_state_suffix_nodes(
             current = next as usize;
             current_ct_base = current * num_bc;
             let absolute_pos = (pos + offset + 1) as i32;
-            for &gid in &dfa_finalizers[current] {
+            for &gid in &dfa_states[current].finalizers {
                 if gid >= num_groups || (skip_groups_enabled && skip_groups[gid]) {
                     continue;
                 }
@@ -456,7 +488,7 @@ fn build_start_state_suffix_nodes(
                 }
                 positions[gid] = absolute_pos;
             }
-            if !state_has_future[current] {
+            if dfa_states[current].possible_future_group_ids.is_empty() {
                 done = true;
             }
         }
@@ -660,24 +692,16 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         std::borrow::Cow::Borrowed(&dfa.transitions)
     };
 
-    let dfa_finalizers: Vec<Vec<usize>> = dfa
+    let mut max_gid = dfa
         .states
         .iter()
-        .map(|state| state.finalizers.iter().copied().collect())
-        .collect();
-    let dfa_future_groups: Vec<Vec<usize>> = dfa
-        .states
-        .iter()
-        .map(|state| state.possible_future_group_ids.iter().copied().collect())
-        .collect();
-    let state_has_future: Vec<bool> = dfa_future_groups
-        .iter()
-        .map(|future_groups| !future_groups.is_empty())
-        .collect();
-    let mut max_gid = dfa_finalizers
-        .iter()
-        .chain(dfa_future_groups.iter())
-        .flat_map(|groups| groups.iter().copied())
+        .flat_map(|state| {
+            state
+                .finalizers
+                .iter()
+                .chain(state.possible_future_group_ids.iter())
+                .copied()
+        })
         .max()
         .map(|m| m + 1)
         .unwrap_or(0);
@@ -687,7 +711,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     let num_groups = max_gid;
     let follow_contexts = FollowContextTable::new(num_groups, disallowed_follows);
     let future_group_hashes_by_context =
-        build_future_group_hashes_by_context(&dfa_future_groups, &follow_contexts);
+        build_future_group_hashes_by_context(&dfa.states, &follow_contexts);
     let mut sorted_indices: Vec<usize> = (0..tokens.len()).collect();
     sorted_indices.par_sort_unstable_by(|&a, &b| tokens[a].as_ref().cmp(tokens[b].as_ref()));
 
@@ -749,8 +773,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                         compact_transitions.as_ref(),
                         byte_to_class,
                         num_bc,
-                        &dfa_finalizers,
-                        &state_has_future,
+                        &dfa.states,
                         skip_groups,
                         positions,
                         active_bits,
@@ -781,7 +804,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         &dead_positions,
         &dead_active_bits,
         0,
-        &future_group_hashes_by_context[0],
+        &future_group_hashes_by_context,
         &follow_contexts,
         None,
     );
@@ -952,7 +975,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                     let position = prefix_len + offset + 1;
 
                                     if num_groups > 0 {
-                                        for &gid in &dfa_finalizers[current as usize] {
+                                        for &gid in &dfa.states[current as usize].finalizers {
                                             if gid >= num_groups {
                                                 continue;
                                             }
@@ -985,7 +1008,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                     positions,
                                     active_bits,
                                     token.len(),
-                                    &future_group_hashes_by_context[0],
+                                    &future_group_hashes_by_context,
                                     &follow_contexts,
                                     suffix_hashes_by_token[global_token_idx].as_ref(),
                                 )
@@ -996,7 +1019,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                     positions,
                                     active_bits,
                                     token.len(),
-                                    &future_group_hashes_by_context[0],
+                                    &future_group_hashes_by_context,
                                     &follow_contexts,
                                     suffix_hashes_by_token[global_token_idx].as_ref(),
                                 )
@@ -1011,7 +1034,6 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                 },
             )
             .collect();
-
         batches_processed += 1;
         let previous_active_indices = std::mem::take(&mut active_indices);
         let all_active = previous_active_indices.len() == states.len();
