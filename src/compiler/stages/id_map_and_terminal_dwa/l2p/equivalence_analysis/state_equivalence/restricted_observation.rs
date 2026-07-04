@@ -344,12 +344,8 @@ pub(crate) fn compute_state_map(
     let mut current_classes = vec![0u32; num_candidates];
     let mut next_classes = vec![0u32; num_candidates];
     let mut class_members = vec![(0..num_candidates).collect::<Vec<_>>()];
-    let mut first_candidate_by_fingerprint = FxHashMap::<u64, usize>::default();
-    first_candidate_by_fingerprint.reserve(num_candidates);
     let mut next_same_fingerprint = vec![NO_CANDIDATE; num_candidates];
     let mut refinement_rounds = 0usize;
-    let mut refined_candidate_visits = 0usize;
-    let mut refined_class_visits = 0usize;
     let mut dirty_classes = vec![0usize];
     let mut dirty_flags = vec![true];
 
@@ -366,12 +362,16 @@ pub(crate) fn compute_state_map(
             }
 
             let members = std::mem::take(&mut class_members[class]);
-            refined_candidate_visits += members.len();
-            refined_class_visits += 1;
             let new_class_base = class_members.len();
             let mut retained_members = Vec::with_capacity(members.len());
             let mut split_members = Vec::<Vec<usize>>::new();
-            first_candidate_by_fingerprint.clear();
+            // Reusing an 18k-entry map here made `clear()` scan its large
+            // backing table for every later tiny class. Most p7 refinements
+            // are tiny, so give each class a right-sized temporary map.
+            let mut first_candidate_by_fingerprint = FxHashMap::<u64, usize>::default();
+            if members.len() > 8 {
+                first_candidate_by_fingerprint.reserve(members.len());
+            }
 
             for candidate in members {
                 let signature_start = candidate * signature_width;
