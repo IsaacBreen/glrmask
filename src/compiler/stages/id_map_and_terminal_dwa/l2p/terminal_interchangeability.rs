@@ -2285,33 +2285,95 @@ impl TerminalInterchangeability {
         ordinary_state_map: &ManyToOneIdMap,
     ) {
         let state_count = ordinary_state_map.original_to_internal.len();
+        let all_ordinary_states_mapped = ordinary_state_map
+            .original_to_internal
+            .iter()
+            .all(|&internal| internal != u32::MAX);
+        let ordinary_class_for_original = Arc::<[u32]>::from(
+            ordinary_state_map.original_to_internal.clone().into_boxed_slice(),
+        );
+        let ordinary_representative_for_class = Arc::<[u32]>::from(
+            ordinary_state_map
+                .representative_original_ids
+                .clone()
+                .into_boxed_slice(),
+        );
+        let mut canonical_representatives_by_raw_array = BTreeMap::<usize, Arc<[u32]>>::new();
+
         for mode in modes {
             assert_eq!(
                 mode.scanner_state_for_original.len(),
                 state_count,
                 "transport mode state domain must match ordinary state quotient",
             );
-            for scanner_state in mode.scanner_state_for_original.make_explicit_mut() {
-                let raw = *scanner_state as usize;
-                let internal = ordinary_state_map
-                    .original_to_internal
-                    .get(raw)
-                    .copied()
-                    .unwrap_or(u32::MAX);
-                if internal != u32::MAX {
-                    *scanner_state = ordinary_state_map
-                        .representative_original_id_for_internal(internal)
-                        .expect("ordinary state quotient missing representative");
+            let is_raw_identity = match &mode.scanner_state_for_original {
+                TransportScannerStateMap::Explicit(states) => states
+                    .iter()
+                    .enumerate()
+                    .all(|(state, &target)| state as u32 == target),
+                TransportScannerStateMap::Quotient { .. } => false,
+            };
+            if mode.terminal_swap.is_none() && is_raw_identity && all_ordinary_states_mapped {
+                mode.scanner_state_for_original = TransportScannerStateMap::Quotient {
+                    state_count,
+                    class_for_original: Arc::clone(&ordinary_class_for_original),
+                    representative_for_class: Arc::clone(&ordinary_representative_for_class),
+                    source_class_for_target_deviations: Box::new([]),
+                };
+                continue;
+            }
+
+            match &mut mode.scanner_state_for_original {
+                TransportScannerStateMap::Quotient {
+                    representative_for_class,
+                    ..
+                } => {
+                    let raw_array_key = representative_for_class.as_ref().as_ptr() as usize;
+                    let canonical_representatives = canonical_representatives_by_raw_array
+                        .entry(raw_array_key)
+                        .or_insert_with(|| {
+                            representative_for_class
+                                .iter()
+                                .map(|&raw| {
+                                    let internal = ordinary_state_map
+                                        .original_to_internal
+                                        .get(raw as usize)
+                                        .copied()
+                                        .unwrap_or(u32::MAX);
+                                    if internal == u32::MAX {
+                                        raw
+                                    } else {
+                                        ordinary_state_map
+                                            .representative_original_id_for_internal(internal)
+                                            .expect("ordinary state quotient missing representative")
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .into()
+                        });
+                    *representative_for_class = Arc::clone(canonical_representatives);
+                }
+                TransportScannerStateMap::Explicit(states) => {
+                    for scanner_state in Arc::make_mut(states) {
+                        let raw = *scanner_state as usize;
+                        let internal = ordinary_state_map
+                            .original_to_internal
+                            .get(raw)
+                            .copied()
+                            .unwrap_or(u32::MAX);
+                        if internal != u32::MAX {
+                            *scanner_state = ordinary_state_map
+                                .representative_original_id_for_internal(internal)
+                                .expect("ordinary state quotient missing representative");
+                        }
+                    }
                 }
             }
         }
     }
-
-    /// Refine an exact ordinary terminal-DWA state quotient only where a
-    /// transport mode observes a different quotient destination. For a raw
-    /// state `s`, the signature is
-    /// `(Q(m_0(s)), Q(m_1(s)), …)`, where `Q` is the ordinary exact state map
-    /// and `m_i` is a scanner transport. States with equal signatures remain
+    /// Refine raw scanner states by the exact transport-coordinate signature
+    /// `(Q(m_0(s)), Q(m_1(s)), …)`, where `Q` is the ordinary terminal-DWA
+    /// quotient and `m_i` is a scanner transport. States with equal signatures remain
     /// interchangeable for every transported output: each mode starts from
     /// ordinary-equivalent scanner states and then applies the same fixed label
     /// permutation.
@@ -2326,6 +2388,9 @@ impl TerminalInterchangeability {
         ordinary_state_map: &ManyToOneIdMap,
         modes: &[TerminalNwaTransportMode],
     ) -> ManyToOneIdMap {
+        if let Some(quotient) = Self::compact_transport_coordinate_quotient(ordinary_state_map, modes) {
+            return quotient;
+        }
         assert!(!modes.is_empty(), "transport coordinate quotient needs a mode");
         let state_count = ordinary_state_map.original_to_internal.len();
         let mut class_for_state = vec![0u32; state_count];
@@ -2341,20 +2406,15 @@ impl TerminalInterchangeability {
             class_for_pair.clear();
             let mut next_class_count = 0u32;
 
-            for (source_state, (&prior_class, &target_state)) in class_for_state
-                .iter()
-                .zip(mode.scanner_state_for_original.materialized().iter())
-                .enumerate()
-            {
-                let target_state = target_state as usize;
+            for (source_state, &prior_class) in class_for_state.iter().enumerate() {
+                let target_state = mode
+                    .scanner_state_for_original
+                    .scanner_state(source_state as u32) as usize;
                 let mapped = ordinary_state_map
                     .original_to_internal
                     .get(target_state)
                     .copied()
                     .unwrap_or(u32::MAX);
-                // Unmapped targets are outside the ordinary quotient's proof
-                // domain. Keep their raw identity distinct rather than merging
-                // them by accident.
                 let target_key = if mapped == u32::MAX {
                     (1u64 << 32) | target_state as u64
                 } else {
@@ -2392,6 +2452,143 @@ impl TerminalInterchangeability {
             class_count as u32,
             representatives,
         )
+    }
+
+    /// Fast exact refinement for compact rooted transport maps. The first
+    /// coordinate is Q(s), so a mode can split only topology classes listed in
+    /// its sparse source-class deviations.
+    fn compact_transport_coordinate_quotient(
+        ordinary_state_map: &ManyToOneIdMap,
+        modes: &[TerminalNwaTransportMode],
+    ) -> Option<ManyToOneIdMap> {
+        let state_count = ordinary_state_map.original_to_internal.len();
+        let first_compact = modes.iter().find(|mode| mode.terminal_swap.is_some())?;
+        let TransportScannerStateMap::Quotient {
+            state_count: compact_state_count,
+            class_for_original,
+            representative_for_class,
+            ..
+        } = &first_compact.scanner_state_for_original
+        else {
+            return None;
+        };
+        if *compact_state_count != state_count || class_for_original.len() < state_count {
+            return None;
+        }
+
+        let ordinary_coordinate = |raw_state: u32| {
+            let internal = ordinary_state_map
+                .original_to_internal
+                .get(raw_state as usize)
+                .copied()
+                .unwrap_or(u32::MAX);
+            if internal == u32::MAX {
+                (1u64 << 32) | raw_state as u64
+            } else {
+                internal as u64
+            }
+        };
+        let compact_class_count = representative_for_class.len();
+        let coordinate_for_compact_class = representative_for_class
+            .iter()
+            .map(|&representative| ordinary_coordinate(representative))
+            .collect::<Vec<_>>();
+        let mut states_by_compact_class = vec![Vec::<u32>::new(); compact_class_count];
+        for (state, &compact_class) in class_for_original.iter().take(state_count).enumerate() {
+            let compact_class = compact_class as usize;
+            if compact_class >= compact_class_count
+                || ordinary_coordinate(state as u32) != coordinate_for_compact_class[compact_class]
+            {
+                return None;
+            }
+            states_by_compact_class[compact_class].push(state as u32);
+        }
+
+        let mut class_for_state = vec![u32::MAX; state_count];
+        let mut base_coordinate_for_class = Vec::<u64>::new();
+        let mut class_for_coordinate = FxHashMap::<u64, u32>::default();
+        for state in 0..state_count {
+            let coordinate = ordinary_coordinate(state as u32);
+            let class = match class_for_coordinate.entry(coordinate) {
+                Entry::Occupied(entry) => *entry.get(),
+                Entry::Vacant(entry) => {
+                    let class = base_coordinate_for_class.len() as u32;
+                    base_coordinate_for_class.push(coordinate);
+                    entry.insert(class);
+                    class
+                }
+            };
+            class_for_state[state] = class;
+        }
+
+        for mode in modes.iter().filter(|mode| mode.terminal_swap.is_some()) {
+            let TransportScannerStateMap::Quotient {
+                state_count: mode_state_count,
+                class_for_original: mode_classes,
+                representative_for_class: mode_representatives,
+                source_class_for_target_deviations,
+            } = &mode.scanner_state_for_original
+            else {
+                return None;
+            };
+            if *mode_state_count != state_count
+                || mode_classes.len() < state_count
+                || !Arc::ptr_eq(mode_classes, class_for_original)
+                || !Arc::ptr_eq(mode_representatives, representative_for_class)
+            {
+                return None;
+            }
+
+            let mut split_class_for_pair = FxHashMap::<(u32, u64), u32>::default();
+            for &(target_class, source_class) in source_class_for_target_deviations.iter() {
+                let target_class = target_class as usize;
+                let source_class = source_class as usize;
+                if target_class >= compact_class_count || source_class >= compact_class_count {
+                    return None;
+                }
+                let target_coordinate = coordinate_for_compact_class[target_class];
+                let source_coordinate = coordinate_for_compact_class[source_class];
+                if target_coordinate == source_coordinate {
+                    continue;
+                }
+                for &state in &states_by_compact_class[target_class] {
+                    let state = state as usize;
+                    let prior_class = class_for_state[state];
+                    let base_coordinate = *base_coordinate_for_class.get(prior_class as usize)?;
+                    if base_coordinate != target_coordinate {
+                        return None;
+                    }
+                    let class = match split_class_for_pair.entry((prior_class, source_coordinate)) {
+                        Entry::Occupied(entry) => *entry.get(),
+                        Entry::Vacant(entry) => {
+                            let class = base_coordinate_for_class.len() as u32;
+                            base_coordinate_for_class.push(base_coordinate);
+                            entry.insert(class);
+                            class
+                        }
+                    };
+                    class_for_state[state] = class;
+                }
+            }
+        }
+
+        let mut dense_for_class = vec![u32::MAX; base_coordinate_for_class.len()];
+        let mut representatives = Vec::<u32>::new();
+        let mut next_dense_class = 0u32;
+        for (state, class) in class_for_state.iter_mut().enumerate() {
+            let dense = &mut dense_for_class[*class as usize];
+            if *dense == u32::MAX {
+                *dense = next_dense_class;
+                representatives.push(state as u32);
+                next_dense_class += 1;
+            }
+            *class = *dense;
+        }
+        Some(ManyToOneIdMap::from_original_to_internal_with_representatives(
+            class_for_state,
+            next_dense_class,
+            representatives,
+        ))
     }
 
     pub(crate) fn terminal_nwa_transport_modes(&self) -> Option<Vec<TerminalNwaTransportMode>> {
