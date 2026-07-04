@@ -5,11 +5,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use rayon::prelude::*;
 
 use super::super::compat::{FlatDfaState, TokenizerView};
 use super::super::vocab::fast::SharedVocabDfaBase;
+use crate::compiler::stages::id_map_and_terminal_dwa::types::compile_profile_enabled;
 use crate::ds::bitset::BitSet;
 
 /// The result of state equivalence analysis: sets of state IDs that behave identically.
@@ -28,6 +30,10 @@ struct StateBatchScratch {
     positions: Vec<i32>,
     active_bits: Vec<u64>,
     changes: Vec<(usize, i32)>,
+    profile_live_tokens: usize,
+    profile_bytes_walked: usize,
+    profile_finalizer_visits: usize,
+    profile_dead_first_byte_ranges: usize,
 }
 
 impl StateBatchScratch {
@@ -38,6 +44,10 @@ impl StateBatchScratch {
             positions: vec![-1; num_groups],
             active_bits: vec![0u64; bit_words(num_groups)],
             changes: Vec::new(),
+            profile_live_tokens: 0,
+            profile_bytes_walked: 0,
+            profile_finalizer_visits: 0,
+            profile_dead_first_byte_ranges: 0,
         }
     }
 }
@@ -427,6 +437,28 @@ fn hash_trellis_node_from_positions(
     mix_tagged(hash, EDGE_COUNT_TAG, edge_count as u128)
 }
 
+/// Exact trellis-node hash for an observation with no terminal edges. The
+/// state walk reaches this common case without scanning the sparse active-edge
+/// bitset; it is byte-for-byte the `edge_count == 0` path above.
+#[inline(always)]
+fn hash_trellis_node_without_edges(
+    end_state: Option<usize>,
+    future_group_hashes: &FutureGroupHashTable,
+) -> u128 {
+    const DEAD_NODE_TAG: u128 = 0xDEAD_DEAD_DEAD_DEAD;
+    const EDGE_COUNT_TAG: u128 = 0xEDEC_EDEC_EDEC_EDEC;
+
+    let hash = match end_state {
+        Some(state) => mix_tagged(
+            0x51A7_E000_0000_0001,
+            0xF070_F070_F070_F070,
+            future_group_hashes.get(0, state),
+        ),
+        None => mix_u128(DEAD_NODE_TAG),
+    };
+    mix_tagged(hash, EDGE_COUNT_TAG, 0)
+}
+
 fn build_strided_batches(total_tokens: usize, target_batch_size: usize) -> Vec<Vec<usize>> {
     if total_tokens == 0 {
         return Vec::new();
@@ -645,6 +677,13 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
 ) -> Vec<usize> {
     use std::collections::{hash_map::Entry, HashMap};
 
+    let profiling = compile_profile_enabled()
+        || std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+    let total_started_at = profiling.then(Instant::now);
+    let elapsed_ms = |started_at: Option<Instant>| {
+        started_at.map_or(0.0, |instant| instant.elapsed().as_secs_f64() * 1000.0)
+    };
+
     let dfa = tokenizer.dfa();
 
     const NONE_STATE: u32 = u32::MAX;
@@ -656,6 +695,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     // <16MB table), the raw table already fits in cache and compression overhead
     // outweighs the benefit.
     const COMPACT_THRESHOLD_STATES: usize = 16_000;
+    let transition_setup_started_at = profiling.then(Instant::now);
     let num_dfa_states = dfa.states.len();
     let use_compact = num_dfa_states >= COMPACT_THRESHOLD_STATES;
     let identity_byte_class: [u8; 256] = std::array::from_fn(|i| i as u8);
@@ -693,7 +733,9 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     } else {
         std::borrow::Cow::Borrowed(&dfa.transitions)
     };
+    let transition_setup_ms = elapsed_ms(transition_setup_started_at);
 
+    let label_setup_started_at = profiling.then(Instant::now);
     let mut max_gid = dfa
         .states
         .iter()
@@ -714,6 +756,9 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     let follow_contexts = FollowContextTable::new(num_groups, disallowed_follows);
     let future_group_hashes_by_context =
         build_future_group_hashes_by_context(&dfa.states, &follow_contexts);
+    let label_setup_ms = elapsed_ms(label_setup_started_at);
+
+    let token_setup_started_at = profiling.then(Instant::now);
     let mut sorted_indices: Vec<usize> = (0..tokens.len()).collect();
     sorted_indices.par_sort_unstable_by(|&a, &b| tokens[a].as_ref().cmp(tokens[b].as_ref()));
 
@@ -733,6 +778,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     });
     let batch_size = custom_batch_size.unwrap_or(250);
     let batches = build_strided_batches(total_tokens, batch_size);
+    let token_setup_ms = elapsed_ms(token_setup_started_at);
 
     let needed_token_flags = if let Some(max) = max_batches {
         let mut flags = vec![false; total_tokens];
@@ -754,6 +800,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         vec![true; total_tokens]
     };
 
+    let suffix_hashes_started_at = profiling.then(Instant::now);
     let tokenizer_start = tokenizer.initial_state_id();
     let suffix_hashes_by_token: Vec<Option<TokenSuffixHashes>> = sorted_tokens
         .par_iter()
@@ -789,6 +836,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
             },
         )
         .collect();
+    let suffix_hashes_ms = elapsed_ms(suffix_hashes_started_at);
 
     let common_prefix_len = |a: &[u8], b: &[u8]| -> usize {
         let len = a.len().min(b.len());
@@ -820,6 +868,13 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     let mut stable_batches = 0usize;
     let mut tokens_tested = 0usize;
     let mut batches_processed = 0usize;
+    let mut candidate_state_visits = 0usize;
+    let mut state_hash_ms = 0.0;
+    let mut refine_ms = 0.0;
+    let mut live_token_walks = 0usize;
+    let mut bytes_walked = 0usize;
+    let mut finalizer_visits = 0usize;
+    let mut dead_first_byte_ranges = 0usize;
     let batch_scratch_pool = StateBatchScratchPool::default();
     for batch_indices in &batches {
         if active_indices.is_empty() {
@@ -876,6 +931,10 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         }
 
         let hash_state = |scratch: &mut StateBatchScratch, state_idx: usize| {
+                    let mut profile_live_tokens = 0usize;
+                    let mut profile_bytes_walked = 0usize;
+                    let mut profile_finalizer_visits = 0usize;
+                    let mut profile_dead_first_byte_ranges = 0usize;
                     let state = states[state_idx] as u32;
                     let mut hash_delta: u128 = 0;
                     let state_ct_base = (state as usize) * num_bc;
@@ -894,6 +953,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                         }
 
                         if compact_transitions[state_ct_base + byte_to_class[byte] as usize] == NONE_STATE {
+                            profile_dead_first_byte_ranges += 1;
                             let weight_sum =
                                 batch_weight_prefix[range_end].wrapping_sub(batch_weight_prefix[range_start]);
                             hash_delta = hash_delta
@@ -922,6 +982,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                         changes.clear();
 
                         for token_idx in range_start..range_end {
+                            profile_live_tokens += 1;
                             let global_token_idx = batch_indices[token_idx];
                             let token = batch_tokens[token_idx];
                             let mut prefix_len = if token_idx == range_start {
@@ -955,6 +1016,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                             if dead_at_depth.is_none() {
                                 let mut current = walk_frames.last().unwrap().state;
                                 for (offset, &byte) in token[prefix_len..].iter().enumerate() {
+                                    profile_bytes_walked += 1;
                                     if current == NONE_STATE {
                                         dead_at_depth = Some(prefix_len + offset);
                                         break;
@@ -973,6 +1035,8 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                     let position = prefix_len + offset + 1;
 
                                     if num_groups > 0 {
+                                        profile_finalizer_visits +=
+                                            dfa.states[current as usize].finalizers.len();
                                         for &gid in &dfa.states[current as usize].finalizers {
                                             if gid >= num_groups {
                                                 continue;
@@ -1000,20 +1064,21 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                 }
                             }
 
-                            let token_hash = if dead_at_depth.is_some() {
-                                hash_trellis_node_from_positions(
-                                    None,
-                                    positions,
-                                    active_bits,
-                                    token.len(),
+                            let end_state = (!dead_at_depth.is_some())
+                                .then(|| walk_frames.last().unwrap().state as usize);
+                            debug_assert_eq!(
+                                changes.is_empty(),
+                                !active_bits.iter().any(|&word| word != 0),
+                                "active terminal edges must correspond to pending walk changes",
+                            );
+                            let token_hash = if changes.is_empty() {
+                                hash_trellis_node_without_edges(
+                                    end_state,
                                     &future_group_hashes_by_context,
-                                    &follow_contexts,
-                                    suffix_hashes_by_token[global_token_idx].as_ref(),
                                 )
                             } else {
-                                let current = walk_frames.last().unwrap().state;
                                 hash_trellis_node_from_positions(
-                                    Some(current as usize),
+                                    end_state,
                                     positions,
                                     active_bits,
                                     token.len(),
@@ -1028,24 +1093,50 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                         }
                     }
 
+                    if profiling {
+                        scratch.profile_live_tokens += profile_live_tokens;
+                        scratch.profile_bytes_walked += profile_bytes_walked;
+                        scratch.profile_finalizer_visits += profile_finalizer_visits;
+                        scratch.profile_dead_first_byte_ranges += profile_dead_first_byte_ranges;
+                    }
                     (state_idx, hash_delta)
         };
 
-        let mut batch_hashes: Vec<(usize, u128)> = if rayon::current_num_threads() == 1 {
+        candidate_state_visits += active_indices.len();
+        let state_hash_started_at = profiling.then(Instant::now);
+        let (mut batch_hashes, batch_walk_counters): (Vec<(usize, u128)>, (usize, usize, usize, usize)) = if rayon::current_num_threads() == 1 {
             let mut scratch = StateBatchScratch::new(num_groups);
-            active_indices
+            let hashes = active_indices
                 .iter()
                 .map(|&state_idx| hash_state(&mut scratch, state_idx))
-                .collect()
+                .collect();
+            (
+                hashes,
+                (
+                    scratch.profile_live_tokens,
+                    scratch.profile_bytes_walked,
+                    scratch.profile_finalizer_visits,
+                    scratch.profile_dead_first_byte_ranges,
+                ),
+            )
         } else {
-            active_indices
+            (
+                active_indices
                 .par_iter()
                 .map_init(
                     || batch_scratch_pool.checkout(num_groups),
                     |lease, &state_idx| hash_state(lease.scratch_mut(), state_idx),
                 )
-                .collect()
+                .collect(),
+                (0, 0, 0, 0),
+            )
         };
+        live_token_walks += batch_walk_counters.0;
+        bytes_walked += batch_walk_counters.1;
+        finalizer_visits += batch_walk_counters.2;
+        dead_first_byte_ranges += batch_walk_counters.3;
+        state_hash_ms += elapsed_ms(state_hash_started_at);
+        let refine_started_at = profiling.then(Instant::now);
         batches_processed += 1;
         let previous_active_indices = std::mem::take(&mut active_indices);
         let all_active = previous_active_indices.len() == states.len();
@@ -1113,6 +1204,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                 reused_group_flags[gid] = false;
             }
         }
+        refine_ms += elapsed_ms(refine_started_at);
 
         let num_groups = group_sizes.len();
         active_indices.reserve(previous_active_indices.len());
@@ -1174,6 +1266,32 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         mapping[idx] = rep_for_group[gid];
     }
 
+    if profiling {
+        eprintln!(
+            "[glrmask/profile][state_equiv] states={} tokens={} groups={} byte_classes={} batches={} candidate_state_visits={} live_token_walks={} bytes_walked={} finalizer_visits={} dead_first_byte_ranges={} compact_transitions={} shared_base={} rep_confirmation={} transition_setup_ms={:.3} label_setup_ms={:.3} token_setup_ms={:.3} suffix_hashes_ms={:.3} state_hash_ms={:.3} refine_ms={:.3} total_ms={:.3}",
+            states.len(),
+            tokens.len(),
+            num_groups,
+            num_bc,
+            batches_processed,
+            candidate_state_visits,
+            live_token_walks,
+            bytes_walked,
+            finalizer_visits,
+            dead_first_byte_ranges,
+            use_compact,
+            compatible_shared_base.is_some(),
+            rep_only_confirmation,
+            transition_setup_ms,
+            label_setup_ms,
+            token_setup_ms,
+            suffix_hashes_ms,
+            state_hash_ms,
+            refine_ms,
+            elapsed_ms(total_started_at),
+        );
+    }
+
     mapping
 }
 
@@ -1195,6 +1313,29 @@ pub fn mapping_to_equivalence_classes(
 #[cfg(test)]
 mod state_batch_scratch_pool_tests {
     use super::*;
+
+    #[test]
+    fn empty_trellis_fast_path_matches_general_hash() {
+        let future_hashes = FutureGroupHashTable {
+            state_to_future_group: vec![0, 1],
+            hashes_by_context: vec![vec![0x1234, 0xABCD]],
+        };
+        let contexts = FollowContextTable::new(0, None);
+        for end_state in [None, Some(0), Some(1)] {
+            assert_eq!(
+                hash_trellis_node_without_edges(end_state, &future_hashes),
+                hash_trellis_node_from_positions(
+                    end_state,
+                    &[],
+                    &[],
+                    0,
+                    &future_hashes,
+                    &contexts,
+                    None,
+                ),
+            );
+        }
+    }
 
     #[test]
     fn recycled_scratch_can_be_scrubbed_before_next_walk() {
