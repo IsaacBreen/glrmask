@@ -2907,6 +2907,67 @@ mod shared_base_tests {
     }
 
     #[test]
+    fn prefiltered_view_needs_no_second_vocab_group_filter() {
+        let view = TokenizerView {
+            flat_dfa: sample_dfa(),
+        };
+        let active_groups = vec![true, false];
+        let filtered_view = TokenizerView {
+            flat_dfa: FlatDfa {
+                states: view
+                    .dfa()
+                    .states
+                    .iter()
+                    .map(|state| FlatDfaState {
+                        finalizers: state
+                            .finalizers
+                            .iter()
+                            .copied()
+                            .filter(|&group| active_groups[group])
+                            .collect(),
+                        possible_future_group_ids: state
+                            .possible_future_group_ids
+                            .iter()
+                            .copied()
+                            .filter(|&group| active_groups[group])
+                            .collect(),
+                    })
+                    .collect(),
+                start_state: view.dfa().start_state,
+                transitions: Arc::clone(&view.dfa().transitions),
+            },
+        };
+        let tokens: Vec<&[u8]> = vec![b"a", b"b", b"aa", b"ba"];
+        let initial_states = vec![0usize, 1, 2];
+        let disallowed = BTreeMap::<u32, BitSet>::new();
+
+        let filtering_in_analysis = find_vocab_equivalence_classes_with_group_filter(
+            &view,
+            &tokens,
+            &initial_states,
+            &disallowed,
+            None,
+            Some(&active_groups),
+            None,
+            None,
+            None,
+        );
+        let filtering_in_view = find_vocab_equivalence_classes_with_group_filter(
+            &filtered_view,
+            &tokens,
+            &initial_states,
+            &disallowed,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(filtering_in_view, filtering_in_analysis);
+    }
+
+    #[test]
     fn trie_target_aggregate_matches_dirty_mask_scan() {
         let mut scratch = Scratch::new(2, 3);
         reset_trie_target_aggregate(&mut scratch, 4);

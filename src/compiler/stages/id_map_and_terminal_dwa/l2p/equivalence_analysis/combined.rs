@@ -519,7 +519,9 @@ fn analyze_equivalences_impl(
         &final_state_representatives,
         effective_disallowed,
         Some(&byte_to_class),
-        active_groups,
+        // `tokenizer_view` was built with this exact active mask above, so
+        // vocab analysis must not filter its already-active labels again.
+        None,
         shared_vocab_dfa_cache,
         shared_analysis_dfa_cache.filter(|_| active_groups.is_none()),
         ignore_terminal,
