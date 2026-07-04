@@ -21,6 +21,7 @@ use super::nwa_builder::TerminalNwaTransportMode;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 
 const CHARACTERIZATION_DOMAIN: &[u8] =
@@ -2105,12 +2106,55 @@ impl TerminalInterchangeability {
         &self.active_representatives
     }
 
-    /// Per-terminal representative assignment: `representative_for[t]` is the
-    /// terminal whose scanner behavior absorbs `t` under interchangeability
-    /// (equal to `t` for representatives / identity terminals). Exposed for
-    /// diagnostic dumps.
-    pub(crate) fn representative_for(&self) -> &[TerminalID] {
-        &self.representative_for
+    /// Coalesce a grammar disallowed-follow table for the representative-labeled
+    /// equivalence phase, where every TI class member is observed only through
+    /// its representative.
+    ///
+    /// A representative-labeled follow edge `(repP, repS)` stands for *some*
+    /// member pair `(mP, mS)`, so it may only be treated as disallowed when
+    /// *every* member pair is disallowed in the original grammar table:
+    /// `coalesced[repP].contains(repS)` iff for all `mP in class(repP)` and
+    /// `mS in class(repS)`, `original[mP].contains(mS)`. This is the follow
+    /// analogue of hiding members behind representatives: without it the
+    /// representative inherits the *union* of member restrictions and wrongly
+    /// prunes a continuation (e.g. `CLASS` after `SPACE`) that is legal for one
+    /// member but not the representative. The original (per-member) table must
+    /// still be applied to the transport-expanded DWA afterwards.
+    pub(crate) fn coalesced_disallowed_follows(
+        &self,
+        original: &BTreeMap<u32, BitSet>,
+        num_terminals: usize,
+    ) -> BTreeMap<u32, BitSet> {
+        let mut members_of: BTreeMap<TerminalID, Vec<TerminalID>> = BTreeMap::new();
+        for (terminal, &representative) in self.representative_for.iter().enumerate() {
+            members_of
+                .entry(representative)
+                .or_default()
+                .push(terminal as TerminalID);
+        }
+
+        let disallowed_pair = |predecessor: TerminalID, successor: TerminalID| -> bool {
+            original
+                .get(&(predecessor as u32))
+                .is_some_and(|bits| bits.contains(successor as usize))
+        };
+
+        let mut coalesced = BTreeMap::new();
+        for (&representative_predecessor, members_predecessor) in &members_of {
+            let mut bits = BitSet::new(num_terminals);
+            for (&representative_successor, members_successor) in &members_of {
+                let every_pair_disallowed = members_predecessor.iter().all(|&predecessor| {
+                    members_successor
+                        .iter()
+                        .all(|&successor| disallowed_pair(predecessor, successor))
+                });
+                if every_pair_disallowed {
+                    bits.set(representative_successor as usize);
+                }
+            }
+            coalesced.insert(representative_predecessor as u32, bits);
+        }
+        coalesced
     }
 
     /// Scanner metadata remains visible for every raw terminal. Only edges for

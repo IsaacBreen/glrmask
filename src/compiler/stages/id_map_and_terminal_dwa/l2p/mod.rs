@@ -203,6 +203,20 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         .then(|| terminal_interchangeability.terminal_nwa_transport_modes())
         .flatten();
     let analysis_active_terminals = terminal_interchangeability.active_representatives();
+    // Equivalence analysis observes only TI representatives, so it must use a
+    // follow table coalesced over each class: a representative-labeled follow is
+    // disallowed only when disallowed for every member. Otherwise the
+    // representative inherits the union of member restrictions and equivalence
+    // wrongly collapses a state whose only distinguishing continuation is a
+    // member terminal (e.g. CLASS after SPACE), merging tokens that differ. The
+    // original per-member table is still applied to the transport-expanded DWA.
+    let coalesced_disallowed_follows = reference_terminal_expansion.then(|| {
+        terminal_interchangeability
+            .coalesced_disallowed_follows(disallowed_follows, grammar.num_terminals as usize)
+    });
+    let equivalence_disallowed_follows = coalesced_disallowed_follows
+        .as_ref()
+        .unwrap_or(disallowed_follows);
     let terminal_nwa_visible_output_labels =
         terminal_interchangeability.visible_output_raw_labels();
     let num_analysis_active_terminals = analysis_active_terminals
@@ -253,54 +267,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // equivalence observations to this L2P partition's active terminals. With
     // TI enabled this is the representative mask, so all three equivalence
     // passes ignore class members replaced by their representatives.
-    if std::env::var_os("GLRMASK_TI_DUMP_VOCAB_INPUTS").is_some_and(|v| v == "1") {
-        let mut out = String::new();
-        out.push_str("===== GLRMASK_TI_DUMP_TERMINALS =====\n");
-        out.push_str(&format!("partition_label = {}\n", partition_label));
-        out.push_str(&format!(
-            "reference_terminal_expansion (TI active) = {}\n",
-            reference_terminal_expansion
-        ));
-        let names: Vec<String> = (0..active_terminals.len() as TerminalID)
-            .map(|t| grammar.terminal_display_name(t).to_string())
-            .collect();
-        out.push_str("terminals (id: name  full_active / observed-by-equivalence):\n");
-        for t in 0..active_terminals.len() {
-            let full = active_terminals[t];
-            let observed = analysis_active_terminals.get(t).copied().unwrap_or(false);
-            let rep = terminal_interchangeability.representative_for()[t];
-            let marker = if rep as usize == t { "" } else { " (member)" };
-            out.push_str(&format!(
-                "  {t}: {}  full_active={full} observed={observed} representative={} ({}){marker}\n",
-                names[t],
-                rep,
-                names.get(rep as usize).map(String::as_str).unwrap_or("?"),
-            ));
-        }
-        // TI classes: representative -> members
-        let mut classes: std::collections::BTreeMap<TerminalID, Vec<TerminalID>> =
-            std::collections::BTreeMap::new();
-        for (t, &rep) in terminal_interchangeability.representative_for().iter().enumerate() {
-            classes.entry(rep).or_default().push(t as TerminalID);
-        }
-        out.push_str("TI classes (representative -> members):\n");
-        for (rep, members) in &classes {
-            if members.len() > 1 || *rep as usize != members[0] as usize {
-                out.push_str(&format!(
-                    "  rep {rep} ({}) <- {members:?}\n",
-                    names.get(*rep as usize).map(String::as_str).unwrap_or("?")
-                ));
-            }
-        }
-        out.push_str("===== END GLRMASK_TI_DUMP_TERMINALS =====\n");
-        eprintln!("{out}");
-    }
     let (mut simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
             tokenizer_for_build,
             vocab,
-            disallowed_follows,
+            equivalence_disallowed_follows,
             ignore_terminal,
             Some(analysis_active_terminals),
             equivalence_vocab_dfa_cache,
@@ -702,12 +674,15 @@ mod ti_mre_tests {
     }
 
     #[test]
-    #[ignore = "known TI correctness failure: representative-only vocabulary equivalence loses a member continuation"]
     fn representative_only_vocab_equivalence_mre() {
         // `b" _"` completes SPACE then is a live prefix of CLASS. With TI
-        // enabled, CLASS is hidden behind FROM during equivalence analysis,
-        // causing it to be merged with `b" !"`; later terminal expansion
-        // cannot recover the discarded vocabulary distinction.
+        // enabled, CLASS is hidden behind representative FROM during equivalence
+        // analysis. Because FROM cannot follow SPACE but CLASS can, the
+        // representative-labeled follow table must be COALESCED (a follow is
+        // disallowed for the class only if disallowed for every member);
+        // otherwise equivalence prunes the FROM-class continuation, merges
+        // `b" !"`/`b" _"`, and the completed terminal DWA underaccepts
+        // `[SPACE, CLASS]`. Regression guard for that coalescing fix.
         let grammar = r#"
 start S;
 t V ::= /.+/;
