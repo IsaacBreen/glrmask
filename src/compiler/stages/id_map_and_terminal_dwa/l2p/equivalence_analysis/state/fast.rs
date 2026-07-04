@@ -233,12 +233,23 @@ struct TokenSuffixHashes {
 struct FutureGroupHashTable {
     state_to_future_group: Vec<u32>,
     hashes_by_context: Vec<Vec<u128>>,
+    /// Exact root-context trellis hashes for observations with no terminal
+    /// edges, indexed directly by raw lexer state.
+    empty_root_hash_by_state: Vec<u128>,
+    dead_empty_root_hash: u128,
 }
 
 impl FutureGroupHashTable {
     #[inline(always)]
     fn get(&self, context: usize, state: usize) -> u128 {
         self.hashes_by_context[context][self.state_to_future_group[state] as usize]
+    }
+
+    #[inline(always)]
+    fn empty_root_hash(&self, state: Option<usize>) -> u128 {
+        state
+            .and_then(|state| self.empty_root_hash_by_state.get(state).copied())
+            .unwrap_or(self.dead_empty_root_hash)
     }
 }
 
@@ -269,7 +280,7 @@ fn build_future_group_hashes_by_context(
         state_to_future_group.push(group_id);
     }
 
-    let hashes_by_context = (0..follow_contexts.num_contexts())
+    let hashes_by_context: Vec<Vec<u128>> = (0..follow_contexts.num_contexts())
         .map(|context| {
             let disallowed = &follow_contexts.disallowed_by_context[context];
             unique_future_groups
@@ -285,9 +296,16 @@ fn build_future_group_hashes_by_context(
         })
         .collect();
 
+    let empty_root_hash_by_state = state_to_future_group
+        .iter()
+        .map(|&group| hash_empty_trellis_root(hashes_by_context[0][group as usize]))
+        .collect();
+
     FutureGroupHashTable {
         state_to_future_group,
         hashes_by_context,
+        empty_root_hash_by_state,
+        dead_empty_root_hash: hash_empty_trellis_dead_root(),
     }
 }
 
@@ -438,26 +456,33 @@ fn hash_trellis_node_from_positions(
     mix_tagged(hash, EDGE_COUNT_TAG, edge_count as u128)
 }
 
+#[inline(always)]
+fn hash_empty_trellis_root(future_hash: u128) -> u128 {
+    const EDGE_COUNT_TAG: u128 = 0xEDEC_EDEC_EDEC_EDEC;
+    let hash = mix_tagged(
+        0x51A7_E000_0000_0001,
+        0xF070_F070_F070_F070,
+        future_hash,
+    );
+    mix_tagged(hash, EDGE_COUNT_TAG, 0)
+}
+
+#[inline(always)]
+fn hash_empty_trellis_dead_root() -> u128 {
+    const DEAD_NODE_TAG: u128 = 0xDEAD_DEAD_DEAD_DEAD;
+    const EDGE_COUNT_TAG: u128 = 0xEDEC_EDEC_EDEC_EDEC;
+    mix_tagged(mix_u128(DEAD_NODE_TAG), EDGE_COUNT_TAG, 0)
+}
+
 /// Exact trellis-node hash for an observation with no terminal edges. The
 /// state walk reaches this common case without scanning the sparse active-edge
-/// bitset; it is byte-for-byte the `edge_count == 0` path above.
+/// bitset or rebuilding the state-local root hash.
 #[inline(always)]
 fn hash_trellis_node_without_edges(
     end_state: Option<usize>,
     future_group_hashes: &FutureGroupHashTable,
 ) -> u128 {
-    const DEAD_NODE_TAG: u128 = 0xDEAD_DEAD_DEAD_DEAD;
-    const EDGE_COUNT_TAG: u128 = 0xEDEC_EDEC_EDEC_EDEC;
-
-    let hash = match end_state {
-        Some(state) => mix_tagged(
-            0x51A7_E000_0000_0001,
-            0xF070_F070_F070_F070,
-            future_group_hashes.get(0, state),
-        ),
-        None => mix_u128(DEAD_NODE_TAG),
-    };
-    mix_tagged(hash, EDGE_COUNT_TAG, 0)
+    future_group_hashes.empty_root_hash(end_state)
 }
 
 fn build_strided_batches(total_tokens: usize, target_batch_size: usize) -> Vec<Vec<usize>> {
@@ -1320,6 +1345,11 @@ mod state_batch_scratch_pool_tests {
         let future_hashes = FutureGroupHashTable {
             state_to_future_group: vec![0, 1],
             hashes_by_context: vec![vec![0x1234, 0xABCD]],
+            empty_root_hash_by_state: vec![
+                hash_empty_trellis_root(0x1234),
+                hash_empty_trellis_root(0xABCD),
+            ],
+            dead_empty_root_hash: hash_empty_trellis_dead_root(),
         };
         let contexts = FollowContextTable::new(0, None);
         for end_state in [None, Some(0), Some(1)] {
