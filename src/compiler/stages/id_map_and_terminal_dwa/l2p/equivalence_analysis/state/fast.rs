@@ -875,16 +875,11 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
             batch_nonempty_first_bytes.push(byte);
         }
 
-        let mut batch_hashes: Vec<(usize, u128)> = active_indices
-            .par_iter()
-            .map_init(
-                || batch_scratch_pool.checkout(num_groups),
-                |lease, &state_idx| {
+        let hash_state = |scratch: &mut StateBatchScratch, state_idx: usize| {
                     let state = states[state_idx] as u32;
                     let mut hash_delta: u128 = 0;
                     let state_ct_base = (state as usize) * num_bc;
 
-                    let scratch = lease.scratch_mut();
                     let live_ranges = &mut scratch.live_ranges;
                     live_ranges.clear();
 
@@ -1034,9 +1029,23 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                     }
 
                     (state_idx, hash_delta)
-                },
-            )
-            .collect();
+        };
+
+        let mut batch_hashes: Vec<(usize, u128)> = if rayon::current_num_threads() == 1 {
+            let mut scratch = StateBatchScratch::new(num_groups);
+            active_indices
+                .iter()
+                .map(|&state_idx| hash_state(&mut scratch, state_idx))
+                .collect()
+        } else {
+            active_indices
+                .par_iter()
+                .map_init(
+                    || batch_scratch_pool.checkout(num_groups),
+                    |lease, &state_idx| hash_state(lease.scratch_mut(), state_idx),
+                )
+                .collect()
+        };
         batches_processed += 1;
         let previous_active_indices = std::mem::take(&mut active_indices);
         let all_active = previous_active_indices.len() == states.len();
