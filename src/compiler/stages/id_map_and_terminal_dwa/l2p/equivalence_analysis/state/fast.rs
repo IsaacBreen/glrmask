@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 
 use super::super::compat::{FlatDfaState, TokenizerView};
 use super::super::vocab::fast::SharedVocabDfaBase;
@@ -175,7 +176,7 @@ impl FollowContextTable {
 
         let mut gid_to_context = vec![0; num_groups];
         let mut disallowed_by_context = vec![root];
-        let mut seen: std::collections::HashMap<BitSet, usize> = std::collections::HashMap::new();
+        let mut seen: FxHashMap<BitSet, usize> = FxHashMap::default();
 
         for gid in 0..num_groups {
             let bits = disallowed_follows
@@ -255,7 +256,7 @@ fn build_future_group_hashes_by_context(
     debug_assert!(dfa_states.len() < u32::MAX as usize);
     let mut state_to_future_group = Vec::with_capacity(dfa_states.len());
     let mut unique_future_groups = Vec::<&[usize]>::new();
-    let mut group_to_id = std::collections::HashMap::<&[usize], u32>::new();
+    let mut group_to_id = FxHashMap::<&[usize], u32>::default();
     group_to_id.reserve(dfa_states.len() / 2);
 
     for state in dfa_states {
