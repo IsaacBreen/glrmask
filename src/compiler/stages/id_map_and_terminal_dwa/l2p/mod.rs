@@ -203,6 +203,20 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         .then(|| terminal_interchangeability.terminal_nwa_transport_modes())
         .flatten();
     let analysis_active_terminals = terminal_interchangeability.active_representatives();
+    // Equivalence analysis observes only TI representatives, so it must use a
+    // follow table coalesced over each class: a representative-labeled follow is
+    // disallowed only when disallowed for every member. Otherwise the
+    // representative inherits the union of member restrictions and equivalence
+    // wrongly collapses a state whose only distinguishing continuation is a
+    // member terminal (e.g. CLASS after SPACE), merging tokens that differ. The
+    // original per-member table is still applied to the transport-expanded DWA.
+    let coalesced_disallowed_follows = reference_terminal_expansion.then(|| {
+        terminal_interchangeability
+            .coalesced_disallowed_follows(disallowed_follows, grammar.num_terminals as usize)
+    });
+    let equivalence_disallowed_follows = coalesced_disallowed_follows
+        .as_ref()
+        .unwrap_or(disallowed_follows);
     let terminal_nwa_visible_output_labels =
         terminal_interchangeability.visible_output_raw_labels();
     let num_analysis_active_terminals = analysis_active_terminals
@@ -258,7 +272,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             partition_label,
             tokenizer_for_build,
             vocab,
-            disallowed_follows,
+            equivalence_disallowed_follows,
             ignore_terminal,
             Some(analysis_active_terminals),
             equivalence_vocab_dfa_cache,
@@ -621,4 +635,67 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     }
 
     Some(output)
+}
+
+#[cfg(test)]
+mod ti_mre_tests {
+    use std::{env, ffi::OsString, sync::Mutex};
+
+    use crate::{Constraint, Vocab};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = env::var_os(key);
+            unsafe {
+                env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => unsafe {
+                    env::set_var(self.key, value);
+                },
+                None => unsafe {
+                    env::remove_var(self.key);
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn representative_only_vocab_equivalence_mre() {
+        // `b" _"` completes SPACE then is a live prefix of CLASS. With TI
+        // enabled, CLASS is hidden behind representative FROM during equivalence
+        // analysis. Because FROM cannot follow SPACE but CLASS can, the
+        // representative-labeled follow table must be COALESCED (a follow is
+        // disallowed for the class only if disallowed for every member);
+        // otherwise equivalence prunes the FROM-class continuation, merges
+        // `b" !"`/`b" _"`, and the completed terminal DWA underaccepts
+        // `[SPACE, CLASS]`. Regression guard for that coalescing fix.
+        let grammar = r#"
+start S;
+t V ::= /.+/;
+t SPACE ::= " ";
+t FROM ::= /_a_/;
+t CLASS ::= /_b_/;
+nt S ::= FROM V | SPACE V SPACE CLASS;
+"#;
+        let vocab = Vocab::new(vec![(0, b" !".to_vec()), (1, b" _".to_vec())], None);
+
+        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+        Constraint::from_glrm_grammar(grammar, &vocab)
+            .expect("TI must preserve the completed terminal-DWA language");
+    }
 }
