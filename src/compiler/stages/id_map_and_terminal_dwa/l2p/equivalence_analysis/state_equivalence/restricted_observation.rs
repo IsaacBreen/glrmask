@@ -269,7 +269,7 @@ pub(crate) fn compute_state_map(
     for (slot, &byte) in active_bytes.iter().enumerate() {
         active_byte_slots[byte as usize] = slot as u16;
     }
-    let mut observed_targets = vec![0u64; num_candidates * observation_width];
+    let mut observed_targets = vec![0u32; num_candidates * observation_width];
     let mut signatures = vec![0u64; num_candidates * signature_width];
     let mut signature_fingerprints = vec![0u64; num_candidates];
     // Keep every observed source-slot edge. The refinement cache below updates
@@ -288,8 +288,8 @@ pub(crate) fn compute_state_map(
                 let target_candidate = raw_to_candidate[target as usize];
                 debug_assert_ne!(target_candidate, NO_CANDIDATE);
                 let labels = target_labels[target as usize] as u64 + 1;
-                let observation = (labels << 32) | (target_candidate as u64 + 1);
-                observed_targets[observation_start + slot] = observation;
+                debug_assert!(target_candidate < u32::MAX as usize);
+                observed_targets[observation_start + slot] = target_candidate as u32 + 1;
                 let signature_word = (labels << 32) | 1;
                 signatures[observation_start + slot] = signature_word;
                 signature_fingerprints[candidate] ^=
@@ -308,8 +308,7 @@ pub(crate) fn compute_state_map(
                 let slot = slot as usize;
                 let target_candidate = target as usize;
                 let labels = target_labels[target_candidate] as u64 + 1;
-                let observation = (labels << 32) | (target_candidate as u64 + 1);
-                observed_targets[observation_start + slot] = observation;
+                observed_targets[observation_start + slot] = target as u32 + 1;
                 let signature_word = (labels << 32) | 1;
                 signatures[observation_start + slot] = signature_word;
                 signature_fingerprints[candidate] ^=
@@ -336,7 +335,7 @@ pub(crate) fn compute_state_map(
             .enumerate()
         {
             if observation != 0 {
-                let target = (observation as u32 - 1) as usize;
+                let target = (observation - 1) as usize;
                 let edge = reverse_cursor[target];
                 reverse_edges[edge] = (source as u64) << 8 | slot as u64;
                 reverse_cursor[target] += 1;
