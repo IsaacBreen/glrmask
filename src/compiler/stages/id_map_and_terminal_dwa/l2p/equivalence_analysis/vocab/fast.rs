@@ -3,13 +3,13 @@
 //! Each token is classified by its match positions, suffix structure, and end
 //! states across all tokenizer starts.
 
-use super::super::compat::{compute_byte_classes, FlatTransitionCache, TokenizerView};
+use super::super::compat::{compute_byte_classes, FlatDfa, FlatTransitionCache, TokenizerView};
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
 use smallvec::SmallVec;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -2358,6 +2358,111 @@ const COMPACT_DFA_MAX_RATIO: f64 = 0.85;
 const COMPACT_DFA_MIN_STATES: usize = 500;
 /// Minimum work estimate (states × tokens) to justify the compaction overhead.
 const COMPACT_DFA_MIN_WORK: usize = 10_000_000;
+const INPUT_VIEW_COMPACT_MIN_STATES: usize = 512;
+const INPUT_VIEW_COMPACT_MAX_RATIO: f64 = 0.85;
+const INPUT_VIEW_COMPACT_MAX_TOKENS: usize = 16;
+
+/// Restrict a tokenizer view to exactly the states reachable from the state
+/// representatives and lexer start along bytes that appear in `strings`.
+///
+/// This happens before building the analysis DFA, rather than after it.  The
+/// finite-vocabulary equivalence pass cannot observe any omitted transition:
+/// every token walk starts from one of these roots and consumes only these
+/// bytes.  Keeping the start root also preserves the suffix observations used
+/// by the trellis hash.
+fn compact_tokenizer_view_for_tokens<S: AsRef<[u8]>>(
+    tokenizer: &TokenizerView,
+    initial_states: &[usize],
+    strings: &[S],
+) -> Option<(TokenizerView, Vec<usize>, Vec<usize>)> {
+    let source = tokenizer.dfa();
+    if source.states.len() < INPUT_VIEW_COMPACT_MIN_STATES || strings.is_empty() {
+        return None;
+    }
+
+    let mut relevant_bytes = [false; 256];
+    for string in strings {
+        for &byte in string.as_ref() {
+            relevant_bytes[byte as usize] = true;
+        }
+    }
+    if !relevant_bytes.iter().any(|&used| used) {
+        return None;
+    }
+
+    let mut reachable = vec![false; source.states.len()];
+    let mut queue = VecDeque::new();
+    let visit = |state: usize, reachable: &mut [bool], queue: &mut VecDeque<usize>| {
+        if state < reachable.len() && !reachable[state] {
+            reachable[state] = true;
+            queue.push_back(state);
+        }
+    };
+    visit(source.start_state, &mut reachable, &mut queue);
+    for &state in initial_states {
+        visit(state, &mut reachable, &mut queue);
+    }
+    while let Some(state) = queue.pop_front() {
+        for (byte, &used) in relevant_bytes.iter().enumerate() {
+            if !used {
+                continue;
+            }
+            let target = source.trans(state, byte);
+            if target != NONE {
+                visit(target as usize, &mut reachable, &mut queue);
+            }
+        }
+    }
+
+    let reachable_count = reachable.iter().filter(|&&state| state).count();
+    if reachable_count as f64 / source.states.len() as f64 > INPUT_VIEW_COMPACT_MAX_RATIO {
+        return None;
+    }
+
+    let mut original_to_compact = vec![NONE; source.states.len()];
+    let mut compact_to_original = Vec::with_capacity(reachable_count);
+    for (original, &is_reachable) in reachable.iter().enumerate() {
+        if is_reachable {
+            original_to_compact[original] = compact_to_original.len() as u32;
+            compact_to_original.push(original);
+        }
+    }
+
+    let mut transitions = vec![NONE; reachable_count * 256];
+    let mut states = Vec::with_capacity(reachable_count);
+    for (compact, &original) in compact_to_original.iter().enumerate() {
+        states.push(source.states[original].clone());
+        let compact_base = compact * 256;
+        for (byte, &used) in relevant_bytes.iter().enumerate() {
+            if !used {
+                continue;
+            }
+            let target = source.trans(original, byte);
+            if target != NONE {
+                let mapped = original_to_compact[target as usize];
+                debug_assert_ne!(mapped, NONE, "reachable token edge omitted from compact view");
+                transitions[compact_base + byte] = mapped;
+            }
+        }
+    }
+
+    let compact_initial = initial_states
+        .iter()
+        .map(|&state| original_to_compact[state] as usize)
+        .collect();
+    let start_state = original_to_compact[source.start_state] as usize;
+    Some((
+        TokenizerView {
+            flat_dfa: FlatDfa {
+                states,
+                start_state,
+                transitions: Arc::from(transitions),
+            },
+        },
+        compact_initial,
+        compact_to_original,
+    ))
+}
 
 /// Build a compact DFA containing only states reachable from `initial_states`
 /// via byte classes actually used by the partition's tokens.  Returns the
@@ -2511,15 +2616,33 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
 
     let total_started_at = profiling.then(Instant::now);
     let build_dfa_started_at = Instant::now();
+    let input_compacted = if shared_analysis_dfa_cache.is_none()
+        && shared_cache.is_none()
+        && active_groups.is_none()
+        && strings.len() <= INPUT_VIEW_COMPACT_MAX_TOKENS
+    {
+        compact_tokenizer_view_for_tokens(tokenizer, initial_states, strings)
+    } else {
+        None
+    };
+    let (tokenizer_for_dfa, initial_states_for_dfa, input_compact_to_original): (
+        &TokenizerView,
+        &[usize],
+        Option<&Vec<usize>>,
+    ) = if let Some((ref compact_view, ref compact_initial, ref compact_to_original)) = input_compacted {
+        (compact_view, compact_initial, Some(compact_to_original))
+    } else {
+        (tokenizer, initial_states, None)
+    };
     let dfa = if let Some(cache) = shared_analysis_dfa_cache {
         let key = AnalysisDfaCacheKey::for_analysis_view(
-            tokenizer,
+            tokenizer_for_dfa,
             active_groups,
             disallowed_follows,
         );
         cache.get_or_init(key, || {
             build_dfa_with_group_filter(
-                tokenizer,
+                tokenizer_for_dfa,
                 disallowed_follows,
                 byte_to_class,
                 active_groups,
@@ -2528,9 +2651,13 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
         })
     } else {
         Arc::new(build_dfa_with_group_filter(
-            tokenizer,
+            tokenizer_for_dfa,
             disallowed_follows,
-            byte_to_class,
+            if input_compact_to_original.is_some() {
+                None
+            } else {
+                byte_to_class
+            },
             active_groups,
             shared_cache,
         ))
@@ -2541,12 +2668,12 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     // partition's token bytes.  This can dramatically shrink the transition
     // table (e.g. 77260 → 36598 for p0 of o62058) improving cache locality.
     let compact_dfa_started_at = profiling.then(Instant::now);
-    let compacted = compact_dfa_for_tokens(dfa.as_ref(), initial_states, strings);
+    let compacted = compact_dfa_for_tokens(dfa.as_ref(), initial_states_for_dfa, strings);
     let compact_dfa_ms = elapsed_ms(compact_dfa_started_at);
     let (dfa_ref, initial_states_ref, compact_to_original): (&Dfa, &[usize], Option<&Vec<usize>>) = if let Some((ref cdfa, ref cstates, ref compact_to_original)) = compacted {
         (cdfa, cstates, Some(compact_to_original))
     } else {
-        (&dfa, initial_states, None)
+        (&dfa, initial_states_for_dfa, None)
     };
     let compacted_states = compact_to_original.map_or(dfa.num_states, |states| states.len());
     let num_tokens = strings.len();
@@ -2588,7 +2715,17 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     let ordered_original_states = if let Some(compact_to_original) = compact_to_original {
         ordered_states
             .iter()
-            .map(|&state| compact_to_original[state])
+            .map(|&state| {
+                let input_state = compact_to_original[state];
+                input_compact_to_original
+                    .map(|source| source[input_state])
+                    .unwrap_or(input_state)
+            })
+            .collect::<Vec<_>>()
+    } else if let Some(input_compact_to_original) = input_compact_to_original {
+        ordered_states
+            .iter()
+            .map(|&state| input_compact_to_original[state])
             .collect::<Vec<_>>()
     } else {
         ordered_states.clone()
@@ -2930,6 +3067,53 @@ mod shared_base_tests {
             start_state: 0,
             transitions: Arc::from(transitions),
         }
+    }
+
+    fn padded_sample_dfa() -> FlatDfa {
+        let mut dfa = sample_dfa();
+        let target_state_count = 600;
+        dfa.states.resize_with(target_state_count, || FlatDfaState {
+            finalizers: Vec::new(),
+            possible_future_group_ids: Vec::new(),
+        });
+        let mut transitions = dfa.transitions.to_vec();
+        transitions.resize(target_state_count * 256, u32::MAX);
+        dfa.transitions = Arc::from(transitions);
+        dfa
+    }
+
+    #[test]
+    fn tiny_vocab_input_compaction_matches_uncompacted_analysis() {
+        let view = TokenizerView {
+            flat_dfa: padded_sample_dfa(),
+        };
+        let tokens: Vec<&[u8]> = vec![b"a", b"b", b"aa", b"ba"];
+        let initial_states = vec![0usize, 1, 2];
+        let disallowed = BTreeMap::<u32, BitSet>::new();
+
+        let compacted = find_vocab_equivalence_classes_with_group_filter(
+            &view,
+            &tokens,
+            &initial_states,
+            &disallowed,
+            None,
+            None,
+            None,
+            None,
+        );
+        let uncached_base = SharedVocabDfaCache::default();
+        let uncompacted = find_vocab_equivalence_classes_with_group_filter(
+            &view,
+            &tokens,
+            &initial_states,
+            &disallowed,
+            None,
+            None,
+            Some(&uncached_base),
+            None,
+        );
+
+        assert_eq!(compacted, uncompacted);
     }
 
     #[test]

@@ -294,6 +294,8 @@ fn should_skip_max_length_for_partition(
 
 const EXACT_REP_CONFIRMATION_MIN_STATES: usize = 2_000;
 const EXACT_REP_CONFIRMATION_MIN_TOKENS: usize = 200;
+const RAW_QUOTIENT_TINY_VOCAB_MAX_TOKENS: usize = 16;
+const RAW_QUOTIENT_TINY_VOCAB_MAX_BYTES: usize = 64;
 
 fn token_length_stats(tokens: &[&[u8]]) -> TokenLengthStats {
     let mut stats = TokenLengthStats {
@@ -429,14 +431,24 @@ fn try_analyze_equivalences_with_raw_quotient(
     }
     let active_byte_count = raw_relevant_bytes.iter().filter(|&&active| active).count();
     let projected_by_global = prepared.initial_states.len() < tokenizer.num_states() as usize;
-    if should_skip_max_length_for_partition(
+    let skip_raw_quotient = should_skip_max_length_for_partition(
         partition_label,
         prepared.initial_states.len(),
         projected_by_global,
         direct_token_bytes,
         max_token_len,
         active_byte_count,
-    ) {
+    );
+    // The generic route still performs restricted observation, but for a tiny
+    // local vocabulary it then keeps the full raw analysis DFA alive for the
+    // exact state and token phases.  Materializing the exact restricted raw
+    // quotient is cheaper in that regime: it avoids the 18k-state shared-base
+    // setup and lets both remaining phases operate on the quotient.  Keep the
+    // bound deliberately narrow; larger short-token partitions (notably p7)
+    // can retain too much raw topology for this to win.
+    let tiny_raw_quotient = prepared.token_bytes.len() <= RAW_QUOTIENT_TINY_VOCAB_MAX_TOKENS
+        && direct_token_bytes <= RAW_QUOTIENT_TINY_VOCAB_MAX_BYTES;
+    if skip_raw_quotient && !tiny_raw_quotient {
         return None;
     }
 
