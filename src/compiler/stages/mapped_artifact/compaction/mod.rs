@@ -1472,12 +1472,15 @@ fn permute_weight_with_general_tsid_remap(
     precomputed_token_remaps: &TokenRemapCache,
     fallback_token_cache: &TokenRemapCache,
 ) -> Weight {
-    let mut tokens_by_new_tsid = vec![None::<RangeSetBlaze<u32>>; perm_context.new_tsid_count];
-
+    // A non-bijective TSID map can collide source coordinates, but each weight
+    // normally covers only a sparse set of permutation runs. Collect those
+    // point contributions and use Weight's exact sorted reducer instead of
+    // clearing a dense output slot for every destination TSID per weight.
+    let mut entries = Vec::<(u32, SharedTokenSet)>::new();
     for (tsid_range, token_set) in weight.0.range_values() {
         let token_set_ptr = Arc::as_ptr(token_set) as usize;
         let mapped_tokens = if perm_context.token_perm_is_identity {
-            (**token_set).clone()
+            Arc::clone(token_set)
         } else {
             lookup_permuted_token_set(
                 token_set,
@@ -1486,25 +1489,17 @@ fn permute_weight_with_general_tsid_remap(
                 precomputed_token_remaps,
                 fallback_token_cache,
             )
-            .as_ref()
-            .clone()
         };
-
         for run in overlapping_perm_runs(
             &perm_context.tsid_runs,
             *tsid_range.start(),
             *tsid_range.end(),
         ) {
-            let new_tsid = run.mapped;
-            let slot = &mut tokens_by_new_tsid[new_tsid as usize];
-            match slot {
-                Some(existing) => *existing |= mapped_tokens.clone(),
-                None => *slot = Some(mapped_tokens.clone()),
-            }
+            entries.push((run.mapped, Arc::clone(&mapped_tokens)));
         }
     }
-
-    finalize_weight_map(build_weight_map_from_tsid_tokens(tokens_by_new_tsid))
+    entries.sort_unstable_by_key(|(tsid, _)| *tsid);
+    Weight::union_sorted_point_entries(entries)
 }
 
 fn lookup_permuted_token_set(

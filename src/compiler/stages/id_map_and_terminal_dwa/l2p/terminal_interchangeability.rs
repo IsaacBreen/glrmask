@@ -3627,9 +3627,79 @@ impl<'a> PostDwaWeightLifter<'a> {
             .map(|&source| Self::core_coordinate(core_state_map, source))
             .collect();
         let mut mode_deviations = vec![Vec::new(); modes.len()];
-
+        let mut sparse_mode_ready = vec![false; modes.len()];
+        let mut direct_modes_by_default = FxHashMap::<(usize, usize), Vec<usize>>::default();
         for &mode_index in active_mode_indices {
             if mode_index == 0 {
+                continue;
+            }
+            if let Some(default_key) = modes[mode_index]
+                .scanner_state_for_original
+                .direct_quotient_default_key()
+            {
+                direct_modes_by_default
+                    .entry(default_key)
+                    .or_default()
+                    .push(mode_index);
+            }
+        }
+
+        // A direct quotient has one shared default representative per source
+        // class and only sparse member-specific class deviations. Verify that
+        // the shared default preserves every final coordinate before using the
+        // deviation-only path; all other transport shapes retain the full scan.
+        for mode_indices in direct_modes_by_default.into_values() {
+            let domain = &modes[mode_indices[0]].scanner_state_for_original;
+            let default_preserves_ordinary = final_sources
+                .iter()
+                .enumerate()
+                .all(|(final_tsid, &source)| {
+                    let source_class = domain.innermost_source_class(source);
+                    Self::core_coordinate(
+                        core_state_map,
+                        domain.innermost_source_representative(source_class),
+                    ) == ordinary_coordinates[final_tsid]
+                });
+            if !default_preserves_ordinary {
+                continue;
+            }
+
+            let mut final_entries_by_source_class =
+                vec![Vec::<(u32, u32)>::new(); domain.innermost_source_class_count()];
+            for (final_tsid, &source) in final_sources.iter().enumerate() {
+                final_entries_by_source_class[domain.innermost_source_class(source)].push((
+                    final_tsid as u32,
+                    ordinary_coordinates[final_tsid],
+                ));
+            }
+            for mode_index in mode_indices {
+                let deviations = &mut mode_deviations[mode_index];
+                for &(input_class, output_class) in modes[mode_index]
+                    .scanner_state_for_original
+                    .quotient_deviations()
+                    .expect("direct quotient transport must expose deviations")
+                {
+                    let Some(entries) = final_entries_by_source_class.get(input_class as usize) else {
+                        continue;
+                    };
+                    let coordinate = Self::core_coordinate(
+                        core_state_map,
+                        domain.innermost_source_representative(output_class as usize),
+                    );
+                    deviations.extend(entries.iter().filter_map(
+                        |&(final_tsid, ordinary_coordinate)| {
+                            (coordinate != ordinary_coordinate)
+                                .then_some((final_tsid, coordinate))
+                        },
+                    ));
+                }
+                deviations.sort_unstable_by_key(|&(final_tsid, _)| final_tsid);
+                sparse_mode_ready[mode_index] = true;
+            }
+        }
+
+        for &mode_index in active_mode_indices {
+            if mode_index == 0 || sparse_mode_ready[mode_index] {
                 continue;
             }
             let mode = &modes[mode_index];
@@ -3639,11 +3709,33 @@ impl<'a> PostDwaWeightLifter<'a> {
                     core_state_map,
                     mode.scanner_state_for_original.scanner_state(source),
                 );
-                if coordinate == ordinary_coordinates[final_tsid] {
+                if coordinate != ordinary_coordinates[final_tsid] {
+                    deviations.push((final_tsid as u32, coordinate));
+                }
+            }
+        }
+
+        if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+            let mut nonempty_modes = 0usize;
+            let mut total_deviations = 0usize;
+            let mut max_deviations = 0usize;
+            for &mode_index in active_mode_indices {
+                if mode_index == 0 {
                     continue;
                 }
-                deviations.push((final_tsid as u32, coordinate));
+                let count = mode_deviations[mode_index].len();
+                nonempty_modes += usize::from(count != 0);
+                total_deviations += count;
+                max_deviations = max_deviations.max(count);
             }
+            eprintln!(
+                "[glrmask/profile][ti_post_dwa_lifter] final_tsids={} active_modes={} nonempty_modes={} total_deviations={} max_deviations={}",
+                final_sources.len(),
+                active_mode_indices.len(),
+                nonempty_modes,
+                total_deviations,
+                max_deviations,
+            );
         }
 
         Self {
@@ -3981,8 +4073,25 @@ pub(crate) fn expand_representative_dwa_after_minimization(
                 .map(|counts| counts.into_iter().sum()),
         )
         .is_some_and(|(union_count, member_count)| union_count == member_count);
+    let ordinary_entry_weights: Vec<Weight> = core_start_transitions
+        .values()
+        .map(|(_, weight)| lifter.lift_for_mode(weight, 0))
+        .collect();
+    let ordinary_entry_union = Weight::union_all(ordinary_entry_weights.iter());
 
-    if member_entries_are_pairwise_disjoint {
+    let ordinary_and_members_are_disjoint = member_entries_are_pairwise_disjoint
+        && ordinary_entry_union.is_disjoint(&all_member_entry_union);
+    if ordinary_and_members_are_disjoint {
+        let modes_in_group: Vec<usize> = member_entry_weights
+            .iter()
+            .map(|(mode_index, _, _)| *mode_index)
+            .collect();
+        for &mode_index in &modes_in_group {
+            group_for_mode[mode_index] = Some(0);
+        }
+        mode_groups[0].extend(modes_in_group);
+        entry_union_by_group[0] = ordinary_entry_union.union(&all_member_entry_union);
+    } else if member_entries_are_pairwise_disjoint {
         let group_index = mode_groups.len();
         let modes_in_group: Vec<usize> = member_entry_weights
             .iter()
@@ -4002,18 +4111,13 @@ pub(crate) fn expand_representative_dwa_after_minimization(
                     mode_groups.push(Vec::new());
                     entry_union_by_group.push(Weight::empty());
                     group_index
-            });
-            entry_union_by_group[group_index] = entry_union_by_group[group_index].union(&entry_weight);
+                });
+            entry_union_by_group[group_index] = entry_union_by_group[group_index].union(entry_weight);
             mode_groups[group_index].push(*mode_index);
             group_for_mode[*mode_index] = Some(group_index);
         }
+        entry_union_by_group[0] = ordinary_entry_union;
     }
-
-    let ordinary_entry_weights: Vec<Weight> = core_start_transitions
-        .values()
-        .map(|(_, weight)| lifter.lift_for_mode(weight, 0))
-        .collect();
-    entry_union_by_group[0] = Weight::union_all(ordinary_entry_weights.iter());
 
     let mut core_reachable_from = vec![vec![false; core_states.len()]; core_states.len()];
     for source in 0..core_states.len() {
@@ -4303,19 +4407,158 @@ pub(crate) fn restore_raw_follow_constraints_after_expansion(
 }
 
 
-/// Restrict each final/transition weight to coordinates that can reach its
-/// source state from the DWA start. This preserves every completed path while
-/// dropping unreachable transport-factor fragments before minimization.
-pub(crate) fn restrict_weights_to_forward_domains(dwa: &DWA) -> DWA {
+/// Return a topological state order when every in-range transition is acyclic.
+///
+/// This small local helper intentionally mirrors the minimizer's Kahn pass
+/// instead of exposing a general graph API just for post-DWA normalization.
+fn forward_domain_topological_order(dwa: &DWA) -> Option<Vec<usize>> {
     let state_count = dwa.states().len();
-    if state_count == 0 || (dwa.start_state() as usize) >= state_count {
-        return dwa.clone();
+    let mut indegree = vec![0u32; state_count];
+    for state in dwa.states() {
+        for (_, (target, _)) in &state.transitions {
+            let target = *target as usize;
+            if target < state_count {
+                indegree[target] = indegree[target].saturating_add(1);
+            }
+        }
     }
+
+    let mut queue = indegree
+        .iter()
+        .enumerate()
+        .filter_map(|(state, &degree)| (degree == 0).then_some(state))
+        .collect::<Vec<_>>();
+    let mut head = 0usize;
+    let mut order = Vec::with_capacity(state_count);
+    while head < queue.len() {
+        let source = queue[head];
+        head += 1;
+        order.push(source);
+        for (_, (target, _)) in &dwa.states()[source].transitions {
+            let target = *target as usize;
+            if target >= state_count {
+                continue;
+            }
+            indegree[target] -= 1;
+            if indegree[target] == 0 {
+                queue.push(target);
+            }
+        }
+    }
+    (order.len() == state_count).then_some(order)
+}
+
+/// Exact intersection cache scoped to one forward-domain normalization pass.
+///
+/// The global Weight operation memo protects correctness and reuse across the
+/// compiler, but this tight pass repeatedly intersects the same weight bodies
+/// with the same per-state domains. Keeping strong local results avoids weak
+/// interner/memo traffic and also shares the final restriction rewrite.
+fn forward_domain_intersection(
+    cache: &mut FxHashMap<(usize, usize), Weight>,
+    left: &Weight,
+    right: &Weight,
+) -> Weight {
+    if left.is_empty() || right.is_empty() {
+        return Weight::empty();
+    }
+    if left.is_full() {
+        return right.clone();
+    }
+    if right.is_full() || left.ptr_key() == right.ptr_key() {
+        return left.clone();
+    }
+    let (left_key, right_key) = if left.ptr_key() <= right.ptr_key() {
+        (left.ptr_key(), right.ptr_key())
+    } else {
+        (right.ptr_key(), left.ptr_key())
+    };
+    cache
+        .entry((left_key, right_key))
+        .or_insert_with(|| left.intersection(right))
+        .clone()
+}
+
+/// Collapse a target's pending domain contributions once, at the point where a
+/// topological traversal proves all predecessors have contributed. Pointer
+/// deduplication is exact because each Weight body is immutable.
+fn union_forward_domain_parts(parts: &mut Vec<Weight>) -> Weight {
+    if parts.is_empty() {
+        return Weight::empty();
+    }
+    if parts.iter().any(Weight::is_full) {
+        parts.clear();
+        return Weight::all();
+    }
+    parts.retain(|weight| !weight.is_empty());
+    if parts.is_empty() {
+        return Weight::empty();
+    }
+    if parts.len() == 1 {
+        return parts.pop().expect("one retained forward-domain part");
+    }
+    parts.sort_unstable_by_key(Weight::ptr_key);
+    parts.dedup_by_key(|weight| weight.ptr_key());
+    if parts.len() == 1 {
+        return parts.pop().expect("one deduplicated forward-domain part");
+    }
+    Weight::union_all(parts.iter())
+}
+
+/// Compute forward domains in one pass when the DWA is acyclic.
+///
+/// A prior queue-based propagation updated a target's domain once for each
+/// predecessor arrival, repeatedly rebuilding large unions at the raw-follow
+/// product joins.  In topological order every predecessor has run before its
+/// target, so collecting exact intersections and taking one union is
+/// equivalent while avoiding that repeated reconstruction.
+fn forward_domains_acyclic(dwa: &DWA) -> Option<Vec<Weight>> {
+    let state_count = dwa.states().len();
+    let order = forward_domain_topological_order(dwa)?;
+    let start = dwa.start_state() as usize;
+    if start >= state_count {
+        return Some(vec![Weight::empty(); state_count]);
+    }
+
+    let mut pending = vec![Vec::<Weight>::new(); state_count];
+    pending[start].push(Weight::all());
+    let mut domains = vec![Weight::empty(); state_count];
+    let mut intersection_cache = FxHashMap::<(usize, usize), Weight>::default();
+
+    for source in order {
+        let source_domain = union_forward_domain_parts(&mut pending[source]);
+        if source_domain.is_empty() {
+            continue;
+        }
+        domains[source] = source_domain.clone();
+        for (target, weight) in dwa.states()[source].transitions.values() {
+            let target = *target as usize;
+            if target >= state_count {
+                continue;
+            }
+            let incoming = forward_domain_intersection(
+                &mut intersection_cache,
+                &source_domain,
+                weight,
+            );
+            if !incoming.is_empty() {
+                pending[target].push(incoming);
+            }
+        }
+    }
+
+    Some(domains)
+}
+
+/// Compute forward domains by the original monotone worklist for cyclic DWAs.
+fn forward_domains_fixed_point(dwa: &DWA) -> Vec<Weight> {
+    let state_count = dwa.states().len();
     let mut domains = vec![Weight::empty(); state_count];
     let mut worklist = VecDeque::new();
     let start = dwa.start_state() as usize;
     domains[start] = Weight::all();
     worklist.push_back(start);
+    let mut intersection_cache = FxHashMap::<(usize, usize), Weight>::default();
     while let Some(source) = worklist.pop_front() {
         let source_domain = domains[source].clone();
         for (target, weight) in dwa.states()[source].transitions.values() {
@@ -4323,7 +4566,11 @@ pub(crate) fn restrict_weights_to_forward_domains(dwa: &DWA) -> DWA {
             if target >= state_count {
                 continue;
             }
-            let incoming = source_domain.intersection(weight);
+            let incoming = forward_domain_intersection(
+                &mut intersection_cache,
+                &source_domain,
+                weight,
+            );
             if incoming.is_empty() {
                 continue;
             }
@@ -4334,15 +4581,29 @@ pub(crate) fn restrict_weights_to_forward_domains(dwa: &DWA) -> DWA {
             }
         }
     }
+    domains
+}
+
+/// Restrict each final/transition weight to coordinates that can reach its
+/// source state from the DWA start. This preserves every completed path while
+/// dropping unreachable transport-factor fragments before minimization.
+pub(crate) fn restrict_weights_to_forward_domains(dwa: &DWA) -> DWA {
+    let state_count = dwa.states().len();
+    if state_count == 0 || (dwa.start_state() as usize) >= state_count {
+        return dwa.clone();
+    }
+
+    let domains = forward_domains_acyclic(dwa).unwrap_or_else(|| forward_domains_fixed_point(dwa));
+    let mut restriction_cache = FxHashMap::<(usize, usize), Weight>::default();
     let mut states = dwa.states().to_vec();
-    for (state, domain) in states.iter_mut().zip(domains) {
+    for (state, domain) in states.iter_mut().zip(domains.iter()) {
         state.final_weight = state
             .final_weight
             .as_ref()
-            .map(|weight| weight.intersection(&domain))
+            .map(|weight| forward_domain_intersection(&mut restriction_cache, weight, domain))
             .filter(|weight| !weight.is_empty());
         state.transitions.retain(|_, (_, weight)| {
-            *weight = weight.intersection(&domain);
+            *weight = forward_domain_intersection(&mut restriction_cache, weight, domain);
             !weight.is_empty()
         });
     }

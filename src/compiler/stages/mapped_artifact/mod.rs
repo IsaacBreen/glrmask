@@ -290,6 +290,11 @@ impl<T: WeightRefs> MappedArtifact<T> {
         self.apply_compaction_plan_with_stats(&plan)
     }
 
+    pub(crate) fn compact_dimensions_merge_only_fast(&mut self) -> CompactReport {
+        let plan = self.plan_dimensions_compaction(false, false);
+        self.apply_compaction_plan(&plan)
+    }
+
     pub(crate) fn plan_dimensions_compaction(
         &self,
         allow_expensive_layout: bool,
