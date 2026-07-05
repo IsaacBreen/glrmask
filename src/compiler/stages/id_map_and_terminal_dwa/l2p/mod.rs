@@ -622,15 +622,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
 
-        // Expansion creates direct transported suffix copies. The result is
-        // deterministic, so minimize it here before generic dimension
-        // compaction can see and eliminate its duplicated graph structure.
-        let post_dwa_minimize_started_at = ti_profile_timing.then(Instant::now);
-        let expanded_dwa = minimize_owned(expanded_dwa);
-        ti_post_dwa_minimize_ms = post_dwa_minimize_started_at
-            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-            .unwrap_or(0.0);
-
+        // The transport-coordinate map is still finer than the final raw
+        // coordinate domain. Compact it before minimization: otherwise the
+        // minimizer cannot see state equivalences enabled by the final TSID
+        // quotient and can retain an avoidable TI-only state split.
         let mut final_id_map = core_id_map.clone();
         final_id_map.tokenizer_states = transport_coordinate_map;
         let mut expanded_artifact = MappedArtifact::new(expanded_dwa, final_id_map);
@@ -641,8 +636,27 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             expanded_artifact.compact_dimensions_fast();
         }
         ti_post_dwa_compact_ms = post_dwa_compact_started_at.elapsed().as_secs_f64() * 1000.0;
-        let stats = expanded_artifact.artifact().stats();
-        let (dwa, id_map) = expanded_artifact.into_parts();
+        let (expanded_dwa, final_id_map) = expanded_artifact.into_parts();
+
+        let post_dwa_minimize_started_at = ti_profile_timing.then(Instant::now);
+        let minimized_dwa = minimize_owned(expanded_dwa);
+        ti_post_dwa_minimize_ms = post_dwa_minimize_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+
+        // The minimizer can expose a little extra dimension locality. This
+        // second pass is intentionally cheap because the final TSID domain was
+        // already established before minimization.
+        let mut minimized_artifact = MappedArtifact::new(minimized_dwa, final_id_map);
+        let final_compact_started_at = Instant::now();
+        if profiling {
+            minimized_artifact.compact_dimensions_fast_with_stats();
+        } else {
+            minimized_artifact.compact_dimensions_fast();
+        }
+        ti_post_dwa_compact_ms += final_compact_started_at.elapsed().as_secs_f64() * 1000.0;
+        let stats = minimized_artifact.artifact().stats();
+        let (dwa, id_map) = minimized_artifact.into_parts();
         (dwa, id_map, stats)
     } else {
         (core_dwa, core_id_map, core_dwa_stats_after_compact)

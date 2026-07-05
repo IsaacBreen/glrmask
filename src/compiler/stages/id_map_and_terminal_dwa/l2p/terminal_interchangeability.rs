@@ -2569,27 +2569,308 @@ pub(crate) fn transport_coordinate_quotient(
     )
 }
 
+/// Sparse final-coordinate lifting for post-DWA TI expansion.
+///
+/// The ordinary coordinate lift is shared by every member mode. A mode differs
+/// only at the final transport-coordinate classes whose representative scanner
+/// state lands in a different ordinary core class. BFCL p0 has thousands of
+/// members but only a handful of such deviations per mode, so lifting the full
+/// final-coordinate weight for every `(weight, mode)` pair is the wrong shape.
+struct PostDwaWeightLifter<'a> {
+    core_state_map: &'a ManyToOneIdMap,
+    final_sources: Vec<u32>,
+    ordinary_coordinates: Vec<u32>,
+    mode_deviations: Vec<Vec<(u32, u32)>>,
+    base_lifts: FxHashMap<usize, Weight>,
+    mode_lifts: FxHashMap<(usize, usize), Weight>,
+    group_lifts: FxHashMap<(usize, usize), Weight>,
+    group_coordinate_plans: FxHashMap<usize, GroupCoordinatePlan>,
+}
+
+#[derive(Clone)]
+struct GroupCoordinateSignature {
+    base_coordinate: u32,
+    alternate_coordinates: Box<[u32]>,
+}
+
+struct GroupCoordinatePlan {
+    overrides: Vec<(u32, u32)>,
+    signatures: Vec<GroupCoordinateSignature>,
+}
+
+fn finite_weight_token_cardinality(weight: &Weight) -> Option<u128> {
+    if weight.is_full() {
+        return None;
+    }
+    Some(
+        weight
+            .range_entries()
+            .map(|(start, end, tokens)| {
+                let tsid_count = u128::from(end) - u128::from(start) + 1;
+                let token_count: u128 = tokens
+                    .ranges()
+                    .map(|range| u128::from(*range.end()) - u128::from(*range.start()) + 1)
+                    .sum();
+                tsid_count * token_count
+            })
+            .sum(),
+    )
+}
+
+impl<'a> PostDwaWeightLifter<'a> {
+    fn new(
+        core_state_map: &'a ManyToOneIdMap,
+        final_state_map: &ManyToOneIdMap,
+        modes: &[TerminalNwaTransportMode],
+        active_mode_indices: &[usize],
+    ) -> Self {
+        let final_sources: Vec<u32> = final_state_map.iter_representative_ids().collect();
+        let ordinary_coordinates: Vec<u32> = final_sources
+            .iter()
+            .map(|&source| Self::core_coordinate(core_state_map, source))
+            .collect();
+        let mut mode_deviations = vec![Vec::new(); modes.len()];
+
+        for &mode_index in active_mode_indices {
+            if mode_index == 0 {
+                continue;
+            }
+            let mode = &modes[mode_index];
+            let deviations = &mut mode_deviations[mode_index];
+            for (final_tsid, &source) in final_sources.iter().enumerate() {
+                let coordinate = Self::core_coordinate(
+                    core_state_map,
+                    mode.scanner_state_for_original.scanner_state(source),
+                );
+                if coordinate == ordinary_coordinates[final_tsid] {
+                    continue;
+                }
+                deviations.push((final_tsid as u32, coordinate));
+            }
+        }
+
+        Self {
+            core_state_map,
+            final_sources,
+            ordinary_coordinates,
+            mode_deviations,
+            base_lifts: FxHashMap::default(),
+            mode_lifts: FxHashMap::default(),
+            group_lifts: FxHashMap::default(),
+            group_coordinate_plans: FxHashMap::default(),
+        }
+    }
+
+    #[inline]
+    fn core_coordinate(core_state_map: &ManyToOneIdMap, raw_state: u32) -> u32 {
+        core_state_map
+            .original_to_internal
+            .get(raw_state as usize)
+            .copied()
+            .unwrap_or(u32::MAX)
+    }
+
+    #[inline]
+    fn tokens_for_coordinate(weight: &Weight, coordinate: u32) -> SharedTokenSet {
+        if coordinate == u32::MAX {
+            shared_rangeset(range_set_blaze::RangeSetBlaze::new())
+        } else {
+            weight.shared_tokens_for_tsid(coordinate)
+        }
+    }
+
+    fn base_lift(&mut self, weight: &Weight) -> Weight {
+        if weight.is_empty() || weight.is_full() {
+            return weight.clone();
+        }
+        let key = weight.ptr_key();
+        if let Some(existing) = self.base_lifts.get(&key) {
+            return existing.clone();
+        }
+
+        let lifted = Weight::from_per_tsid_shared(
+            self.final_sources
+                .iter()
+                .enumerate()
+                .filter_map(|(final_tsid, &source)| {
+                    let coordinate = Self::core_coordinate(self.core_state_map, source);
+                    (coordinate != u32::MAX).then(|| {
+                        (
+                            final_tsid as u32,
+                            weight.shared_tokens_for_tsid(coordinate),
+                        )
+                    })
+                }),
+        );
+        self.base_lifts.insert(key, lifted.clone());
+        lifted
+    }
+
+    fn lift_for_mode(&mut self, weight: &Weight, mode_index: usize) -> Weight {
+        if weight.is_empty() || weight.is_full() || mode_index == 0 {
+            return self.base_lift(weight);
+        }
+        let key = (weight.ptr_key(), mode_index);
+        if let Some(existing) = self.mode_lifts.get(&key) {
+            return existing.clone();
+        }
+
+        let base = self.base_lift(weight);
+        let overrides: Vec<(u32, SharedTokenSet)> = self.mode_deviations[mode_index]
+            .iter()
+            .map(|&(final_tsid, coordinate)| {
+                (final_tsid, Self::tokens_for_coordinate(weight, coordinate))
+            })
+            .collect();
+        let lifted = base.with_sparse_tsid_overrides(&overrides);
+        self.mode_lifts.insert(key, lifted.clone());
+        lifted
+    }
+
+    fn prepare_group_coordinate_plan(&mut self, group_index: usize, mode_indices: &[usize]) {
+        if mode_indices.len() <= 1 || self.group_coordinate_plans.contains_key(&group_index) {
+            return;
+        }
+
+        let mut alternates_by_final_tsid = vec![Vec::<u32>::new(); self.final_sources.len()];
+        for &mode_index in mode_indices {
+            for &(final_tsid, coordinate) in &self.mode_deviations[mode_index] {
+                let alternates = &mut alternates_by_final_tsid[final_tsid as usize];
+                if !alternates.contains(&coordinate) {
+                    alternates.push(coordinate);
+                }
+            }
+        }
+
+        let mut signature_for_key = FxHashMap::<(u32, Vec<u32>), u32>::default();
+        let mut signatures = Vec::<GroupCoordinateSignature>::new();
+        let mut overrides = Vec::<(u32, u32)>::new();
+        for (final_tsid, alternates) in alternates_by_final_tsid.iter_mut().enumerate() {
+            if alternates.is_empty() {
+                continue;
+            }
+            alternates.sort_unstable();
+            alternates.dedup();
+            let base_coordinate = self.ordinary_coordinates[final_tsid];
+            let key = (base_coordinate, alternates.clone());
+            let signature = match signature_for_key.entry(key) {
+                Entry::Occupied(entry) => *entry.get(),
+                Entry::Vacant(entry) => {
+                    let signature = signatures.len() as u32;
+                    let (base_coordinate, alternate_coordinates) = entry.key();
+                    signatures.push(GroupCoordinateSignature {
+                        base_coordinate: *base_coordinate,
+                        alternate_coordinates: alternate_coordinates.clone().into_boxed_slice(),
+                    });
+                    entry.insert(signature);
+                    signature
+                }
+            };
+            overrides.push((final_tsid as u32, signature));
+        }
+
+        self.group_coordinate_plans.insert(
+            group_index,
+            GroupCoordinatePlan {
+                overrides,
+                signatures,
+            },
+        );
+    }
+
+    /// Union the exact lifted weight over one proven-disjoint transport group.
+    fn lift_over_disjoint_group(
+        &mut self,
+        weight: &Weight,
+        group_index: usize,
+        mode_indices: &[usize],
+        entry_domain: &Weight,
+    ) -> Weight {
+        if weight.is_empty() || weight.is_full() {
+            return weight.intersection(entry_domain);
+        }
+        if mode_indices.len() == 1 {
+            return self
+                .lift_for_mode(weight, mode_indices[0])
+                .intersection(entry_domain);
+        }
+        let key = (weight.ptr_key(), group_index);
+        if let Some(existing) = self.group_lifts.get(&key) {
+            return existing.clone();
+        }
+
+        let base = self.base_lift(weight);
+        self.prepare_group_coordinate_plan(group_index, mode_indices);
+        let overrides = {
+            let plan = self
+                .group_coordinate_plans
+                .get(&group_index)
+                .expect("prepared group coordinate plan must be retained");
+            let mut union_for_token_signature = FxHashMap::<Vec<usize>, SharedTokenSet>::default();
+            let transformed_tokens: Vec<SharedTokenSet> = plan
+                .signatures
+                .iter()
+                .map(|signature| {
+                    let mut token_sets = Vec::with_capacity(signature.alternate_coordinates.len() + 1);
+                    token_sets.push(Self::tokens_for_coordinate(weight, signature.base_coordinate));
+                    for &coordinate in &signature.alternate_coordinates {
+                        token_sets.push(Self::tokens_for_coordinate(weight, coordinate));
+                    }
+                    let mut token_signature: Vec<usize> = token_sets
+                        .iter()
+                        .filter(|tokens| !tokens.is_empty())
+                        .map(|tokens| Arc::as_ptr(tokens) as usize)
+                        .collect();
+                    token_signature.sort_unstable();
+                    token_signature.dedup();
+                    if let Some(tokens) = union_for_token_signature.get(&token_signature) {
+                        return Arc::clone(tokens);
+                    }
+
+                    let mut tokens = shared_rangeset(range_set_blaze::RangeSetBlaze::new());
+                    for candidate in token_sets {
+                        if candidate.is_empty() || candidate.as_ref() == tokens.as_ref() {
+                            continue;
+                        }
+                        tokens = shared_rangeset(tokens.as_ref() | candidate.as_ref());
+                    }
+                    union_for_token_signature.insert(token_signature, Arc::clone(&tokens));
+                    tokens
+                })
+                .collect();
+            plan.overrides
+                .iter()
+                .filter_map(|&(final_tsid, signature)| {
+                    let base_tokens = base.shared_tokens_for_tsid(final_tsid);
+                    let tokens = &transformed_tokens[signature as usize];
+                    (tokens.as_ref() != base_tokens.as_ref())
+                        .then(|| (final_tsid, Arc::clone(tokens)))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let lifted = base.with_sparse_tsid_overrides(&overrides).intersection(entry_domain);
+        self.group_lifts.insert(key, lifted.clone());
+        lifted
+    }
+}
+
 /// Expand a minimized representative DWA directly into a raw-terminal DWA.
 ///
-/// A member's first terminal changes the lexer coordinate for the *entire
-/// remaining terminal word*, not only for the edge carrying that member label.
-/// For member `m` represented by `r`, the suffix is evaluated at
-/// `Q(M_{r→m}(source))`. Therefore this keeps one direct DWA graph copy per
-/// replayed member mode, lifting every edge and final weight in that copy via
-/// the same mode. A dispatcher start state sends `m` to the corresponding copy
-/// at the old `r` transition target. Noninitial representative edges are then
-/// expanded to their raw members inside every copy.
-///
-/// This is the historical copy-and-transport-all-weights post-DWA strategy,
-/// adapted to temporary replayed target-only modes and the compact final
-/// transport-coordinate quotient. It does not construct an expanded NWA or
-/// run a second determinization/minimization pass.
+/// The previous implementation allocated one full suffix graph per replayed
+/// member mode and asked generic DWA minimization to rediscover the common
+/// representative topology. The direct construction shares that topology from
+/// the start. It restores raw member labels at the dispatcher, then lifts each
+/// shared suffix weight to the exact union of its reachable transported
+/// final-coordinate behaviors.
 pub(crate) fn expand_representative_dwa_after_minimization(
     core_dwa: &DWA,
     core_state_map: &ManyToOneIdMap,
     final_state_map: &ManyToOneIdMap,
     modes: &[TerminalNwaTransportMode],
 ) -> DWA {
+    let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+    let coordinate_setup_started_at = profile_timing.then(Instant::now);
     assert!(
         !modes.is_empty(),
         "post-DWA TI expansion needs the ordinary transport mode",
@@ -2611,101 +2892,244 @@ pub(crate) fn expand_representative_dwa_after_minimization(
             .push((member, mode_index));
     }
 
-    struct WeightLifter<'a> {
-        core_state_map: &'a ManyToOneIdMap,
-        final_state_map: &'a ManyToOneIdMap,
-        modes: &'a [TerminalNwaTransportMode],
-        lifted: FxHashMap<(usize, usize), Weight>,
-    }
-
-    impl<'a> WeightLifter<'a> {
-        fn lift(&mut self, weight: &Weight, mode_index: usize) -> Weight {
-            if weight.is_empty() || weight.is_full() {
-                return weight.clone();
-            }
-            let key = (weight.ptr_key(), mode_index);
-            if let Some(lifted) = self.lifted.get(&key) {
-                return lifted.clone();
-            }
-
-            let mode = &self.modes[mode_index];
-            let mut tokens_for_core_tsid = FxHashMap::<u32, SharedTokenSet>::default();
-            let lifted = Weight::from_per_tsid_shared(
-                self.final_state_map
-                    .iter_representative_ids()
-                    .enumerate()
-                    .filter_map(|(final_tsid, source_raw)| {
-                        let target_raw = mode.scanner_state_for_original.scanner_state(source_raw);
-                        let core_tsid = self
-                            .core_state_map
-                            .original_to_internal
-                            .get(target_raw as usize)
-                            .copied()
-                            .unwrap_or(u32::MAX);
-                        if core_tsid == u32::MAX {
-                            return None;
-                        }
-                        let tokens = tokens_for_core_tsid
-                            .entry(core_tsid)
-                            .or_insert_with(|| shared_rangeset(weight.tokens_for_tsid(core_tsid)));
-                        (!tokens.is_empty()).then(|| (final_tsid as u32, tokens.clone()))
-                    }),
-            );
-            self.lifted.insert(key, lifted.clone());
-            lifted
-        }
-    }
-
-    let mut lifter = WeightLifter {
-        core_state_map,
-        final_state_map,
-        modes,
-        lifted: FxHashMap::default(),
-    };
     let core_start = core_dwa.start_state() as usize;
     let core_states = core_dwa.states();
     let core_start_transitions = &core_states[core_start].transitions;
 
-    // A member mode can only be entered when its representative has an
-    // initial edge in the minimized core. Avoid allocating unreachable graph
-    // copies for members that cannot begin a terminal word in this partition.
-    let mut active_mode_indices = vec![0usize];
+    let mut candidate_mode_indices = vec![0usize];
     for (mode_index, mode) in modes.iter().enumerate().skip(1) {
         let (representative, _) = mode
             .member_reconstruction()
             .expect("non-ordinary TI transport mode must reconstruct one member");
         if core_start_transitions.contains_key(&(representative as i32)) {
-            active_mode_indices.push(mode_index);
+            candidate_mode_indices.push(mode_index);
         }
     }
 
-    let mut clone_offset_for_mode = vec![None::<u32>; modes.len()];
-    let mut next_state = 1u32; // State zero is the raw-terminal dispatcher.
-    for &mode_index in &active_mode_indices {
-        clone_offset_for_mode[mode_index] = Some(next_state);
-        next_state += core_states.len() as u32;
+    // Drop modes whose first raw-member edge has no viable token flow. These
+    // clones were unreachable in the old graph-copy construction and therefore
+    // must not participate in a shared suffix-weight union.
+    let mut lifter = PostDwaWeightLifter::new(
+        core_state_map,
+        final_state_map,
+        modes,
+        &candidate_mode_indices,
+    );
+    let coordinate_setup_ms = coordinate_setup_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let active_filter_started_at = profile_timing.then(Instant::now);
+    let active_mode_indices: Vec<usize> = candidate_mode_indices
+        .iter()
+        .copied()
+        .filter(|&mode_index| {
+            if mode_index == 0 {
+                return true;
+            }
+            let (representative, _) = modes[mode_index]
+                .member_reconstruction()
+                .expect("non-ordinary TI transport mode must reconstruct one member");
+            let (_, weight) = core_start_transitions
+                .get(&(representative as i32))
+                .expect("active TI member mode must have its representative start edge");
+            !lifter.lift_for_mode(weight, mode_index).is_empty()
+        })
+        .collect();
+    if active_mode_indices != candidate_mode_indices {
+        lifter = PostDwaWeightLifter::new(
+            core_state_map,
+            final_state_map,
+            modes,
+            &active_mode_indices,
+        );
     }
-    let mut states = vec![DWAState::default(); next_state as usize];
+    let active_filter_ms = active_filter_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
-    // Every clone has the same representative DWA topology. Its weights are
-    // evaluated under one fixed replayed coordinate. Only noninitial states
-    // receive member-label closure: a member in the first position must choose
-    // a whole transported suffix graph through the dispatcher below.
-    for &mode_index in &active_mode_indices {
-        let offset = clone_offset_for_mode[mode_index]
-            .expect("active transport mode must have a clone offset");
+    let grouping_started_at = profile_timing.then(Instant::now);
+    // Modes can share one suffix graph only when their first-edge domains are
+    // disjoint. That domain is retained by DWA weight intersection after the
+    // dispatcher, so merging their suffix weights by union cannot leak one
+    // member's transported behavior into another member's execution.
+    // The ordinary representative mode remains a singleton deliberately: it
+    // has multiple possible first labels rather than one stable gate.
+    let mut mode_groups = vec![vec![0usize]];
+    let mut entry_union_by_group = vec![Weight::empty()];
+    let mut group_for_mode = vec![None::<usize>; modes.len()];
+    group_for_mode[0] = Some(0);
+    let member_entry_weights: Vec<(usize, u32, Weight)> = active_mode_indices
+        .iter()
+        .copied()
+        .skip(1)
+        .map(|mode_index| {
+            let (representative, _) = modes[mode_index]
+                .member_reconstruction()
+                .expect("non-ordinary TI transport mode must reconstruct one member");
+            let (target, start_weight) = core_start_transitions
+                .get(&(representative as i32))
+                .expect("active TI member mode must have its representative start edge");
+            (mode_index, *target, lifter.lift_for_mode(start_weight, mode_index))
+        })
+        .collect();
+
+    let all_member_entry_union =
+        Weight::union_all(member_entry_weights.iter().map(|(_, _, weight)| weight));
+    let member_entries_are_pairwise_disjoint = finite_weight_token_cardinality(&all_member_entry_union)
+        .zip(
+            member_entry_weights
+                .iter()
+                .map(|(_, _, weight)| finite_weight_token_cardinality(weight))
+                .collect::<Option<Vec<_>>>()
+                .map(|counts| counts.into_iter().sum()),
+        )
+        .is_some_and(|(union_count, member_count)| union_count == member_count);
+
+    if member_entries_are_pairwise_disjoint {
+        let group_index = mode_groups.len();
+        let modes_in_group: Vec<usize> = member_entry_weights
+            .iter()
+            .map(|(mode_index, _, _)| *mode_index)
+            .collect();
+        for &mode_index in &modes_in_group {
+            group_for_mode[mode_index] = Some(group_index);
+        }
+        mode_groups.push(modes_in_group);
+        entry_union_by_group.push(all_member_entry_union);
+    } else {
+        for (mode_index, _, entry_weight) in &member_entry_weights {
+            let group_index = (1..mode_groups.len())
+                .find(|&group_index| entry_weight.is_disjoint(&entry_union_by_group[group_index]))
+                .unwrap_or_else(|| {
+                    let group_index = mode_groups.len();
+                    mode_groups.push(Vec::new());
+                    entry_union_by_group.push(Weight::empty());
+                    group_index
+            });
+            entry_union_by_group[group_index] = entry_union_by_group[group_index].union(&entry_weight);
+            mode_groups[group_index].push(*mode_index);
+            group_for_mode[*mode_index] = Some(group_index);
+        }
+    }
+
+    let ordinary_entry_weights: Vec<Weight> = core_start_transitions
+        .values()
+        .map(|(_, weight)| lifter.lift_for_mode(weight, 0))
+        .collect();
+    entry_union_by_group[0] = Weight::union_all(ordinary_entry_weights.iter());
+
+    let mut core_reachable_from = vec![vec![false; core_states.len()]; core_states.len()];
+    for source in 0..core_states.len() {
+        let mut stack = vec![source];
+        while let Some(state) = stack.pop() {
+            if core_reachable_from[source][state] {
+                continue;
+            }
+            core_reachable_from[source][state] = true;
+            for (target, _) in core_states[state].transitions.values() {
+                if (*target as usize) < core_states.len() {
+                    stack.push(*target as usize);
+                }
+            }
+        }
+    }
+
+    let mut mode_indices_at_core_state =
+        vec![vec![Vec::<usize>::new(); core_states.len()]; mode_groups.len()];
+    let mut entry_weights_at_core_state =
+        vec![vec![Vec::<Weight>::new(); core_states.len()]; mode_groups.len()];
+
+    for (_, (target, weight)) in core_start_transitions {
+        let entry_weight = lifter.lift_for_mode(weight, 0);
+        if entry_weight.is_empty() {
+            continue;
+        }
+        for (core_state, reachable) in core_reachable_from[*target as usize].iter().enumerate() {
+            if *reachable {
+                entry_weights_at_core_state[0][core_state].push(entry_weight.clone());
+            }
+        }
+    }
+    for (mode_index, target, entry_weight) in &member_entry_weights {
+        let group_index = group_for_mode[*mode_index]
+            .expect("active TI member mode must belong to one direct suffix group");
+        for (core_state, reachable) in core_reachable_from[*target as usize].iter().enumerate() {
+            if *reachable {
+                mode_indices_at_core_state[group_index][core_state].push(*mode_index);
+                entry_weights_at_core_state[group_index][core_state].push(entry_weight.clone());
+            }
+        }
+    }
+    for core_state in 0..core_states.len() {
+        if !entry_weights_at_core_state[0][core_state].is_empty() {
+            mode_indices_at_core_state[0][core_state].push(0);
+        }
+    }
+    let entry_domain_at_core_state: Vec<Vec<Weight>> = entry_weights_at_core_state
+        .iter()
+        .map(|by_core_state| {
+            by_core_state
+                .iter()
+                .map(|weights| Weight::union_all(weights.iter()))
+                .collect()
+        })
+        .collect();
+
+    let grouping_ms = grouping_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+        let member_group_count = mode_groups.len().saturating_sub(1);
+        let largest_member_group = mode_groups
+            .iter()
+            .skip(1)
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0);
+        eprintln!(
+            "[glrmask/profile][ti_post_dwa_direct_groups] core_states={} active_modes={} member_groups={} largest_member_group={} direct_states_before_follow={}",
+            core_states.len(),
+            active_mode_indices.len(),
+            member_group_count,
+            largest_member_group,
+            1 + mode_groups.len() * core_states.len(),
+        );
+    }
+
+    let state_for = |group_index: usize, core_state_index: usize| -> u32 {
+        (1 + group_index * core_states.len() + core_state_index) as u32
+    };
+    let shared_build_started_at = profile_timing.then(Instant::now);
+    let mut states = vec![DWAState::default(); 1 + mode_groups.len() * core_states.len()];
+    for group_index in 0..mode_groups.len() {
         for (core_state_index, core_state) in core_states.iter().enumerate() {
-            let final_weight = core_state
-                .final_weight
-                .as_ref()
-                .map(|weight| lifter.lift(weight, mode_index));
+            let mode_indices = &mode_indices_at_core_state[group_index][core_state_index];
+            let entry_domain = &entry_domain_at_core_state[group_index][core_state_index];
+            if mode_indices.is_empty() || entry_domain.is_empty() {
+                continue;
+            }
+            let lift_group_index = group_index * core_states.len() + core_state_index;
+            let final_weight = core_state.final_weight.as_ref().map(|weight| {
+                lifter.lift_over_disjoint_group(
+                    weight,
+                    lift_group_index,
+                    mode_indices,
+                    entry_domain,
+                )
+            });
             let mut transitions = BTreeMap::new();
             for (&label, (target, weight)) in &core_state.transitions {
-                let lifted_weight = lifter.lift(weight, mode_index);
+                let lifted_weight = lifter.lift_over_disjoint_group(
+                    weight,
+                    lift_group_index,
+                    mode_indices,
+                    entry_domain,
+                );
                 if lifted_weight.is_empty() {
                     continue;
                 }
-                let destination = offset + *target;
+                let destination = state_for(group_index, *target as usize);
                 assert!(
                     transitions
                         .insert(label, (destination, lifted_weight.clone()))
@@ -2713,6 +3137,8 @@ pub(crate) fn expand_representative_dwa_after_minimization(
                     "representative DWA must be deterministic before TI expansion",
                 );
 
+                // First terminal selection is handled only by the dispatcher:
+                // its member-specific transport determines the entire suffix.
                 if core_state_index == core_start || label < 0 {
                     continue;
                 }
@@ -2730,44 +3156,45 @@ pub(crate) fn expand_representative_dwa_after_minimization(
                     );
                 }
             }
-            states[(offset as usize) + core_state_index] = DWAState {
+            states[state_for(group_index, core_state_index) as usize] = DWAState {
                 transitions,
                 final_weight,
             };
         }
     }
 
-    let ordinary_offset = clone_offset_for_mode[0]
-        .expect("ordinary transport mode must always have a clone");
-    let mut dispatcher_transitions = BTreeMap::new();
     let ordinary_start = &core_states[core_start];
+    let mut dispatcher_transitions = BTreeMap::new();
     for (&label, (target, weight)) in &ordinary_start.transitions {
-        let ordinary_weight = lifter.lift(weight, 0);
-        if !ordinary_weight.is_empty() {
-            assert!(
-                dispatcher_transitions
-                    .insert(label, (ordinary_offset + *target, ordinary_weight))
-                    .is_none(),
-                "representative initial DWA edge labels must be unique",
-            );
+        let ordinary_weight = lifter.lift_for_mode(weight, 0);
+        if ordinary_weight.is_empty() {
+            continue;
         }
+        assert!(
+            dispatcher_transitions
+                .insert(label, (state_for(0, *target as usize), ordinary_weight))
+                .is_none(),
+            "representative initial DWA edge labels must be unique",
+        );
     }
-
     for (representative, member_modes) in &member_modes_by_representative {
         let Some((target, weight)) = core_start_transitions.get(&(*representative as i32)) else {
             continue;
         };
         for &(member, mode_index) in member_modes {
-            let Some(offset) = clone_offset_for_mode[mode_index] else {
+            let Some(group_index) = group_for_mode[mode_index] else {
                 continue;
             };
-            let member_weight = lifter.lift(weight, mode_index);
+            let member_weight = lifter.lift_for_mode(weight, mode_index);
             if member_weight.is_empty() {
                 continue;
             }
             assert!(
                 dispatcher_transitions
-                    .insert(member as i32, (offset + *target, member_weight))
+                    .insert(
+                        member as i32,
+                        (state_for(group_index, *target as usize), member_weight),
+                    )
                     .is_none(),
                 "one raw member must belong to exactly one TI representative class",
             );
@@ -2778,8 +3205,18 @@ pub(crate) fn expand_representative_dwa_after_minimization(
         final_weight: ordinary_start
             .final_weight
             .as_ref()
-            .map(|weight| lifter.lift(weight, 0)),
+            .map(|weight| lifter.lift_for_mode(weight, 0)),
     };
+
+    if let Some(started_at) = shared_build_started_at {
+        eprintln!(
+            "[glrmask/profile][ti_post_dwa_direct_detail] coordinate_setup_ms={:.3} active_filter_ms={:.3} grouping_ms={:.3} shared_build_ms={:.3}",
+            coordinate_setup_ms,
+            active_filter_ms,
+            grouping_ms,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
 
     DWA::from_parts(states, 0)
 }

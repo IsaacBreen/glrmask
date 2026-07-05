@@ -1970,6 +1970,79 @@ impl Weight {
         builder.finish()
     }
 
+    /// Return the interned token set at one TSID without cloning its range
+    /// contents. This is intentionally crate-visible for sparse coordinate
+    /// remaps in the terminal-DWA compiler.
+    pub(crate) fn shared_tokens_for_tsid(&self, tsid: u32) -> SharedTokenSet {
+        if self.is_full() {
+            return self
+                .0
+                .range_values()
+                .next()
+                .expect("full weight must retain its sentinel token set")
+                .1
+                .clone();
+        }
+        self.0
+            .get(tsid)
+            .cloned()
+            .unwrap_or_else(|| Arc::clone(&EMPTY_RANGESET))
+    }
+
+    /// Apply a sorted, unique set of point-TSID token-set overrides without
+    /// expanding the unchanged ranges of `self`. Empty override token sets
+    /// remove that point from the result.
+    pub(crate) fn with_sparse_tsid_overrides(
+        &self,
+        overrides: &[(u32, SharedTokenSet)],
+    ) -> Self {
+        if overrides.is_empty() || self.is_full() {
+            return self.clone();
+        }
+        debug_assert!(overrides.windows(2).all(|pair| pair[0].0 < pair[1].0));
+
+        let mut builder = CompactRangeBuilder::new();
+        let mut override_index = 0usize;
+
+        let push_override = |builder: &mut CompactRangeBuilder,
+                             tsid: u32,
+                             tokens: &SharedTokenSet| {
+            if !tokens.is_empty() {
+                builder.push(tsid, tsid, Arc::clone(tokens));
+            }
+        };
+
+        for (start, end, tokens) in self.range_entries() {
+            while override_index < overrides.len() && overrides[override_index].0 < start {
+                let (tsid, override_tokens) = &overrides[override_index];
+                push_override(&mut builder, *tsid, override_tokens);
+                override_index += 1;
+            }
+
+            let mut cursor = start;
+            while override_index < overrides.len() && overrides[override_index].0 <= end {
+                let (tsid, override_tokens) = &overrides[override_index];
+                if cursor < *tsid {
+                    builder.push(cursor, *tsid - 1, Arc::clone(tokens));
+                }
+                push_override(&mut builder, *tsid, override_tokens);
+                cursor = tsid.saturating_add(1);
+                override_index += 1;
+            }
+            if cursor <= end {
+                builder.push(cursor, end, Arc::clone(tokens));
+            }
+        }
+
+        while override_index < overrides.len() {
+            let (tsid, tokens) = &overrides[override_index];
+            push_override(&mut builder, *tsid, tokens);
+            override_index += 1;
+        }
+
+        builder.finish()
+    }
+
     /// Build the exact union of sorted point-TSID entries.
     ///
     /// The entries must be nondecreasing by TSID. Equal TSIDs are reduced with
