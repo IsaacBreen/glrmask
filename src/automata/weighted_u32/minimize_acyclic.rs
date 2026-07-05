@@ -17,6 +17,18 @@ use crate::ds::weight::Weight;
 
 type Label = i32;
 
+/// Ordering policy for exact pointwise merge groups during acyclic weighted
+/// minimization. The policy affects only representation choices among already
+/// compatible classes; it does not alter the accepted weighted language.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PointwiseClassOrder {
+    /// Preserve the partition-refinement class order used historically.
+    Stable,
+    /// Place denser partial behavior functions first so their constraints are
+    /// absorbed before smaller compatible fragments are grouped greedily.
+    DescendingDomain,
+}
+
 const UNMAPPED: u32 = u32::MAX;
 fn weighted_dwa_minimize_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
@@ -1882,6 +1894,7 @@ fn try_build_and_color_pointwise(
     class_coloring: &[usize],
     class_needed_union: &[Weight],
     class_profiles: &[ClassProfile],
+    pointwise_class_order: PointwiseClassOrder,
     profile_enabled: bool,
 ) -> Option<Vec<usize>> {
     let started_at = Instant::now();
@@ -1920,7 +1933,17 @@ fn try_build_and_color_pointwise(
     let mut group_attempts = 0usize;
     let mut target_rejects = 0usize;
     let mut behavior_rejects = 0usize;
-    for class in 0..class_profiles.len() {
+    let mut class_order = (0..class_profiles.len()).collect::<Vec<_>>();
+    if pointwise_class_order == PointwiseClassOrder::DescendingDomain {
+        class_order.sort_unstable_by_key(|&class| {
+            std::cmp::Reverse((
+                pointwise_profiles[class].by_tsid.len(),
+                class_profiles[class].targets.len(),
+                class,
+            ))
+        });
+    }
+    for class in class_order {
         let class_profile = &class_profiles[class];
         let pointwise_profile = &pointwise_profiles[class];
         let mut placed = false;
@@ -2015,6 +2038,7 @@ fn try_build_and_color_pointwise_ranges(
     class_coloring: &[usize],
     class_needed_union: &[Weight],
     class_profiles: &[ClassProfile],
+    pointwise_class_order: PointwiseClassOrder,
     profile_enabled: bool,
 ) -> Option<Vec<usize>> {
     let started_at = Instant::now();
@@ -2063,6 +2087,7 @@ fn try_build_and_color_pointwise_ranges(
             class_coloring,
             class_needed_union,
             class_profiles,
+            pointwise_class_order,
             profile_enabled,
         );
     }
@@ -2072,7 +2097,17 @@ fn try_build_and_color_pointwise_ranges(
     let mut group_attempts = 0usize;
     let mut target_rejects = 0usize;
     let mut behavior_rejects = 0usize;
-    for class in 0..class_profiles.len() {
+    let mut class_order = (0..class_profiles.len()).collect::<Vec<_>>();
+    if pointwise_class_order == PointwiseClassOrder::DescendingDomain {
+        class_order.sort_unstable_by_key(|&class| {
+            std::cmp::Reverse((
+                pointwise_profiles[class].by_tsid_range.len(),
+                class_profiles[class].targets.len(),
+                class,
+            ))
+        });
+    }
+    for class in class_order {
         let class_profile = &class_profiles[class];
         let pointwise_profile = &pointwise_profiles[class];
         let mut placed = false;
@@ -2630,6 +2665,7 @@ fn build_and_color_hybrid(
     needed: &[Weight],
     old_to_new: &[u32],
     productive_transitions: &[Vec<ProductiveTransition>],
+    pointwise_class_order: PointwiseClassOrder,
 ) -> Vec<usize> {
     let profile_enabled = weighted_dwa_minimize_profile_enabled();
     let total_started_at = Instant::now();
@@ -2718,6 +2754,7 @@ fn build_and_color_hybrid(
             &class_coloring,
             &class_needed_union,
             &class_profiles,
+            pointwise_class_order,
             profile_enabled,
         )
     } else {
@@ -2726,6 +2763,7 @@ fn build_and_color_hybrid(
             &class_coloring,
             &class_needed_union,
             &class_profiles,
+            pointwise_class_order,
             profile_enabled,
         )
     };
@@ -3519,7 +3557,14 @@ pub fn minimize_acyclic(dwa: &DWA) -> DWA {
     minimize_acyclic_owned(dwa.clone())
 }
 
-pub fn minimize_acyclic_owned(mut pushed: DWA) -> DWA {
+pub fn minimize_acyclic_owned(pushed: DWA) -> DWA {
+    minimize_acyclic_owned_with_pointwise_class_order(pushed, PointwiseClassOrder::Stable)
+}
+
+pub fn minimize_acyclic_owned_with_pointwise_class_order(
+    mut pushed: DWA,
+    pointwise_class_order: PointwiseClassOrder,
+) -> DWA {
     if pushed.states().is_empty() {
         return pushed;
     }
@@ -3651,6 +3696,7 @@ pub fn minimize_acyclic_owned(mut pushed: DWA) -> DWA {
             &needed,
             &old_to_new,
             &productive_transitions,
+            pointwise_class_order,
         );
         height_color_ms += color_started_at.elapsed().as_secs_f64() * 1000.0;
 

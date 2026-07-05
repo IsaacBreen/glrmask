@@ -3305,6 +3305,53 @@ pub(crate) fn restore_raw_follow_constraints_after_expansion(
     DWA::from_parts(states, start)
 }
 
+
+/// Restrict each final/transition weight to coordinates that can reach its
+/// source state from the DWA start. This preserves every completed path while
+/// dropping unreachable transport-factor fragments before minimization.
+pub(crate) fn restrict_weights_to_forward_domains(dwa: &DWA) -> DWA {
+    let state_count = dwa.states().len();
+    if state_count == 0 || (dwa.start_state() as usize) >= state_count {
+        return dwa.clone();
+    }
+    let mut domains = vec![Weight::empty(); state_count];
+    let mut worklist = VecDeque::new();
+    let start = dwa.start_state() as usize;
+    domains[start] = Weight::all();
+    worklist.push_back(start);
+    while let Some(source) = worklist.pop_front() {
+        let source_domain = domains[source].clone();
+        for (target, weight) in dwa.states()[source].transitions.values() {
+            let target = *target as usize;
+            if target >= state_count {
+                continue;
+            }
+            let incoming = source_domain.intersection(weight);
+            if incoming.is_empty() {
+                continue;
+            }
+            let merged = domains[target].union(&incoming);
+            if merged != domains[target] {
+                domains[target] = merged;
+                worklist.push_back(target);
+            }
+        }
+    }
+    let mut states = dwa.states().to_vec();
+    for (state, domain) in states.iter_mut().zip(domains) {
+        state.final_weight = state
+            .final_weight
+            .as_ref()
+            .map(|weight| weight.intersection(&domain))
+            .filter(|weight| !weight.is_empty());
+        state.transitions.retain(|_, (_, weight)| {
+            *weight = weight.intersection(&domain);
+            !weight.is_empty()
+        });
+    }
+    DWA::from_parts(states, dwa.start_state())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -3521,6 +3568,60 @@ mod tests {
         );
         assert!(ordinary_word.tokens_for_tsid(0).contains(10));
         assert!(!ordinary_word.tokens_for_tsid(0).contains(20));
+    }
+
+    #[test]
+    fn forward_domain_normalization_removes_unreachable_weight_coordinates() {
+        let reachable = Weight::from_uniform(
+            0..=0,
+            range_set_blaze::RangeSetBlaze::from_iter([7..=7]),
+        );
+        let source = DWAState {
+            transitions: BTreeMap::from([(10, (1, reachable.clone()))]),
+            final_weight: None,
+        };
+        let middle = DWAState {
+            transitions: BTreeMap::from([(11, (2, Weight::all()))]),
+            final_weight: Some(Weight::all()),
+        };
+        let final_state = DWAState {
+            transitions: BTreeMap::new(),
+            final_weight: Some(Weight::all()),
+        };
+        let before = DWA::from_parts(vec![source, middle, final_state], 0);
+        let after = restrict_weights_to_forward_domains(&before);
+
+        assert_eq!(after.eval_word(&[10]), before.eval_word(&[10]));
+        assert_eq!(after.eval_word(&[10, 11]), before.eval_word(&[10, 11]));
+        assert_eq!(after.states()[1].final_weight.as_ref(), Some(&reachable));
+        assert_eq!(after.states()[1].transitions.get(&11).unwrap().1, reachable);
+    }
+
+    #[test]
+    fn forward_domain_normalization_converges_on_cycles() {
+        let reachable = Weight::from_uniform(
+            0..=0,
+            range_set_blaze::RangeSetBlaze::from_iter([7..=7]),
+        );
+        let before = DWA::from_parts(
+            vec![
+                DWAState {
+                    transitions: BTreeMap::from([(10, (1, reachable.clone()))]),
+                    final_weight: None,
+                },
+                DWAState {
+                    transitions: BTreeMap::from([(11, (1, Weight::all()))]),
+                    final_weight: Some(Weight::all()),
+                },
+            ],
+            0,
+        );
+        let after = restrict_weights_to_forward_domains(&before);
+
+        assert_eq!(after.eval_word(&[10]), before.eval_word(&[10]));
+        assert_eq!(after.eval_word(&[10, 11, 11]), before.eval_word(&[10, 11, 11]));
+        assert_eq!(after.states()[1].final_weight.as_ref(), Some(&reachable));
+        assert_eq!(after.states()[1].transitions.get(&11).unwrap().1, reachable);
     }
 
     #[test]

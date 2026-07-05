@@ -22,7 +22,9 @@ use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::determinize::determinize;
-use crate::automata::weighted::minimize::minimize_owned;
+use crate::automata::weighted::minimize::{
+    PointwiseClassOrder, minimize_owned, minimize_owned_with_pointwise_class_order,
+};
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
@@ -42,7 +44,8 @@ use terminal_interchangeability::{
     active_terminals_for_partition, binary_transport_modes, coalesced_disallowed_follows,
     canonicalize_transport_mode_states, discover_one_round, fold_one_round_partition,
     expand_representative_dwa_after_minimization, partition_has_merges,
-    restore_raw_follow_constraints_after_expansion, singleton_partition,
+    restrict_weights_to_forward_domains, restore_raw_follow_constraints_after_expansion,
+    singleton_partition,
     transport_coordinate_quotient, visible_output_raw_labels,
 };
 use postprocess::{
@@ -565,6 +568,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // terminal partition.
     let mut ti_post_dwa_expansion_ms = 0.0;
     let mut ti_raw_follow_restore_ms = 0.0;
+    let mut ti_forward_domain_normalize_ms = 0.0;
     let mut ti_post_dwa_minimize_ms = 0.0;
     let mut ti_post_dwa_compact_ms = 0.0;
     let ti_post_dwa_started_at = reference_terminal_expansion.then(Instant::now);
@@ -622,6 +626,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
 
+        let forward_domain_started_at = ti_profile_timing.then(Instant::now);
+        let expanded_dwa = restrict_weights_to_forward_domains(&expanded_dwa);
+        ti_forward_domain_normalize_ms = forward_domain_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+
         // The transport-coordinate map is still finer than the final raw
         // coordinate domain. Compact it before minimization: otherwise the
         // minimizer cannot see state equivalences enabled by the final TSID
@@ -639,7 +649,14 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         let (expanded_dwa, final_id_map) = expanded_artifact.into_parts();
 
         let post_dwa_minimize_started_at = ti_profile_timing.then(Instant::now);
-        let minimized_dwa = minimize_owned(expanded_dwa);
+        // TI lifting creates partial source domains. Let the densest exact
+        // pointwise profiles establish each greedy merge group first; this is
+        // scoped to the post-DWA artifact and leaves ordinary minimization
+        // unchanged.
+        let minimized_dwa = minimize_owned_with_pointwise_class_order(
+            expanded_dwa,
+            PointwiseClassOrder::DescendingDomain,
+        );
         ti_post_dwa_minimize_ms = post_dwa_minimize_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
@@ -681,7 +698,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             ti_representative_core_total_ms,
         );
         eprintln!(
-            "[glrmask/profile][ti_post_dwa_expansion] partition={} ti_active={} replay_maps_ms={:.3} canonicalize_transport_modes_ms={:.3} transport_coordinate_quotient_ms={:.3} expansion_ms={:.3} raw_follow_restore_ms={:.3} post_dwa_minimize_ms={:.3} post_dwa_compact_ms={:.3} final_tsids={} expansion_total_ms={:.3}",
+            "[glrmask/profile][ti_post_dwa_expansion] partition={} ti_active={} replay_maps_ms={:.3} canonicalize_transport_modes_ms={:.3} transport_coordinate_quotient_ms={:.3} expansion_ms={:.3} raw_follow_restore_ms={:.3} forward_domain_normalize_ms={:.3} post_dwa_minimize_ms={:.3} post_dwa_compact_ms={:.3} final_tsids={} expansion_total_ms={:.3}",
             partition_label,
             reference_terminal_expansion,
             ti_transport_modes_ms,
@@ -689,6 +706,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             ti_transport_coordinate_quotient_ms,
             ti_post_dwa_expansion_ms,
             ti_raw_follow_restore_ms,
+            ti_forward_domain_normalize_ms,
             ti_post_dwa_minimize_ms,
             ti_post_dwa_compact_ms,
             id_map.num_tsids(),
