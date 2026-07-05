@@ -13,7 +13,7 @@
 //! interchange map. The initial lexer state must occur in the same class on both
 //! sides.
 
-use std::collections::{BTreeMap, hash_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, hash_map::Entry};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -21,7 +21,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::nwa_builder::{TerminalNwaTransportMode, TransportScannerStateMap};
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
-use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 
@@ -1980,28 +1979,12 @@ fn rooted_class_bijection_still_possible(
     identity_classes == swapped_classes
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct TerminalInterchangeability {
-    active_representatives: Vec<bool>,
-    representative_for: Vec<TerminalID>,
-    map_for_representative_member: BTreeMap<(TerminalID, TerminalID), InterchangeMap>,
-}
-
-impl TerminalInterchangeability {
-    pub(crate) fn identity(active_terminals: &[bool]) -> Self {
-        Self {
-            active_representatives: active_terminals.to_vec(),
-            representative_for: (0..active_terminals.len() as TerminalID).collect(),
-            map_for_representative_member: BTreeMap::new(),
-        }
-    }
-
-    pub(crate) fn build(
+pub(crate) fn discover_one_round(
         tokenizer: &Tokenizer,
         active_terminals: &[bool],
         relevant_bytes: &[bool; 256],
         ignore_terminal: Option<TerminalID>,
-    ) -> Self {
+    ) -> BTreeMap<TerminalID, BTreeSet<TerminalID>> {
         let candidates = active_terminals
             .iter()
             .enumerate()
@@ -2009,7 +1992,7 @@ impl TerminalInterchangeability {
             .filter(|&terminal| Some(terminal) != ignore_terminal)
             .collect::<Vec<_>>();
         if candidates.len() < 2 {
-            return Self::identity(active_terminals);
+            return identity_partition(active_terminals);
         }
 
         let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
@@ -2030,7 +2013,7 @@ impl TerminalInterchangeability {
             .map(|group| group.len() * group.len().saturating_sub(1) / 2)
             .sum::<usize>();
         if root_candidate_pairs == 0 {
-            return Self::identity(active_terminals);
+            return identity_partition(active_terminals);
         }
 
         let (structural_signatures, structural_color_count) = structural_candidate_signatures(
@@ -2073,11 +2056,11 @@ impl TerminalInterchangeability {
             );
         }
         if exact_candidate_pairs == 0 {
-            return Self::identity(active_terminals);
+            return identity_partition(active_terminals);
         }
 
         let mut dfa = InterchangeabilityDfa::from_topology(tokenizer, active_terminals, topology);
-        let mut result = Self::identity(active_terminals);
+        let mut result = identity_partition(active_terminals);
         let mut output_pair_rejections = 0usize;
         let mut output_invariant_checks = 0usize;
         let mut first_round_rejections = 0usize;
@@ -2139,12 +2122,15 @@ impl TerminalInterchangeability {
                             map
                         }
                     };
-                    if let Some(map) = map {
+                    if map.is_some() {
                         let storage_started_at = profile_timing.then(Instant::now);
                         accepted_representative_members += 1;
-                        result.representative_for[terminal as usize] = representative;
-                        result.active_representatives[terminal as usize] = false;
-                        result.map_for_representative_member.insert((representative, terminal), map);
+                        result
+                            .get_mut(&representative)
+                            .expect("TI representative must retain its singleton partition entry")
+                            .insert(terminal);
+                        let removed = result.remove(&terminal);
+                        debug_assert!(removed.is_some(), "TI member must retain its singleton partition entry");
                         if let Some(started_at) = storage_started_at {
                             accepted_map_storage_ns += started_at.elapsed().as_nanos() as u64;
                         }
@@ -2182,237 +2168,173 @@ impl TerminalInterchangeability {
                     .unwrap_or(0.0),
             );
         }
+        assert_partition_invariants(&result, active_terminals);
         result
     }
 
-    pub(crate) fn is_identity(&self) -> bool {
-        self.map_for_representative_member.is_empty()
-    }
 
-    pub(crate) fn active_representatives(&self) -> &[bool] {
-        &self.active_representatives
-    }
+/// Return the singleton-inclusive one-round partition for the current active
+/// terminal mask. Inactive terminals are deliberately absent: this same mask
+/// controls both candidates and frozen F/U observation for the round.
+fn identity_partition(active_terminals: &[bool]) -> BTreeMap<TerminalID, BTreeSet<TerminalID>> {
+    active_terminals
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, &active)| {
+            active.then_some((terminal as TerminalID, BTreeSet::from([terminal as TerminalID])))
+        })
+        .collect()
+}
 
-    /// Coalesce a grammar disallowed-follow table for the representative-labeled
-    /// equivalence phase, where every TI class member is observed only through
-    /// its representative.
-    ///
-    /// A representative-labeled follow edge `(repP, repS)` stands for *some*
-    /// member pair `(mP, mS)`, so it may only be treated as disallowed when
-    /// *every* member pair is disallowed in the original grammar table:
-    /// `coalesced[repP].contains(repS)` iff for all `mP in class(repP)` and
-    /// `mS in class(repS)`, `original[mP].contains(mS)`. This is the follow
-    /// analogue of hiding members behind representatives: without it the
-    /// representative inherits the *union* of member restrictions and wrongly
-    /// prunes a continuation (e.g. `CLASS` after `SPACE`) that is legal for one
-    /// member but not the representative. The original (per-member) table must
-    /// still be applied to the transport-expanded DWA afterwards.
-    pub(crate) fn coalesced_disallowed_follows(
-        &self,
-        original: &BTreeMap<u32, BitSet>,
-        num_terminals: usize,
-    ) -> BTreeMap<u32, BitSet> {
-        // A representative pair is coalesced precisely when every raw member
-        // pair is disallowed. Count the original sparse relation by its
-        // representative endpoints, then retain exactly the pairs whose count
-        // equals the Cartesian product of the two class sizes. This is the same
-        // predicate as the direct nested all() scan, but does no work for class
-        // pairs absent from the grammar's (usually sparse) follow table.
-        let representative_count = self.representative_for.len();
-        let mut members_per_representative = vec![0usize; representative_count];
-        for &representative in &self.representative_for {
-            members_per_representative[representative as usize] += 1;
+fn assert_partition_invariants(
+    partition: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
+    active_terminals: &[bool],
+) {
+    let mut seen = vec![false; active_terminals.len()];
+    for (&representative, members) in partition {
+        assert!(members.contains(&representative), "TI partition class must contain its key");
+        for &member in members {
+            assert!(
+                active_terminals.get(member as usize).copied().unwrap_or(false),
+                "TI partition contains an inactive terminal",
+            );
+            assert!(
+                !std::mem::replace(&mut seen[member as usize], true),
+                "TI partition contains a terminal in multiple classes",
+            );
         }
+    }
+    assert_eq!(seen, active_terminals, "TI partition must cover exactly active terminals");
+}
 
-        let mut disallowed_member_pairs = FxHashMap::<(TerminalID, TerminalID), usize>::default();
-        for (&predecessor, successors) in original {
-            let predecessor = predecessor as usize;
-            let Some(&representative_predecessor) = self.representative_for.get(predecessor) else {
+pub(crate) fn active_terminals_for_partition(
+    partition: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
+    terminal_count: usize,
+) -> Vec<bool> {
+    let mut active = vec![false; terminal_count];
+    for &representative in partition.keys() {
+        active[representative as usize] = true;
+    }
+    active
+}
+
+pub(crate) fn partition_has_merges(partition: &BTreeMap<TerminalID, BTreeSet<TerminalID>>) -> bool {
+    partition.values().any(|members| members.len() > 1)
+}
+
+pub(crate) fn visible_output_raw_labels(
+    partition: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
+    terminal_count: usize,
+) -> Vec<bool> {
+    active_terminals_for_partition(partition, terminal_count)
+}
+
+fn representatives_for_partition(
+    partition: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
+    terminal_count: usize,
+) -> Vec<TerminalID> {
+    let mut representative_for = (0..terminal_count as TerminalID).collect::<Vec<_>>();
+    for (&representative, members) in partition {
+        for &member in members {
+            representative_for[member as usize] = representative;
+        }
+    }
+    representative_for
+}
+
+/// Coalesce grammar follows for a compact representative alphabet. A class pair
+/// is disallowed only when every concrete member pair is disallowed; original
+/// follows are retained for the later raw-member transport construction.
+pub(crate) fn coalesced_disallowed_follows(
+    partition: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
+    original: &BTreeMap<u32, BitSet>,
+    num_terminals: usize,
+) -> BTreeMap<u32, BitSet> {
+    let representative_for = representatives_for_partition(partition, num_terminals);
+    let mut members_per_representative = vec![0usize; num_terminals];
+    for (&representative, members) in partition {
+        members_per_representative[representative as usize] = members.len();
+    }
+
+    let mut disallowed_member_pairs = FxHashMap::<(TerminalID, TerminalID), usize>::default();
+    for (&predecessor, successors) in original {
+        let Some(&representative_predecessor) = representative_for.get(predecessor as usize) else {
+            continue;
+        };
+        for successor in successors.iter_ones() {
+            let Some(&representative_successor) = representative_for.get(successor) else {
                 continue;
             };
-            for successor in successors.iter_ones() {
-                let Some(&representative_successor) = self.representative_for.get(successor) else {
-                    continue;
-                };
-                *disallowed_member_pairs
-                    .entry((representative_predecessor, representative_successor))
-                    .or_default() += 1;
-            }
+            *disallowed_member_pairs
+                .entry((representative_predecessor, representative_successor))
+                .or_default() += 1;
         }
+    }
 
-        let mut coalesced = BTreeMap::new();
-        for (representative, &member_count) in members_per_representative.iter().enumerate() {
-            if member_count > 0 {
-                coalesced.insert(representative as u32, BitSet::new(num_terminals));
-            }
-        }
-        for ((representative_predecessor, representative_successor), disallowed_count) in
-            disallowed_member_pairs
+    let mut coalesced = BTreeMap::new();
+    for &representative in partition.keys() {
+        coalesced.insert(representative as u32, BitSet::new(num_terminals));
+    }
+    for ((representative_predecessor, representative_successor), count) in disallowed_member_pairs {
+        if count
+            == members_per_representative[representative_predecessor as usize]
+                * members_per_representative[representative_successor as usize]
         {
-            let predecessor_member_count =
-                members_per_representative[representative_predecessor as usize];
-            let successor_member_count = members_per_representative[representative_successor as usize];
-            if disallowed_count == predecessor_member_count * successor_member_count {
-                coalesced
-                    .get_mut(&(representative_predecessor as u32))
-                    .expect("representative class must have a coalesced follow row")
-                    .set(representative_successor as usize);
-            }
-        }
-        coalesced
-    }
-
-    /// Scanner metadata remains visible for every raw terminal. Only edges for
-    /// nonrepresentative active terminals are reconstructed through a transport
-    /// mode rather than emitted directly.
-    pub(crate) fn visible_output_raw_labels(&self) -> Vec<bool> {
-        self.representative_for
-            .iter()
-            .enumerate()
-            .map(|(terminal, &representative)| terminal as TerminalID == representative)
-            .collect()
-    }
-
-    /// Replace each mapped raw scanner state with the representative of its
-    /// ordinary exact terminal-DWA class. The transport map's label permutation
-    /// is unchanged, and ordinary-equivalent scanner states admit exactly the
-    /// same vocabulary continuations under that fixed permutation. This makes
-    /// context sharing depend on semantic scanner destinations rather than
-    /// incidental raw DFA state identities.
-    pub(crate) fn canonicalize_transport_mode_states(
-        &self,
-        modes: &mut [TerminalNwaTransportMode],
-        ordinary_state_map: &ManyToOneIdMap,
-    ) {
-        let state_count = ordinary_state_map.original_to_internal.len();
-        for mode in modes {
-            assert_eq!(
-                mode.scanner_state_for_original.len(),
-                state_count,
-                "transport mode state domain must match ordinary state quotient",
-            );
-            for scanner_state in mode.scanner_state_for_original.make_explicit_mut() {
-                let raw = *scanner_state as usize;
-                let internal = ordinary_state_map
-                    .original_to_internal
-                    .get(raw)
-                    .copied()
-                    .unwrap_or(u32::MAX);
-                if internal != u32::MAX {
-                    *scanner_state = ordinary_state_map
-                        .representative_original_id_for_internal(internal)
-                        .expect("ordinary state quotient missing representative");
-                }
-            }
+            coalesced
+                .get_mut(&(representative_predecessor as u32))
+                .expect("TI partition representative must have a follow row")
+                .set(representative_successor as usize);
         }
     }
+    coalesced
+}
 
-    /// Refine an exact ordinary terminal-DWA state quotient only where a
-    /// transport mode observes a different quotient destination. For a raw
-    /// state `s`, the signature is
-    /// `(Q(m_0(s)), Q(m_1(s)), …)`, where `Q` is the ordinary exact state map
-    /// and `m_i` is a scanner transport. States with equal signatures remain
-    /// interchangeable for every transported output: each mode starts from
-    /// ordinary-equivalent scanner states and then applies the same fixed label
-    /// permutation.
-    ///
-    /// The signature is *not* materialized. Starting from one class, each mode
-    /// exactly refines the current partition by the next `Q(m_i(s))` value. The
-    /// resulting class ID is therefore an exact canonical encoding of the full
-    /// vector, while scratch space stays O(number of raw lexer states) rather
-    /// than O(states × modes).
-    pub(crate) fn transport_coordinate_quotient(
-        &self,
-        ordinary_state_map: &ManyToOneIdMap,
-        modes: &[TerminalNwaTransportMode],
-    ) -> ManyToOneIdMap {
-        assert!(!modes.is_empty(), "transport coordinate quotient needs a mode");
-        let state_count = ordinary_state_map.original_to_internal.len();
-        let mut class_for_state = vec![0u32; state_count];
-        let mut next_class_for_state = vec![0u32; state_count];
-        let mut class_for_pair = FxHashMap::<(u32, u64), u32>::default();
+/// Active terminal mask for direct final-partition materialization. Every
+/// final representative stays visible, and exactly one hidden member is added
+/// as the interchange target. This is deliberately not a two-terminal mask.
+fn materialization_active_mask(
+    partition: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
+    terminal_count: usize,
+    member: TerminalID,
+) -> Vec<bool> {
+    let mut active = active_terminals_for_partition(partition, terminal_count);
+    active[member as usize] = true;
+    active
+}
 
-        for mode in modes {
-            assert_eq!(
-                mode.scanner_state_for_original.len(),
-                state_count,
-                "transport mode state domain must match ordinary state quotient",
-            );
-            class_for_pair.clear();
-            let mut next_class_count = 0u32;
-
-            for (source_state, (&prior_class, &target_state)) in class_for_state
-                .iter()
-                .zip(mode.scanner_state_for_original.materialized().iter())
-                .enumerate()
-            {
-                let target_state = target_state as usize;
-                let mapped = ordinary_state_map
-                    .original_to_internal
-                    .get(target_state)
-                    .copied()
-                    .unwrap_or(u32::MAX);
-                // Unmapped targets are outside the ordinary quotient's proof
-                // domain. Keep their raw identity distinct rather than merging
-                // them by accident.
-                let target_key = if mapped == u32::MAX {
-                    (1u64 << 32) | target_state as u64
-                } else {
-                    mapped as u64
-                };
-                let class = match class_for_pair.entry((prior_class, target_key)) {
-                    Entry::Occupied(entry) => *entry.get(),
-                    Entry::Vacant(entry) => {
-                        let class = next_class_count;
-                        next_class_count += 1;
-                        entry.insert(class);
-                        class
-                    }
-                };
-                next_class_for_state[source_state] = class;
+/// Build temporary direct witnesses for the final transport NWA. Discovery
+/// stores only the terminal partition. For each final representative/member
+/// pair, rediscover the exact map with every final representative plus that one
+/// member active; all other final representatives must therefore remain fixed.
+pub(crate) fn binary_transport_modes(
+    tokenizer: &Tokenizer,
+    partition: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
+    relevant_bytes: &[bool; 256],
+) -> Vec<TerminalNwaTransportMode> {
+    let state_count = tokenizer.num_states() as usize;
+    let terminal_count = tokenizer.num_terminals() as usize;
+    let mut modes = vec![TerminalNwaTransportMode::ordinary(state_count)];
+    for (&representative, members) in partition {
+        for &member in members {
+            if member == representative {
+                continue;
             }
-            std::mem::swap(&mut class_for_state, &mut next_class_for_state);
-        }
-
-        let class_count = class_for_state
-            .iter()
-            .copied()
-            .max()
-            .map_or(0usize, |class| class as usize + 1);
-        let mut representatives = vec![u32::MAX; class_count];
-        for (state, &class) in class_for_state.iter().enumerate() {
-            let representative = &mut representatives[class as usize];
-            if *representative == u32::MAX {
-                *representative = state as u32;
-            }
-        }
-
-        ManyToOneIdMap::from_original_to_internal_with_representatives(
-            class_for_state,
-            class_count as u32,
-            representatives,
-        )
-    }
-
-    pub(crate) fn terminal_nwa_transport_modes(&self) -> Option<Vec<TerminalNwaTransportMode>> {
-        let state_count = self
-            .map_for_representative_member
-            .values()
-            .next()
-            .map(|map| map.scanner_state_map.len())?;
-        let mut modes = vec![TerminalNwaTransportMode {
-            scanner_state_for_original: TransportScannerStateMap::Explicit((0..state_count as u32).collect::<Vec<_>>().into()),
-            terminal_swap: None,
-        }];
-
-        for (&(representative, member), map) in &self.map_for_representative_member {
-            modes.push(TerminalNwaTransportMode {
-                scanner_state_for_original: map.scanner_state_map(),
-                terminal_swap: Some((representative, member)),
+            let visible = materialization_active_mask(partition, terminal_count, member);
+            let mut dfa = InterchangeabilityDfa::new(tokenizer, &visible, relevant_bytes);
+            let map = dfa.interchange_map(representative, member).unwrap_or_else(|| {
+                panic!(
+                    "TI final partition member lacks a direct exact transport witness: rep={} member={} visible_final_representatives_plus_member={:?}",
+                    representative, member, visible,
+                )
             });
+            modes.push(TerminalNwaTransportMode::member(
+                map.scanner_state_map(),
+                representative,
+                member,
+            ));
         }
-        Some(modes)
     }
+    modes
 }
 
 #[cfg(test)]
@@ -2432,23 +2354,28 @@ mod tests {
     }
 
     #[test]
+    fn partition_invariants_cover_each_active_terminal_once() {
+        let active = [true, false, true, true, false];
+        let partition = BTreeMap::from([
+            (0, BTreeSet::from([0, 2])),
+            (3, BTreeSet::from([3])),
+        ]);
+        assert_partition_invariants(&partition, &active);
+        assert_eq!(active_terminals_for_partition(&partition, active.len()), [true, false, false, true, false]);
+        assert_eq!(visible_output_raw_labels(&partition, active.len()), [true, false, false, true, false]);
+    }
+
+    #[test]
     fn sparse_coalesced_disallowed_follows_matches_direct_member_pair_predicate() {
         fn direct(
-            plan: &TerminalInterchangeability,
+            partition: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
             original: &BTreeMap<u32, BitSet>,
             num_terminals: usize,
         ) -> BTreeMap<u32, BitSet> {
-            let mut members_of: BTreeMap<TerminalID, Vec<TerminalID>> = BTreeMap::new();
-            for (terminal, &representative) in plan.representative_for.iter().enumerate() {
-                members_of
-                    .entry(representative)
-                    .or_default()
-                    .push(terminal as TerminalID);
-            }
             let mut result = BTreeMap::new();
-            for (&predecessor_representative, predecessors) in &members_of {
+            for (&predecessor_representative, predecessors) in partition {
                 let mut bits = BitSet::new(num_terminals);
-                for (&successor_representative, successors) in &members_of {
+                for (&successor_representative, successors) in partition {
                     if predecessors.iter().all(|&predecessor| {
                         successors.iter().all(|&successor| {
                             original
@@ -2464,11 +2391,12 @@ mod tests {
             result
         }
 
-        let plan = TerminalInterchangeability {
-            active_representatives: vec![true, false, true, false, true, true],
-            representative_for: vec![0, 0, 2, 2, 4, 5],
-            map_for_representative_member: BTreeMap::new(),
-        };
+        let partition = BTreeMap::from([
+            (0, BTreeSet::from([0, 1])),
+            (2, BTreeSet::from([2, 3])),
+            (4, BTreeSet::from([4])),
+            (5, BTreeSet::from([5])),
+        ]);
         let mut original = BTreeMap::new();
         let row = |successors: &[usize]| {
             let mut bits = BitSet::new(6);
@@ -2477,77 +2405,15 @@ mod tests {
             }
             bits
         };
-        // Class 0 -> class 2 is fully forbidden (four raw pairs); the other
-        // examples are only partially forbidden and must not be coalesced.
         original.insert(0, row(&[2, 3, 4]));
         original.insert(1, row(&[2, 3]));
         original.insert(2, row(&[0, 1]));
         original.insert(3, row(&[0]));
 
         assert_eq!(
-            plan.coalesced_disallowed_follows(&original, 6),
-            direct(&plan, &original, 6),
+            coalesced_disallowed_follows(&partition, &original, 6),
+            direct(&partition, &original, 6),
         );
-    }
-
-    #[test]
-    fn transport_coordinate_quotient_matches_full_mode_signature() {
-        let ordinary = ManyToOneIdMap::from_original_to_internal_with_representatives(
-            vec![0, 0, 1, 1, 2, 2, 3],
-            4,
-            vec![0, 2, 4, 6],
-        );
-        let modes = vec![
-            TerminalNwaTransportMode {
-                scanner_state_for_original: TransportScannerStateMap::Explicit(vec![0, 1, 2, 3, 4, 5, 6].into()),
-                terminal_swap: None,
-            },
-            TerminalNwaTransportMode {
-                scanner_state_for_original: TransportScannerStateMap::Explicit(vec![1, 0, 3, 2, 5, 4, 6].into()),
-                terminal_swap: None,
-            },
-            TerminalNwaTransportMode {
-                scanner_state_for_original: TransportScannerStateMap::Explicit(vec![2, 3, 0, 1, 6, 6, 4].into()),
-                terminal_swap: None,
-            },
-        ];
-        let plan = TerminalInterchangeability::identity(&[true]);
-        let quotient = plan.transport_coordinate_quotient(&ordinary, &modes);
-
-        let signatures = (0..ordinary.original_to_internal.len())
-            .map(|source| {
-                modes
-                    .iter()
-                    .map(|mode| {
-                        ordinary.original_to_internal
-                            [mode.scanner_state_for_original.scanner_state(source as u32) as usize]
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        for left in 0..signatures.len() {
-            for right in 0..signatures.len() {
-                assert_eq!(
-                    quotient.original_to_internal[left] == quotient.original_to_internal[right],
-                    signatures[left] == signatures[right],
-                    "signature quotient disagreed for states {left} and {right}",
-                );
-            }
-        }
-
-        let mut canonical_modes = modes.clone();
-        plan.canonicalize_transport_mode_states(&mut canonical_modes, &ordinary);
-        let canonical_quotient = plan.transport_coordinate_quotient(&ordinary, &canonical_modes);
-        for left in 0..signatures.len() {
-            for right in 0..signatures.len() {
-                assert_eq!(
-                    quotient.original_to_internal[left] == quotient.original_to_internal[right],
-                    canonical_quotient.original_to_internal[left]
-                        == canonical_quotient.original_to_internal[right],
-                    "canonical transport changed the quotient for states {left} and {right}",
-                );
-            }
-        }
     }
 
     #[test]
@@ -2586,8 +2452,8 @@ mod tests {
         assert_eq!(map.scanner_state_map.scanner_state(root as u32), tokenizer.initial_state_id());
         let representatives = map.materialized_scanner_states();
         assert_eq!(map.scanner_state_map.scanner_state(root as u32), representatives[root]);
-        let plan = TerminalInterchangeability::build(&tokenizer, &[true, true], &[true; 256], None);
-        assert_eq!(plan.active_representatives.iter().filter(|&&active| active).count(), 1);
+        let partition = discover_one_round(&tokenizer, &[true, true], &[true; 256], None);
+        assert_eq!(partition, BTreeMap::from([(0, BTreeSet::from([0, 1]))]));
     }
 
     #[test]
@@ -2600,14 +2466,13 @@ mod tests {
         ]);
         let mut punctuation_only = [false; 256];
         punctuation_only[b'"' as usize] = true;
-        let plan = TerminalInterchangeability::build(
+        let partition = discover_one_round(
             &tokenizer,
             &[true, true, true, true],
             &punctuation_only,
             None,
         );
-        assert_eq!(plan.active_representatives.iter().filter(|&&active| active).count(), 1);
-        assert_eq!(plan.representative_for, vec![0, 0, 0, 0]);
+        assert_eq!(partition, BTreeMap::from([(0, BTreeSet::from([0, 1, 2, 3]))]));
     }
 
     #[test]
@@ -2674,8 +2539,8 @@ mod tests {
 
         let mut dfa = InterchangeabilityDfa::new(&tokenizer, &active, &only_x);
         assert!(dfa.interchange_map(0, 1).is_some());
-        let plan = TerminalInterchangeability::build(&tokenizer, &active, &only_x, None);
-        assert_eq!(plan.active_representatives.iter().filter(|&&active| active).count(), 1);
+        let partition = discover_one_round(&tokenizer, &active, &only_x, None);
+        assert_eq!(partition, BTreeMap::from([(0, BTreeSet::from([0, 1]))]));
     }
 
     #[test]

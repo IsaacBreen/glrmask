@@ -41,7 +41,10 @@ use nwa_builder::{
     build_nwa_via_trie_walk, build_transport_nwa_via_trie_walk, internal_vocab_entries,
     seed_root_nodes,
 };
-use terminal_interchangeability::TerminalInterchangeability;
+use terminal_interchangeability::{
+    active_terminals_for_partition, binary_transport_modes, coalesced_disallowed_follows,
+    discover_one_round, partition_has_merges, visible_output_raw_labels,
+};
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
     prune_non_coreachable_states,
@@ -185,63 +188,50 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         }
     }
 
-    // Discover terminal interchangeability in the current vocabulary byte
-    // partition. The L2+ active mask limits which terminals may form a class,
-    // but a transported scanner must retain the complete terminal alphabet.
+    // Discover one exact, singleton-inclusive terminal partition. The active
+    // mask controls both candidates and frozen F/U in this call. The partition
+    // is the durable result; binary scanner witnesses are created only when the
+    // strict transport NWA is built below.
     let ti_profile_timing = l2p_timing_profile_enabled();
     let ti_discovery_started_at = ti_profile_timing.then(Instant::now);
-    let terminal_interchangeability = if l2p_terminal_interchangeability_enabled() {
-        TerminalInterchangeability::build(
-            tokenizer,
-            active_terminals,
-            &relevant_bytes,
-            ignore_terminal,
-        )
-    } else {
-        TerminalInterchangeability::identity(active_terminals)
-    };
+    let terminal_partition = l2p_terminal_interchangeability_enabled().then(|| {
+        discover_one_round(tokenizer, active_terminals, &relevant_bytes, ignore_terminal)
+    });
     let ti_discovery_ms = ti_discovery_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
-    let reference_terminal_expansion = !terminal_interchangeability.is_identity();
-    let transport_modes_started_at = ti_profile_timing.then(Instant::now);
-    let mut transport_modes = reference_terminal_expansion
-        .then(|| terminal_interchangeability.terminal_nwa_transport_modes())
-        .flatten();
-    let ti_transport_modes_ms = transport_modes_started_at
-        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-    let analysis_active_terminals = terminal_interchangeability.active_representatives();
-    // Equivalence analysis observes only TI representatives, so it must use a
-    // follow table coalesced over each class: a representative-labeled follow is
-    // disallowed only when disallowed for every member. Otherwise the
-    // representative inherits the union of member restrictions and equivalence
-    // wrongly collapses a state whose only distinguishing continuation is a
-    // member terminal (e.g. CLASS after SPACE), merging tokens that differ. The
-    // original per-member table is still applied to the transport-expanded DWA.
+    let reference_terminal_expansion = terminal_partition
+        .as_ref()
+        .is_some_and(|partition| partition_has_merges(partition));
+    let analysis_active_terminals = terminal_partition
+        .as_ref()
+        .map(|partition| active_terminals_for_partition(partition, active_terminals.len()))
+        .unwrap_or_else(|| active_terminals.to_vec());
     let coalesced_disallowed_follows_started_at = ti_profile_timing.then(Instant::now);
     let coalesced_disallowed_follows = reference_terminal_expansion.then(|| {
-        terminal_interchangeability
-            .coalesced_disallowed_follows(disallowed_follows, grammar.num_terminals as usize)
+        coalesced_disallowed_follows(
+            terminal_partition
+                .as_ref()
+                .expect("active TI partition must be present"),
+            disallowed_follows,
+            grammar.num_terminals as usize,
+        )
     });
     let ti_coalesced_disallowed_follows_ms = coalesced_disallowed_follows_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
-    // Deliberately process-scoped profiling escape hatch. It is only enabled
-    // by an exact partition label, prints all discovery/plan measurements that
-    // precede equivalence and transport expansion, then exits before a known
-    // slow downstream build can obscure those figures.
     if std::env::var("GLRMASK_PROFILE_L2P_EXIT_AFTER_TI_DISCOVERY")
         .ok()
         .as_deref()
         == Some(partition_label)
     {
+        let class_count = terminal_partition.as_ref().map_or(0, |partition| partition.len());
         eprintln!(
-            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} discovery_ms={:.3} transport_modes_ms={:.3} coalesced_disallowed_follows_ms={:.3} early_exit=after_ti_discovery",
+            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} classes={} discovery_ms={:.3} coalesced_disallowed_follows_ms={:.3} early_exit=after_ti_discovery",
             partition_label,
             reference_terminal_expansion,
+            class_count,
             ti_discovery_ms,
-            ti_transport_modes_ms,
             ti_coalesced_disallowed_follows_ms,
         );
         std::process::exit(0);
@@ -249,8 +239,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let equivalence_disallowed_follows = coalesced_disallowed_follows
         .as_ref()
         .unwrap_or(disallowed_follows);
-    let terminal_nwa_visible_output_labels =
-        terminal_interchangeability.visible_output_raw_labels();
     let num_analysis_active_terminals = analysis_active_terminals
         .iter()
         .filter(|&&active| active)
@@ -306,7 +294,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             vocab,
             equivalence_disallowed_follows,
             ignore_terminal,
-            Some(analysis_active_terminals),
+            Some(&analysis_active_terminals),
             equivalence_vocab_dfa_cache,
             shared_analysis_dfa_cache,
             shared_base_setup_ms,
@@ -314,37 +302,27 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             equivalence_initial_state_map,
         );
 
-    // Transport modes are indexed by raw lexer states, but they only observe
-    // the ordinary terminal-DWA quotient of each mapped destination. Preserve
-    // the coarsest exact refinement of that quotient across every mode rather
-    // than restoring one internal state ID per raw lexer state.
-    let mut ti_canonicalize_transport_modes_ms = 0.0;
-    let mut ti_transport_coordinate_quotient_ms = 0.0;
-    if let Some(modes) = transport_modes.as_mut() {
-        let ordinary_state_map = &simplified_id_map.tokenizer_states;
-        let canonicalize_started_at = ti_profile_timing.then(Instant::now);
-        terminal_interchangeability.canonicalize_transport_mode_states(modes, ordinary_state_map);
-        ti_canonicalize_transport_modes_ms = canonicalize_started_at
-            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-            .unwrap_or(0.0);
-        let quotient_started_at = ti_profile_timing.then(Instant::now);
-        let transport_coordinate_map =
-            terminal_interchangeability.transport_coordinate_quotient(ordinary_state_map, modes);
-        ti_transport_coordinate_quotient_ms = quotient_started_at
-            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-            .unwrap_or(0.0);
-        simplified_id_map.tokenizer_states = transport_coordinate_map;
+    // Binary member witnesses are defined on raw lexer states. The
+    // representative-only equivalence map is sound for the ordinary scan, but
+    // it does not prove that every raw state in a class has the same witness
+    // destination. Keep strict transport construction in raw singleton state
+    // coordinates; this deliberately replaces the removed recursive quotient.
+    if reference_terminal_expansion {
+        let raw_states = (0..tokenizer.num_states()).collect::<Vec<_>>();
+        simplified_id_map.tokenizer_states =
+            ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+                raw_states.clone(),
+                raw_states,
+            );
     }
+
     if ti_profile_timing {
         eprintln!(
-            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} discovery_ms={:.3} transport_modes_ms={:.3} coalesced_disallowed_follows_ms={:.3} canonicalize_transport_modes_ms={:.3} transport_coordinate_quotient_ms={:.3}",
+            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} discovery_ms={:.3} coalesced_disallowed_follows_ms={:.3}",
             partition_label,
             reference_terminal_expansion,
             ti_discovery_ms,
-            ti_transport_modes_ms,
             ti_coalesced_disallowed_follows_ms,
-            ti_canonicalize_transport_modes_ms,
-            ti_transport_coordinate_quotient_ms,
         );
     }
 
@@ -434,7 +412,17 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
             // ---- Step 6: Trie-walk NWA build ----
             let trie_build_started_at = Instant::now();
-            let _build_profile = if let Some(modes) = transport_modes.as_deref() {
+            let _build_profile = if reference_terminal_expansion {
+                let partition = terminal_partition
+                    .as_ref()
+                    .expect("active TI transport must retain its partition");
+                // These binary maps are temporary witnesses. The partition does
+                // not retain scanner maps or a general label permutation.
+                let modes = binary_transport_modes(tokenizer_for_build, partition, &relevant_bytes);
+                let visible_output_raw_labels = visible_output_raw_labels(
+                    partition,
+                    grammar.num_terminals as usize,
+                );
                 seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
                 build_transport_nwa_via_trie_walk(
                     tokenizer_for_build,
@@ -445,8 +433,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                     &simplified_id_map,
                     &full_tree.root,
                     &mut pm_computer,
-                    &terminal_nwa_visible_output_labels,
-                    modes,
+                    &visible_output_raw_labels,
+                    &modes,
                 )
             } else {
                 let roots = seed_root_nodes(&mut nwa, start_state, &simplified_id_map);

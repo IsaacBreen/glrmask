@@ -1057,7 +1057,9 @@ mod tests {
     use crate::automata::weighted::determinize::determinize;
     use crate::automata::weighted::minimize::minimize_owned;
     use crate::compiler::stages::equiv_types::ManyToOneIdMap;
-    use crate::compiler::stages::id_map_and_terminal_dwa::l2p::terminal_interchangeability::TerminalInterchangeability;
+    use crate::compiler::stages::id_map_and_terminal_dwa::l2p::terminal_interchangeability::{
+        binary_transport_modes, discover_one_round, visible_output_raw_labels,
+    };
     use crate::compiler::stages::id_map_and_terminal_dwa::types::{
         LocalIdMapTerminalDwa, TerminalDwaPhaseProfile,
     };
@@ -1133,10 +1135,7 @@ mod tests {
     }
 
     #[test]
-    fn transport_mode_preserves_sibling_outputs_outside_its_swap() {
-        // A swap mode may relabel A <-> B, but C remains an observable output
-        // of the full lexer. Filtering C before the trie walk makes the mode's
-        // lexer language differ from the full swapped-label lexer language.
+    fn member_reconstruction_emits_only_its_target_member() {
         let expressions = vec![
             Expr::U8Seq(b"a".to_vec()),
             Expr::U8Seq(b"b".to_vec()),
@@ -1146,17 +1145,15 @@ mod tests {
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
         );
-        let tree = VocabPrefixTree::build(&[(0, b"c".to_vec())]);
+        let tree = VocabPrefixTree::build(&[(0, b"a".to_vec()), (1, b"c".to_vec())]);
         let state_ids = (0..tokenizer.num_states()).collect::<Vec<_>>();
         let id_map = InternalIdMap {
             tokenizer_states:
                 ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-                    state_ids.clone(),
-                    state_ids,
+                    state_ids.clone(), state_ids,
                 ),
             vocab_tokens: ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-                vec![0],
-                vec![0],
+                vec![0, 1], vec![0, 1],
             ),
         };
         let mut possible_matches = PossibleMatchesComputer::new(&tokenizer);
@@ -1165,10 +1162,13 @@ mod tests {
         nwa.set_final_weight(leaf, Weight::all());
         let start = nwa.add_state();
         nwa.start_states_mut().push(start);
-        let modes = [TerminalNwaTransportMode {
-            scanner_state_for_original: TransportScannerStateMap::Explicit((0..tokenizer.num_states()).collect::<Vec<_>>().into()),
-            terminal_swap: Some((0, 1)),
-        }];
+        let identity = TransportScannerStateMap::Explicit(
+            (0..tokenizer.num_states()).collect::<Vec<_>>().into(),
+        );
+        let modes = [
+            TerminalNwaTransportMode::ordinary(tokenizer.num_states() as usize),
+            TerminalNwaTransportMode::member(identity, 0, 1),
+        ];
 
         build_transport_nwa_via_trie_walk(
             &tokenizer,
@@ -1184,12 +1184,23 @@ mod tests {
         );
 
         let root = nwa.states()[start as usize].epsilons[0].0;
+        let transitions = &nwa.states()[root as usize].transitions;
+        assert!(transitions.contains_key(&0), "ordinary representative scan must emit rep");
+        assert!(transitions.contains_key(&1), "member reconstruction must emit its target member");
+        assert!(transitions.contains_key(&2), "ordinary representative scan must retain unrelated rep");
+        let member_weight = transitions
+            .get(&1)
+            .and_then(|edges| {
+                edges
+                    .iter()
+                    .find_map(|(destination, weight)| (*destination == leaf).then_some(weight))
+            })
+            .expect("member reconstruction must create a leaf edge");
+        let member_tokens = member_weight.tokens_for_tsid(0);
+        assert!(member_tokens.contains(0), "member must accept the representative token");
         assert!(
-            nwa.states()[root as usize]
-                .transitions
-                .get(&2)
-                .is_some_and(|edges| edges.iter().any(|(destination, _)| *destination == leaf)),
-            "a mode that swaps A and B must retain the fixed C output"
+            !member_tokens.contains(1),
+            "member reconstruction must not emit its member for unrelated raw outputs",
         );
     }
 
@@ -1285,15 +1296,13 @@ mod tests {
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
         );
-        let plan = TerminalInterchangeability::build(
+        let partition = discover_one_round(
             &tokenizer,
             &vec![true; tokenizer.num_terminals() as usize],
             &[true; 256],
             None,
         );
-        let modes = plan
-            .terminal_nwa_transport_modes()
-            .expect("duplicate terminals must transport");
+        let modes = binary_transport_modes(&tokenizer, &partition, &[true; 256]);
         assert!(modes.len() >= 16, "the test requires many transport modes");
 
         let tree = VocabPrefixTree::build(&[
@@ -1319,7 +1328,7 @@ mod tests {
             &id_map,
             &tree.root,
             &mut possible_matches,
-            &plan.visible_output_raw_labels(),
+            &visible_output_raw_labels(&partition, tokenizer.num_terminals() as usize),
             &modes,
         );
 
@@ -1344,10 +1353,8 @@ mod tests {
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
         );
-        let plan = TerminalInterchangeability::build(&tokenizer, &[true, true], &[true; 256], None);
-        let modes = plan
-            .terminal_nwa_transport_modes()
-            .expect("duplicate terminals must transport");
+        let partition = discover_one_round(&tokenizer, &[true, true], &[true; 256], None);
+        let modes = binary_transport_modes(&tokenizer, &partition, &[true; 256]);
         let tree = VocabPrefixTree::build(&[
             (0, b"a".to_vec()),
             (1, b"aaa".to_vec()),
@@ -1370,7 +1377,7 @@ mod tests {
             &tokenizer,
             &tree,
             &id_map,
-            &plan.visible_output_raw_labels(),
+            &visible_output_raw_labels(&partition, tokenizer.num_terminals() as usize),
             &modes,
         );
         super::super::terminal_dwa_equivalence::compare(&baseline, &compact)
@@ -1439,24 +1446,53 @@ impl TransportScannerStateMap {
     }
 }
 
-/// One strict-interchangeability scanner mode. `scanner_state_for_original[s]`
-/// is the full-lexer simulator state used when the actual current lexer state is
-/// `s`. Terminal relabelling is always either identity or one transposition;
-/// storing that swap directly avoids cloning a full terminal-alphabet map for
-/// every representative/member mode.
+/// One temporary binary-witness scanner mode for strict terminal
+/// interchangeability. The ordinary mode emits only final representatives. A
+/// member mode scans from one certified binary transport state map and emits
+/// exactly one label: its member whenever the transported scan emits that
+/// member's representative. It never relabels or emits unrelated terminals.
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalNwaTransportMode {
     pub(crate) scanner_state_for_original: TransportScannerStateMap,
-    pub(crate) terminal_swap: Option<(TerminalID, TerminalID)>,
+    member_reconstruction: Option<(TerminalID, TerminalID)>,
 }
 
 impl TerminalNwaTransportMode {
+    pub(crate) fn ordinary(state_count: usize) -> Self {
+        Self {
+            scanner_state_for_original: TransportScannerStateMap::Explicit(
+                (0..state_count as u32).collect::<Vec<_>>().into(),
+            ),
+            member_reconstruction: None,
+        }
+    }
+
+    pub(crate) fn member(
+        scanner_state_for_original: TransportScannerStateMap,
+        representative: TerminalID,
+        member: TerminalID,
+    ) -> Self {
+        Self {
+            scanner_state_for_original,
+            member_reconstruction: Some((representative, member)),
+        }
+    }
+
     #[inline]
-    pub(crate) fn mapped_terminal(&self, terminal: TerminalID) -> TerminalID {
-        match self.terminal_swap {
-            Some((left, right)) if terminal == left => right,
-            Some((left, right)) if terminal == right => left,
-            _ => terminal,
+    fn emitted_terminal(
+        &self,
+        raw_terminal: TerminalID,
+        visible_representatives: &[bool],
+    ) -> Option<TerminalID> {
+        match self.member_reconstruction {
+            None => visible_representatives
+                .get(raw_terminal as usize)
+                .copied()
+                .unwrap_or(false)
+                .then_some(raw_terminal),
+            Some((representative, member)) => {
+                (raw_terminal == representative).then_some(member)
+            }
         }
     }
 }
@@ -1602,6 +1638,7 @@ impl IntoIterator for NodesByTransportContext {
 /// differ.
 struct TransportModePlanner<'m> {
     modes: &'m [TerminalNwaTransportMode],
+    visible_representatives: &'m [bool],
     mode_set_ids: FxHashMap<TransportModeSet, usize>,
     mode_sets: Vec<TransportModeSet>,
     mapped_labels: Vec<FxHashMap<TerminalID, SmallVec<[TerminalID; 4]>>>,
@@ -1609,10 +1646,14 @@ struct TransportModePlanner<'m> {
 }
 
 impl<'m> TransportModePlanner<'m> {
-    fn new(modes: &'m [TerminalNwaTransportMode]) -> Self {
+    fn new(
+        modes: &'m [TerminalNwaTransportMode],
+        visible_representatives: &'m [bool],
+    ) -> Self {
         assert!(!modes.is_empty());
         Self {
             modes,
+            visible_representatives,
             mode_set_ids: FxHashMap::default(),
             mode_sets: Vec::new(),
             mapped_labels: Vec::new(),
@@ -1779,7 +1820,11 @@ impl<'m> TransportModePlanner<'m> {
         match &self.mode_sets[mode_set] {
             TransportModeSet::Explicit(modes) => {
                 for &mode in modes.iter() {
-                    labels.push(self.modes[mode].mapped_terminal(terminal));
+                    if let Some(label) = self.modes[mode]
+                        .emitted_terminal(terminal, self.visible_representatives)
+                    {
+                        labels.push(label);
+                    }
                 }
             }
             TransportModeSet::AllExcept(excluded) => {
@@ -1787,8 +1832,10 @@ impl<'m> TransportModePlanner<'m> {
                 for mode in 0..self.modes.len() {
                     if excluded.get(excluded_index).copied() == Some(mode) {
                         excluded_index += 1;
-                    } else {
-                        labels.push(self.modes[mode].mapped_terminal(terminal));
+                    } else if let Some(label) = self.modes[mode]
+                        .emitted_terminal(terminal, self.visible_representatives)
+                    {
+                        labels.push(label);
                     }
                 }
             }
@@ -1804,20 +1851,12 @@ impl<'m> TransportModePlanner<'m> {
 struct TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
     base: TerminalNwaBuilder<'tok, 'pm, 'nwa>,
     transport: TransportModePlanner<'m>,
-    /// After every terminal boundary every transport mode is available again.
+    /// After every terminal boundary every temporary witness is available again.
     /// This vector partitions those modes by their reset scanner state.
     reset_contexts: SmallVec<[TransportContext; 4]>,
-    visible_output_raw_labels: &'m [bool],
 }
 
 impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
-    fn emits_raw_label(&self, terminal: TerminalID) -> bool {
-        self.visible_output_raw_labels
-            .get(terminal as usize)
-            .copied()
-            .unwrap_or(false)
-    }
-
     fn mapped_labels(&mut self, context: TransportContext, terminal: TerminalID) -> SmallVec<[TerminalID; 4]> {
         self.transport.mapped_labels_for(context.mode_set, terminal)
     }
@@ -1833,10 +1872,10 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
             .base
             .possible_future_terminals_for_state(context.scanner_state);
         for terminal in future {
-            if !self.emits_raw_label(terminal) {
+            let mapped_labels = self.mapped_labels(context, terminal);
+            if mapped_labels.is_empty() {
                 continue;
             }
-            let mapped_labels = self.mapped_labels(context, terminal);
             self.base.profile.future_terminal_additions +=
                 (sources.len() * mapped_labels.len()) as u64;
             self.transport.timing.edge_buffer_insertions +=
@@ -1908,7 +1947,7 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                     };
                     scan_state = next;
                     for terminal in self.base.tokenizer.matched_terminals_iter(scan_state) {
-                        if self.emits_raw_label(terminal) {
+                        if !self.mapped_labels(context, terminal).is_empty() {
                             match_map.insert(terminal, (index + 1, scan_state));
                         }
                     }
@@ -2055,7 +2094,7 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
     assert!(!modes.is_empty());
     let mut roots = NodesByTransportContext::default();
     let mut initial_source_states = Vec::<bool>::new();
-    let mut transport = TransportModePlanner::new(modes);
+    let mut transport = TransportModePlanner::new(modes, visible_output_raw_labels);
     let build_timer = transport.timing.start();
     let representative_states: Vec<_> = id_map
         .tokenizer_states
@@ -2107,7 +2146,6 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
         base,
         transport,
         reset_contexts,
-        visible_output_raw_labels,
     };
     builder.build_from_trie(vocab_tree_root, &roots);
     let flush_timer = builder.transport.timing.start();
