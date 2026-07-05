@@ -6,6 +6,7 @@
 use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
@@ -1471,6 +1472,15 @@ struct TransportContext {
     mode_set: usize,
 }
 
+/// Exact mode subset representation. The common scanner context contains all
+/// transport modes except a sparse deviation list, avoiding a full mode vector
+/// at every root.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum TransportModeSet {
+    Explicit(Arc<[usize]>),
+    AllExcept(Arc<[usize]>),
+}
+
 #[derive(Clone, Default)]
 struct NodesByTransportContext {
     entries: FxHashMap<TransportContext, Vec<NwaState>>,
@@ -1494,6 +1504,89 @@ impl NodesByTransportContext {
     }
 }
 
+#[derive(Default)]
+struct TransportNwaTiming {
+    enabled: bool,
+    root_context_ms: f64,
+    reset_context_ms: f64,
+    mode_set_intern_ms: f64,
+    mode_set_intern_hits: u64,
+    mode_set_intern_new: u64,
+    mapped_label_cache_hit_ms: f64,
+    mapped_label_compute_ms: f64,
+    mapped_label_cache_hits: u64,
+    mapped_label_cache_misses: u64,
+    trie_scan_ms: f64,
+    trie_scan_calls: u64,
+    trie_scan_bytes: u64,
+    pending_context_ms: f64,
+    pending_context_ops: u64,
+    context_merge_ms: f64,
+    future_edge_ms: f64,
+    endpoint_leaf_edge_ms: f64,
+    match_edge_ms: f64,
+    edge_flush_ms: f64,
+    edge_buffer_insertions: u64,
+    total_ms: f64,
+}
+
+impl TransportNwaTiming {
+    fn new() -> Self {
+        Self {
+            enabled: std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some(),
+            ..Self::default()
+        }
+    }
+
+    #[inline]
+    fn start(&self) -> Option<Instant> {
+        self.enabled.then(Instant::now)
+    }
+
+    #[inline]
+    fn elapsed_ms(&self, started: Option<Instant>) -> f64 {
+        started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0)
+    }
+
+    fn emit(&self, modes: usize, roots: usize, mode_sets: usize) {
+        if !self.enabled {
+            return;
+        }
+        let edge_insertion_ms = self.future_edge_ms
+            + self.endpoint_leaf_edge_ms
+            + self.match_edge_ms
+            + self.edge_flush_ms;
+        eprintln!(
+            "[glrmask/profile][transport_nwa] modes={} roots={} mode_sets={} root_context_ms={:.3} reset_context_ms={:.3} mode_set_intern_ms={:.3} mode_set_intern_hits={} mode_set_intern_new={} mapped_label_cache_hit_ms={:.3} mapped_label_compute_ms={:.3} mapped_label_cache_hits={} mapped_label_cache_misses={} trie_scan_ms={:.3} trie_scan_calls={} trie_scan_bytes={} pending_context_ms={:.3} pending_context_ops={} context_merge_ms={:.3} future_edge_ms={:.3} endpoint_leaf_edge_ms={:.3} match_edge_ms={:.3} edge_flush_ms={:.3} edge_insertion_ms={:.3} edge_buffer_insertions={} total_ms={:.3}",
+            modes,
+            roots,
+            mode_sets,
+            self.root_context_ms,
+            self.reset_context_ms,
+            self.mode_set_intern_ms,
+            self.mode_set_intern_hits,
+            self.mode_set_intern_new,
+            self.mapped_label_cache_hit_ms,
+            self.mapped_label_compute_ms,
+            self.mapped_label_cache_hits,
+            self.mapped_label_cache_misses,
+            self.trie_scan_ms,
+            self.trie_scan_calls,
+            self.trie_scan_bytes,
+            self.pending_context_ms,
+            self.pending_context_ops,
+            self.context_merge_ms,
+            self.future_edge_ms,
+            self.endpoint_leaf_edge_ms,
+            self.match_edge_ms,
+            self.edge_flush_ms,
+            edge_insertion_ms,
+            self.edge_buffer_insertions,
+            self.total_ms,
+        );
+    }
+}
+
 impl IntoIterator for NodesByTransportContext {
     type Item = (TransportContext, Vec<NwaState>);
     type IntoIter = <FxHashMap<TransportContext, Vec<NwaState>> as IntoIterator>::IntoIter;
@@ -1509,9 +1602,10 @@ impl IntoIterator for NodesByTransportContext {
 /// differ.
 struct TransportModePlanner<'m> {
     modes: &'m [TerminalNwaTransportMode],
-    mode_set_ids: BTreeMap<Vec<usize>, usize>,
-    mode_sets: Vec<Box<[usize]>>,
+    mode_set_ids: FxHashMap<TransportModeSet, usize>,
+    mode_sets: Vec<TransportModeSet>,
     mapped_labels: Vec<FxHashMap<TerminalID, SmallVec<[TerminalID; 4]>>>,
+    timing: TransportNwaTiming,
 }
 
 impl<'m> TransportModePlanner<'m> {
@@ -1519,29 +1613,37 @@ impl<'m> TransportModePlanner<'m> {
         assert!(!modes.is_empty());
         Self {
             modes,
-            mode_set_ids: BTreeMap::new(),
+            mode_set_ids: FxHashMap::default(),
             mode_sets: Vec::new(),
             mapped_labels: Vec::new(),
+            timing: TransportNwaTiming::new(),
         }
     }
 
-    fn intern_mode_set(&mut self, mut modes: Vec<usize>) -> usize {
-        modes.sort_unstable();
-        modes.dedup();
-        if let Some(&id) = self.mode_set_ids.get(&modes) {
+    fn intern_mode_set(&mut self, mode_set: TransportModeSet) -> usize {
+        let timer = self.timing.start();
+        debug_assert!(match &mode_set {
+            TransportModeSet::Explicit(modes) | TransportModeSet::AllExcept(modes) => {
+                modes.windows(2).all(|pair| pair[0] < pair[1])
+            }
+        });
+        if let Some(&id) = self.mode_set_ids.get(&mode_set) {
+            self.timing.mode_set_intern_hits += 1;
+            self.timing.mode_set_intern_ms += self.timing.elapsed_ms(timer);
             return id;
         }
         let id = self.mode_sets.len();
-        self.mode_set_ids.insert(modes.clone(), id);
-        self.mode_sets.push(modes.into_boxed_slice());
+        self.mode_set_ids.insert(mode_set.clone(), id);
+        self.mode_sets.push(mode_set);
         self.mapped_labels.push(FxHashMap::default());
+        self.timing.mode_set_intern_new += 1;
+        self.timing.mode_set_intern_ms += self.timing.elapsed_ms(timer);
         id
     }
 
-    /// Partition all modes by the raw scanner state they choose for one actual
-    /// lexer state. Within one bucket the byte scan is exactly shared; the
-    /// output labels are the union of the bucket's terminal maps.
-    fn contexts_for_original_state(
+    /// The original direct grouping is cheaper when there are few transport
+    /// modes, because a two-pass batch setup cannot amortize its own work.
+    fn contexts_for_original_state_small(
         &mut self,
         original_state: TokenizerState,
     ) -> SmallVec<[TransportContext; 4]> {
@@ -1559,9 +1661,106 @@ impl<'m> TransportModePlanner<'m> {
             .into_iter()
             .map(|(scanner_state, modes)| TransportContext {
                 scanner_state,
-                mode_set: self.intern_mode_set(modes),
+                mode_set: self.intern_mode_set(TransportModeSet::Explicit(modes.into())),
             })
             .collect()
+    }
+
+    /// Build all root/reset contexts at once. The modal scanner state for a
+    /// raw state is represented as all modes except sparse deviations, which
+    /// avoids per-root ordered maps and full mode-vector interning.
+    fn contexts_for_original_states(
+        &mut self,
+        original_states: &[TokenizerState],
+    ) -> Vec<SmallVec<[TransportContext; 4]>> {
+        const BATCH_MODE_THRESHOLD: usize = 128;
+        if self.modes.len() < BATCH_MODE_THRESHOLD {
+            return original_states
+                .iter()
+                .map(|&original_state| self.contexts_for_original_state_small(original_state))
+                .collect();
+        }
+
+        type ScannerCounts = SmallVec<[(TokenizerState, usize); 4]>;
+        type ExplicitGroups = SmallVec<[(TokenizerState, SmallVec<[usize; 4]>); 4]>;
+
+        let state_count = original_states.len();
+        if state_count == 0 {
+            return Vec::new();
+        }
+
+        let mut counts = vec![ScannerCounts::new(); state_count];
+        for transport in self.modes {
+            for (state_index, &original_state) in original_states.iter().enumerate() {
+                let scanner_state = transport
+                    .scanner_state_for_original
+                    .scanner_state(original_state);
+                if let Some((_, count)) = counts[state_index]
+                    .iter_mut()
+                    .find(|(state, _)| *state == scanner_state)
+                {
+                    *count += 1;
+                } else {
+                    counts[state_index].push((scanner_state, 1));
+                }
+            }
+        }
+
+        let modal_scanner_states: Vec<_> = counts
+            .iter()
+            .map(|scanner_counts| {
+                let mut modal = scanner_counts[0];
+                for &(scanner_state, count) in scanner_counts.iter().skip(1) {
+                    if count > modal.1 || (count == modal.1 && scanner_state < modal.0) {
+                        modal = (scanner_state, count);
+                    }
+                }
+                modal.0
+            })
+            .collect();
+
+        let mut exclusions = vec![SmallVec::<[usize; 4]>::new(); state_count];
+        let mut explicit_groups = vec![ExplicitGroups::new(); state_count];
+        for (mode, transport) in self.modes.iter().enumerate() {
+            for (state_index, &original_state) in original_states.iter().enumerate() {
+                let scanner_state = transport
+                    .scanner_state_for_original
+                    .scanner_state(original_state);
+                if scanner_state == modal_scanner_states[state_index] {
+                    continue;
+                }
+                exclusions[state_index].push(mode);
+                if let Some((_, mode_indices)) = explicit_groups[state_index]
+                    .iter_mut()
+                    .find(|(state, _)| *state == scanner_state)
+                {
+                    mode_indices.push(mode);
+                } else {
+                    explicit_groups[state_index]
+                        .push((scanner_state, SmallVec::from_vec(vec![mode])));
+                }
+            }
+        }
+
+        let mut contexts_by_state = Vec::with_capacity(state_count);
+        for state_index in 0..state_count {
+            let excluded: Vec<_> = std::mem::take(&mut exclusions[state_index]).into_vec();
+            let mut contexts = SmallVec::<[TransportContext; 4]>::new();
+            contexts.push(TransportContext {
+                scanner_state: modal_scanner_states[state_index],
+                mode_set: self.intern_mode_set(TransportModeSet::AllExcept(excluded.into())),
+            });
+            for (scanner_state, mode_indices) in std::mem::take(&mut explicit_groups[state_index]) {
+                let mode_indices: Vec<_> = mode_indices.into_vec();
+                contexts.push(TransportContext {
+                    scanner_state,
+                    mode_set: self.intern_mode_set(TransportModeSet::Explicit(mode_indices.into())),
+                });
+            }
+            contexts.sort_unstable_by_key(|context| context.scanner_state);
+            contexts_by_state.push(contexts);
+        }
+        contexts_by_state
     }
 
     fn mapped_labels_for(
@@ -1569,16 +1768,35 @@ impl<'m> TransportModePlanner<'m> {
         mode_set: usize,
         terminal: TerminalID,
     ) -> SmallVec<[TerminalID; 4]> {
+        let timer = self.timing.start();
         if let Some(labels) = self.mapped_labels[mode_set].get(&terminal) {
+            self.timing.mapped_label_cache_hits += 1;
+            self.timing.mapped_label_cache_hit_ms += self.timing.elapsed_ms(timer);
             return labels.clone();
         }
+        self.timing.mapped_label_cache_misses += 1;
         let mut labels = SmallVec::<[TerminalID; 4]>::new();
-        for &mode in &self.mode_sets[mode_set] {
-            labels.push(self.modes[mode].mapped_terminal(terminal));
+        match &self.mode_sets[mode_set] {
+            TransportModeSet::Explicit(modes) => {
+                for &mode in modes.iter() {
+                    labels.push(self.modes[mode].mapped_terminal(terminal));
+                }
+            }
+            TransportModeSet::AllExcept(excluded) => {
+                let mut excluded_index = 0;
+                for mode in 0..self.modes.len() {
+                    if excluded.get(excluded_index).copied() == Some(mode) {
+                        excluded_index += 1;
+                    } else {
+                        labels.push(self.modes[mode].mapped_terminal(terminal));
+                    }
+                }
+            }
         }
         labels.sort_unstable();
         labels.dedup();
         self.mapped_labels[mode_set].insert(terminal, labels.clone());
+        self.timing.mapped_label_compute_ms += self.timing.elapsed_ms(timer);
         labels
     }
 }
@@ -1610,6 +1828,7 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
         context: TransportContext,
         internal_token_id: u32,
     ) {
+        let future_edge_timer = self.transport.timing.start();
         let future = self
             .base
             .possible_future_terminals_for_state(context.scanner_state);
@@ -1620,11 +1839,15 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
             let mapped_labels = self.mapped_labels(context, terminal);
             self.base.profile.future_terminal_additions +=
                 (sources.len() * mapped_labels.len()) as u64;
+            self.transport.timing.edge_buffer_insertions +=
+                (sources.len() * mapped_labels.len()) as u64;
             for mapped_label in mapped_labels {
                 self.base
                     .add_leaf_token_from_sources(sources, mapped_label, internal_token_id);
             }
         }
+        self.transport.timing.future_edge_ms +=
+            self.transport.timing.elapsed_ms(future_edge_timer);
     }
 
     fn build_from_trie(
@@ -1652,15 +1875,22 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
         let leaf_token_id = child_node.token_id() as u32;
         let mut next_level = NodesByTransportContext::default();
         let mut pending = BTreeMap::<usize, NodesByTransportContext>::new();
+        let pending_timer = self.transport.timing.start();
         pending.insert(0, initial_contexts.clone());
+        self.transport.timing.pending_context_ms +=
+            self.transport.timing.elapsed_ms(pending_timer);
+        self.transport.timing.pending_context_ops += 1;
         let mut match_map = FxHashMap::<TerminalID, (usize, TokenizerState)>::default();
         let mut matches = Vec::<TokenizerMatch>::new();
 
         while let Some((offset, contexts_at_offset)) = pending.pop_first() {
             if offset == segment_bytes.len() {
+                let merge_timer = self.transport.timing.start();
                 for (context, nodes) in contexts_at_offset {
                     next_level.merge(context, &nodes);
                 }
+                self.transport.timing.context_merge_ms +=
+                    self.transport.timing.elapsed_ms(merge_timer);
                 continue;
             }
 
@@ -1668,7 +1898,10 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                 match_map.clear();
                 let mut scan_state = context.scanner_state;
                 let mut alive = true;
+                let scan_timer = self.transport.timing.start();
+                let mut scanned_bytes = 0_u64;
                 for (index, &byte) in segment_bytes[offset..].iter().enumerate() {
+                    scanned_bytes += 1;
                     let Some(next) = self.base.fast_step(scan_state, byte) else {
                         alive = false;
                         break;
@@ -1680,6 +1913,10 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                         }
                     }
                 }
+                self.transport.timing.trie_scan_ms +=
+                    self.transport.timing.elapsed_ms(scan_timer);
+                self.transport.timing.trie_scan_calls += 1;
+                self.transport.timing.trie_scan_bytes += scanned_bytes;
                 let end_state = alive.then_some(scan_state);
 
                 matches.clear();
@@ -1697,10 +1934,13 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                             leaf_token_id,
                         );
                     }
+                    let merge_timer = self.transport.timing.start();
                     next_level.merge(
                         TransportContext { scanner_state: end_state, ..context },
                         &source_nodes,
                     );
+                    self.transport.timing.context_merge_ms +=
+                        self.transport.timing.elapsed_ms(merge_timer);
                 }
 
                 for matched in &matches {
@@ -1716,6 +1956,7 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                     {
                         self.base.profile.match_transition_additions +=
                             (source_nodes.len() * mapped_labels.len()) as u64;
+                        let endpoint_edge_timer = self.transport.timing.start();
                         for mapped_label in &mapped_labels {
                             self.base.add_leaf_token_from_sources(
                                 &source_nodes,
@@ -1723,6 +1964,10 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                                 leaf_token_id,
                             );
                         }
+                        self.transport.timing.endpoint_leaf_edge_ms +=
+                            self.transport.timing.elapsed_ms(endpoint_edge_timer);
+                        self.transport.timing.edge_buffer_insertions +=
+                            (source_nodes.len() * mapped_labels.len()) as u64;
                     }
 
                     let Some(weight) = self.base.continuation_weight_for_match(
@@ -1742,6 +1987,7 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                     // transport mode is available for the next terminal, so one
                     // NWA continuation state carries their exact union; it is
                     // merely attached to each distinct reset scanner context.
+                    let pending_timer = self.transport.timing.start();
                     let continuation_contexts = pending.entry(next_offset).or_default();
                     let destination = ensure_transport_continuation_state(
                         continuation_contexts,
@@ -1750,8 +1996,13 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                     for &next_context in &self.reset_contexts {
                         continuation_contexts.push_one(next_context, destination);
                     }
+                    self.transport.timing.pending_context_ms +=
+                        self.transport.timing.elapsed_ms(pending_timer);
+                    self.transport.timing.pending_context_ops += 1;
                     self.base.profile.match_transition_additions +=
                         (source_nodes.len() * mapped_labels.len()) as u64;
+                    let match_edge_timer = self.transport.timing.start();
+                    let mapped_label_count = mapped_labels.len();
                     for mapped_label in mapped_labels {
                         self.base.add_match_from_sources(
                             &source_nodes,
@@ -1760,6 +2011,10 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                             &weight,
                         );
                     }
+                    self.transport.timing.match_edge_ms +=
+                        self.transport.timing.elapsed_ms(match_edge_timer);
+                    self.transport.timing.edge_buffer_insertions +=
+                        (source_nodes.len() * mapped_label_count) as u64;
                 }
             }
         }
@@ -1801,12 +2056,15 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
     let mut roots = NodesByTransportContext::default();
     let mut initial_source_states = Vec::<bool>::new();
     let mut transport = TransportModePlanner::new(modes);
-
-    for (internal_tsid, representative_state) in id_map
+    let build_timer = transport.timing.start();
+    let representative_states: Vec<_> = id_map
         .tokenizer_states
         .iter_representative_ids()
-        .enumerate()
-    {
+        .collect();
+    let root_context_timer = transport.timing.start();
+    let root_contexts = transport.contexts_for_original_states(&representative_states);
+
+    for (internal_tsid, contexts) in root_contexts.into_iter().enumerate() {
         // All transport modes start from the same parser-side condition for
         // this actual tokenizer state. A single NWA root therefore represents
         // their exact union; contexts retain only the distinct raw scanner
@@ -1818,11 +2076,18 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
             initial_source_states.resize(root as usize + 1, false);
         }
         initial_source_states[root as usize] = true;
-        for context in transport.contexts_for_original_state(representative_state) {
+        for context in contexts {
             roots.merge(context, &[root]);
         }
     }
-    let reset_contexts = transport.contexts_for_original_state(tokenizer.initial_state_id());
+    transport.timing.root_context_ms += transport.timing.elapsed_ms(root_context_timer);
+    let reset_context_timer = transport.timing.start();
+    let reset_contexts = transport
+        .contexts_for_original_states(&[tokenizer.initial_state_id()])
+        .into_iter()
+        .next()
+        .expect("one reset state must produce one context set");
+    transport.timing.reset_context_ms += transport.timing.elapsed_ms(reset_context_timer);
 
     let base = TerminalNwaBuilder::new(
         tokenizer,
@@ -1845,6 +2110,15 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
         visible_output_raw_labels,
     };
     builder.build_from_trie(vocab_tree_root, &roots);
+    let flush_timer = builder.transport.timing.start();
     builder.base.flush_transition_buffer();
+    builder.transport.timing.edge_flush_ms +=
+        builder.transport.timing.elapsed_ms(flush_timer);
+    builder.transport.timing.total_ms = builder.transport.timing.elapsed_ms(build_timer);
+    builder.transport.timing.emit(
+        modes.len(),
+        id_map.num_tsids() as usize,
+        builder.transport.mode_sets.len(),
+    );
     builder.base.profile
 }
