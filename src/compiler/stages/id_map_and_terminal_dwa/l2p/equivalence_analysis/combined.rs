@@ -476,7 +476,6 @@ fn try_analyze_equivalences_with_raw_quotient(
         None,
         None,
         None,
-        ignore_terminal,
     );
     let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
