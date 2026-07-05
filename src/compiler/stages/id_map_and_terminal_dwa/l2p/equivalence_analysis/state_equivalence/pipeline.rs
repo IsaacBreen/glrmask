@@ -57,6 +57,7 @@ pub(crate) struct StateEquivalencePipelineProfile {
     pub max_length_skipped: bool,
     pub max_length_state_equiv_ms: f64,
     pub max_length_reps: usize,
+    pub max_length_congruence_certified: bool,
 }
 
 fn parse_passes(value: &str) -> Vec<StateEquivalencePassKind> {
@@ -153,6 +154,30 @@ pub(crate) fn run_state_equivalence_pipeline(
     let statistic = max_length::compute_statistic(vocab);
 
     for kind in &config.passes {
+        if matches!(kind, StateEquivalencePassKind::MaxLength)
+            && matches!(scope, StateEquivalenceScope::L2p)
+            && kbounded_tokenizer_view.is_some_and(|view| {
+                view.is_relevant_byte_congruent(&current_state_map, statistic.relevant_bytes())
+            })
+        {
+            // A visible-output right congruence is already safe for every
+            // vocabulary suffix, hence for the bounded max-length observer.
+            // Retaining it is at least as fine as the optional prepass; the
+            // following exact token refinement still decides the final map.
+            profile.max_length_skipped = false;
+            profile.max_length_state_equiv_ms = 0.0;
+            profile.max_length_reps = current_state_map.num_internal_ids() as usize;
+            profile.max_length_congruence_certified = true;
+            profile.pass_profiles.push(StateEquivalencePassProfile {
+                kind: StateEquivalencePassKind::MaxLength,
+                name: "max_length_congruence_certified",
+                elapsed_ms: 0.0,
+                representative_count: current_state_map.num_internal_ids() as usize,
+                skipped: false,
+            });
+            continue;
+        }
+
         match *kind {
             StateEquivalencePassKind::RestrictedObservation => {
                 assert!(
@@ -160,12 +185,14 @@ pub(crate) fn run_state_equivalence_pipeline(
                     "restricted-observation state equivalence is L2P-only",
                 );
                 let started_at = Instant::now();
+                let tokenizer_view = kbounded_tokenizer_view
+                    .expect("L2P restricted observation requires the shared analysis view");
                 current_state_map = restricted_observation::compute_state_map(
-                    tokenizer,
+                    tokenizer_view,
                     statistic.relevant_bytes(),
                     Some(&current_state_map),
-                    active_groups,
                     kbounded_byte_to_class,
+                    config.passes.iter().any(|kind| matches!(kind, StateEquivalencePassKind::MaxLength)),
                 );
                 record_restricted_observation_profile(
                     &mut profile,

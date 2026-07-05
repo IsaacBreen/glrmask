@@ -337,6 +337,195 @@ fn build_internal_id_map_from_combined_result(
     }
 }
 
+fn try_analyze_equivalences_with_raw_quotient(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    effective_disallowed: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<u32>,
+    active_groups: Option<&[bool]>,
+    flat_trans: Option<&std::sync::Arc<[u32]>>,
+    initial_state_map: Option<&ManyToOneIdMap>,
+) -> Option<(InternalIdMap, CombinedEquivalenceProfile)> {
+    let active_groups = active_groups?;
+    let flat_trans = flat_trans?;
+    if flat_trans.len() != tokenizer.num_states() as usize * 256 {
+        return None;
+    }
+
+    let prepare_inputs_started_at = Instant::now();
+    let prepared = prepare_equivalence_inputs(tokenizer, vocab, initial_state_map);
+    let token_len_stats = token_length_stats(&prepared.token_bytes);
+    let prepare_inputs_ms = prepare_inputs_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    // The direct raw refinement sees every byte that can occur in this local
+    // vocabulary. It is deliberately at least as fine as the later deduped
+    // quotient analysis.
+    let mut raw_relevant_bytes = [false; 256];
+    let mut direct_token_bytes = 0usize;
+    let mut max_token_len = 0usize;
+    for token in &prepared.token_bytes {
+        direct_token_bytes += token.len();
+        max_token_len = max_token_len.max(token.len());
+        for &byte in *token {
+            raw_relevant_bytes[byte as usize] = true;
+        }
+    }
+    let active_byte_count = raw_relevant_bytes.iter().filter(|&&active| active).count();
+    let projected_by_global = prepared.initial_states.len() < tokenizer.num_states() as usize;
+    if should_skip_max_length_for_partition(
+        partition_label,
+        prepared.initial_states.len(),
+        projected_by_global,
+        direct_token_bytes,
+        max_token_len,
+        active_byte_count,
+    ) {
+        return None;
+    }
+
+    let restricted_started_at = Instant::now();
+    let raw_restricted = super::state_equivalence::restricted_observation::compute_state_map_raw(
+        tokenizer,
+        flat_trans,
+        active_groups,
+        &raw_relevant_bytes,
+    )?;
+    let restricted_observation_state_equiv_ms =
+        restricted_started_at.elapsed().as_secs_f64() * 1000.0;
+    if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+        eprintln!(
+            "[glrmask/profile][raw_restricted_observation] partition={} labels_ms={:.3} refine_ms={:.3} certificate_ms={:.3} rounds={} reps={}",
+            partition_label,
+            raw_restricted.label_ms,
+            raw_restricted.refine_ms,
+            raw_restricted.certificate_ms,
+            raw_restricted.rounds,
+            raw_restricted.state_map.num_internal_ids(),
+        );
+    }
+    let pre_state_map = raw_restricted.state_map;
+
+    let view_build_started_at = Instant::now();
+    let analysis_view = TokenizerView::new_filtered_quotient_from_flat_trans(
+        flat_trans,
+        tokenizer,
+        active_groups,
+        &pre_state_map,
+    );
+    let _analysis_view_build_ms = view_build_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    // This exact byte partition is now over at most a few hundred quotient
+    // rows. It replaces the previous 18k-state shared-base cold setup.
+    let byte_class_setup_started_at = Instant::now();
+    let byte_to_class = super::compat::compute_byte_classes(analysis_view.dfa());
+    let byte_class_setup_ms = byte_class_setup_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let token_dedup_started_at = Instant::now();
+    let dedup = deduplicate_tokens_by_byte_class(&prepared.token_bytes, &byte_to_class);
+    let token_dedup_ms = token_dedup_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let normalized_disallowed_follows =
+        normalize_disallowed_follows(tokenizer_group_count(&analysis_view), effective_disallowed);
+    let pre_reduced_states: Vec<usize> = (0..pre_state_map.internal_to_originals.len()).collect();
+    let exact_rep_confirmation_used = pre_reduced_states.len() >= EXACT_REP_CONFIRMATION_MIN_STATES
+        && dedup.representative_token_bytes.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
+    let exact_started_at = Instant::now();
+    let reduced_state_reps_for_pre_reduced = if exact_rep_confirmation_used {
+        state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
+            &analysis_view,
+            &dedup.representative_token_bytes,
+            &pre_reduced_states,
+            &normalized_disallowed_follows,
+            None,
+            None,
+            Some(true),
+            None,
+        )
+    } else {
+        state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
+            &analysis_view,
+            &dedup.representative_token_bytes,
+            &pre_reduced_states,
+            &normalized_disallowed_follows,
+            None,
+        )
+    };
+    let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let representative_states = prepared
+        .initial_states
+        .iter()
+        .map(|&state| {
+            let pre_internal = pre_state_map.original_to_internal[state] as usize;
+            let final_internal = reduced_state_reps_for_pre_reduced[pre_internal];
+            pre_state_map.representative_original_ids[final_internal] as usize
+        })
+        .collect::<Vec<_>>();
+    let mut final_state_representatives = reduced_state_reps_for_pre_reduced;
+    final_state_representatives.sort_unstable();
+    final_state_representatives.dedup();
+
+    let vocab_equiv_started_at = Instant::now();
+    let dedup_vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
+        &analysis_view,
+        &dedup.representative_token_bytes,
+        &final_state_representatives,
+        effective_disallowed,
+        Some(&byte_to_class),
+        None,
+        None,
+        None,
+        ignore_terminal,
+    );
+    let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let id_map_finalize_started_at = Instant::now();
+    let vocab_classes = expand_vocab_classes(
+        dedup_vocab_classes,
+        &dedup.original_to_repr,
+        dedup.representative_token_bytes.len(),
+    );
+    let state_classes = state_equivalence_analysis::mapping_to_equivalence_classes(
+        &prepared.initial_states,
+        &representative_states,
+    );
+    let exact_reps = state_classes.len();
+    let result = CombinedEquivalenceResult {
+        vocab_classes,
+        state_classes,
+    };
+    let internal_id_map =
+        build_internal_id_map_from_combined_result(tokenizer, initial_state_map, &prepared, &result);
+    let id_map_finalize_ms = id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    Some((
+        internal_id_map,
+        CombinedEquivalenceProfile {
+            initial_states_considered: prepared.initial_states.len(),
+            max_length_skipped: false,
+            max_token_len,
+            token_len_gt_4: token_len_stats.gt_4,
+            token_len_gt_8: token_len_stats.gt_8,
+            token_len_gt_16: token_len_stats.gt_16,
+            token_len_gt_32: token_len_stats.gt_32,
+            token_len_gt_64: token_len_stats.gt_64,
+            prepare_inputs_ms,
+            byte_class_setup_ms,
+            token_dedup_ms,
+            restricted_observation_state_equiv_ms,
+            max_length_state_equiv_ms: 0.0,
+            vocab_equiv_ms,
+            exact_state_equiv_ms,
+            id_map_finalize_ms,
+            restricted_observation_reps: pre_state_map.num_internal_ids() as usize,
+            max_length_reps: pre_state_map.num_internal_ids() as usize,
+            exact_reps,
+            exact_rep_confirmation_used,
+        },
+    ))
+}
+
 pub(crate) fn analyze_equivalences_with_group_filter(
     partition_label: &str,
     tokenizer: &Tokenizer,
@@ -385,6 +574,18 @@ fn analyze_equivalences_impl(
     let token_path_disallowed_follows =
         ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal);
     let effective_disallowed = &token_path_disallowed_follows;
+    if let Some(result) = try_analyze_equivalences_with_raw_quotient(
+        partition_label,
+        tokenizer,
+        vocab,
+        effective_disallowed,
+        ignore_terminal,
+        active_groups,
+        flat_trans,
+        initial_state_map,
+    ) {
+        return result;
+    }
     // The raw tokenizer is the only lexer coordinate in L2P. Retain the
     // compatibility check defensively, since this cache is shared by callers.
     let compatible_flat_trans = flat_trans.filter(|ft| {
@@ -457,13 +658,26 @@ fn analyze_equivalences_impl(
         Some(&tokenizer_view),
         Some(&byte_to_class),
     );
-    let pre_reduced_states: Vec<usize> = pre_state_map
-        .representative_original_ids
-        .iter()
-        .map(|&state| state as usize)
-        .collect();
+    // Restricted observation is a fixed point over the vocabulary byte
+    // alphabet. When its map is also output-labelled congruent, token paths can
+    // be evaluated exactly on the quotient instead of reinitializing 18k raw
+    // lexer states for the exact and vocabulary phases.
+    let analysis_quotient = tokenizer_view
+        .is_relevant_byte_congruent(&pre_state_map, &relevant_bytes)
+        .then(|| tokenizer_view.quotient_by_state_map(&pre_state_map));
+    let uses_analysis_quotient = analysis_quotient.is_some();
+    let analysis_view = analysis_quotient.as_ref().unwrap_or(&tokenizer_view);
+    let pre_reduced_states: Vec<usize> = if uses_analysis_quotient {
+        (0..pre_state_map.internal_to_originals.len()).collect()
+    } else {
+        pre_state_map
+            .representative_original_ids
+            .iter()
+            .map(|&state| state as usize)
+            .collect()
+    };
     let normalized_disallowed_follows =
-        normalize_disallowed_follows(tokenizer_group_count(&tokenizer_view), effective_disallowed);
+        normalize_disallowed_follows(tokenizer_group_count(analysis_view), effective_disallowed);
 
     // First finalize state equivalence against every deduplicated token.
     // A final state representative is indistinguishable from each state it
@@ -475,53 +689,70 @@ fn analyze_equivalences_impl(
     let exact_started_at = Instant::now();
     let reduced_state_reps_for_pre_reduced = if exact_rep_confirmation_used {
         state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
-            &tokenizer_view,
+            analysis_view,
             &dedup.representative_token_bytes,
             &pre_reduced_states,
             &normalized_disallowed_follows,
             None,
             None,
             Some(true),
-            compatible_cache,
+            (!uses_analysis_quotient).then_some(compatible_cache).flatten(),
         )
     } else {
         state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
-            &tokenizer_view,
+            analysis_view,
             &dedup.representative_token_bytes,
             &pre_reduced_states,
             &normalized_disallowed_follows,
-            compatible_cache,
+            (!uses_analysis_quotient).then_some(compatible_cache).flatten(),
         )
     };
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let rep_to_final: BTreeMap<usize, usize> = pre_reduced_states
-        .iter()
-        .copied()
-        .zip(reduced_state_reps_for_pre_reduced.iter().copied())
-        .collect();
-    let representative_states = prepared.initial_states
-        .iter()
-        .map(|&state| {
-            let pre_internal = pre_state_map.original_to_internal[state];
-            let pre_rep = pre_state_map.representative_original_ids[pre_internal as usize] as usize;
-            rep_to_final[&pre_rep]
-        })
-        .collect::<Vec<_>>();
+    let representative_states = if uses_analysis_quotient {
+        prepared
+            .initial_states
+            .iter()
+            .map(|&state| {
+                let pre_internal = pre_state_map.original_to_internal[state] as usize;
+                let final_internal = reduced_state_reps_for_pre_reduced[pre_internal];
+                pre_state_map.representative_original_ids[final_internal] as usize
+            })
+            .collect::<Vec<_>>()
+    } else {
+        let rep_to_final: BTreeMap<usize, usize> = pre_reduced_states
+            .iter()
+            .copied()
+            .zip(reduced_state_reps_for_pre_reduced.iter().copied())
+            .collect();
+        prepared
+            .initial_states
+            .iter()
+            .map(|&state| {
+                let pre_internal = pre_state_map.original_to_internal[state];
+                let pre_rep = pre_state_map.representative_original_ids[pre_internal as usize] as usize;
+                rep_to_final[&pre_rep]
+            })
+            .collect::<Vec<_>>()
+    };
     let mut final_state_representatives = reduced_state_reps_for_pre_reduced;
     final_state_representatives.sort_unstable();
     final_state_representatives.dedup();
 
     let vocab_equiv_started_at = Instant::now();
     let dedup_vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
-        &tokenizer_view,
+        analysis_view,
         &dedup.representative_token_bytes,
         &final_state_representatives,
         effective_disallowed,
         Some(&byte_to_class),
-        active_groups,
-        shared_vocab_dfa_cache,
-        shared_analysis_dfa_cache.filter(|_| active_groups.is_none()),
+        if uses_analysis_quotient { None } else { active_groups },
+        if uses_analysis_quotient { None } else { shared_vocab_dfa_cache },
+        if uses_analysis_quotient {
+            None
+        } else {
+            shared_analysis_dfa_cache.filter(|_| active_groups.is_none())
+        },
         ignore_terminal,
     );
     let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;

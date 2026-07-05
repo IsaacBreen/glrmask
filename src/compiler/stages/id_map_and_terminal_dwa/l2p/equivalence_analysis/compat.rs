@@ -5,6 +5,7 @@ use crate::ds::u8set::U8Set;
 use std::sync::Arc;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
 fn build_transition_table(
     transitions: impl Iterator<Item = (u8, u32)>,
@@ -16,18 +17,26 @@ fn build_transition_table(
     table
 }
 
+fn normalize_group_ids(mut groups: Vec<usize>) -> Vec<usize> {
+    groups.sort_unstable();
+    groups.dedup();
+    groups
+}
+
 fn collect_group_ids(groups: impl Iterator<Item = u32>) -> Vec<usize> {
-    groups.map(|group| group as usize).collect()
+    normalize_group_ids(groups.map(|group| group as usize).collect())
 }
 
 fn collect_filtered_group_ids(
     groups: impl Iterator<Item = u32>,
     active_groups: &[bool],
 ) -> Vec<usize> {
-    groups
-        .map(|group| group as usize)
-        .filter(|&group| group < active_groups.len() && active_groups[group])
-        .collect()
+    normalize_group_ids(
+        groups
+            .map(|group| group as usize)
+            .filter(|&group| group < active_groups.len() && active_groups[group])
+            .collect(),
+    )
 }
 
 /// Per-state metadata: finalizers and reachable groups.
@@ -350,6 +359,158 @@ impl TokenizerView {
 
     pub fn initial_state_id(&self) -> usize {
         self.flat_dfa.start_state
+    }
+
+    /// Build a filtered quotient directly from the shared raw transition table.
+    /// This is used only after a raw-coordinate congruence certificate, so one
+    /// representative row per state class preserves every vocabulary-byte walk.
+    pub(crate) fn new_filtered_quotient_from_flat_trans(
+        flat_trans: &Arc<[u32]>,
+        tokenizer: &Tokenizer,
+        active_groups: &[bool],
+        state_map: &ManyToOneIdMap,
+    ) -> Self {
+        let raw_states = tokenizer.num_states() as usize;
+        assert_eq!(flat_trans.len(), raw_states * 256, "invalid raw transition table");
+        assert_eq!(state_map.original_to_internal.len(), raw_states, "invalid state map");
+        let quotient_states = state_map.internal_to_originals.len();
+        let mut transitions = vec![u32::MAX; quotient_states * 256];
+        let mut states = Vec::with_capacity(quotient_states);
+        for (internal, &representative) in state_map.representative_original_ids.iter().enumerate() {
+            let representative = representative as usize;
+            assert!(representative < raw_states, "invalid quotient representative");
+            states.push(FlatDfaState {
+                finalizers: collect_filtered_group_ids(
+                    tokenizer.matched_terminals_iter(representative as u32),
+                    active_groups,
+                ),
+                possible_future_group_ids: collect_filtered_group_ids(
+                    tokenizer.possible_future_terminals_iter(representative as u32),
+                    active_groups,
+                ),
+            });
+            let raw_base = representative * 256;
+            let quotient_base = internal * 256;
+            for byte in 0..256usize {
+                let target = flat_trans[raw_base + byte];
+                transitions[quotient_base + byte] = if target == u32::MAX {
+                    u32::MAX
+                } else {
+                    let mapped = state_map.original_to_internal[target as usize];
+                    assert_ne!(mapped, u32::MAX, "quotient target must be mapped");
+                    mapped
+                };
+            }
+        }
+        let start_state = state_map.original_to_internal[tokenizer.start_state() as usize];
+        assert_ne!(start_state, u32::MAX, "quotient start state must be mapped");
+        Self {
+            flat_dfa: FlatDfa {
+                states,
+                start_state: start_state as usize,
+                transitions: Arc::from(transitions),
+            },
+        }
+    }
+
+    /// Verify that `state_map` is an output-labelled right congruence for every
+    /// byte that may occur in the active vocabulary. This is the exact condition
+    /// needed to evaluate token paths in the quotient DFA.
+    pub(crate) fn is_relevant_byte_congruent(
+        &self,
+        state_map: &ManyToOneIdMap,
+        relevant_bytes: &[bool; 256],
+    ) -> bool {
+        let dfa = self.dfa();
+        if state_map.original_to_internal.len() != dfa.states.len() {
+            return false;
+        }
+        for (internal, members) in state_map.internal_to_originals.iter().enumerate() {
+            let Some(&representative) = state_map.representative_original_ids.get(internal) else {
+                return false;
+            };
+            let representative = representative as usize;
+            if representative >= dfa.states.len()
+                || state_map.original_to_internal[representative] != internal as u32
+            {
+                return false;
+            }
+            let representative_state = &dfa.states[representative];
+            for &raw_state in members {
+                let raw_state = raw_state as usize;
+                if raw_state >= dfa.states.len()
+                    || state_map.original_to_internal[raw_state] != internal as u32
+                {
+                    return false;
+                }
+                let state = &dfa.states[raw_state];
+                if state.finalizers != representative_state.finalizers
+                    || state.possible_future_group_ids
+                        != representative_state.possible_future_group_ids
+                {
+                    return false;
+                }
+                for (byte, &relevant) in relevant_bytes.iter().enumerate() {
+                    if !relevant {
+                        continue;
+                    }
+                    let representative_target = dfa.trans(representative, byte);
+                    let target = dfa.trans(raw_state, byte);
+                    let mapped_representative = if representative_target == u32::MAX {
+                        u32::MAX
+                    } else {
+                        state_map.original_to_internal[representative_target as usize]
+                    };
+                    let mapped_target = if target == u32::MAX {
+                        u32::MAX
+                    } else {
+                        state_map.original_to_internal[target as usize]
+                    };
+                    if mapped_target != mapped_representative {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Materialize the exact active-byte quotient after a congruence check. The
+    /// returned view owns only one row and observation pair per state class.
+    pub(crate) fn quotient_by_state_map(&self, state_map: &ManyToOneIdMap) -> Self {
+        let dfa = self.dfa();
+        let quotient_states = state_map.internal_to_originals.len();
+        let mut transitions = vec![u32::MAX; quotient_states * 256];
+        let mut states = Vec::with_capacity(quotient_states);
+        for (internal, &representative) in state_map.representative_original_ids.iter().enumerate() {
+            let representative = representative as usize;
+            assert!(representative < dfa.states.len(), "invalid quotient representative");
+            let source = &dfa.states[representative];
+            states.push(FlatDfaState {
+                finalizers: source.finalizers.clone(),
+                possible_future_group_ids: source.possible_future_group_ids.clone(),
+            });
+            let base = internal * 256;
+            for byte in 0..256usize {
+                let target = dfa.trans(representative, byte);
+                transitions[base + byte] = if target == u32::MAX {
+                    u32::MAX
+                } else {
+                    let mapped = state_map.original_to_internal[target as usize];
+                    assert_ne!(mapped, u32::MAX, "quotient target must be mapped");
+                    mapped
+                };
+            }
+        }
+        let start_state = state_map.original_to_internal[dfa.start_state];
+        assert_ne!(start_state, u32::MAX, "quotient start state must be mapped");
+        Self {
+            flat_dfa: FlatDfa {
+                states,
+                start_state: start_state as usize,
+                transitions: Arc::from(transitions),
+            },
+        }
     }
 
 }

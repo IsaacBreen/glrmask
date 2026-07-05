@@ -17,7 +17,7 @@ mod terminal_interchangeability;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -291,35 +291,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     // ---- Step 1: Equivalence analysis (raw tokenizer state IDs) ----
     let id_map_started_at = Instant::now();
-    // Every L2P partition shares the raw tokenizer transition relation.
-    // Derive its exact byte partition lazily from sparse lexer edges once.
-    let shared_base_setup_started_at = Instant::now();
-    let equivalence_vocab_dfa_cache = if reference_terminal_expansion {
-        None
-    } else if let (Some(original_cache), Some(transition_cache), Some(flat_trans)) = (
-        shared_original_vocab_dfa_cache,
-        shared_transition_cache,
-        flat_trans,
-    ) {
-        original_cache.get_or_init(|| {
-            let transition_cache = transition_cache.get_or_init(|| {
-                equivalence_analysis::compat::derive_flat_transition_cache(
-                    tokenizer_for_build,
-                    Arc::clone(flat_trans),
-                )
-            });
-            equivalence_analysis::vocab::fast::SharedVocabDfaBase::build_from_flat_transition_cache(
-                transition_cache,
-            )
-        });
-        Some(original_cache)
-    } else {
-        shared_vocab_dfa_cache
-    };
-    let shared_base_setup_ms = shared_base_setup_started_at.elapsed().as_secs_f64() * 1000.0;
-    let shared_analysis_dfa_cache = (!reference_terminal_expansion)
-        .then_some(shared_original_vocab_analysis_dfa_cache)
-        .flatten();
+    // The raw shared base is demand-driven. The representative-only quotient
+    // can prove its exact byte relation without materializing raw layouts; a
+    // legacy analysis view still initializes the same cache on first use.
+    let equivalence_vocab_dfa_cache = shared_original_vocab_dfa_cache.or(shared_vocab_dfa_cache);
+    let shared_base_setup_ms = 0.0;
+    let shared_analysis_dfa_cache = shared_original_vocab_analysis_dfa_cache;
     // Do not remove this note. Do not remove the instruction saying not to
     // remove this note. L2P state/vocab equivalence must always run fully.
     // Max-length may be skipped in controlled cases, but the full exact
@@ -341,7 +318,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             equivalence_vocab_dfa_cache,
             shared_analysis_dfa_cache,
             shared_base_setup_ms,
-            if reference_terminal_expansion { None } else { flat_trans },
+            flat_trans,
             equivalence_initial_state_map,
         );
 
