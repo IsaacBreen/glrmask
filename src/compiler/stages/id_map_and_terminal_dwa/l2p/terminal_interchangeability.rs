@@ -13,7 +13,7 @@
 //! interchange map. The initial lexer state must occur in the same class on both
 //! sides.
 
-use std::collections::{BTreeMap, BTreeSet, hash_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, VecDeque, hash_map::Entry};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -21,7 +21,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::nwa_builder::{TerminalNwaTransportMode, TransportScannerStateMap};
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
+use crate::automata::weighted::dwa::{DWAState, DWA};
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+use crate::ds::weight::{SharedTokenSet, Weight, shared_rangeset};
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 
@@ -2567,6 +2569,305 @@ pub(crate) fn transport_coordinate_quotient(
     )
 }
 
+/// Expand a minimized representative DWA directly into a raw-terminal DWA.
+///
+/// A member's first terminal changes the lexer coordinate for the *entire
+/// remaining terminal word*, not only for the edge carrying that member label.
+/// For member `m` represented by `r`, the suffix is evaluated at
+/// `Q(M_{r→m}(source))`. Therefore this keeps one direct DWA graph copy per
+/// replayed member mode, lifting every edge and final weight in that copy via
+/// the same mode. A dispatcher start state sends `m` to the corresponding copy
+/// at the old `r` transition target. Noninitial representative edges are then
+/// expanded to their raw members inside every copy.
+///
+/// This is the historical copy-and-transport-all-weights post-DWA strategy,
+/// adapted to temporary replayed target-only modes and the compact final
+/// transport-coordinate quotient. It does not construct an expanded NWA or
+/// run a second determinization/minimization pass.
+pub(crate) fn expand_representative_dwa_after_minimization(
+    core_dwa: &DWA,
+    core_state_map: &ManyToOneIdMap,
+    final_state_map: &ManyToOneIdMap,
+    modes: &[TerminalNwaTransportMode],
+) -> DWA {
+    assert!(
+        !modes.is_empty(),
+        "post-DWA TI expansion needs the ordinary transport mode",
+    );
+    assert_eq!(
+        modes[0].member_reconstruction(),
+        None,
+        "the first TI transport mode must be ordinary",
+    );
+
+    let mut member_modes_by_representative = BTreeMap::<TerminalID, Vec<(TerminalID, usize)>>::new();
+    for (mode_index, mode) in modes.iter().enumerate().skip(1) {
+        let (representative, member) = mode
+            .member_reconstruction()
+            .expect("non-ordinary TI transport mode must reconstruct one member");
+        member_modes_by_representative
+            .entry(representative)
+            .or_default()
+            .push((member, mode_index));
+    }
+
+    struct WeightLifter<'a> {
+        core_state_map: &'a ManyToOneIdMap,
+        final_state_map: &'a ManyToOneIdMap,
+        modes: &'a [TerminalNwaTransportMode],
+        lifted: FxHashMap<(usize, usize), Weight>,
+    }
+
+    impl<'a> WeightLifter<'a> {
+        fn lift(&mut self, weight: &Weight, mode_index: usize) -> Weight {
+            if weight.is_empty() || weight.is_full() {
+                return weight.clone();
+            }
+            let key = (weight.ptr_key(), mode_index);
+            if let Some(lifted) = self.lifted.get(&key) {
+                return lifted.clone();
+            }
+
+            let mode = &self.modes[mode_index];
+            let mut tokens_for_core_tsid = FxHashMap::<u32, SharedTokenSet>::default();
+            let lifted = Weight::from_per_tsid_shared(
+                self.final_state_map
+                    .iter_representative_ids()
+                    .enumerate()
+                    .filter_map(|(final_tsid, source_raw)| {
+                        let target_raw = mode.scanner_state_for_original.scanner_state(source_raw);
+                        let core_tsid = self
+                            .core_state_map
+                            .original_to_internal
+                            .get(target_raw as usize)
+                            .copied()
+                            .unwrap_or(u32::MAX);
+                        if core_tsid == u32::MAX {
+                            return None;
+                        }
+                        let tokens = tokens_for_core_tsid
+                            .entry(core_tsid)
+                            .or_insert_with(|| shared_rangeset(weight.tokens_for_tsid(core_tsid)));
+                        (!tokens.is_empty()).then(|| (final_tsid as u32, tokens.clone()))
+                    }),
+            );
+            self.lifted.insert(key, lifted.clone());
+            lifted
+        }
+    }
+
+    let mut lifter = WeightLifter {
+        core_state_map,
+        final_state_map,
+        modes,
+        lifted: FxHashMap::default(),
+    };
+    let core_start = core_dwa.start_state() as usize;
+    let core_states = core_dwa.states();
+    let core_start_transitions = &core_states[core_start].transitions;
+
+    // A member mode can only be entered when its representative has an
+    // initial edge in the minimized core. Avoid allocating unreachable graph
+    // copies for members that cannot begin a terminal word in this partition.
+    let mut active_mode_indices = vec![0usize];
+    for (mode_index, mode) in modes.iter().enumerate().skip(1) {
+        let (representative, _) = mode
+            .member_reconstruction()
+            .expect("non-ordinary TI transport mode must reconstruct one member");
+        if core_start_transitions.contains_key(&(representative as i32)) {
+            active_mode_indices.push(mode_index);
+        }
+    }
+
+    let mut clone_offset_for_mode = vec![None::<u32>; modes.len()];
+    let mut next_state = 1u32; // State zero is the raw-terminal dispatcher.
+    for &mode_index in &active_mode_indices {
+        clone_offset_for_mode[mode_index] = Some(next_state);
+        next_state += core_states.len() as u32;
+    }
+    let mut states = vec![DWAState::default(); next_state as usize];
+
+    // Every clone has the same representative DWA topology. Its weights are
+    // evaluated under one fixed replayed coordinate. Only noninitial states
+    // receive member-label closure: a member in the first position must choose
+    // a whole transported suffix graph through the dispatcher below.
+    for &mode_index in &active_mode_indices {
+        let offset = clone_offset_for_mode[mode_index]
+            .expect("active transport mode must have a clone offset");
+        for (core_state_index, core_state) in core_states.iter().enumerate() {
+            let final_weight = core_state
+                .final_weight
+                .as_ref()
+                .map(|weight| lifter.lift(weight, mode_index));
+            let mut transitions = BTreeMap::new();
+            for (&label, (target, weight)) in &core_state.transitions {
+                let lifted_weight = lifter.lift(weight, mode_index);
+                if lifted_weight.is_empty() {
+                    continue;
+                }
+                let destination = offset + *target;
+                assert!(
+                    transitions
+                        .insert(label, (destination, lifted_weight.clone()))
+                        .is_none(),
+                    "representative DWA must be deterministic before TI expansion",
+                );
+
+                if core_state_index == core_start || label < 0 {
+                    continue;
+                }
+                let representative = label as TerminalID;
+                for &(member, _) in member_modes_by_representative
+                    .get(&representative)
+                    .into_iter()
+                    .flatten()
+                {
+                    assert!(
+                        transitions
+                            .insert(member as i32, (destination, lifted_weight.clone()))
+                            .is_none(),
+                        "one raw member must belong to exactly one TI representative class",
+                    );
+                }
+            }
+            states[(offset as usize) + core_state_index] = DWAState {
+                transitions,
+                final_weight,
+            };
+        }
+    }
+
+    let ordinary_offset = clone_offset_for_mode[0]
+        .expect("ordinary transport mode must always have a clone");
+    let mut dispatcher_transitions = BTreeMap::new();
+    let ordinary_start = &core_states[core_start];
+    for (&label, (target, weight)) in &ordinary_start.transitions {
+        let ordinary_weight = lifter.lift(weight, 0);
+        if !ordinary_weight.is_empty() {
+            assert!(
+                dispatcher_transitions
+                    .insert(label, (ordinary_offset + *target, ordinary_weight))
+                    .is_none(),
+                "representative initial DWA edge labels must be unique",
+            );
+        }
+    }
+
+    for (representative, member_modes) in &member_modes_by_representative {
+        let Some((target, weight)) = core_start_transitions.get(&(*representative as i32)) else {
+            continue;
+        };
+        for &(member, mode_index) in member_modes {
+            let Some(offset) = clone_offset_for_mode[mode_index] else {
+                continue;
+            };
+            let member_weight = lifter.lift(weight, mode_index);
+            if member_weight.is_empty() {
+                continue;
+            }
+            assert!(
+                dispatcher_transitions
+                    .insert(member as i32, (offset + *target, member_weight))
+                    .is_none(),
+                "one raw member must belong to exactly one TI representative class",
+            );
+        }
+    }
+    states[0] = DWAState {
+        transitions: dispatcher_transitions,
+        final_weight: ordinary_start
+            .final_weight
+            .as_ref()
+            .map(|weight| lifter.lift(weight, 0)),
+    };
+
+    DWA::from_parts(states, 0)
+}
+
+/// Restore the original raw-terminal follow relation after building and
+/// minimizing a representative-only core. This is the deterministic product of
+/// the expanded DWA with the same one-previous-terminal guard used by the NWA
+/// postprocess. It deliberately performs no further NWA construction,
+/// determinization, or minimization.
+pub(crate) fn restore_raw_follow_constraints_after_expansion(
+    expanded_dwa: &DWA,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: usize,
+    ignore_terminal: Option<TerminalID>,
+) -> DWA {
+    let normalized = super::equivalence_analysis::disallowed_follows::normalize_disallowed_follows(
+        num_terminals,
+        disallowed_follows,
+    );
+    if normalized.iter().all(BitSet::is_zero) {
+        return expanded_dwa.clone();
+    }
+
+    type ProductState = (u32, Option<u32>);
+    let mut state_ids = FxHashMap::<ProductState, u32>::default();
+    let mut worklist = VecDeque::<ProductState>::new();
+    let mut states = Vec::<DWAState>::new();
+
+    let get_or_create = |product: ProductState,
+                         state_ids: &mut FxHashMap<ProductState, u32>,
+                         worklist: &mut VecDeque<ProductState>,
+                         states: &mut Vec<DWAState>| {
+        if let Some(&id) = state_ids.get(&product) {
+            return id;
+        }
+        let id = states.len() as u32;
+        state_ids.insert(product, id);
+        worklist.push_back(product);
+        states.push(DWAState::default());
+        id
+    };
+
+    let start = get_or_create(
+        (expanded_dwa.start_state(), None),
+        &mut state_ids,
+        &mut worklist,
+        &mut states,
+    );
+    while let Some((dwa_state, previous_terminal)) = worklist.pop_front() {
+        let result_state = state_ids[&(dwa_state, previous_terminal)] as usize;
+        let source = &expanded_dwa.states()[dwa_state as usize];
+        states[result_state].final_weight = source.final_weight.clone();
+
+        for (&label, (target, weight)) in &source.transitions {
+            let next_previous_terminal = if label < 0
+                || ignore_terminal.is_some_and(|ignore| label as TerminalID == ignore)
+            {
+                previous_terminal
+            } else if (label as usize) < normalized.len() {
+                let terminal = label as usize;
+                if previous_terminal.is_some_and(|previous| {
+                    normalized[previous as usize].contains(terminal)
+                }) {
+                    continue;
+                }
+                Some(terminal as u32)
+            } else {
+                None
+            };
+            let destination = get_or_create(
+                (*target, next_previous_terminal),
+                &mut state_ids,
+                &mut worklist,
+                &mut states,
+            );
+            let previous = states[result_state]
+                .transitions
+                .insert(label, (destination, weight.clone()));
+            assert!(
+                previous.is_none(),
+                "expanded DWA and raw follow product must remain deterministic",
+            );
+        }
+    }
+
+    DWA::from_parts(states, start)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -2727,6 +3028,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn post_dwa_member_expansion_reads_representative_weight_at_transport_target() {
+        let state_map = ManyToOneIdMap::from_original_to_internal_with_representatives(
+            vec![0, 1],
+            2,
+            vec![0, 1],
+        );
+        let member_map = TransportScannerStateMap::Explicit(vec![1, 0].into());
+        let modes = vec![
+            TerminalNwaTransportMode::ordinary(2),
+            TerminalNwaTransportMode::member(member_map, 0, 1),
+        ];
+        let start_weight = Weight::from_uniform(
+            0..=1,
+            range_set_blaze::RangeSetBlaze::from_iter([10..=10, 20..=20]),
+        );
+        let suffix_weight = Weight::from_per_tsid_token_sets([
+            (0, range_set_blaze::RangeSetBlaze::from_iter([10..=10])),
+            (1, range_set_blaze::RangeSetBlaze::from_iter([20..=20])),
+        ]);
+        let core = DWA::from_parts(
+            vec![
+                DWAState {
+                    transitions: BTreeMap::from([(0, (1, start_weight))]),
+                    final_weight: None,
+                },
+                DWAState {
+                    transitions: BTreeMap::from([(2, (2, suffix_weight))]),
+                    final_weight: None,
+                },
+                DWAState {
+                    transitions: BTreeMap::new(),
+                    final_weight: Some(Weight::all()),
+                },
+            ],
+            0,
+        );
+
+        let expanded = expand_representative_dwa_after_minimization(
+            &core,
+            &state_map,
+            &state_map,
+            &modes,
+        );
+        let member_word = expanded.eval_word(&[1, 2]);
+        let ordinary_word = expanded.eval_word(&[0, 2]);
+        assert!(member_word.tokens_for_tsid(0).contains(20));
+        assert!(member_word.tokens_for_tsid(1).contains(10));
+        assert!(
+            !member_word.tokens_for_tsid(0).contains(10),
+            "the member's suffix must use its transported representative coordinate",
+        );
+        assert!(ordinary_word.tokens_for_tsid(0).contains(10));
+        assert!(!ordinary_word.tokens_for_tsid(0).contains(20));
     }
 
     #[test]

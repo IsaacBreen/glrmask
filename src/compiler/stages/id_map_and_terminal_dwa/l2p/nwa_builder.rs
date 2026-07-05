@@ -1525,6 +1525,11 @@ impl TerminalNwaTransportMode {
     }
 
     #[inline]
+    pub(crate) fn member_reconstruction(&self) -> Option<(TerminalID, TerminalID)> {
+        self.member_reconstruction
+    }
+
+    #[inline]
     fn emitted_terminal(
         &self,
         raw_terminal: TerminalID,

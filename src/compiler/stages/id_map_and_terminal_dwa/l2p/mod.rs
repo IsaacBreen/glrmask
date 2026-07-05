@@ -37,15 +37,13 @@ use crate::Vocab;
 
 use super::grammar_helpers::compute_always_allowed_follows;
 use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhaseProfile};
-use nwa_builder::{
-    build_nwa_via_trie_walk, build_transport_nwa_via_trie_walk, internal_vocab_entries,
-    seed_root_nodes,
-};
+use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
 use terminal_interchangeability::{
     active_terminals_for_partition, binary_transport_modes, coalesced_disallowed_follows,
     canonicalize_transport_mode_states, discover_one_round, fold_one_round_partition,
-    partition_has_merges, singleton_partition, transport_coordinate_quotient,
-    visible_output_raw_labels,
+    expand_representative_dwa_after_minimization, partition_has_merges,
+    restore_raw_follow_constraints_after_expansion, singleton_partition,
+    transport_coordinate_quotient, visible_output_raw_labels,
 };
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
@@ -229,6 +227,17 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         .as_ref()
         .map(|partition| active_terminals_for_partition(partition, active_terminals.len()))
         .unwrap_or_else(|| active_terminals.to_vec());
+    // TI narrows equivalence observations to final representatives, but the
+    // representative core must still emit terminals outside the TI-active
+    // partition. Only true nonrepresentative class members are hidden.
+    let representative_core_output_labels = reference_terminal_expansion.then(|| {
+        visible_output_raw_labels(
+            terminal_partition
+                .as_ref()
+                .expect("active TI transport must retain its partition"),
+            grammar.num_terminals as usize,
+        )
+    });
     let coalesced_disallowed_follows_started_at = ti_profile_timing.then(Instant::now);
     let coalesced_disallowed_follows = reference_terminal_expansion.then(|| {
         coalesced_disallowed_follows(
@@ -263,6 +272,13 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let equivalence_disallowed_follows = coalesced_disallowed_follows
         .as_ref()
         .unwrap_or(disallowed_follows);
+    // The representative core begins after TI discovery/coalescing. It includes
+    // ordinary representative-only equivalence through representative DWA
+    // compaction, but deliberately excludes replay and post-DWA expansion.
+    // Time the ordinary representative-core section for both TI-on and TI-off
+    // builds. This makes the profile compare the same work directly while
+    // still excluding discovery, replay, and the strict baseline comparator.
+    let ti_representative_core_started_at = l2p_timing_profile_enabled().then(Instant::now);
     let num_analysis_active_terminals = analysis_active_terminals
         .iter()
         .filter(|&&active| active)
@@ -311,7 +327,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // equivalence observations to this L2P partition's active terminals. With
     // TI enabled this is the representative mask, so all three equivalence
     // passes ignore class members replaced by their representatives.
-    let (mut simplified_id_map, equiv_profile) =
+    let (simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
             tokenizer_for_build,
@@ -326,66 +342,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             equivalence_initial_state_map,
         );
 
-    // Replay derives temporary round-local witnesses under the historical
-    // pre-merge active masks. Canonicalize their targets through the ordinary
-    // representative-only quotient, then refine that quotient only where a
-    // witness observes a different quotient destination. This retains the
-    // compact coarsest transport-safe TSID coordinate instead of restoring a
-    // singleton TSID for every raw lexer state.
+    // Replay and transport-coordinate refinement are intentionally deferred
+    // until after the representative-only DWA is minimized and compacted.
+    // Keeping this ordinary quotient here is what makes the core small.
     let mut ti_transport_modes_ms = 0.0;
     let mut ti_canonicalize_transport_modes_ms = 0.0;
     let mut ti_transport_coordinate_quotient_ms = 0.0;
-    let mut transport_modes = None;
-    if reference_terminal_expansion {
-        let partition = terminal_partition
-            .as_ref()
-            .expect("active TI transport must retain its partition");
-        let transport_modes_started_at = ti_profile_timing.then(Instant::now);
-        let mut modes = binary_transport_modes(
-            tokenizer_for_build,
-            active_terminals,
-            partition,
-            &relevant_bytes,
-            ignore_terminal,
-        );
-        ti_transport_modes_ms = transport_modes_started_at
-            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-            .unwrap_or(0.0);
-
-        let transport_coordinate_map = {
-            let ordinary_state_map = &simplified_id_map.tokenizer_states;
-            let canonicalize_started_at = ti_profile_timing.then(Instant::now);
-            canonicalize_transport_mode_states(&mut modes, ordinary_state_map);
-            ti_canonicalize_transport_modes_ms = canonicalize_started_at
-                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-                .unwrap_or(0.0);
-
-            let quotient_started_at = ti_profile_timing.then(Instant::now);
-            let quotient = transport_coordinate_quotient(ordinary_state_map, &modes);
-            ti_transport_coordinate_quotient_ms = quotient_started_at
-                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-                .unwrap_or(0.0);
-            quotient
-        };
-        simplified_id_map.tokenizer_states = transport_coordinate_map;
-        transport_modes = Some(modes);
-    }
-
-    if ti_profile_timing {
-        eprintln!(
-            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} rounds={} classes={} additional_merged_members={} discovery_ms={:.3} transport_modes_ms={:.3} coalesced_disallowed_follows_ms={:.3} canonicalize_transport_modes_ms={:.3} transport_coordinate_quotient_ms={:.3}",
-            partition_label,
-            reference_terminal_expansion,
-            ti_round_count,
-            terminal_partition.as_ref().map_or(0, |partition| partition.len()),
-            ti_additional_merged_members,
-            ti_discovery_ms,
-            ti_transport_modes_ms,
-            ti_coalesced_disallowed_follows_ms,
-            ti_canonicalize_transport_modes_ms,
-            ti_transport_coordinate_quotient_ms,
-        );
-    }
 
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -473,47 +435,21 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
             // ---- Step 6: Trie-walk NWA build ----
             let trie_build_started_at = Instant::now();
-            let _build_profile = if reference_terminal_expansion {
-                let partition = terminal_partition
-                    .as_ref()
-                    .expect("active TI transport must retain its partition");
-                let modes = transport_modes
-                    .as_ref()
-                    .expect("active TI transport modes must be built before NWA construction");
-                let visible_output_raw_labels = visible_output_raw_labels(
-                    partition,
-                    grammar.num_terminals as usize,
-                );
-                seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
-                build_transport_nwa_via_trie_walk(
-                    tokenizer_for_build,
-                    ignore_terminal,
-                    &mut nwa,
-                    start_state,
-                    leaf_state,
-                    &simplified_id_map,
-                    &full_tree.root,
-                    &mut pm_computer,
-                    &visible_output_raw_labels,
-                    &modes,
-                )
-            } else {
-                let roots = seed_root_nodes(&mut nwa, start_state, &simplified_id_map);
-                seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
-                build_nwa_via_trie_walk(
-                    tokenizer_for_build,
-                    terminal_coloring,
-                    use_terminal_coloring,
-                    ignore_terminal,
-                    &mut nwa,
-                    leaf_state,
-                    simplified_id_map.num_tsids(),
-                    &full_tree.root,
-                    &roots,
-                    &mut pm_computer,
-                    None,
-                )
-            };
+            let roots = seed_root_nodes(&mut nwa, start_state, &simplified_id_map);
+            seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+            let _build_profile = build_nwa_via_trie_walk(
+                tokenizer_for_build,
+                terminal_coloring,
+                use_terminal_coloring,
+                ignore_terminal,
+                &mut nwa,
+                leaf_state,
+                simplified_id_map.num_tsids(),
+                &full_tree.root,
+                &roots,
+                &mut pm_computer,
+                representative_core_output_labels.as_deref(),
+            );
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let always_allowed_started_at = Instant::now();
@@ -529,7 +465,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let disallowed_started_at = Instant::now();
             apply_disallowed_follow_constraints(
                 &mut nwa,
-                disallowed_follows,
+                equivalence_disallowed_follows,
                 grammar.num_terminals as usize,
                 ignore_terminal,
             );
@@ -609,15 +545,144 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     let profiling = compile_profile_enabled();
     let mut mapped_dwa = MappedArtifact::new(dwa, composed_id_map);
-    let compact_started_at = Instant::now();
+    let core_compact_started_at = Instant::now();
     if profiling {
         mapped_dwa.compact_dimensions_fast_with_stats();
     } else {
         mapped_dwa.compact_dimensions_fast();
     }
-    let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
-    let dwa_stats_after_compact = mapped_dwa.artifact().stats();
-    let (dwa, id_map) = mapped_dwa.into_parts();
+    let core_compact_ms = core_compact_started_at.elapsed().as_secs_f64() * 1000.0;
+    let core_dwa_stats_after_compact = mapped_dwa.artifact().stats();
+    let (core_dwa, core_id_map) = mapped_dwa.into_parts();
+    let core_tsid_count = core_id_map.num_tsids();
+    let ti_representative_core_total_ms = ti_representative_core_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    // Expand only the already minimized representative DWA. Replay witnesses
+    // are temporary and are deliberately built here rather than before core
+    // NWA construction. The final retained TI result remains the flat
+    // terminal partition.
+    let mut ti_post_dwa_expansion_ms = 0.0;
+    let mut ti_raw_follow_restore_ms = 0.0;
+    let mut ti_post_dwa_compact_ms = 0.0;
+    let ti_post_dwa_started_at = reference_terminal_expansion.then(Instant::now);
+    let (dwa, id_map, dwa_stats_after_compact) = if reference_terminal_expansion {
+        let partition = terminal_partition
+            .as_ref()
+            .expect("active TI transport must retain its partition");
+        let transport_modes_started_at = ti_profile_timing.then(Instant::now);
+        let mut modes = binary_transport_modes(
+            tokenizer_for_build,
+            active_terminals,
+            partition,
+            &relevant_bytes,
+            ignore_terminal,
+        );
+        ti_transport_modes_ms = transport_modes_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+
+        let transport_coordinate_map = {
+            let ordinary_state_map = &core_id_map.tokenizer_states;
+            let canonicalize_started_at = ti_profile_timing.then(Instant::now);
+            canonicalize_transport_mode_states(&mut modes, ordinary_state_map);
+            ti_canonicalize_transport_modes_ms = canonicalize_started_at
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+
+            let quotient_started_at = ti_profile_timing.then(Instant::now);
+            let quotient = transport_coordinate_quotient(ordinary_state_map, &modes);
+            ti_transport_coordinate_quotient_ms = quotient_started_at
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+            quotient
+        };
+
+        let expansion_started_at = ti_profile_timing.then(Instant::now);
+        let expanded_dwa = expand_representative_dwa_after_minimization(
+            &core_dwa,
+            &core_id_map.tokenizer_states,
+            &transport_coordinate_map,
+            &modes,
+        );
+        ti_post_dwa_expansion_ms = expansion_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+
+        let raw_follow_started_at = ti_profile_timing.then(Instant::now);
+        let expanded_dwa = restore_raw_follow_constraints_after_expansion(
+            &expanded_dwa,
+            disallowed_follows,
+            grammar.num_terminals as usize,
+            ignore_terminal,
+        );
+        ti_raw_follow_restore_ms = raw_follow_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+
+        let mut final_id_map = core_id_map.clone();
+        final_id_map.tokenizer_states = transport_coordinate_map;
+        let mut expanded_artifact = MappedArtifact::new(expanded_dwa, final_id_map);
+        let post_dwa_compact_started_at = Instant::now();
+        if profiling {
+            expanded_artifact.compact_dimensions_fast_with_stats();
+        } else {
+            expanded_artifact.compact_dimensions_fast();
+        }
+        ti_post_dwa_compact_ms = post_dwa_compact_started_at.elapsed().as_secs_f64() * 1000.0;
+        let stats = expanded_artifact.artifact().stats();
+        let (dwa, id_map) = expanded_artifact.into_parts();
+        (dwa, id_map, stats)
+    } else {
+        (core_dwa, core_id_map, core_dwa_stats_after_compact)
+    };
+    let ti_post_dwa_total_ms = ti_post_dwa_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let compact_ms = core_compact_ms + ti_post_dwa_compact_ms;
+
+    if ti_profile_timing {
+        eprintln!(
+            "[glrmask/profile][ti_representative_core] partition={} ti_active={} ordinary_exact_tsids={} core_tsids={} id_map_ms={:.3} representative_nwa_build_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} core_compact_ms={:.3} core_total_ms={:.3}",
+            partition_label,
+            reference_terminal_expansion,
+            equiv_profile.exact_reps,
+            core_tsid_count,
+            id_map_ms,
+            trie_build_ms,
+            determinize_ms,
+            minimize_ms,
+            core_compact_ms,
+            ti_representative_core_total_ms,
+        );
+        eprintln!(
+            "[glrmask/profile][ti_post_dwa_expansion] partition={} ti_active={} replay_maps_ms={:.3} canonicalize_transport_modes_ms={:.3} transport_coordinate_quotient_ms={:.3} expansion_ms={:.3} raw_follow_restore_ms={:.3} post_dwa_compact_ms={:.3} final_tsids={} expansion_total_ms={:.3}",
+            partition_label,
+            reference_terminal_expansion,
+            ti_transport_modes_ms,
+            ti_canonicalize_transport_modes_ms,
+            ti_transport_coordinate_quotient_ms,
+            ti_post_dwa_expansion_ms,
+            ti_raw_follow_restore_ms,
+            ti_post_dwa_compact_ms,
+            id_map.num_tsids(),
+            ti_post_dwa_total_ms,
+        );
+        eprintln!(
+            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} rounds={} classes={} additional_merged_members={} discovery_ms={:.3} transport_modes_ms={:.3} coalesced_disallowed_follows_ms={:.3} canonicalize_transport_modes_ms={:.3} transport_coordinate_quotient_ms={:.3}",
+            partition_label,
+            reference_terminal_expansion,
+            ti_round_count,
+            terminal_partition.as_ref().map_or(0, |partition| partition.len()),
+            ti_additional_merged_members,
+            ti_discovery_ms,
+            ti_transport_modes_ms,
+            ti_coalesced_disallowed_follows_ms,
+            ti_canonicalize_transport_modes_ms,
+            ti_transport_coordinate_quotient_ms,
+        );
+    }
 
     if l2p_timing_profile_enabled() {
         eprintln!(
@@ -626,7 +691,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             vocab.entries.len(),
             num_active_terminals,
             num_original_states,
-            simplified_id_map.num_tsids(),
+            id_map.num_tsids(),
             internal_vocab_count,
             equiv_profile.initial_states_considered,
             equiv_profile.max_length_skipped,
@@ -692,7 +757,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 + trie_build_ms
                 + postprocess_ms
                 + determinize_ms
-                + minimize_ms,
+                + minimize_ms
+                + ti_post_dwa_total_ms,
             compact_ms,
             ..TerminalDwaPhaseProfile::default()
         },
