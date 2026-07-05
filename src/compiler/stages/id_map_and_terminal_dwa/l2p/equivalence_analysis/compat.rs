@@ -3,6 +3,7 @@
 use crate::automata::lexer::Lexer;
 use crate::ds::u8set::U8Set;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
@@ -369,25 +370,29 @@ impl TokenizerView {
         tokenizer: &Tokenizer,
         active_groups: &[bool],
         state_map: &ManyToOneIdMap,
-    ) -> Self {
+    ) -> (Self, f64) {
         let raw_states = tokenizer.num_states() as usize;
         assert_eq!(flat_trans.len(), raw_states * 256, "invalid raw transition table");
         assert_eq!(state_map.original_to_internal.len(), raw_states, "invalid state map");
         let quotient_states = state_map.internal_to_originals.len();
         let mut transitions = vec![u32::MAX; quotient_states * 256];
         let mut states = Vec::with_capacity(quotient_states);
+        let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let filter_started_at = profile_timing.then(Instant::now);
         for (internal, &representative) in state_map.representative_original_ids.iter().enumerate() {
             let representative = representative as usize;
             assert!(representative < raw_states, "invalid quotient representative");
+            let finalizers = collect_filtered_group_ids(
+                tokenizer.matched_terminals_iter(representative as u32),
+                active_groups,
+            );
+            let possible_future_group_ids = collect_filtered_group_ids(
+                tokenizer.possible_future_terminals_iter(representative as u32),
+                active_groups,
+            );
             states.push(FlatDfaState {
-                finalizers: collect_filtered_group_ids(
-                    tokenizer.matched_terminals_iter(representative as u32),
-                    active_groups,
-                ),
-                possible_future_group_ids: collect_filtered_group_ids(
-                    tokenizer.possible_future_terminals_iter(representative as u32),
-                    active_groups,
-                ),
+                finalizers,
+                possible_future_group_ids,
             });
             let raw_base = representative * 256;
             let quotient_base = internal * 256;
@@ -404,13 +409,18 @@ impl TokenizerView {
         }
         let start_state = state_map.original_to_internal[tokenizer.start_state() as usize];
         assert_ne!(start_state, u32::MAX, "quotient start state must be mapped");
-        Self {
-            flat_dfa: FlatDfa {
-                states,
-                start_state: start_state as usize,
-                transitions: Arc::from(transitions),
+        (
+            Self {
+                flat_dfa: FlatDfa {
+                    states,
+                    start_state: start_state as usize,
+                    transitions: Arc::from(transitions),
+                },
             },
-        }
+            filter_started_at
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0),
+        )
     }
 
     /// Verify that `state_map` is an output-labelled right congruence for every

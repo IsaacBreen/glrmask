@@ -704,9 +704,22 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         );
     }
 
+    let id_map_attributed_ms = equiv_profile.raw_analysis_base_init_ms
+        + equiv_profile.analysis_view_build_ms
+        + equiv_profile.effective_follows_normalize_ms
+        + equiv_profile.prepare_inputs_ms
+        + equiv_profile.byte_class_setup_ms
+        + equiv_profile.token_dedup_ms
+        + equiv_profile.restricted_observation_state_equiv_ms
+        + equiv_profile.max_length_state_equiv_ms
+        + equiv_profile.vocab_equiv_ms
+        + equiv_profile.exact_state_equiv_ms
+        + equiv_profile.id_map_finalize_ms;
+    let id_map_unattributed_ms = (id_map_ms - id_map_attributed_ms).max(0.0);
+
     if l2p_timing_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} internal_vocab_entries={} initial_states_considered={} max_length_skipped={} max_token_len={} token_len_gt_4={} token_len_gt_8={} token_len_gt_16={} token_len_gt_32={} token_len_gt_64={} prepare_inputs_ms={:.3} byte_class_setup_ms={:.3} token_dedup_ms={:.3} max_length_state_equiv_ms={:.3} vocab_equiv_ms={:.3} exact_state_equiv_ms={:.3} id_map_finalize_ms={:.3} max_length_reps={} exact_reps={} exact_rep_confirmation_used={} fast_sound_id_map_used={} max_length_reduction_pct={:.2} exact_reduction_pct={:.2} restricted_observation_state_equiv_ms={:.3} restricted_observation_reps={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} compact_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
+            "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} internal_vocab_entries={} initial_states_considered={} max_length_skipped={} max_token_len={} token_len_gt_4={} token_len_gt_8={} token_len_gt_16={} token_len_gt_32={} token_len_gt_64={} raw_analysis_base_init_ms={:.3} analysis_view_build_ms={:.3} active_mask_filter_ms={:.3} effective_follows_normalize_ms={:.3} prepare_inputs_ms={:.3} byte_class_setup_ms={:.3} vocab_analysis_dfa_build_ms={:.3} token_dedup_ms={:.3} max_length_state_equiv_ms={:.3} vocab_equiv_ms={:.3} exact_state_equiv_ms={:.3} id_map_finalize_ms={:.3} id_map_unattributed_ms={:.3} max_length_reps={} exact_reps={} exact_rep_confirmation_used={} fast_sound_id_map_used={} max_length_reduction_pct={:.2} exact_reduction_pct={:.2} restricted_observation_state_equiv_ms={:.3} restricted_observation_reps={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} compact_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
             partition_label,
             vocab.entries.len(),
             num_active_terminals,
@@ -721,13 +734,19 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             equiv_profile.token_len_gt_16,
             equiv_profile.token_len_gt_32,
             equiv_profile.token_len_gt_64,
+            equiv_profile.raw_analysis_base_init_ms,
+            equiv_profile.analysis_view_build_ms,
+            equiv_profile.active_mask_filter_ms,
+            equiv_profile.effective_follows_normalize_ms,
             equiv_profile.prepare_inputs_ms,
             equiv_profile.byte_class_setup_ms,
+            equiv_profile.vocab_analysis_dfa_build_ms,
             equiv_profile.token_dedup_ms,
             equiv_profile.max_length_state_equiv_ms,
             equiv_profile.vocab_equiv_ms,
             equiv_profile.exact_state_equiv_ms,
             equiv_profile.id_map_finalize_ms,
+            id_map_unattributed_ms,
             equiv_profile.max_length_reps,
             equiv_profile.exact_reps,
             equiv_profile.exact_rep_confirmation_used,

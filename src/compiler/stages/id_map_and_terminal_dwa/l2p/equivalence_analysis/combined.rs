@@ -208,8 +208,14 @@ pub(crate) struct CombinedEquivalenceProfile {
     pub(crate) token_len_gt_16: usize,
     pub(crate) token_len_gt_32: usize,
     pub(crate) token_len_gt_64: usize,
+    pub(crate) raw_analysis_base_init_ms: f64,
+    pub(crate) analysis_view_build_ms: f64,
+    /// Sub-timing within `analysis_view_build_ms`; do not add separately.
+    pub(crate) active_mask_filter_ms: f64,
+    pub(crate) effective_follows_normalize_ms: f64,
     pub(crate) prepare_inputs_ms: f64,
     pub(crate) byte_class_setup_ms: f64,
+    pub(crate) vocab_analysis_dfa_build_ms: f64,
     pub(crate) token_dedup_ms: f64,
     pub(crate) restricted_observation_state_equiv_ms: f64,
     pub(crate) max_length_state_equiv_ms: f64,
@@ -395,6 +401,7 @@ fn try_analyze_equivalences_with_raw_quotient(
     active_groups: Option<&[bool]>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
+    effective_follows_prepare_ms: f64,
 ) -> Option<(InternalIdMap, CombinedEquivalenceProfile)> {
     let active_groups = active_groups?;
     let flat_trans = flat_trans?;
@@ -456,13 +463,14 @@ fn try_analyze_equivalences_with_raw_quotient(
     let pre_state_map = raw_restricted.state_map;
 
     let view_build_started_at = Instant::now();
-    let analysis_view = TokenizerView::new_filtered_quotient_from_flat_trans(
-        flat_trans,
-        tokenizer,
-        active_groups,
-        &pre_state_map,
-    );
-    let _analysis_view_build_ms = view_build_started_at.elapsed().as_secs_f64() * 1000.0;
+    let (analysis_view, active_mask_filter_ms) =
+        TokenizerView::new_filtered_quotient_from_flat_trans(
+            flat_trans,
+            tokenizer,
+            active_groups,
+            &pre_state_map,
+        );
+    let analysis_view_build_ms = view_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // This exact byte partition is now over at most a few hundred quotient
     // rows. It replaces the previous 18k-state shared-base cold setup.
@@ -474,8 +482,11 @@ fn try_analyze_equivalences_with_raw_quotient(
     let dedup = deduplicate_tokens_by_byte_class(&prepared.token_bytes, &byte_to_class);
     let token_dedup_ms = token_dedup_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let follows_normalize_started_at = Instant::now();
     let normalized_disallowed_follows =
         normalize_disallowed_follows(tokenizer_group_count(&analysis_view), effective_disallowed);
+    let effective_follows_normalize_ms = effective_follows_prepare_ms
+        + follows_normalize_started_at.elapsed().as_secs_f64() * 1000.0;
     let pre_reduced_states: Vec<usize> = (0..pre_state_map.internal_to_originals.len()).collect();
     let exact_rep_confirmation_used = pre_reduced_states.len() >= EXACT_REP_CONFIRMATION_MIN_STATES
         && dedup.representative_token_bytes.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
@@ -507,16 +518,17 @@ fn try_analyze_equivalences_with_raw_quotient(
     final_state_representatives.dedup();
 
     let vocab_equiv_started_at = Instant::now();
-    let dedup_vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
-        &analysis_view,
-        &dedup.representative_token_bytes,
-        &final_state_representatives,
-        effective_disallowed,
-        Some(&byte_to_class),
-        None,
-        None,
-        None,
-    );
+    let (dedup_vocab_classes, vocab_analysis_dfa_build_ms) =
+        vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
+            &analysis_view,
+            &dedup.representative_token_bytes,
+            &final_state_representatives,
+            effective_disallowed,
+            Some(&byte_to_class),
+            None,
+            None,
+            None,
+        );
     let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let id_map_finalize_started_at = Instant::now();
@@ -547,8 +559,13 @@ fn try_analyze_equivalences_with_raw_quotient(
             token_len_gt_16: token_len_stats.gt_16,
             token_len_gt_32: token_len_stats.gt_32,
             token_len_gt_64: token_len_stats.gt_64,
+            raw_analysis_base_init_ms: 0.0,
+            analysis_view_build_ms,
+            active_mask_filter_ms,
+            effective_follows_normalize_ms,
             prepare_inputs_ms,
             byte_class_setup_ms,
+            vocab_analysis_dfa_build_ms,
             token_dedup_ms,
             restricted_observation_state_equiv_ms,
             max_length_state_equiv_ms: 0.0,
@@ -608,8 +625,10 @@ fn analyze_equivalences_impl(
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
+    let follows_prepare_started_at = Instant::now();
     let token_path_disallowed_follows =
         ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal);
+    let effective_follows_prepare_ms = follows_prepare_started_at.elapsed().as_secs_f64() * 1000.0;
     let effective_disallowed = &token_path_disallowed_follows;
     if let Some(result) = try_analyze_equivalences_with_raw_quotient(
         partition_label,
@@ -620,6 +639,7 @@ fn analyze_equivalences_impl(
         active_groups,
         flat_trans,
         initial_state_map,
+        effective_follows_prepare_ms,
     ) {
         return result;
     }
@@ -628,31 +648,35 @@ fn analyze_equivalences_impl(
     let compatible_flat_trans = flat_trans.filter(|ft| {
         ft.len() == tokenizer.num_states() as usize * 256
     });
+    let analysis_view_build_started_at = Instant::now();
     let tokenizer_view = match (active_groups, compatible_flat_trans) {
         (Some(active_groups), Some(ft)) => TokenizerView::new_filtered_from_flat_trans(ft, tokenizer, active_groups),
         (Some(active_groups), None) => TokenizerView::new_filtered(tokenizer, active_groups),
         (None, Some(ft)) => TokenizerView::new_from_flat_trans(ft, tokenizer),
         _ => TokenizerView::new(tokenizer),
     };
+    let analysis_view_build_ms = analysis_view_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let prepare_inputs_started_at = Instant::now();
     let prepared = prepare_equivalence_inputs(tokenizer, vocab, initial_state_map);
     let token_len_stats = token_length_stats(&prepared.token_bytes);
     let prepare_inputs_ms = prepare_inputs_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let byte_class_setup_started_at = Instant::now();
+    let raw_analysis_base_started_at = Instant::now();
     if let Some(cache) = shared_vocab_dfa_cache {
         cache.get_or_init(|| vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa(tokenizer_view.dfa()));
     }
+    let raw_analysis_base_init_ms = shared_base_setup_ms
+        + raw_analysis_base_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let byte_class_setup_started_at = Instant::now();
     let compatible_cache = shared_vocab_dfa_cache
         .and_then(|cache| cache.get())
         .filter(|base| base.is_compatible_with_dfa(tokenizer_view.dfa()));
     let byte_to_class = compatible_cache
         .map(|base| base.byte_to_class())
         .unwrap_or_else(|| super::compat::compute_byte_classes(tokenizer_view.dfa()));
-    let byte_class_setup_ms = shared_base_setup_ms
-        + byte_class_setup_started_at.elapsed().as_secs_f64() * 1000.0;
+    let byte_class_setup_ms = byte_class_setup_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let token_dedup_started_at = Instant::now();
     let dedup = deduplicate_tokens_by_byte_class(&prepared.token_bytes, &byte_to_class);
@@ -713,8 +737,11 @@ fn analyze_equivalences_impl(
             .map(|&state| state as usize)
             .collect()
     };
+    let follows_normalize_started_at = Instant::now();
     let normalized_disallowed_follows =
         normalize_disallowed_follows(tokenizer_group_count(analysis_view), effective_disallowed);
+    let effective_follows_normalize_ms = effective_follows_prepare_ms
+        + follows_normalize_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // First finalize state equivalence against every deduplicated token.
     // A final state representative is indistinguishable from each state it
@@ -777,16 +804,17 @@ fn analyze_equivalences_impl(
     final_state_representatives.dedup();
 
     let vocab_equiv_started_at = Instant::now();
-    let dedup_vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
-        analysis_view,
-        &dedup.representative_token_bytes,
-        &final_state_representatives,
-        effective_disallowed,
-        Some(&byte_to_class),
-        if uses_analysis_quotient { None } else { active_groups },
-        if uses_analysis_quotient { None } else { shared_vocab_dfa_cache },
-        if uses_analysis_quotient { None } else { shared_analysis_dfa_cache },
-    );
+    let (dedup_vocab_classes, vocab_analysis_dfa_build_ms) =
+        vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
+            analysis_view,
+            &dedup.representative_token_bytes,
+            &final_state_representatives,
+            effective_disallowed,
+            Some(&byte_to_class),
+            if uses_analysis_quotient { None } else { active_groups },
+            if uses_analysis_quotient { None } else { shared_vocab_dfa_cache },
+            if uses_analysis_quotient { None } else { shared_analysis_dfa_cache },
+        );
     let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let id_map_finalize_started_at = Instant::now();
@@ -817,8 +845,13 @@ fn analyze_equivalences_impl(
             token_len_gt_16: token_len_stats.gt_16,
             token_len_gt_32: token_len_stats.gt_32,
             token_len_gt_64: token_len_stats.gt_64,
+            raw_analysis_base_init_ms,
+            analysis_view_build_ms,
+            active_mask_filter_ms: 0.0,
+            effective_follows_normalize_ms,
             prepare_inputs_ms,
             byte_class_setup_ms,
+            vocab_analysis_dfa_build_ms,
             token_dedup_ms,
             restricted_observation_state_equiv_ms: pipeline_profile.restricted_observation_state_equiv_ms,
             max_length_state_equiv_ms: pipeline_profile.max_length_state_equiv_ms,

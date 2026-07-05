@@ -2494,7 +2494,7 @@ fn compact_dfa_for_tokens<S: AsRef<[u8]>>(
 
 /// When `active_groups` is provided, the DFA only tracks groups marked `true`.
 /// L1 terminal groups can be excluded this way for a L2+-only analysis.
-pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
+pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef<[u8]> + Sync>(
     tokenizer: &TokenizerView,
     strings: &[S],
     initial_states: &[usize],
@@ -2503,14 +2503,14 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     active_groups: Option<&[bool]>,
     shared_cache: Option<&SharedVocabDfaCache>,
     shared_analysis_dfa_cache: Option<&SharedVocabAnalysisDfaCache>,
-) -> VocabEquivalenceResult {
+) -> (VocabEquivalenceResult, f64) {
     let profiling = compile_profile_enabled();
     let elapsed_ms = |started_at: Option<Instant>| {
         started_at.map_or(0.0, |instant| instant.elapsed().as_secs_f64() * 1000.0)
     };
 
     let total_started_at = profiling.then(Instant::now);
-    let build_dfa_started_at = profiling.then(Instant::now);
+    let build_dfa_started_at = Instant::now();
     let dfa = if let Some(cache) = shared_analysis_dfa_cache {
         let key = AnalysisDfaCacheKey::for_analysis_view(
             tokenizer,
@@ -2535,7 +2535,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
             shared_cache,
         ))
     };
-    let build_dfa_ms = elapsed_ms(build_dfa_started_at);
+    let build_dfa_ms = build_dfa_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // Compact DFA: restrict to states reachable from initial_states via the
     // partition's token bytes.  This can dramatically shrink the transition
@@ -2553,7 +2553,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     let num_initial_states = initial_states_ref.len();
 
     if num_initial_states == 0 || num_tokens == 0 {
-        return BTreeSet::from_iter(vec![(0..num_tokens).collect()]);
+        return (BTreeSet::from_iter(vec![(0..num_tokens).collect()]), build_dfa_ms);
     }
 
     if initial_states_ref
@@ -2575,7 +2575,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
                 elapsed_ms(total_started_at),
             );
         }
-        return BTreeSet::from_iter(vec![(0..num_tokens).collect()]);
+        return (BTreeSet::from_iter(vec![(0..num_tokens).collect()]), build_dfa_ms);
     }
 
     let state_order_started_at = profiling.then(Instant::now);
@@ -2868,7 +2868,32 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
         );
     }
 
-    groups.into_iter().collect()
+    (groups.into_iter().collect(), build_dfa_ms)
+}
+
+/// Result-only compatibility entry point. Callers that need precise phase
+/// accounting should use the profiled sibling above.
+pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
+    tokenizer: &TokenizerView,
+    strings: &[S],
+    initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    byte_to_class: Option<&[u8; 256]>,
+    active_groups: Option<&[bool]>,
+    shared_cache: Option<&SharedVocabDfaCache>,
+    shared_analysis_dfa_cache: Option<&SharedVocabAnalysisDfaCache>,
+) -> VocabEquivalenceResult {
+    find_vocab_equivalence_classes_with_group_filter_profiled(
+        tokenizer,
+        strings,
+        initial_states,
+        disallowed_follows,
+        byte_to_class,
+        active_groups,
+        shared_cache,
+        shared_analysis_dfa_cache,
+    )
+    .0
 }
 
 #[cfg(test)]
