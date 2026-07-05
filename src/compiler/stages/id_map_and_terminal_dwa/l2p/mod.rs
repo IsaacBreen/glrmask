@@ -565,6 +565,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // terminal partition.
     let mut ti_post_dwa_expansion_ms = 0.0;
     let mut ti_raw_follow_restore_ms = 0.0;
+    let mut ti_post_dwa_minimize_ms = 0.0;
     let mut ti_post_dwa_compact_ms = 0.0;
     let ti_post_dwa_started_at = reference_terminal_expansion.then(Instant::now);
     let (dwa, id_map, dwa_stats_after_compact) = if reference_terminal_expansion {
@@ -621,6 +622,15 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
 
+        // Expansion creates direct transported suffix copies. The result is
+        // deterministic, so minimize it here before generic dimension
+        // compaction can see and eliminate its duplicated graph structure.
+        let post_dwa_minimize_started_at = ti_profile_timing.then(Instant::now);
+        let expanded_dwa = minimize_owned(expanded_dwa);
+        ti_post_dwa_minimize_ms = post_dwa_minimize_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+
         let mut final_id_map = core_id_map.clone();
         final_id_map.tokenizer_states = transport_coordinate_map;
         let mut expanded_artifact = MappedArtifact::new(expanded_dwa, final_id_map);
@@ -657,7 +667,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             ti_representative_core_total_ms,
         );
         eprintln!(
-            "[glrmask/profile][ti_post_dwa_expansion] partition={} ti_active={} replay_maps_ms={:.3} canonicalize_transport_modes_ms={:.3} transport_coordinate_quotient_ms={:.3} expansion_ms={:.3} raw_follow_restore_ms={:.3} post_dwa_compact_ms={:.3} final_tsids={} expansion_total_ms={:.3}",
+            "[glrmask/profile][ti_post_dwa_expansion] partition={} ti_active={} replay_maps_ms={:.3} canonicalize_transport_modes_ms={:.3} transport_coordinate_quotient_ms={:.3} expansion_ms={:.3} raw_follow_restore_ms={:.3} post_dwa_minimize_ms={:.3} post_dwa_compact_ms={:.3} final_tsids={} expansion_total_ms={:.3}",
             partition_label,
             reference_terminal_expansion,
             ti_transport_modes_ms,
@@ -665,6 +675,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             ti_transport_coordinate_quotient_ms,
             ti_post_dwa_expansion_ms,
             ti_raw_follow_restore_ms,
+            ti_post_dwa_minimize_ms,
             ti_post_dwa_compact_ms,
             id_map.num_tsids(),
             ti_post_dwa_total_ms,
