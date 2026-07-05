@@ -225,7 +225,7 @@ impl TokenSuffixHashes {
 }
 
 fn build_future_group_hashes_by_context(
-    dfa_future_groups: &[Vec<usize>],
+    dfa_future_groups: &[&[usize]],
     follow_contexts: &FollowContextTable,
 ) -> Vec<Vec<u128>> {
     (0..follow_contexts.num_contexts())
@@ -417,7 +417,7 @@ fn build_start_state_suffix_nodes(
     dfa_transitions: &[u32],
     byte_to_class: &[u8; 256],
     num_bc: usize,
-    dfa_finalizers: &[Vec<usize>],
+    dfa_finalizers: &[&[usize]],
     state_has_future: &[bool],
     skip_groups: &[bool],
     positions: &mut [i32],
@@ -447,7 +447,7 @@ fn build_start_state_suffix_nodes(
             current = next as usize;
             current_ct_base = current * num_bc;
             let absolute_pos = (pos + offset + 1) as i32;
-            for &gid in &dfa_finalizers[current] {
+            for &gid in dfa_finalizers[current] {
                 if gid >= num_groups || (skip_groups_enabled && skip_groups[gid]) {
                     continue;
                 }
@@ -660,15 +660,15 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         std::borrow::Cow::Borrowed(&dfa.transitions)
     };
 
-    let dfa_finalizers: Vec<Vec<usize>> = dfa
+    let dfa_finalizers: Vec<&[usize]> = dfa
         .states
         .iter()
-        .map(|state| state.finalizers.iter().copied().collect())
+        .map(|state| state.finalizers.as_slice())
         .collect();
-    let dfa_future_groups: Vec<Vec<usize>> = dfa
+    let dfa_future_groups: Vec<&[usize]> = dfa
         .states
         .iter()
-        .map(|state| state.possible_future_group_ids.iter().copied().collect())
+        .map(|state| state.possible_future_group_ids.as_slice())
         .collect();
     let state_has_future: Vec<bool> = dfa_future_groups
         .iter()
@@ -952,7 +952,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                     let position = prefix_len + offset + 1;
 
                                     if num_groups > 0 {
-                                        for &gid in &dfa_finalizers[current as usize] {
+                                        for &gid in dfa_finalizers[current as usize] {
                                             if gid >= num_groups {
                                                 continue;
                                             }

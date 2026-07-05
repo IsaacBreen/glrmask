@@ -73,11 +73,13 @@ struct Dfa {
 pub struct SharedVocabDfaBase {
     byte_to_class: [u8; 256],
     pub num_classes: usize,
-    trans_by_class: Arc<[u32]>,
-    /// Row-major transition table: `trans_by_state_class[state * num_classes + class]`.
-    /// State equivalence walks one state through a token at a time, so it needs
-    /// this complementary locality. Both layouts share the same exact classes.
-    trans_by_state_class: Arc<[u32]>,
+    class_representatives: Arc<[u8]>,
+    /// The two dense compressed layouts are independently lazy. A reduced
+    /// representative analysis can use the shared byte partition without
+    /// paying to materialize raw-state layouts it never walks.
+    trans_by_class: OnceLock<Arc<[u32]>>,
+    /// Row-major transition table: `state * num_classes + class`.
+    trans_by_state_class: OnceLock<Arc<[u32]>>,
     self_loop_bytes: Arc<[U8Set]>,
     none_completion_hash: u64,
     /// Exact source table for pointer-fast and value-exact compatibility checks.
@@ -145,49 +147,59 @@ fn compute_byte_classes_and_self_loops(
 }
 
 impl SharedVocabDfaBase {
-    /// Build from transition data derived from sparse lexer rows. The cache
-    /// already proved the byte partition against the dense transition table;
-    /// this function only materializes the two compressed layouts.
+    fn class_representatives(byte_to_class: &[u8; 256], num_classes: usize) -> Arc<[u8]> {
+        let mut representatives = vec![0u8; num_classes];
+        let mut seen = vec![false; num_classes];
+        for byte in 0..=255u8 {
+            let class = byte_to_class[byte as usize] as usize;
+            if !seen[class] {
+                seen[class] = true;
+                representatives[class] = byte;
+            }
+        }
+        Arc::from(representatives)
+    }
+
+    fn build_layout(&self, transposed: bool) -> Arc<[u32]> {
+        let num_states = self.source_transitions.len() / 256;
+        let mut transitions = vec![NONE; self.num_classes * num_states];
+        for state in 0..num_states {
+            let source_base = state * 256;
+            for class in 0..self.num_classes {
+                let target = self.source_transitions
+                    [source_base + self.class_representatives[class] as usize];
+                let destination = if transposed {
+                    class * num_states + state
+                } else {
+                    state * self.num_classes + class
+                };
+                transitions[destination] = target;
+            }
+        }
+        Arc::from(transitions)
+    }
+
+    /// Build from transition data derived from sparse lexer rows. Byte classes
+    /// and self-loop bytes are shared immediately; the two dense layouts remain
+    /// lazy until a caller actually needs their access pattern.
     pub fn build_from_flat_transition_cache(cache: &FlatTransitionCache) -> Self {
-        let num_dfa_states = cache.transitions.len() / 256;
         let byte_to_class = cache.byte_to_class;
         let num_classes = byte_to_class
             .iter()
             .copied()
             .max()
             .map_or(0usize, |max_class| max_class as usize + 1);
-
-        let mut class_repr = vec![0u8; num_classes];
-        let mut class_seen = vec![false; num_classes];
-        for byte in 0..=255u8 {
-            let class = byte_to_class[byte as usize] as usize;
-            if !class_seen[class] {
-                class_seen[class] = true;
-                class_repr[class] = byte;
-            }
-        }
-
-        let mut trans_by_class = vec![NONE; num_classes * num_dfa_states];
-        let mut trans_by_state_class = vec![NONE; num_classes * num_dfa_states];
-        for state in 0..num_dfa_states {
-            let source_base = state * 256;
-            for class in 0..num_classes {
-                let target = cache.transitions[source_base + class_repr[class] as usize];
-                trans_by_class[class * num_dfa_states + state] = target;
-                trans_by_state_class[state * num_classes + class] = target;
-            }
-        }
-
         let none_completion_hash = {
             let mut h = new_hasher();
             h.write_u8(0);
             h.finish()
         };
-        SharedVocabDfaBase {
+        Self {
             byte_to_class,
             num_classes,
-            trans_by_class: Arc::from(trans_by_class),
-            trans_by_state_class: Arc::from(trans_by_state_class),
+            class_representatives: Self::class_representatives(&byte_to_class, num_classes),
+            trans_by_class: OnceLock::new(),
+            trans_by_state_class: OnceLock::new(),
             self_loop_bytes: Arc::clone(&cache.self_loop_bytes),
             none_completion_hash,
             source_transitions: Arc::clone(&cache.transitions),
@@ -196,49 +208,23 @@ impl SharedVocabDfaBase {
 
     /// Build from a FlatDfa. Called lazily via OnceLock on first use.
     pub fn build_from_dfa(dfa: &super::super::compat::FlatDfa) -> Self {
-        let num_dfa_states = dfa.states.len();
         let (byte_to_class, self_loop_bytes) = compute_byte_classes_and_self_loops(dfa);
         let num_classes = byte_to_class
             .iter()
             .copied()
             .max()
             .map_or(0usize, |max_class| max_class as usize + 1);
-
-        let mut class_repr = vec![0u8; num_classes];
-        let mut class_seen = vec![false; num_classes];
-        for b in 0..=255u8 {
-            let class = byte_to_class[b as usize] as usize;
-            if !class_seen[class] {
-                class_seen[class] = true;
-                class_repr[class] = b;
-            }
-        }
-
-        // Fused row-major construction: one pass over DFA states instead of
-        // 51 column-major passes for trans_by_class + 1 pass for self_loop_bytes.
-        let mut trans_by_class = vec![NONE; num_classes * num_dfa_states];
-        let mut trans_by_state_class = vec![NONE; num_classes * num_dfa_states];
-        for s in 0..dfa.states.len() {
-            for c in 0..num_classes {
-                let target = dfa.trans(s, class_repr[c] as usize);
-                trans_by_class[c * num_dfa_states + s] = target;
-                trans_by_state_class[s * num_classes + c] = target;
-            }
-        }
-
         let none_completion_hash = {
             let mut h = new_hasher();
             h.write_u8(0);
             h.finish()
         };
-
-
-
-        SharedVocabDfaBase {
+        Self {
             byte_to_class,
             num_classes,
-            trans_by_class: Arc::from(trans_by_class),
-            trans_by_state_class: Arc::from(trans_by_state_class),
+            class_representatives: Self::class_representatives(&byte_to_class, num_classes),
+            trans_by_class: OnceLock::new(),
+            trans_by_state_class: OnceLock::new(),
             self_loop_bytes: Arc::from(self_loop_bytes),
             none_completion_hash,
             source_transitions: Arc::clone(&dfa.transitions),
@@ -255,25 +241,31 @@ impl SharedVocabDfaBase {
         &self.byte_to_class
     }
 
-    /// Borrow row-major compressed transitions for state-by-token walks.
-    pub fn transitions_by_state_class(&self) -> &[u32] {
-        &self.trans_by_state_class
+    /// Borrow the class-major compressed layout for token-equivalence walks.
+    pub fn transitions_by_class(&self) -> &[u32] {
+        self.trans_by_class
+            .get_or_init(|| self.build_layout(true))
+            .as_ref()
     }
 
-    /// Check full compatibility: state count AND transition hash must match.
-    /// Two DFAs with the same state count but different transitions must not
-    /// share the cache.
+    pub fn transitions_by_class_arc(&self) -> Arc<[u32]> {
+        Arc::clone(self.trans_by_class.get_or_init(|| self.build_layout(true)))
+    }
+
+    /// Borrow the row-major compressed layout for state-by-token walks.
+    pub fn transitions_by_state_class(&self) -> &[u32] {
+        self.trans_by_state_class
+            .get_or_init(|| self.build_layout(false))
+            .as_ref()
+    }
+
+    /// Check full compatibility without forcing either lazy layout.
     pub fn is_compatible_with_dfa(&self, dfa: &super::super::compat::FlatDfa) -> bool {
         let num_dfa_states = dfa.states.len();
-        if self.trans_by_class.len() != self.num_classes * num_dfa_states
-            || self.trans_by_state_class.len() != self.num_classes * num_dfa_states
-            || self.self_loop_bytes.len() != num_dfa_states
-            || self.source_transitions.len() != dfa.transitions.len()
-        {
-            return false;
-        }
-        Arc::ptr_eq(&self.source_transitions, &dfa.transitions)
-            || self.source_transitions.as_ref() == dfa.transitions.as_ref()
+        self.self_loop_bytes.len() == num_dfa_states
+            && self.source_transitions.len() == dfa.transitions.len()
+            && (Arc::ptr_eq(&self.source_transitions, &dfa.transitions)
+                || self.source_transitions.as_ref() == dfa.transitions.as_ref())
     }
 }
 
@@ -573,7 +565,7 @@ fn build_dfa_with_group_filter(
             let btc = byte_to_class_override.copied().unwrap_or(base.byte_to_class);
             (
                 btc,
-                Arc::clone(&base.trans_by_class),
+                base.transitions_by_class_arc(),
                 Arc::clone(&base.self_loop_bytes),
                 base.none_completion_hash,
             )
