@@ -677,9 +677,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         let mut minimized_artifact = MappedArtifact::new(minimized_dwa, final_id_map);
         let final_compact_started_at = Instant::now();
         if profiling {
-            minimized_artifact.compact_dimensions_fast_with_stats();
+            minimized_artifact.compact_dimensions_merge_only_fast_with_stats();
         } else {
-            minimized_artifact.compact_dimensions_fast();
+            minimized_artifact.compact_dimensions_merge_only_fast();
         }
         ti_post_dwa_compact_ms += final_compact_started_at.elapsed().as_secs_f64() * 1000.0;
         let stats = minimized_artifact.artifact().stats();

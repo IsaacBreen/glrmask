@@ -1573,6 +1573,21 @@ impl TransportScannerStateMap {
         }
     }
 
+    #[inline]
+    pub(crate) fn direct_quotient_default_key(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::Quotient {
+                class_for_original,
+                representative_for_class,
+                ..
+            } => Some((
+                class_for_original.as_ptr() as usize,
+                representative_for_class.as_ptr() as usize,
+            )),
+            Self::Explicit(_) | Self::Composed { .. } => None,
+        }
+    }
+
     pub(crate) fn make_explicit_mut(&mut self) -> &mut [TokenizerState] {
         if !matches!(self, Self::Explicit(_)) {
             *self = Self::Explicit(self.materialized());
