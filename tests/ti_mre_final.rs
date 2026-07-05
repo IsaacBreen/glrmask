@@ -14,7 +14,7 @@ use glrmask::{Constraint, Vocab};
 fn shared_suffix_terminals_are_not_interchangeable_under_prefix_byte_partition() {
     unsafe {
         std::env::set_var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
-        std::env::set_var("GLRMASK_ASSERT_L2P_TERMINAL_INTERCHANGEABILITY_EQUAL", "1");
+        std::env::set_var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE", "1");
         std::env::set_var("GLRMASK_FORCE_ALL_L2P", "1");
         std::env::set_var("GLRMASK_SPLIT_L2P_VOCAB", "0");
     }

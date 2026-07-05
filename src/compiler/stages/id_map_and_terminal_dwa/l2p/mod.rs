@@ -83,20 +83,28 @@ impl Drop for SuppressTerminalInterchangeability {
     }
 }
 
-/// Enable the deliberately slow strict terminal-interchangeability reference
-/// construction. It preserves raw lexer-state coordinates, uses a
-/// transport-aware trie walk, and checks the completed local artifact against a
-/// baseline build before returning it.
-fn l2p_terminal_interchangeability_enabled() -> bool {
-    if TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH.with(|depth| depth.get() != 0) {
-        return false;
-    }
-    std::env::var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY")
+fn l2p_env_enabled(name: &str) -> bool {
+    std::env::var(name)
         .map(|value| {
             let value = value.trim();
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         })
         .unwrap_or(false)
+}
+
+/// Enable production terminal interchangeability. This changes only the
+/// representative-terminal construction and post-DWA expansion; strict
+/// reference validation remains separately opt-in.
+fn l2p_terminal_interchangeability_enabled() -> bool {
+    TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
+        && l2p_env_enabled("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY")
+}
+
+/// Rebuild the TI-off local artifact and symbolically compare it with TI-on.
+/// This is deliberately slow and is intended for tests and explicit validation,
+/// not ordinary TI compilation.
+fn l2p_terminal_interchangeability_strict_reference_enabled() -> bool {
+    l2p_env_enabled("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE")
 }
 
 #[derive(Clone, Copy)]
@@ -245,6 +253,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let reference_terminal_expansion = terminal_partition
         .as_ref()
         .is_some_and(|partition| partition_has_merges(partition));
+    // A successful merge activates production TI. The recursive TI-off rebuild
+    // and symbolic comparison are a separate, explicit validation mode.
+    let strict_reference = reference_terminal_expansion
+        && l2p_terminal_interchangeability_strict_reference_enabled();
     let analysis_active_terminals = terminal_partition
         .as_ref()
         .map(|partition| active_terminals_for_partition(partition, active_terminals.len()))
@@ -280,9 +292,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     {
         let class_count = terminal_partition.as_ref().map_or(0, |partition| partition.len());
         eprintln!(
-            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} rounds={} classes={} additional_merged_members={} discovery_ms={:.3} coalesced_disallowed_follows_ms={:.3} early_exit=after_ti_discovery",
+            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} strict_reference={} rounds={} classes={} additional_merged_members={} discovery_ms={:.3} coalesced_disallowed_follows_ms={:.3} early_exit=after_ti_discovery",
             partition_label,
             reference_terminal_expansion,
+            strict_reference,
             ti_round_count,
             class_count,
             ti_additional_merged_members,
@@ -710,9 +723,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             ti_post_dwa_total_ms,
         );
         eprintln!(
-            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} rounds={} classes={} additional_merged_members={} discovery_ms={:.3} transport_modes_ms={:.3} coalesced_disallowed_follows_ms={:.3} canonicalize_transport_modes_ms={:.3} transport_coordinate_quotient_ms={:.3}",
+            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} strict_reference={} rounds={} classes={} additional_merged_members={} discovery_ms={:.3} transport_modes_ms={:.3} coalesced_disallowed_follows_ms={:.3} canonicalize_transport_modes_ms={:.3} transport_coordinate_quotient_ms={:.3}",
             partition_label,
             reference_terminal_expansion,
+            strict_reference,
             ti_round_count,
             terminal_partition.as_ref().map_or(0, |partition| partition.len()),
             ti_additional_merged_members,
@@ -824,12 +838,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     };
 
 
-    if reference_terminal_expansion {
-        // Rebuild the same local L2P artifact with the feature suppressed, then
-        // compare the completed weighted terminal languages after expanding both
-        // id maps into original tokenizer-state and token coordinates. This is
-        // intentionally expensive: it is the correctness gate for the reference
-        // construction.
+    if strict_reference {
+        // Rebuild the same local L2P artifact with TI suppressed, then compare
+        // completed weighted terminal languages in original tokenizer-state and
+        // token coordinates. This is an explicit correctness oracle, not part
+        // of normal TI production compilation.
+        let strict_baseline_started_at = Instant::now();
         let baseline = {
             let _suppress = SuppressTerminalInterchangeability::new();
             build_l2p_id_map_and_terminal_dwa(
@@ -851,6 +865,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             )
             .expect("terminal interchangeability baseline L2P build unexpectedly returned None")
         };
+        let strict_baseline_build_ms = strict_baseline_started_at.elapsed().as_secs_f64() * 1000.0;
+        let strict_compare_started_at = Instant::now();
         terminal_dwa_equivalence::compare(&baseline, &output).unwrap_or_else(|mismatch| {
             panic!(
                 "terminal interchangeability candidate differed from baseline: partition={} {}",
@@ -858,6 +874,15 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 mismatch,
             )
         });
+        let strict_compare_ms = strict_compare_started_at.elapsed().as_secs_f64() * 1000.0;
+        if ti_profile_timing {
+            eprintln!(
+                "[glrmask/profile][terminal_interchangeability_strict_reference] partition={} baseline_build_ms={:.3} terminal_dwa_equivalence_ms={:.3} differs=false",
+                partition_label,
+                strict_baseline_build_ms,
+                strict_compare_ms,
+            );
+        }
     }
 
     Some(output)
