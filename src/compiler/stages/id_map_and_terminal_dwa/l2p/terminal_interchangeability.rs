@@ -21,6 +21,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::nwa_builder::{TerminalNwaTransportMode, TransportScannerStateMap};
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
+use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 
@@ -2449,6 +2450,123 @@ pub(crate) fn binary_transport_modes(
     modes
 }
 
+/// Replace every transport-map target with the representative raw scanner
+/// state of its ordinary exact terminal-DWA class. The target-only member
+/// reconstruction is unchanged: this only canonicalizes scanner coordinates.
+///
+/// The ordinary mode is included as well. After canonicalization it still
+/// contributes `Q(identity(source))` to the coordinate signature because
+/// applying `Q` to its representative target returns the same ordinary class.
+pub(crate) fn canonicalize_transport_mode_states(
+    modes: &mut [TerminalNwaTransportMode],
+    ordinary_state_map: &ManyToOneIdMap,
+) {
+    let state_count = ordinary_state_map.original_to_internal.len();
+    for mode in modes {
+        assert_eq!(
+            mode.scanner_state_for_original.len(),
+            state_count,
+            "transport mode state domain must match ordinary state quotient",
+        );
+        for scanner_state in mode.scanner_state_for_original.make_explicit_mut() {
+            let raw_target = *scanner_state as usize;
+            let Some(&ordinary_class) = ordinary_state_map.original_to_internal.get(raw_target)
+            else {
+                continue;
+            };
+            if ordinary_class == u32::MAX {
+                continue;
+            }
+            *scanner_state = ordinary_state_map
+                .representative_original_id_for_internal(ordinary_class)
+                .expect("ordinary state quotient missing representative");
+        }
+    }
+}
+
+/// Refine an ordinary terminal-DWA quotient by the scanner destinations of
+/// every temporary transport mode. A source raw state `s` is assigned a compact
+/// transport TSID from the exact signature
+/// `(Q(m_0(s)), Q(m_1(s)), …)`, where `m_0` is the ordinary mode and each later
+/// mode is one target-only member reconstruction coordinate.
+///
+/// The full states-by-modes signature matrix is deliberately never
+/// materialized. Starting with one class, each mode refines the current class
+/// partition by its next `Q(m_i(s))` component. This is an exact incremental
+/// encoding of the complete vector and uses O(raw states) scratch space.
+pub(crate) fn transport_coordinate_quotient(
+    ordinary_state_map: &ManyToOneIdMap,
+    modes: &[TerminalNwaTransportMode],
+) -> ManyToOneIdMap {
+    assert!(
+        !modes.is_empty(),
+        "transport coordinate quotient needs the ordinary mode",
+    );
+    let state_count = ordinary_state_map.original_to_internal.len();
+    let mut class_for_state = vec![0u32; state_count];
+    let mut next_class_for_state = vec![0u32; state_count];
+    let mut class_for_pair = FxHashMap::<(u32, u64), u32>::default();
+
+    for mode in modes {
+        assert_eq!(
+            mode.scanner_state_for_original.len(),
+            state_count,
+            "transport mode state domain must match ordinary state quotient",
+        );
+        class_for_pair.clear();
+        let mut next_class_count = 0u32;
+
+        for source_state in 0..state_count {
+            let target_state = mode
+                .scanner_state_for_original
+                .scanner_state(source_state as u32) as usize;
+            let mapped = ordinary_state_map
+                .original_to_internal
+                .get(target_state)
+                .copied()
+                .unwrap_or(u32::MAX);
+            // A target outside the ordinary proof domain must retain its raw
+            // identity; merging all unmapped targets would be unsound.
+            let target_key = if mapped == u32::MAX {
+                (1u64 << 32) | target_state as u64
+            } else {
+                mapped as u64
+            };
+            let prior_class = class_for_state[source_state];
+            let next_class = match class_for_pair.entry((prior_class, target_key)) {
+                Entry::Occupied(entry) => *entry.get(),
+                Entry::Vacant(entry) => {
+                    let class = next_class_count;
+                    next_class_count += 1;
+                    entry.insert(class);
+                    class
+                }
+            };
+            next_class_for_state[source_state] = next_class;
+        }
+        std::mem::swap(&mut class_for_state, &mut next_class_for_state);
+    }
+
+    let class_count = class_for_state
+        .iter()
+        .copied()
+        .max()
+        .map_or(0usize, |class| class as usize + 1);
+    let mut representatives = vec![u32::MAX; class_count];
+    for (state, &class) in class_for_state.iter().enumerate() {
+        let representative = &mut representatives[class as usize];
+        if *representative == u32::MAX {
+            *representative = state as u32;
+        }
+    }
+
+    ManyToOneIdMap::from_original_to_internal_with_representatives(
+        class_for_state,
+        class_count as u32,
+        representatives,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -2552,6 +2670,63 @@ mod tests {
             ]),
         );
         assert_partition_invariants(&final_classes, &active);
+    }
+
+    #[test]
+    fn transport_coordinate_quotient_matches_target_only_mode_signature() {
+        let ordinary = ManyToOneIdMap::from_original_to_internal_with_representatives(
+            vec![0, 0, 1, 1, 2, 2, 3],
+            4,
+            vec![0, 2, 4, 6],
+        );
+        let mut modes = vec![
+            TerminalNwaTransportMode::ordinary(7),
+            TerminalNwaTransportMode::member(
+                TransportScannerStateMap::Explicit(vec![1, 0, 3, 2, 5, 4, 6].into()),
+                0,
+                1,
+            ),
+            TerminalNwaTransportMode::member(
+                TransportScannerStateMap::Explicit(vec![2, 3, 0, 1, 6, 6, 4].into()),
+                2,
+                3,
+            ),
+        ];
+
+        let expected_signatures = (0..ordinary.original_to_internal.len())
+            .map(|source| {
+                modes
+                    .iter()
+                    .map(|mode| {
+                        ordinary.original_to_internal
+                            [mode.scanner_state_for_original.scanner_state(source as u32) as usize]
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let quotient = transport_coordinate_quotient(&ordinary, &modes);
+        for left in 0..expected_signatures.len() {
+            for right in 0..expected_signatures.len() {
+                assert_eq!(
+                    quotient.original_to_internal[left] == quotient.original_to_internal[right],
+                    expected_signatures[left] == expected_signatures[right],
+                    "signature quotient disagreed for states {left} and {right}",
+                );
+            }
+        }
+
+        canonicalize_transport_mode_states(&mut modes, &ordinary);
+        let canonical_quotient = transport_coordinate_quotient(&ordinary, &modes);
+        for left in 0..expected_signatures.len() {
+            for right in 0..expected_signatures.len() {
+                assert_eq!(
+                    canonical_quotient.original_to_internal[left]
+                        == canonical_quotient.original_to_internal[right],
+                    expected_signatures[left] == expected_signatures[right],
+                    "canonical target-only transport changed the quotient for states {left} and {right}",
+                );
+            }
+        }
     }
 
     #[test]

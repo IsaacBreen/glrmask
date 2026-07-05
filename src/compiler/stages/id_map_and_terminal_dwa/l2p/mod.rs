@@ -43,7 +43,8 @@ use nwa_builder::{
 };
 use terminal_interchangeability::{
     active_terminals_for_partition, binary_transport_modes, coalesced_disallowed_follows,
-    discover_one_round, fold_one_round_partition, partition_has_merges, singleton_partition,
+    canonicalize_transport_mode_states, discover_one_round, fold_one_round_partition,
+    partition_has_merges, singleton_partition, transport_coordinate_quotient,
     visible_output_raw_labels,
 };
 use postprocess::{
@@ -325,30 +326,64 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             equivalence_initial_state_map,
         );
 
-    // Binary member witnesses are defined on raw lexer states. The
-    // representative-only equivalence map is sound for the ordinary scan, but
-    // it does not prove that every raw state in a class has the same witness
-    // destination. Keep strict transport construction in raw singleton state
-    // coordinates; this deliberately replaces the removed recursive quotient.
+    // Replay derives temporary round-local witnesses under the historical
+    // pre-merge active masks. Canonicalize their targets through the ordinary
+    // representative-only quotient, then refine that quotient only where a
+    // witness observes a different quotient destination. This retains the
+    // compact coarsest transport-safe TSID coordinate instead of restoring a
+    // singleton TSID for every raw lexer state.
+    let mut ti_transport_modes_ms = 0.0;
+    let mut ti_canonicalize_transport_modes_ms = 0.0;
+    let mut ti_transport_coordinate_quotient_ms = 0.0;
+    let mut transport_modes = None;
     if reference_terminal_expansion {
-        let raw_states = (0..tokenizer.num_states()).collect::<Vec<_>>();
-        simplified_id_map.tokenizer_states =
-            ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-                raw_states.clone(),
-                raw_states,
-            );
+        let partition = terminal_partition
+            .as_ref()
+            .expect("active TI transport must retain its partition");
+        let transport_modes_started_at = ti_profile_timing.then(Instant::now);
+        let mut modes = binary_transport_modes(
+            tokenizer_for_build,
+            active_terminals,
+            partition,
+            &relevant_bytes,
+            ignore_terminal,
+        );
+        ti_transport_modes_ms = transport_modes_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+
+        let transport_coordinate_map = {
+            let ordinary_state_map = &simplified_id_map.tokenizer_states;
+            let canonicalize_started_at = ti_profile_timing.then(Instant::now);
+            canonicalize_transport_mode_states(&mut modes, ordinary_state_map);
+            ti_canonicalize_transport_modes_ms = canonicalize_started_at
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+
+            let quotient_started_at = ti_profile_timing.then(Instant::now);
+            let quotient = transport_coordinate_quotient(ordinary_state_map, &modes);
+            ti_transport_coordinate_quotient_ms = quotient_started_at
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
+            quotient
+        };
+        simplified_id_map.tokenizer_states = transport_coordinate_map;
+        transport_modes = Some(modes);
     }
 
     if ti_profile_timing {
         eprintln!(
-            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} rounds={} classes={} additional_merged_members={} discovery_ms={:.3} coalesced_disallowed_follows_ms={:.3}",
+            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} rounds={} classes={} additional_merged_members={} discovery_ms={:.3} transport_modes_ms={:.3} coalesced_disallowed_follows_ms={:.3} canonicalize_transport_modes_ms={:.3} transport_coordinate_quotient_ms={:.3}",
             partition_label,
             reference_terminal_expansion,
             ti_round_count,
             terminal_partition.as_ref().map_or(0, |partition| partition.len()),
             ti_additional_merged_members,
             ti_discovery_ms,
+            ti_transport_modes_ms,
             ti_coalesced_disallowed_follows_ms,
+            ti_canonicalize_transport_modes_ms,
+            ti_transport_coordinate_quotient_ms,
         );
     }
 
@@ -442,15 +477,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 let partition = terminal_partition
                     .as_ref()
                     .expect("active TI transport must retain its partition");
-                // Replay derives temporary round-local witnesses. The retained
-                // TI result remains only the flat terminal partition.
-                let modes = binary_transport_modes(
-                    tokenizer_for_build,
-                    active_terminals,
-                    partition,
-                    &relevant_bytes,
-                    ignore_terminal,
-                );
+                let modes = transport_modes
+                    .as_ref()
+                    .expect("active TI transport modes must be built before NWA construction");
                 let visible_output_raw_labels = visible_output_raw_labels(
                     partition,
                     grammar.num_terminals as usize,
