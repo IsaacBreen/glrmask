@@ -280,26 +280,82 @@ impl SharedVocabDfaBase {
 /// Cache type for lazy SharedVocabDfaBase initialization across partitions.
 pub type SharedVocabDfaCache = std::sync::OnceLock<SharedVocabDfaBase>;
 
-/// Stage-local cache for the immutable, full vocabulary-equivalence DFA.
-///
-/// It is valid only for raw-tokenizer views with the same ignored terminal
-/// context. The key is intentionally local to a terminal-DWA stage,
-/// where the source DFA and base disallowed-follows relation are fixed.
+/// Canonical active-terminal component of a materialized analysis-DFA cache
+/// key. `None` means every terminal in the supplied terminal universe is
+/// active; otherwise the supplied mask is packed exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ActiveGroupMaskKey {
+    len: usize,
+    packed_bits: Box<[u64]>,
+}
+
+impl ActiveGroupMaskKey {
+    fn new(active_groups: Option<&[bool]>, all_groups_len: usize) -> Self {
+        let len = active_groups.map_or(all_groups_len, <[bool]>::len);
+        let mut packed_bits = vec![0u64; len.div_ceil(64)];
+        match active_groups {
+            Some(groups) => {
+                for (gid, &active) in groups.iter().enumerate() {
+                    if active {
+                        packed_bits[gid / 64] |= 1u64 << (gid % 64);
+                    }
+                }
+            }
+            None => {
+                packed_bits.fill(u64::MAX);
+                if len % 64 != 0 {
+                    if let Some(last) = packed_bits.last_mut() {
+                        *last &= (1u64 << (len % 64)) - 1;
+                    }
+                }
+            }
+        }
+        Self { len, packed_bits: packed_bits.into_boxed_slice() }
+    }
+}
+
+/// Cache key for an immutable analysis DFA. The stage-local cache fixes the
+/// source tokenizer and raw transition relation; the remaining inputs that
+/// alter materialized fields are the active terminal view and the effective,
+/// normalized disallowed-follows relation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AnalysisDfaCacheKey {
+    active_groups: ActiveGroupMaskKey,
+    normalized_disallowed_follows: Box<[BitSet]>,
+}
+
+impl AnalysisDfaCacheKey {
+    fn new(
+        active_groups: Option<&[bool]>,
+        terminal_count: usize,
+        disallowed_follows: &BTreeMap<u32, BitSet>,
+    ) -> Self {
+        Self {
+            active_groups: ActiveGroupMaskKey::new(active_groups, terminal_count),
+            normalized_disallowed_follows:
+                normalize_disallowed_follows(terminal_count, disallowed_follows).into_boxed_slice(),
+        }
+    }
+}
+
+/// Stage-local cache for immutable vocabulary-equivalence DFAs. The source
+/// tokenizer and raw transition relation are fixed by the cache scope. Each
+/// entry is keyed by the complete filtered analysis view.
 #[derive(Default)]
 pub struct SharedVocabAnalysisDfaCache {
-    entries: Mutex<HashMap<Option<u32>, Arc<OnceLock<Arc<Dfa>>>>>,
+    entries: Mutex<HashMap<AnalysisDfaCacheKey, Arc<OnceLock<Arc<Dfa>>>>>,
 }
 
 impl SharedVocabAnalysisDfaCache {
     fn get_or_init(
         &self,
-        ignored_terminal: Option<u32>,
+        key: AnalysisDfaCacheKey,
         build: impl FnOnce() -> Dfa,
     ) -> Arc<Dfa> {
         let entry = {
             let mut entries = self.entries.lock().expect("vocab analysis DFA cache poisoned");
             entries
-                .entry(ignored_terminal)
+                .entry(key)
                 .or_insert_with(|| Arc::new(OnceLock::new()))
                 .clone()
         };
@@ -2459,7 +2515,6 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     active_groups: Option<&[bool]>,
     shared_cache: Option<&SharedVocabDfaCache>,
     shared_analysis_dfa_cache: Option<&SharedVocabAnalysisDfaCache>,
-    ignored_terminal: Option<u32>,
 ) -> VocabEquivalenceResult {
     let profiling = compile_profile_enabled();
     let elapsed_ms = |started_at: Option<Instant>| {
@@ -2469,7 +2524,26 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
     let total_started_at = profiling.then(Instant::now);
     let build_dfa_started_at = profiling.then(Instant::now);
     let dfa = if let Some(cache) = shared_analysis_dfa_cache {
-        cache.get_or_init(ignored_terminal, || {
+        let terminal_count = active_groups.map_or_else(
+            || {
+                tokenizer
+                    .dfa()
+                    .states
+                    .iter()
+                    .flat_map(|state| {
+                        state
+                            .finalizers
+                            .iter()
+                            .copied()
+                            .chain(state.possible_future_group_ids.iter().copied())
+                    })
+                    .max()
+                    .map_or(0, |gid| gid + 1)
+            },
+            <[bool]>::len,
+        );
+        let key = AnalysisDfaCacheKey::new(active_groups, terminal_count, disallowed_follows);
+        cache.get_or_init(key, || {
             build_dfa_with_group_filter(
                 tokenizer,
                 disallowed_follows,
@@ -2875,7 +2949,6 @@ mod shared_base_tests {
             None,
             None,
             None,
-            None,
         );
         let cache = SharedVocabAnalysisDfaCache::default();
         let cached_first = find_vocab_equivalence_classes_with_group_filter(
@@ -2887,7 +2960,6 @@ mod shared_base_tests {
             None,
             None,
             Some(&cache),
-            None,
         );
         let cached_hit = find_vocab_equivalence_classes_with_group_filter(
             &view,
@@ -2898,12 +2970,77 @@ mod shared_base_tests {
             None,
             None,
             Some(&cache),
-            None,
         );
 
         assert_eq!(cached_first, uncached);
         assert_eq!(cached_hit, uncached);
+
+        // Explicit empty follows canonicalize to the same complete relation as
+        // an absent entry, so this must hit the entry above.
+        let mut explicit_empty = BTreeMap::new();
+        explicit_empty.insert(0, BitSet::new(2));
+        let cached_explicit_empty = find_vocab_equivalence_classes_with_group_filter(
+            &view,
+            &tokens,
+            &initial_states,
+            &explicit_empty,
+            None,
+            None,
+            None,
+            Some(&cache),
+        );
+        assert_eq!(cached_explicit_empty, uncached);
         assert_eq!(cache.entries.lock().unwrap().len(), 1);
+
+        let only_group_zero = [true, false];
+        let filtered_uncached = find_vocab_equivalence_classes_with_group_filter(
+            &view,
+            &tokens,
+            &initial_states,
+            &disallowed,
+            None,
+            Some(&only_group_zero),
+            None,
+            None,
+        );
+        let filtered_cached = find_vocab_equivalence_classes_with_group_filter(
+            &view,
+            &tokens,
+            &initial_states,
+            &disallowed,
+            None,
+            Some(&only_group_zero),
+            None,
+            Some(&cache),
+        );
+        assert_eq!(filtered_cached, filtered_uncached);
+
+        let mut forbidden_follow = BitSet::new(2);
+        forbidden_follow.set(1);
+        let mut different_follows = BTreeMap::new();
+        different_follows.insert(0, forbidden_follow);
+        let follows_uncached = find_vocab_equivalence_classes_with_group_filter(
+            &view,
+            &tokens,
+            &initial_states,
+            &different_follows,
+            None,
+            None,
+            None,
+            None,
+        );
+        let follows_cached = find_vocab_equivalence_classes_with_group_filter(
+            &view,
+            &tokens,
+            &initial_states,
+            &different_follows,
+            None,
+            None,
+            None,
+            Some(&cache),
+        );
+        assert_eq!(follows_cached, follows_uncached);
+        assert_eq!(cache.entries.lock().unwrap().len(), 3);
     }
 
     #[test]

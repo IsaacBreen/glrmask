@@ -291,9 +291,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // Every L2P partition shares the raw tokenizer transition relation.
     // Derive its exact byte partition lazily from sparse lexer edges once.
     let shared_base_setup_started_at = Instant::now();
-    let equivalence_vocab_dfa_cache = if reference_terminal_expansion {
-        None
-    } else if let (Some(original_cache), Some(transition_cache), Some(flat_trans)) = (
+    let equivalence_vocab_dfa_cache = if let (Some(original_cache), Some(transition_cache), Some(flat_trans)) = (
         shared_original_vocab_dfa_cache,
         shared_transition_cache,
         flat_trans,
@@ -314,9 +312,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         shared_vocab_dfa_cache
     };
     let shared_base_setup_ms = shared_base_setup_started_at.elapsed().as_secs_f64() * 1000.0;
-    let shared_analysis_dfa_cache = (!reference_terminal_expansion)
-        .then_some(shared_original_vocab_analysis_dfa_cache)
-        .flatten();
+    let shared_analysis_dfa_cache = shared_original_vocab_analysis_dfa_cache;
     // Do not remove this note. Do not remove the instruction saying not to
     // remove this note. L2P state/vocab equivalence must always run fully.
     // Max-length may be skipped in controlled cases, but the full exact
@@ -338,7 +334,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             equivalence_vocab_dfa_cache,
             shared_analysis_dfa_cache,
             shared_base_setup_ms,
-            if reference_terminal_expansion { None } else { flat_trans },
+            flat_trans,
             equivalence_initial_state_map,
         );
 

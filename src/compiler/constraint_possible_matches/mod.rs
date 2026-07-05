@@ -774,7 +774,6 @@ fn compute_pm_vocab_equivalence_map_fast(
         None,
         None,
         None,
-        None,
     );
 
     let mut original_to_internal = vec![u32::MAX; ordered_vocab.original_slot_count];
