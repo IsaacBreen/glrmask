@@ -748,12 +748,7 @@ fn analyze_equivalences_impl(
         Some(&byte_to_class),
         if uses_analysis_quotient { None } else { active_groups },
         if uses_analysis_quotient { None } else { shared_vocab_dfa_cache },
-        if uses_analysis_quotient {
-            None
-        } else {
-            shared_analysis_dfa_cache.filter(|_| active_groups.is_none())
-        },
-        ignore_terminal,
+        if uses_analysis_quotient { None } else { shared_analysis_dfa_cache },
     );
     let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -889,7 +884,6 @@ mod prepass_selection_tests {
             None,
             None,
             None,
-            None,
         );
         let old_token_reps = representative_tokens_for_vocab_classes(&old_vocab, &tokens);
         let old_state_reps =
@@ -919,7 +913,6 @@ mod prepass_selection_tests {
             &final_state_reps,
             &disallowed,
             Some(&byte_to_class),
-            None,
             None,
             None,
             None,
