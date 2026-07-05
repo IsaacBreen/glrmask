@@ -41,12 +41,13 @@ use super::grammar_helpers::compute_always_allowed_follows;
 use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhaseProfile};
 use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
 use terminal_interchangeability::{
-    active_terminals_for_partition, binary_transport_modes, coalesced_disallowed_follows,
-    canonicalize_transport_mode_states, discover_one_round, fold_one_round_partition,
+    active_terminals_for_partition, binary_transport_modes_from_witnesses,
+    canonicalize_transport_mode_states, coalesced_disallowed_follows,
+    discover_one_round_with_transport_witnesses_in_context, fold_one_round_partition,
     expand_representative_dwa_after_minimization, partition_has_merges,
     restrict_weights_to_forward_domains, restore_raw_follow_constraints_after_expansion,
-    singleton_partition,
-    transport_coordinate_quotient, visible_output_raw_labels,
+    singleton_partition, transport_coordinate_quotient, visible_output_raw_labels,
+    TiDiscoveryContext,
 };
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
@@ -195,19 +196,32 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // Only the final flat original-member partition survives this loop.
     let ti_profile_timing = l2p_timing_profile_enabled();
     let ti_discovery_started_at = ti_profile_timing.then(Instant::now);
-    let (terminal_partition, ti_round_count, ti_additional_merged_members) =
+    let (
+        terminal_partition,
+        ti_transport_witness_rounds,
+        ti_round_count,
+        ti_additional_merged_members,
+    ) =
         if l2p_terminal_interchangeability_enabled() {
             let mut active = active_terminals.to_vec();
             let mut classes = singleton_partition(&active);
+            let discovery_context = TiDiscoveryContext::new(tokenizer, &relevant_bytes);
+            let mut transport_witness_rounds = Vec::new();
             let mut round_count = 0usize;
             let mut first_round_class_count = None;
             loop {
-                let round = discover_one_round(tokenizer, &active, &relevant_bytes, ignore_terminal);
-                let next_active = active_terminals_for_partition(&round, active.len());
-                let next_classes = fold_one_round_partition(&classes, &round);
+                let round = discover_one_round_with_transport_witnesses_in_context(
+                    tokenizer,
+                    &active,
+                    &discovery_context,
+                    ignore_terminal,
+                );
+                let next_active = active_terminals_for_partition(&round.partition, active.len());
+                let next_classes = fold_one_round_partition(&classes, &round.partition);
                 round_count += 1;
                 first_round_class_count.get_or_insert(next_classes.len());
                 classes = next_classes;
+                transport_witness_rounds.push(round);
                 if next_active == active {
                     break;
                 }
@@ -216,9 +230,14 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let additional_merged_members = first_round_class_count
                 .unwrap_or(classes.len())
                 .saturating_sub(classes.len());
-            (Some(classes), round_count, additional_merged_members)
+            (
+                Some(classes),
+                Some(transport_witness_rounds),
+                round_count,
+                additional_merged_members,
+            )
         } else {
-            (None, 0, 0)
+            (None, None, 0, 0)
         };
     let ti_discovery_ms = ti_discovery_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
@@ -554,12 +573,13 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             .as_ref()
             .expect("active TI transport must retain its partition");
         let transport_modes_started_at = ti_profile_timing.then(Instant::now);
-        let mut modes = binary_transport_modes(
+        let mut modes = binary_transport_modes_from_witnesses(
             tokenizer_for_build,
             active_terminals,
             partition,
-            &relevant_bytes,
-            ignore_terminal,
+            ti_transport_witness_rounds
+                .as_ref()
+                .expect("active TI transport must retain its transient exact round witnesses"),
         );
         ti_transport_modes_ms = transport_modes_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)

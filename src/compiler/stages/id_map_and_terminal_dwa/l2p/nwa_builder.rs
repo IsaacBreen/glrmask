@@ -1479,6 +1479,100 @@ impl TransportScannerStateMap {
         }
     }
 
+    /// A composed TI transform is constant on the source classes of its
+    /// innermost map: that map first selects one representative raw coordinate,
+    /// and every outer transform is then deterministic.  Transport-coordinate
+    /// refinement uses this fact to evaluate a whole mode group once per source
+    /// quotient class instead of once per raw scanner state.
+    #[inline]
+    fn innermost_source_map(&self) -> &Self {
+        match self {
+            Self::Composed { inner, .. } => inner.innermost_source_map(),
+            Self::Explicit(_) | Self::Quotient { .. } => self,
+        }
+    }
+
+    /// A stable identity for the innermost source partition.  Equal keys mean
+    /// the maps share the same raw-state-to-source-class function.  Distinct
+    /// but extensionally equal partitions are merely kept in separate groups,
+    /// which is conservative and remains exact.
+    #[inline]
+    pub(crate) fn innermost_source_domain_key(&self) -> usize {
+        match self.innermost_source_map() {
+            Self::Explicit(_) => 0,
+            Self::Quotient {
+                class_for_original,
+                ..
+            } => class_for_original.as_ptr() as usize,
+            Self::Composed { .. } => unreachable!("innermost transport map cannot be composed"),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn innermost_source_class_count(&self) -> usize {
+        match self.innermost_source_map() {
+            Self::Explicit(states) => states.len(),
+            Self::Quotient {
+                representative_for_class,
+                ..
+            } => representative_for_class.len(),
+            Self::Composed { .. } => unreachable!("innermost transport map cannot be composed"),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn innermost_source_class(&self, original_state: TokenizerState) -> usize {
+        match self.innermost_source_map() {
+            Self::Explicit(_) => original_state as usize,
+            Self::Quotient {
+                class_for_original,
+                ..
+            } => class_for_original[original_state as usize] as usize,
+            Self::Composed { .. } => unreachable!("innermost transport map cannot be composed"),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn innermost_source_representative(&self, class: usize) -> TokenizerState {
+        match self.innermost_source_map() {
+            Self::Explicit(_) => class as TokenizerState,
+            Self::Quotient {
+                representative_for_class,
+                ..
+            } => representative_for_class[class],
+            Self::Composed { .. } => unreachable!("innermost transport map cannot be composed"),
+        }
+    }
+
+    /// Append this temporary transport program in application order.  A
+    /// composed transform applies its inner map first, then its outer map.
+    pub(crate) fn append_atomic_transforms<'a>(
+        &'a self,
+        output: &mut Vec<&'a TransportScannerStateMap>,
+    ) {
+        match self {
+            Self::Composed { outer, inner } => {
+                inner.append_atomic_transforms(output);
+                outer.append_atomic_transforms(output);
+            }
+            Self::Explicit(_) | Self::Quotient { .. } => output.push(self),
+        }
+    }
+
+    /// Sparse inverse class permutation of a direct certified TI quotient.
+    /// Each pair maps an input stable class to the representative class used
+    /// by the transport; omitted classes map to themselves.
+    #[inline]
+    pub(crate) fn quotient_deviations(&self) -> Option<&[(u32, u32)]> {
+        match self {
+            Self::Quotient {
+                source_class_for_target_deviations,
+                ..
+            } => Some(source_class_for_target_deviations),
+            Self::Explicit(_) | Self::Composed { .. } => None,
+        }
+    }
+
     pub(crate) fn make_explicit_mut(&mut self) -> &mut [TokenizerState] {
         if !matches!(self, Self::Explicit(_)) {
             *self = Self::Explicit(self.materialized());
