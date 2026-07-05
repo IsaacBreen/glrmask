@@ -185,6 +185,92 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         }
     }
 
+    // Experimental recursive terminal/state quotient. It intentionally does
+    // not alter the exact pairwise-TI build below: the quotient has no
+    // per-member scanner automorphisms yet, so feeding it into transport
+    // expansion would be unsound. This opt-in dump is for inspecting the
+    // coinductive class relation on a real partition.
+    if let (Some(path), Ok(target_partition)) = (
+        std::env::var_os("GLRMASK_DUMP_L2P_RECURSIVE_TI_QUOTIENT"),
+        std::env::var("GLRMASK_DUMP_L2P_RECURSIVE_TI_QUOTIENT_PARTITION"),
+    ) {
+        if target_partition == partition_label {
+            use std::fmt::Write as _;
+            let started_at = Instant::now();
+            let quotient = TerminalInterchangeability::recursive_terminal_state_quotient(
+                tokenizer,
+                active_terminals,
+                &relevant_bytes,
+                ignore_terminal,
+            );
+            let mut class_indices = (0..quotient.classes().len()).collect::<Vec<_>>();
+            class_indices.sort_unstable_by_key(|&class| {
+                std::cmp::Reverse(quotient.classes()[class].len())
+            });
+            let mut dump = String::new();
+            let _ = writeln!(dump, "# Recursive terminal/state quotient");
+            let _ = writeln!(dump);
+            let _ = writeln!(dump, "- partition: `{partition_label}`");
+            let _ = writeln!(
+                dump,
+                "- active terminals: `{}`",
+                active_terminals.iter().filter(|&&active| active).count(),
+            );
+            let _ = writeln!(dump, "- terminal classes: `{}`", quotient.classes().len());
+            let _ = writeln!(
+                dump,
+                "- state classes: `{}`",
+                quotient
+                    .state_class_for()
+                    .iter()
+                    .copied()
+                    .max()
+                    .map_or(0, |class| class as usize + 1),
+            );
+            let _ = writeln!(dump, "- refinement rounds: `{}`", quotient.rounds());
+            let _ = writeln!(dump);
+            for (ordinal, class) in class_indices.into_iter().enumerate() {
+                let members = &quotient.classes()[class];
+                let representative = quotient.representative_for()[members[0] as usize];
+                let _ = writeln!(
+                    dump,
+                    "## Class {:03} · {} terminals · representative `{}` — `{}`",
+                    ordinal + 1,
+                    members.len(),
+                    representative,
+                    grammar.terminal_display_name(representative),
+                );
+                let _ = writeln!(dump);
+                for &terminal in members {
+                    let representative_marker = (terminal == representative)
+                        .then_some(" **representative**")
+                        .unwrap_or("");
+                    let _ = writeln!(
+                        dump,
+                        "- `{terminal}` — `{}`{representative_marker}",
+                        grammar.terminal_display_name(terminal),
+                    );
+                }
+                let _ = writeln!(dump);
+            }
+            std::fs::write(&path, dump).expect("write recursive TI quotient dump");
+            eprintln!(
+                "[glrmask/profile][recursive_terminal_state_quotient] partition={} terminal_classes={} state_classes={} rounds={} elapsed_ms={:.3} path={}",
+                partition_label,
+                quotient.classes().len(),
+                quotient
+                    .state_class_for()
+                    .iter()
+                    .copied()
+                    .max()
+                    .map_or(0, |class| class as usize + 1),
+                quotient.rounds(),
+                started_at.elapsed().as_secs_f64() * 1000.0,
+                std::path::Path::new(&path).display(),
+            );
+        }
+    }
+
     // Discover terminal interchangeability in the current vocabulary byte
     // partition. The L2+ active mask limits which terminals may form a class,
     // but a transported scanner must retain the complete terminal alphabet.

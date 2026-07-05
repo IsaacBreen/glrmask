@@ -511,6 +511,306 @@ fn refine_candidate_groups_by_structure(
     groups
 }
 
+/// Experimental simultaneous quotient of active terminal labels and restricted
+/// tokenizer states. Unlike pairwise TI, this deliberately observes terminal
+/// *classes* in frozen final/future output sets and computes the coarsest
+/// stable partition by monotone refinement from one candidate terminal class.
+///
+/// This is a discovery/proof object only. It does not provide the per-member
+/// scanner automorphisms that the existing transport-expansion path requires.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct RecursiveOutputClassPair {
+    finalizers: Box<[u32]>,
+    future_finalizers: Box<[u32]>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct RecursiveStateComponent {
+    byte: u8,
+    successor_class: u32,
+    output_class_pair: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct RecursiveStateSignature(Vec<RecursiveStateComponent>);
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct RecursiveTerminalSignature {
+    finalizer_state_classes: Box<[u32]>,
+    future_finalizer_state_classes: Box<[u32]>,
+}
+
+/// Result of the coinductive terminal/state quotient. `u32::MAX` in
+/// `terminal_class_for` denotes an inactive terminal, not a class.
+#[derive(Clone, Debug)]
+pub(crate) struct RecursiveTerminalStateQuotient {
+    terminal_class_for: Vec<u32>,
+    representative_for: Vec<TerminalID>,
+    state_class_for: Vec<u32>,
+    classes: Vec<Vec<TerminalID>>,
+    rounds: usize,
+}
+
+impl RecursiveTerminalStateQuotient {
+    pub(crate) fn terminal_class_for(&self) -> &[u32] {
+        &self.terminal_class_for
+    }
+
+    pub(crate) fn representative_for(&self) -> &[TerminalID] {
+        &self.representative_for
+    }
+
+    pub(crate) fn state_class_for(&self) -> &[u32] {
+        &self.state_class_for
+    }
+
+    pub(crate) fn classes(&self) -> &[Vec<TerminalID>] {
+        &self.classes
+    }
+
+    pub(crate) fn rounds(&self) -> usize {
+        self.rounds
+    }
+}
+
+fn recursive_terminal_class_sets_by_state(
+    tokenizer: &Tokenizer,
+    topology: &RestrictedTopology,
+    terminal_class_for: &[u32],
+) -> (Vec<u32>, Vec<RecursiveOutputClassPair>) {
+    let empty = RecursiveOutputClassPair {
+        finalizers: Box::new([]),
+        future_finalizers: Box::new([]),
+    };
+    let mut output_pairs = vec![empty.clone()];
+    let mut output_pair_ids = FxHashMap::<RecursiveOutputClassPair, u32>::default();
+    output_pair_ids.insert(empty, 0);
+    let mut output_for_state = Vec::with_capacity(topology.state_count());
+
+    let terminal_classes = |terminals: Vec<TerminalID>| {
+        let mut classes = terminals
+            .into_iter()
+            .filter_map(|terminal| {
+                terminal_class_for
+                    .get(terminal as usize)
+                    .copied()
+                    .filter(|&class| class != u32::MAX)
+            })
+            .collect::<Vec<_>>();
+        classes.sort_unstable();
+        classes.dedup();
+        classes.into_boxed_slice()
+    };
+
+    for state in 0..topology.real_state_count {
+        let pair = RecursiveOutputClassPair {
+            finalizers: terminal_classes(tokenizer.matched_terminals_iter(state as u32).collect()),
+            future_finalizers: terminal_classes(
+                tokenizer
+                    .possible_future_terminals_iter(state as u32)
+                    .collect(),
+            ),
+        };
+        let next = output_pairs.len() as u32;
+        let id = *output_pair_ids.entry(pair.clone()).or_insert_with(|| {
+            output_pairs.push(pair);
+            next
+        });
+        output_for_state.push(id);
+    }
+    // Synthetic dead has no frozen outputs.
+    output_for_state.push(0);
+    (output_for_state, output_pairs)
+}
+
+fn refine_recursive_state_partition(
+    topology: &RestrictedTopology,
+    previous: &[u32],
+    output_for_state: &[u32],
+) -> Vec<u32> {
+    debug_assert_eq!(previous.len(), topology.state_count());
+    debug_assert_eq!(output_for_state.len(), topology.state_count());
+    let dead = topology.dead_state();
+    let default_successor_class = previous[dead];
+    let default_output = output_for_state[dead];
+    let mut class_for_signature = FxHashMap::<(u32, RecursiveStateSignature), u32>::default();
+    let mut next = Vec::with_capacity(topology.state_count());
+
+    for state in 0..topology.state_count() {
+        let mut components = Vec::with_capacity(topology.edges_from(state).len());
+        for &(byte, destination) in topology.edges_from(state) {
+            let destination = destination as usize;
+            let successor_class = previous[destination];
+            let output_class_pair = output_for_state[destination];
+            if successor_class == default_successor_class && output_class_pair == default_output {
+                continue;
+            }
+            components.push(RecursiveStateComponent {
+                byte,
+                successor_class,
+                output_class_pair,
+            });
+        }
+        let signature = RecursiveStateSignature(components);
+        let key = (previous[state], signature);
+        let class = class_for_signature.len() as u32;
+        next.push(*class_for_signature.entry(key).or_insert(class));
+    }
+    next
+}
+
+fn refine_recursive_terminal_partition(
+    tokenizer: &Tokenizer,
+    topology: &RestrictedTopology,
+    previous: &[u32],
+    state_class_for: &[u32],
+) -> Vec<u32> {
+    let terminal_count = previous.len();
+    let mut finalizer_state_classes = vec![Vec::<u32>::new(); terminal_count];
+    let mut future_finalizer_state_classes = vec![Vec::<u32>::new(); terminal_count];
+    let observed = topology.observed_destinations();
+
+    for state in 0..topology.real_state_count {
+        if !observed[state] {
+            continue;
+        }
+        let state_class = state_class_for[state];
+        for terminal in tokenizer.matched_terminals_iter(state as u32) {
+            let terminal = terminal as usize;
+            if previous.get(terminal).copied().unwrap_or(u32::MAX) != u32::MAX {
+                finalizer_state_classes[terminal].push(state_class);
+            }
+        }
+        for terminal in tokenizer.possible_future_terminals_iter(state as u32) {
+            let terminal = terminal as usize;
+            if previous.get(terminal).copied().unwrap_or(u32::MAX) != u32::MAX {
+                future_finalizer_state_classes[terminal].push(state_class);
+            }
+        }
+    }
+
+    let mut class_for_signature = FxHashMap::<(u32, RecursiveTerminalSignature), u32>::default();
+    let mut next = vec![u32::MAX; terminal_count];
+    for terminal in 0..terminal_count {
+        let old_class = previous[terminal];
+        if old_class == u32::MAX {
+            continue;
+        }
+        finalizer_state_classes[terminal].sort_unstable();
+        finalizer_state_classes[terminal].dedup();
+        future_finalizer_state_classes[terminal].sort_unstable();
+        future_finalizer_state_classes[terminal].dedup();
+        let signature = RecursiveTerminalSignature {
+            finalizer_state_classes: std::mem::take(&mut finalizer_state_classes[terminal])
+                .into_boxed_slice(),
+            future_finalizer_state_classes: std::mem::take(
+                &mut future_finalizer_state_classes[terminal],
+            )
+            .into_boxed_slice(),
+        };
+        let key = (old_class, signature);
+        let class = class_for_signature.len() as u32;
+        next[terminal] = *class_for_signature.entry(key).or_insert(class);
+    }
+    next
+}
+
+fn class_count(classes: &[u32]) -> usize {
+    classes
+        .iter()
+        .copied()
+        .filter(|&class| class != u32::MAX)
+        .max()
+        .map_or(0, |class| class as usize + 1)
+}
+
+fn recursive_terminal_state_quotient(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+    relevant_bytes: &[bool; 256],
+    ignore_terminal: Option<TerminalID>,
+) -> RecursiveTerminalStateQuotient {
+    let terminal_count = tokenizer.num_terminals() as usize;
+    assert_eq!(
+        active_terminals.len(),
+        terminal_count,
+        "active terminal mask must cover tokenizer terminals",
+    );
+    let mut terminal_class_for = vec![u32::MAX; terminal_count];
+    let mut next_fixed_class = 1u32;
+    for (terminal, &active) in active_terminals.iter().enumerate() {
+        if !active {
+            continue;
+        }
+        if Some(terminal as TerminalID) == ignore_terminal {
+            terminal_class_for[terminal] = next_fixed_class;
+            next_fixed_class += 1;
+        } else {
+            // All mergeable terminals begin in one class. Later rounds only
+            // split this class, never greedily merge it back together.
+            terminal_class_for[terminal] = 0;
+        }
+    }
+
+    let topology = RestrictedTopology::new(tokenizer, relevant_bytes);
+    let mut state_class_for = vec![0u32; topology.state_count()];
+    let mut rounds = 0usize;
+    loop {
+        rounds += 1;
+        let (output_for_state, _) = recursive_terminal_class_sets_by_state(
+            tokenizer,
+            &topology,
+            &terminal_class_for,
+        );
+        let next_state_class_for =
+            refine_recursive_state_partition(&topology, &state_class_for, &output_for_state);
+        let next_terminal_class_for = refine_recursive_terminal_partition(
+            tokenizer,
+            &topology,
+            &terminal_class_for,
+            &next_state_class_for,
+        );
+        let state_changed = class_count(&next_state_class_for) != class_count(&state_class_for);
+        let terminal_changed =
+            class_count(&next_terminal_class_for) != class_count(&terminal_class_for);
+        state_class_for = next_state_class_for;
+        terminal_class_for = next_terminal_class_for;
+        if !state_changed && !terminal_changed {
+            break;
+        }
+        assert!(
+            rounds <= topology.state_count() + terminal_count + 1,
+            "recursive terminal/state quotient failed to stabilize",
+        );
+    }
+
+    let terminal_class_count = class_count(&terminal_class_for);
+    let mut classes = vec![Vec::<TerminalID>::new(); terminal_class_count];
+    for (terminal, &class) in terminal_class_for.iter().enumerate() {
+        if class != u32::MAX {
+            classes[class as usize].push(terminal as TerminalID);
+        }
+    }
+    let mut representative_for = (0..terminal_count as TerminalID).collect::<Vec<_>>();
+    for class in &classes {
+        let representative = *class
+            .first()
+            .expect("every terminal quotient class must have a member");
+        for &terminal in class {
+            representative_for[terminal as usize] = representative;
+        }
+    }
+
+    RecursiveTerminalStateQuotient {
+        terminal_class_for,
+        representative_for,
+        state_class_for,
+        classes,
+        rounds,
+    }
+}
+
+
 /// The selected raw tokenizer-state representative for every source state
 /// under one terminal swap. The exact characterization establishes a mapped
 /// target class; all downstream consumers have always selected only that
@@ -1996,6 +2296,23 @@ impl TerminalInterchangeability {
         }
     }
 
+    /// Compute the experimental coinductive terminal/state quotient. This is
+    /// intentionally separate from `build`: it has no pairwise scanner
+    /// transport maps and therefore cannot yet drive terminal-DWA expansion.
+    pub(crate) fn recursive_terminal_state_quotient(
+        tokenizer: &Tokenizer,
+        active_terminals: &[bool],
+        relevant_bytes: &[bool; 256],
+        ignore_terminal: Option<TerminalID>,
+    ) -> RecursiveTerminalStateQuotient {
+        recursive_terminal_state_quotient(
+            tokenizer,
+            active_terminals,
+            relevant_bytes,
+            ignore_terminal,
+        )
+    }
+
     pub(crate) fn build(
         tokenizer: &Tokenizer,
         active_terminals: &[bool],
@@ -2966,6 +3283,106 @@ mod tests {
         let y = CharacterizationHash([10; blake3::OUT_LEN]);
         assert!(same_equality_partition_pair(&[a, a, b], &[a, a, b], &[x, x, y], &[x, x, y]));
         assert!(!same_equality_partition_pair(&[a, a, b], &[a, a, b], &[x, y, y], &[x, y, y]));
+    }
+
+    #[test]
+    fn recursive_quotient_merges_bfcl_key_literals_beyond_pairwise_ti() {
+        use crate::automata::lexer::regex::parse_regex;
+        const JSON_STRING_CHAR_REGEX: &str = r#"(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\xA0-\xBF][\x80-\xBF]|[\xE1-\xEC\xEE-\xEF][\x80-\xBF]{2}|\xED[\x80-\x9F][\x80-\xBF]|\xF0[\x90-\xBF][\x80-\xBF]{2}|[\xF1-\xF3][\x80-\xBF]{3}|\xF4[\x80-\x8F][\x80-\xBF]{2}|\\["/\\bfnrt]|\\u[0-9A-Fa-f]{4})"#;
+        let json_string = Expr::Seq(vec![
+            Expr::U8Seq(b"\"".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(parse_regex(JSON_STRING_CHAR_REGEX, true)),
+                min: 0,
+                max: None,
+            },
+            Expr::U8Seq(b"\"".to_vec()),
+        ]);
+        let tokenizer = tokenizer(vec![
+            json_string,
+            Expr::U8Seq(b"\"update_values\": ".to_vec()),
+            Expr::U8Seq(b"\"table_name\": ".to_vec()),
+            Expr::U8Seq(b"\"update_info\": {".to_vec()),
+        ]);
+        let mut bytes = [false; 256];
+        for byte in [b' ', b'\"', b':', b'_'] {
+            bytes[byte as usize] = true;
+        }
+        let quotient = TerminalInterchangeability::recursive_terminal_state_quotient(
+            &tokenizer,
+            &[true, true, true, true],
+            &bytes,
+            None,
+        );
+        let exact = TerminalInterchangeability::build(
+            &tokenizer,
+            &[true, true, true, true],
+            &bytes,
+            None,
+        );
+        assert_ne!(exact.representative_for[1], exact.representative_for[2]);
+        assert_eq!(quotient.classes(), &[vec![0], vec![1, 2], vec![3]]);
+        assert_eq!(quotient.representative_for(), &[0, 1, 1, 3]);
+        assert_eq!(quotient.rounds(), 3);
+        assert_eq!(quotient.state_class_for().iter().copied().max().unwrap_or(0) + 1, 12);
+    }
+
+    #[test]
+    fn recursive_quotient_keeps_ignore_terminal_out_of_mergeable_class() {
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"same".to_vec()),
+            Expr::U8Seq(b"same".to_vec()),
+        ]);
+        let quotient = TerminalInterchangeability::recursive_terminal_state_quotient(
+            &tokenizer,
+            &[true, true],
+            &[true; 256],
+            Some(1),
+        );
+        assert_eq!(quotient.classes(), &[vec![0], vec![1]]);
+        assert_eq!(quotient.representative_for(), &[0, 1]);
+        assert_eq!(quotient.terminal_class_for(), &[0, 1]);
+    }
+
+    #[test]
+    fn recursive_quotient_result_is_a_joint_fixed_point() {
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"ac".to_vec()),
+            Expr::U8Seq(b"bd".to_vec()),
+        ]);
+        let bytes = [true; 256];
+        let quotient = TerminalInterchangeability::recursive_terminal_state_quotient(
+            &tokenizer,
+            &[true, true, true],
+            &bytes,
+            None,
+        );
+        let topology = RestrictedTopology::new(&tokenizer, &bytes);
+        let (output_for_state, _) = recursive_terminal_class_sets_by_state(
+            &tokenizer,
+            &topology,
+            quotient.terminal_class_for(),
+        );
+        let next_states = refine_recursive_state_partition(
+            &topology,
+            quotient.state_class_for(),
+            &output_for_state,
+        );
+        let next_terminals = refine_recursive_terminal_partition(
+            &tokenizer,
+            &topology,
+            quotient.terminal_class_for(),
+            &next_states,
+        );
+        assert!(same_equality_partition_u32(
+            quotient.state_class_for(),
+            &next_states,
+        ));
+        assert!(same_equality_partition_u32(
+            quotient.terminal_class_for(),
+            &next_terminals,
+        ));
     }
 
     #[test]
