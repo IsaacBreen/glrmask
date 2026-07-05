@@ -1302,7 +1302,13 @@ mod tests {
             &[true; 256],
             None,
         );
-        let modes = binary_transport_modes(&tokenizer, &partition, &[true; 256]);
+        let modes = binary_transport_modes(
+            &tokenizer,
+            &vec![true; tokenizer.num_terminals() as usize],
+            &partition,
+            &[true; 256],
+            None,
+        );
         assert!(modes.len() >= 16, "the test requires many transport modes");
 
         let tree = VocabPrefixTree::build(&[
@@ -1354,7 +1360,13 @@ mod tests {
             Some(Arc::from(expressions.into_boxed_slice())),
         );
         let partition = discover_one_round(&tokenizer, &[true, true], &[true; 256], None);
-        let modes = binary_transport_modes(&tokenizer, &partition, &[true; 256]);
+        let modes = binary_transport_modes(
+            &tokenizer,
+            &[true, true],
+            &partition,
+            &[true; 256],
+            None,
+        );
         let tree = VocabPrefixTree::build(&[
             (0, b"a".to_vec()),
             (1, b"aaa".to_vec()),
@@ -1394,6 +1406,13 @@ pub(crate) enum TransportScannerStateMap {
         representative_for_class: Arc<[TokenizerState]>,
         source_class_for_target_deviations: Box<[(u32, u32)]>,
     },
+    /// Temporary composition of round-local TI scanner coordinates. Keeping
+    /// this lazy lets iterative TI replay share every accepted round map until
+    /// the transport NWA actually queries a scanner state.
+    Composed {
+        outer: Arc<TransportScannerStateMap>,
+        inner: Arc<TransportScannerStateMap>,
+    },
 }
 
 impl TransportScannerStateMap {
@@ -1402,6 +1421,10 @@ impl TransportScannerStateMap {
         match self {
             Self::Explicit(states) => states.len(),
             Self::Quotient { state_count, .. } => *state_count,
+            Self::Composed { outer, inner } => {
+                debug_assert_eq!(outer.len(), inner.len());
+                outer.len()
+            }
         }
     }
 
@@ -1422,13 +1445,34 @@ impl TransportScannerStateMap {
                     .unwrap_or(target_class);
                 representative_for_class[source_class as usize]
             }
+            Self::Composed { outer, inner } => {
+                outer.scanner_state(inner.scanner_state(original_state))
+            }
         }
+    }
+
+    /// Return the scanner coordinate for applying `inner` first and `outer`
+    /// second. TI replay composes every accepted round-local witness this way.
+    pub(crate) fn compose(
+        outer: Arc<TransportScannerStateMap>,
+        inner: Arc<TransportScannerStateMap>,
+    ) -> Arc<TransportScannerStateMap> {
+        assert_eq!(
+            outer.len(),
+            inner.len(),
+            "TI scanner-coordinate composition requires equal state domains",
+        );
+        Arc::new(Self::Composed { outer, inner })
     }
 
     pub(crate) fn materialized(&self) -> Arc<[TokenizerState]> {
         match self {
             Self::Explicit(states) => Arc::clone(states),
             Self::Quotient { state_count, .. } => (0..*state_count)
+                .map(|state| self.scanner_state(state as TokenizerState))
+                .collect::<Vec<_>>()
+                .into(),
+            Self::Composed { .. } => (0..self.len())
                 .map(|state| self.scanner_state(state as TokenizerState))
                 .collect::<Vec<_>>()
                 .into(),
@@ -1441,7 +1485,9 @@ impl TransportScannerStateMap {
         }
         match self {
             Self::Explicit(states) => Arc::make_mut(states),
-            Self::Quotient { .. } => unreachable!("transport map was just materialized"),
+            Self::Quotient { .. } | Self::Composed { .. } => {
+                unreachable!("transport map was just materialized")
+            }
         }
     }
 }

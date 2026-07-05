@@ -1992,7 +1992,7 @@ pub(crate) fn discover_one_round(
             .filter(|&terminal| Some(terminal) != ignore_terminal)
             .collect::<Vec<_>>();
         if candidates.len() < 2 {
-            return identity_partition(active_terminals);
+            return singleton_partition(active_terminals);
         }
 
         let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
@@ -2013,7 +2013,7 @@ pub(crate) fn discover_one_round(
             .map(|group| group.len() * group.len().saturating_sub(1) / 2)
             .sum::<usize>();
         if root_candidate_pairs == 0 {
-            return identity_partition(active_terminals);
+            return singleton_partition(active_terminals);
         }
 
         let (structural_signatures, structural_color_count) = structural_candidate_signatures(
@@ -2056,11 +2056,11 @@ pub(crate) fn discover_one_round(
             );
         }
         if exact_candidate_pairs == 0 {
-            return identity_partition(active_terminals);
+            return singleton_partition(active_terminals);
         }
 
         let mut dfa = InterchangeabilityDfa::from_topology(tokenizer, active_terminals, topology);
-        let mut result = identity_partition(active_terminals);
+        let mut result = singleton_partition(active_terminals);
         let mut output_pair_rejections = 0usize;
         let mut output_invariant_checks = 0usize;
         let mut first_round_rejections = 0usize;
@@ -2176,7 +2176,9 @@ pub(crate) fn discover_one_round(
 /// Return the singleton-inclusive one-round partition for the current active
 /// terminal mask. Inactive terminals are deliberately absent: this same mask
 /// controls both candidates and frozen F/U observation for the round.
-fn identity_partition(active_terminals: &[bool]) -> BTreeMap<TerminalID, BTreeSet<TerminalID>> {
+pub(crate) fn singleton_partition(
+    active_terminals: &[bool],
+) -> BTreeMap<TerminalID, BTreeSet<TerminalID>> {
     active_terminals
         .iter()
         .enumerate()
@@ -2207,6 +2209,28 @@ fn assert_partition_invariants(
     assert_eq!(seen, active_terminals, "TI partition must cover exactly active terminals");
 }
 
+/// Fold one transient discovery round into a flat original-terminal
+/// partition. `round` names only current visible representatives; its values
+/// are expanded through the existing flat classes. No history is retained.
+pub(crate) fn fold_one_round_partition(
+    classes: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
+    round: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
+) -> BTreeMap<TerminalID, BTreeSet<TerminalID>> {
+    let mut next_classes = BTreeMap::new();
+    for (&new_representative, old_representatives) in round {
+        let mut members = BTreeSet::new();
+        for &old_representative in old_representatives {
+            let old_members = classes
+                .get(&old_representative)
+                .expect("TI round must refer only to visible representatives");
+            members.extend(old_members.iter().copied());
+        }
+        assert!(members.contains(&new_representative));
+        next_classes.insert(new_representative, members);
+    }
+    next_classes
+}
+
 pub(crate) fn active_terminals_for_partition(
     partition: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
     terminal_count: usize,
@@ -2226,7 +2250,19 @@ pub(crate) fn visible_output_raw_labels(
     partition: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
     terminal_count: usize,
 ) -> Vec<bool> {
-    active_terminals_for_partition(partition, terminal_count)
+    // The partition contains only TI-active terminals. Terminals outside it
+    // were never compressed and must remain ordinary visible outputs. Start
+    // from the full raw alphabet, then hide only actual nonrepresentative
+    // partition members.
+    let mut visible = vec![true; terminal_count];
+    for (&representative, members) in partition {
+        for &member in members {
+            if member != representative {
+                visible[member as usize] = false;
+            }
+        }
+    }
+    visible
 }
 
 fn representatives_for_partition(
@@ -2289,46 +2325,122 @@ pub(crate) fn coalesced_disallowed_follows(
     coalesced
 }
 
-/// Active terminal mask for direct final-partition materialization. Every
-/// final representative stays visible, and exactly one hidden member is added
-/// as the interchange target. This is deliberately not a two-terminal mask.
-fn materialization_active_mask(
-    partition: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
-    terminal_count: usize,
+/// Re-run the same accepted-pair decision used by discovery for one replayed
+/// round. Replay must derive the scanner coordinate under that round's
+/// pre-merge active-terminal mask.
+fn replay_accepted_interchange_map(
+    dfa: &mut InterchangeabilityDfa,
+    representative: TerminalID,
     member: TerminalID,
-) -> Vec<bool> {
-    let mut active = active_terminals_for_partition(partition, terminal_count);
-    active[member as usize] = true;
-    active
+) -> Option<InterchangeMap> {
+    if !dfa.observed_output_pair_set_is_swap_closed(representative, member) {
+        return None;
+    }
+    if dfa.swap_preserves_all_frozen_outputs(representative, member) {
+        return Some(dfa.canonical_identity_map());
+    }
+    if !dfa.canonical_round_one_still_possible(representative, member) {
+        return None;
+    }
+    dfa.interchange_map(representative, member)
 }
 
-/// Build temporary direct witnesses for the final transport NWA. Discovery
-/// stores only the terminal partition. For each final representative/member
-/// pair, rediscover the exact map with every final representative plus that one
-/// member active; all other final representatives must therefore remain fixed.
+/// Replay deterministic TI discovery while materializing temporary transport
+/// witnesses. The stored result remains only the flat final partition.
+///
+/// Each accepted pair uses the active mask that existed before its round
+/// merged anything. When a later round folds `old_representative` into
+/// `representative`, it composes that round-local map outside the prior map for
+/// every original member. Reconstructing final pairs under only final
+/// representatives, or final representatives plus one member, is unsound.
 pub(crate) fn binary_transport_modes(
     tokenizer: &Tokenizer,
+    original_active_terminals: &[bool],
     partition: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
     relevant_bytes: &[bool; 256],
+    ignore_terminal: Option<TerminalID>,
 ) -> Vec<TerminalNwaTransportMode> {
     let state_count = tokenizer.num_states() as usize;
     let terminal_count = tokenizer.num_terminals() as usize;
+    assert_eq!(original_active_terminals.len(), terminal_count);
+
+    let mut active = original_active_terminals.to_vec();
+    let mut classes = singleton_partition(&active);
+    let mut map_for_original = vec![None::<Arc<TransportScannerStateMap>>; terminal_count];
+
+    loop {
+        let round = discover_one_round(tokenizer, &active, relevant_bytes, ignore_terminal);
+        let mut dfa = InterchangeabilityDfa::new(tokenizer, &active, relevant_bytes);
+
+        for (&representative, old_representatives) in &round {
+            for &old_representative in old_representatives {
+                if old_representative == representative {
+                    continue;
+                }
+                let round_map = Arc::new(
+                    replay_accepted_interchange_map(
+                        &mut dfa,
+                        representative,
+                        old_representative,
+                    )
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "TI replay lost an accepted round-local transport witness: rep={} member={} active_before_round={:?}",
+                            representative,
+                            old_representative,
+                            active,
+                        )
+                    })
+                    .scanner_state_map(),
+                );
+                let original_members = classes
+                    .get(&old_representative)
+                    .expect("TI replay round must refer only to current representatives");
+                for &original_member in original_members {
+                    let original_member = original_member as usize;
+                    map_for_original[original_member] = Some(
+                        map_for_original[original_member]
+                            .take()
+                            .map(|prior_map| {
+                                TransportScannerStateMap::compose(
+                                    Arc::clone(&round_map),
+                                    prior_map,
+                                )
+                            })
+                            .unwrap_or_else(|| Arc::clone(&round_map)),
+                    );
+                }
+            }
+        }
+
+        let next_classes = fold_one_round_partition(&classes, &round);
+        let next_active = active_terminals_for_partition(&round, active.len());
+        if next_active == active {
+            assert_eq!(
+                &next_classes,
+                partition,
+                "deterministic TI replay must reproduce the retained final partition",
+            );
+            break;
+        }
+        classes = next_classes;
+        active = next_active;
+    }
+
     let mut modes = vec![TerminalNwaTransportMode::ordinary(state_count)];
     for (&representative, members) in partition {
         for &member in members {
             if member == representative {
                 continue;
             }
-            let visible = materialization_active_mask(partition, terminal_count, member);
-            let mut dfa = InterchangeabilityDfa::new(tokenizer, &visible, relevant_bytes);
-            let map = dfa.interchange_map(representative, member).unwrap_or_else(|| {
+            let map = map_for_original[member as usize].as_ref().unwrap_or_else(|| {
                 panic!(
-                    "TI final partition member lacks a direct exact transport witness: rep={} member={} visible_final_representatives_plus_member={:?}",
-                    representative, member, visible,
+                    "TI replay produced no composed transport witness: rep={} member={}",
+                    representative, member,
                 )
             });
             modes.push(TerminalNwaTransportMode::member(
-                map.scanner_state_map(),
+                map.as_ref().clone(),
                 representative,
                 member,
             ));
@@ -2354,7 +2466,7 @@ mod tests {
     }
 
     #[test]
-    fn partition_invariants_cover_each_active_terminal_once() {
+    fn partition_invariants_hide_only_merged_active_members() {
         let active = [true, false, true, true, false];
         let partition = BTreeMap::from([
             (0, BTreeSet::from([0, 2])),
@@ -2362,7 +2474,7 @@ mod tests {
         ]);
         assert_partition_invariants(&partition, &active);
         assert_eq!(active_terminals_for_partition(&partition, active.len()), [true, false, false, true, false]);
-        assert_eq!(visible_output_raw_labels(&partition, active.len()), [true, false, false, true, false]);
+        assert_eq!(visible_output_raw_labels(&partition, active.len()), [true, true, false, true, true]);
     }
 
     #[test]
@@ -2414,6 +2526,64 @@ mod tests {
             coalesced_disallowed_follows(&partition, &original, 6),
             direct(&partition, &original, 6),
         );
+    }
+
+    #[test]
+    fn folding_memberships_requires_only_current_classes_and_round() {
+        let active = [true, true, true, true];
+        let initial = singleton_partition(&active);
+        let first_round = BTreeMap::from([
+            (0, BTreeSet::from([0, 1])),
+            (2, BTreeSet::from([2])),
+            (3, BTreeSet::from([3])),
+        ]);
+        let after_first = fold_one_round_partition(&initial, &first_round);
+        let second_round = BTreeMap::from([
+            (0, BTreeSet::from([0, 2])),
+            (3, BTreeSet::from([3])),
+        ]);
+        let final_classes = fold_one_round_partition(&after_first, &second_round);
+
+        assert_eq!(
+            final_classes,
+            BTreeMap::from([
+                (0, BTreeSet::from([0, 1, 2])),
+                (3, BTreeSet::from([3])),
+            ]),
+        );
+        assert_partition_invariants(&final_classes, &active);
+    }
+
+    #[test]
+    fn iterative_discovery_stops_at_the_first_stable_round() {
+        // Distinct literals whose alphabetic interiors are unobserved in this
+        // punctuation-only L2P byte partition. The first exact round merges
+        // them; the next single-representative round is the fixed point.
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"CREATE\"".to_vec()),
+            Expr::U8Seq(b"CrossFit\"".to_vec()),
+            Expr::U8Seq(b"DELETE\"".to_vec()),
+            Expr::U8Seq(b"Drums\"".to_vec()),
+        ]);
+        let mut active = vec![true; 4];
+        let mut classes = singleton_partition(&active);
+        let mut rounds = 0usize;
+        let mut punctuation_only = [false; 256];
+        punctuation_only[b'"' as usize] = true;
+        loop {
+            let round = discover_one_round(&tokenizer, &active, &punctuation_only, None);
+            let next_active = active_terminals_for_partition(&round, active.len());
+            classes = fold_one_round_partition(&classes, &round);
+            rounds += 1;
+            if next_active == active {
+                break;
+            }
+            active = next_active;
+        }
+
+        assert_eq!(rounds, 2);
+        assert_eq!(active, vec![true, false, false, false]);
+        assert_eq!(classes, BTreeMap::from([(0, BTreeSet::from([0, 1, 2, 3]))]));
     }
 
     #[test]

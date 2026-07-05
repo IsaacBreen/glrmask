@@ -43,7 +43,8 @@ use nwa_builder::{
 };
 use terminal_interchangeability::{
     active_terminals_for_partition, binary_transport_modes, coalesced_disallowed_follows,
-    discover_one_round, partition_has_merges, visible_output_raw_labels,
+    discover_one_round, fold_one_round_partition, partition_has_merges, singleton_partition,
+    visible_output_raw_labels,
 };
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
@@ -188,15 +189,35 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         }
     }
 
-    // Discover one exact, singleton-inclusive terminal partition. The active
-    // mask controls both candidates and frozen F/U in this call. The partition
-    // is the durable result; binary scanner witnesses are created only when the
-    // strict transport NWA is built below.
+    // Repeatedly discover and immediately fold each transient exact partition.
+    // Only the final flat original-member partition survives this loop.
     let ti_profile_timing = l2p_timing_profile_enabled();
     let ti_discovery_started_at = ti_profile_timing.then(Instant::now);
-    let terminal_partition = l2p_terminal_interchangeability_enabled().then(|| {
-        discover_one_round(tokenizer, active_terminals, &relevant_bytes, ignore_terminal)
-    });
+    let (terminal_partition, ti_round_count, ti_additional_merged_members) =
+        if l2p_terminal_interchangeability_enabled() {
+            let mut active = active_terminals.to_vec();
+            let mut classes = singleton_partition(&active);
+            let mut round_count = 0usize;
+            let mut first_round_class_count = None;
+            loop {
+                let round = discover_one_round(tokenizer, &active, &relevant_bytes, ignore_terminal);
+                let next_active = active_terminals_for_partition(&round, active.len());
+                let next_classes = fold_one_round_partition(&classes, &round);
+                round_count += 1;
+                first_round_class_count.get_or_insert(next_classes.len());
+                classes = next_classes;
+                if next_active == active {
+                    break;
+                }
+                active = next_active;
+            }
+            let additional_merged_members = first_round_class_count
+                .unwrap_or(classes.len())
+                .saturating_sub(classes.len());
+            (Some(classes), round_count, additional_merged_members)
+        } else {
+            (None, 0, 0)
+        };
     let ti_discovery_ms = ti_discovery_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
@@ -227,10 +248,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     {
         let class_count = terminal_partition.as_ref().map_or(0, |partition| partition.len());
         eprintln!(
-            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} classes={} discovery_ms={:.3} coalesced_disallowed_follows_ms={:.3} early_exit=after_ti_discovery",
+            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} rounds={} classes={} additional_merged_members={} discovery_ms={:.3} coalesced_disallowed_follows_ms={:.3} early_exit=after_ti_discovery",
             partition_label,
             reference_terminal_expansion,
+            ti_round_count,
             class_count,
+            ti_additional_merged_members,
             ti_discovery_ms,
             ti_coalesced_disallowed_follows_ms,
         );
@@ -318,9 +341,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     if ti_profile_timing {
         eprintln!(
-            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} discovery_ms={:.3} coalesced_disallowed_follows_ms={:.3}",
+            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} rounds={} classes={} additional_merged_members={} discovery_ms={:.3} coalesced_disallowed_follows_ms={:.3}",
             partition_label,
             reference_terminal_expansion,
+            ti_round_count,
+            terminal_partition.as_ref().map_or(0, |partition| partition.len()),
+            ti_additional_merged_members,
             ti_discovery_ms,
             ti_coalesced_disallowed_follows_ms,
         );
@@ -416,9 +442,15 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 let partition = terminal_partition
                     .as_ref()
                     .expect("active TI transport must retain its partition");
-                // These binary maps are temporary witnesses. The partition does
-                // not retain scanner maps or a general label permutation.
-                let modes = binary_transport_modes(tokenizer_for_build, partition, &relevant_bytes);
+                // Replay derives temporary round-local witnesses. The retained
+                // TI result remains only the flat terminal partition.
+                let modes = binary_transport_modes(
+                    tokenizer_for_build,
+                    active_terminals,
+                    partition,
+                    &relevant_bytes,
+                    ignore_terminal,
+                );
                 let visible_output_raw_labels = visible_output_raw_labels(
                     partition,
                     grammar.num_terminals as usize,
