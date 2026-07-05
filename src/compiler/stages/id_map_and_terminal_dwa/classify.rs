@@ -414,6 +414,12 @@ impl SharedClassifyBytesets {
 /// partition (P0) rather than splitting them into the auxiliary P5.
 const JSON_STRUCTURAL: &[u8] = b"\":[]{},";
 
+/// `_` belongs with alphabetic bytes for vocabulary partitioning. This is a
+/// routing convention only: it does not change lexer or grammar semantics.
+fn is_partition_ascii_alpha(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
 /// Characters whose sole repetition qualifies a non-alnum token for the
 /// auxiliary P5 partition even if the token contains a structural byte.
 const P5_REPEATED_CHARS: &[u8] = b"\n:{ ,";
@@ -423,7 +429,7 @@ const P5_REPEATED_CHARS: &[u8] = b"\n:{ ,";
 /// Returns:
 /// - 0: non-alnum with JSON structural chars (multi-byte, not single-repeated)
 /// - 1: mixed (contains both alnum and non-alnum)
-/// - 2: ASCII alnum with ≥1 alpha, optionally with leading space
+/// - 2: ASCII word token with ≥1 alpha or `_`, optionally with leading space
 /// - 3: pure digit, optionally with leading space
 /// - 4: Unicode-only alpha (non-ASCII alphanumeric, e.g. CJK, Cyrillic,
 ///       Arabic, Hangul), optionally with leading space
@@ -459,13 +465,13 @@ pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
     }
     // Try to decode as UTF-8 for Unicode-aware classification.
     if let Ok(s) = std::str::from_utf8(content) {
-        let all_alnum = s.chars().all(|c| c.is_alphanumeric());
-        if all_alnum {
-            let has_alpha = s.chars().any(|c| c.is_alphabetic());
+        let all_word = s.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if all_word {
+            let has_alpha = s.chars().any(|c| c.is_alphabetic() || c == '_');
             if has_alpha {
-                let has_ascii_alpha = content.iter().any(|b| b.is_ascii_alphabetic());
+                let has_ascii_alpha = content.iter().copied().any(is_partition_ascii_alpha);
                 if has_ascii_alpha {
-                    return 2; // ASCII alpha (may also contain non-ASCII alpha)
+                    return 2; // ASCII word token (may also contain non-ASCII alpha)
                 }
                 return 4; // Unicode-only alpha (CJK, Cyrillic, Arabic, etc.)
             }
@@ -473,20 +479,31 @@ pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
         }
         // Check non-alphanumeric.
         if let Ok(full) = std::str::from_utf8(bytes) {
-            if full.chars().all(|c| !c.is_alphanumeric()) {
+            if !full
+                .chars()
+                .any(|c| c.is_alphanumeric() || c == '_')
+            {
                 return classify_nonalnum(bytes);
             }
         }
         return 1; // Mixed
     }
     // Fallback: byte-level ASCII checks for invalid UTF-8.
-    if content.iter().all(|b| b.is_ascii_alphanumeric()) {
-        if content.iter().any(|b| b.is_ascii_alphabetic()) {
+    if content
+        .iter()
+        .copied()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        if content.iter().copied().any(is_partition_ascii_alpha) {
             return 2;
         }
         return 3;
     }
-    if bytes.iter().all(|b| !b.is_ascii_alphanumeric()) {
+    if bytes
+        .iter()
+        .copied()
+        .all(|byte| !byte.is_ascii_alphanumeric() && byte != b'_')
+    {
         return classify_nonalnum(bytes);
     }
     1 // Mixed
@@ -519,7 +536,7 @@ fn is_structural_boundary_lexical_token(bytes: &[u8]) -> bool {
     }
     bytes
         .strip_prefix(b"\"")
-        .is_some_and(|suffix| suffix.first().is_some_and(u8::is_ascii_alphabetic))
+        .is_some_and(|suffix| suffix.first().copied().is_some_and(is_partition_ascii_alpha))
 }
 
 fn structural_boundary_lexical_partition_enabled() -> bool {
@@ -1981,9 +1998,10 @@ mod tests {
         token_has_active_terminal_suffix,
     };
     use super::{
-        parse_exact_l2p_boundary_filter_mode, ExactL2pBoundaryFilterMode,
-        state_future_intersects_words, token_has_active_l2p_boundary_words,
-        token_l2p_route_hint, SharedClassifyBytesets, TokenL2pRouteHint,
+        classify_vocab_char_type, parse_exact_l2p_boundary_filter_mode,
+        ExactL2pBoundaryFilterMode, SharedClassifyBytesets,
+        TokenL2pRouteHint, state_future_intersects_words,
+        token_has_active_l2p_boundary_words, token_l2p_route_hint,
     };
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::compile::build_regex;
@@ -2055,6 +2073,19 @@ mod tests {
         assert!(matches!(parse_exact_l2p_boundary_filter_mode("0"), ExactL2pBoundaryFilterMode::Force(false)));
         assert!(matches!(parse_exact_l2p_boundary_filter_mode("false"), ExactL2pBoundaryFilterMode::Force(false)));
         assert!(matches!(parse_exact_l2p_boundary_filter_mode("off"), ExactL2pBoundaryFilterMode::Force(false)));
+    }
+
+    #[test]
+    fn underscore_is_alphabetic_for_vocab_partitioning() {
+        // `_` is treated like an ASCII alphabetic byte only for partition
+        // routing. It must keep identifier-style tokens out of punctuation
+        // partitions, including the quoted structural-boundary route.
+        for bytes in [b"_".as_slice(), b" _", b"snake_case", b"123_456", b"__"] {
+            assert_eq!(classify_vocab_char_type(bytes), 2, "bytes={bytes:?}");
+        }
+        assert_eq!(classify_vocab_char_type(b"123"), 3);
+        assert_eq!(classify_vocab_char_type(b"_!"), 1);
+        assert_eq!(classify_vocab_char_type(b"\"_field"), 7);
     }
 
     #[test]
