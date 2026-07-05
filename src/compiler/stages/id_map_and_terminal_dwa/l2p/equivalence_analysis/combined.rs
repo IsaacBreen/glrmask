@@ -318,6 +318,55 @@ fn token_length_stats(tokens: &[&[u8]]) -> TokenLengthStats {
     stats
 }
 
+/// Compose the raw restricted-observation quotient with its final exact
+/// representative map without materializing ordered sets of raw states.
+///
+/// Scanning raw states in ascending order assigns dense IDs in the same order
+/// as the generic `BTreeSet` path: each class is ordered by its first raw
+/// member, and that member is also the retained raw representative.
+fn compose_raw_quotient_state_map(
+    pre_state_map: &ManyToOneIdMap,
+    final_representative_for_preclass: &[usize],
+) -> ManyToOneIdMap {
+    assert_eq!(
+        pre_state_map.internal_to_originals.len(),
+        final_representative_for_preclass.len(),
+        "raw quotient and exact representative map disagree",
+    );
+    let preclass_count = pre_state_map.internal_to_originals.len();
+    let mut final_key_to_internal = vec![u32::MAX; preclass_count];
+    let mut original_to_internal = vec![u32::MAX; pre_state_map.original_to_internal.len()];
+    let mut internal_to_originals = Vec::<Vec<u32>>::new();
+    let mut representative_original_ids = Vec::<u32>::new();
+
+    for (raw_state, &preclass) in pre_state_map.original_to_internal.iter().enumerate() {
+        if preclass == u32::MAX {
+            continue;
+        }
+        let preclass = preclass as usize;
+        assert!(preclass < preclass_count, "invalid raw quotient class");
+        let final_key = final_representative_for_preclass[preclass];
+        assert!(final_key < preclass_count, "invalid exact representative");
+        let internal = if final_key_to_internal[final_key] == u32::MAX {
+            let next = internal_to_originals.len() as u32;
+            final_key_to_internal[final_key] = next;
+            internal_to_originals.push(Vec::new());
+            representative_original_ids.push(raw_state as u32);
+            next
+        } else {
+            final_key_to_internal[final_key]
+        };
+        original_to_internal[raw_state] = internal;
+        internal_to_originals[internal as usize].push(raw_state as u32);
+    }
+
+    ManyToOneIdMap {
+        original_to_internal,
+        internal_to_originals,
+        representative_original_ids,
+    }
+}
+
 fn build_internal_id_map_from_combined_result(
     tokenizer: &Tokenizer,
     initial_state_map: Option<&ManyToOneIdMap>,
@@ -453,16 +502,7 @@ fn try_analyze_equivalences_with_raw_quotient(
     };
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let representative_states = prepared
-        .initial_states
-        .iter()
-        .map(|&state| {
-            let pre_internal = pre_state_map.original_to_internal[state] as usize;
-            let final_internal = reduced_state_reps_for_pre_reduced[pre_internal];
-            pre_state_map.representative_original_ids[final_internal] as usize
-        })
-        .collect::<Vec<_>>();
-    let mut final_state_representatives = reduced_state_reps_for_pre_reduced;
+    let mut final_state_representatives = reduced_state_reps_for_pre_reduced.clone();
     final_state_representatives.sort_unstable();
     final_state_representatives.dedup();
 
@@ -485,17 +525,15 @@ fn try_analyze_equivalences_with_raw_quotient(
         &dedup.original_to_repr,
         dedup.representative_token_bytes.len(),
     );
-    let state_classes = state_equivalence_analysis::mapping_to_equivalence_classes(
-        &prepared.initial_states,
-        &representative_states,
+    let tokenizer_states = compose_raw_quotient_state_map(
+        &pre_state_map,
+        &reduced_state_reps_for_pre_reduced,
     );
-    let exact_reps = state_classes.len();
-    let result = CombinedEquivalenceResult {
-        vocab_classes,
-        state_classes,
+    let exact_reps = tokenizer_states.num_internal_ids() as usize;
+    let internal_id_map = InternalIdMap {
+        tokenizer_states,
+        vocab_tokens: build_vocab_map(&vocab_classes, &prepared.token_ids, prepared.max_token_id),
     };
-    let internal_id_map =
-        build_internal_id_map_from_combined_result(tokenizer, initial_state_map, &prepared, &result);
     let id_map_finalize_ms = id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
 
     Some((
