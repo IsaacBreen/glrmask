@@ -22,6 +22,25 @@ type LabelTargets = SmallVec<[(i32, u32, u32); 8]>;
 const SUBSET_BLOCK_BITS: usize = 8;
 const SUBSET_BLOCK_MASK: u64 = (1u64 << SUBSET_BLOCK_BITS) - 1;
 
+/// A per-weight terminal group either reuses an immutable template DFA or owns
+/// the union required for a multi-terminal group. Keeping singleton groups
+/// borrowed avoids cloning their full DFA only to read it once while building a
+/// deterministic bundle.
+enum BundleGroupDfa<'a> {
+    Borrowed(&'a UnweightedDfa),
+    Owned(UnweightedDfa),
+}
+
+impl BundleGroupDfa<'_> {
+    #[inline]
+    fn dfa(&self) -> &UnweightedDfa {
+        match self {
+            Self::Borrowed(dfa) => dfa,
+            Self::Owned(dfa) => dfa,
+        }
+    }
+}
+
 fn checked_usize_to_u32(value: usize, what: &str) -> u32 {
     u32::try_from(value).unwrap_or_else(|_| panic!("{what} exceeds u32::MAX"))
 }
@@ -64,15 +83,14 @@ fn clear_subset_key(key: &mut SubsetKey) {
 }
 
 fn collect_label_targets(
-    groups: &[(&Weight, UnweightedDfa)],
+    groups: &[(&Weight, BundleGroupDfa<'_>)],
     product_state: &[(u32, u32)],
     label_targets: &mut LabelTargets,
 ) {
     label_targets.clear();
     for &(group_id, dfa_state) in product_state {
-        for (&label, &target) in &groups[group_id as usize].1.states[dfa_state as usize]
-            .transitions
-        {
+        let dfa = groups[group_id as usize].1.dfa();
+        for (&label, &target) in &dfa.states[dfa_state as usize].transitions {
             label_targets.push((label, group_id, target));
         }
     }
@@ -316,29 +334,6 @@ fn count_unweighted_dfa_transitions(dfa: &UnweightedDfa) -> usize {
     dfa.states.iter().map(|state| state.transitions.len()).sum()
 }
 
-fn dfa_order_key(dfa: &UnweightedDfa) -> Vec<i32> {
-    let mut key = Vec::new();
-    let mut stack = vec![dfa.start_state];
-    let mut seen = vec![false; dfa.states.len()];
-
-    while let Some(state_id) = stack.pop() {
-        let index = state_id as usize;
-        if index >= seen.len() || seen[index] {
-            continue;
-        }
-        seen[index] = true;
-
-        let state = &dfa.states[index];
-        key.push(if state.is_accepting { i32::MIN } else { i32::MIN + 1 });
-        for (&label, &target) in state.transitions.iter().rev() {
-            key.push(label);
-            stack.push(target);
-        }
-    }
-
-    key
-}
-
 fn count_weighted_dwa_transitions(dwa: &DWA) -> usize {
     dwa.states().iter().map(|state| state.transitions.len()).sum()
 }
@@ -373,7 +368,7 @@ impl Templates {
     fn group_terminals_by_weight<'a>(
         &'a self,
         terminal_weights: &'a BTreeMap<TerminalID, Weight>,
-    ) -> HashMap<&'a Weight, Vec<TerminalID>> {
+    ) -> Vec<(&'a Weight, Vec<TerminalID>)> {
         let mut weight_groups: HashMap<&Weight, Vec<TerminalID>> = HashMap::new();
         for (&terminal, weight) in terminal_weights {
             if weight.is_empty() || !self.by_terminal.contains_key(&terminal) {
@@ -381,14 +376,20 @@ impl Templates {
             }
             weight_groups.entry(weight).or_default().push(terminal);
         }
-        weight_groups
+
+        // Terminal IDs come from a BTreeMap, so each group's first terminal is
+        // stable. This gives the product construction a deterministic order
+        // without traversing every group DFA to allocate a structural sort key.
+        let mut groups = weight_groups.into_iter().collect::<Vec<_>>();
+        groups.sort_unstable_by_key(|(_, terminals)| terminals[0]);
+        groups
     }
 
     fn build_group_dfas_profiled<'a>(
         &'a self,
-        weight_groups: &'a HashMap<&'a Weight, Vec<TerminalID>>,
+        weight_groups: &'a [(&'a Weight, Vec<TerminalID>)],
         profile: &mut BundleBuildProfile,
-    ) -> Vec<(&'a Weight, UnweightedDfa)> {
+    ) -> Vec<(&'a Weight, BundleGroupDfa<'a>)> {
         let build_started_at = Instant::now();
         let mut group_dfas = Vec::with_capacity(weight_groups.len());
         for (weight, terminals) in weight_groups {
@@ -397,7 +398,7 @@ impl Templates {
             if terminals.len() == 1 {
                 profile.singleton_groups += 1;
                 if let Some(template) = self.by_terminal.get(&terminals[0]) {
-                    group_dfas.push((*weight, template.clone()));
+                    group_dfas.push((*weight, BundleGroupDfa::Borrowed(template)));
                 }
                 continue;
             }
@@ -417,31 +418,29 @@ impl Templates {
                 profile.slowest_group_dfa_transitions = count_unweighted_dfa_transitions(&merged);
             }
 
-            group_dfas.push((*weight, merged));
+            group_dfas.push((*weight, BundleGroupDfa::Owned(merged)));
         }
-        group_dfas.sort_by_cached_key(|(_, dfa)| dfa_order_key(dfa));
         profile.build_group_dfas_ms = elapsed_ms(build_started_at);
         group_dfas
     }
 
     fn build_group_dfas<'a>(
         &'a self,
-        weight_groups: &'a HashMap<&'a Weight, Vec<TerminalID>>,
-    ) -> Vec<(&'a Weight, UnweightedDfa)> {
+        weight_groups: &'a [(&'a Weight, Vec<TerminalID>)],
+    ) -> Vec<(&'a Weight, BundleGroupDfa<'a>)> {
         let mut group_dfas = Vec::with_capacity(weight_groups.len());
         for (weight, terminals) in weight_groups {
             if terminals.len() == 1 {
                 if let Some(template) = self.by_terminal.get(&terminals[0]) {
-                    group_dfas.push((*weight, template.clone()));
+                    group_dfas.push((*weight, BundleGroupDfa::Borrowed(template)));
                 }
             } else {
                 let merged = union_unweighted_dfas(
                     terminals.iter().filter_map(|terminal| self.by_terminal.get(terminal)),
                 );
-                group_dfas.push((*weight, merged));
+                group_dfas.push((*weight, BundleGroupDfa::Owned(merged)));
             }
         }
-        group_dfas.sort_by_cached_key(|(_, dfa)| dfa_order_key(dfa));
         group_dfas
     }
 
@@ -465,7 +464,7 @@ impl Templates {
 
         let weight_groups = self.group_terminals_by_weight(terminal_weights);
         profile.weight_groups = weight_groups.len();
-        for weight in weight_groups.keys() {
+        for (weight, _) in &weight_groups {
             profile.total_weight_outer_ranges += weight.outer_range_count();
             if weight.single_compact_entry_parts().is_some() {
                 profile.single_entry_weights += 1;
@@ -587,7 +586,7 @@ struct DeterminizeBundleProfile {
 }
 
 fn determinize_bundle_groups_profiled(
-    groups: &[(&Weight, UnweightedDfa)],
+    groups: &[(&Weight, BundleGroupDfa<'_>)],
 ) -> (DWA, DeterminizeBundleProfile) {
     use crate::automata::weighted_u32::dwa::DWA;
 
@@ -616,7 +615,7 @@ fn determinize_bundle_groups_profiled(
         .map(|(group_id, (_, dfa))| {
             (
                 checked_usize_to_u32(group_id, "bundle group id"),
-                dfa.start_state,
+                dfa.dfa().start_state,
             )
         })
         .collect();
@@ -654,7 +653,7 @@ fn determinize_bundle_groups_profiled(
         clear_subset_key(&mut final_key);
         for &(group_id, dfa_state) in &product_state {
             let group_id = group_id as usize;
-            if groups[group_id].1.states[dfa_state as usize].is_accepting {
+            if groups[group_id].1.dfa().states[dfa_state as usize].is_accepting {
                 final_groups.push(group_id);
                 set_subset_key_bit(&mut final_key, group_id);
             }
@@ -749,7 +748,7 @@ fn determinize_bundle_groups_profiled(
     (dwa, profile)
 }
 
-fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
+fn determinize_bundle_groups(groups: &[(&Weight, BundleGroupDfa<'_>)]) -> DWA {
     use crate::automata::weighted_u32::dwa::DWA;
 
     let n = groups.len();
@@ -775,7 +774,7 @@ fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
         .map(|(group_id, (_, dfa))| {
             (
                 checked_usize_to_u32(group_id, "bundle group id"),
-                dfa.start_state,
+                dfa.dfa().start_state,
             )
         })
         .collect();
@@ -801,7 +800,7 @@ fn determinize_bundle_groups(groups: &[(&Weight, UnweightedDfa)]) -> DWA {
         clear_subset_key(&mut final_key);
         for &(group_id, dfa_state) in &product_state {
             let group_id = group_id as usize;
-            if groups[group_id].1.states[dfa_state as usize].is_accepting {
+            if groups[group_id].1.dfa().states[dfa_state as usize].is_accepting {
                 final_groups.push(group_id);
                 set_subset_key_bit(&mut final_key, group_id);
             }
@@ -944,7 +943,10 @@ mod tests {
         second.add_transition(0, 3, 31);
         second.add_transition(0, 1, 11);
         let weight = Weight::all();
-        let groups = vec![(&weight, first), (&weight, second)];
+        let groups = vec![
+            (&weight, BundleGroupDfa::Owned(first)),
+            (&weight, BundleGroupDfa::Owned(second)),
+        ];
         let state = vec![(0, 0), (1, 0)];
         let mut targets = LabelTargets::new();
 

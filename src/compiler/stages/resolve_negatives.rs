@@ -200,6 +200,29 @@ impl GuardedFinalWeight {
             subset_of: Some(edge_weight.clone()),
         })
     }
+
+    /// Exact cached counterpart for serial finality propagation. The guard keeps
+    /// the common nested-template case allocation-free; other repeated pairs use
+    /// the invocation-local cache rather than recomputing range intersections.
+    fn intersection_with_edge_cached(
+        &self,
+        edge_weight: &Weight,
+        weight_ops: &mut ScopedWeightOpCache,
+    ) -> Option<Self> {
+        if self.weight.is_empty() || edge_weight.is_empty() {
+            return None;
+        }
+
+        if self.is_guarded_by(edge_weight) {
+            return Some(self.clone());
+        }
+
+        let weight = weight_ops.intersection(&self.weight, edge_weight);
+        (!weight.is_empty()).then_some(Self {
+            weight,
+            subset_of: Some(edge_weight.clone()),
+        })
+    }
 }
 
 fn merge_guarded_final_weight(
@@ -698,7 +721,7 @@ fn propagate_final_weights_to_predecessors(
     };
 
     for edge in &preds[state_id] {
-        let Some(propagated) = reachable_final.intersection_with_edge(edge.weight) else {
+        let Some(propagated) = reachable_final.intersection_with_edge_cached(edge.weight, weight_ops) else {
             continue;
         };
         if merge_guarded_final_weight(&mut reachable_final_weights[edge.from], propagated, weight_ops) {
@@ -767,7 +790,7 @@ fn apply_finality_fixpoint_acyclic(
         };
 
         for edge in &preds[state_id] {
-            let Some(propagated) = reachable_final.intersection_with_edge(edge.weight) else {
+            let Some(propagated) = reachable_final.intersection_with_edge_cached(edge.weight, weight_ops) else {
                 continue;
             };
             pending_by_state[edge.from].push(propagated);
