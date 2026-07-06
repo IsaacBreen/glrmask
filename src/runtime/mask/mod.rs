@@ -958,8 +958,8 @@ impl<'a> ConstraintState<'a> {
                     let token_set_key = Arc::as_ptr(token_set) as usize;
                     if self
                         .constraint
-                        .weight_token_sparse_buf_masks
-                        .contains_key(&token_set_key)
+                        .direct_sparse_weight_token_sets
+                        .contains(&token_set_key)
                         && self
                             .constraint
                             .or_dense_token_set_to_buf_sparse(dense, token_set, 2048, buf)

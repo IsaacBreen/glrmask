@@ -54,13 +54,20 @@ pub(crate) struct ConstraintPossibleMatchesProfile {
 #[derive(Debug)]
 pub(crate) struct ConstraintPossibleMatchesComputation {
     pub(crate) mapped_possible_matches: MappedArtifact<RuntimePossibleMatchesByTerminal>,
+    pub(crate) runtime_dynamic_vocab: RuntimeDynamicMaskVocabArtifacts,
     pub(crate) profile: ConstraintPossibleMatchesProfile,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeDynamicMaskVocabArtifacts {
+    pub(crate) trie: Arc<VocabPrefixTree>,
+    pub(crate) token_aliases: Arc<Vec<Vec<u32>>>,
 }
 
 #[derive(Debug, Clone)]
 struct OrderedVocab {
     original_slot_count: usize,
-    ordered_to_originals: Vec<Vec<u32>>,
+    ordered_to_originals: Arc<Vec<Vec<u32>>>,
     ordered_token_bytes: Vec<Vec<u8>>,
 }
 
@@ -170,7 +177,11 @@ fn build_ordered_vocab(token_bytes: &BTreeMap<u32, Vec<u8>>) -> OrderedVocab {
         ordered_to_originals.push(originals);
     }
 
-    OrderedVocab { original_slot_count, ordered_to_originals, ordered_token_bytes }
+    OrderedVocab {
+        original_slot_count,
+        ordered_to_originals: Arc::new(ordered_to_originals),
+        ordered_token_bytes,
+    }
 }
 
 fn build_ordered_vocab_prefix_tree(ordered_vocab: &OrderedVocab) -> VocabPrefixTree {
@@ -1700,6 +1711,15 @@ pub(crate) fn compute_constraint_possible_matches(
     )
 }
 
+fn runtime_dynamic_vocab_artifacts(
+    artifacts: &OrderedVocabTrieArtifacts,
+) -> RuntimeDynamicMaskVocabArtifacts {
+    RuntimeDynamicMaskVocabArtifacts {
+        trie: Arc::clone(&artifacts.trie),
+        token_aliases: Arc::clone(&artifacts.ordered_vocab.ordered_to_originals),
+    }
+}
+
 fn compute_constraint_possible_matches_with_artifacts(
     tokenizer: &Tokenizer,
     original_token_count: usize,
@@ -1710,6 +1730,7 @@ fn compute_constraint_possible_matches_with_artifacts(
 
     let (artifacts, ordered_vocab_cache_profile) = artifacts_and_profile;
     emit_ordered_vocab_cache_profile(ordered_vocab_cache_profile);
+    let runtime_dynamic_vocab = runtime_dynamic_vocab_artifacts(&artifacts);
     let ordered_vocab = artifacts.ordered_vocab;
     let trie = artifacts.trie;
 
@@ -1779,6 +1800,7 @@ fn compute_constraint_possible_matches_with_artifacts(
 
     ConstraintPossibleMatchesComputation {
         mapped_possible_matches: MappedArtifact::new(possible_matches, possible_matches_id_map),
+        runtime_dynamic_vocab,
         profile: ConstraintPossibleMatchesProfile { possible_matches_collect_ms, possible_match_vocab_ms },
     }
 }
@@ -1790,6 +1812,7 @@ pub(crate) fn compute_constraint_possible_matches_for_vocab(
 ) -> ConstraintPossibleMatchesComputation {
     if pm_vocab_equiv_enabled() {
         let (full_artifacts, full_profile) = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
+        let runtime_dynamic_vocab = runtime_dynamic_vocab_artifacts(&full_artifacts);
         emit_ordered_vocab_cache_profile(full_profile);
         let vocab_equiv_started_at = Instant::now();
         let use_naive = std::env::var("GLRMASK_PM_VOCAB_EQUIV_NAIVE")
@@ -1817,12 +1840,14 @@ pub(crate) fn compute_constraint_possible_matches_for_vocab(
         }
         let compact_token_bytes =
             build_internal_token_bytes_from_groups(vocab, &pm_vocab_map.internal_to_originals);
-        return compute_constraint_possible_matches_with_artifacts(
+        let mut computation = compute_constraint_possible_matches_with_artifacts(
             tokenizer,
             vocab.entries.len(),
             get_ordered_vocab_trie_artifacts(&compact_token_bytes),
             Some(&pm_vocab_map),
         );
+        computation.runtime_dynamic_vocab = runtime_dynamic_vocab;
+        return computation;
     }
 
     compute_constraint_possible_matches_with_artifacts(

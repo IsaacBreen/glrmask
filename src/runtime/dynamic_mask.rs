@@ -10,7 +10,6 @@ use crate::automata::lexer::Lexer;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{advance_stacks, stack_may_advance_on, ParserGSS};
 use crate::ds::leveled_gss::LeveledGSS;
-use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::grammar::flat::TerminalID;
 
 use super::artifact::Constraint;
@@ -21,8 +20,8 @@ type Exclusions = Arc<ExclusionMap>;
 type ParserStacks = LeveledGSS<u32, ()>;
 
 #[derive(Clone)]
-struct TraverseWork<'a> {
-    node: &'a VocabPrefixTreeNode,
+struct TraverseWork {
+    node: u32,
     tokenizer_state: u32,
     gss: ParserStacks,
     exclusions: Exclusions,
@@ -151,12 +150,12 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
 
     buf.fill(0);
     let initial_tsid = state.constraint.tokenizer.initial_state();
-    let mut traversal = Vec::<TraverseWork<'_>>::new();
+    let mut traversal = Vec::<TraverseWork>::new();
 
     for (&tokenizer_state, gss) in &state.state {
         for (stacks, exclusions) in gss.partition_by_accumulator() {
             traversal.push(TraverseWork {
-                node: &vocab.trie.root,
+                node: 0,
                 tokenizer_state,
                 gss: stacks,
                 exclusions: exclusions.0,
@@ -165,7 +164,8 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
     }
 
     while let Some(current) = traversal.pop() {
-        if current.node.has_token()
+        let node = vocab.trie.node(current.node);
+        if node.token_id.is_some()
             && (current.tokenizer_state == initial_tsid
                 || token_boundary_allowed(
                     state.constraint,
@@ -173,17 +173,17 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                     &current.gss,
                 ))
         {
-            let canonical_token_id = current.node.token_id() as u32;
+            let canonical_token_id = node.token_id.expect("token leaf checked");
             let token_ids = vocab
-                .token_ids
-                .get(&canonical_token_id)
+                .token_ids(canonical_token_id)
                 .expect("dynamic vocabulary trie node lacks token ids");
-            for &token_id in token_ids.iter() {
+            for &token_id in token_ids {
                 set_mask_bit(buf, token_id);
             }
         }
 
-        for (segment, child) in current.node.iter_children() {
+        for edge in vocab.trie.children(current.node) {
+            let segment = vocab.trie.edge_bytes(edge);
             let Some(segment_exclusions) =
                 advance_exclusions(state.constraint, segment, &current.exclusions)
             else {
@@ -215,7 +215,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                             },
                         );
                         traversal.push(TraverseWork {
-                            node: child,
+                            node: edge.child,
                             tokenizer_state: initial_tsid,
                             gss: advanced_parser,
                             exclusions,
@@ -227,7 +227,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
 
                 if let Some(end_state) = execution.end_state {
                     traversal.push(TraverseWork {
-                        node: child,
+                        node: edge.child,
                         tokenizer_state: end_state,
                         gss,
                         exclusions: segment_exclusions.clone(),
