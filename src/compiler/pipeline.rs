@@ -42,7 +42,7 @@ use crate::compiler::stages::templates::compile_dfa::{
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::{GrammarDef, Terminal};
-use crate::runtime::Constraint;
+use crate::runtime::{Constraint, DynamicMaskVocab};
 
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
@@ -675,6 +675,7 @@ fn compile_prepared_with_profile_and_table_construction(
         profile.split_terminal_dwa_total_ms = terminal_phase_profile.split_terminal_dwa_total_ms;
         profile.global_merge_ms = terminal_phase_profile.global_merge_ms;
 
+        let runtime_dynamic_vocab = cpm_result.runtime_dynamic_vocab;
         let mut possible_matches = cpm_result.mapped_possible_matches;
         let cpm_profile = cpm_result.profile;
         let dwa_pm_mode = dwa_possible_matches_mode();
@@ -868,7 +869,10 @@ fn compile_prepared_with_profile_and_table_construction(
             terminal_display_names: analyzed_grammar.terminal_display_names.clone(),
             tokenizer,
             ignore_terminal: prepared_grammar.ignore_terminal,
-            dynamic_mask_vocab: Default::default(),
+            dynamic_mask_vocab: DynamicMaskVocab::from_compiler_artifacts(
+                runtime_dynamic_vocab.trie,
+                runtime_dynamic_vocab.token_aliases,
+            ),
             possible_matches: possible_matches.into_artifact(),
             state_to_internal_tsid: internal_ids.tokenizer_states.original_to_internal.clone(),
             internal_tsid_to_states: internal_ids.tokenizer_states.internal_to_originals_vecs(),
@@ -898,6 +902,7 @@ fn compile_prepared_with_profile_and_table_construction(
             weight_token_dense_masks: rustc_hash::FxHashMap::default(),
             weight_token_buf_masks: rustc_hash::FxHashMap::default(),
             weight_token_sparse_buf_masks: rustc_hash::FxHashMap::default(),
+            direct_sparse_weight_token_sets: rustc_hash::FxHashSet::default(),
             seed_terminal_dense: rustc_hash::FxHashMap::default(),
             seed_universe_dense: std::sync::Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice()),
             dwa_fast_transitions: Vec::new(),
