@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use range_set_blaze::RangeSetBlaze;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use rayon::prelude::*;
 
 use crate::automata::weighted::dwa::DWA;
@@ -16,6 +17,10 @@ use super::artifact::{
     DenseWeightBufMaskCache,
     DenseWeightMaskCache,
     DenseWords,
+    DirectSparseWeightTokenSetCache,
+    PackedDynamicMaskTokenAliases,
+    DynamicMaskTrie,
+    DynamicMaskTrieEdge,
     DynamicMaskVocab,
     FastDwaTransitions,
     FastTokenizerTransitions,
@@ -28,6 +33,18 @@ pub(crate) use super::mask_mapping::{DeltaReplayProfileStats, DenseToBufProfileS
 use super::mask_mapping::FinalMaskMapping;
 use super::state::ConstraintState;
 
+#[derive(Default)]
+struct DirectSparseWeightBufCaches {
+    eligible: DirectSparseWeightTokenSetCache,
+    fallback: Vec<(usize, Arc<RangeSetBlaze<u32>>)>,
+}
+
+/// Finalization-local view of the parser-DWA token sets.  The final and
+/// transition cache builders share it so finalization traverses the DWA once.
+struct WeightTokenSetInventory<'a> {
+    final_sets: Vec<(usize, &'a Arc<RangeSetBlaze<u32>>)>,
+    transition_sets: FxHashMap<usize, &'a RangeSetBlaze<u32>>,
+}
 
 /// Dense buf OR: `buf[i] |= mask[i]` for all i in min(buf.len(), mask.len()).
 /// Processes u64 chunks for reduced loop overhead and better throughput.
@@ -139,29 +156,191 @@ fn count_complement_subgroups(missing: u64, valid_mask: u64) -> (u32, u32, u32) 
 
 impl Constraint {
     fn build_dynamic_mask_vocab(&self) -> DynamicMaskVocab {
-        let mut aliases_by_bytes = BTreeMap::<Vec<u8>, Vec<u32>>::new();
-        for (&token_id, bytes) in self.token_bytes.iter() {
-            aliases_by_bytes
-                .entry(bytes.clone())
-                .or_default()
-                .push(token_id);
+        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+        let total_started_at = profile.then(std::time::Instant::now);
+        let collect_started_at = profile.then(std::time::Instant::now);
+        // `token_bytes` is id-sorted. Runtime traversal needs byte-sorted,
+        // duplicate-collapsed leaves instead. Borrow the source byte slices
+        // until trie construction is complete: this avoids cloning every token
+        // once into a BTreeMap and again into VocabPrefixTree::build_owned.
+        let mut sorted_tokens = self
+            .token_bytes
+            .iter()
+            .map(|(&token_id, bytes)| (token_id, bytes.as_slice()))
+            .collect::<Vec<_>>();
+        let collect_ms = collect_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let sort_started_at = profile.then(std::time::Instant::now);
+        let sort_tokens = |left: &(u32, &[u8]), right: &(u32, &[u8])| {
+            left.1.cmp(right.1).then_with(|| left.0.cmp(&right.0))
+        };
+        if rayon::current_num_threads() == 1 {
+            sorted_tokens.sort_unstable_by(sort_tokens);
+        } else {
+            sorted_tokens.par_sort_unstable_by(sort_tokens);
         }
 
-        let mut aliases_by_canonical = BTreeMap::<u32, Box<[u32]>>::new();
-        let mut trie_entries = Vec::with_capacity(aliases_by_bytes.len());
-        for (bytes, mut token_ids) in aliases_by_bytes {
-            token_ids.sort_unstable();
-            let canonical = token_ids[0];
-            aliases_by_canonical.insert(canonical, token_ids.into_boxed_slice());
+        let sort_ms = sort_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let aliases_started_at = profile.then(std::time::Instant::now);
+        let max_token_id = self
+            .token_bytes
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(0) as usize;
+        let mut token_aliases = Vec::with_capacity(max_token_id.saturating_add(1));
+        token_aliases.resize_with(max_token_id.saturating_add(1), || None);
+        let mut trie_entries = Vec::with_capacity(sorted_tokens.len());
+
+        let mut start = 0usize;
+        while start < sorted_tokens.len() {
+            let bytes = sorted_tokens[start].1;
+            let canonical = sorted_tokens[start].0;
+            let mut end = start + 1;
+            while end < sorted_tokens.len() && sorted_tokens[end].1 == bytes {
+                end += 1;
+            }
+
+            let aliases = if end == start + 1 {
+                PackedDynamicMaskTokenAliases::Single(canonical)
+            } else {
+                PackedDynamicMaskTokenAliases::Many(
+                    sorted_tokens[start..end]
+                        .iter()
+                        .map(|(token_id, _)| *token_id)
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                )
+            };
+            token_aliases[canonical as usize] = Some(aliases);
             trie_entries.push((canonical as usize, bytes));
+            start = end;
         }
 
-        DynamicMaskVocab {
-            trie: Arc::new(crate::ds::vocab_prefix_tree::VocabPrefixTree::build_owned(
-                trie_entries,
-            )),
-            token_ids: Arc::new(aliases_by_canonical),
+        let aliases_ms = aliases_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let trie_started_at = profile.then(std::time::Instant::now);
+        let trie = Self::build_dynamic_mask_trie(&trie_entries);
+        let trie_ms = trie_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        if let Some(total_started_at) = total_started_at {
+            let alias_groups = token_aliases.iter().flatten().count();
+            let alias_many = token_aliases
+                .iter()
+                .flatten()
+                .filter(|aliases| matches!(aliases, PackedDynamicMaskTokenAliases::Many(_)))
+                .count();
+            eprintln!(
+                "[glrmask/profile][runtime_dynamic_vocab] tokens={} unique_bytes={} aliases={} alias_many={} collect_ms={:.3} sort_ms={:.3} aliases_ms={:.3} trie_ms={:.3} trie_nodes={} trie_edges={} trie_bytes={} total_ms={:.3}",
+                self.token_bytes.len(),
+                trie_entries.len(),
+                alias_groups,
+                alias_many,
+                collect_ms,
+                sort_ms,
+                aliases_ms,
+                trie_ms,
+                trie.nodes.len(),
+                trie.edges.len(),
+                trie.edge_bytes_len(),
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
         }
+        DynamicMaskVocab::from_packed(Arc::new(trie), Arc::new(token_aliases))
+    }
+
+    #[inline]
+    fn dynamic_mask_lcp_len(left: &[u8], right: &[u8], from: usize) -> usize {
+        let max_len = left.len().min(right.len());
+        let mut index = from;
+        while index < max_len && left[index] == right[index] {
+            index += 1;
+        }
+        index
+    }
+
+    fn build_dynamic_mask_trie_children(
+        entries: &[(usize, &[u8])],
+        parent_prefix_len: usize,
+        parent_node_id: u32,
+        trie: &mut DynamicMaskTrie,
+    ) {
+        let mut child_edges = SmallVec::<[DynamicMaskTrieEdge; 4]>::new();
+        let mut index = 0usize;
+        while index < entries.len() {
+            let group_start = index;
+            let next_byte = entries[index].1[parent_prefix_len];
+            index += 1;
+            while index < entries.len() && entries[index].1[parent_prefix_len] == next_byte {
+                index += 1;
+            }
+            let group = &entries[group_start..index];
+            let (child, child_prefix_len) =
+                Self::build_dynamic_mask_trie_node(group, parent_prefix_len, trie);
+            let (byte_start, byte_len) =
+                trie.push_edge_bytes(&group[0].1[parent_prefix_len..child_prefix_len]);
+            child_edges.push(DynamicMaskTrieEdge {
+                byte_start,
+                byte_len,
+                child,
+            });
+        }
+
+        if !child_edges.is_empty() {
+            let first_child = trie.edges.len() as u32;
+            let child_len = child_edges.len() as u32;
+            trie.edges.extend(child_edges);
+            let parent = &mut trie.nodes[parent_node_id as usize];
+            parent.first_child = first_child;
+            parent.child_len = child_len;
+        }
+    }
+
+    fn build_dynamic_mask_trie_node(
+        entries: &[(usize, &[u8])],
+        parent_prefix_len: usize,
+        trie: &mut DynamicMaskTrie,
+    ) -> (u32, usize) {
+        debug_assert!(!entries.is_empty());
+        let prefix_len = Self::dynamic_mask_lcp_len(
+            entries.first().expect("nonempty entries").1,
+            entries.last().expect("nonempty entries").1,
+            parent_prefix_len,
+        );
+        let has_token = entries[0].1.len() == prefix_len;
+        let node_id = trie.nodes.len() as u32;
+        trie.nodes.push(super::artifact::DynamicMaskTrieNode {
+            token_id: has_token.then_some(entries[0].0 as u32),
+            first_child: 0,
+            child_len: 0,
+        });
+
+        let child_entries = if has_token { &entries[1..] } else { entries };
+        if !child_entries.is_empty() {
+            Self::build_dynamic_mask_trie_children(child_entries, prefix_len, node_id, trie);
+        }
+
+        (node_id, prefix_len)
+    }
+
+    fn build_dynamic_mask_trie(entries: &[(usize, &[u8])]) -> DynamicMaskTrie {
+        let mut trie = DynamicMaskTrie::new();
+        if entries.is_empty() {
+            return trie;
+        }
+
+        let mut start = 0usize;
+        if entries[0].1.is_empty() {
+            trie.nodes[0].token_id = Some(entries[0].0 as u32);
+            start = 1;
+        }
+        if start != entries.len() {
+            Self::build_dynamic_mask_trie_children(&entries[start..], 0, 0, &mut trie);
+        }
+
+        trie
     }
 
     pub fn table_ambiguous_actions(&self) -> Vec<TableAmbiguity> {
@@ -419,63 +598,193 @@ impl Constraint {
     }
 
     pub(crate) fn rebuild_runtime_caches_impl(&mut self) {
-        self.table.rebuild_guarded_shift_index();
-        self.dynamic_mask_vocab = self.build_dynamic_mask_vocab();
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
+        let guarded_shift_started_at = profile.then(std::time::Instant::now);
+        self.table.rebuild_guarded_shift_index();
+        let guarded_shift_ms = guarded_shift_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        // This mapping is a derived cache. Reset it before scheduling the
+        // independent cache builders so the direct sparse weight-cache branch
+        // observes the same default mapping as the historical serial path.
+        self.final_mask_mapping = FinalMaskMapping::default();
+        let mut pending_dynamic_mask_vocab = std::mem::take(&mut self.dynamic_mask_vocab);
         let primary_started_at = profile.then(std::time::Instant::now);
         let (
+            dynamic_mask_vocab,
+            dynamic_vocab_reused,
+            dynamic_vocab_ms,
             internal_token_buf_masks,
+            internal_token_buf_masks_ms,
             tokenizer_fast_transitions,
+            tokenizer_fast_transitions_ms,
             (dense_mask_words, dense_masks),
+            dense_token_masks_ms,
             fast_transitions,
+            dwa_fast_transitions_ms,
+            prebuilt_weight_caches,
+            prebuilt_weight_sparse_ms,
         ) = if rayon::current_num_threads() == 1 {
+            let dynamic_vocab_started_at = profile.then(std::time::Instant::now);
+            let dynamic_vocab_reused = pending_dynamic_mask_vocab.materialize_pending_source();
+            if !pending_dynamic_mask_vocab.is_initialized() {
+                pending_dynamic_mask_vocab = self.build_dynamic_mask_vocab();
+            }
+            let dynamic_vocab_ms = dynamic_vocab_started_at
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+            let started = profile.then(std::time::Instant::now);
+            let internal_token_buf_masks = self.compute_buf_masks();
+            let internal_token_buf_masks_ms =
+                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            let started = profile.then(std::time::Instant::now);
+            let weight_token_sets = self.weight_token_set_inventory();
+            let prebuilt_weight_caches = self
+                .compute_direct_sparse_weight_token_buf_masks(&weight_token_sets.final_sets);
+            let prebuilt_weight_sparse_ms =
+                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            let started = profile.then(std::time::Instant::now);
+            let tokenizer_fast_transitions = self.compute_tokenizer_fast_transitions();
+            let tokenizer_fast_transitions_ms =
+                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            let started = profile.then(std::time::Instant::now);
+            let dense_masks = self.compute_dense_token_masks_excluding_direct_final(
+                &prebuilt_weight_caches.eligible,
+                weight_token_sets,
+            );
+            let dense_token_masks_ms =
+                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            let started = profile.then(std::time::Instant::now);
+            let fast_transitions = self.compute_fast_transitions();
+            let dwa_fast_transitions_ms =
+                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             (
-                self.compute_buf_masks(),
-                self.compute_tokenizer_fast_transitions(),
-                self.compute_dense_token_masks(),
-                self.compute_fast_transitions(),
+                pending_dynamic_mask_vocab,
+                dynamic_vocab_reused,
+                dynamic_vocab_ms,
+                internal_token_buf_masks,
+                internal_token_buf_masks_ms,
+                tokenizer_fast_transitions,
+                tokenizer_fast_transitions_ms,
+                dense_masks,
+                dense_token_masks_ms,
+                fast_transitions,
+                dwa_fast_transitions_ms,
+                prebuilt_weight_caches,
+                prebuilt_weight_sparse_ms,
             )
         } else {
-            let ((internal_token_buf_masks, tokenizer_fast_transitions), ((dense_mask_words, dense_masks), fast_transitions)) = rayon::join(
-                || rayon::join(
-                    || self.compute_buf_masks(),
-                    || self.compute_tokenizer_fast_transitions(),
-                ),
-                || rayon::join(
-                    || self.compute_dense_token_masks(),
-                    || self.compute_fast_transitions(),
-                ),
+            let (
+                ((dynamic_mask_vocab, dynamic_vocab_reused, dynamic_vocab_ms), ((tokenizer_fast_transitions, tokenizer_fast_transitions_ms), (fast_transitions, dwa_fast_transitions_ms))),
+                (((internal_token_buf_masks, internal_token_buf_masks_ms), ((dense_mask_words, dense_masks), dense_token_masks_ms)), (prebuilt_weight_caches, prebuilt_weight_sparse_ms)),
+            ) = rayon::join(
+                || {
+                    let build_dynamic_vocab = || {
+                        let started = profile.then(std::time::Instant::now);
+                        let dynamic_vocab_reused = pending_dynamic_mask_vocab.materialize_pending_source();
+                        if !pending_dynamic_mask_vocab.is_initialized() {
+                            pending_dynamic_mask_vocab = self.build_dynamic_mask_vocab();
+                        }
+                        let dynamic_vocab_ms = started
+                            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                        (pending_dynamic_mask_vocab, dynamic_vocab_reused, dynamic_vocab_ms)
+                    };
+                    let build_tokenizer_fast_transitions = || {
+                        let started = profile.then(std::time::Instant::now);
+                        let result = self.compute_tokenizer_fast_transitions();
+                        let ms = started
+                            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                        (result, ms)
+                    };
+                    let build_dwa_fast_transitions = || {
+                        let started = profile.then(std::time::Instant::now);
+                        let result = self.compute_fast_transitions();
+                        let ms = started
+                            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                        (result, ms)
+                    };
+                    rayon::join(
+                        build_dynamic_vocab,
+                        || rayon::join(build_tokenizer_fast_transitions, build_dwa_fast_transitions),
+                    )
+                },
+                || {
+                    let started = profile.then(std::time::Instant::now);
+                    let internal_token_buf_masks = self.compute_buf_masks();
+                    let internal_token_buf_masks_ms = started
+                        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                    let started = profile.then(std::time::Instant::now);
+                    let weight_token_sets = self.weight_token_set_inventory();
+                    let prebuilt_weight_caches = self
+                        .compute_direct_sparse_weight_token_buf_masks(&weight_token_sets.final_sets);
+                    let prebuilt_weight_sparse_ms = started
+                        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                    let started = profile.then(std::time::Instant::now);
+                    let (dense_mask_words, dense_masks) = self
+                        .compute_dense_token_masks_excluding_direct_final(
+                            &prebuilt_weight_caches.eligible,
+                            weight_token_sets,
+                        );
+                    let dense_token_masks_ms = started
+                        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                    (
+                        ((internal_token_buf_masks, internal_token_buf_masks_ms), ((dense_mask_words, dense_masks), dense_token_masks_ms)),
+                        (prebuilt_weight_caches, prebuilt_weight_sparse_ms),
+                    )
+                },
             );
             (
+                dynamic_mask_vocab,
+                dynamic_vocab_reused,
+                dynamic_vocab_ms,
                 internal_token_buf_masks,
+                internal_token_buf_masks_ms,
                 tokenizer_fast_transitions,
+                tokenizer_fast_transitions_ms,
                 (dense_mask_words, dense_masks),
+                dense_token_masks_ms,
                 fast_transitions,
+                dwa_fast_transitions_ms,
+                prebuilt_weight_caches,
+                prebuilt_weight_sparse_ms,
             )
         };
-        let primary_ms = primary_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-
+        let primary_ms = primary_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        self.dynamic_mask_vocab = dynamic_mask_vocab;
         self.internal_token_buf_masks = internal_token_buf_masks;
         self.word_group_buf_masks = Vec::new();
         let block_started_at = profile.then(std::time::Instant::now);
-        let block_masks = if rayon::current_num_threads() == 1 {
-            (
-                self.compute_token_block_sparse_masks(64),
-                self.compute_token_block_sparse_masks(4),
-                self.compute_token_block_sparse_masks(8),
-            )
-        } else {
-            let (word, (quad, byte)) = rayon::join(
-                || self.compute_token_block_sparse_masks(64),
-                || rayon::join(
-                    || self.compute_token_block_sparse_masks(4),
-                    || self.compute_token_block_sparse_masks(8),
-                ),
-            );
-            (word, quad, byte)
+        let build_word_blocks = || {
+            let started = profile.then(std::time::Instant::now);
+            let result = self.compute_token_block_sparse_masks(64);
+            let ms = started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            (result, ms)
         };
+        let build_quad_blocks = || {
+            let started = profile.then(std::time::Instant::now);
+            let result = self.compute_token_block_sparse_masks(4);
+            let ms = started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            (result, ms)
+        };
+        let build_byte_blocks = || {
+            let started = profile.then(std::time::Instant::now);
+            let result = self.compute_token_block_sparse_masks(8);
+            let ms = started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            (result, ms)
+        };
+        let ((word_blocks, word_block_ms), (quad_blocks, quad_block_ms), (byte_blocks, byte_block_ms)) =
+            if rayon::current_num_threads() == 1 {
+                (build_word_blocks(), build_quad_blocks(), build_byte_blocks())
+            } else {
+                let (word, (quad, byte)) = rayon::join(
+                    build_word_blocks,
+                    || rayon::join(build_quad_blocks, build_byte_blocks),
+                );
+                (word, quad, byte)
+            };
+        let block_masks = (word_blocks, quad_blocks, byte_blocks);
         let (
             (word_group_sparse_masks, word_group_sparse_total_entries, word_group_sparse_max_entries),
             (quad_group_sparse_masks, _, _),
@@ -540,7 +849,6 @@ impl Constraint {
         );
         self.word_group_buf_op_costs =
             Self::compute_word_group_buf_op_costs(&self.internal_token_buf_op_costs);
-        self.final_mask_mapping = FinalMaskMapping::default();
         let costs_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let n_light = n_internal.saturating_sub(self.heavy_token_indices.len());
         let light_total = self.total_internal_buf_cost.saturating_sub(self.heavy_total_cost);
@@ -550,11 +858,15 @@ impl Constraint {
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
         let derived_piece_started_at = profile.then(std::time::Instant::now);
-        let (weight_token_buf_masks, weight_token_sparse_buf_masks) =
-            self.compute_weight_token_buf_mask_caches();
+        let (
+            weight_token_buf_masks,
+            weight_token_sparse_buf_masks,
+            direct_sparse_weight_token_sets,
+        ) = self.compute_weight_token_buf_mask_caches_with_prebuilt_sparse(prebuilt_weight_caches);
         self.weight_token_buf_masks = weight_token_buf_masks;
         let weight_buf_ms = derived_piece_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         self.weight_token_sparse_buf_masks = weight_token_sparse_buf_masks;
+        self.direct_sparse_weight_token_sets = direct_sparse_weight_token_sets;
         let weight_sparse_ms = 0.0;
         self.dwa_fast_transitions = fast_transitions;
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
@@ -564,7 +876,7 @@ impl Constraint {
         let seed_ms = seed_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if let Some(total_started_at) = total_started_at {
             eprintln!(
-                "[glrmask/profile][runtime_finalize_derived] pair_ms={:.3} quad_ms={:.3} super_ms={:.3} mega_ms={:.3} giga_ms={:.3} all_tokens_ms={:.3} heavy_ms={:.3} flat_ms={:.3} costs_ms={:.3} weight_buf_ms={:.3} weight_sparse_ms={:.3} final_weight_sets={} final_weight_sparse_sets={}",
+                "[glrmask/profile][runtime_finalize_derived] pair_ms={:.3} quad_ms={:.3} super_ms={:.3} mega_ms={:.3} giga_ms={:.3} all_tokens_ms={:.3} heavy_ms={:.3} flat_ms={:.3} costs_ms={:.3} prebuilt_weight_sparse_ms={:.3} weight_buf_ms={:.3} weight_sparse_ms={:.3} final_weight_sets={} final_weight_sparse_sets={} direct_sparse_weight_sets={}",
                 pair_ms,
                 quad_ms,
                 super_ms,
@@ -574,14 +886,26 @@ impl Constraint {
                 heavy_ms,
                 flat_ms,
                 costs_ms,
+                prebuilt_weight_sparse_ms,
                 weight_buf_ms,
                 weight_sparse_ms,
                 self.weight_token_buf_masks.len(),
                 self.weight_token_sparse_buf_masks.len(),
+                self.direct_sparse_weight_token_sets.len(),
             );
             eprintln!(
-                "[glrmask/profile][runtime_finalize] primary_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][runtime_finalize] guarded_shift_ms={:.3} dynamic_mask_vocab_ms={:.3} dynamic_mask_vocab_reused={} internal_token_buf_masks_ms={:.3} tokenizer_fast_transitions_ms={:.3} dense_token_masks_ms={:.3} dwa_fast_transitions_ms={:.3} primary_ms={:.3} word_block_masks_ms={:.3} quad_block_masks_ms={:.3} byte_block_masks_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} total_ms={:.3}",
+                guarded_shift_ms,
+                dynamic_vocab_ms,
+                dynamic_vocab_reused,
+                internal_token_buf_masks_ms,
+                tokenizer_fast_transitions_ms,
+                dense_token_masks_ms,
+                dwa_fast_transitions_ms,
                 primary_ms,
+                word_block_ms,
+                quad_block_ms,
+                byte_block_ms,
                 block_ms,
                 derived_ms,
                 seed_ms,
@@ -754,15 +1078,15 @@ impl Constraint {
         }
     }
 
-    fn build_sparse_buf_mask_from_internal_tokens(
-        &self,
+    fn build_sparse_buf_mask_from_internal_tokens_with_masks(
         internal_tokens: &RangeSetBlaze<u32>,
+        internal_token_buf_masks: &[InternalTokenBufMasks],
         scratch: &mut [u32],
         touched: &mut Vec<u16>,
     ) -> Box<[(u16, u32)]> {
         debug_assert!(touched.is_empty());
         for internal_token in internal_tokens.iter() {
-            if let Some(token_masks) = self.internal_token_buf_masks.get(internal_token as usize) {
+            if let Some(token_masks) = internal_token_buf_masks.get(internal_token as usize) {
                 for &(word, mask) in token_masks {
                     let slot = &mut scratch[word as usize];
                     if *slot == 0 {
@@ -782,15 +1106,22 @@ impl Constraint {
         sparse
     }
 
+    fn build_sparse_buf_mask_from_internal_tokens(
+        &self,
+        internal_tokens: &RangeSetBlaze<u32>,
+        scratch: &mut [u32],
+        touched: &mut Vec<u16>,
+    ) -> Box<[(u16, u32)]> {
+        Self::build_sparse_buf_mask_from_internal_tokens_with_masks(
+            internal_tokens,
+            &self.internal_token_buf_masks,
+            scratch,
+            touched,
+        )
+    }
+
     fn token_set_cardinality_at_most(tokens: &RangeSetBlaze<u32>, limit: u64) -> bool {
-        let mut total = 0u64;
-        for range in tokens.ranges() {
-            total = total.saturating_add(u64::from(*range.end() - *range.start()) + 1);
-            if total > limit {
-                return false;
-            }
-        }
-        true
+        tokens.len() <= limit
     }
 
     #[inline(always)]
@@ -801,6 +1132,11 @@ impl Constraint {
         buf: &mut [u32],
     ) -> bool {
         let key = Arc::as_ptr(token_set) as usize;
+        if self.direct_sparse_weight_token_sets.contains(&key) {
+            return self
+                .or_dense_token_set_to_buf_sparse(dense, token_set, 2048, buf)
+                .unwrap_or(false);
+        }
         let sparse_mask = self.weight_token_sparse_buf_masks.get(&key);
         let dense_mask = self.weight_token_buf_masks.get(&key);
         if sparse_mask.is_none() && dense_mask.is_none() {
@@ -877,6 +1213,23 @@ impl Constraint {
         token_set: &Arc<RangeSetBlaze<u32>>,
     ) -> bool {
         let key = Arc::as_ptr(token_set) as usize;
+        if self.direct_sparse_weight_token_sets.contains(&key) {
+            for range in token_set.ranges() {
+                let start = *range.start() as usize;
+                let end = *range.end() as usize;
+                for internal_token in start..=end {
+                    let word = internal_token / 64;
+                    let bit = internal_token % 64;
+                    if dense
+                        .get(word)
+                        .is_none_or(|dense_word| (dense_word & (1u64 << bit)) == 0)
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
         if !self.weight_token_buf_masks.contains_key(&key)
             && !self.weight_token_sparse_buf_masks.contains_key(&key)
         {
@@ -896,51 +1249,160 @@ impl Constraint {
         true
     }
 
-    /// Build dense and sparse per-weight buffer-mask caches in one expansion.
-    ///
-    /// The sparse cache is a subset representation of the dense cache. Building
-    /// both independently duplicated the internal-token-to-buffer expansion for
-    /// every sparse candidate.
-    fn compute_weight_token_buf_mask_caches(
+    fn weight_token_set_inventory(&self) -> WeightTokenSetInventory<'_> {
+        let mut final_keys: FxHashSet<usize> = FxHashSet::default();
+        let mut final_sets = Vec::new();
+        let mut transition_sets: FxHashMap<usize, &RangeSetBlaze<u32>> = FxHashMap::default();
+
+        for state in self.parser_dwa.states() {
+            for (_, weight) in state.transitions.values() {
+                for (_tsid_range, token_set) in weight.0.range_values() {
+                    let key = Arc::as_ptr(token_set) as usize;
+                    transition_sets.entry(key).or_insert(token_set.as_ref());
+                }
+            }
+            let Some(final_weight) = &state.final_weight else {
+                continue;
+            };
+            if final_weight.is_full() || final_weight.is_empty() {
+                continue;
+            }
+            for (_tsid_range, token_set) in final_weight.0.range_values() {
+                let key = Arc::as_ptr(token_set) as usize;
+                if final_keys.insert(key) {
+                    final_sets.push((key, token_set));
+                }
+            }
+        }
+
+        WeightTokenSetInventory {
+            final_sets,
+            transition_sets,
+        }
+    }
+
+    /// Classify final-weight token sets for the direct runtime-intersection
+    /// path. The runtime itself performs an exact intersection with the active
+    /// dense state, so no final output buffer is needed for sets under its
+    /// fixed work cap.
+    fn compute_direct_sparse_weight_token_buf_masks(
         &self,
-    ) -> (DenseWeightBufMaskCache, SparseWeightBufMaskCache) {
+        final_token_sets: &[(usize, &Arc<RangeSetBlaze<u32>>) ],
+    ) -> DirectSparseWeightBufCaches {
+        let buf_words = self.mask_len();
+        let direct_sparse = buf_words != 0
+            && buf_words <= u16::MAX as usize
+            && Self::direct_sparse_weight_buf_cache_enabled()
+            && self.final_mask_mapping.internal_len() == 0;
+        let sparse_cost_limit = ((buf_words / 2).min(2048)) as u64;
+
+        #[derive(Default)]
+        struct SparseBatch {
+            eligible: Vec<usize>,
+            fallback: Vec<(usize, Arc<RangeSetBlaze<u32>>)>,
+            small_cardinality: usize,
+        }
+
+        impl SparseBatch {
+            fn merge_from(&mut self, mut other: Self) {
+                self.eligible.append(&mut other.eligible);
+                self.fallback.append(&mut other.fallback);
+                self.small_cardinality += other.small_cardinality;
+            }
+        }
+
+        let build_one = |batch: &mut SparseBatch,
+                         &(key, token_set): &(usize, &Arc<RangeSetBlaze<u32>>)| {
+            if direct_sparse
+                && Self::token_set_cardinality_at_most(token_set.as_ref(), sparse_cost_limit)
+            {
+                batch.small_cardinality += 1;
+                batch.eligible.push(key);
+            } else {
+                batch.fallback.push((key, Arc::clone(token_set)));
+            }
+        };
+
+        let batch = if rayon::current_num_threads() == 1 {
+            let mut batch = SparseBatch::default();
+            for entry in final_token_sets {
+                build_one(&mut batch, entry);
+            }
+            batch
+        } else {
+            final_token_sets
+                .par_iter()
+                .fold(SparseBatch::default, |mut batch, entry| {
+                    build_one(&mut batch, entry);
+                    batch
+                })
+                .reduce(SparseBatch::default, |mut left, right| {
+                    left.merge_from(right);
+                    left
+                })
+        };
+
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][runtime_direct_sparse] final_sets={} direct_sets={} fallback_sets={}",
+                batch.eligible.len() + batch.fallback.len(),
+                batch.eligible.len(),
+                batch.fallback.len(),
+            );
+        }
+        DirectSparseWeightBufCaches {
+            eligible: batch.eligible.into_iter().collect(),
+            fallback: batch.fallback,
+        }
+    }
+
+    /// Build the small residual set of final-weight output buffers. All direct
+    /// sparse sets have already been classified, so this path visits only the
+    /// token sets that genuinely require a materialized dense or sparse output.
+    fn compute_weight_token_buf_mask_caches_with_prebuilt_sparse(
+        &self,
+        mut prebuilt: DirectSparseWeightBufCaches,
+    ) -> (
+        DenseWeightBufMaskCache,
+        SparseWeightBufMaskCache,
+        DirectSparseWeightTokenSetCache,
+    ) {
+        #[derive(Default)]
+        struct CacheBatch {
+            dense: Vec<(usize, Box<[u32]>)>,
+            sparse: Vec<(usize, Box<[(u16, u32)]>)>,
+        }
+
+        impl CacheBatch {
+            fn merge_from(&mut self, mut other: Self) {
+                self.dense.append(&mut other.dense);
+                self.sparse.append(&mut other.sparse);
+            }
+        }
+
         let buf_words = self.mask_len();
         if buf_words == 0 {
-            return (FxHashMap::default(), FxHashMap::default());
+            return (
+                FxHashMap::default(),
+                FxHashMap::default(),
+                prebuilt.eligible,
+            );
         }
 
         let can_store_sparse = buf_words <= u16::MAX as usize;
         let sparse_cost_limit = (buf_words / 2) as u64;
-        let final_dense_masks = self.final_weight_token_dense_masks();
-        let direct_sparse = Self::direct_sparse_weight_buf_cache_enabled()
-            && self.final_mask_mapping.internal_len() == 0;
-        let mut dense_masks = FxHashMap::default();
-        let mut sparse_masks = FxHashMap::default();
-        let mut sparse_scratch = vec![0u32; buf_words];
-        let mut sparse_touched = Vec::<u16>::new();
+        let dense_masks = &self.weight_token_dense_masks;
 
-        for (&key, token_set, dense) in final_dense_masks {
-            // Most final-weight token sets are tiny. Build their sparse output
-            // cache directly from the source set instead of scanning the dense
-            // internal-token bitmap that the runtime keeps for containment.
-            if can_store_sparse
-                && direct_sparse
-                && Self::token_set_cardinality_at_most(token_set, sparse_cost_limit)
-            {
-                let sparse = self.build_sparse_buf_mask_from_internal_tokens(
-                    token_set,
-                    &mut sparse_scratch,
-                    &mut sparse_touched,
-                );
-                if sparse.len() < buf_words / 2 {
-                    sparse_masks.insert(key, sparse);
-                    continue;
-                }
-            }
-
+        let build_one = |batch: &mut CacheBatch,
+                         (key, _token_set): (usize, Arc<RangeSetBlaze<u32>>)| {
+            let Some(dense) = dense_masks.get(&key) else {
+                return;
+            };
             let estimated_cost = self.estimate_internal_dense_to_buf_cost(dense);
             if estimated_cost == 0 {
-                continue;
+                return;
             }
 
             let try_sparse = can_store_sparse && estimated_cost < sparse_cost_limit;
@@ -950,15 +1412,39 @@ impl Constraint {
             if try_sparse {
                 let sparse = Self::dense_buf_to_sparse_entries(&buf);
                 if sparse.len() < buf_words / 2 {
-                    sparse_masks.insert(key, sparse);
-                    continue;
+                    batch.sparse.push((key, sparse));
+                    return;
                 }
             }
 
-            dense_masks.insert(key, buf.into_boxed_slice());
-        }
+            batch.dense.push((key, buf.into_boxed_slice()));
+        };
 
-        (dense_masks, sparse_masks)
+        let fallback = std::mem::take(&mut prebuilt.fallback);
+        let batch = if rayon::current_num_threads() == 1 {
+            let mut batch = CacheBatch::default();
+            for entry in fallback {
+                build_one(&mut batch, entry);
+            }
+            batch
+        } else {
+            fallback
+                .into_par_iter()
+                .fold(CacheBatch::default, |mut batch, entry| {
+                    build_one(&mut batch, entry);
+                    batch
+                })
+                .reduce(CacheBatch::default, |mut left, right| {
+                    left.merge_from(right);
+                    left
+                })
+        };
+
+        (
+            batch.dense.into_iter().collect(),
+            batch.sparse.into_iter().collect(),
+            prebuilt.eligible,
+        )
     }
 
     fn dense_buf_to_sparse_entries(buf: &[u32]) -> Box<[(u16, u32)]> {
@@ -1091,22 +1577,65 @@ impl Constraint {
         }
     }
 
+    // For narrow token sets, RangeSetBlaze word-span intersection is less
+    // work than scanning the full dense mask. Keep dense bitmaps only for wide
+    // transition sets and for residual final sets that need contained-mask IO.
+    const DENSE_WEIGHT_PRECOMPUTE_MIN_WORD_SPANS: usize = 16;
+
+    fn token_set_dense_word_span_count(
+        tokens: &RangeSetBlaze<u32>,
+        dense_word_count: usize,
+    ) -> usize {
+        if dense_word_count == 0 {
+            return 0;
+        }
+        let max_token = dense_word_count.saturating_mul(64).saturating_sub(1);
+        let mut count = 0usize;
+        for range in tokens.ranges() {
+            let start = *range.start() as usize;
+            if start > max_token {
+                continue;
+            }
+            let end = (*range.end() as usize).min(max_token);
+            count = count.saturating_add(end / 64 - start / 64 + 1);
+        }
+        count
+    }
+
     fn compute_dense_token_masks(&self) -> (usize, DenseWeightMaskCache) {
+        let inventory = self.weight_token_set_inventory();
+        self.compute_dense_token_masks_excluding_direct_final(
+            &DirectSparseWeightTokenSetCache::default(),
+            inventory,
+        )
+    }
+
+    fn compute_dense_token_masks_excluding_direct_final(
+        &self,
+        direct_final_sets: &DirectSparseWeightTokenSetCache,
+        inventory: WeightTokenSetInventory<'_>,
+    ) -> (usize, DenseWeightMaskCache) {
         let internal_token_dense_words = self.internal_token_to_tokens.len().div_ceil(64);
         if internal_token_dense_words == 0 {
             return (0, DenseWeightMaskCache::default());
         }
 
-        let mut unique_sets: FxHashMap<usize, &RangeSetBlaze<u32>> = FxHashMap::default();
-        for state in self.parser_dwa.states() {
-            if let Some(final_weight) = &state.final_weight {
-                Self::collect_weight_token_sets(final_weight, &mut unique_sets);
-            }
-            for (_, weight) in state.transitions.values() {
-                Self::collect_weight_token_sets(weight, &mut unique_sets);
+        let mut unique_sets = inventory.transition_sets;
+        let mut residual_final_sets: DirectSparseWeightTokenSetCache = Default::default();
+        for (key, token_set) in inventory.final_sets {
+            if !direct_final_sets.contains(&key) {
+                // These sets may need the contained-output cache, which
+                // requires their dense form regardless of range width.
+                residual_final_sets.insert(key);
+                unique_sets.entry(key).or_insert(token_set.as_ref());
             }
         }
 
+        unique_sets.retain(|key, token_set| {
+            residual_final_sets.contains(key)
+                || Self::token_set_dense_word_span_count(token_set, internal_token_dense_words)
+                    >= Self::DENSE_WEIGHT_PRECOMPUTE_MIN_WORD_SPANS
+        });
         let build = |(key, token_set): (usize, &RangeSetBlaze<u32>)| {
             (
                 key,
@@ -1206,34 +1735,6 @@ impl Constraint {
         }
     }
 
-    fn final_weight_token_dense_masks(&self) -> Vec<(&usize, &RangeSetBlaze<u32>, &DenseWords)> {
-        let mut keys: FxHashMap<usize, ()> = FxHashMap::default();
-        let mut dense_masks = Vec::new();
-
-        for state in self.parser_dwa.states() {
-            let Some(final_weight) = &state.final_weight else {
-                continue;
-            };
-            if final_weight.is_full() || final_weight.is_empty() {
-                continue;
-            }
-            // The global pointer set already removes duplicates. Do not build a
-            // temporary per-weight `unique_token_sets` vector first.
-            for (_tsid_range, token_set) in final_weight.0.range_values() {
-                let token_set = token_set.as_ref();
-                let key = token_set as *const RangeSetBlaze<u32> as usize;
-                if keys.insert(key, ()).is_some() {
-                    continue;
-                }
-                if let Some((stored_key, dense)) = self.weight_token_dense_masks.get_key_value(&key)
-                {
-                    dense_masks.push((stored_key, token_set, dense));
-                }
-            }
-        }
-
-        dense_masks
-    }
 
     fn dense_words_from_internal_set_with_words(
         internal_tokens: &RangeSetBlaze<u32>,

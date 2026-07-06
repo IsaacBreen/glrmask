@@ -89,6 +89,7 @@ impl RuntimePayloadV1 {
             weight_token_dense_masks: Default::default(),
             weight_token_buf_masks: Default::default(),
             weight_token_sparse_buf_masks: Default::default(),
+            direct_sparse_weight_token_sets: Default::default(),
             seed_terminal_dense: Default::default(),
             seed_universe_dense: empty_dense_words(),
             dwa_fast_transitions: Vec::new(),
