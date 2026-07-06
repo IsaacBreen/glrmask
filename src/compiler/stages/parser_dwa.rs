@@ -2267,3 +2267,65 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 
     minimized
 }
+
+
+/// Build the parser-side NWA for one terminal-DWA point, but deliberately do
+/// not run parser-DWA default/fallback normalization yet.  Build-graph plans
+/// merge at this representation so DEFAULT_LABEL is never misinterpreted as a
+/// regular alphabet symbol.
+pub(crate) fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates(
+    terminal_dwa: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    templates: Templates,
+) -> NWA {
+    let Some((mut parser_nwa, _profile)) =
+        build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates)
+    else {
+        return NWA::new(0, 0);
+    };
+    resolve_negative_codes_in_nwa(&mut parser_nwa);
+    parser_nwa
+}
+
+/// Finalize one merged parser-side NWA into the runtime DWA representation.
+///
+/// This owns the parser-specific support/default/fallback pass.  In particular,
+/// callers must merge parser points *before* this function; a finalized parser
+/// DWA can contain DEFAULT_LABEL transitions whose scope depends on the support
+/// sets reconstructed here.
+pub(crate) fn finalize_parser_dwa_from_nwa(
+    table: &GLRTable,
+    parser_nwa: &NWA,
+) -> DWA {
+    if parser_nwa.start_states().is_empty() {
+        return DWA::new(0, 0);
+    }
+
+    let determinized = determinize_with_supports(parser_nwa, Some(table.num_states));
+    let mut parser_dwa_pre_minimize = determinized.dwa;
+    let possible_by_state = build_possible_outgoing_ids_by_state(
+        parser_nwa,
+        &determinized.supports,
+        table.num_states,
+    );
+    optimize_parser_dwa_defaults(
+        &mut parser_dwa_pre_minimize,
+        &possible_by_state,
+        table.num_states,
+    );
+    subtract_final_weights_from_outgoing_dwa(&mut parser_dwa_pre_minimize);
+    parser_dwa_pre_minimize = determinize_parser_dwa_with_fallbacks(
+        &parser_dwa_pre_minimize,
+        &possible_by_state,
+        table.num_states,
+    );
+
+    if should_skip_parser_dwa_minimization(
+        parser_dwa_pre_minimize.states().len(),
+        parser_dwa_pre_minimize.num_transitions(),
+    ) {
+        parser_dwa_pre_minimize
+    } else {
+        minimize(&parser_dwa_pre_minimize)
+    }
+}

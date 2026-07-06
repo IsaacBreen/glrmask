@@ -33,8 +33,30 @@ use l2p::equivalence_analysis::state_equivalence::{
 };
 use types::{
     compile_profile_enabled, compile_profile_uses_serial_partition_schedule,
-    LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaPhaseProfile,
+    LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaBranch, TerminalDwaPhaseProfile,
 };
+
+/// A directly-built terminal point addressable by a DWA build graph.
+#[derive(Debug)]
+pub(crate) struct TerminalDwaLeaf {
+    pub(crate) partition: usize,
+    pub(crate) branch: TerminalDwaBranch,
+    pub(crate) output: LocalIdMapTerminalDwa,
+}
+
+/// Terminal leaves plus the build metadata shared by every merge arrangement.
+#[derive(Debug)]
+pub(crate) struct TerminalDwaLeaves {
+    pub(crate) leaves: Vec<TerminalDwaLeaf>,
+    pub(crate) profile: TerminalDwaPhaseProfile,
+    pub(crate) num_tokenizer_states: usize,
+    pub(crate) max_token_id: u32,
+}
+
+enum TerminalDwaBuildOutput {
+    Merged(MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile),
+    Leaves(TerminalDwaLeaves),
+}
 
 fn l2p_partition_cost_fn_from_env() -> classify::L2pPartitionCostFn {
     match std::env::var("GLRMASK_L2P_COST_FN").as_deref() {
@@ -306,6 +328,7 @@ pub(crate) fn build_global_max_length_state_map(
 /// 2. Builds each partition's `(InternalIdMap, DWA)` in parallel via
 ///    [`partition::build_partition_id_map_and_terminal_dwa`].
 /// 3. Merges the 3 results via [`merge::merge_id_maps_and_terminal_dwas`].
+/// Build the legacy global terminal DWA.  This remains the no-config path.
 pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -318,6 +341,69 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     global_max_length_state_map: &ManyToOneIdMap,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
 ) -> (MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile) {
+    match build_id_map_and_terminal_dwa_impl(
+        tokenizer,
+        vocab,
+        terminal_coloring,
+        use_terminal_coloring,
+        ignore_terminal,
+        grammar,
+        disallowed_follows,
+        flat_trans,
+        global_max_length_state_map,
+        external_classify_cache,
+        false,
+    ) {
+        TerminalDwaBuildOutput::Merged(terminal_dwa, profile) => (terminal_dwa, profile),
+        TerminalDwaBuildOutput::Leaves(_) => unreachable!("legacy terminal build requested leaves"),
+    }
+}
+
+/// Build independently movable L1/L2P terminal-DWA leaves.  The caller owns
+/// every later terminal merge and parser conversion through `dwa_build_plan`.
+pub(crate) fn build_terminal_dwa_leaves_with_precomputed_global_max_length(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    flat_trans: Arc<[u32]>,
+    global_max_length_state_map: &ManyToOneIdMap,
+    external_classify_cache: Option<&classify::SharedClassifyCache>,
+) -> TerminalDwaLeaves {
+    match build_id_map_and_terminal_dwa_impl(
+        tokenizer,
+        vocab,
+        terminal_coloring,
+        use_terminal_coloring,
+        ignore_terminal,
+        grammar,
+        disallowed_follows,
+        flat_trans,
+        global_max_length_state_map,
+        external_classify_cache,
+        true,
+    ) {
+        TerminalDwaBuildOutput::Leaves(leaves) => leaves,
+        TerminalDwaBuildOutput::Merged(_, _) => unreachable!("leaf terminal build unexpectedly merged"),
+    }
+}
+
+fn build_id_map_and_terminal_dwa_impl(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    flat_trans: Arc<[u32]>,
+    global_max_length_state_map: &ManyToOneIdMap,
+    external_classify_cache: Option<&classify::SharedClassifyCache>,
+    separate_branches: bool,
+) -> TerminalDwaBuildOutput {
     let total_started_at = Instant::now();
     let mut profile = TerminalDwaPhaseProfile::default();
 
@@ -509,7 +595,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     use rayon::prelude::*;
     let build_partition = |idx: usize,
                            sub_vocab: &Vocab|
-     -> (Option<(LocalIdMapTerminalDwa, f64)>, usize) {
+     -> (Option<(partition::PartitionTerminalDwaBuild, f64)>, usize) {
         let started_at = Instant::now();
         let label = format!("p{}", idx);
         let result = partition::build_partition_id_map_and_terminal_dwa(
@@ -529,13 +615,14 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             Some(&shared_original_vocab_analysis_dfa_cache),
             Some(&shared_transition_cache),
             Some(&shared_classify_cache),
+            separate_branches,
         )
-        .map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
+        .map(|build| (build, started_at.elapsed().as_secs_f64() * 1000.0));
         (result, idx)
     };
     let serial_profile_partition_schedule = compile_profile_uses_serial_partition_schedule();
     let partition_build_started_at = Instant::now();
-    let partition_results: Vec<(Option<(LocalIdMapTerminalDwa, f64)>, usize)> =
+    let partition_results: Vec<(Option<(partition::PartitionTerminalDwaBuild, f64)>, usize)> =
         if serial_profile_partition_schedule {
             sub_vocabs
                 .iter()
@@ -563,15 +650,74 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     };
     let dominant_partition_profile = partition_results
         .iter()
-        .filter_map(|(result, _)| result.as_ref().map(|(pair, ms)| (pair.profile, *ms)))
+        .filter_map(|(result, _)| {
+            result.as_ref().map(|(build, ms)| {
+                let profile = match build {
+                    partition::PartitionTerminalDwaBuild::Merged(pair) => pair.profile,
+                    partition::PartitionTerminalDwaBuild::Branches(branches) => branches.profile,
+                };
+                (profile, *ms)
+            })
+        })
         .max_by(|(_, left_ms), (_, right_ms)| left_ms.total_cmp(right_ms))
         .map(|(phase_profile, _)| phase_profile)
         .unwrap_or_default();
 
-    // Collect non-None results.
+    let partition_result_finalize_ms =
+        partition_result_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
+    let num_tokenizer_states = tokenizer.num_states() as usize;
+    let max_token_id = vocab.max_token_id();
+
+    if separate_branches {
+        let mut leaves = Vec::new();
+        for (result, partition) in partition_results {
+            let Some((build, _elapsed_ms)) = result else {
+                continue;
+            };
+            let partition::PartitionTerminalDwaBuild::Branches(branches) = build else {
+                unreachable!("leaf terminal build returned a legacy local merge");
+            };
+            for (branch, output) in branches.branches {
+                leaves.push(TerminalDwaLeaf {
+                    partition,
+                    branch,
+                    output,
+                });
+            }
+        }
+        profile.add_assign(dominant_partition_profile);
+        profile.split_terminal_dwa_total_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
+        if compile_profile_enabled() {
+            let detail = leaves
+                .iter()
+                .map(|leaf| format!("p{}.{}", leaf.partition, leaf.branch.as_str()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            eprintln!(
+                "[glrmask/profile][terminal_dwa_leaves] leaves={} {} partition_vocab_ms={:.3} partition_build_wall_ms={:.3} partition_result_finalize_ms={:.3} total_ms={:.3}",
+                leaves.len(),
+                detail,
+                partition_vocab_ms,
+                partition_build_wall_ms,
+                partition_result_finalize_ms,
+                profile.split_terminal_dwa_total_ms,
+            );
+        }
+        return TerminalDwaBuildOutput::Leaves(TerminalDwaLeaves {
+            leaves,
+            profile,
+            num_tokenizer_states,
+            max_token_id,
+        });
+    }
+
+    // Collect non-None legacy partition results.
     let mut pairs: Vec<LocalIdMapTerminalDwa> = Vec::new();
     for (result, _idx) in partition_results {
-        if let Some((pair, _)) = result {
+        if let Some((build, _)) = result {
+            let partition::PartitionTerminalDwaBuild::Merged(pair) = build else {
+                unreachable!("legacy terminal build returned branch leaves");
+            };
             pairs.push(pair);
         }
     }
@@ -590,16 +736,11 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
                 representative_original_ids: Vec::new(),
             },
         };
-        return (
+        return TerminalDwaBuildOutput::Merged(
             MappedArtifact::new(TerminalAutomaton::Dwa(DWA::new(1, 0)), empty_map),
             profile,
         );
     }
-
-    let partition_result_finalize_ms =
-        partition_result_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
-    let num_tokenizer_states = tokenizer.num_states() as usize;
-    let max_token_id = vocab.max_token_id();
 
     let did_global_merge = pairs.len() > 1;
     let merge_started_at = Instant::now();
@@ -707,7 +848,10 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
         );
     }
 
-    (MappedArtifact::new(merged_terminal_automaton, merged_id_map), profile)
+    TerminalDwaBuildOutput::Merged(
+        MappedArtifact::new(merged_terminal_automaton, merged_id_map),
+        profile,
+    )
 }
 
 pub(crate) fn build_id_map_and_terminal_dwa(

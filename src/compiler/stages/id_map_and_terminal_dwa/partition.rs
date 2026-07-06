@@ -16,8 +16,8 @@ use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     classify_terminal_path_lengths, split_vocab_for_active_l2p_terminals,
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::types::{
-    LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaPhaseProfile, TerminalPathLength,
-    compile_profile_enabled, compile_profile_join,
+    LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaBranch, TerminalDwaPhaseProfile,
+    TerminalPathLength, compile_profile_enabled, compile_profile_join,
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_local_id_maps_and_terminal_dwas;
 use crate::ds::bitset::BitSet;
@@ -34,6 +34,22 @@ fn split_l2p_vocab_enabled() -> bool {
             })
             .unwrap_or(true)
     })
+}
+
+/// Independently addressable terminal-DWA outputs from one vocabulary partition.
+///
+/// `L2p` remains one graph point even when its token split uses both the full
+/// L2P builder and the cheap single-token L1-style builder internally.
+#[derive(Debug)]
+pub(crate) struct PartitionTerminalDwaBranches {
+    pub(crate) branches: Vec<(TerminalDwaBranch, LocalIdMapTerminalDwa)>,
+    pub(crate) profile: TerminalDwaPhaseProfile,
+}
+
+#[derive(Debug)]
+pub(crate) enum PartitionTerminalDwaBuild {
+    Merged(LocalIdMapTerminalDwa),
+    Branches(PartitionTerminalDwaBranches),
 }
 
 /// Build an id_map and terminal DWA for a single vocab partition.
@@ -61,7 +77,8 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     shared_original_vocab_analysis_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_transition_cache: Option<&std::sync::OnceLock<super::l2p::equivalence_analysis::compat::FlatTransitionCache>>,
     shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
-) -> Option<LocalIdMapTerminalDwa> {
+    separate_branches: bool,
+) -> Option<PartitionTerminalDwaBuild> {
     if vocab.is_empty() {
         return None;
     }
@@ -128,7 +145,11 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             shared_classify_cache,
         )
     });
-    let combine_no_boundary_l2p_single_with_l1 = has_l1
+    // The legacy merged path intentionally folds the L2+ single-token branch
+    // into L1.  Graph plans instead keep it inside the L2+ leaf so that L1 and
+    // L2+ remain independently movable points.
+    let combine_no_boundary_l2p_single_with_l1 = !separate_branches
+        && has_l1
         && l2p_vocab_split
             .as_ref()
             .is_some_and(|split| split.boundary_tokens == 0 && split.single_tokens != 0);
@@ -321,7 +342,78 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         return None;
     };
 
-    // Collect non-None results and merge.
+    let num_tokenizer_states = tokenizer.num_states() as usize;
+    let max_token_id = vocab.max_token_id();
+    let post_branch_ms = post_branch_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if separate_branches {
+        let branch_merge_started_at = Instant::now();
+        let mut branches = Vec::new();
+        if let Some(l1) = l1_pair {
+            branches.push((TerminalDwaBranch::L1, l1));
+        }
+        if !l2p_pairs.is_empty() {
+            let l2p_dominant_profile = l2p_pairs
+                .iter()
+                .max_by(|(_, left_ms), (_, right_ms)| left_ms.total_cmp(right_ms))
+                .map(|(pair, _)| pair.profile)
+                .unwrap_or_default();
+            let l2p_inputs = l2p_pairs.into_iter().map(|(pair, _)| pair).collect::<Vec<_>>();
+            let mut l2p = if l2p_inputs.len() == 1 {
+                l2p_inputs.into_iter().next().unwrap()
+            } else {
+                merge_local_id_maps_and_terminal_dwas(
+                    l2p_inputs,
+                    num_tokenizer_states,
+                    max_token_id,
+                )
+            };
+            // Local merge profiling intentionally keeps only merge work. Restore
+            // the branch critical path so leaf-level measurements remain useful.
+            l2p.profile.add_assign(l2p_dominant_profile);
+            branches.push((TerminalDwaBranch::L2p, l2p));
+        }
+        if branches.is_empty() {
+            return None;
+        }
+
+        let mut branch_profile = dominant_branch_profile;
+        branch_profile.id_map_ms += classify_ms;
+        let branch_merge_ms = branch_merge_started_at.elapsed().as_secs_f64() * 1000.0;
+        if compile_profile_enabled() {
+            let branch_detail = branches
+                .iter()
+                .map(|(kind, pair)| format!(
+                    "{}:states={} transitions={}",
+                    kind.as_str(),
+                    pair.dwa.states().len(),
+                    pair.dwa.num_transitions(),
+                ))
+                .collect::<Vec<_>>()
+                .join(" ");
+            eprintln!(
+                "[glrmask/profile][partition_terminal_leaves] label={} {} pre_classify_setup_ms={:.3} classify_ms={:.3} routing_ms={:.3} branch_build_wall_ms={:.3} post_branch_ms={:.3} branch_merge_ms={:.3} total_ms={:.3}",
+                partition_label,
+                branch_detail,
+                pre_classify_setup_ms,
+                classify_ms,
+                routing_ms,
+                branch_build_wall_ms,
+                post_branch_ms,
+                branch_merge_ms,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return Some(PartitionTerminalDwaBuild::Branches(
+            PartitionTerminalDwaBranches {
+                branches,
+                profile: branch_profile,
+            },
+        ));
+    }
+
+    // Legacy/default behavior: merge all locally-built branch artifacts before
+    // returning the partition point.
     let mut pairs = Vec::new();
     if let Some(l1) = l1_pair {
         pairs.push(l1);
@@ -329,10 +421,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     for (l2p, _) in l2p_pairs {
         pairs.push(l2p);
     }
-    let post_branch_ms = post_branch_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let num_tokenizer_states = tokenizer.num_states() as usize;
-    let max_token_id = vocab.max_token_id();
     let merge_started_at = Instant::now();
     let mut merged = merge_local_id_maps_and_terminal_dwas(
         pairs,
@@ -383,5 +472,5 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         );
     }
 
-    Some(merged)
+    Some(PartitionTerminalDwaBuild::Merged(merged))
 }

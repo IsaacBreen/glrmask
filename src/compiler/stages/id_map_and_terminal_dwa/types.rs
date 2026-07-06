@@ -70,6 +70,25 @@ impl TerminalDwaPhaseProfile {
     }
 }
 
+/// Stable identity for a directly-built terminal-DWA branch within a vocab
+/// partition.  This is deliberately about construction provenance, not the
+/// terminal language: an L2+ branch may internally use an L1-style builder for
+/// its single-token sub-vocab, but remains an L2+ graph leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum TerminalDwaBranch {
+    L1,
+    L2p,
+}
+
+impl TerminalDwaBranch {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::L1 => "l1",
+            Self::L2p => "l2p",
+        }
+    }
+}
+
 /// Terminal path length classification for L1/L2+ split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TerminalPathLength {
