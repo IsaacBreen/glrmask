@@ -42,38 +42,64 @@ impl CharacterizationHash {
     }
 }
 
+/// Sparse, sorted active-terminal labels for one frozen output family.
+///
+/// TI partitions typically observe only a handful of terminals at a lexer
+/// state. Keeping a full active-terminal bitmap for every state therefore
+/// spends most planning time allocating and copying zero words. Raw terminal
+/// ids remain exact labels: disabled terminals are simply absent for the
+/// current iterative round.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct OutputBits(Vec<u64>);
+struct OutputBits(SmallVec<[TerminalID; 4]>);
 
 impl OutputBits {
-    fn new(words: usize) -> Self { Self(vec![0; words]) }
+    fn new(_words: usize) -> Self { Self(SmallVec::new()) }
 
-    fn set(&mut self, terminal: usize) {
-        self.0[terminal / 64] |= 1u64 << (terminal % 64);
+    fn from_active(terminals: &[TerminalID], active_terminals: &[bool]) -> Self {
+        let mut output = SmallVec::<[TerminalID; 4]>::new();
+        for &terminal in terminals {
+            if active_terminals
+                .get(terminal as usize)
+                .copied()
+                .unwrap_or(false)
+            {
+                output.push(terminal);
+            }
+        }
+        Self(output)
     }
 
     fn contains(&self, terminal: usize) -> bool {
-        (self.0[terminal / 64] & (1u64 << (terminal % 64))) != 0
+        self.0.binary_search(&(terminal as TerminalID)).is_ok()
     }
 
     fn mapped(&self, swap: Option<(usize, usize)>) -> Self {
         let Some((left, right)) = swap else { return self.clone(); };
         if left == right { return self.clone(); }
-        let left_word = left / 64;
-        let right_word = right / 64;
-        let left_mask = 1u64 << (left % 64);
-        let right_mask = 1u64 << (right % 64);
-        let left_present = (self.0[left_word] & left_mask) != 0;
-        let right_present = (self.0[right_word] & right_mask) != 0;
-        if left_present == right_present { return self.clone(); }
-        let mut words = self.0.clone();
-        words[left_word] ^= left_mask;
-        words[right_word] ^= right_mask;
-        Self(words)
+        let left = left as TerminalID;
+        let right = right as TerminalID;
+        let left_present = self.0.binary_search(&left).ok();
+        let right_present = self.0.binary_search(&right).ok();
+        if left_present.is_some() == right_present.is_some() { return self.clone(); }
+        let (source_index, replacement) = if let Some(index) = left_present {
+            (index, right)
+        } else {
+            (right_present.expect("one swapped terminal must be present"), left)
+        };
+        let mut terminals = self.0.clone();
+        terminals.remove(source_index);
+        let insertion = terminals
+            .binary_search(&replacement)
+            .expect_err("the replacement terminal must be absent");
+        terminals.insert(insertion, replacement);
+        Self(terminals)
     }
 
     fn append_to(&self, output: &mut Vec<u8>) {
-        for &word in &self.0 { output.extend_from_slice(&word.to_le_bytes()); }
+        output.extend_from_slice(&(self.0.len() as u32).to_le_bytes());
+        for &terminal in &self.0 {
+            output.extend_from_slice(&(terminal as u32).to_le_bytes());
+        }
     }
 }
 
@@ -714,6 +740,155 @@ fn refine_candidate_groups_by_observed_output_pair_shape(
     refined
 }
 
+/// Sound terminal-side color refinement of the set of observed frozen output
+/// pairs.  Treat each pair `(finalizers, future_finalizers)` as a directed
+/// hyperedge, with a three-way incidence tag for final-only, future-only, and
+/// both.  A valid terminal transposition maps this set of hyperedges to itself,
+/// so it preserves every refinement color.  Different resulting colors can
+/// therefore reject a pair without affecting exact TI semantics.
+///
+/// Terminals already excluded from a candidate group are fixed under every
+/// remaining binary swap.  Giving them individual colors strengthens the
+/// invariant: their raw labels are not accidentally treated as exchangeable
+/// context.  The compact commutative fingerprints may collide only by merging
+/// colors, which is conservative.
+fn refine_candidate_groups_by_observed_output_hypergraph(
+    groups: Vec<Vec<TerminalID>>,
+    observed_pairs: &[OutputPair],
+    terminal_count: usize,
+) -> (Vec<Vec<TerminalID>>, usize) {
+    if groups.is_empty() {
+        return (groups, 0);
+    }
+
+    let mut candidate_group_by_terminal = vec![usize::MAX; terminal_count];
+    for (group_index, group) in groups.iter().enumerate() {
+        for &terminal in group {
+            candidate_group_by_terminal[terminal as usize] = group_index;
+        }
+    }
+
+    // Fixed terminals receive raw-id colors. Candidate terminals receive their
+    // already sound prefilter group color, ensuring an accepted swap starts in
+    // one common color class.
+    let mut colors = (0..terminal_count as u32).collect::<Vec<_>>();
+    for (group_index, group) in groups.iter().enumerate() {
+        let color = terminal_count as u32 + group_index as u32;
+        for &terminal in group {
+            colors[terminal as usize] = color;
+        }
+    }
+
+    let mut rounds = 0usize;
+    loop {
+        rounds += 1;
+        let mut sum = vec![0u64; terminal_count];
+        let mut xor = vec![0u64; terminal_count];
+        let mut count = vec![0u32; terminal_count];
+
+        for pair in observed_pairs {
+            let color_multiset_fingerprint = |terminals: &OutputBits| {
+                let mut total = 0u64;
+                let mut parity = 0u64;
+                for &terminal in &terminals.0 {
+                    let component = mix_structural_fingerprint(
+                        0x6d2b_79f5_aa99_5a71,
+                        colors[terminal as usize] as u64,
+                    );
+                    total = total.wrapping_add(component);
+                    parity ^= component.rotate_left((colors[terminal as usize] & 63) as u32);
+                }
+                let mut fingerprint = mix_structural_fingerprint(
+                    0xa076_1d64_78bd_642f,
+                    terminals.0.len() as u64,
+                );
+                fingerprint = mix_structural_fingerprint(fingerprint, total);
+                mix_structural_fingerprint(fingerprint, parity)
+            };
+            let finalizer_fingerprint = color_multiset_fingerprint(&pair.finalizers);
+            let future_fingerprint = color_multiset_fingerprint(&pair.future_finalizers);
+            let mut edge_fingerprint = mix_structural_fingerprint(
+                0xe703_7ed1_a0b4_28db,
+                finalizer_fingerprint,
+            );
+            edge_fingerprint = mix_structural_fingerprint(edge_fingerprint, future_fingerprint);
+
+            let mut finalizer_index = 0usize;
+            let mut future_index = 0usize;
+            while finalizer_index < pair.finalizers.0.len()
+                || future_index < pair.future_finalizers.0.len()
+            {
+                let (terminal, category) = match (
+                    pair.finalizers.0.get(finalizer_index),
+                    pair.future_finalizers.0.get(future_index),
+                ) {
+                    (Some(&finalizer), Some(&future)) if finalizer == future => {
+                        finalizer_index += 1;
+                        future_index += 1;
+                        (finalizer as usize, 2u64)
+                    }
+                    (Some(&finalizer), Some(&future)) if finalizer < future => {
+                        finalizer_index += 1;
+                        (finalizer as usize, 0u64)
+                    }
+                    (Some(_), Some(&future)) => {
+                        future_index += 1;
+                        (future as usize, 1u64)
+                    }
+                    (Some(&finalizer), None) => {
+                        finalizer_index += 1;
+                        (finalizer as usize, 0u64)
+                    }
+                    (None, Some(&future)) => {
+                        future_index += 1;
+                        (future as usize, 1u64)
+                    }
+                    (None, None) => unreachable!("nonempty observed-output hyperedge merge"),
+                };
+                let component = mix_structural_fingerprint(edge_fingerprint, category);
+                sum[terminal] = sum[terminal].wrapping_add(component);
+                xor[terminal] ^= component.rotate_left((category * 17) as u32);
+                count[terminal] += 1;
+            }
+        }
+
+        let mut class_for_signature = FxHashMap::<u64, u32>::default();
+        let mut next_colors = colors.clone();
+        for (terminal, &group_index) in candidate_group_by_terminal.iter().enumerate() {
+            if group_index == usize::MAX {
+                continue;
+            }
+            let mut fingerprint = mix_structural_fingerprint(
+                0x8ebc_6af0_9c88_c6e3,
+                colors[terminal] as u64,
+            );
+            fingerprint = mix_structural_fingerprint(fingerprint, sum[terminal]);
+            fingerprint = mix_structural_fingerprint(fingerprint, xor[terminal]);
+            fingerprint = mix_structural_fingerprint(fingerprint, count[terminal] as u64);
+            let next = terminal_count as u32 + class_for_signature.len() as u32;
+            next_colors[terminal] = *class_for_signature.entry(fingerprint).or_insert(next);
+        }
+        let stable = same_equality_partition_u32(&colors, &next_colors);
+        colors = next_colors;
+        if stable || rounds == terminal_count {
+            break;
+        }
+    }
+
+    let mut refined = Vec::new();
+    for group in groups {
+        let mut by_color = BTreeMap::<u32, Vec<TerminalID>>::new();
+        for terminal in group {
+            by_color
+                .entry(colors[terminal as usize])
+                .or_default()
+                .push(terminal);
+        }
+        refined.extend(by_color.into_values().filter(|group| group.len() >= 2));
+    }
+    (refined, rounds)
+}
+
 /// The selected raw tokenizer-state representative for every source state
 /// under one terminal swap. The exact characterization establishes a mapped
 /// target class; all downstream consumers have always selected only that
@@ -777,8 +952,6 @@ struct PairCharacterization {
 
 struct InterchangeabilityDfa {
     topology: Arc<RestrictedTopology>,
-    active_bit_index_by_terminal: Vec<u32>,
-    active_terminal_for_bit: Vec<TerminalID>,
     empty_output: OutputBits,
     finalizers: Vec<OutputBits>,
     future_finalizers: Vec<OutputBits>,
@@ -878,27 +1051,8 @@ impl InterchangeabilityDfa {
         raw: Arc<TiRawDiscoveryData>,
     ) -> Self {
         let state_count = topology.state_count();
-        let mut active_bit_index_by_terminal = vec![u32::MAX; observed_terminals.len()];
-        let mut active_terminal_for_bit = Vec::new();
-        for (terminal, &active) in observed_terminals.iter().enumerate() {
-            if active {
-                active_bit_index_by_terminal[terminal] = active_terminal_for_bit.len() as u32;
-                active_terminal_for_bit.push(terminal as TerminalID);
-            }
-        }
-        let output_words = active_terminal_for_bit.len().div_ceil(64);
         let terminal_bits = |terminals: &[TerminalID]| {
-            let mut bits = OutputBits::new(output_words);
-            for &terminal in terminals {
-                let bit = active_bit_index_by_terminal
-                    .get(terminal as usize)
-                    .copied()
-                    .unwrap_or(u32::MAX);
-                if bit != u32::MAX {
-                    bits.set(bit as usize);
-                }
-            }
-            bits
+            OutputBits::from_active(terminals, observed_terminals)
         };
         let finalizers = raw
             .finalizer_terminals_by_state
@@ -933,34 +1087,49 @@ impl InterchangeabilityDfa {
         let mut observed_output_pair_support_shapes_by_terminal =
             vec![SupportTrackShape::default(); observed_terminals.len()];
         for (id, pair) in observed_output_pairs.iter().enumerate() {
-            for word_index in 0..pair.finalizers.0.len() {
-                let finalizers = pair.finalizers.0[word_index];
-                let future_finalizers = pair.future_finalizers.0[word_index];
-                let final_only = finalizers & !future_finalizers;
-                let future_only = future_finalizers & !finalizers;
-                let both = finalizers & future_finalizers;
-                for (mut word, category) in [
-                    (final_only, 0u8),
-                    (future_only, 1u8),
-                    (both, 2u8),
-                ] {
-                    while word != 0 {
-                        let bit = word.trailing_zeros() as usize;
-                        let terminal = active_terminal_for_bit[word_index * 64 + bit] as usize;
-                        observed_output_pair_ids_by_terminal[terminal].push(id as u32);
-                        let shape = &mut observed_output_pair_support_shapes_by_terminal[terminal];
-                        match category {
-                            0 => shape.finalizer_only += 1,
-                            1 => shape.future_only += 1,
-                            2 => shape.both += 1,
-                            _ => unreachable!("known observed-output support category"),
-                        }
-                        word &= word - 1;
+            let mut finalizer_index = 0usize;
+            let mut future_index = 0usize;
+            while finalizer_index < pair.finalizers.0.len()
+                || future_index < pair.future_finalizers.0.len()
+            {
+                let (terminal, category) = match (
+                    pair.finalizers.0.get(finalizer_index),
+                    pair.future_finalizers.0.get(future_index),
+                ) {
+                    (Some(&finalizer), Some(&future)) if finalizer == future => {
+                        finalizer_index += 1;
+                        future_index += 1;
+                        (finalizer as usize, 2u8)
                     }
+                    (Some(&finalizer), Some(&future)) if finalizer < future => {
+                        finalizer_index += 1;
+                        (finalizer as usize, 0u8)
+                    }
+                    (Some(_), Some(&future)) => {
+                        future_index += 1;
+                        (future as usize, 1u8)
+                    }
+                    (Some(&finalizer), None) => {
+                        finalizer_index += 1;
+                        (finalizer as usize, 0u8)
+                    }
+                    (None, Some(&future)) => {
+                        future_index += 1;
+                        (future as usize, 1u8)
+                    }
+                    (None, None) => unreachable!("nonempty sparse output merge"),
+                };
+                observed_output_pair_ids_by_terminal[terminal].push(id as u32);
+                let shape = &mut observed_output_pair_support_shapes_by_terminal[terminal];
+                match category {
+                    0 => shape.finalizer_only += 1,
+                    1 => shape.future_only += 1,
+                    2 => shape.both += 1,
+                    _ => unreachable!("known observed-output support category"),
                 }
             }
         }
-        let empty_output = OutputBits::new(output_words);
+        let empty_output = OutputBits::new(0);
         let empty_pair = OutputPair {
             finalizers: empty_output.clone(),
             future_finalizers: empty_output.clone(),
@@ -990,13 +1159,11 @@ impl InterchangeabilityDfa {
         let signature_capacity = CHARACTERIZATION_DOMAIN.len()
             + 4
             + topology.max_outdegree
-                * (1 + blake3::OUT_LEN + 2 * output_words * size_of::<u64>());
+                * (1 + blake3::OUT_LEN + 2 * (size_of::<u32>() + 4 * size_of::<TerminalID>()));
         let seed = CharacterizationHash::seed();
         let observed_output_pair_count = observed_output_pair_lookup.len();
         Self {
             topology,
-            active_bit_index_by_terminal,
-            active_terminal_for_bit,
             empty_output,
             finalizers,
             future_finalizers,
@@ -1055,17 +1222,6 @@ impl InterchangeabilityDfa {
 
     fn dead_state(&self) -> usize {
         self.topology.dead_state()
-    }
-
-    #[inline]
-    fn active_terminal_bit(&self, terminal: TerminalID) -> usize {
-        let bit = self
-            .active_bit_index_by_terminal
-            .get(terminal as usize)
-            .copied()
-            .unwrap_or(u32::MAX);
-        assert_ne!(bit, u32::MAX, "TI swap terminal must be active in this round");
-        bit as usize
     }
 
     fn ensure_support_quotient(&mut self) {
@@ -1141,7 +1297,7 @@ impl InterchangeabilityDfa {
         }
         support.truncate(write);
         let supports = self.terminal_quotient_output_supports.get_or_insert_with(|| {
-            vec![None; self.active_bit_index_by_terminal.len()]
+            vec![None; self.finalizer_states_by_terminal.len()]
         });
         supports[terminal] = Some(support);
         if let Some(started_at) = started_at {
@@ -1310,8 +1466,8 @@ impl InterchangeabilityDfa {
         let mut outputs = SparseSwappedOutputIds::new(
             &self.output_pairs,
             &self.output_pair_lookup,
-            self.active_terminal_bit(left),
-            self.active_terminal_bit(right),
+            left as usize,
+            right as usize,
         );
         for &class in &cone_classes {
             let target = Self::mapped_support_class(&deviations, class);
@@ -2200,8 +2356,8 @@ impl InterchangeabilityDfa {
                 let mut outputs = SwappedOutputIds::new(
                     &self.output_pairs,
                     &self.output_pair_lookup,
-                    self.active_terminal_bit(left),
-                    self.active_terminal_bit(right),
+                    left as usize,
+                    right as usize,
                 );
                 let mut found = None;
                 for round in 1..=stable_round {
@@ -2314,8 +2470,8 @@ impl InterchangeabilityDfa {
         let mut outputs = SwappedOutputIds::new(
             &self.output_pairs,
             &self.output_pair_lookup,
-            self.active_terminal_bit(left),
-            self.active_terminal_bit(right),
+            left as usize,
+            right as usize,
         );
         for round in 1..=stable_round {
             let identity_previous = self.quotient_identity_classes_at_round(quotient, round - 1);
@@ -2457,8 +2613,8 @@ impl InterchangeabilityDfa {
         let mut outputs = SwappedOutputIds::new(
             &self.output_pairs,
             &self.output_pair_lookup,
-            self.active_terminal_bit(left),
-            self.active_terminal_bit(right),
+            left as usize,
+            right as usize,
         );
         for &source in &affected_sources {
             let source = source as usize;
@@ -2505,8 +2661,8 @@ impl InterchangeabilityDfa {
         let mut outputs = SwappedOutputIds::new(
             &self.output_pairs,
             &self.output_pair_lookup,
-            self.active_terminal_bit(left),
-            self.active_terminal_bit(right),
+            left as usize,
+            right as usize,
         );
         let mut swapped_previous = self.canonical_rounds[0].classes.clone();
         for round in 1..=stable_round {
@@ -2628,8 +2784,8 @@ impl InterchangeabilityDfa {
         }
         let epoch = self.observed_output_pair_mark_epoch;
         let swap = Some((
-            self.active_terminal_bit(left),
-            self.active_terminal_bit(right),
+            left as usize,
+            right as usize,
         ));
         for ids in [
             &self.observed_output_pair_ids_by_terminal[left_terminal],
@@ -2665,8 +2821,8 @@ impl InterchangeabilityDfa {
     fn characterize_pair(&mut self, left: TerminalID, right: TerminalID) -> PairCharacterization {
         let state_count = self.state_count();
         let swap = Some((
-            self.active_terminal_bit(left),
-            self.active_terminal_bit(right),
+            left as usize,
+            right as usize,
         ));
         let swapped_finalizers = self
             .finalizers
@@ -2984,36 +3140,55 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
             return TiRoundTransportWitnesses::singleton(active_terminals);
         }
 
-        let (structural_signatures, structural_color_count) = structural_candidate_signatures(
-            tokenizer,
-            active_terminals,
-            &candidates,
-            &topology,
-            STRUCTURAL_REFINEMENT_ROUNDS,
-        );
-        let structural_candidate_groups = refine_candidate_groups_by_structure(
-            root_candidate_groups,
-            &candidates,
-            &structural_signatures,
-        );
+        // The old structural support pass is only a rejection prefilter. Once
+        // the output-pair hypergraph refinement is in place it costs more than
+        // the additional exact checks it avoids on p0/p1, so production goes
+        // straight from rooted candidates to the exact-safe output filters.
+        let structural_filter_started_at = profile_timing.then(Instant::now);
+        let structural_candidate_groups = root_candidate_groups
+            .into_iter()
+            .filter(|group| group.len() >= 2)
+            .collect::<Vec<_>>();
+        let structural_color_count = 0usize;
         let structural_candidate_pairs = structural_candidate_groups
             .iter()
             .map(|group| group.len() * group.len().saturating_sub(1) / 2)
             .sum::<usize>();
         let structural_candidate_group_count = structural_candidate_groups.len();
+        let structural_filter_ms = structural_filter_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
         if structural_candidate_pairs == 0 {
             return TiRoundTransportWitnesses::singleton(active_terminals);
         }
 
+        let dfa_setup_started_at = profile_timing.then(Instant::now);
         let mut dfa = InterchangeabilityDfa::from_context(active_terminals, context);
-        let candidate_groups = refine_candidate_groups_by_observed_output_pair_shape(
+        let dfa_setup_ms = dfa_setup_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let output_shape_filter_started_at = profile_timing.then(Instant::now);
+        let output_shape_candidate_groups = refine_candidate_groups_by_observed_output_pair_shape(
             structural_candidate_groups,
             &dfa.observed_output_pair_support_shapes_by_terminal,
         );
+        let output_shape_filter_ms = output_shape_filter_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let output_hypergraph_filter_started_at = profile_timing.then(Instant::now);
+        let (candidate_groups, output_hypergraph_rounds) =
+            refine_candidate_groups_by_observed_output_hypergraph(
+                output_shape_candidate_groups,
+                &dfa.observed_output_pairs,
+                active_terminals.len(),
+            );
         let exact_candidate_pairs = candidate_groups
             .iter()
             .map(|group| group.len() * group.len().saturating_sub(1) / 2)
             .sum::<usize>();
+        let output_hypergraph_filter_ms = output_hypergraph_filter_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
         let candidate_filter_ms = candidate_filter_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
@@ -3023,7 +3198,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 *group_size_histogram.entry(group.len()).or_default() += 1;
             }
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] active={} selected_bytes={} sparse_edges={} max_outdegree={} root_observed_states={} root_candidate_pairs={} structural_colors={} structural_candidate_groups={} structural_candidate_pairs={} observed_output_candidate_groups={} exact_candidate_pairs={} group_size_histogram={:?} topology_ms={:.3} root_structural_filter_ms={:.3}",
+                "[glrmask/profile][terminal_interchangeability] active={} selected_bytes={} sparse_edges={} max_outdegree={} root_observed_states={} root_candidate_pairs={} structural_colors={} structural_candidate_groups={} structural_candidate_pairs={} observed_output_candidate_groups={} output_hypergraph_rounds={} exact_candidate_pairs={} group_size_histogram={:?} topology_ms={:.3} candidate_filter_total_ms={:.3} structural_filter_ms={:.3} dfa_setup_ms={:.3} output_shape_filter_ms={:.3} output_hypergraph_filter_ms={:.3}",
                 candidates.len(),
                 topology_byte_count,
                 topology_edge_count,
@@ -3034,10 +3209,15 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 structural_candidate_group_count,
                 structural_candidate_pairs,
                 candidate_groups.len(),
+                output_hypergraph_rounds,
                 exact_candidate_pairs,
                 group_size_histogram,
                 topology_ms,
                 candidate_filter_ms,
+                structural_filter_ms,
+                dfa_setup_ms,
+                output_shape_filter_ms,
+                output_hypergraph_filter_ms,
             );
         }
         if exact_candidate_pairs == 0 {
