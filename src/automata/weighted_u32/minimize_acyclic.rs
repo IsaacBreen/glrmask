@@ -13,7 +13,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use super::dwa::{DWA, DWAState};
-use crate::ds::weight::Weight;
+use crate::ds::weight::{Weight, WeightIntersectionIndex};
 
 type Label = i32;
 
@@ -81,6 +81,7 @@ fn memoized_intersection(
     cache: &mut FxHashMap<(usize, usize), Weight>,
     left: &Weight,
     right: &Weight,
+    index: Option<&WeightIntersectionIndex>,
 ) -> Weight {
     if left.is_empty() || right.is_empty() {
         return Weight::empty();
@@ -97,7 +98,7 @@ fn memoized_intersection(
         return existing.clone();
     }
 
-    let value = left.intersection(right);
+    let value = index.map_or_else(|| left.intersection(right), |index| left.intersection_with_index(index));
     cache.insert(key, value.clone());
     value
 }
@@ -130,6 +131,16 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
     // so we compute reachable[u] and push transitions in a single pass.
     let mut reachable: Vec<Weight> = vec![Weight::empty(); n];
     let mut intersection_cache = FxHashMap::default();
+    let mut incoming_transition_counts = vec![0usize; n];
+    for state in dwa.states() {
+        for (target, _) in state.transitions.values() {
+            if (*target as usize) < n {
+                incoming_transition_counts[*target as usize] += 1;
+            }
+        }
+    }
+    let mut intersection_indexes = FxHashMap::<usize, WeightIntersectionIndex>::default();
+    let mut indexed_intersection_uses = 0usize;
     let mut changed = false;
     let mut target_full = 0usize;
     let mut target_empty = 0usize;
@@ -182,7 +193,21 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
             } else {
                 target_partial += 1;
                 let intersection_started_at = profile_enabled.then(Instant::now);
-                let new_w = memoized_intersection(&mut intersection_cache, w, &reachable[t]);
+                let index = (incoming_transition_counts[t] >= 8).then(|| {
+                    let key = reachable[t].ptr_key();
+                    intersection_indexes
+                        .entry(key)
+                        .or_insert_with(|| reachable[t].intersection_index())
+                });
+                if index.is_some() {
+                    indexed_intersection_uses += 1;
+                }
+                let new_w = memoized_intersection(
+                    &mut intersection_cache,
+                    w,
+                    &reachable[t],
+                    index.as_deref(),
+                );
                 if let Some(started_at) = intersection_started_at {
                     intersection_ms += started_at.elapsed().as_secs_f64() * 1000.0;
                 }
@@ -254,7 +279,7 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
 
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][weighted_dwa_minimize_push] states={} topo_ms={:.3} target_full={} target_empty={} target_partial={} intersection_ms={:.3} intersection_cache_entries={} reachable_parts={} union_ms={:.3} union_sizes=[{},{},{},{},{},{},{}] max_union_size={} union_key_occurrences={} union_unique_keys={} union_key_repeats={} pushed_transitions={} apply_ms={:.3}",
+            "[glrmask/profile][weighted_dwa_minimize_push] states={} topo_ms={:.3} target_full={} target_empty={} target_partial={} intersection_ms={:.3} intersection_cache_entries={} intersection_indexes={} indexed_intersection_uses={} reachable_parts={} union_ms={:.3} union_sizes=[{},{},{},{},{},{},{}] max_union_size={} union_key_occurrences={} union_unique_keys={} union_key_repeats={} pushed_transitions={} apply_ms={:.3}",
             n,
             topo_ms,
             target_full,
@@ -262,6 +287,8 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
             target_partial,
             intersection_ms,
             intersection_cache.len(),
+            intersection_indexes.len(),
+            indexed_intersection_uses,
             reachable_parts,
             union_ms,
             union_size_histogram[0],
