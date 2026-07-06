@@ -2043,6 +2043,127 @@ impl Weight {
         builder.finish()
     }
 
+    /// Apply sparse TSID overrides and restrict the result to `domain` in a
+    /// single range walk. This is exactly equivalent to
+    /// `self.with_sparse_tsid_overrides(overrides).intersection(domain)`, but
+    /// avoids interning and then immediately re-reading the intermediate
+    /// overridden weight.
+    pub(crate) fn with_sparse_tsid_overrides_intersection(
+        &self,
+        overrides: &[(u32, SharedTokenSet)],
+        domain: &Weight,
+    ) -> Self {
+        if self.is_empty() || domain.is_empty() {
+            return Self::empty();
+        }
+        if self.is_full() {
+            return self.intersection(domain);
+        }
+        if overrides.is_empty() {
+            return self.intersection(domain);
+        }
+        if domain.is_full() {
+            return self.with_sparse_tsid_overrides(overrides);
+        }
+        debug_assert!(overrides.windows(2).all(|pair| pair[0].0 < pair[1].0));
+
+        let mut overlay = SmallVec::<[WeightRangeEntry; 16]>::new();
+        let push_overlay = |entries: &mut SmallVec<[WeightRangeEntry; 16]>,
+                            start: u32,
+                            end: u32,
+                            tokens: &SharedTokenSet| {
+            if tokens.is_empty() || start > end {
+                return;
+            }
+            if let Some(previous) = entries.last_mut()
+                && previous.end.checked_add(1) == Some(start)
+                && same_shared_token_set(&previous.tokens, tokens)
+            {
+                previous.end = end;
+            } else {
+                entries.push(WeightRangeEntry {
+                    start,
+                    end,
+                    tokens: Arc::clone(tokens),
+                });
+            }
+        };
+
+        let mut override_index = 0usize;
+        for (start, end, tokens) in self.range_entries() {
+            while override_index < overrides.len() && overrides[override_index].0 < start {
+                let (tsid, override_tokens) = &overrides[override_index];
+                push_overlay(&mut overlay, *tsid, *tsid, override_tokens);
+                override_index += 1;
+            }
+
+            let mut cursor = start;
+            while override_index < overrides.len() && overrides[override_index].0 <= end {
+                let (tsid, override_tokens) = &overrides[override_index];
+                if cursor < *tsid {
+                    push_overlay(&mut overlay, cursor, *tsid - 1, &tokens);
+                }
+                push_overlay(&mut overlay, *tsid, *tsid, override_tokens);
+                cursor = tsid.saturating_add(1);
+                override_index += 1;
+            }
+            if cursor <= end {
+                push_overlay(&mut overlay, cursor, end, &tokens);
+            }
+        }
+        while override_index < overrides.len() {
+            let (tsid, tokens) = &overrides[override_index];
+            push_overlay(&mut overlay, *tsid, *tsid, tokens);
+            override_index += 1;
+        }
+
+        let mut builder = CompactRangeBuilder::new();
+        let mut overlap_cache: SmallVec<[(
+            *const RangeSetBlaze<u32>,
+            *const RangeSetBlaze<u32>,
+            Option<SharedTokenSet>,
+        ); 8]> = SmallVec::new();
+        let mut domain_iter = domain.0.range_values();
+        let mut current_domain = domain_iter.next();
+        for entry in overlay {
+            while current_domain
+                .as_ref()
+                .is_some_and(|(range, _)| *range.end() < entry.start)
+            {
+                current_domain = domain_iter.next();
+            }
+            while let Some((range, domain_tokens)) = current_domain.as_ref() {
+                if *range.start() > entry.end {
+                    break;
+                }
+                let start = entry.start.max(*range.start());
+                let end = entry.end.min(*range.end());
+                let source_ptr = Arc::as_ptr(&entry.tokens);
+                let domain_ptr = Arc::as_ptr(domain_tokens);
+                let tokens = if let Some((_, _, cached)) = overlap_cache.iter().find(
+                    |(cached_source, cached_domain, _)| {
+                        *cached_source == source_ptr && *cached_domain == domain_ptr
+                    },
+                ) {
+                    cached.clone()
+                } else {
+                    let overlap = shared_token_intersection(&entry.tokens, domain_tokens);
+                    overlap_cache.push((source_ptr, domain_ptr, overlap.clone()));
+                    overlap
+                };
+                if let Some(tokens) = tokens {
+                    builder.push(start, end, tokens);
+                }
+                if *range.end() <= entry.end {
+                    current_domain = domain_iter.next();
+                } else {
+                    break;
+                }
+            }
+        }
+        builder.finish()
+    }
+
     /// Build the exact union of sorted point-TSID entries.
     ///
     /// The entries must be nondecreasing by TSID. Equal TSIDs are reduced with
@@ -2817,6 +2938,45 @@ mod tests {
             }));
             assert_matches(sparse, dense);
         }
+    }
+
+    #[test]
+    fn sparse_tsid_overrides_intersection_matches_two_step_form() {
+        let alpha = shared_rangeset(RangeSetBlaze::from_iter([1..=3]));
+        let beta = shared_rangeset(RangeSetBlaze::from_iter([4..=7]));
+        let gamma = shared_rangeset(RangeSetBlaze::from_iter([2..=6]));
+        let delta = shared_rangeset(RangeSetBlaze::from_iter([8..=10]));
+        let base = Weight::from_per_tsid_shared([
+            (0, Arc::clone(&alpha)),
+            (1, Arc::clone(&alpha)),
+            (2, Arc::clone(&alpha)),
+            (3, Arc::clone(&alpha)),
+            (5, Arc::clone(&beta)),
+            (6, Arc::clone(&beta)),
+            (7, Arc::clone(&beta)),
+        ]);
+        let domain = Weight::from_per_tsid_shared([
+            (1, Arc::clone(&gamma)),
+            (2, Arc::clone(&gamma)),
+            (4, Arc::clone(&delta)),
+            (5, Arc::clone(&beta)),
+            (6, Arc::clone(&gamma)),
+            (8, Arc::clone(&delta)),
+            (10, Arc::clone(&alpha)),
+        ]);
+        let overrides = [
+            (1, Arc::clone(&delta)),
+            (4, Arc::clone(&alpha)),
+            (6, Arc::clone(&EMPTY_RANGESET)),
+            (8, Arc::clone(&gamma)),
+            (10, Arc::clone(&beta)),
+        ];
+
+        clear_weight_op_caches();
+        let expected = base.with_sparse_tsid_overrides(&overrides).intersection(&domain);
+        clear_weight_op_caches();
+        let actual = base.with_sparse_tsid_overrides_intersection(&overrides, &domain);
+        assert_eq!(actual, expected);
     }
 
     #[test]

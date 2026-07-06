@@ -3579,8 +3579,8 @@ pub(crate) fn transport_coordinate_quotient(
 
     #[derive(Eq, Hash, PartialEq)]
     struct SparseModeSignature {
-        defaults: Vec<u64>,
-        deviations: Vec<(u32, u64)>,
+        defaults: SmallVec<[u64; 4]>,
+        deviations: SmallVec<[(u32, u64); 4]>,
     }
 
     struct TailGroup<'a> {
@@ -3693,7 +3693,7 @@ pub(crate) fn transport_coordinate_quotient(
         }
 
         let mut deviations_by_source_class =
-            vec![Vec::<(u32, u64)>::new(); source_class_count];
+            vec![SmallVec::<[(u32, u64); 4]>::new(); source_class_count];
         for tail_group in &mut tail_groups {
             tail_group.default_for_source_class = Vec::with_capacity(source_class_count);
             for source_class in 0..source_class_count {
@@ -3717,12 +3717,12 @@ pub(crate) fn transport_coordinate_quotient(
                         input_class < source_class_count && output_class < source_class_count,
                         "TI transport deviation must stay within its source quotient",
                     );
-                    let mut target_state = domain.innermost_source_representative(output_class);
-                    for transform in &tail_group.tail {
-                        target_state = transform.scanner_state(target_state);
-                    }
-                    let coordinate = ordinary_coordinate_key(target_state as usize);
-                    source_class_mode_evaluations += 1 + tail_group.tail.len();
+                    // The tail default table already contains the exact
+                    // coordinate reached from every source-class representative.
+                    // A sparse inner deviation merely selects a different
+                    // source class, so re-running the same tail here is
+                    // redundant.
+                    let coordinate = tail_group.default_for_source_class[output_class];
                     if coordinate != tail_group.default_for_source_class[input_class] {
                         deviations_by_source_class[input_class]
                             .push((mode_index as u32, coordinate));
@@ -3755,10 +3755,10 @@ pub(crate) fn transport_coordinate_quotient(
         .unwrap_or(0.0);
 
     let final_refinement_started_at = profile_timing.then(Instant::now);
-    let mut class_for_signature = FxHashMap::<Vec<u64>, u32>::default();
+    let mut class_for_signature = FxHashMap::<SmallVec<[u64; 8]>, u32>::default();
     let mut class_for_state = Vec::with_capacity(state_count);
     for source_state in 0..state_count {
-        let mut signature = Vec::with_capacity(groups.len() + 1);
+        let mut signature = SmallVec::<[u64; 8]>::with_capacity(groups.len() + 1);
         signature.push(ordinary_coordinate_key(source_state));
         for group in &groups {
             let source_class = modes[group.domain_mode]
@@ -3837,19 +3837,28 @@ struct PostDwaWeightLifter<'a> {
     mode_deviations: Vec<Vec<(u32, u32)>>,
     base_lifts: FxHashMap<usize, Weight>,
     mode_lifts: FxHashMap<(usize, usize), Weight>,
-    group_lifts: FxHashMap<(usize, usize), Weight>,
-    group_coordinate_plans: FxHashMap<usize, GroupCoordinatePlan>,
+    // (core-weight body, exact mode-set id, entry-domain body).
+    group_lifts: FxHashMap<(usize, usize, usize), Weight>,
+    // Coordinate plans depend only on the exact transport-mode set, not on
+    // the core state whose entry domain happens to reach that set.
+    group_coordinate_plans: FxHashMap<Vec<usize>, GroupCoordinatePlan>,
+    profile_base_lift_ms: f64,
+    profile_plan_ms: f64,
+    profile_signature_ms: f64,
+    profile_override_ms: f64,
+    profile_apply_ms: f64,
 }
 
 #[derive(Clone)]
 struct GroupCoordinateSignature {
-    base_coordinate: u32,
-    alternate_coordinates: Box<[u32]>,
+    base_coordinate_index: usize,
+    alternate_coordinate_indices: Box<[usize]>,
 }
 
 struct GroupCoordinatePlan {
     overrides: Vec<(u32, u32)>,
     signatures: Vec<GroupCoordinateSignature>,
+    coordinates: Vec<u32>,
 }
 
 fn finite_weight_token_cardinality(weight: &Weight) -> Option<u128> {
@@ -4004,6 +4013,11 @@ impl<'a> PostDwaWeightLifter<'a> {
             mode_lifts: FxHashMap::default(),
             group_lifts: FxHashMap::default(),
             group_coordinate_plans: FxHashMap::default(),
+            profile_base_lift_ms: 0.0,
+            profile_plan_ms: 0.0,
+            profile_signature_ms: 0.0,
+            profile_override_ms: 0.0,
+            profile_apply_ms: 0.0,
         }
     }
 
@@ -4073,8 +4087,8 @@ impl<'a> PostDwaWeightLifter<'a> {
         lifted
     }
 
-    fn prepare_group_coordinate_plan(&mut self, group_index: usize, mode_indices: &[usize]) {
-        if mode_indices.len() <= 1 || self.group_coordinate_plans.contains_key(&group_index) {
+    fn prepare_group_coordinate_plan(&mut self, mode_indices: &[usize]) {
+        if mode_indices.len() <= 1 || self.group_coordinate_plans.contains_key(mode_indices) {
             return;
         }
 
@@ -4105,8 +4119,8 @@ impl<'a> PostDwaWeightLifter<'a> {
                     let signature = signatures.len() as u32;
                     let (base_coordinate, alternate_coordinates) = entry.key();
                     signatures.push(GroupCoordinateSignature {
-                        base_coordinate: *base_coordinate,
-                        alternate_coordinates: alternate_coordinates.clone().into_boxed_slice(),
+                        base_coordinate_index: *base_coordinate as usize,
+                        alternate_coordinate_indices: alternate_coordinates.iter().map(|&coordinate| coordinate as usize).collect::<Vec<_>>().into_boxed_slice(),
                     });
                     entry.insert(signature);
                     signature
@@ -4115,11 +4129,38 @@ impl<'a> PostDwaWeightLifter<'a> {
             overrides.push((final_tsid as u32, signature));
         }
 
+        let mut coordinates = signatures
+            .iter()
+            .flat_map(|signature| {
+                std::iter::once(signature.base_coordinate_index as u32).chain(
+                    signature
+                        .alternate_coordinate_indices
+                        .iter()
+                        .map(|&coordinate| coordinate as u32),
+                )
+            })
+            .collect::<Vec<_>>();
+        coordinates.sort_unstable();
+        coordinates.dedup();
+        for signature in &mut signatures {
+            let raw_base = signature.base_coordinate_index as u32;
+            signature.base_coordinate_index = coordinates
+                .binary_search(&raw_base)
+                .expect("group-plan base coordinate must be retained");
+            for coordinate_index in signature.alternate_coordinate_indices.iter_mut() {
+                let raw_coordinate = *coordinate_index as u32;
+                *coordinate_index = coordinates
+                    .binary_search(&raw_coordinate)
+                    .expect("group-plan alternate coordinate must be retained");
+            }
+        }
+
         self.group_coordinate_plans.insert(
-            group_index,
+            mode_indices.to_vec(),
             GroupCoordinatePlan {
                 overrides,
                 signatures,
+                coordinates,
             },
         );
     }
@@ -4128,7 +4169,7 @@ impl<'a> PostDwaWeightLifter<'a> {
     fn lift_over_disjoint_group(
         &mut self,
         weight: &Weight,
-        group_index: usize,
+        mode_set_id: usize,
         mode_indices: &[usize],
         entry_domain: &Weight,
     ) -> Weight {
@@ -4140,27 +4181,42 @@ impl<'a> PostDwaWeightLifter<'a> {
                 .lift_for_mode(weight, mode_indices[0])
                 .intersection(entry_domain);
         }
-        let key = (weight.ptr_key(), group_index);
+        let key = (weight.ptr_key(), mode_set_id, entry_domain.ptr_key());
         if let Some(existing) = self.group_lifts.get(&key) {
             return existing.clone();
         }
 
+        let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let started_at = profile_timing.then(Instant::now);
         let base = self.base_lift(weight);
-        self.prepare_group_coordinate_plan(group_index, mode_indices);
+        if let Some(started_at) = started_at {
+            self.profile_base_lift_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
+        let started_at = profile_timing.then(Instant::now);
+        self.prepare_group_coordinate_plan(mode_indices);
+        if let Some(started_at) = started_at {
+            self.profile_plan_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
+        let started_at = profile_timing.then(Instant::now);
         let overrides = {
             let plan = self
                 .group_coordinate_plans
-                .get(&group_index)
+                .get(mode_indices)
                 .expect("prepared group coordinate plan must be retained");
             let mut union_for_token_signature = FxHashMap::<Vec<usize>, SharedTokenSet>::default();
+            let coordinate_tokens = plan
+                .coordinates
+                .iter()
+                .map(|&coordinate| Self::tokens_for_coordinate(weight, coordinate))
+                .collect::<Vec<_>>();
             let transformed_tokens: Vec<SharedTokenSet> = plan
                 .signatures
                 .iter()
                 .map(|signature| {
-                    let mut token_sets = Vec::with_capacity(signature.alternate_coordinates.len() + 1);
-                    token_sets.push(Self::tokens_for_coordinate(weight, signature.base_coordinate));
-                    for &coordinate in &signature.alternate_coordinates {
-                        token_sets.push(Self::tokens_for_coordinate(weight, coordinate));
+                    let mut token_sets = Vec::with_capacity(signature.alternate_coordinate_indices.len() + 1);
+                    token_sets.push(Arc::clone(&coordinate_tokens[signature.base_coordinate_index]));
+                    for &coordinate_index in &signature.alternate_coordinate_indices {
+                        token_sets.push(Arc::clone(&coordinate_tokens[coordinate_index]));
                     }
                     let mut token_signature: Vec<usize> = token_sets
                         .iter()
@@ -4194,8 +4250,15 @@ impl<'a> PostDwaWeightLifter<'a> {
                 })
                 .collect::<Vec<_>>()
         };
+        if let Some(started_at) = started_at {
+            self.profile_signature_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
 
-        let lifted = base.with_sparse_tsid_overrides(&overrides).intersection(entry_domain);
+        let started_at = profile_timing.then(Instant::now);
+        let lifted = base.with_sparse_tsid_overrides_intersection(&overrides, entry_domain);
+        if let Some(started_at) = started_at {
+            self.profile_apply_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
         self.group_lifts.insert(key, lifted.clone());
         lifted
     }
@@ -4302,6 +4365,9 @@ pub(crate) fn expand_representative_dwa_after_minimization(
     // has multiple possible first labels rather than one stable gate.
     let mut mode_groups = vec![vec![0usize]];
     let mut entry_union_by_group = vec![Weight::empty()];
+    // Exact entry unions computed while proving disjointness can be reused
+    // later for suffix states with the same complete member-mode set.
+    let mut known_member_entry_domain_by_mode_set = FxHashMap::<Vec<usize>, Weight>::default();
     let mut group_for_mode = vec![None::<usize>; modes.len()];
     group_for_mode[0] = Some(0);
     let member_entry_weights: Vec<(usize, u32, Weight)> = active_mode_indices
@@ -4357,6 +4423,8 @@ pub(crate) fn expand_representative_dwa_after_minimization(
         for &mode_index in &modes_in_group {
             group_for_mode[mode_index] = Some(group_index);
         }
+        known_member_entry_domain_by_mode_set
+            .insert(modes_in_group.clone(), all_member_entry_union.clone());
         mode_groups.push(modes_in_group);
         entry_union_by_group.push(all_member_entry_union);
     } else {
@@ -4423,12 +4491,49 @@ pub(crate) fn expand_representative_dwa_after_minimization(
             mode_indices_at_core_state[0][core_state].push(0);
         }
     }
+    // Member entry domains are determined solely by the exact active mode
+    // set. Several p0 suffix states share the complete 1,609-member set, so
+    // retain one exact union rather than rebuilding it per core state.
+    let mut member_entry_domain_by_mode_set = known_member_entry_domain_by_mode_set;
     let entry_domain_at_core_state: Vec<Vec<Weight>> = entry_weights_at_core_state
+        .iter()
+        .enumerate()
+        .map(|(group_index, by_core_state)| {
+            by_core_state
+                .iter()
+                .enumerate()
+                .map(|(core_state, weights)| {
+                    if group_index == 0 {
+                        return Weight::union_all(weights.iter());
+                    }
+                    let mode_set = &mode_indices_at_core_state[group_index][core_state];
+                    if mode_set.is_empty() {
+                        return Weight::empty();
+                    }
+                    member_entry_domain_by_mode_set
+                        .entry(mode_set.clone())
+                        .or_insert_with(|| Weight::union_all(weights.iter()))
+                        .clone()
+                })
+                .collect()
+        })
+        .collect();
+
+    let mut mode_set_id_by_contents = FxHashMap::<Vec<usize>, usize>::default();
+    let mode_set_id_at_core_state: Vec<Vec<Option<usize>>> = mode_indices_at_core_state
         .iter()
         .map(|by_core_state| {
             by_core_state
                 .iter()
-                .map(|weights| Weight::union_all(weights.iter()))
+                .map(|mode_set| {
+                    if mode_set.is_empty() {
+                        return None;
+                    }
+                    let next = mode_set_id_by_contents.len();
+                    Some(*mode_set_id_by_contents
+                        .entry(mode_set.clone())
+                        .or_insert(next))
+                })
                 .collect()
         })
         .collect();
@@ -4437,7 +4542,7 @@ pub(crate) fn expand_representative_dwa_after_minimization(
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
 
-    if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+    if profile_timing {
         let member_group_count = mode_groups.len().saturating_sub(1);
         let largest_member_group = mode_groups
             .iter()
@@ -4459,6 +4564,10 @@ pub(crate) fn expand_representative_dwa_after_minimization(
         (1 + group_index * core_states.len() + core_state_index) as u32
     };
     let shared_build_started_at = profile_timing.then(Instant::now);
+    let mut lift_ms = 0.0;
+    let mut raw_label_insert_ms = 0.0;
+    let mut lift_calls = 0usize;
+    let mut raw_label_inserts = 0usize;
     let mut states = vec![DWAState::default(); 1 + mode_groups.len() * core_states.len()];
     for group_index in 0..mode_groups.len() {
         for (core_state_index, core_state) in core_states.iter().enumerate() {
@@ -4467,23 +4576,30 @@ pub(crate) fn expand_representative_dwa_after_minimization(
             if mode_indices.is_empty() || entry_domain.is_empty() {
                 continue;
             }
-            let lift_group_index = group_index * core_states.len() + core_state_index;
+            let mode_set_id = mode_set_id_at_core_state[group_index][core_state_index]
+                .expect("active suffix state must have a mode-set id");
             let final_weight = core_state.final_weight.as_ref().map(|weight| {
-                lifter.lift_over_disjoint_group(
-                    weight,
-                    lift_group_index,
-                    mode_indices,
-                    entry_domain,
-                )
+                let started_at = profile_timing.then(Instant::now);
+                let lifted = lifter.lift_over_disjoint_group(weight, mode_set_id, mode_indices, entry_domain);
+                if let Some(started_at) = started_at {
+                    lift_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+                }
+                lift_calls += 1;
+                lifted
             });
             let mut transitions = BTreeMap::new();
             for (&label, (target, weight)) in &core_state.transitions {
+                let lift_started_at = profile_timing.then(Instant::now);
                 let lifted_weight = lifter.lift_over_disjoint_group(
                     weight,
-                    lift_group_index,
+                    mode_set_id,
                     mode_indices,
                     entry_domain,
                 );
+                if let Some(started_at) = lift_started_at {
+                    lift_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+                }
+                lift_calls += 1;
                 if lifted_weight.is_empty() {
                     continue;
                 }
@@ -4506,12 +4622,17 @@ pub(crate) fn expand_representative_dwa_after_minimization(
                     .into_iter()
                     .flatten()
                 {
+                    let raw_label_started_at = profile_timing.then(Instant::now);
                     assert!(
                         transitions
                             .insert(member as i32, (destination, lifted_weight.clone()))
                             .is_none(),
                         "one raw member must belong to exactly one TI representative class",
                     );
+                    if let Some(started_at) = raw_label_started_at {
+                        raw_label_insert_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+                    }
+                    raw_label_inserts += 1;
                 }
             }
             states[state_for(group_index, core_state_index) as usize] = DWAState {
@@ -4568,11 +4689,23 @@ pub(crate) fn expand_representative_dwa_after_minimization(
 
     if let Some(started_at) = shared_build_started_at {
         eprintln!(
-            "[glrmask/profile][ti_post_dwa_direct_detail] coordinate_setup_ms={:.3} active_filter_ms={:.3} grouping_ms={:.3} shared_build_ms={:.3}",
+            "[glrmask/profile][ti_post_dwa_direct_detail] coordinate_setup_ms={:.3} active_filter_ms={:.3} grouping_ms={:.3} shared_build_ms={:.3} lift_calls={} lift_ms={:.3} raw_label_inserts={} raw_label_insert_ms={:.3} base_lifts={} mode_lifts={} group_lifts={} coordinate_plans={} group_base_ms={:.3} group_plan_ms={:.3} group_signature_ms={:.3} group_apply_ms={:.3}",
             coordinate_setup_ms,
             active_filter_ms,
             grouping_ms,
             started_at.elapsed().as_secs_f64() * 1000.0,
+            lift_calls,
+            lift_ms,
+            raw_label_inserts,
+            raw_label_insert_ms,
+            lifter.base_lifts.len(),
+            lifter.mode_lifts.len(),
+            lifter.group_lifts.len(),
+            lifter.group_coordinate_plans.len(),
+            lifter.profile_base_lift_ms,
+            lifter.profile_plan_ms,
+            lifter.profile_signature_ms,
+            lifter.profile_apply_ms,
         );
     }
 
@@ -4584,19 +4717,71 @@ pub(crate) fn expand_representative_dwa_after_minimization(
 /// the expanded DWA with the same one-previous-terminal guard used by the NWA
 /// postprocess. It deliberately performs no further NWA construction,
 /// determinization, or minimization.
+pub(crate) struct RawFollowRestoration {
+    pub(crate) dwa: DWA,
+    pub(crate) used_follow_row_quotient: bool,
+}
+
 pub(crate) fn restore_raw_follow_constraints_after_expansion(
     expanded_dwa: &DWA,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     num_terminals: usize,
     ignore_terminal: Option<TerminalID>,
-) -> DWA {
-    let normalized = super::equivalence_analysis::disallowed_follows::normalize_disallowed_follows(
-        num_terminals,
-        disallowed_follows,
-    );
-    if normalized.iter().all(BitSet::is_zero) {
-        return expanded_dwa.clone();
+) -> RawFollowRestoration {
+    // Every query below is for an in-range raw terminal. Borrow the original
+    // rows instead of normalizing by cloning `num_terminals` full bitsets. The
+    // former normalization was several milliseconds by itself on p0/p1 even
+    // when the ensuing product was tiny.
+    let rows_for_terminal: Vec<Option<&BitSet>> = (0..num_terminals)
+        .map(|terminal| {
+            disallowed_follows
+                .get(&(terminal as u32))
+                .filter(|row| !row.is_zero())
+        })
+        .collect();
+    if !rows_for_terminal.iter().flatten().any(|row| {
+        row.iter().any(|disallowed| disallowed < num_terminals)
+    }) {
+        return RawFollowRestoration {
+            dwa: expanded_dwa.clone(),
+            used_follow_row_quotient: false,
+        };
     }
+
+    // A previous terminal is observed only through its follow row. On the
+    // tiny direct suffix shapes this exact quotient avoids constructing one
+    // otherwise identical product state per raw terminal. Retain raw
+    // predecessor identity on larger shapes because pointwise minimization's
+    // canonical representative choice is intentionally shape-sensitive there.
+    let follow_row_class_count = rows_for_terminal
+        .iter()
+        .copied()
+        .collect::<FxHashSet<_>>()
+        .len();
+    // This exact quotient is particularly valuable for compact direct suffix
+    // graphs.  Bound the product shape so large general TI artifacts retain
+    // their historical canonicalization path.
+    let use_follow_row_quotient = expanded_dwa.states().len() <= 24
+        && follow_row_class_count <= 64
+        && expanded_dwa.states().len() * follow_row_class_count <= 1200;
+    let (previous_key_for_terminal, follow_rows) = if use_follow_row_quotient {
+        let mut class_for_row = FxHashMap::<Option<&BitSet>, u32>::default();
+        let mut rows = Vec::<Option<&BitSet>>::new();
+        let keys = rows_for_terminal
+            .iter()
+            .copied()
+            .map(|row| {
+                let next = rows.len() as u32;
+                *class_for_row.entry(row).or_insert_with(|| {
+                    rows.push(row);
+                    next
+                })
+            })
+            .collect::<Vec<_>>();
+        (keys, rows)
+    } else {
+        ((0..num_terminals as u32).collect(), rows_for_terminal)
+    };
 
     type ProductState = (u32, Option<u32>);
     let mut state_ids = FxHashMap::<ProductState, u32>::default();
@@ -4623,29 +4808,29 @@ pub(crate) fn restore_raw_follow_constraints_after_expansion(
         &mut worklist,
         &mut states,
     );
-    while let Some((dwa_state, previous_terminal)) = worklist.pop_front() {
-        let result_state = state_ids[&(dwa_state, previous_terminal)] as usize;
+    while let Some((dwa_state, previous_key)) = worklist.pop_front() {
+        let result_state = state_ids[&(dwa_state, previous_key)] as usize;
         let source = &expanded_dwa.states()[dwa_state as usize];
         states[result_state].final_weight = source.final_weight.clone();
 
         for (&label, (target, weight)) in &source.transitions {
-            let next_previous_terminal = if label < 0
+            let next_previous_key = if label < 0
                 || ignore_terminal.is_some_and(|ignore| label as TerminalID == ignore)
             {
-                previous_terminal
-            } else if (label as usize) < normalized.len() {
+                previous_key
+            } else if (label as usize) < previous_key_for_terminal.len() {
                 let terminal = label as usize;
-                if previous_terminal.is_some_and(|previous| {
-                    normalized[previous as usize].contains(terminal)
+                if previous_key.is_some_and(|previous| {
+                    follow_rows[previous as usize].is_some_and(|row| row.contains(terminal))
                 }) {
                     continue;
                 }
-                Some(terminal as u32)
+                Some(previous_key_for_terminal[terminal])
             } else {
                 None
             };
             let destination = get_or_create(
-                (*target, next_previous_terminal),
+                (*target, next_previous_key),
                 &mut state_ids,
                 &mut worklist,
                 &mut states,
@@ -4660,7 +4845,10 @@ pub(crate) fn restore_raw_follow_constraints_after_expansion(
         }
     }
 
-    DWA::from_parts(states, start)
+    RawFollowRestoration {
+        dwa: DWA::from_parts(states, start),
+        used_follow_row_quotient: use_follow_row_quotient,
+    }
 }
 
 
@@ -4842,18 +5030,19 @@ fn forward_domains_fixed_point(dwa: &DWA) -> Vec<Weight> {
 }
 
 /// Restrict each final/transition weight to coordinates that can reach its
-/// source state from the DWA start. This preserves every completed path while
-/// dropping unreachable transport-factor fragments before minimization.
-pub(crate) fn restrict_weights_to_forward_domains(dwa: &DWA) -> DWA {
+/// source state from the DWA start, mutating an already-owned product DWA.
+/// This preserves every completed path while dropping unreachable
+/// transport-factor fragments before minimization without cloning the full
+/// raw-follow state vector a second time.
+pub(crate) fn restrict_weights_to_forward_domains_in_place(dwa: &mut DWA) {
     let state_count = dwa.states().len();
     if state_count == 0 || (dwa.start_state() as usize) >= state_count {
-        return dwa.clone();
+        return;
     }
 
     let domains = forward_domains_acyclic(dwa).unwrap_or_else(|| forward_domains_fixed_point(dwa));
     let mut restriction_cache = FxHashMap::<(usize, usize), Weight>::default();
-    let mut states = dwa.states().to_vec();
-    for (state, domain) in states.iter_mut().zip(domains.iter()) {
+    for (state, domain) in dwa.states_mut().iter_mut().zip(domains.iter()) {
         state.final_weight = state
             .final_weight
             .as_ref()
@@ -4864,7 +5053,14 @@ pub(crate) fn restrict_weights_to_forward_domains(dwa: &DWA) -> DWA {
             !weight.is_empty()
         });
     }
-    DWA::from_parts(states, dwa.start_state())
+}
+
+/// Owned convenience wrapper for tests and callers that need to retain the
+/// unnormalized input DWA.
+pub(crate) fn restrict_weights_to_forward_domains(dwa: &DWA) -> DWA {
+    let mut normalized = dwa.clone();
+    restrict_weights_to_forward_domains_in_place(&mut normalized);
+    normalized
 }
 
 #[cfg(test)]

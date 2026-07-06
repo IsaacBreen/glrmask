@@ -45,7 +45,7 @@ use terminal_interchangeability::{
     canonicalize_transport_mode_states, coalesced_disallowed_follows,
     discover_one_round_with_transport_witnesses_in_context, fold_one_round_partition,
     expand_representative_dwa_after_minimization, partition_has_merges,
-    restrict_weights_to_forward_domains, restore_raw_follow_constraints_after_expansion,
+    restrict_weights_to_forward_domains_in_place, restore_raw_follow_constraints_after_expansion,
     singleton_partition, transport_coordinate_quotient, visible_output_raw_labels,
     TiDiscoveryContext,
 };
@@ -626,18 +626,20 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             .unwrap_or(0.0);
 
         let raw_follow_started_at = ti_profile_timing.then(Instant::now);
-        let expanded_dwa = restore_raw_follow_constraints_after_expansion(
+        let raw_follow_restoration = restore_raw_follow_constraints_after_expansion(
             &expanded_dwa,
             disallowed_follows,
             grammar.num_terminals as usize,
             ignore_terminal,
         );
+        let used_follow_row_quotient = raw_follow_restoration.used_follow_row_quotient;
+        let mut expanded_dwa = raw_follow_restoration.dwa;
         ti_raw_follow_restore_ms = raw_follow_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
 
         let forward_domain_started_at = ti_profile_timing.then(Instant::now);
-        let expanded_dwa = restrict_weights_to_forward_domains(&expanded_dwa);
+        restrict_weights_to_forward_domains_in_place(&mut expanded_dwa);
         ti_forward_domain_normalize_ms = forward_domain_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
@@ -650,10 +652,16 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         final_id_map.tokenizer_states = transport_coordinate_map;
         let mut expanded_artifact = MappedArtifact::new(expanded_dwa, final_id_map);
         let post_dwa_compact_started_at = Instant::now();
-        if profiling {
-            expanded_artifact.compact_dimensions_fast_with_stats();
-        } else {
-            expanded_artifact.compact_dimensions_fast();
+        // The compact follow-row product used by p1 already exposes the exact
+        // pointwise grouping to minimization. Avoid rebuilding an equivalent
+        // token layout before that pass; p0 retains the established precompact
+        // canonicalization path.
+        if !(used_follow_row_quotient && expanded_artifact.artifact().stats().states <= 64) {
+            if profiling {
+                expanded_artifact.compact_dimensions_fast_with_stats();
+            } else {
+                expanded_artifact.compact_dimensions_fast();
+            }
         }
         ti_post_dwa_compact_ms = post_dwa_compact_started_at.elapsed().as_secs_f64() * 1000.0;
         let (expanded_dwa, final_id_map) = expanded_artifact.into_parts();
@@ -663,10 +671,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         // pointwise profiles establish each greedy merge group first; this is
         // scoped to the post-DWA artifact and leaves ordinary minimization
         // unchanged.
-        let minimized_dwa = minimize_owned_with_pointwise_class_order(
-            expanded_dwa,
-            PointwiseClassOrder::DescendingDomain,
-        );
+        let pointwise_order = if used_follow_row_quotient {
+            PointwiseClassOrder::Stable
+        } else {
+            PointwiseClassOrder::DescendingDomain
+        };
+        let minimized_dwa = minimize_owned_with_pointwise_class_order(expanded_dwa, pointwise_order);
         ti_post_dwa_minimize_ms = post_dwa_minimize_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
