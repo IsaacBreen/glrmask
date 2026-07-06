@@ -446,6 +446,37 @@ fn append_l1_profile_entry<'a>(
     *len_accum += entry_range_count;
 }
 
+/// Serial exact-profile collection visits many TSIDs while drawing from the
+/// same compact terminal-signature universe. Reuse a dense signature-to-slot
+/// scratch table instead of allocating and hashing a fresh sparse map per TSID.
+/// `touched_signature_ids` records precisely the entries that must be cleared
+/// before the next TSID; the produced range vectors still move into `LazyRanges`.
+#[inline]
+fn append_l1_profile_entry_dense<'a>(
+    touched_positions: &mut [usize],
+    touched_signature_ids: &mut Vec<usize>,
+    touched_signatures: &mut Vec<(usize, Vec<&'a [(u32, u32)]>, u64, usize)>,
+    sig_idx: usize,
+    ranges: &'a [(u32, u32)],
+    entry_hash: u64,
+    entry_range_count: usize,
+) {
+    let position = touched_positions[sig_idx];
+    let position = if position == usize::MAX {
+        let position = touched_signatures.len();
+        touched_positions[sig_idx] = position;
+        touched_signature_ids.push(sig_idx);
+        touched_signatures.push((sig_idx, Vec::new(), 0, 0));
+        position
+    } else {
+        position
+    };
+    let (_, refs, hash_accum, len_accum) = &mut touched_signatures[position];
+    refs.push(ranges);
+    *hash_accum = hash_accum.wrapping_add(entry_hash);
+    *len_accum += entry_range_count;
+}
+
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -3145,15 +3176,98 @@ fn build_l1_terminal_dwa(
             }
             result
         };
-    let per_thread_results: Vec<Vec<(u32, u32, LazyRanges<'_>)>> =
-        if rayon::current_num_threads() == 1 {
-            start_states_list.iter().map(build_start_state_results).collect()
-        } else {
-            start_states_list
-                .par_iter()
-                .map(build_start_state_results)
-                .collect()
-        };
+    // In the normal exact L1 path every TSID already has a representative
+    // profile. On one worker, collect its entries directly into the eventual
+    // interning vector. This avoids one FxHashMap allocation per TSID and the
+    // intermediate Vec<Vec<_>>/flatten pass, while retaining the established
+    // parallel and fallback paths unchanged.
+    let serial_exact_profile_collection =
+        exact_profile_reuse.is_some() && rayon::current_num_threads() == 1;
+    let mut all_entries: Vec<(u32, u32, LazyRanges<'_>)> = if serial_exact_profile_collection {
+        let reuse = exact_profile_reuse.expect("missing exact L1 profile reuse");
+        let profiles = indexed_reuse_profiles
+            .as_ref()
+            .expect("missing indexed exact L1 profiles");
+        let mut touched_positions = vec![usize::MAX; terminal_signatures.len()];
+        let mut touched_signature_ids = Vec::<usize>::new();
+        let mut touched_signatures: Vec<(usize, Vec<&[(u32, u32)]>, u64, usize)> =
+            Vec::new();
+        let mut entries = Vec::new();
+
+        for (internal_tsid, start_state) in id_map
+            .tokenizer_states
+            .iter_representative_ids()
+            .enumerate()
+        {
+            for &sig_idx in &touched_signature_ids {
+                touched_positions[sig_idx] = usize::MAX;
+            }
+            touched_signature_ids.clear();
+            touched_signatures.clear();
+
+            if !empty_token_ranges.is_empty() {
+                let sig_id = state_to_terminal_signature[start_state as usize];
+                if sig_id != u32::MAX {
+                    append_l1_profile_entry_dense(
+                        &mut touched_positions,
+                        &mut touched_signature_ids,
+                        &mut touched_signatures,
+                        sig_id as usize,
+                        empty_token_ranges.as_slice(),
+                        empty_token_hash,
+                        empty_token_ranges.len(),
+                    );
+                }
+            }
+
+            let profile_ids = reuse
+                .representative_profile_ids
+                .get(&start_state)
+                .expect("exact L1 profile reuse missing id-map representative");
+            for &profile_id in profile_ids.iter() {
+                if profile_id == 0 {
+                    continue;
+                }
+                for &(sig_idx, ranges, entry_hash, entry_range_count) in
+                    &profiles[profile_id as usize]
+                {
+                    append_l1_profile_entry_dense(
+                        &mut touched_positions,
+                        &mut touched_signature_ids,
+                        &mut touched_signatures,
+                        sig_idx,
+                        ranges,
+                        entry_hash,
+                        entry_range_count,
+                    );
+                }
+            }
+
+            for (sig_idx, refs, hash, total_len) in touched_signatures.drain(..) {
+                entries.push((
+                    sig_idx as u32,
+                    internal_tsid as u32,
+                    LazyRanges {
+                        refs,
+                        hash,
+                        total_len,
+                    },
+                ));
+            }
+        }
+        entries
+    } else {
+        let per_thread_results: Vec<Vec<(u32, u32, LazyRanges<'_>)>> =
+            if rayon::current_num_threads() == 1 {
+                start_states_list.iter().map(build_start_state_results).collect()
+            } else {
+                start_states_list
+                    .par_iter()
+                    .map(build_start_state_results)
+                    .collect()
+            };
+        per_thread_results.into_iter().flatten().collect()
+    };
 
     let start_state_collect_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -3162,10 +3276,6 @@ fn build_l1_terminal_dwa(
     // ref identity (fast pointer comparison) and materialized only for
     // unique groups.
     let token_set_intern_started_at = Instant::now();
-
-    // Flatten all thread results into a single Vec.
-    let mut all_entries: Vec<(u32, u32, LazyRanges<'_>)> =
-        per_thread_results.into_iter().flatten().collect();
 
     // Sort by hash (fast u64 comparison). Equal hashes → same group candidate.
     all_entries.sort_unstable_by_key(|entry| entry.2.hash);
