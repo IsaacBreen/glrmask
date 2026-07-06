@@ -23,19 +23,41 @@ use rustc_hash::FxHashMap;
 type L1WalkProfile = Arc<[(u32, Arc<[(u32, u32)]>)]>;
 
 fn freeze_l1_walk_profile(runs: &[(u32, u32, u32)]) -> L1WalkProfile {
-    let mut positions = FxHashMap::<u32, usize>::default();
     let mut grouped = Vec::<(u32, Vec<(u32, u32)>)>::new();
+    // Most exact target profiles touch only a handful of terminal signatures.
+    // Avoid allocating and hashing a map for those cases, but promote to the
+    // existing exact lookup strategy once the linear probe stops being cheap.
+    const LINEAR_GROUP_LIMIT: usize = 8;
+    let mut positions: Option<FxHashMap<u32, usize>> = None;
     for &(signature_id, start, end) in runs {
         if signature_id == 0 {
             continue;
         }
         let direct_signature_id = signature_id - 1;
-        let position = if let Some(&position) = positions.get(&direct_signature_id) {
+        let position = if let Some(positions) = positions.as_mut() {
+            if let Some(&position) = positions.get(&direct_signature_id) {
+                position
+            } else {
+                let position = grouped.len();
+                positions.insert(direct_signature_id, position);
+                grouped.push((direct_signature_id, Vec::new()));
+                position
+            }
+        } else if let Some(position) = grouped
+            .iter()
+            .position(|(signature, _)| *signature == direct_signature_id)
+        {
             position
         } else {
             let position = grouped.len();
-            positions.insert(direct_signature_id, position);
             grouped.push((direct_signature_id, Vec::new()));
+            if grouped.len() == LINEAR_GROUP_LIMIT {
+                let mut indexed = FxHashMap::default();
+                for (position, (signature, _)) in grouped.iter().enumerate() {
+                    indexed.insert(*signature, position);
+                }
+                positions = Some(indexed);
+            }
             position
         };
         grouped[position].1.push((start, end));
