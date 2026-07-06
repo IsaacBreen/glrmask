@@ -19,7 +19,7 @@ use crate::compiler::constraint_possible_matches as cpm;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{GLRTable, GlrTableConstruction};
 use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
-use crate::compiler::stages::dwa_build_plan::DwaBuildPlan;
+use crate::compiler::stages::dwa_build_graph::DwaBuildTopology;
 use crate::compiler::stages::id_map_and_terminal_dwa::{
     TerminalDwaLeaves,
     build_terminal_dwa_leaves_with_precomputed_global_max_length,
@@ -57,6 +57,23 @@ use crate::runtime::Constraint;
 enum PipelineTerminalDwaBuild {
     Merged(MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile),
     Leaves(TerminalDwaLeaves),
+}
+
+/// The production entry points always use `LegacyGlobalTerminal`. Other
+/// variants are code-level layouts for tests and future source changes.
+#[derive(Debug, Clone, Copy)]
+enum PipelineDwaBuildLayout {
+    LegacyGlobalTerminal,
+    Graph(DwaBuildTopology),
+}
+
+impl PipelineDwaBuildLayout {
+    fn graph_topology(self) -> Option<DwaBuildTopology> {
+        match self {
+            Self::LegacyGlobalTerminal => None,
+            Self::Graph(topology) => Some(topology),
+        }
+    }
 }
 
 fn env_flag_enabled(name: &str) -> bool {
@@ -470,6 +487,20 @@ fn compile_prepared_with_profile_and_table_construction(
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
 ) -> (Constraint, CompilePhaseProfile) {
+    compile_prepared_with_profile_and_table_construction_and_dwa_build_layout(
+        prepared_grammar,
+        vocab,
+        default_table_construction,
+        PipelineDwaBuildLayout::LegacyGlobalTerminal,
+    )
+}
+
+fn compile_prepared_with_profile_and_table_construction_and_dwa_build_layout(
+    prepared_grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+    dwa_build_layout: PipelineDwaBuildLayout,
+) -> (Constraint, CompilePhaseProfile) {
     let interner_cleanup = crate::ds::weight::defer_weight_interner_cleanup();
     let result = run_with_compile_thread_pool(|| {
         let compile_started_at = Instant::now();
@@ -586,8 +617,8 @@ fn compile_prepared_with_profile_and_table_construction(
             );
         let global_max_length_ms = elapsed_ms(global_max_length_started_at);
 
-        let dwa_build_plan = DwaBuildPlan::from_env();
-        let use_dwa_build_plan = dwa_build_plan.is_some();
+        let dwa_build_topology = dwa_build_layout.graph_topology();
+        let use_dwa_build_graph = dwa_build_topology.is_some();
         let (
             (terminal_build, cpm_result),
             (templates, template_dfas_by_terminal, templates_ms),
@@ -595,7 +626,7 @@ fn compile_prepared_with_profile_and_table_construction(
             || {
                 rayon::join(
                     || {
-                        if use_dwa_build_plan {
+                        if use_dwa_build_graph {
                             PipelineTerminalDwaBuild::Leaves(
                                 build_terminal_dwa_leaves_with_precomputed_global_max_length(
                                     &tokenizer,
@@ -726,9 +757,9 @@ fn compile_prepared_with_profile_and_table_construction(
             possible_matches_interned_ranges_before_pm_reconcile,
             terminal_pm_joint_interned_ranges_before_reconcile,
             terminal_pm_joint_interned_ranges,
-        ) = if let Some(dwa_build_plan) = dwa_build_plan.as_ref() {
+        ) = if let Some(dwa_build_topology) = dwa_build_topology {
             let PipelineTerminalDwaBuild::Leaves(leaves) = terminal_build else {
-                unreachable!("DWA build plan requested but terminal stage returned a global DWA");
+                unreachable!("DWA build graph requested but terminal stage returned a global DWA");
             };
             let mut possible_matches = cpm_result.mapped_possible_matches;
             let cpm_profile = cpm_result.profile;
@@ -746,7 +777,7 @@ fn compile_prepared_with_profile_and_table_construction(
             }
 
             let parser_points_started_at = Instant::now();
-            let parser_nwa = dwa_build_plan.execute(leaves, &analyzed_grammar, &templates);
+            let parser_nwa = dwa_build_topology.build_parser_point(leaves, &analyzed_grammar, &templates);
             let parser_points_ms = elapsed_ms(parser_points_started_at);
 
             // The planned path intentionally does not materialize one global
@@ -1142,4 +1173,102 @@ pub(crate) fn compile_owned_profiled_with_table_construction(
     profile.prepare_ms = prepare_ms;
     profile.total_ms = elapsed_ms(total_started_at);
     (constraint, profile)
+}
+
+#[cfg(test)]
+mod dwa_build_graph_tests {
+    use super::*;
+    use crate::import::ebnf::parse_ebnf;
+
+    fn witness_vocab() -> Vocab {
+        Vocab::new(
+            vec![
+                (0, b"[".to_vec()),
+                (1, b"x".to_vec()),
+                (2, b"]".to_vec()),
+                (3, b"abc".to_vec()),
+                (4, b"a".to_vec()),
+                (5, b"bc".to_vec()),
+                (6, b"[x]".to_vec()),
+                (7, b"z".to_vec()),
+                (8, b"[z]".to_vec()),
+            ],
+            None,
+        )
+    }
+
+    fn compile_witness(layout: PipelineDwaBuildLayout) -> Constraint {
+        let grammar = parse_ebnf(r#"start ::= "abc" | "[" "x" "]""#).unwrap();
+        let prepared = prepare_grammar_transforms_only(grammar);
+        compile_prepared_with_profile_and_table_construction_and_dwa_build_layout(
+            prepared,
+            &witness_vocab(),
+            GlrTableConstruction::ExperimentalCoreMerged,
+            layout,
+        )
+        .0
+    }
+
+    fn accepts_tokens(constraint: &Constraint, tokens: &[u32]) -> bool {
+        let mut state = constraint.start();
+        tokens.iter().all(|&token| state.commit_token(token).is_ok()) && state.is_finished()
+    }
+
+    fn accepts_bytes(constraint: &Constraint, bytes: &[u8]) -> bool {
+        let mut state = constraint.start();
+        state.commit_bytes(bytes).is_ok() && state.is_finished()
+    }
+
+    fn mask_after(constraint: &Constraint, tokens: &[u32]) -> Option<Vec<u32>> {
+        let mut state = constraint.start();
+        for &token in tokens {
+            state.commit_token(token).ok()?;
+        }
+        Some(state.mask())
+    }
+
+    #[test]
+    fn static_dwa_build_topologies_preserve_terminal_and_parser_semantics() {
+        let legacy = compile_witness(PipelineDwaBuildLayout::LegacyGlobalTerminal);
+        let prefixes: &[&[u32]] = &[&[], &[0], &[0, 1], &[4], &[4, 5], &[6]];
+        let layouts = [
+            (
+                "global_terminal",
+                PipelineDwaBuildLayout::Graph(DwaBuildTopology::GlobalTerminal),
+            ),
+            (
+                "partition_parser",
+                PipelineDwaBuildLayout::Graph(DwaBuildTopology::PerPartitionParser),
+            ),
+            (
+                "branch_parser",
+                PipelineDwaBuildLayout::Graph(DwaBuildTopology::PerBranchParser),
+            ),
+            (
+                "left_deep_terminal",
+                PipelineDwaBuildLayout::Graph(DwaBuildTopology::LeftDeepTerminal),
+            ),
+        ];
+
+        for (name, layout) in layouts {
+            let constraint = compile_witness(layout);
+            for &prefix in prefixes {
+                assert_eq!(
+                    mask_after(&constraint, prefix),
+                    mask_after(&legacy, prefix),
+                    "{name}: mask diverged after {prefix:?}",
+                );
+            }
+            assert!(accepts_tokens(&constraint, &[3]), "{name}: abc token");
+            assert!(accepts_tokens(&constraint, &[4, 5]), "{name}: split abc");
+            assert!(accepts_tokens(&constraint, &[0, 1, 2]), "{name}: split bracket form");
+            assert!(accepts_tokens(&constraint, &[6]), "{name}: cross-terminal token");
+            assert!(!accepts_tokens(&constraint, &[7]), "{name}: z must reject");
+            assert!(!accepts_tokens(&constraint, &[8]), "{name}: [z] must reject");
+            assert!(accepts_bytes(&constraint, b"abc"), "{name}: byte abc");
+            assert!(accepts_bytes(&constraint, b"[x]"), "{name}: byte bracket form");
+            assert!(!accepts_bytes(&constraint, b"abd"), "{name}: byte abd must reject");
+            assert!(!accepts_bytes(&constraint, b"[z]"), "{name}: byte [z] must reject");
+        }
+    }
 }

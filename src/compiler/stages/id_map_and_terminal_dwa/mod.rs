@@ -360,7 +360,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
 }
 
 /// Build independently movable L1/L2P terminal-DWA leaves.  The caller owns
-/// every later terminal merge and parser conversion through `dwa_build_plan`.
+/// every later terminal merge and parser conversion through `dwa_build_graph`.
 pub(crate) fn build_terminal_dwa_leaves_with_precomputed_global_max_length(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
