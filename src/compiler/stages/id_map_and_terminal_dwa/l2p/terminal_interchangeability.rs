@@ -5130,52 +5130,56 @@ fn union_forward_domain_parts(parts: &mut Vec<Weight>) -> Weight {
     Weight::union_all(parts.iter())
 }
 
-/// Compute forward domains in one pass when the DWA is acyclic.
-///
-/// A prior queue-based propagation updated a target's domain once for each
-/// predecessor arrival, repeatedly rebuilding large unions at the raw-follow
-/// product joins.  In topological order every predecessor has run before its
-/// target, so collecting exact intersections and taking one union is
-/// equivalent while avoiding that repeated reconstruction.
-fn forward_domains_acyclic(dwa: &DWA) -> Option<Vec<Weight>> {
+/// Propagate forward domains and rewrite the product DWA in one exact
+/// topological pass. Every incoming contribution is the same intersection
+/// that becomes the normalized transition weight, so retaining it avoids
+/// computing `source_domain ∩ transition_weight` twice.
+fn normalize_weights_to_forward_domains_acyclic_in_place(dwa: &mut DWA) -> bool {
     let state_count = dwa.states().len();
-    let order = forward_domain_topological_order(dwa)?;
+    let Some(order) = forward_domain_topological_order(dwa) else {
+        return false;
+    };
     let start = dwa.start_state() as usize;
     if start >= state_count {
-        return Some(vec![Weight::empty(); state_count]);
+        return true;
     }
 
     let mut pending = vec![Vec::<Weight>::new(); state_count];
     pending[start].push(Weight::all());
-    let mut domains = vec![Weight::empty(); state_count];
     let mut intersection_cache = FxHashMap::<(usize, usize), Weight>::default();
 
     for source in order {
         let source_domain = union_forward_domain_parts(&mut pending[source]);
+        let state = &mut dwa.states_mut()[source];
         if source_domain.is_empty() {
+            state.final_weight = None;
+            state.transitions.clear();
             continue;
         }
-        domains[source] = source_domain.clone();
-        for (target, weight) in dwa.states()[source].transitions.values() {
-            let target = *target as usize;
-            if target >= state_count {
-                continue;
-            }
-            let incoming = forward_domain_intersection(
+
+        state.final_weight = state
+            .final_weight
+            .as_ref()
+            .map(|weight| forward_domain_intersection(&mut intersection_cache, weight, &source_domain))
+            .filter(|weight| !weight.is_empty());
+        state.transitions.retain(|_, (target, weight)| {
+            let normalized = forward_domain_intersection(
                 &mut intersection_cache,
-                &source_domain,
                 weight,
+                &source_domain,
             );
-            if !incoming.is_empty() {
-                pending[target].push(incoming);
+            let target = *target as usize;
+            if target < state_count && !normalized.is_empty() {
+                pending[target].push(normalized.clone());
             }
-        }
+            *weight = normalized;
+            !weight.is_empty()
+        });
     }
 
-    Some(domains)
+    true
 }
 
-/// Compute forward domains by the original monotone worklist for cyclic DWAs.
 fn forward_domains_fixed_point(dwa: &DWA) -> Vec<Weight> {
     let state_count = dwa.states().len();
     let mut domains = vec![Weight::empty(); state_count];
@@ -5220,7 +5224,11 @@ pub(crate) fn restrict_weights_to_forward_domains_in_place(dwa: &mut DWA) {
         return;
     }
 
-    let domains = forward_domains_acyclic(dwa).unwrap_or_else(|| forward_domains_fixed_point(dwa));
+    if normalize_weights_to_forward_domains_acyclic_in_place(dwa) {
+        return;
+    }
+
+    let domains = forward_domains_fixed_point(dwa);
     let mut restriction_cache = FxHashMap::<(usize, usize), Weight>::default();
     for (state, domain) in dwa.states_mut().iter_mut().zip(domains.iter()) {
         state.final_weight = state
