@@ -13,6 +13,10 @@ pub(super) fn reconcile_weight_id_maps(
     right_weights: &mut [&mut Weight],
     right_id_map: &mut InternalIdMap,
 ) {
+    if try_reconcile_refinement_fast_path(left_weights, left_id_map, right_weights, right_id_map) {
+        return;
+    }
+
     let common_id_map = build_common_internal_id_map(&[left_id_map, right_id_map]);
 
     let left_tsid_map = build_local_to_common_tsid_map(left_id_map, &common_id_map);
@@ -43,6 +47,21 @@ pub(super) fn reconcile_weight_id_maps_into_common(
     right_weights: &mut [&mut Weight],
     right_id_map: &InternalIdMap,
 ) -> InternalIdMap {
+    if right_weights.is_empty() {
+        return left_id_map.clone();
+    }
+    if left_weights.is_empty() {
+        return right_id_map.clone();
+    }
+    if internal_id_map_refines(left_id_map, right_id_map) {
+        remap_weights_into_existing_common(right_weights, right_id_map, left_id_map);
+        return left_id_map.clone();
+    }
+    if internal_id_map_refines(right_id_map, left_id_map) {
+        remap_weights_into_existing_common(left_weights, left_id_map, right_id_map);
+        return right_id_map.clone();
+    }
+
     let common_id_map = build_common_internal_id_map(&[left_id_map, right_id_map]);
 
     let left_tsid_map = build_local_to_common_tsid_map(left_id_map, &common_id_map);
@@ -64,6 +83,89 @@ pub(super) fn reconcile_weight_id_maps_into_common(
     );
 
     common_id_map
+}
+
+fn try_reconcile_refinement_fast_path(
+    left_weights: &mut [&mut Weight],
+    left_id_map: &mut InternalIdMap,
+    right_weights: &mut [&mut Weight],
+    right_id_map: &mut InternalIdMap,
+) -> bool {
+    if right_weights.is_empty() {
+        *right_id_map = left_id_map.clone();
+        return true;
+    }
+    if left_weights.is_empty() {
+        *left_id_map = right_id_map.clone();
+        return true;
+    }
+    if internal_id_map_refines(left_id_map, right_id_map) {
+        remap_weights_into_existing_common(right_weights, right_id_map, left_id_map);
+        *right_id_map = left_id_map.clone();
+        return true;
+    }
+    if internal_id_map_refines(right_id_map, left_id_map) {
+        remap_weights_into_existing_common(left_weights, left_id_map, right_id_map);
+        *left_id_map = right_id_map.clone();
+        return true;
+    }
+    false
+}
+
+fn remap_weights_into_existing_common(
+    weights: &mut [&mut Weight],
+    local_id_map: &InternalIdMap,
+    common_id_map: &InternalIdMap,
+) {
+    if weights.is_empty() {
+        return;
+    }
+    let tsid_map = build_local_to_common_tsid_map(local_id_map, common_id_map);
+    let token_map = build_local_to_common_token_map_from_common_classes(local_id_map, common_id_map);
+    remap_weights_with_maps(
+        weights,
+        &tsid_map,
+        &token_map,
+        common_id_map.num_tsids() as usize,
+    );
+}
+
+fn internal_id_map_refines(finer: &InternalIdMap, coarser: &InternalIdMap) -> bool {
+    many_to_one_id_map_refines(&finer.tokenizer_states, &coarser.tokenizer_states, false)
+        && many_to_one_id_map_refines(&finer.vocab_tokens, &coarser.vocab_tokens, true)
+}
+
+fn many_to_one_id_map_refines(
+    finer: &ManyToOneIdMap,
+    coarser: &ManyToOneIdMap,
+    allow_unmapped: bool,
+) -> bool {
+    if finer.original_to_internal.len() < coarser.original_to_internal.len() {
+        return false;
+    }
+
+    let mut coarser_by_finer = vec![None; finer.internal_to_originals.len()];
+    for original in 0..finer.original_to_internal.len() {
+        let finer_internal = finer.original_to_internal[original];
+        let coarser_internal = coarser
+            .original_to_internal
+            .get(original)
+            .copied()
+            .unwrap_or(u32::MAX);
+        if allow_unmapped && finer_internal == u32::MAX && coarser_internal == u32::MAX {
+            continue;
+        }
+        let Some(slot) = coarser_by_finer.get_mut(finer_internal as usize) else {
+            return false;
+        };
+        match slot {
+            Some(previous) if *previous != coarser_internal => return false,
+            Some(_) => {}
+            None => *slot = Some(coarser_internal),
+        }
+    }
+
+    true
 }
 
 fn build_common_internal_id_map(inputs: &[&InternalIdMap]) -> InternalIdMap {
@@ -682,6 +784,25 @@ fn remap_weight_general(
 mod tests {
     use super::*;
 
+    fn map(original_to_internal: Vec<u32>, num_internal: u32) -> ManyToOneIdMap {
+        ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+            original_to_internal,
+            num_internal,
+        )
+    }
+
+    fn id_map(
+        states: Vec<u32>,
+        num_states: u32,
+        tokens: Vec<u32>,
+        num_tokens: u32,
+    ) -> InternalIdMap {
+        InternalIdMap {
+            tokenizer_states: map(states, num_states),
+            vocab_tokens: map(tokens, num_tokens),
+        }
+    }
+
     fn entries_key(weight: &Weight) -> Vec<(u32, u32, Vec<(u32, u32)>)> {
         weight
             .0
@@ -697,6 +818,46 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    fn id_map_key(id_map: &InternalIdMap) -> (Vec<u32>, Vec<Vec<u32>>, Vec<u32>, Vec<Vec<u32>>) {
+        (
+            id_map.tokenizer_states.original_to_internal.clone(),
+            id_map.tokenizer_states.internal_to_originals.clone(),
+            id_map.vocab_tokens.original_to_internal.clone(),
+            id_map.vocab_tokens.internal_to_originals.clone(),
+        )
+    }
+
+    fn reconcile_generic_for_test(
+        left_weight: &mut Weight,
+        left_id_map: &mut InternalIdMap,
+        right_weight: &mut Weight,
+        right_id_map: &mut InternalIdMap,
+    ) {
+        let common_id_map = build_common_internal_id_map(&[left_id_map, right_id_map]);
+        let left_tsid_map = build_local_to_common_tsid_map(left_id_map, &common_id_map);
+        let left_token_map =
+            build_local_to_common_token_map_from_common_classes(left_id_map, &common_id_map);
+        let right_tsid_map = build_local_to_common_tsid_map(right_id_map, &common_id_map);
+        let right_token_map =
+            build_local_to_common_token_map_from_common_classes(right_id_map, &common_id_map);
+
+        remap_weights_with_maps(
+            &mut [left_weight],
+            &left_tsid_map,
+            &left_token_map,
+            common_id_map.num_tsids() as usize,
+        );
+        remap_weights_with_maps(
+            &mut [right_weight],
+            &right_tsid_map,
+            &right_token_map,
+            common_id_map.num_tsids() as usize,
+        );
+
+        *left_id_map = common_id_map.clone();
+        *right_id_map = common_id_map;
     }
 
     #[test]
@@ -719,5 +880,113 @@ mod tests {
         );
 
         assert_eq!(entries_key(&fast), entries_key(&general));
+    }
+
+    #[test]
+    fn refinement_reconcile_matches_generic_with_non_empty_coarser_weights() {
+        let left_id_map = id_map(
+            vec![0, 0, 1, 1, 2, 2],
+            3,
+            vec![0, 0, 1, 1, 2, 2],
+            3,
+        );
+        let right_id_map = id_map(vec![0, 0, 0, 0, 1, 1], 2, vec![0, 0, 0, 0, 0, 0], 1);
+        assert!(internal_id_map_refines(&left_id_map, &right_id_map));
+
+        let left_weight = Weight::from_per_tsid_token_sets([
+            (0, RangeSetBlaze::from_iter([0..=1])),
+            (2, RangeSetBlaze::from_iter([2..=2])),
+        ]);
+        let right_weight = Weight::from_per_tsid_token_sets([
+            (0, RangeSetBlaze::from_iter([0..=0])),
+            (1, RangeSetBlaze::from_iter([0..=0])),
+        ]);
+
+        let mut fast_left_id_map = left_id_map.clone();
+        let mut fast_right_id_map = right_id_map.clone();
+        let mut fast_left_weight = left_weight.clone();
+        let mut fast_right_weight = right_weight.clone();
+        reconcile_weight_id_maps(
+            &mut [&mut fast_left_weight],
+            &mut fast_left_id_map,
+            &mut [&mut fast_right_weight],
+            &mut fast_right_id_map,
+        );
+
+        let mut generic_left_id_map = left_id_map;
+        let mut generic_right_id_map = right_id_map;
+        let mut generic_left_weight = left_weight;
+        let mut generic_right_weight = right_weight;
+        reconcile_generic_for_test(
+            &mut generic_left_weight,
+            &mut generic_left_id_map,
+            &mut generic_right_weight,
+            &mut generic_right_id_map,
+        );
+
+        assert_eq!(id_map_key(&fast_left_id_map), id_map_key(&generic_left_id_map));
+        assert_eq!(id_map_key(&fast_right_id_map), id_map_key(&generic_right_id_map));
+        assert_eq!(entries_key(&fast_left_weight), entries_key(&generic_left_weight));
+        assert_eq!(entries_key(&fast_right_weight), entries_key(&generic_right_weight));
+    }
+
+    #[test]
+    fn refinement_reconcile_preserves_finer_weights_when_other_side_is_empty() {
+        let left_id_map = id_map(
+            vec![0, 1, 2, 3],
+            4,
+            vec![0, 1, 2, 3, 4, 5],
+            6,
+        );
+        let right_id_map = id_map(vec![0, 0, 0, 0], 1, vec![0, 0, 0, 0, 0, 0], 1);
+        assert!(internal_id_map_refines(&left_id_map, &right_id_map));
+
+        let left_weight = Weight::from_per_tsid_token_sets([
+            (0, RangeSetBlaze::from_iter([0..=2])),
+            (3, RangeSetBlaze::from_iter([4..=5])),
+        ]);
+        let mut fast_left_id_map = left_id_map.clone();
+        let mut fast_right_id_map = right_id_map;
+        let mut fast_left_weight = left_weight.clone();
+        reconcile_weight_id_maps(
+            &mut [&mut fast_left_weight],
+            &mut fast_left_id_map,
+            &mut [],
+            &mut fast_right_id_map,
+        );
+
+        assert_eq!(id_map_key(&fast_left_id_map), id_map_key(&left_id_map));
+        assert_eq!(id_map_key(&fast_right_id_map), id_map_key(&left_id_map));
+        assert_eq!(entries_key(&fast_left_weight), entries_key(&left_weight));
+    }
+
+    #[test]
+    fn empty_side_reconcile_adopts_non_empty_side_after_domain_compaction() {
+        let left_id_map = id_map(
+            vec![0, 0, 1, 1],
+            2,
+            vec![0, 0, 1, 1, 2, 2],
+            3,
+        );
+        let compact_empty_id_map = id_map(vec![0], 1, vec![0], 1);
+        assert!(!internal_id_map_refines(&left_id_map, &compact_empty_id_map));
+
+        let left_weight = Weight::from_per_tsid_token_sets([
+            (0, RangeSetBlaze::from_iter([0..=1])),
+            (1, RangeSetBlaze::from_iter([2..=2])),
+        ]);
+        let mut fast_left_id_map = left_id_map.clone();
+        let mut fast_right_id_map = compact_empty_id_map;
+        let mut fast_left_weight = left_weight.clone();
+        reconcile_weight_id_maps(
+            &mut [&mut fast_left_weight],
+            &mut fast_left_id_map,
+            &mut [],
+            &mut fast_right_id_map,
+        );
+
+        assert_eq!(id_map_key(&fast_left_id_map), id_map_key(&left_id_map));
+        assert_eq!(id_map_key(&fast_right_id_map), id_map_key(&left_id_map));
+        assert_eq!(entries_key(&fast_left_weight), entries_key(&left_weight));
     }
 }
