@@ -551,7 +551,14 @@ fn build_dfa(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     byte_to_class_override: Option<&[u8; 256]>,
 ) -> Dfa {
-    build_dfa_with_group_filter(tokenizer, disallowed_follows, byte_to_class_override, None, None)
+    build_dfa_with_group_filter(
+        tokenizer,
+        disallowed_follows,
+        byte_to_class_override,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Build the analysis DFA, optionally filtering to only active groups.
@@ -569,6 +576,7 @@ fn build_dfa_with_group_filter(
     byte_to_class_override: Option<&[u8; 256]>,
     active_groups: Option<&[bool]>,
     shared_cache: Option<&SharedVocabDfaCache>,
+    normalized_disallowed_follows: Option<Vec<BitSet>>,
 ) -> Dfa {
     let dfa = tokenizer.dfa();
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
@@ -679,7 +687,9 @@ fn build_dfa_with_group_filter(
         completion_hash,
         none_completion_hash,
         self_loop_bytes,
-        disallowed_follows: normalize_disallowed_follows(num_groups, disallowed_follows),
+        disallowed_follows: normalized_disallowed_follows
+            .filter(|follows| follows.len() == num_groups)
+            .unwrap_or_else(|| normalize_disallowed_follows(num_groups, disallowed_follows)),
     }
 }
 
@@ -2604,6 +2614,7 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
+    normalized_disallowed_follows: Option<Vec<BitSet>>,
     byte_to_class: Option<&[u8; 256]>,
     active_groups: Option<&[bool]>,
     shared_cache: Option<&SharedVocabDfaCache>,
@@ -2647,6 +2658,7 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
                 byte_to_class,
                 active_groups,
                 shared_cache,
+                normalized_disallowed_follows,
             )
         })
     } else {
@@ -2660,6 +2672,7 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
             },
             active_groups,
             shared_cache,
+            normalized_disallowed_follows,
         ))
     };
     let build_dfa_ms = build_dfa_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -3025,6 +3038,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
         strings,
         initial_states,
         disallowed_follows,
+        None,
         byte_to_class,
         active_groups,
         shared_cache,

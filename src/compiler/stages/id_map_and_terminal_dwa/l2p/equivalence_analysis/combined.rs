@@ -294,8 +294,8 @@ fn should_skip_max_length_for_partition(
 
 const EXACT_REP_CONFIRMATION_MIN_STATES: usize = 2_000;
 const EXACT_REP_CONFIRMATION_MIN_TOKENS: usize = 200;
-const RAW_QUOTIENT_TINY_VOCAB_MAX_TOKENS: usize = 16;
-const RAW_QUOTIENT_TINY_VOCAB_MAX_BYTES: usize = 64;
+const RAW_QUOTIENT_SMALL_VOCAB_MAX_TOKENS: usize = 64;
+const RAW_QUOTIENT_SMALL_VOCAB_MAX_BYTES: usize = 512;
 
 fn token_length_stats(tokens: &[&[u8]]) -> TokenLengthStats {
     let mut stats = TokenLengthStats {
@@ -402,6 +402,7 @@ fn try_analyze_equivalences_with_raw_quotient(
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
+    shared_transition_cache: Option<&OnceLock<super::compat::FlatTransitionCache>>,
     initial_state_map: Option<&ManyToOneIdMap>,
     effective_follows_prepare_ms: f64,
 ) -> Option<(InternalIdMap, CombinedEquivalenceProfile)> {
@@ -439,18 +440,43 @@ fn try_analyze_equivalences_with_raw_quotient(
         max_token_len,
         active_byte_count,
     );
-    // The generic route still performs restricted observation, but for a tiny
-    // local vocabulary it then keeps the full raw analysis DFA alive for the
-    // exact state and token phases.  Materializing the exact restricted raw
-    // quotient is cheaper in that regime: it avoids the 18k-state shared-base
-    // setup and lets both remaining phases operate on the quotient.  Keep the
-    // bound deliberately narrow; larger short-token partitions (notably p7)
-    // can retain too much raw topology for this to win.
-    let tiny_raw_quotient = prepared.token_bytes.len() <= RAW_QUOTIENT_TINY_VOCAB_MAX_TOKENS
-        && direct_token_bytes <= RAW_QUOTIENT_TINY_VOCAB_MAX_BYTES;
-    if skip_raw_quotient && !tiny_raw_quotient {
+    // The generic route still performs restricted observation, but for a
+    // bounded local vocabulary the exact raw quotient is cheaper: it avoids
+    // the full shared-base setup and lets both remaining phases operate on the
+    // quotient. The bound is a cost selector only; it cannot affect the
+    // restricted observations or the resulting exact equivalence relation.
+    let small_raw_quotient = prepared.token_bytes.len() <= RAW_QUOTIENT_SMALL_VOCAB_MAX_TOKENS
+        && direct_token_bytes <= RAW_QUOTIENT_SMALL_VOCAB_MAX_BYTES;
+    if skip_raw_quotient && !small_raw_quotient {
         return None;
     }
+
+    // This cache contains only raw lexer transition data. Its construction is
+    // independent of active terminals, TI representatives, transport maps,
+    // replay, and partition identity; the bounded route merely delays when the
+    // transition-only layout is first needed.
+    let raw_analysis_base_started_at = Instant::now();
+    let raw_byte_to_class = if small_raw_quotient {
+        match shared_transition_cache {
+            Some(cache) => Some(
+                cache
+                    .get_or_init(|| {
+                        super::compat::derive_flat_transition_cache(
+                            tokenizer,
+                            std::sync::Arc::clone(flat_trans),
+                        )
+                    })
+                    .byte_to_class,
+            ),
+            None => None,
+        }
+    } else {
+        None
+    };
+    let raw_analysis_base_init_ms = raw_byte_to_class
+        .as_ref()
+        .map(|_| raw_analysis_base_started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
 
     let restricted_started_at = Instant::now();
     let raw_restricted = super::state_equivalence::restricted_observation::compute_state_map_raw(
@@ -458,6 +484,7 @@ fn try_analyze_equivalences_with_raw_quotient(
         flat_trans,
         active_groups,
         &raw_relevant_bytes,
+        raw_byte_to_class.as_ref(),
     )?;
     let restricted_observation_state_equiv_ms =
         restricted_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -487,8 +514,18 @@ fn try_analyze_equivalences_with_raw_quotient(
     // This exact byte partition is now over at most a few hundred quotient
     // rows. It replaces the previous 18k-state shared-base cold setup.
     let byte_class_setup_started_at = Instant::now();
-    let byte_to_class = super::compat::compute_byte_classes(analysis_view.dfa());
-    let byte_class_setup_ms = byte_class_setup_started_at.elapsed().as_secs_f64() * 1000.0;
+    // A raw byte class is equality of complete raw transition columns.  After
+    // an exact state quotient it remains a (possibly finer) byte partition,
+    // so choosing one representative per raw class cannot suppress any
+    // observable transition distinction.
+    let reused_raw_byte_to_class = raw_byte_to_class.is_some();
+    let byte_to_class = raw_byte_to_class
+        .unwrap_or_else(|| super::compat::compute_byte_classes(analysis_view.dfa()));
+    let byte_class_setup_ms = if reused_raw_byte_to_class {
+        0.0
+    } else {
+        byte_class_setup_started_at.elapsed().as_secs_f64() * 1000.0
+    };
 
     let token_dedup_started_at = Instant::now();
     let dedup = deduplicate_tokens_by_byte_class(&prepared.token_bytes, &byte_to_class);
@@ -536,6 +573,7 @@ fn try_analyze_equivalences_with_raw_quotient(
             &dedup.representative_token_bytes,
             &final_state_representatives,
             effective_disallowed,
+            Some(normalized_disallowed_follows),
             Some(&byte_to_class),
             None,
             None,
@@ -571,7 +609,7 @@ fn try_analyze_equivalences_with_raw_quotient(
             token_len_gt_16: token_len_stats.gt_16,
             token_len_gt_32: token_len_stats.gt_32,
             token_len_gt_64: token_len_stats.gt_64,
-            raw_analysis_base_init_ms: 0.0,
+            raw_analysis_base_init_ms,
             analysis_view_build_ms,
             active_mask_filter_ms,
             effective_follows_normalize_ms,
@@ -603,6 +641,7 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_base_setup_ms: f64,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
+    shared_transition_cache: Option<&OnceLock<super::compat::FlatTransitionCache>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
     analyze_equivalences_impl(
@@ -616,6 +655,7 @@ pub(crate) fn analyze_equivalences_with_group_filter(
         shared_analysis_dfa_cache,
         shared_base_setup_ms,
         flat_trans,
+        shared_transition_cache,
         initial_state_map,
     )
 }
@@ -635,6 +675,7 @@ fn analyze_equivalences_impl(
     shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_base_setup_ms: f64,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
+    shared_transition_cache: Option<&OnceLock<super::compat::FlatTransitionCache>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
     let follows_prepare_started_at = Instant::now();
@@ -650,6 +691,7 @@ fn analyze_equivalences_impl(
         ignore_terminal,
         active_groups,
         flat_trans,
+        shared_transition_cache,
         initial_state_map,
         effective_follows_prepare_ms,
     ) {
@@ -822,6 +864,7 @@ fn analyze_equivalences_impl(
             &dedup.representative_token_bytes,
             &final_state_representatives,
             effective_disallowed,
+            Some(normalized_disallowed_follows),
             Some(&byte_to_class),
             if uses_analysis_quotient { None } else { active_groups },
             if uses_analysis_quotient { None } else { shared_vocab_dfa_cache },

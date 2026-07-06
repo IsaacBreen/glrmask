@@ -720,12 +720,13 @@ pub(crate) fn compute_state_map_raw(
     transitions: &[u32],
     active_groups: &[bool],
     relevant_bytes: &[bool; 256],
+    byte_to_class: Option<&[u8; 256]>,
 ) -> Option<RawRestrictedObservationResult> {
     let num_states = tokenizer.num_states() as usize;
     if transitions.len() != num_states * 256 || num_states == 0 {
         return None;
     }
-    let active_bytes = active_byte_representatives(Some(relevant_bytes), None);
+    let active_bytes = active_byte_representatives(Some(relevant_bytes), byte_to_class);
     let labels_started_at = Instant::now();
     let target_labels = raw_target_label_ids(tokenizer, active_groups);
     let label_ms = labels_started_at.elapsed().as_secs_f64() * 1000.0;

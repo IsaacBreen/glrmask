@@ -1,6 +1,7 @@
 //! Flattened tokenizer-DFA views for the equivalence-analysis passes.
 
 use crate::automata::lexer::Lexer;
+use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use std::sync::Arc;
 use std::time::Instant;
@@ -38,6 +39,30 @@ fn collect_filtered_group_ids(
             .filter(|&group| group < active_groups.len() && active_groups[group])
             .collect(),
     )
+}
+
+fn active_group_words(active_groups: &[bool]) -> Vec<u64> {
+    let mut words = vec![0u64; active_groups.len().div_ceil(64)];
+    for (group, &active) in active_groups.iter().enumerate() {
+        if active {
+            words[group / 64] |= 1u64 << (group % 64);
+        }
+    }
+    words
+}
+
+#[inline]
+fn collect_masked_group_ids(groups: &BitSet, active_words: &[u64]) -> Vec<usize> {
+    let mut result = Vec::new();
+    for (word_index, (&groups_word, &active_word)) in groups.words().iter().zip(active_words).enumerate() {
+        let mut visible = groups_word & active_word;
+        while visible != 0 {
+            let bit = visible.trailing_zeros() as usize;
+            result.push(word_index * 64 + bit);
+            visible &= visible - 1;
+        }
+    }
+    result
 }
 
 /// Per-state metadata: finalizers and reachable groups.
@@ -379,16 +404,17 @@ impl TokenizerView {
         let mut states = Vec::with_capacity(quotient_states);
         let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
         let filter_started_at = profile_timing.then(Instant::now);
+        let active_words = active_group_words(active_groups);
         for (internal, &representative) in state_map.representative_original_ids.iter().enumerate() {
             let representative = representative as usize;
             assert!(representative < raw_states, "invalid quotient representative");
-            let finalizers = collect_filtered_group_ids(
-                tokenizer.matched_terminals_iter(representative as u32),
-                active_groups,
+            let finalizers = collect_masked_group_ids(
+                tokenizer.matched_terminal_bitset(representative as u32),
+                &active_words,
             );
-            let possible_future_group_ids = collect_filtered_group_ids(
-                tokenizer.possible_future_terminals_iter(representative as u32),
-                active_groups,
+            let possible_future_group_ids = collect_masked_group_ids(
+                tokenizer.possible_future_terminals(representative as u32),
+                &active_words,
             );
             states.push(FlatDfaState {
                 finalizers,
@@ -529,6 +555,27 @@ impl TokenizerView {
 #[cfg(test)]
 mod sparse_transition_cache_tests {
     use super::*;
+
+    #[test]
+    fn masked_group_ids_match_iterator_filter_across_word_boundaries() {
+        let mut groups = BitSet::new(130);
+        for group in [0usize, 1, 63, 64, 65, 127, 129] {
+            groups.set(group);
+        }
+        let mut active = vec![false; 130];
+        for group in [1usize, 63, 65, 127] {
+            active[group] = true;
+        }
+
+        let expected: Vec<usize> = groups
+            .iter()
+            .filter(|&group| active.get(group).copied().unwrap_or(false))
+            .collect();
+        assert_eq!(
+            collect_masked_group_ids(&groups, &active_group_words(&active)),
+            expected,
+        );
+    }
 
     #[test]
     fn sparse_column_hashes_preserve_exact_byte_classes() {
