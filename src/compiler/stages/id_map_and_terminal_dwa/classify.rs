@@ -436,6 +436,9 @@ const P5_REPEATED_CHARS: &[u8] = b"\n:{ ,";
 /// - 5: non-alnum auxiliary short (no JSON structural, or single-char repeated,
 ///       or length 1; ≤ 8 bytes)
 /// - 6: non-alnum auxiliary long (same criteria as 5, but > 8 bytes)
+/// - 7: JSON literal-boundary tokens requiring structural treatment (leading-
+///       space collisions, bracketed forms, and the special ` -` token)
+/// - 8: quoted ASCII identifier-start tokens
 ///
 /// Uses Unicode-aware classification so that non-Latin scripts are separated
 /// into their own partition (4) instead of being lumped with ASCII punctuation (0)
@@ -447,6 +450,15 @@ const P5_REPEATED_CHARS: &[u8] = b"\n:{ ,";
 pub(crate) fn classify_vocab_char_type(bytes: &[u8]) -> u8 {
     if bytes.is_empty() {
         return 5;
+    }
+    // Bare ASCII word pieces that overlap a JSON literal spelling are ordinary
+    // P2 material. Only their leading-space variants need to stay isolated at
+    // the structural boundary.
+    if !bytes.starts_with(b" ") && is_json_literal_collision(bytes) {
+        return 2;
+    }
+    if is_quoted_identifier_boundary_token(bytes) {
+        return 8;
     }
     if is_structural_boundary_lexical_token(bytes) {
         return 7;
@@ -534,7 +546,12 @@ fn is_structural_boundary_lexical_token(bytes: &[u8]) -> bool {
     if bytes.starts_with(b"[") && is_json_literal_collision(&bytes[1..]) {
         return true;
     }
-    bytes
+    false
+}
+
+fn is_quoted_identifier_boundary_token(bytes: &[u8]) -> bool {
+    structural_boundary_lexical_partition_enabled()
+        && bytes
         .strip_prefix(b"\"")
         .is_some_and(|suffix| suffix.first().copied().is_some_and(is_partition_ascii_alpha))
 }
@@ -1769,7 +1786,7 @@ fn compute_token_l2p_map(
 }
 
 pub(crate) fn partition_vocab_char_type_tokens(vocab: &Vocab) -> Vec<Vec<u32>> {
-    let mut partitions: Vec<Vec<u32>> = (0..8).map(|_| Vec::new()).collect();
+    let mut partitions: Vec<Vec<u32>> = (0..9).map(|_| Vec::new()).collect();
     for (&token_id, bytes) in vocab.entries.iter() {
         let idx = classify_vocab_char_type(bytes) as usize;
         partitions[idx].push(token_id);
@@ -2085,7 +2102,34 @@ mod tests {
         }
         assert_eq!(classify_vocab_char_type(b"123"), 3);
         assert_eq!(classify_vocab_char_type(b"_!"), 1);
-        assert_eq!(classify_vocab_char_type(b"\"_field"), 7);
+        assert_eq!(classify_vocab_char_type(b"\"_field"), 8);
+    }
+
+    #[test]
+    fn structural_boundary_lexical_tokens_split_literal_and_quoted_identifier_routes() {
+        for bytes in [
+            b" true".as_slice(),
+            b" nullptr".as_slice(),
+            b"[n".as_slice(),
+            b" -".as_slice(),
+        ] {
+            assert_eq!(classify_vocab_char_type(bytes), 7, "bytes={bytes:?}");
+        }
+        for bytes in [
+            b"t".as_slice(),
+            b"true".as_slice(),
+            b"falsehood".as_slice(),
+            b"nullable".as_slice(),
+        ] {
+            assert_eq!(classify_vocab_char_type(bytes), 2, "bytes={bytes:?}");
+        }
+        for bytes in [
+            b"\"name".as_slice(),
+            b"\"_field".as_slice(),
+            b"\"This".as_slice(),
+        ] {
+            assert_eq!(classify_vocab_char_type(bytes), 8, "bytes={bytes:?}");
+        }
     }
 
     #[test]

@@ -122,7 +122,7 @@ fn build_char_type_sub_vocabs(vocab: &Vocab) -> Arc<[Vocab]> {
         return Arc::clone(&cached.sub_vocabs);
     }
 
-    let mut partition_entries: Vec<Vec<(u32, Vec<u8>)>> = (0..8).map(|_| Vec::new()).collect();
+    let mut partition_entries: Vec<Vec<(u32, Vec<u8>)>> = (0..9).map(|_| Vec::new()).collect();
     for (&token_id, bytes) in vocab.entries.iter() {
         let idx = classify_vocab_char_type(bytes) as usize;
         partition_entries[idx].push((token_id, bytes.clone()));
