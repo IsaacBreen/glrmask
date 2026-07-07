@@ -2775,7 +2775,15 @@ fn build_and_color_hybrid(
     // TSID/token domain. When that representation is finite, compare against
     // the exact union function of each group instead of revisiting all members.
     // A full sentinel cannot be enumerated, so it retains the generic path.
-    let pointwise_coloring = if pointwise_tsid_ranges_enabled() {
+    let estimated_pointwise_work = class_profiles
+        .iter()
+        .flat_map(|profile| profile.weights.iter())
+        .map(|(_, weight)| weight.outer_range_count())
+        .sum::<usize>();
+    let prefer_overlap_indexed_merge = num_classes <= 64 && estimated_pointwise_work >= 8_192;
+    let pointwise_coloring = if prefer_overlap_indexed_merge {
+        None
+    } else if pointwise_tsid_ranges_enabled() {
         try_build_and_color_pointwise_ranges(
             candidates,
             &class_coloring,
@@ -2794,6 +2802,12 @@ fn build_and_color_hybrid(
             profile_enabled,
         )
     };
+    if profile_enabled && prefer_overlap_indexed_merge {
+        eprintln!(
+            "[glrmask/profile][weighted_dwa_minimize_overlap_choice] candidates={} classes={} estimated_pointwise_work={} strategy=overlap_indexed",
+            candidates.len(), num_classes, estimated_pointwise_work,
+        );
+    }
     if let Some(coloring) = pointwise_coloring {
         if profile_enabled {
             eprintln!(
