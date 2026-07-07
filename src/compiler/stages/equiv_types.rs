@@ -133,6 +133,63 @@ impl ManyToOneIdMap {
     }
 }
 
+/// A total quotient of the complete raw scanner-state domain.
+///
+/// This is deliberately distinct from the `ManyToOneIdMap` values threaded as
+/// `initial_state_map` through id-map analysis. An initial map is an analysis
+/// coordinate or seed and can be local, composed, or otherwise unsuitable for
+/// terminal interchangeability. A `GlobalScannerStateQuotient` instead covers
+/// every raw lexer state and names one raw representative for every class.
+///
+/// The producer establishes the global state-equivalence relation. A consumer
+/// such as TI additionally validates the observation-specific contract it
+/// needs, including frozen output equality and selected-byte congruence.
+#[derive(Debug, Clone)]
+pub(crate) struct GlobalScannerStateQuotient {
+    map: ManyToOneIdMap,
+}
+
+impl GlobalScannerStateQuotient {
+    /// Wrap a structurally total raw-state quotient. Semantic safety for a
+    /// particular consumer remains that consumer's responsibility.
+    pub(crate) fn from_total_raw_state_map(map: ManyToOneIdMap, raw_state_count: usize) -> Self {
+        assert_eq!(
+            map.original_to_internal.len(),
+            raw_state_count,
+            "global scanner-state quotient must cover every raw lexer state",
+        );
+        assert_eq!(
+            map.internal_to_originals.len(),
+            map.representative_original_ids.len(),
+            "global scanner-state quotient must have one representative slot per class",
+        );
+        for (raw_state, &class) in map.original_to_internal.iter().enumerate() {
+            assert!(
+                class != u32::MAX && (class as usize) < map.representative_original_ids.len(),
+                "global scanner-state quotient omitted raw lexer state {raw_state}",
+            );
+        }
+        for (class, &representative) in map.representative_original_ids.iter().enumerate() {
+            assert!(
+                (representative as usize) < raw_state_count
+                    && map.original_to_internal[representative as usize] == class as u32,
+                "global scanner-state quotient representative must belong to its class",
+            );
+        }
+        Self { map }
+    }
+
+    #[inline]
+    pub(crate) fn as_many_to_one(&self) -> &ManyToOneIdMap {
+        &self.map
+    }
+
+    #[inline]
+    pub(crate) fn raw_state_count(&self) -> usize {
+        self.map.original_to_internal.len()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InternalIdMap {
     pub tokenizer_states: ManyToOneIdMap,
