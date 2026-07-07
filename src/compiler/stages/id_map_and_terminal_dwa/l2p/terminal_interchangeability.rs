@@ -23,7 +23,7 @@ use super::nwa_builder::{TerminalNwaTransportMode, TransportScannerStateMap};
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
 use crate::automata::weighted::dwa::{DWAState, DWA};
-use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+use crate::compiler::stages::equiv_types::{GlobalScannerStateQuotient, ManyToOneIdMap};
 use crate::ds::weight::{SharedTokenSet, Weight, shared_rangeset};
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
@@ -276,14 +276,23 @@ impl<'a> SparseSwappedOutputIds<'a> {
     }
 }
 
-/// Sparse topology of the byte-restricted raw tokenizer DFA. A missing enabled
-/// transition has the same synthetic dead destination for every raw state.
-/// Keeping only real edges is exact: all omitted bytes share that one default.
+/// Sparse topology of the byte-restricted tokenizer DFA. Its real-state domain
+/// is either the raw tokenizer state domain or a global scanner-state
+/// quotient. A missing enabled transition has the same synthetic dead
+/// destination for every real state. Keeping only real edges is exact: all
+/// omitted bytes share that one default.
 #[derive(Debug)]
 struct RestrictedTopology {
     bytes: Vec<u8>,
     edge_offsets: Vec<u32>,
     edges: Vec<(u8, u32)>,
+    /// Number of raw tokenizer states. Transport witnesses must retain this
+    /// external scanner coordinate even when discovery runs on a quotient.
+    raw_state_count: usize,
+    /// Raw scanner state selected for each discovery-domain state.
+    raw_representative_by_state: Option<Arc<[u32]>>,
+    /// Discovery-domain state for every raw scanner state.
+    state_for_raw: Option<Arc<[u32]>>,
     real_state_count: usize,
     initial_state: usize,
     max_outdegree: usize,
@@ -291,18 +300,124 @@ struct RestrictedTopology {
 
 impl RestrictedTopology {
     fn new(tokenizer: &Tokenizer, relevant_bytes: &[bool; 256]) -> Self {
+        Self::new_inner(tokenizer, relevant_bytes, None)
+    }
+
+    /// Build a restricted topology over a global scanner-state quotient.
+    /// The quotient must be a total right congruence for the selected bytes
+    /// and must preserve both frozen output families.
+    fn new_with_global_state_quotient(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        global_state_quotient: &GlobalScannerStateQuotient,
+    ) -> Self {
+        Self::new_inner(tokenizer, relevant_bytes, Some(global_state_quotient))
+    }
+
+    fn new_inner(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        global_state_quotient: Option<&GlobalScannerStateQuotient>,
+    ) -> Self {
         let bytes = (0..=255u8)
             .filter(|&byte| relevant_bytes[byte as usize])
             .collect::<Vec<_>>();
-        let real_state_count = tokenizer.num_states() as usize;
+        let raw_state_count = tokenizer.num_states() as usize;
+        let (state_for_raw, raw_representative_by_state): (
+            Option<Arc<[u32]>>,
+            Option<Arc<[u32]>>,
+        ) =
+            match global_state_quotient {
+                Some(global_state_quotient) => {
+                    assert_eq!(
+                        global_state_quotient.raw_state_count(),
+                        raw_state_count,
+                        "global scanner-state quotient must match the tokenizer state domain",
+                    );
+                    let map = global_state_quotient.as_many_to_one();
+                    assert_eq!(
+                        map.original_to_internal.len(),
+                        raw_state_count,
+                        "global scanner-state quotient must cover every tokenizer state",
+                    );
+                    assert!(
+                        !map.representative_original_ids.is_empty() || raw_state_count == 0,
+                        "global scanner-state quotient must retain one representative per class",
+                    );
+                    for (raw_state, &class) in map.original_to_internal.iter().enumerate() {
+                        assert!(
+                            class != u32::MAX
+                                && (class as usize) < map.representative_original_ids.len(),
+                            "global scanner-state quotient omitted raw tokenizer state {raw_state}",
+                        );
+                    }
+                    for (class, &representative) in
+                        map.representative_original_ids.iter().enumerate()
+                    {
+                        let representative = representative as usize;
+                        assert!(
+                            representative < raw_state_count
+                                && map.original_to_internal[representative] == class as u32,
+                            "global scanner-state quotient representative must belong to its class",
+                        );
+                    }
+
+                    // A supplied map is safe for TI only when it preserves the
+                    // exact frozen F/U labels and the selected-byte transition
+                    // quotient. This also makes the later compact-state
+                    // characterization an exact re-indexing of the raw one.
+                    for raw_state in 0..raw_state_count {
+                        let class = map.original_to_internal[raw_state] as usize;
+                        let representative = map.representative_original_ids[class] as usize;
+                        assert_eq!(
+                            tokenizer.matched_terminal_bitset(raw_state as u32),
+                            tokenizer.matched_terminal_bitset(representative as u32),
+                            "global scanner-state quotient changed frozen finalizers for raw tokenizer state {raw_state}",
+                        );
+                        assert_eq!(
+                            tokenizer.possible_future_terminals(raw_state as u32),
+                            tokenizer.possible_future_terminals(representative as u32),
+                            "global scanner-state quotient changed frozen future finalizers for raw tokenizer state {raw_state}",
+                        );
+                        for &byte in &bytes {
+                            let raw_target = tokenizer.step(raw_state as u32, byte).map(|target| {
+                                map.original_to_internal[target as usize]
+                            });
+                            let representative_target = tokenizer
+                                .step(representative as u32, byte)
+                                .map(|target| map.original_to_internal[target as usize]);
+                            assert_eq!(
+                                raw_target,
+                                representative_target,
+                                "global scanner-state quotient is not a selected-byte right congruence for raw tokenizer state {raw_state} and byte {byte}",
+                            );
+                        }
+                    }
+
+                    (
+                        Some(Arc::from(map.original_to_internal.clone())),
+                        Some(Arc::from(map.representative_original_ids.clone())),
+                    )
+                }
+                None => (None, None),
+            };
+        let real_state_count = raw_representative_by_state
+            .as_ref()
+            .map_or(raw_state_count, |representatives| representatives.len());
         let mut edge_offsets = Vec::with_capacity(real_state_count + 2);
         let mut edges = Vec::new();
         let mut max_outdegree = 0usize;
         edge_offsets.push(0);
         for state in 0..real_state_count {
             let start = edges.len();
-            for (byte, target) in tokenizer.transitions_from(state as u32) {
+            let raw_state = raw_representative_by_state
+                .as_ref()
+                .map_or(state as u32, |representatives| representatives[state]);
+            for (byte, target) in tokenizer.transitions_from(raw_state) {
                 if relevant_bytes[byte as usize] {
+                    let target = state_for_raw
+                        .as_ref()
+                        .map_or(target, |classes| classes[target as usize]);
                     edges.push((byte, target));
                 }
             }
@@ -311,12 +426,20 @@ impl RestrictedTopology {
         }
         // Synthetic dead has no real edges: every enabled byte loops to itself.
         edge_offsets.push(edges.len() as u32);
+        let initial_state = state_for_raw
+            .as_ref()
+            .map_or(tokenizer.initial_state_id() as usize, |classes| {
+                classes[tokenizer.initial_state_id() as usize] as usize
+            });
         Self {
             bytes,
             edge_offsets,
             edges,
+            raw_state_count,
+            raw_representative_by_state,
+            state_for_raw,
             real_state_count,
-            initial_state: tokenizer.initial_state_id() as usize,
+            initial_state,
             max_outdegree,
         }
     }
@@ -353,6 +476,84 @@ impl RestrictedTopology {
         }
         observed
     }
+
+    #[inline]
+    fn raw_state_for_state(&self, state: usize) -> u32 {
+        self.raw_representative_by_state
+            .as_ref()
+            .map_or(state as u32, |representatives| representatives[state])
+    }
+
+    fn scanner_map_from_state_targets(&self, state_targets: &[u32]) -> TransportScannerStateMap {
+        assert_eq!(state_targets.len(), self.real_state_count);
+        if self.state_for_raw.is_none() {
+            return TransportScannerStateMap::Explicit(Arc::from(state_targets.to_vec()));
+        }
+        let state_for_raw = self
+            .state_for_raw
+            .as_ref()
+            .expect("quotient topology must retain raw-to-state classes");
+        let raw_representative_by_state = self
+            .raw_representative_by_state
+            .as_ref()
+            .expect("quotient topology must retain raw representatives");
+        let raw_targets = (0..self.raw_state_count)
+            .map(|raw_state| {
+                let state = state_for_raw[raw_state] as usize;
+                raw_representative_by_state[state_targets[state] as usize]
+            })
+            .collect::<Vec<_>>();
+        TransportScannerStateMap::Explicit(raw_targets.into())
+    }
+
+    fn scanner_map_from_internal_quotient(
+        &self,
+        class_for_state: Arc<[u32]>,
+        representative_for_class: Arc<[u32]>,
+        source_class_for_target_deviations: Box<[(u32, u32)]>,
+    ) -> TransportScannerStateMap {
+        if self.state_for_raw.is_none() {
+            return TransportScannerStateMap::Quotient {
+                state_count: self.real_state_count,
+                class_for_original: class_for_state,
+                representative_for_class,
+                source_class_for_target_deviations,
+            };
+        }
+        let state_for_raw = self
+            .state_for_raw
+            .as_ref()
+            .expect("quotient topology must retain raw-to-state classes");
+        let raw_representative_by_state = self
+            .raw_representative_by_state
+            .as_ref()
+            .expect("quotient topology must retain raw representatives");
+        let class_for_original = (0..self.raw_state_count)
+            .map(|raw_state| class_for_state[state_for_raw[raw_state] as usize])
+            .collect::<Vec<_>>();
+        let unused_dead_representative = raw_representative_by_state
+            .first()
+            .copied()
+            .unwrap_or(0);
+        let raw_representative_for_class = representative_for_class
+            .iter()
+            .map(|&state| {
+                raw_representative_by_state
+                    .get(state as usize)
+                    .copied()
+                    // The synthetic dead class has no raw scanner source. Its
+                    // representative is therefore never queried, but the
+                    // public transport-map shape still needs one in-range ID.
+                    .unwrap_or(unused_dead_representative)
+            })
+            .collect::<Vec<_>>();
+        TransportScannerStateMap::Quotient {
+            state_count: self.raw_state_count,
+            class_for_original: class_for_original.into(),
+            representative_for_class: raw_representative_for_class.into(),
+            source_class_for_target_deviations,
+        }
+    }
 }
 
 /// The frozen-output observation made by the root-reachable part of the
@@ -387,8 +588,9 @@ impl TiRawDiscoveryData {
         let mut future_finalizer_states_by_terminal = vec![Vec::<u32>::new(); terminal_count];
 
         for state in 0..topology.real_state_count {
+            let raw_state = topology.raw_state_for_state(state);
             let finalizers = tokenizer
-                .matched_terminals_iter(state as u32)
+                .matched_terminals_iter(raw_state)
                 .collect::<Vec<_>>();
             for &terminal in &finalizers {
                 finalizer_states_by_terminal[terminal as usize].push(state as u32);
@@ -396,7 +598,7 @@ impl TiRawDiscoveryData {
             finalizer_terminals_by_state.push(finalizers.into_boxed_slice());
 
             let future_finalizers = tokenizer
-                .possible_future_terminals_iter(state as u32)
+                .possible_future_terminals_iter(raw_state)
                 .collect::<Vec<_>>();
             for &terminal in &future_finalizers {
                 future_finalizer_states_by_terminal[terminal as usize].push(state as u32);
@@ -435,6 +637,30 @@ pub(crate) struct TiDiscoveryContext {
 impl TiDiscoveryContext {
     pub(crate) fn new(tokenizer: &Tokenizer, relevant_bytes: &[bool; 256]) -> Self {
         let topology = Arc::new(RestrictedTopology::new(tokenizer, relevant_bytes));
+        let raw = Arc::new(TiRawDiscoveryData::new(tokenizer, &topology));
+        let (root_output_signatures, root_observed_states) =
+            root_output_signatures(tokenizer, &topology);
+        Self {
+            topology,
+            raw,
+            root_output_signatures,
+            root_observed_states,
+        }
+    }
+
+    /// Build immutable discovery evidence over a total global scanner-state
+    /// quotient. This is intentionally separate from an `initial_state_map`
+    /// used to seed later id-map analysis.
+    pub(crate) fn new_with_global_state_quotient(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        global_state_quotient: &GlobalScannerStateQuotient,
+    ) -> Self {
+        let topology = Arc::new(RestrictedTopology::new_with_global_state_quotient(
+            tokenizer,
+            relevant_bytes,
+            global_state_quotient,
+        ));
         let raw = Arc::new(TiRawDiscoveryData::new(tokenizer, &topology));
         let (root_output_signatures, root_observed_states) =
             root_output_signatures(tokenizer, &topology);
@@ -494,10 +720,11 @@ fn root_output_signatures(
         if !is_observed {
             continue;
         }
-        for terminal in tokenizer.matched_terminals_iter(state as u32) {
+        let raw_state = topology.raw_state_for_state(state);
+        for terminal in tokenizer.matched_terminals_iter(raw_state) {
             finalizer_states[terminal as usize].push(state as u32);
         }
-        for terminal in tokenizer.possible_future_terminals_iter(state as u32) {
+        for terminal in tokenizer.possible_future_terminals_iter(raw_state) {
             future_finalizer_states[terminal as usize].push(state as u32);
         }
     }
@@ -594,12 +821,13 @@ fn structural_candidate_signatures(
     let mut finalizer_counts = vec![0u64; state_count];
     let mut future_finalizer_counts = vec![0u64; state_count];
     for state in 0..topology.real_state_count {
+        let raw_state = topology.raw_state_for_state(state);
         finalizer_counts[state] = tokenizer
-            .matched_terminals_iter(state as u32)
+            .matched_terminals_iter(raw_state)
             .filter(|&terminal| active_terminals[terminal as usize])
             .count() as u64;
         future_finalizer_counts[state] = tokenizer
-            .possible_future_terminals_iter(state as u32)
+            .possible_future_terminals_iter(raw_state)
             .filter(|&terminal| active_terminals[terminal as usize])
             .count() as u64;
     }
@@ -656,13 +884,14 @@ fn structural_candidate_signatures(
         let color = colors[state] as usize;
         let word = color / 64;
         let mask = 1u64 << (color % 64);
-        for terminal in tokenizer.matched_terminals_iter(state as u32) {
+        let raw_state = topology.raw_state_for_state(state);
+        for terminal in tokenizer.matched_terminals_iter(raw_state) {
             let candidate_index = candidate_index_by_terminal[terminal as usize];
             if candidate_index != usize::MAX {
                 finalizer_support[candidate_index][word] |= mask;
             }
         }
-        for terminal in tokenizer.possible_future_terminals_iter(state as u32) {
+        for terminal in tokenizer.possible_future_terminals_iter(raw_state) {
             let candidate_index = candidate_index_by_terminal[terminal as usize];
             if candidate_index != usize::MAX {
                 future_finalizer_support[candidate_index][word] |= mask;
@@ -1531,12 +1760,11 @@ impl InterchangeabilityDfa {
         }
         self.support_transposition_certified += 1;
         Some(InterchangeMap {
-            scanner_state_map: TransportScannerStateMap::Quotient {
-                state_count: self.topology.real_state_count,
-                class_for_original: Arc::clone(&quotient.class_for_state),
-                representative_for_class: Arc::clone(&quotient.representative_by_class),
-                source_class_for_target_deviations: deviations.into_boxed_slice(),
-            },
+            scanner_state_map: self.topology.scanner_map_from_internal_quotient(
+                Arc::clone(&quotient.class_for_state),
+                Arc::clone(&quotient.representative_by_class),
+                deviations.into_boxed_slice(),
+            ),
         })
     }
 
@@ -2095,24 +2323,22 @@ impl InterchangeabilityDfa {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Some(InterchangeMap {
-            scanner_state_map: TransportScannerStateMap::Quotient {
-                state_count: self.topology.real_state_count,
-                class_for_original: Arc::clone(&quotient.class_for_state),
-                representative_for_class: Arc::clone(&quotient.representative_by_class),
+            scanner_state_map: self.topology.scanner_map_from_internal_quotient(
+                Arc::clone(&quotient.class_for_state),
+                Arc::clone(&quotient.representative_by_class),
                 source_class_for_target_deviations,
-            },
+            ),
         })
     }
 
     #[inline]
     fn quotient_identity_map(&self, quotient: &CanonicalQuotient) -> InterchangeMap {
         InterchangeMap {
-            scanner_state_map: TransportScannerStateMap::Quotient {
-                state_count: self.topology.real_state_count,
-                class_for_original: Arc::clone(&quotient.class_for_state),
-                representative_for_class: Arc::clone(&quotient.representative_by_class),
-                source_class_for_target_deviations: Box::default(),
-            },
+            scanner_state_map: self.topology.scanner_map_from_internal_quotient(
+                Arc::clone(&quotient.class_for_state),
+                Arc::clone(&quotient.representative_by_class),
+                Box::default(),
+            ),
         }
     }
 
@@ -2150,12 +2376,11 @@ impl InterchangeabilityDfa {
         }
         deviations.sort_unstable_by_key(|&(target, _)| target);
         Some(InterchangeMap {
-            scanner_state_map: TransportScannerStateMap::Quotient {
-                state_count: self.topology.real_state_count,
-                class_for_original: Arc::clone(&quotient.class_for_state),
-                representative_for_class: Arc::clone(&quotient.representative_by_class),
-                source_class_for_target_deviations: deviations.into_boxed_slice(),
-            },
+            scanner_state_map: self.topology.scanner_map_from_internal_quotient(
+                Arc::clone(&quotient.class_for_state),
+                Arc::clone(&quotient.representative_by_class),
+                deviations.into_boxed_slice(),
+            ),
         })
     }
 
@@ -2762,7 +2987,9 @@ impl InterchangeabilityDfa {
             .map(|source| target_representative_by_class.get(&identity_classes[source]).copied())
             .collect::<Option<Vec<_>>>()?;
         Some(InterchangeMap {
-            scanner_state_map: TransportScannerStateMap::Explicit(target_representative_for_source_state.into()),
+            scanner_state_map: self
+                .topology
+                .scanner_map_from_state_targets(&target_representative_for_source_state),
         })
     }
 
@@ -2932,7 +3159,9 @@ impl InterchangeabilityDfa {
             })
             .collect::<Option<Vec<_>>>()?;
         Some(InterchangeMap {
-            scanner_state_map: TransportScannerStateMap::Explicit(target_representative_for_source_state.into()),
+            scanner_state_map: self
+                .topology
+                .scanner_map_from_state_targets(&target_representative_for_source_state),
         })
     }
 }
@@ -3101,6 +3330,28 @@ pub(crate) fn discover_one_round_with_transport_witnesses(
     )
 }
 
+/// As `discover_one_round_with_transport_witnesses`, but evaluates the exact
+/// TI relation over a total global scanner-state quotient.
+pub(crate) fn discover_one_round_with_transport_witnesses_with_global_state_quotient(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+    relevant_bytes: &[bool; 256],
+    ignore_terminal: Option<TerminalID>,
+    global_state_quotient: &GlobalScannerStateQuotient,
+) -> TiRoundTransportWitnesses {
+    let context = TiDiscoveryContext::new_with_global_state_quotient(
+        tokenizer,
+        relevant_bytes,
+        global_state_quotient,
+    );
+    discover_one_round_with_transport_witnesses_in_context(
+        tokenizer,
+        active_terminals,
+        &context,
+        ignore_terminal,
+    )
+}
+
 /// As `discover_one_round_with_transport_witnesses`, but reuses the immutable
 /// topology/root-observation context across iterative historical masks.
 pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
@@ -3198,8 +3449,10 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 *group_size_histogram.entry(group.len()).or_default() += 1;
             }
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] active={} selected_bytes={} sparse_edges={} max_outdegree={} root_observed_states={} root_candidate_pairs={} structural_colors={} structural_candidate_groups={} structural_candidate_pairs={} observed_output_candidate_groups={} output_hypergraph_rounds={} exact_candidate_pairs={} group_size_histogram={:?} topology_ms={:.3} candidate_filter_total_ms={:.3} structural_filter_ms={:.3} dfa_setup_ms={:.3} output_shape_filter_ms={:.3} output_hypergraph_filter_ms={:.3}",
+                "[glrmask/profile][terminal_interchangeability] active={} raw_states={} discovery_states={} selected_bytes={} sparse_edges={} max_outdegree={} root_observed_states={} root_candidate_pairs={} structural_colors={} structural_candidate_groups={} structural_candidate_pairs={} observed_output_candidate_groups={} output_hypergraph_rounds={} exact_candidate_pairs={} group_size_histogram={:?} topology_ms={:.3} candidate_filter_total_ms={:.3} structural_filter_ms={:.3} dfa_setup_ms={:.3} output_shape_filter_ms={:.3} output_hypergraph_filter_ms={:.3}",
                 candidates.len(),
+                topology.raw_state_count,
+                topology.real_state_count,
                 topology_byte_count,
                 topology_edge_count,
                 topology_max_outdegree,
@@ -5593,6 +5846,39 @@ mod tests {
         assert_eq!(map.scanner_state_map.scanner_state(root as u32), representatives[root]);
         let partition = discover_one_round(&tokenizer, &[true, true], &[true; 256], None);
         assert_eq!(partition, BTreeMap::from([(0, BTreeSet::from([0, 1]))]));
+    }
+
+    #[test]
+    fn global_scanner_state_quotient_preserves_exact_ti_round() {
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"same".to_vec()),
+            Expr::U8Seq(b"same".to_vec()),
+        ]);
+        let state_count = tokenizer.num_states() as usize;
+        let identity = ManyToOneIdMap::from_original_to_internal_with_representatives(
+            (0..state_count as u32).collect(),
+            state_count as u32,
+            (0..state_count as u32).collect(),
+        );
+        let global_state_quotient =
+            GlobalScannerStateQuotient::from_total_raw_state_map(identity, state_count);
+
+        let raw = discover_one_round_with_transport_witnesses(
+            &tokenizer,
+            &[true, true],
+            &[true; 256],
+            None,
+        );
+        let quotient = discover_one_round_with_transport_witnesses_with_global_state_quotient(
+            &tokenizer,
+            &[true, true],
+            &[true; 256],
+            None,
+            &global_state_quotient,
+        );
+
+        assert_eq!(quotient.partition, raw.partition);
+        assert!(quotient.maps.values().all(|map| map.len() == state_count));
     }
 
     #[test]
