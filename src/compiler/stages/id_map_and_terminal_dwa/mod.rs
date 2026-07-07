@@ -28,6 +28,7 @@ use crate::Vocab;
 
 use classify::classify_vocab_char_type;
 use grammar_helpers::ignore_transparent_disallowed_follows;
+use l2p::equivalence_analysis::disallowed_follows::normalize_disallowed_follows;
 use l2p::equivalence_analysis::state_equivalence::{
     resolve_global_pipeline_config, run_state_equivalence_pipeline, StateEquivalenceScope,
 };
@@ -332,6 +333,15 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     let token_path_disallowed_follows = Arc::new(
         ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal),
     );
+    // The ordinary L2P relation is identical across partitions. Individual
+    // analyses still verify this axis length before borrowing it; TI-coalesced
+    // relations deliberately take the local normalization path.
+    let token_path_normalized_disallowed_follows: Arc<[BitSet]> = Arc::from(
+        normalize_disallowed_follows(
+            grammar.num_terminals as usize,
+            token_path_disallowed_follows.as_ref(),
+        ),
+    );
     let stage_setup_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let partition_vocab_started_at = Instant::now();
@@ -522,6 +532,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             grammar,
             disallowed_follows,
             &token_path_disallowed_follows,
+            &token_path_normalized_disallowed_follows,
             &flat_trans,
             Some(global_max_length_state_map),
             Some(&shared_vocab_dfa_cache),

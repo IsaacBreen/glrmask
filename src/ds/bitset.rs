@@ -177,6 +177,17 @@ impl BitSet {
         &self.words
     }
 
+    /// Clone the prefix `[0, len)`, clearing every bit at or beyond `len`.
+    /// This is exact even when the source has a wider terminal-ID axis.
+    pub(crate) fn prefix_clone(&self, len: usize) -> Self {
+        let word_len = len.div_ceil(64);
+        let mut words = self.words[..self.words.len().min(word_len)].to_vec();
+        words.resize(word_len, 0);
+        let mut result = Self { words, len };
+        result.mask_unused_bits();
+        result
+    }
+
     pub fn fill_u32_mask(&self, buf: &mut [u32]) {
         for (i, &word) in self.words.iter().enumerate() {
             let base = i * 2;
@@ -229,6 +240,17 @@ impl Iterator for BitIter {
 #[cfg(test)]
 mod tests {
     use super::BitSet;
+
+    #[test]
+    fn prefix_clone_discards_high_bits_and_preserves_low_bits() {
+        let mut source = BitSet::new(130);
+        for bit in [0usize, 63, 64, 95, 96, 129] {
+            source.set(bit);
+        }
+        let projected = source.prefix_clone(96);
+        assert_eq!(projected.len(), 96);
+        assert_eq!(projected.iter_ones().collect::<Vec<_>>(), vec![0, 63, 64, 95]);
+    }
 
     #[test]
     fn union_with_delta_reports_only_new_bits() {

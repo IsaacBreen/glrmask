@@ -756,6 +756,9 @@ fn compute_pm_vocab_equivalence_map_fast(
             states,
             start_state: tokenizer.start_state() as usize,
             transitions: Arc::from(transitions),
+            compressed_transitions: None,
+            compressed_byte_to_class: None,
+            compressed_num_classes: 0,
         },
     };
     let strings = ordered_vocab

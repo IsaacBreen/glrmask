@@ -17,7 +17,7 @@ mod terminal_interchangeability;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -178,6 +178,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     grammar: &AnalyzedGrammar,
     active_terminals: &[bool],
     disallowed_follows: &BTreeMap<u32, BitSet>,
+    token_path_disallowed_follows: Option<&BTreeMap<u32, BitSet>>,
+    token_path_normalized_disallowed_follows: Option<&Arc<[BitSet]>>,
     shared_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_original_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_original_vocab_analysis_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
@@ -304,9 +306,17 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         );
         std::process::exit(0);
     }
-    let equivalence_disallowed_follows = coalesced_disallowed_follows
-        .as_ref()
-        .unwrap_or(disallowed_follows);
+    let (
+        equivalence_disallowed_follows,
+        follows_are_ignore_transparent,
+        normalized_equivalence_disallowed_follows,
+    ) = if let Some(coalesced) = coalesced_disallowed_follows.as_ref() {
+        (coalesced, false, None)
+    } else if let Some(token_path) = token_path_disallowed_follows {
+        (token_path, true, token_path_normalized_disallowed_follows)
+    } else {
+        (disallowed_follows, false, None)
+    };
     // The representative core begins after TI discovery/coalescing. It includes
     // ordinary representative-only equivalence through representative DWA
     // compaction, but deliberately excludes replay and post-DWA expansion.
@@ -345,6 +355,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             tokenizer_for_build,
             vocab,
             equivalence_disallowed_follows,
+            follows_are_ignore_transparent,
+            normalized_equivalence_disallowed_follows,
             ignore_terminal,
             Some(&analysis_active_terminals),
             equivalence_vocab_dfa_cache,
@@ -867,6 +879,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 grammar,
                 active_terminals,
                 disallowed_follows,
+                token_path_disallowed_follows,
+                token_path_normalized_disallowed_follows,
                 shared_vocab_dfa_cache,
                 shared_original_vocab_dfa_cache,
                 shared_original_vocab_analysis_dfa_cache,

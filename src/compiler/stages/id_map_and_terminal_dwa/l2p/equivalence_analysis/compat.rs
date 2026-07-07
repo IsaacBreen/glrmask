@@ -85,6 +85,11 @@ pub struct FlatDfa {
     /// Flat transition table: `transitions[state * 256 + byte] = target_state`.
     /// Shared via `Arc` to avoid 35MB duplication per partition.
     pub transitions: Arc<[u32]>,
+    /// Optional exact transition rows indexed by raw byte class rather than
+    /// byte. Present only for small raw restricted quotients.
+    pub compressed_transitions: Option<Arc<[u32]>>,
+    pub compressed_byte_to_class: Option<[u8; 256]>,
+    pub compressed_num_classes: usize,
 }
 
 const BYTE_COLUMN_HASH_MULTIPLIER: u64 = 0x517c_c1b7_2722_0a95;
@@ -197,6 +202,9 @@ pub(crate) fn derive_flat_transition_cache(
 
 
 pub(crate) fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
+    if let Some((_, byte_to_class, _)) = dfa.compressed_layout() {
+        return *byte_to_class;
+    }
     let mut column_hashes = [0u64; 256];
     for row in dfa.transitions.chunks_exact(256) {
         for (hash, &target) in column_hashes.iter_mut().zip(row) {
@@ -212,12 +220,32 @@ impl FlatDfa {
     /// Get the transition target for a given state and byte.
     #[inline]
     pub fn trans(&self, state: usize, byte: usize) -> u32 {
+        if let (Some(transitions), Some(byte_to_class)) = (
+            self.compressed_transitions.as_ref(),
+            self.compressed_byte_to_class.as_ref(),
+        ) {
+            return transitions[state * self.compressed_num_classes + byte_to_class[byte] as usize];
+        }
         self.transitions[state * 256 + byte]
+    }
+
+    #[inline]
+    pub fn compressed_layout(&self) -> Option<(&[u32], &[u8; 256], usize)> {
+        self.compressed_transitions.as_ref().map(|transitions| {
+            (
+                transitions.as_ref(),
+                self.compressed_byte_to_class
+                    .as_ref()
+                    .expect("compressed layout must include byte classes"),
+                self.compressed_num_classes,
+            )
+        })
     }
 
     /// Get the 256-entry transition slice for a given state.
     #[inline]
     pub fn transitions_for(&self, state: usize) -> &[u32] {
+        assert!(self.compressed_transitions.is_none(), "compressed DFA has no byte rows");
         let base = state * 256;
         &self.transitions[base..base + 256]
     }
@@ -246,6 +274,9 @@ impl FlatDfa {
             states,
             start_state,
             transitions: Arc::from(transitions),
+            compressed_transitions: None,
+            compressed_byte_to_class: None,
+            compressed_num_classes: 0,
         }
     }
 
@@ -280,6 +311,9 @@ impl FlatDfa {
             states,
             start_state,
             transitions: Arc::from(transitions),
+            compressed_transitions: None,
+            compressed_byte_to_class: None,
+            compressed_num_classes: 0,
         }
     }
 
@@ -301,7 +335,14 @@ impl FlatDfa {
                 }
             })
             .collect();
-        FlatDfa { states, start_state, transitions: Arc::clone(flat_trans) }
+        FlatDfa {
+            states,
+            start_state,
+            transitions: Arc::clone(flat_trans),
+            compressed_transitions: None,
+            compressed_byte_to_class: None,
+            compressed_num_classes: 0,
+        }
     }
 
     /// Build a FlatDfa using a pre-built flat transition table, sharing the
@@ -328,7 +369,14 @@ impl FlatDfa {
                 }
             })
             .collect();
-        FlatDfa { states, start_state, transitions: Arc::clone(flat_trans) }
+        FlatDfa {
+            states,
+            start_state,
+            transitions: Arc::clone(flat_trans),
+            compressed_transitions: None,
+            compressed_byte_to_class: None,
+            compressed_num_classes: 0,
+        }
     }
 
 }
@@ -387,50 +435,90 @@ impl TokenizerView {
         self.flat_dfa.start_state
     }
 
-    /// Build a filtered quotient directly from the shared raw transition table.
-    /// This is used only after a raw-coordinate congruence certificate, so one
-    /// representative row per state class preserves every vocabulary-byte walk.
-    pub(crate) fn new_filtered_quotient_from_flat_trans(
+    /// Build an exact active-terminal quotient directly from shared raw rows
+    /// and the canonical observations already interned by restricted refinement.
+    ///
+    /// Every state class begins with one of `observation_labels`; refinement
+    /// preserves that label, so reading the representative label here is
+    /// equivalent to re-filtering the raw terminal bitsets. Reusing it avoids
+    /// a second full active-mask scan without weakening the quotient proof.
+    pub(crate) fn new_quotient_from_flat_trans_and_observations(
         flat_trans: &Arc<[u32]>,
         tokenizer: &Tokenizer,
-        active_groups: &[bool],
         state_map: &ManyToOneIdMap,
+        state_label_ids: &[u32],
+        observation_labels: &[FlatDfaState],
+        raw_byte_to_class: Option<&[u8; 256]>,
     ) -> (Self, f64) {
         let raw_states = tokenizer.num_states() as usize;
         assert_eq!(flat_trans.len(), raw_states * 256, "invalid raw transition table");
         assert_eq!(state_map.original_to_internal.len(), raw_states, "invalid state map");
+        assert_eq!(state_label_ids.len(), raw_states, "invalid raw observation labels");
         let quotient_states = state_map.internal_to_originals.len();
-        let mut transitions = vec![u32::MAX; quotient_states * 256];
+        let raw_byte_classes = raw_byte_to_class.map(|byte_to_class| {
+            let class_count = byte_to_class
+                .iter()
+                .copied()
+                .max()
+                .map_or(0usize, |class| class as usize + 1);
+            let mut representatives = vec![usize::MAX; class_count];
+            for byte in 0..256usize {
+                let class = byte_to_class[byte] as usize;
+                if representatives[class] == usize::MAX {
+                    representatives[class] = byte;
+                }
+            }
+            (representatives, *byte_to_class)
+        });
+        let mut full_transitions = raw_byte_classes
+            .is_none()
+            .then(|| vec![u32::MAX; quotient_states * 256]);
+        let mut compressed_transitions = raw_byte_classes.as_ref().map(|(representatives, _)| {
+            vec![u32::MAX; quotient_states * representatives.len()]
+        });
         let mut states = Vec::with_capacity(quotient_states);
         let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
-        let filter_started_at = profile_timing.then(Instant::now);
-        let active_words = active_group_words(active_groups);
+        let materialize_started_at = profile_timing.then(Instant::now);
         for (internal, &representative) in state_map.representative_original_ids.iter().enumerate() {
             let representative = representative as usize;
             assert!(representative < raw_states, "invalid quotient representative");
-            let finalizers = collect_masked_group_ids(
-                tokenizer.matched_terminal_bitset(representative as u32),
-                &active_words,
-            );
-            let possible_future_group_ids = collect_masked_group_ids(
-                tokenizer.possible_future_terminals(representative as u32),
-                &active_words,
-            );
+            let label_id = state_label_ids[representative] as usize;
+            let observation = observation_labels
+                .get(label_id)
+                .expect("raw observation ID must index its canonical label");
+            debug_assert!(state_map.internal_to_originals[internal]
+                .iter()
+                .all(|&raw| state_label_ids[raw as usize] as usize == label_id));
             states.push(FlatDfaState {
-                finalizers,
-                possible_future_group_ids,
+                finalizers: observation.finalizers.clone(),
+                possible_future_group_ids: observation.possible_future_group_ids.clone(),
             });
             let raw_base = representative * 256;
-            let quotient_base = internal * 256;
-            for byte in 0..256usize {
-                let target = flat_trans[raw_base + byte];
-                transitions[quotient_base + byte] = if target == u32::MAX {
+            let map_target = |target: u32| {
+                if target == u32::MAX {
                     u32::MAX
                 } else {
                     let mapped = state_map.original_to_internal[target as usize];
                     assert_ne!(mapped, u32::MAX, "quotient target must be mapped");
                     mapped
-                };
+                }
+            };
+            if let Some((representatives, _)) = raw_byte_classes.as_ref() {
+                let compact_base = internal * representatives.len();
+                let compact = compressed_transitions
+                    .as_mut()
+                    .expect("compressed transition storage must exist");
+                for (class, &byte) in representatives.iter().enumerate() {
+                    compact[compact_base + class] = map_target(flat_trans[raw_base + byte]);
+                }
+            } else {
+                let full = full_transitions
+                    .as_mut()
+                    .expect("full transition storage must exist");
+                let full_base = internal * 256;
+                for byte in 0..256usize {
+                    full[full_base + byte] = map_target(flat_trans[raw_base + byte]);
+                }
             }
         }
         let start_state = state_map.original_to_internal[tokenizer.start_state() as usize];
@@ -440,10 +528,15 @@ impl TokenizerView {
                 flat_dfa: FlatDfa {
                     states,
                     start_state: start_state as usize,
-                    transitions: Arc::from(transitions),
+                    transitions: Arc::from(full_transitions.unwrap_or_default()),
+                    compressed_transitions: compressed_transitions.map(Arc::from),
+                    compressed_byte_to_class: raw_byte_classes.as_ref().map(|(_, classes)| *classes),
+                    compressed_num_classes: raw_byte_classes
+                        .as_ref()
+                        .map_or(0, |(representatives, _)| representatives.len()),
                 },
             },
-            filter_started_at
+            materialize_started_at
                 .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
                 .unwrap_or(0.0),
         )
@@ -511,12 +604,42 @@ impl TokenizerView {
         true
     }
 
-    /// Materialize the exact active-byte quotient after a congruence check. The
-    /// returned view owns only one row and observation pair per state class.
+    /// Materialize the exact active-byte quotient after a congruence check.
+    /// The optional raw byte partition is a finer exact transition partition
+    /// after quotienting, so its class rows can replace 256-byte rows without
+    /// changing any successor.
     pub(crate) fn quotient_by_state_map(&self, state_map: &ManyToOneIdMap) -> Self {
+        self.quotient_by_state_map_with_byte_classes(state_map, None)
+    }
+
+    pub(crate) fn quotient_by_state_map_with_byte_classes(
+        &self,
+        state_map: &ManyToOneIdMap,
+        raw_byte_to_class: Option<&[u8; 256]>,
+    ) -> Self {
         let dfa = self.dfa();
         let quotient_states = state_map.internal_to_originals.len();
-        let mut transitions = vec![u32::MAX; quotient_states * 256];
+        let class_representatives = raw_byte_to_class.map(|byte_to_class| {
+            let class_count = byte_to_class
+                .iter()
+                .copied()
+                .max()
+                .map_or(0usize, |class| class as usize + 1);
+            let mut representatives = vec![usize::MAX; class_count];
+            for byte in 0..256usize {
+                let class = byte_to_class[byte] as usize;
+                if representatives[class] == usize::MAX {
+                    representatives[class] = byte;
+                }
+            }
+            representatives
+        });
+        let mut full_transitions = class_representatives
+            .is_none()
+            .then(|| vec![u32::MAX; quotient_states * 256]);
+        let mut compressed_transitions = class_representatives.as_ref().map(|representatives| {
+            vec![u32::MAX; quotient_states * representatives.len()]
+        });
         let mut states = Vec::with_capacity(quotient_states);
         for (internal, &representative) in state_map.representative_original_ids.iter().enumerate() {
             let representative = representative as usize;
@@ -526,16 +649,31 @@ impl TokenizerView {
                 finalizers: source.finalizers.clone(),
                 possible_future_group_ids: source.possible_future_group_ids.clone(),
             });
-            let base = internal * 256;
-            for byte in 0..256usize {
-                let target = dfa.trans(representative, byte);
-                transitions[base + byte] = if target == u32::MAX {
+            let map_target = |target: u32| {
+                if target == u32::MAX {
                     u32::MAX
                 } else {
                     let mapped = state_map.original_to_internal[target as usize];
                     assert_ne!(mapped, u32::MAX, "quotient target must be mapped");
                     mapped
-                };
+                }
+            };
+            if let Some(representatives) = class_representatives.as_ref() {
+                let base = internal * representatives.len();
+                let transitions = compressed_transitions
+                    .as_mut()
+                    .expect("compressed transition storage must exist");
+                for (class, &byte) in representatives.iter().enumerate() {
+                    transitions[base + class] = map_target(dfa.trans(representative, byte));
+                }
+            } else {
+                let base = internal * 256;
+                let transitions = full_transitions
+                    .as_mut()
+                    .expect("full transition storage must exist");
+                for byte in 0..256usize {
+                    transitions[base + byte] = map_target(dfa.trans(representative, byte));
+                }
             }
         }
         let start_state = state_map.original_to_internal[dfa.start_state];
@@ -544,7 +682,10 @@ impl TokenizerView {
             flat_dfa: FlatDfa {
                 states,
                 start_state: start_state as usize,
-                transitions: Arc::from(transitions),
+                transitions: Arc::from(full_transitions.unwrap_or_default()),
+                compressed_transitions: compressed_transitions.map(Arc::from),
+                compressed_byte_to_class: raw_byte_to_class.copied(),
+                compressed_num_classes: class_representatives.as_ref().map_or(0, Vec::len),
             },
         }
     }
@@ -575,6 +716,38 @@ mod sparse_transition_cache_tests {
             collect_masked_group_ids(&groups, &active_group_words(&active)),
             expected,
         );
+    }
+
+    #[test]
+    fn compressed_layout_reproduces_each_byte_transition() {
+        let mut byte_to_class = [0u8; 256];
+        byte_to_class[b'a' as usize] = 1;
+        byte_to_class[b'b' as usize] = 1;
+        byte_to_class[b'c' as usize] = 2;
+        let dfa = FlatDfa {
+            states: vec![
+                FlatDfaState {
+                    finalizers: Vec::new(),
+                    possible_future_group_ids: Vec::new(),
+                },
+                FlatDfaState {
+                    finalizers: Vec::new(),
+                    possible_future_group_ids: Vec::new(),
+                },
+            ],
+            start_state: 0,
+            transitions: Arc::from([]),
+            compressed_transitions: Some(Arc::from(vec![7, 11, 13, 17, 19, 23])),
+            compressed_byte_to_class: Some(byte_to_class),
+            compressed_num_classes: 3,
+        };
+        assert_eq!(dfa.trans(0, b'a' as usize), 11);
+        assert_eq!(dfa.trans(0, b'b' as usize), 11);
+        assert_eq!(dfa.trans(0, b'c' as usize), 13);
+        assert_eq!(dfa.trans(1, b'a' as usize), 19);
+        assert_eq!(dfa.trans(1, b'b' as usize), 19);
+        assert_eq!(dfa.trans(1, b'c' as usize), 23);
+        assert_eq!(compute_byte_classes(&dfa), byte_to_class);
     }
 
     #[test]
@@ -620,6 +793,9 @@ mod sparse_transition_cache_tests {
                 .collect(),
             start_state: 0,
             transitions: Arc::from(transitions),
+            compressed_transitions: None,
+            compressed_byte_to_class: None,
+            compressed_num_classes: 0,
         };
         assert_eq!(
             byte_classes_from_column_hashes(&dfa.transitions, num_states, &sparse_hashes),

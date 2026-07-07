@@ -1,6 +1,6 @@
 use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use crate::Vocab;
@@ -21,6 +21,30 @@ use super::shared::{
 };
 use super::state::fast as state_equivalence_analysis;
 use super::vocab::fast as vocab_equivalence_analysis;
+
+fn normalized_follows_for_analysis_axis(
+    cached: Option<&Arc<[BitSet]>>,
+    num_groups: usize,
+    fallback: &BTreeMap<u32, BitSet>,
+) -> Arc<[BitSet]> {
+    if let Some(cached) = cached {
+        if cached.len() == num_groups {
+            return Arc::clone(cached);
+        }
+        if cached.len() > num_groups {
+            // The stage cache is normalized on the raw token-path axis. This
+            // analysis observes only the prefix terminal-ID axis, so a row and
+            // bitset prefix is an exact restriction of the same relation.
+            return Arc::from(
+                cached[..num_groups]
+                    .iter()
+                    .map(|bits| bits.prefix_clone(num_groups))
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+    Arc::from(normalize_disallowed_follows(num_groups, fallback))
+}
 
 fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
     tokens: &'a [S],
@@ -399,6 +423,7 @@ fn try_analyze_equivalences_with_raw_quotient(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     effective_disallowed: &BTreeMap<u32, BitSet>,
+    normalized_effective_disallowed_follows: Option<&Arc<[BitSet]>>,
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
@@ -499,15 +524,22 @@ fn try_analyze_equivalences_with_raw_quotient(
             raw_restricted.state_map.num_internal_ids(),
         );
     }
-    let pre_state_map = raw_restricted.state_map;
+    let super::state_equivalence::restricted_observation::RawRestrictedObservationResult {
+        state_map: pre_state_map,
+        state_label_ids,
+        observation_labels,
+        ..
+    } = raw_restricted;
 
     let view_build_started_at = Instant::now();
     let (analysis_view, active_mask_filter_ms) =
-        TokenizerView::new_filtered_quotient_from_flat_trans(
+        TokenizerView::new_quotient_from_flat_trans_and_observations(
             flat_trans,
             tokenizer,
-            active_groups,
             &pre_state_map,
+            &state_label_ids,
+            &observation_labels,
+            raw_byte_to_class.as_ref(),
         );
     let analysis_view_build_ms = view_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -532,8 +564,12 @@ fn try_analyze_equivalences_with_raw_quotient(
     let token_dedup_ms = token_dedup_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let follows_normalize_started_at = Instant::now();
-    let normalized_disallowed_follows =
-        normalize_disallowed_follows(tokenizer_group_count(&analysis_view), effective_disallowed);
+    let analysis_num_groups = tokenizer_group_count(&analysis_view);
+    let normalized_disallowed_follows = normalized_follows_for_analysis_axis(
+        normalized_effective_disallowed_follows,
+        analysis_num_groups,
+        effective_disallowed,
+    );
     let effective_follows_normalize_ms = effective_follows_prepare_ms
         + follows_normalize_started_at.elapsed().as_secs_f64() * 1000.0;
     let pre_reduced_states: Vec<usize> = (0..pre_state_map.internal_to_originals.len()).collect();
@@ -573,11 +609,12 @@ fn try_analyze_equivalences_with_raw_quotient(
             &dedup.representative_token_bytes,
             &final_state_representatives,
             effective_disallowed,
-            Some(normalized_disallowed_follows),
+            Some(Arc::clone(&normalized_disallowed_follows)),
             Some(&byte_to_class),
             None,
             None,
             None,
+            false,
         );
     let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -635,6 +672,8 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     disallowed_follows: &BTreeMap<u32, BitSet>,
+    follows_are_ignore_transparent: bool,
+    normalized_effective_disallowed_follows: Option<&Arc<[BitSet]>>,
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
@@ -649,6 +688,8 @@ pub(crate) fn analyze_equivalences_with_group_filter(
         tokenizer,
         vocab,
         disallowed_follows,
+        follows_are_ignore_transparent,
+        normalized_effective_disallowed_follows,
         ignore_terminal,
         active_groups,
         shared_vocab_dfa_cache,
@@ -669,6 +710,8 @@ fn analyze_equivalences_impl(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     disallowed_follows: &BTreeMap<u32, BitSet>,
+    follows_are_ignore_transparent: bool,
+    normalized_effective_disallowed_follows: Option<&Arc<[BitSet]>>,
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
@@ -679,15 +722,22 @@ fn analyze_equivalences_impl(
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
     let follows_prepare_started_at = Instant::now();
-    let token_path_disallowed_follows =
-        ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal);
-    let effective_follows_prepare_ms = follows_prepare_started_at.elapsed().as_secs_f64() * 1000.0;
-    let effective_disallowed = &token_path_disallowed_follows;
+    let token_path_disallowed_follows = (!follows_are_ignore_transparent)
+        .then(|| ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal));
+    let effective_follows_prepare_ms = if token_path_disallowed_follows.is_some() {
+        follows_prepare_started_at.elapsed().as_secs_f64() * 1000.0
+    } else {
+        0.0
+    };
+    let effective_disallowed = token_path_disallowed_follows
+        .as_ref()
+        .unwrap_or(disallowed_follows);
     if let Some(result) = try_analyze_equivalences_with_raw_quotient(
         partition_label,
         tokenizer,
         vocab,
         effective_disallowed,
+        normalized_effective_disallowed_follows,
         ignore_terminal,
         active_groups,
         flat_trans,
@@ -779,7 +829,10 @@ fn analyze_equivalences_impl(
     // lexer states for the exact and vocabulary phases.
     let analysis_quotient = tokenizer_view
         .is_relevant_byte_congruent(&pre_state_map, &relevant_bytes)
-        .then(|| tokenizer_view.quotient_by_state_map(&pre_state_map));
+        .then(|| tokenizer_view.quotient_by_state_map_with_byte_classes(
+            &pre_state_map,
+            Some(&byte_to_class),
+        ));
     let uses_analysis_quotient = analysis_quotient.is_some();
     let analysis_view = analysis_quotient.as_ref().unwrap_or(&tokenizer_view);
     let pre_reduced_states: Vec<usize> = if uses_analysis_quotient {
@@ -792,8 +845,12 @@ fn analyze_equivalences_impl(
             .collect()
     };
     let follows_normalize_started_at = Instant::now();
-    let normalized_disallowed_follows =
-        normalize_disallowed_follows(tokenizer_group_count(analysis_view), effective_disallowed);
+    let analysis_num_groups = tokenizer_group_count(analysis_view);
+    let normalized_disallowed_follows = normalized_follows_for_analysis_axis(
+        normalized_effective_disallowed_follows,
+        analysis_num_groups,
+        effective_disallowed,
+    );
     let effective_follows_normalize_ms = effective_follows_prepare_ms
         + follows_normalize_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -864,11 +921,12 @@ fn analyze_equivalences_impl(
             &dedup.representative_token_bytes,
             &final_state_representatives,
             effective_disallowed,
-            Some(normalized_disallowed_follows),
+            Some(Arc::clone(&normalized_disallowed_follows)),
             Some(&byte_to_class),
             if uses_analysis_quotient { None } else { active_groups },
             if uses_analysis_quotient { None } else { shared_vocab_dfa_cache },
             if uses_analysis_quotient { None } else { shared_analysis_dfa_cache },
+            true,
         );
     let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -963,6 +1021,9 @@ mod prepass_selection_tests {
             flat_dfa: FlatDfa {
                 start_state: 0,
                 transitions: Arc::from(transitions),
+                compressed_transitions: None,
+                compressed_byte_to_class: None,
+                compressed_num_classes: 0,
                 states: vec![
                     FlatDfaState {
                         finalizers: vec![],

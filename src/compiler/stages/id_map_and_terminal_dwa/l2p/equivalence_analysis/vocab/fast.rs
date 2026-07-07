@@ -61,7 +61,9 @@ struct Dfa {
     none_completion_hash: u64,
     /// Per-state bitset: which bytes cause a self-loop (transition back to same state).
     self_loop_bytes: Arc<[U8Set]>,
-    disallowed_follows: Vec<BitSet>,
+    /// Whether `self_loop_bytes` may be used for the optional batch fast path.
+    self_loop_acceleration_enabled: bool,
+    disallowed_follows: Arc<[BitSet]>,
 }
 
 /// Precomputed transition-only data that is identical across partitions.
@@ -89,6 +91,23 @@ pub struct SharedVocabDfaBase {
 fn compute_byte_classes_and_self_loops(
     dfa: &super::super::compat::FlatDfa,
 ) -> ([u8; 256], Vec<U8Set>) {
+    // A compact quotient already carries an exact raw byte partition. Its
+    // source rows are stored by that partition rather than byte, so preserve
+    // the partition and materialize only the optional self-loop masks.
+    if let Some((_, byte_to_class, _)) = dfa.compressed_layout() {
+        let mut self_loop_bytes = Vec::with_capacity(dfa.states.len());
+        for state in 0..dfa.states.len() {
+            let mut self_loops = U8Set::empty();
+            for byte in 0..256usize {
+                if dfa.trans(state, byte) == state as u32 {
+                    self_loops.insert(byte as u8);
+                }
+            }
+            self_loop_bytes.push(self_loops);
+        }
+        return (*byte_to_class, self_loop_bytes);
+    }
+
     // Exact byte-class discovery already requires a full DFA-table pass. Build
     // self-loop masks in that same pass rather than paying for another scan.
     let mut column_hashes = [0u64; 256];
@@ -261,6 +280,9 @@ impl SharedVocabDfaBase {
 
     /// Check full compatibility without forcing either lazy layout.
     pub fn is_compatible_with_dfa(&self, dfa: &super::super::compat::FlatDfa) -> bool {
+        if dfa.compressed_layout().is_some() {
+            return false;
+        }
         let num_dfa_states = dfa.states.len();
         self.self_loop_bytes.len() == num_dfa_states
             && self.source_transitions.len() == dfa.transitions.len()
@@ -406,6 +428,9 @@ struct Scratch {
     /// Per-state multi-word dirty bitmask.  Layout: `[dirty_words * num_states]`
     /// where state `i`'s dirty mask occupies indices `[i*dirty_words .. (i+1)*dirty_words]`.
     dirty_group_masks: Vec<u64>,
+    /// Bit `w` is set when dirty-mask word `w` is nonzero for this state.
+    /// Used only when `dirty_words <= 64`; larger axes retain the old scan.
+    dirty_word_masks: Vec<u64>,
     /// Number of u64 words per state in `dirty_group_masks` (= ceil(num_groups/64)).
     dirty_words: usize,
     num_groups: usize,
@@ -414,6 +439,13 @@ struct Scratch {
     trie_target_group_counts: Vec<u32>,
     /// Number of live groups at each token position in the active DFS path.
     trie_target_position_counts: Vec<u32>,
+    /// XOR of live group IDs at each token position. When the count is one,
+    /// this is an exact O(1) witness for the only group at that position.
+    trie_target_group_xors: Vec<usize>,
+    /// Exact nonempty-group masks for each live target position. This avoids
+    /// scanning the full terminal axis when a target has only a few matches.
+    trie_target_word_masks: Vec<u64>,
+    trie_target_words: usize,
     targets: Vec<usize>,
     target_gids: HashMap<usize, SmallVec<[usize; 16]>>,
     single_target_pos: usize,
@@ -428,6 +460,8 @@ struct Scratch {
     single_target_hash: u64,
     suffix_match_positions: Vec<u32>,
     suffix_dirty_groups: SmallVec<[usize; 16]>,
+    /// Reused intersection for a single suffix target with multiple groups.
+    suffix_root_disallowed: BitSet,
 }
 
 static HASH_RANDOM_STATE: Lazy<RandomState> =
@@ -558,6 +592,7 @@ fn build_dfa(
         None,
         None,
         None,
+        true,
     )
 }
 
@@ -576,15 +611,18 @@ fn build_dfa_with_group_filter(
     byte_to_class_override: Option<&[u8; 256]>,
     active_groups: Option<&[bool]>,
     shared_cache: Option<&SharedVocabDfaCache>,
-    normalized_disallowed_follows: Option<Vec<BitSet>>,
+    normalized_disallowed_follows: Option<Arc<[BitSet]>>,
+    enable_self_loop_acceleration: bool,
 ) -> Dfa {
     let dfa = tokenizer.dfa();
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
 
     // Lazily initialize the shared base from this TokenizerView's DFA.
-    let shared_base: Option<&SharedVocabDfaBase> = shared_cache.map(|cache| {
-        cache.get_or_init(|| SharedVocabDfaBase::build_from_dfa(dfa))
-    });
+    let shared_base: Option<&SharedVocabDfaBase> = if dfa.compressed_layout().is_some() {
+        None
+    } else {
+        shared_cache.map(|cache| cache.get_or_init(|| SharedVocabDfaBase::build_from_dfa(dfa)))
+    };
 
     // Compute the raw group axis before filtering. The active view removes
     // observations but does not change the terminal-ID coordinate used by
@@ -655,16 +693,23 @@ fn build_dfa_with_group_filter(
                 }
             }
 
-            let mut slb = Vec::with_capacity(num_dfa_states);
-            for s in 0..dfa.states.len() {
-                let mut bits = U8Set::empty();
-                for (byte_idx, &target) in dfa.transitions_for(s).iter().enumerate() {
-                    if target == s as u32 {
-                        bits.insert(byte_idx as u8);
+            let slb = if enable_self_loop_acceleration {
+                let mut masks = Vec::with_capacity(num_dfa_states);
+                for s in 0..dfa.states.len() {
+                    let mut bits = U8Set::empty();
+                    for byte_idx in 0..256usize {
+                        if dfa.trans(s, byte_idx) == s as u32 {
+                            bits.insert(byte_idx as u8);
+                        }
                     }
+                    masks.push(bits);
                 }
-                slb.push(bits);
-            }
+                masks
+            } else {
+                // This only disables a later token-walk short circuit. The
+                // exact transition and finalizer relations are unchanged.
+                vec![U8Set::empty(); num_dfa_states]
+            };
 
             let nch = {
                 let mut h = new_hasher();
@@ -687,9 +732,10 @@ fn build_dfa_with_group_filter(
         completion_hash,
         none_completion_hash,
         self_loop_bytes,
+        self_loop_acceleration_enabled: enable_self_loop_acceleration,
         disallowed_follows: normalized_disallowed_follows
             .filter(|follows| follows.len() == num_groups)
-            .unwrap_or_else(|| normalize_disallowed_follows(num_groups, disallowed_follows)),
+            .unwrap_or_else(|| Arc::from(normalize_disallowed_follows(num_groups, disallowed_follows))),
     }
 }
 
@@ -731,10 +777,14 @@ impl Scratch {
             match_positions: vec![NONE; num_states * num_groups],
             dirty_state_flags: vec![0; num_states],
             dirty_group_masks: vec![0; num_states * dirty_words.max(1)],
+            dirty_word_masks: vec![0; num_states],
             dirty_words,
             num_groups,
             trie_target_group_counts: Vec::new(),
             trie_target_position_counts: Vec::new(),
+            trie_target_group_xors: Vec::new(),
+            trie_target_word_masks: Vec::new(),
+            trie_target_words: num_groups.div_ceil(64),
             targets: Vec::new(),
             target_gids: HashMap::new(),
             single_target_pos: usize::MAX,
@@ -748,6 +798,7 @@ impl Scratch {
             single_target_hash: 0,
             suffix_match_positions: vec![NONE; num_groups],
             suffix_dirty_groups: SmallVec::new(),
+            suffix_root_disallowed: BitSet::new(num_groups),
         }
     }
 
@@ -767,6 +818,7 @@ impl Scratch {
         self.dirty_state_flags.resize(num_states, 0);
         self.dirty_group_masks
             .resize(num_states * dirty_words.max(1), 0);
+        self.dirty_word_masks.resize(num_states, 0);
     }
 }
 
@@ -776,6 +828,11 @@ fn reset_trie_target_aggregate(scratch: &mut Scratch, max_token_len: usize) {
     scratch.trie_target_group_counts[..slots].fill(0);
     scratch.trie_target_position_counts.resize(max_token_len + 1, 0);
     scratch.trie_target_position_counts[..=max_token_len].fill(0);
+    scratch.trie_target_group_xors.resize(max_token_len + 1, 0);
+    scratch.trie_target_group_xors[..=max_token_len].fill(0);
+    let word_slots = (max_token_len + 1).saturating_mul(scratch.trie_target_words);
+    scratch.trie_target_word_masks.resize(word_slots, 0);
+    scratch.trie_target_word_masks[..word_slots].fill(0);
 }
 
 #[inline(always)]
@@ -799,6 +856,12 @@ fn update_trie_target_aggregate(
         if scratch.trie_target_group_counts[index] == 0 {
             debug_assert!(scratch.trie_target_position_counts[position] > 0);
             scratch.trie_target_position_counts[position] -= 1;
+            scratch.trie_target_group_xors[position] ^= gid;
+            if scratch.trie_target_words <= 64 {
+                let word = gid >> 6;
+                let mask_index = position * scratch.trie_target_words + word;
+                scratch.trie_target_word_masks[mask_index] &= !(1u64 << (gid & 63));
+            }
         }
     };
     let add = |scratch: &mut Scratch, position: usize, gid: usize| {
@@ -808,6 +871,12 @@ fn update_trie_target_aggregate(
         let index = position * scratch.num_groups + gid;
         if scratch.trie_target_group_counts[index] == 0 {
             scratch.trie_target_position_counts[position] += 1;
+            scratch.trie_target_group_xors[position] ^= gid;
+            if scratch.trie_target_words <= 64 {
+                let word = gid >> 6;
+                let mask_index = position * scratch.trie_target_words + word;
+                scratch.trie_target_word_masks[mask_index] |= 1u64 << (gid & 63);
+            }
         }
         scratch.trie_target_group_counts[index] += 1;
     };
@@ -829,33 +898,54 @@ fn collect_trie_targets(scratch: &mut Scratch, token_len: usize) {
     scratch.single_target_pos = usize::MAX;
     scratch.single_target_gids.clear();
 
-    let mut targets_with_gids: SmallVec<[(usize, SmallVec<[usize; 16]>); 4]> = SmallVec::new();
     for position in 1..=token_len {
-        if scratch.trie_target_position_counts[position] == 0 {
-            continue;
+        if scratch.trie_target_position_counts[position] != 0 {
+            scratch.targets.push(position);
         }
-        let base = position * scratch.num_groups;
-        let mut gids = SmallVec::<[usize; 16]>::new();
-        for gid in 0..scratch.num_groups {
-            if scratch.trie_target_group_counts[base + gid] != 0 {
-                gids.push(gid);
-            }
-        }
-        debug_assert!(!gids.is_empty());
-        targets_with_gids.push((position, gids));
     }
 
-    for (position, _) in &targets_with_gids {
-        scratch.targets.push(*position);
-    }
-    if targets_with_gids.len() == 1 {
-        let (position, gids) = targets_with_gids.pop().expect("single target exists");
-        scratch.single_target_pos = position;
-        scratch.single_target_gids = gids;
-    } else {
-        for (position, gids) in targets_with_gids {
-            scratch.target_gids.insert(position, gids);
+    let append_gids = |scratch: &Scratch, position: usize, output: &mut SmallVec<[usize; 16]>| {
+        if scratch.trie_target_words <= 64 {
+            let mask_base = position * scratch.trie_target_words;
+            for word in 0..scratch.trie_target_words {
+                let mut bits = scratch.trie_target_word_masks[mask_base + word];
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    output.push(word * 64 + bit);
+                }
+            }
+        } else {
+            let base = position * scratch.num_groups;
+            for gid in 0..scratch.num_groups {
+                if scratch.trie_target_group_counts[base + gid] != 0 {
+                    output.push(gid);
+                }
+            }
         }
+    };
+
+    if scratch.targets.len() == 1 {
+        let position = scratch.targets[0];
+        scratch.single_target_pos = position;
+        if scratch.trie_target_position_counts[position] == 1 {
+            scratch
+                .single_target_gids
+                .push(scratch.trie_target_group_xors[position]);
+            return;
+        }
+        let mut gids = SmallVec::<[usize; 16]>::new();
+        append_gids(scratch, position, &mut gids);
+        debug_assert!(!gids.is_empty());
+        scratch.single_target_gids = gids;
+        return;
+    }
+
+    for &position in &scratch.targets {
+        let mut gids = SmallVec::<[usize; 16]>::new();
+        append_gids(scratch, position, &mut gids);
+        debug_assert!(!gids.is_empty());
+        scratch.target_gids.insert(position, gids);
     }
 }
 
@@ -1020,7 +1110,10 @@ fn run_batch_inner(
 
             // Self-loop early exit: if all active states self-loop on every remaining byte,
             // greedy match positions advance to token_length and we can stop.
-            if pos + 1 < len && active_len <= SELF_LOOP_ACTIVE_LEN_LIMIT {
+            if dfa.self_loop_acceleration_enabled
+                && pos + 1 < len
+                && active_len <= SELF_LOOP_ACTIVE_LEN_LIMIT
+            {
                 // Intersect self_loop_bytes for all active states
                 let mut sl = U8Set::all();
                 for idx in 0..active_len {
@@ -1359,11 +1452,8 @@ fn try_hash_single_target_suffix(
         return Some(0);
     }
 
-    let (&first_gid, rest) = scratch.single_target_gids.split_first()?;
-    let mut root_disallowed = dfa.disallowed_for(first_gid).clone();
-    for &gid in rest {
-        root_disallowed = root_disallowed.intersection(dfa.disallowed_for(gid));
-    }
+    let first_gid = *scratch.single_target_gids.first()?;
+    let single_gid = scratch.single_target_gids.len() == 1;
 
     let (end_state, edges) = run_suffix(
         dfa,
@@ -1376,21 +1466,42 @@ fn try_hash_single_target_suffix(
         return None;
     }
 
-    let mut h = new_hasher();
-    h.write_u64(dfa.completion_with_disallowed(
-        end_state.unwrap_or(STATE_NONE),
-        Some(&root_disallowed),
-    ));
-    for &(gid, _target) in &edges {
-        if root_disallowed.contains(gid) {
-            continue;
+    let hash = if single_gid {
+        let root_disallowed = dfa.disallowed_for(first_gid);
+        let mut h = new_hasher();
+        h.write_u64(dfa.completion_with_disallowed(
+            end_state.unwrap_or(STATE_NONE),
+            Some(root_disallowed),
+        ));
+        for &(gid, _target) in &edges {
+            if !root_disallowed.contains(gid) {
+                h.write_u64(gid as u64);
+                h.write_u64(0);
+            }
         }
-        h.write_u64(gid as u64);
-        h.write_u64(0);
-    }
+        h.finish()
+    } else {
+        let root_disallowed = &mut scratch.suffix_root_disallowed;
+        root_disallowed.clone_from(dfa.disallowed_for(first_gid));
+        for &gid in &scratch.single_target_gids[1..] {
+            root_disallowed.intersect_with(dfa.disallowed_for(gid));
+        }
+        let mut h = new_hasher();
+        h.write_u64(dfa.completion_with_disallowed(
+            end_state.unwrap_or(STATE_NONE),
+            Some(root_disallowed),
+        ));
+        for &(gid, _target) in &edges {
+            if !root_disallowed.contains(gid) {
+                h.write_u64(gid as u64);
+                h.write_u64(0);
+            }
+        }
+        h.finish()
+    };
 
     scratch.single_target_hash_pos = pos;
-    scratch.single_target_hash = h.finish();
+    scratch.single_target_hash = hash;
     Some(1)
 }
 
@@ -1784,6 +1895,8 @@ struct DepthChangeLog {
     dirty_changes: Vec<(usize, u64)>,
     /// (state_idx, old_dirty_state_flag)
     dirty_state_flag_changes: Vec<(usize, u8)>,
+    /// (state_idx, old bitmap of nonzero dirty-mask words)
+    dirty_word_mask_changes: Vec<(usize, u64)>,
 }
 
 impl DepthChangeLog {
@@ -1793,6 +1906,7 @@ impl DepthChangeLog {
             match_changes: Vec::new(),
             dirty_changes: Vec::new(),
             dirty_state_flag_changes: Vec::new(),
+            dirty_word_mask_changes: Vec::new(),
         }
     }
 
@@ -1801,6 +1915,7 @@ impl DepthChangeLog {
         self.match_changes.clear();
         self.dirty_changes.clear();
         self.dirty_state_flag_changes.clear();
+        self.dirty_word_mask_changes.clear();
     }
 }
 
@@ -1983,14 +2098,19 @@ fn dfs_step(
                     let word_idx = gid / 64;
                     let bit = gid % 64;
                     let flat_idx = i * dirty_words + word_idx;
-                    log.dirty_changes
-                        .push((flat_idx, scratch.dirty_group_masks[flat_idx]));
+                    let old_dirty = scratch.dirty_group_masks[flat_idx];
+                    log.dirty_changes.push((flat_idx, old_dirty));
+                    if old_dirty == 0 && dirty_words <= 64 {
+                        log.dirty_word_mask_changes
+                            .push((i, scratch.dirty_word_masks[i]));
+                        scratch.dirty_word_masks[i] |= 1u64 << word_idx;
+                    }
                     if scratch.dirty_state_flags[i] == 0 {
                         log.dirty_state_flag_changes
                             .push((i, scratch.dirty_state_flags[i]));
                         scratch.dirty_state_flags[i] = 1;
                     }
-                    scratch.dirty_group_masks[flat_idx] |= 1u64 << bit;
+                    scratch.dirty_group_masks[flat_idx] = old_dirty | (1u64 << bit);
                 }
                 log.match_changes.push((ix, old_mp));
                 update_trie_target_aggregate(scratch, gid, old_mp, position);
@@ -2056,15 +2176,20 @@ fn dfs_step_profiled(
                     let word_idx = gid / 64;
                     let bit = gid % 64;
                     let flat_idx = i * dirty_words + word_idx;
-                    log.dirty_changes
-                        .push((flat_idx, scratch.dirty_group_masks[flat_idx]));
+                    let old_dirty = scratch.dirty_group_masks[flat_idx];
+                    log.dirty_changes.push((flat_idx, old_dirty));
+                    if old_dirty == 0 && dirty_words <= 64 {
+                        log.dirty_word_mask_changes
+                            .push((i, scratch.dirty_word_masks[i]));
+                        scratch.dirty_word_masks[i] |= 1u64 << word_idx;
+                    }
                     if scratch.dirty_state_flags[i] == 0 {
                         log.dirty_state_flag_changes
                             .push((i, scratch.dirty_state_flags[i]));
                         scratch.dirty_state_flags[i] = 1;
                         step_stats.new_dirty_states += 1;
                     }
-                    scratch.dirty_group_masks[flat_idx] |= 1u64 << bit;
+                    scratch.dirty_group_masks[flat_idx] = old_dirty | (1u64 << bit);
                     step_stats.new_dirty_groups += 1;
                     state_new_dirty_groups += 1;
                 }
@@ -2096,6 +2221,9 @@ fn dfs_undo_depth(scratch: &mut Scratch, log: &DepthChangeLog) {
     }
     for &(flat_idx, old_dirty) in log.dirty_changes.iter().rev() {
         scratch.dirty_group_masks[flat_idx] = old_dirty;
+    }
+    for &(state_idx, old_word_mask) in log.dirty_word_mask_changes.iter().rev() {
+        scratch.dirty_word_masks[state_idx] = old_word_mask;
     }
     for &(state_idx, old_flag) in log.dirty_state_flag_changes.iter().rev() {
         scratch.dirty_state_flags[state_idx] = old_flag;
@@ -2174,28 +2302,43 @@ fn finish_token_signature_no_cleanup(
         let state_sig = if scratch.dirty_state_flags[i] != 0 {
             let mut h = new_hasher();
             h.write_u64(completion);
-            for w in 0..dirty_words {
-                let mut dm = scratch.dirty_group_masks[mask_base + w];
-                while dm != 0 {
-                    let bit = dm.trailing_zeros() as usize;
-                    dm &= dm - 1;
-                    let gid = w * 64 + bit;
-                    if gid >= num_groups {
-                        break;
+            macro_rules! hash_dirty_word {
+                ($word:expr) => {{
+                    let w = $word;
+                    let mut dm = scratch.dirty_group_masks[mask_base + w];
+                    while dm != 0 {
+                        let bit = dm.trailing_zeros() as usize;
+                        dm &= dm - 1;
+                        let gid = w * 64 + bit;
+                        if gid >= num_groups {
+                            break;
+                        }
+                        let pv = scratch.match_positions[base + gid];
+                        if pv != NONE && pv > 0 {
+                            h.write_u64(gid as u64);
+                            let target = pv as usize;
+                            let target_hash = if single_target_hash_pos == target {
+                                single_target_hash
+                            } else {
+                                dag.get(target)
+                                    .and_then(|node| node.as_ref())
+                                    .map_or(0, |node| node.hash)
+                            };
+                            h.write_u64(target_hash);
+                        }
                     }
-                    let pv = scratch.match_positions[base + gid];
-                    if pv != NONE && pv > 0 {
-                        h.write_u64(gid as u64);
-                        let target = pv as usize;
-                        let target_hash = if single_target_hash_pos == target {
-                            single_target_hash
-                        } else {
-                            dag.get(target)
-                                .and_then(|node| node.as_ref())
-                                .map_or(0, |node| node.hash)
-                        };
-                        h.write_u64(target_hash);
-                    }
+                }};
+            }
+            if dirty_words <= 64 {
+                let mut words = scratch.dirty_word_masks[i];
+                while words != 0 {
+                    let w = words.trailing_zeros() as usize;
+                    words &= words - 1;
+                    hash_dirty_word!(w);
+                }
+            } else {
+                for w in 0..dirty_words {
+                    hash_dirty_word!(w);
                 }
             }
             h.finish()
@@ -2239,6 +2382,7 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
     for flag in scratch.dirty_state_flags[..batch_len].iter_mut() {
         *flag = 0;
     }
+    scratch.dirty_word_masks[..batch_len].fill(0);
     for i in 0..batch_len {
         if dfa.is_dead_end[scratch.current_states[i]] {
             scratch.current_states[i] = STATE_NONE;
@@ -2467,6 +2611,9 @@ fn compact_tokenizer_view_for_tokens<S: AsRef<[u8]>>(
                 states,
                 start_state,
                 transitions: Arc::from(transitions),
+                compressed_transitions: None,
+                compressed_byte_to_class: None,
+                compressed_num_classes: 0,
             },
         },
         compact_initial,
@@ -2601,7 +2748,8 @@ fn compact_dfa_for_tokens<S: AsRef<[u8]>>(
         completion_hash: compact_completion_hash,
         none_completion_hash: dfa.none_completion_hash,
         self_loop_bytes: Arc::from(compact_self_loop),
-        disallowed_follows: dfa.disallowed_follows.clone(),
+        self_loop_acceleration_enabled: dfa.self_loop_acceleration_enabled,
+        disallowed_follows: Arc::clone(&dfa.disallowed_follows),
     };
 
     Some((compact_dfa, compact_initial, compact_to_original))
@@ -2614,11 +2762,12 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
-    normalized_disallowed_follows: Option<Vec<BitSet>>,
+    normalized_disallowed_follows: Option<Arc<[BitSet]>>,
     byte_to_class: Option<&[u8; 256]>,
     active_groups: Option<&[bool]>,
     shared_cache: Option<&SharedVocabDfaCache>,
     shared_analysis_dfa_cache: Option<&SharedVocabAnalysisDfaCache>,
+    enable_self_loop_acceleration: bool,
 ) -> (VocabEquivalenceResult, f64) {
     let profiling = compile_profile_enabled();
     let elapsed_ms = |started_at: Option<Instant>| {
@@ -2659,6 +2808,7 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
                 active_groups,
                 shared_cache,
                 normalized_disallowed_follows,
+                enable_self_loop_acceleration,
             )
         })
     } else {
@@ -2673,6 +2823,7 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
             active_groups,
             shared_cache,
             normalized_disallowed_follows,
+            enable_self_loop_acceleration,
         ))
     };
     let build_dfa_ms = build_dfa_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -3043,6 +3194,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
         active_groups,
         shared_cache,
         shared_analysis_dfa_cache,
+        true,
     )
     .0
 }
@@ -3080,6 +3232,9 @@ mod shared_base_tests {
             ],
             start_state: 0,
             transitions: Arc::from(transitions),
+            compressed_transitions: None,
+            compressed_byte_to_class: None,
+            compressed_num_classes: 0,
         }
     }
 
@@ -3128,6 +3283,43 @@ mod shared_base_tests {
         );
 
         assert_eq!(compacted, uncompacted);
+    }
+
+    #[test]
+    fn self_loop_acceleration_does_not_change_vocab_equivalence() {
+        let view = TokenizerView { flat_dfa: sample_dfa() };
+        let tokens: Vec<&[u8]> = vec![b"a", b"b", b"aa", b"ba"];
+        let initial_states = vec![0usize, 1, 2];
+        let disallowed = BTreeMap::<u32, BitSet>::new();
+
+        let with_acceleration = find_vocab_equivalence_classes_with_group_filter_profiled(
+            &view,
+            &tokens,
+            &initial_states,
+            &disallowed,
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .0;
+        let without_acceleration = find_vocab_equivalence_classes_with_group_filter_profiled(
+            &view,
+            &tokens,
+            &initial_states,
+            &disallowed,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .0;
+
+        assert_eq!(with_acceleration, without_acceleration);
     }
 
     #[test]
@@ -3307,6 +3499,33 @@ mod shared_base_tests {
     }
 
     #[test]
+    fn trie_target_word_masks_preserve_group_order_across_word_boundaries() {
+        let mut scratch = Scratch::new(2, 130);
+        reset_trie_target_aggregate(&mut scratch, 4);
+
+        let set_match = |scratch: &mut Scratch, state: usize, gid: usize, position: u32| {
+            let index = state * scratch.num_groups + gid;
+            let previous = scratch.match_positions[index];
+            if previous == NONE {
+                mark_dirty_group(scratch, state, gid);
+            }
+            update_trie_target_aggregate(scratch, gid, previous, position);
+            scratch.match_positions[index] = position;
+        };
+
+        set_match(&mut scratch, 0, 1, 1);
+        set_match(&mut scratch, 0, 63, 2);
+        set_match(&mut scratch, 1, 64, 2);
+        set_match(&mut scratch, 1, 129, 4);
+        collect_trie_targets(&mut scratch, 4);
+
+        assert_eq!(scratch.targets, vec![1, 2, 4]);
+        assert_eq!(scratch.target_gids[&1].as_slice(), &[1]);
+        assert_eq!(scratch.target_gids[&2].as_slice(), &[63, 64]);
+        assert_eq!(scratch.target_gids[&4].as_slice(), &[129]);
+    }
+
+    #[test]
     fn shared_base_row_major_layout_matches_flat_dfa() {
         let dfa = sample_dfa();
         let base = SharedVocabDfaBase::build_from_dfa(&dfa);
@@ -3329,6 +3548,9 @@ mod shared_base_tests {
             states: dfa.states.clone(),
             start_state: dfa.start_state,
             transitions: Arc::from(dfa.transitions.to_vec()),
+            compressed_transitions: None,
+            compressed_byte_to_class: None,
+            compressed_num_classes: 0,
         };
         assert!(base.is_compatible_with_dfa(&independently_allocated));
     }

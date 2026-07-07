@@ -26,6 +26,9 @@ struct StateBatchScratch {
     walk_frames: Vec<WalkFrame>,
     positions: Vec<i32>,
     active_bits: Vec<u64>,
+    /// Bitmap of nonzero words in `active_bits` when there are at most 64
+    /// words. The state walker uses this to skip provably empty group words.
+    active_word_mask: u64,
     changes: Vec<(usize, i32)>,
 }
 
@@ -35,6 +38,7 @@ impl StateBatchScratch {
             walk_frames: Vec::new(),
             positions: vec![-1; num_groups],
             active_bits: vec![0u64; bit_words(num_groups)],
+            active_word_mask: 0,
             changes: Vec::new(),
         }
     }
@@ -96,6 +100,33 @@ fn bitset_clear(bits: &mut [u64], idx: usize) {
 }
 
 #[inline(always)]
+fn clear_active_positions_and_word_mask(
+    positions: &mut [i32],
+    active_bits: &mut [u64],
+    active_word_mask: &mut u64,
+) {
+    clear_active_positions(positions, active_bits);
+    *active_word_mask = 0;
+}
+
+#[inline(always)]
+fn set_active_bit_with_word_mask(active_bits: &mut [u64], active_word_mask: &mut u64, gid: usize) {
+    let word = gid >> 6;
+    bitset_set(active_bits, gid);
+    if active_bits.len() <= 64 {
+        *active_word_mask |= 1u64 << word;
+    }
+}
+
+#[inline(always)]
+fn clear_active_bit_with_word_mask(active_bits: &mut [u64], active_word_mask: &mut u64, gid: usize) {
+    let word = gid >> 6;
+    bitset_clear(active_bits, gid);
+    if active_bits.len() <= 64 && active_bits[word] == 0 {
+        *active_word_mask &= !(1u64 << word);
+    }
+}
+
 fn clear_active_positions(positions: &mut [i32], active_bits: &mut [u64]) {
     for (word_idx, word) in active_bits.iter_mut().enumerate() {
         let mut bits = *word;
@@ -392,6 +423,98 @@ fn hash_trellis_node_from_positions(
     mix_tagged(hash, EDGE_COUNT_TAG, edge_count as u128)
 }
 
+fn hash_trellis_node_from_positions_sparse_words(
+    end_state: Option<usize>,
+    positions: &[i32],
+    active_bits: &[u64],
+    active_word_mask: u64,
+    token_len: usize,
+    future_group_hashes: &[u128],
+    follow_contexts: &FollowContextTable,
+    suffix_hashes: Option<&TokenSuffixHashes>,
+) -> u128 {
+    const DEAD_NODE_TAG: u128 = 0xDEAD_DEAD_DEAD_DEAD;
+    const ACCEPT_SINK_HASH: u128 = 0xA11C_EA5E_A11C_EA5E;
+    const EDGE_COUNT_TAG: u128 = 0xEDEC_EDEC_EDEC_EDEC;
+    const EDGE_GID_TAG: u128 = 0xE001_E001_E001_E001;
+    const EDGE_POS_TAG: u128 = 0xE002_E002_E002_E002;
+    const EDGE_CHILD_TAG: u128 = 0xE003_E003_E003_E003;
+
+    debug_assert!(active_bits.len() <= 64);
+    let mut edge_count = 0usize;
+    let mut hash = match end_state {
+        Some(state) => mix_tagged(
+            0x51A7_E000_0000_0001,
+            0xF070_F070_F070_F070,
+            future_group_hashes[state],
+        ),
+        None => mix_u128(DEAD_NODE_TAG),
+    };
+
+    let mut words = active_word_mask;
+    while words != 0 {
+        let word_idx = words.trailing_zeros() as usize;
+        words &= words - 1;
+        let mut bits = active_bits[word_idx];
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            let gid = word_idx * 64 + bit;
+            bits &= bits - 1;
+
+            let target_pos = positions[gid] as usize;
+            edge_count += 1;
+            let child_hash = if target_pos >= token_len {
+                ACCEPT_SINK_HASH
+            } else {
+                let suffix_hashes = suffix_hashes.expect("child suffix hashes required for live edge");
+                let child_context = follow_contexts.context_for_gid(gid);
+                suffix_hashes.get(child_context, target_pos)
+            };
+            hash = mix_tagged(hash, EDGE_GID_TAG, gid as u128);
+            hash = mix_tagged(hash, EDGE_POS_TAG, target_pos as u128);
+            hash = mix_tagged(hash, EDGE_CHILD_TAG, child_hash);
+        }
+    }
+
+    mix_tagged(hash, EDGE_COUNT_TAG, edge_count as u128)
+}
+
+#[inline(always)]
+fn hash_trellis_node_from_state_scratch(
+    end_state: Option<usize>,
+    positions: &[i32],
+    active_bits: &[u64],
+    active_word_mask: u64,
+    token_len: usize,
+    future_group_hashes: &[u128],
+    follow_contexts: &FollowContextTable,
+    suffix_hashes: Option<&TokenSuffixHashes>,
+) -> u128 {
+    if active_bits.len() <= 64 {
+        hash_trellis_node_from_positions_sparse_words(
+            end_state,
+            positions,
+            active_bits,
+            active_word_mask,
+            token_len,
+            future_group_hashes,
+            follow_contexts,
+            suffix_hashes,
+        )
+    } else {
+        hash_trellis_node_from_positions(
+            end_state,
+            positions,
+            active_bits,
+            token_len,
+            future_group_hashes,
+            follow_contexts,
+            suffix_hashes,
+        )
+    }
+}
+
+
 fn build_strided_batches(total_tokens: usize, target_batch_size: usize) -> Vec<Vec<usize>> {
     if total_tokens == 0 {
         return Vec::new();
@@ -623,26 +746,33 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     // outweighs the benefit.
     const COMPACT_THRESHOLD_STATES: usize = 16_000;
     let num_dfa_states = dfa.states.len();
-    let use_compact = num_dfa_states >= COMPACT_THRESHOLD_STATES;
+    let direct_compressed_layout = dfa.compressed_layout();
+    let use_compact = direct_compressed_layout.is_some() || num_dfa_states >= COMPACT_THRESHOLD_STATES;
     let identity_byte_class: [u8; 256] = std::array::from_fn(|i| i as u8);
-    let compatible_shared_base = use_compact
+    let compatible_shared_base = (direct_compressed_layout.is_none() && use_compact)
         .then(|| shared_base.filter(|base| base.is_compatible_with_dfa(dfa)))
         .flatten();
-    let computed_byte_class = (use_compact && compatible_shared_base.is_none())
+    let computed_byte_class = (direct_compressed_layout.is_none()
+        && use_compact
+        && compatible_shared_base.is_none())
         .then(|| super::super::compat::compute_byte_classes(dfa));
-    let byte_to_class: &[u8; 256] = compatible_shared_base
-        .map(SharedVocabDfaBase::byte_to_class_ref)
+    let byte_to_class: &[u8; 256] = direct_compressed_layout
+        .map(|(_, classes, _)| classes)
+        .or_else(|| compatible_shared_base.map(SharedVocabDfaBase::byte_to_class_ref))
         .or_else(|| computed_byte_class.as_ref())
         .unwrap_or(&identity_byte_class);
-    let num_bc = compatible_shared_base
-        .map(|base| base.num_classes)
+    let num_bc = direct_compressed_layout
+        .map(|(_, _, classes)| classes)
+        .or_else(|| compatible_shared_base.map(|base| base.num_classes))
         .or_else(|| {
             computed_byte_class
                 .as_ref()
                 .map(|classes| classes.iter().copied().max().map_or(0usize, |max| max as usize + 1))
         })
         .unwrap_or(256);
-    let compact_transitions: std::borrow::Cow<'_, [u32]> = if let Some(base) = compatible_shared_base {
+    let compact_transitions: std::borrow::Cow<'_, [u32]> = if let Some((transitions, _, _)) = direct_compressed_layout {
+        std::borrow::Cow::Borrowed(transitions)
+    } else if let Some(base) = compatible_shared_base {
         std::borrow::Cow::Borrowed(base.transitions_by_state_class())
     } else if let Some(classes) = computed_byte_class.as_ref() {
         let mut transitions = vec![NONE_STATE; num_dfa_states * num_bc];
@@ -884,6 +1014,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                     let walk_frames = &mut scratch.walk_frames;
                     let positions = &mut scratch.positions;
                     let active_bits = &mut scratch.active_bits;
+                    let active_word_mask = &mut scratch.active_word_mask;
                     let changes = &mut scratch.changes;
 
                     for (range_start, range_end) in live_ranges {
@@ -897,7 +1028,11 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                             dead_at_depth: None,
                             changes_len: 0,
                         });
-                        clear_active_positions(positions, active_bits);
+                        clear_active_positions_and_word_mask(
+                            positions,
+                            active_bits,
+                            active_word_mask,
+                        );
                         changes.clear();
 
                         for token_idx in range_start..range_end {
@@ -919,10 +1054,18 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                     let (gid, prev_pos) = changes.pop().unwrap();
                                     if prev_pos < 0 {
                                         positions[gid] = -1;
-                                        bitset_clear(active_bits, gid);
+                                        clear_active_bit_with_word_mask(
+                                            active_bits,
+                                            active_word_mask,
+                                            gid,
+                                        );
                                     } else {
                                         positions[gid] = prev_pos;
-                                        bitset_set(active_bits, gid);
+                                        set_active_bit_with_word_mask(
+                                            active_bits,
+                                            active_word_mask,
+                                            gid,
+                                        );
                                     }
                                 }
 
@@ -963,7 +1106,11 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                             let prev = positions[gid];
                                             if prev != pos_i32 {
                                                 if prev < 0 {
-                                                    bitset_set(active_bits, gid);
+                                                    set_active_bit_with_word_mask(
+                                                        active_bits,
+                                                        active_word_mask,
+                                                        gid,
+                                                    );
                                                 }
                                                 changes.push((gid, prev));
                                                 positions[gid] = pos_i32;
@@ -980,10 +1127,11 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                             }
 
                             let token_hash = if dead_at_depth.is_some() {
-                                hash_trellis_node_from_positions(
+                                hash_trellis_node_from_state_scratch(
                                     None,
                                     positions,
                                     active_bits,
+                                    *active_word_mask,
                                     token.len(),
                                     &future_group_hashes_by_context[0],
                                     &follow_contexts,
@@ -991,10 +1139,11 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                 )
                             } else {
                                 let current = walk_frames.last().unwrap().state;
-                                hash_trellis_node_from_positions(
+                                hash_trellis_node_from_state_scratch(
                                     Some(current as usize),
                                     positions,
                                     active_bits,
+                                    *active_word_mask,
                                     token.len(),
                                     &future_group_hashes_by_context[0],
                                     &follow_contexts,
@@ -1087,7 +1236,6 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                 active_indices.push(state_idx);
             }
         }
-
         // All tokens must be processed before early-stop convergence is trusted.
         let min_tokens_met = tokens_tested >= total_tokens;
         if early_stop && min_tokens_met {
@@ -1140,6 +1288,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         mapping[idx] = rep_for_group[gid];
     }
 
+
     mapping
 }
 
@@ -1161,6 +1310,39 @@ pub fn mapping_to_equivalence_classes(
 #[cfg(test)]
 mod state_batch_scratch_pool_tests {
     use super::*;
+
+    #[test]
+    fn sparse_word_hash_matches_dense_hash() {
+        let mut positions = vec![-1i32; 130];
+        let mut active_bits = vec![0u64; bit_words(130)];
+        let mut active_word_mask = 0u64;
+        for group in [1usize, 63, 64, 129] {
+            positions[group] = 3;
+            set_active_bit_with_word_mask(&mut active_bits, &mut active_word_mask, group);
+        }
+        let follow_contexts = FollowContextTable::new(130, None);
+        let future_hashes = vec![0x1234u128];
+        let dense = hash_trellis_node_from_positions(
+            Some(0),
+            &positions,
+            &active_bits,
+            3,
+            &future_hashes,
+            &follow_contexts,
+            None,
+        );
+        let sparse = hash_trellis_node_from_positions_sparse_words(
+            Some(0),
+            &positions,
+            &active_bits,
+            active_word_mask,
+            3,
+            &future_hashes,
+            &follow_contexts,
+            None,
+        );
+        assert_eq!(sparse, dense);
+    }
 
     #[test]
     fn recycled_scratch_can_be_scrubbed_before_next_walk() {

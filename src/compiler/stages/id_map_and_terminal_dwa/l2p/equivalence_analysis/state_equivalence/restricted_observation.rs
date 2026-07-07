@@ -16,13 +16,17 @@ use std::time::Instant;
 
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
-use super::super::compat::TokenizerView;
+use super::super::compat::{FlatDfaState, TokenizerView};
 use super::max_length::active_byte_representatives;
 
 const NO_CANDIDATE: usize = usize::MAX;
 
 pub(crate) struct RawRestrictedObservationResult {
     pub(crate) state_map: ManyToOneIdMap,
+    /// Exact active-terminal observation ID for every raw lexer state.
+    pub(crate) state_label_ids: Vec<u32>,
+    /// Canonical terminal observations indexed by `state_label_ids`.
+    pub(crate) observation_labels: Vec<FlatDfaState>,
     pub(crate) label_ms: f64,
     pub(crate) refine_ms: f64,
     pub(crate) certificate_ms: f64,
@@ -378,9 +382,51 @@ fn hash_visible_observation_key(key: &[u64]) -> u64 {
     hash
 }
 
-fn raw_target_label_ids(tokenizer: &Tokenizer, active_groups: &[bool]) -> Vec<u32> {
+struct RawTargetLabels {
+    ids: Vec<u32>,
+    observations: Vec<FlatDfaState>,
+}
+
+/// Decode the canonical packed observation key used for raw-state labels.
+///
+/// `visible_observation_key` records every nonzero active bitset word with its
+/// word index, so this inverse produces exactly the sorted group lists used by
+/// `TokenizerView` without looking at the tokenizer a second time.
+fn observation_from_visible_key(key: &[u64]) -> FlatDfaState {
+    let final_pairs = usize::try_from(*key.first().expect("observation key is nonempty"))
+        .expect("final-pair count must fit usize");
+    let final_end = 1usize
+        .checked_add(final_pairs.checked_mul(2).expect("final-pair count overflow"))
+        .expect("final-pair end overflow");
+    assert!(
+        final_end <= key.len() && (key.len() - final_end).is_multiple_of(2),
+        "malformed visible observation key"
+    );
+
+    fn decode_pairs(pairs: &[u64]) -> Vec<usize> {
+        let mut groups = Vec::new();
+        for pair in pairs.chunks_exact(2) {
+            let word_index = usize::try_from(pair[0]).expect("word index must fit usize");
+            let mut word = pair[1];
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                groups.push(word_index * 64 + bit);
+                word &= word - 1;
+            }
+        }
+        groups
+    }
+
+    FlatDfaState {
+        finalizers: decode_pairs(&key[1..final_end]),
+        possible_future_group_ids: decode_pairs(&key[final_end..]),
+    }
+}
+
+fn raw_target_label_ids(tokenizer: &Tokenizer, active_groups: &[bool]) -> RawTargetLabels {
     let active_words = active_mask_words(active_groups);
     let mut ids = vec![0u32; tokenizer.num_states() as usize];
+    let mut observations = Vec::new();
     let mut buckets = FxHashMap::<u64, Vec<(Vec<u64>, u32)>>::default();
     let mut key = Vec::with_capacity(16);
     let mut next_id = 0u32;
@@ -392,6 +438,7 @@ fn raw_target_label_ids(tokenizer: &Tokenizer, active_groups: &[bool]) -> Vec<u3
             ids[state as usize] = *id;
         } else {
             bucket.push((key.clone(), next_id));
+            observations.push(observation_from_visible_key(&key));
             ids[state as usize] = next_id;
             next_id += 1;
         }
@@ -429,14 +476,15 @@ fn raw_target_label_ids(tokenizer: &Tokenizer, active_groups: &[bool]) -> Vec<u3
             "[glrmask/profile][raw_visible_observations] active_groups={} active_words={} labels={} final_bits={} future_bits={} nonempty_final_states={} nonempty_future_states={}",
             active_groups.iter().filter(|&&active| active).count(),
             active_words.iter().filter(|&&word| word != 0).count(),
-            next_id,
+            observations.len(),
             final_bits,
             future_bits,
             nonempty_final_states,
             nonempty_future_states,
         );
     }
-    ids
+    debug_assert_eq!(observations.len(), next_id as usize);
+    RawTargetLabels { ids, observations }
 }
 
 enum ExactSignatureBucket {
@@ -731,7 +779,7 @@ pub(crate) fn compute_state_map_raw(
     let target_labels = raw_target_label_ids(tokenizer, active_groups);
     let label_ms = labels_started_at.elapsed().as_secs_f64() * 1000.0;
     let refine_started_at = Instant::now();
-    let mut current_classes = target_labels.clone();
+    let mut current_classes = target_labels.ids.clone();
     let mut current_class_count = current_classes
         .iter()
         .copied()
@@ -741,17 +789,20 @@ pub(crate) fn compute_state_map_raw(
     // Hopcroft is the default for the large raw-coordinate case. The
     // signature fixed point remains available as a diagnostic reference.
     if std::env::var_os("GLRMASK_RAW_RESTRICTED_SIGNATURE_REFINE").is_none() {
-        let classes = hopcroft_refine_sparse(&target_labels, &edges);
+        let classes = hopcroft_refine_sparse(&target_labels.ids, &edges);
         let refine_ms = refine_started_at.elapsed().as_secs_f64() * 1000.0;
         let state_map = map_from_raw_classes(&classes);
         debug_assert!(raw_map_is_relevant_byte_congruent(
             &state_map,
-            &target_labels,
+            &target_labels.ids,
             transitions,
             &active_bytes,
         ));
+        let RawTargetLabels { ids, observations } = target_labels;
         return Some(RawRestrictedObservationResult {
             state_map,
+            state_label_ids: ids,
+            observation_labels: observations,
             label_ms,
             refine_ms,
             certificate_ms: 0.0,
@@ -818,12 +869,15 @@ pub(crate) fn compute_state_map_raw(
             let state_map = map_from_raw_classes(&next_classes);
             debug_assert!(raw_map_is_relevant_byte_congruent(
                 &state_map,
-                &target_labels,
+                &target_labels.ids,
                 transitions,
                 &active_bytes,
             ));
+            let RawTargetLabels { ids, observations } = target_labels;
             return Some(RawRestrictedObservationResult {
                 state_map,
+                state_label_ids: ids,
+                observation_labels: observations,
                 label_ms,
                 refine_ms,
                 certificate_ms: 0.0,
@@ -858,6 +912,33 @@ mod tests {
 
     fn class_of(map: &ManyToOneIdMap, state: u32) -> u32 {
         map.original_to_internal[state as usize]
+    }
+
+    #[test]
+    fn raw_label_table_reconstructs_exact_masked_observations() {
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"bc".to_vec()),
+            Expr::U8Seq(b"bd".to_vec()),
+        ]);
+        let active = [true, false, true];
+        let labels = raw_target_label_ids(&tokenizer, &active);
+
+        for state in 0..tokenizer.num_states() {
+            let observation = &labels.observations[labels.ids[state as usize] as usize];
+            let expected_finalizers: Vec<usize> = tokenizer
+                .matched_terminals_iter(state)
+                .map(|terminal| terminal as usize)
+                .filter(|&terminal| active[terminal])
+                .collect();
+            let expected_futures: Vec<usize> = tokenizer
+                .possible_future_terminals_iter(state)
+                .map(|terminal| terminal as usize)
+                .filter(|&terminal| active[terminal])
+                .collect();
+            assert_eq!(observation.finalizers, expected_finalizers);
+            assert_eq!(observation.possible_future_group_ids, expected_futures);
+        }
     }
 
     #[test]
