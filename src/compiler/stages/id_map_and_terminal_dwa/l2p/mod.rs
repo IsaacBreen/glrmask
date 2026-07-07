@@ -100,6 +100,15 @@ fn l2p_terminal_interchangeability_enabled() -> bool {
         && l2p_env_enabled("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY")
 }
 
+fn l2p_terminal_interchangeability_bypassed_for_partition(partition_label: &str) -> bool {
+    partition_label == "p8"
+}
+
+fn l2p_terminal_interchangeability_enabled_for_partition(partition_label: &str) -> bool {
+    l2p_terminal_interchangeability_enabled()
+        && !l2p_terminal_interchangeability_bypassed_for_partition(partition_label)
+}
+
 /// Rebuild the TI-off local artifact and symbolically compare it with TI-on.
 /// This is deliberately slow and is intended for tests and explicit validation,
 /// not ordinary TI compilation.
@@ -210,7 +219,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         ti_round_count,
         ti_additional_merged_members,
     ) =
-        if l2p_terminal_interchangeability_enabled() {
+        if l2p_terminal_interchangeability_enabled_for_partition(partition_label) {
             let mut active = active_terminals.to_vec();
             let mut classes = singleton_partition(&active);
             let discovery_context = TiDiscoveryContext::new(tokenizer, &relevant_bytes);
@@ -932,6 +941,38 @@ mod ti_mre_tests {
                 },
             }
         }
+    }
+
+    #[test]
+    fn p8_bypasses_terminal_interchangeability_when_globally_enabled() {
+        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+
+        assert!(!super::l2p_terminal_interchangeability_enabled_for_partition("p8"));
+    }
+
+    #[test]
+    fn terminal_interchangeability_policy_leaves_generic_partitions_unchanged() {
+        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+
+        assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p0"));
+        assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p7"));
+    }
+
+    #[test]
+    fn terminal_interchangeability_policy_preserves_global_disable() {
+        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let original = env::var_os("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
+        unsafe {
+            env::remove_var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
+        }
+        let _restore = EnvVarGuard {
+            key: "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY",
+            original,
+        };
+
+        assert!(!super::l2p_terminal_interchangeability_enabled_for_partition("p0"));
     }
 
     #[test]
