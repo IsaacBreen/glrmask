@@ -1401,6 +1401,21 @@ fn union_all_multiway(weights: &[&Weight]) -> Weight {
         return Weight::empty();
     }
 
+    // Terminal-transport unions frequently contain coordinate-disjoint
+    // fragments. Emit them directly instead of building an active-token sweep
+    // whose active set can never contain more than one operand.
+    all_entries.sort_unstable_by_key(|entry| entry.start);
+    if all_entries
+        .windows(2)
+        .all(|pair| pair[0].end < pair[1].start)
+    {
+        let mut builder = CompactRangeBuilder::new();
+        for entry in all_entries {
+            builder.push(entry.start, entry.end, entry.tokens);
+        }
+        return builder.finish();
+    }
+
     // The compact rescan path avoids tree-map overhead for the small common
     // case; the event sweep avoids pathological repeated scans for larger
     // overlapping unions.
@@ -2865,6 +2880,27 @@ mod tests {
         assert_eq!(direct, sequential);
         assert_eq!(direct.tokens_for_tsid(2), rangeset_from_ranges([1..=5]));
         assert_eq!(direct.tokens_for_tsid(4), rangeset_from_ranges([7..=9]));
+    }
+
+    #[test]
+    fn multiway_union_disjoint_ranges_matches_sequential_union() {
+        let alpha = RangeSetBlaze::from_iter([1..=3]);
+        let beta = RangeSetBlaze::from_iter([7..=9]);
+        let gamma = RangeSetBlaze::from_iter([12..=15]);
+        let weights = [
+            Weight::from_uniform(20..=21, gamma.clone()),
+            Weight::from_uniform(0..=1, alpha.clone()),
+            Weight::from_uniform(2..=3, alpha),
+            Weight::from_uniform(7..=8, beta.clone()),
+            Weight::from_uniform(12..=14, beta),
+        ];
+        let bulk = Weight::union_all(weights.iter());
+        let sequential = weights
+            .iter()
+            .fold(Weight::empty(), |acc, weight| acc.union(weight));
+
+        assert_eq!(bulk, sequential);
+        assert_eq!(bulk.range_entries().count(), 4);
     }
 
     #[test]
