@@ -682,15 +682,11 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         let (expanded_dwa, final_id_map) = expanded_artifact.into_parts();
 
         let post_dwa_minimize_started_at = ti_profile_timing.then(Instant::now);
-        // TI lifting creates partial source domains. Let the densest exact
-        // pointwise profiles establish each greedy merge group first; this is
-        // scoped to the post-DWA artifact and leaves ordinary minimization
-        // unchanged.
-        let pointwise_order = if used_follow_row_quotient {
-            PointwiseClassOrder::Stable
-        } else {
-            PointwiseClassOrder::DescendingDomain
-        };
+        // TI lifting creates partial source domains. The precompacted local
+        // layout already carries the useful density information, so retain
+        // stable exact pointwise class order and avoid a second domain-ordering
+        // pass. This is scoped to the post-DWA artifact.
+        let pointwise_order = PointwiseClassOrder::Stable;
         let minimized_dwa = minimize_owned_with_pointwise_class_order(expanded_dwa, pointwise_order);
         ti_post_dwa_minimize_ms = post_dwa_minimize_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)

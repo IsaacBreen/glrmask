@@ -4010,9 +4010,8 @@ pub(crate) fn transport_coordinate_quotient(
 /// state lands in a different ordinary core class. BFCL p0 has thousands of
 /// members but only a handful of such deviations per mode, so lifting the full
 /// final-coordinate weight for every `(weight, mode)` pair is the wrong shape.
-struct PostDwaWeightLifter<'a> {
-    core_state_map: &'a ManyToOneIdMap,
-    final_sources: Vec<u32>,
+struct PostDwaWeightLifter {
+    ordinary_coordinate_runs: Vec<(u32, u32, u32)>,
     ordinary_coordinates: Vec<u32>,
     mode_deviations: Vec<Vec<(u32, u32)>>,
     base_lifts: FxHashMap<usize, Weight>,
@@ -4060,9 +4059,9 @@ fn finite_weight_token_cardinality(weight: &Weight) -> Option<u128> {
     )
 }
 
-impl<'a> PostDwaWeightLifter<'a> {
+impl PostDwaWeightLifter {
     fn new(
-        core_state_map: &'a ManyToOneIdMap,
+        core_state_map: &ManyToOneIdMap,
         final_state_map: &ManyToOneIdMap,
         modes: &[TerminalNwaTransportMode],
         active_mode_indices: &[usize],
@@ -4072,6 +4071,20 @@ impl<'a> PostDwaWeightLifter<'a> {
             .iter()
             .map(|&source| Self::core_coordinate(core_state_map, source))
             .collect();
+        let mut ordinary_coordinate_runs = Vec::<(u32, u32, u32)>::new();
+        if let Some((&first_coordinate, rest)) = ordinary_coordinates.split_first() {
+            let mut run_start = 0u32;
+            let mut coordinate = first_coordinate;
+            for (index, &next_coordinate) in rest.iter().enumerate() {
+                let final_tsid = index as u32 + 1;
+                if next_coordinate != coordinate {
+                    ordinary_coordinate_runs.push((run_start, final_tsid - 1, coordinate));
+                    run_start = final_tsid;
+                    coordinate = next_coordinate;
+                }
+            }
+            ordinary_coordinate_runs.push((run_start, ordinary_coordinates.len() as u32 - 1, coordinate));
+        }
         let mut mode_deviations = vec![Vec::new(); modes.len()];
         let mut sparse_mode_ready = vec![false; modes.len()];
         let mut direct_modes_by_default = FxHashMap::<(usize, usize), Vec<usize>>::default();
@@ -4175,8 +4188,9 @@ impl<'a> PostDwaWeightLifter<'a> {
                 max_deviations = max_deviations.max(count);
             }
             eprintln!(
-                "[glrmask/profile][ti_post_dwa_lifter] final_tsids={} active_modes={} nonempty_modes={} total_deviations={} max_deviations={}",
+                "[glrmask/profile][ti_post_dwa_lifter] final_tsids={} ordinary_coordinate_runs={} active_modes={} nonempty_modes={} total_deviations={} max_deviations={}",
                 final_sources.len(),
+                ordinary_coordinate_runs.len(),
                 active_mode_indices.len(),
                 nonempty_modes,
                 total_deviations,
@@ -4185,8 +4199,7 @@ impl<'a> PostDwaWeightLifter<'a> {
         }
 
         Self {
-            core_state_map,
-            final_sources,
+            ordinary_coordinate_runs,
             ordinary_coordinates,
             mode_deviations,
             base_lifts: FxHashMap::default(),
@@ -4228,17 +4241,12 @@ impl<'a> PostDwaWeightLifter<'a> {
             return existing.clone();
         }
 
-        let lifted = Weight::from_per_tsid_shared(
-            self.final_sources
+        let lifted = Weight::from_tsid_ranges_shared(
+            self.ordinary_coordinate_runs
                 .iter()
-                .enumerate()
-                .filter_map(|(final_tsid, &source)| {
-                    let coordinate = Self::core_coordinate(self.core_state_map, source);
+                .filter_map(|&(start, end, coordinate)| {
                     (coordinate != u32::MAX).then(|| {
-                        (
-                            final_tsid as u32,
-                            weight.shared_tokens_for_tsid(coordinate),
-                        )
+                        (start, end, weight.shared_tokens_for_tsid(coordinate))
                     })
                 }),
         );
@@ -4272,7 +4280,7 @@ impl<'a> PostDwaWeightLifter<'a> {
             return;
         }
 
-        let mut alternates_by_final_tsid = vec![Vec::<u32>::new(); self.final_sources.len()];
+        let mut alternates_by_final_tsid = vec![Vec::<u32>::new(); self.ordinary_coordinates.len()];
         for &mode_index in mode_indices {
             for &(final_tsid, coordinate) in &self.mode_deviations[mode_index] {
                 let alternates = &mut alternates_by_final_tsid[final_tsid as usize];
@@ -4744,9 +4752,11 @@ pub(crate) fn expand_representative_dwa_after_minimization(
         (1 + group_index * core_states.len() + core_state_index) as u32
     };
     let shared_build_started_at = profile_timing.then(Instant::now);
-    let mut lift_ms = 0.0;
+    let mut final_lift_ms = 0.0;
+    let mut transition_lift_ms = 0.0;
     let mut raw_label_insert_ms = 0.0;
-    let mut lift_calls = 0usize;
+    let mut final_lift_calls = 0usize;
+    let mut transition_lift_calls = 0usize;
     let mut raw_label_inserts = 0usize;
     let mut states = vec![DWAState::default(); 1 + mode_groups.len() * core_states.len()];
     for group_index in 0..mode_groups.len() {
@@ -4762,9 +4772,9 @@ pub(crate) fn expand_representative_dwa_after_minimization(
                 let started_at = profile_timing.then(Instant::now);
                 let lifted = lifter.lift_over_disjoint_group(weight, mode_set_id, mode_indices, entry_domain);
                 if let Some(started_at) = started_at {
-                    lift_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+                    final_lift_ms += started_at.elapsed().as_secs_f64() * 1000.0;
                 }
-                lift_calls += 1;
+                final_lift_calls += 1;
                 lifted
             });
             let mut transitions = BTreeMap::new();
@@ -4777,9 +4787,9 @@ pub(crate) fn expand_representative_dwa_after_minimization(
                     entry_domain,
                 );
                 if let Some(started_at) = lift_started_at {
-                    lift_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+                    transition_lift_ms += started_at.elapsed().as_secs_f64() * 1000.0;
                 }
-                lift_calls += 1;
+                transition_lift_calls += 1;
                 if lifted_weight.is_empty() {
                     continue;
                 }
@@ -4869,13 +4879,15 @@ pub(crate) fn expand_representative_dwa_after_minimization(
 
     if let Some(started_at) = shared_build_started_at {
         eprintln!(
-            "[glrmask/profile][ti_post_dwa_direct_detail] coordinate_setup_ms={:.3} active_filter_ms={:.3} grouping_ms={:.3} shared_build_ms={:.3} lift_calls={} lift_ms={:.3} raw_label_inserts={} raw_label_insert_ms={:.3} base_lifts={} mode_lifts={} group_lifts={} coordinate_plans={} group_base_ms={:.3} group_plan_ms={:.3} group_signature_ms={:.3} group_apply_ms={:.3}",
+            "[glrmask/profile][ti_post_dwa_direct_detail] coordinate_setup_ms={:.3} active_filter_ms={:.3} grouping_ms={:.3} shared_build_ms={:.3} final_lift_calls={} final_lift_ms={:.3} transition_lift_calls={} transition_lift_ms={:.3} raw_label_inserts={} raw_label_insert_ms={:.3} base_lifts={} mode_lifts={} group_lifts={} coordinate_plans={} group_base_ms={:.3} group_plan_ms={:.3} group_signature_ms={:.3} group_apply_ms={:.3}",
             coordinate_setup_ms,
             active_filter_ms,
             grouping_ms,
             started_at.elapsed().as_secs_f64() * 1000.0,
-            lift_calls,
-            lift_ms,
+            final_lift_calls,
+            final_lift_ms,
+            transition_lift_calls,
+            transition_lift_ms,
             raw_label_inserts,
             raw_label_insert_ms,
             lifter.base_lifts.len(),
@@ -5025,6 +5037,15 @@ pub(crate) fn restore_raw_follow_constraints_after_expansion(
         }
     }
 
+    if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+        eprintln!(
+            "[glrmask/profile][ti_post_dwa_raw_follow] source_states={} follow_row_classes={} used_row_quotient={} result_states={}",
+            expanded_dwa.states().len(),
+            follow_row_class_count,
+            use_follow_row_quotient,
+            states.len(),
+        );
+    }
     RawFollowRestoration {
         dwa: DWA::from_parts(states, start),
         used_follow_row_quotient: use_follow_row_quotient,

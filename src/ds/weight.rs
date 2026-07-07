@@ -1970,6 +1970,24 @@ impl Weight {
         builder.finish()
     }
 
+    /// Build a weight from ordered inclusive TSID ranges that already share
+    /// one interned token set. Adjacent equal token-set ranges are coalesced
+    /// exactly as in `from_per_tsid_shared`, without expanding each TSID point.
+    ///
+    /// Entries must be sorted and non-overlapping. Empty token sets and empty
+    /// ranges are ignored.
+    pub(crate) fn from_tsid_ranges_shared(
+        entries: impl IntoIterator<Item = (u32, u32, SharedTokenSet)>,
+    ) -> Self {
+        let mut builder = CompactRangeBuilder::new();
+        for (start, end, tokens) in entries {
+            if start <= end && !tokens.is_empty() {
+                builder.push(start, end, tokens);
+            }
+        }
+        builder.finish()
+    }
+
     /// Return the interned token set at one TSID without cloning its range
     /// contents. This is intentionally crate-visible for sparse coordinate
     /// remaps in the terminal-DWA compiler.
@@ -2938,6 +2956,24 @@ mod tests {
             }));
             assert_matches(sparse, dense);
         }
+    }
+
+    #[test]
+    fn ranged_shared_entries_match_point_shared_entries() {
+        let alpha = shared_rangeset(RangeSetBlaze::from_iter([1..=3]));
+        let beta = shared_rangeset(RangeSetBlaze::from_iter([7..=9]));
+        let gamma = shared_rangeset(RangeSetBlaze::from_iter([2..=8]));
+        let ranges = [
+            (0, 2, Arc::clone(&alpha)),
+            (3, 5, Arc::clone(&beta)),
+            (6, 6, Arc::clone(&alpha)),
+            (8, 10, Arc::clone(&gamma)),
+        ];
+        let ranged = Weight::from_tsid_ranges_shared(ranges.iter().cloned());
+        let points = Weight::from_per_tsid_shared(ranges.iter().flat_map(|(start, end, tokens)| {
+            (*start..=*end).map(move |tsid| (tsid, Arc::clone(tokens)))
+        }));
+        assert_eq!(ranged, points);
     }
 
     #[test]
