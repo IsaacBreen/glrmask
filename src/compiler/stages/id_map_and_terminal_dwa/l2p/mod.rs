@@ -92,12 +92,18 @@ fn l2p_env_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Enable production terminal interchangeability. This changes only the
-/// representative-terminal construction and post-DWA expansion; strict
-/// reference validation remains separately opt-in.
+/// Enable production terminal interchangeability by default. This changes only
+/// representative-terminal construction and post-DWA expansion; strict reference
+/// validation remains separately opt-in. Set `GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY=0`
+/// or `false` to disable production TI explicitly.
 fn l2p_terminal_interchangeability_enabled() -> bool {
     TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
-        && l2p_env_enabled("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY")
+        && std::env::var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY")
+            .map(|value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(true)
 }
 
 fn l2p_terminal_interchangeability_bypassed_for_partition(partition_label: &str) -> bool {
@@ -961,7 +967,7 @@ mod ti_mre_tests {
     }
 
     #[test]
-    fn terminal_interchangeability_policy_preserves_global_disable() {
+    fn terminal_interchangeability_policy_defaults_enabled_and_honors_explicit_disable() {
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
         let original = env::var_os("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
         unsafe {
@@ -972,6 +978,8 @@ mod ti_mre_tests {
             original,
         };
 
+        assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p0"));
+        let _disabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "0");
         assert!(!super::l2p_terminal_interchangeability_enabled_for_partition("p0"));
     }
 
