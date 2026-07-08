@@ -3815,19 +3815,25 @@ pub(crate) fn transport_coordinate_quotient(
         "transport coordinate quotient needs the ordinary mode",
     );
     let state_count = ordinary_state_map.original_to_internal.len();
+    let ordinary_coordinate_key_by_state = ordinary_state_map
+        .original_to_internal
+        .iter()
+        .enumerate()
+        .map(|(target_state, &mapped)| {
+            // A target outside the ordinary proof domain must retain its raw
+            // identity; merging all unmapped targets would be unsound.
+            if mapped == u32::MAX {
+                (1u64 << 32) | target_state as u64
+            } else {
+                mapped as u64
+            }
+        })
+        .collect::<Vec<_>>();
     let ordinary_coordinate_key = |target_state: usize| {
-        let mapped = ordinary_state_map
-            .original_to_internal
+        ordinary_coordinate_key_by_state
             .get(target_state)
             .copied()
-            .unwrap_or(u32::MAX);
-        // A target outside the ordinary proof domain must retain its raw
-        // identity; merging all unmapped targets would be unsound.
-        if mapped == u32::MAX {
-            (1u64 << 32) | target_state as u64
-        } else {
-            mapped as u64
-        }
+            .unwrap_or((1u64 << 32) | target_state as u64)
     };
 
     struct ModeGroup {
@@ -4558,7 +4564,8 @@ impl PostDwaWeightLifter {
                 .group_coordinate_plans
                 .get(mode_indices)
                 .expect("prepared group coordinate plan must be retained");
-            let mut union_for_token_signature = FxHashMap::<Vec<usize>, SharedTokenSet>::default();
+            let mut union_for_token_signature =
+                FxHashMap::<SmallVec<[usize; 8]>, SharedTokenSet>::default();
             let coordinate_tokens = plan
                 .coordinates
                 .iter()
@@ -4568,12 +4575,15 @@ impl PostDwaWeightLifter {
                 .signatures
                 .iter()
                 .map(|signature| {
-                    let mut token_sets = Vec::with_capacity(signature.alternate_coordinate_indices.len() + 1);
+                    let mut token_sets =
+                        SmallVec::<[SharedTokenSet; 8]>::with_capacity(
+                            signature.alternate_coordinate_indices.len() + 1,
+                        );
                     token_sets.push(Arc::clone(&coordinate_tokens[signature.base_coordinate_index]));
                     for &coordinate_index in &signature.alternate_coordinate_indices {
                         token_sets.push(Arc::clone(&coordinate_tokens[coordinate_index]));
                     }
-                    let mut token_signature: Vec<usize> = token_sets
+                    let mut token_signature: SmallVec<[usize; 8]> = token_sets
                         .iter()
                         .filter(|tokens| !tokens.is_empty())
                         .map(|tokens| Arc::as_ptr(tokens) as usize)
@@ -4684,30 +4694,7 @@ pub(crate) fn expand_representative_dwa_after_minimization(
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
     let active_filter_started_at = profile_timing.then(Instant::now);
-    let active_mode_indices: Vec<usize> = candidate_mode_indices
-        .iter()
-        .copied()
-        .filter(|&mode_index| {
-            if mode_index == 0 {
-                return true;
-            }
-            let (representative, _) = modes[mode_index]
-                .member_reconstruction()
-                .expect("non-ordinary TI transport mode must reconstruct one member");
-            let (_, weight) = core_start_transitions
-                .get(&(representative as i32))
-                .expect("active TI member mode must have its representative start edge");
-            !lifter.lift_for_mode(weight, mode_index).is_empty()
-        })
-        .collect();
-    if active_mode_indices != candidate_mode_indices {
-        lifter = PostDwaWeightLifter::new(
-            core_state_map,
-            final_state_map,
-            modes,
-            &active_mode_indices,
-        );
-    }
+    let active_mode_indices = candidate_mode_indices;
     let active_filter_ms = active_filter_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
@@ -4739,6 +4726,7 @@ pub(crate) fn expand_representative_dwa_after_minimization(
                 .expect("active TI member mode must have its representative start edge");
             (mode_index, *target, lifter.lift_for_mode(start_weight, mode_index))
         })
+        .filter(|(_, _, weight)| !weight.is_empty())
         .collect();
 
     if profile_direct_detail {
