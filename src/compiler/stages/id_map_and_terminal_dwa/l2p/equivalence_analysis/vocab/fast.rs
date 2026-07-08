@@ -163,8 +163,11 @@ fn compute_byte_classes_and_self_loops_relevant(
     relevant_bytes: &[bool; 256],
 ) -> ([u8; 256], Vec<U8Set>) {
     let relevant: Vec<usize> = (0..256usize).filter(|&byte| relevant_bytes[byte]).collect();
+    // A single 64-bit rolling hash suffices here: the relevant alphabet is tiny
+    // (<=256, in practice a few dozen columns), so a false collision between two
+    // distinct relevant columns is ~n^2/2^64 — negligible — and the strict
+    // reference validator is the backstop.
     let mut hash_a = [0u64; 256];
-    let mut hash_b = [0u64; 256];
     let mut self_loop_bytes = Vec::with_capacity(dfa.states.len());
     for state in 0..dfa.states.len() {
         let mut self_loops = U8Set::empty();
@@ -174,9 +177,6 @@ fn compute_byte_classes_and_self_loops_relevant(
             hash_a[byte] = hash_a[byte]
                 .wrapping_mul(0x517cc1b727220a95)
                 .wrapping_add(target as u64 + 1);
-            hash_b[byte] = hash_b[byte]
-                .wrapping_mul(0x9e3779b97f4a7c15)
-                .wrapping_add((target as u64).rotate_left(17) ^ 0xD1B54A32D192ED03);
             if target == state as u32 {
                 self_loops.insert(byte as u8);
             }
@@ -188,13 +188,10 @@ fn compute_byte_classes_and_self_loops_relevant(
     // grouped by fingerprint into classes starting at 1.
     let mut byte_to_class = [0u8; 256];
     let mut sorted = relevant.clone();
-    sorted.sort_unstable_by_key(|&byte| (hash_a[byte], hash_b[byte]));
+    sorted.sort_unstable_by_key(|&byte| hash_a[byte]);
     let mut next_class = 0u8;
     for (index, &byte) in sorted.iter().enumerate() {
-        if index == 0
-            || hash_a[byte] != hash_a[sorted[index - 1]]
-            || hash_b[byte] != hash_b[sorted[index - 1]]
-        {
+        if index == 0 || hash_a[byte] != hash_a[sorted[index - 1]] {
             next_class = next_class.wrapping_add(1);
         }
         byte_to_class[byte] = next_class;
