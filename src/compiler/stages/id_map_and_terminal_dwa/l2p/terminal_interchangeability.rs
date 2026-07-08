@@ -3098,7 +3098,27 @@ pub(crate) fn discover_one_round_with_transport_witnesses(
         active_terminals,
         &context,
         ignore_terminal,
+        None,
     )
+}
+
+fn refine_candidate_groups_by_terminal_class(
+    groups: Vec<Vec<TerminalID>>,
+    class_for_terminal: &[u32],
+) -> Vec<Vec<TerminalID>> {
+    let mut refined = Vec::new();
+    for group in groups {
+        let mut by_class = BTreeMap::<u32, Vec<TerminalID>>::new();
+        for terminal in group {
+            let class = class_for_terminal
+                .get(terminal as usize)
+                .copied()
+                .unwrap_or(u32::MAX);
+            by_class.entry(class).or_default().push(terminal);
+        }
+        refined.extend(by_class.into_values().filter(|group| group.len() >= 2));
+    }
+    refined
 }
 
 /// As `discover_one_round_with_transport_witnesses`, but reuses the immutable
@@ -3108,6 +3128,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
     active_terminals: &[bool],
     context: &TiDiscoveryContext,
     ignore_terminal: Option<TerminalID>,
+    terminal_merge_class: Option<&[u32]>,
 ) -> TiRoundTransportWitnesses {
         let candidates = active_terminals
             .iter()
@@ -3182,6 +3203,10 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 &dfa.observed_output_pairs,
                 active_terminals.len(),
             );
+        let candidate_groups = match terminal_merge_class {
+            Some(classes) => refine_candidate_groups_by_terminal_class(candidate_groups, classes),
+            None => candidate_groups,
+        };
         let exact_candidate_pairs = candidate_groups
             .iter()
             .map(|group| group.len() * group.len().saturating_sub(1) / 2)
@@ -3530,6 +3555,61 @@ pub(crate) fn coalesced_disallowed_follows(
     }
 
     coalesced
+}
+
+/// Extend a TI partition with singleton classes for every terminal outside the
+/// active partition before coalescing follows. This is needed only when raw
+/// follow restoration is omitted: constraints involving an ordinary visible
+/// raw label must remain present in the representative-core relation.
+pub(crate) fn coalesced_disallowed_follows_full_domain(
+    partition: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
+    original: &BTreeMap<u32, BitSet>,
+    num_terminals: usize,
+) -> BTreeMap<u32, BitSet> {
+    let mut full_partition = partition.clone();
+    let mut covered = vec![false; num_terminals];
+    for members in partition.values() {
+        for &member in members {
+            covered[member as usize] = true;
+        }
+    }
+    for terminal in 0..num_terminals as TerminalID {
+        if !covered[terminal as usize] {
+            full_partition.insert(terminal, BTreeSet::from([terminal]));
+        }
+    }
+    coalesced_disallowed_follows(&full_partition, original, num_terminals)
+}
+
+/// Classify terminals by their complete raw disallowed-follow row and column.
+/// Equal signatures make the follow relation constant whenever both endpoints
+/// are taken from signature-homogeneous TI classes.
+pub(crate) fn raw_follow_row_column_signature_ids(
+    original: &BTreeMap<u32, BitSet>,
+    num_terminals: usize,
+) -> Vec<u32> {
+    let mut columns = vec![BitSet::new(num_terminals); num_terminals];
+    for (&source, row) in original {
+        if (source as usize) >= num_terminals {
+            continue;
+        }
+        for target in row.iter().filter(|&target| target < num_terminals) {
+            columns[target].set(source as usize);
+        }
+    }
+
+    let empty = BitSet::new(num_terminals);
+    let mut ids = FxHashMap::<(BitSet, BitSet), u32>::default();
+    (0..num_terminals)
+        .map(|terminal| {
+            let row = original
+                .get(&(terminal as u32))
+                .cloned()
+                .unwrap_or_else(|| empty.clone());
+            let next = ids.len() as u32;
+            *ids.entry((row, columns[terminal].clone())).or_insert(next)
+        })
+        .collect()
 }
 
 /// Re-run the same accepted-pair decision used by discovery for one replayed
@@ -3935,20 +4015,38 @@ pub(crate) fn transport_coordinate_quotient(
         .unwrap_or(0.0);
 
     let final_refinement_started_at = profile_timing.then(Instant::now);
-    let mut class_for_signature = FxHashMap::<SmallVec<[u64; 8]>, u32>::default();
     let mut class_for_state = Vec::with_capacity(state_count);
-    for source_state in 0..state_count {
-        let mut signature = SmallVec::<[u64; 8]>::with_capacity(groups.len() + 1);
-        signature.push(ordinary_coordinate_key(source_state));
-        for group in &groups {
-            let source_class = modes[group.domain_mode]
-                .scanner_state_for_original
-                .innermost_source_class(source_state as u32);
-            signature.push(group.component_for_source_class[source_class] as u64);
+    if groups.len() <= 2 {
+        let mut class_for_signature = FxHashMap::<u128, u32>::default();
+        for source_state in 0..state_count {
+            let ordinary = ordinary_coordinate_key(source_state) as u128;
+            let mut signature = ordinary << 64;
+            for (group_index, group) in groups.iter().enumerate() {
+                let source_class = modes[group.domain_mode]
+                    .scanner_state_for_original
+                    .innermost_source_class(source_state as u32);
+                signature |= (group.component_for_source_class[source_class] as u128)
+                    << (32 * (1 - group_index));
+            }
+            let next_class = class_for_signature.len() as u32;
+            let class = *class_for_signature.entry(signature).or_insert(next_class);
+            class_for_state.push(class);
         }
-        let next_class = class_for_signature.len() as u32;
-        let class = *class_for_signature.entry(signature).or_insert(next_class);
-        class_for_state.push(class);
+    } else {
+        let mut class_for_signature = FxHashMap::<SmallVec<[u64; 8]>, u32>::default();
+        for source_state in 0..state_count {
+            let mut signature = SmallVec::<[u64; 8]>::with_capacity(groups.len() + 1);
+            signature.push(ordinary_coordinate_key(source_state));
+            for group in &groups {
+                let source_class = modes[group.domain_mode]
+                    .scanner_state_for_original
+                    .innermost_source_class(source_state as u32);
+                signature.push(group.component_for_source_class[source_class] as u64);
+            }
+            let next_class = class_for_signature.len() as u32;
+            let class = *class_for_signature.entry(signature).or_insert(next_class);
+            class_for_state.push(class);
+        }
     }
     let final_refinement_ms = final_refinement_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
@@ -4003,6 +4101,57 @@ pub(crate) fn transport_coordinate_quotient(
     quotient
 }
 
+/// Relabel one transport-coordinate quotient so classes sharing the same
+/// ordinary core coordinate are adjacent.  This is a pure bijection of the
+/// final coordinate space: it preserves every raw source's transport signature
+/// while making common lifted weights substantially more range-friendly.
+pub(crate) fn reorder_transport_coordinates_by_ordinary(
+    ordinary_state_map: &ManyToOneIdMap,
+    transport_coordinate_map: &ManyToOneIdMap,
+) -> ManyToOneIdMap {
+    let class_count = transport_coordinate_map.num_internal_ids() as usize;
+    if class_count <= 1 {
+        return transport_coordinate_map.clone();
+    }
+
+    let mut old_classes = (0..class_count).collect::<Vec<_>>();
+    old_classes.sort_unstable_by_key(|&old_class| {
+        let representative = transport_coordinate_map.representative_original_ids[old_class];
+        let ordinary = ordinary_state_map
+            .original_to_internal
+            .get(representative as usize)
+            .copied()
+            .unwrap_or(u32::MAX);
+        (ordinary, old_class)
+    });
+    if old_classes.iter().enumerate().all(|(new_class, &old_class)| new_class == old_class) {
+        return transport_coordinate_map.clone();
+    }
+
+    let mut old_to_new = vec![u32::MAX; class_count];
+    let mut representatives = Vec::with_capacity(class_count);
+    for (new_class, old_class) in old_classes.into_iter().enumerate() {
+        old_to_new[old_class] = new_class as u32;
+        representatives.push(transport_coordinate_map.representative_original_ids[old_class]);
+    }
+    let original_to_internal = transport_coordinate_map
+        .original_to_internal
+        .iter()
+        .map(|&old_class| {
+            if old_class == u32::MAX {
+                u32::MAX
+            } else {
+                old_to_new[old_class as usize]
+            }
+        })
+        .collect();
+    ManyToOneIdMap::from_original_to_internal_with_representatives(
+        original_to_internal,
+        class_count as u32,
+        representatives,
+    )
+}
+
 /// Sparse final-coordinate lifting for post-DWA TI expansion.
 ///
 /// The ordinary coordinate lift is shared by every member mode. A mode differs
@@ -4026,6 +4175,10 @@ struct PostDwaWeightLifter {
     profile_signature_ms: f64,
     profile_override_ms: f64,
     profile_apply_ms: f64,
+    profile_mode_lift_builds: usize,
+    profile_mode_raw_overrides: usize,
+    profile_mode_effective_overrides: usize,
+    profile_mode_unchanged: usize,
 }
 
 #[derive(Clone)]
@@ -4211,6 +4364,10 @@ impl PostDwaWeightLifter {
             profile_signature_ms: 0.0,
             profile_override_ms: 0.0,
             profile_apply_ms: 0.0,
+            profile_mode_lift_builds: 0,
+            profile_mode_raw_overrides: 0,
+            profile_mode_effective_overrides: 0,
+            profile_mode_unchanged: 0,
         }
     }
 
@@ -4264,13 +4421,23 @@ impl PostDwaWeightLifter {
         }
 
         let base = self.base_lift(weight);
+        self.profile_mode_lift_builds += 1;
+        self.profile_mode_raw_overrides += self.mode_deviations[mode_index].len();
         let overrides: Vec<(u32, SharedTokenSet)> = self.mode_deviations[mode_index]
             .iter()
-            .map(|&(final_tsid, coordinate)| {
-                (final_tsid, Self::tokens_for_coordinate(weight, coordinate))
+            .filter_map(|&(final_tsid, coordinate)| {
+                let tokens = Self::tokens_for_coordinate(weight, coordinate);
+                (tokens.as_ref() != base.shared_tokens_for_tsid(final_tsid).as_ref())
+                    .then_some((final_tsid, tokens))
             })
             .collect();
-        let lifted = base.with_sparse_tsid_overrides(&overrides);
+        self.profile_mode_effective_overrides += overrides.len();
+        let lifted = if overrides.is_empty() {
+            self.profile_mode_unchanged += 1;
+            base
+        } else {
+            base.with_sparse_tsid_overrides(&overrides)
+        };
         self.mode_lifts.insert(key, lifted.clone());
         lifted
     }
@@ -4374,18 +4541,18 @@ impl PostDwaWeightLifter {
             return existing.clone();
         }
 
-        let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
-        let started_at = profile_timing.then(Instant::now);
+        let profile_direct_detail = std::env::var_os("GLRMASK_PROFILE_TI_DIRECT_DETAIL").is_some();
+        let started_at = profile_direct_detail.then(Instant::now);
         let base = self.base_lift(weight);
         if let Some(started_at) = started_at {
             self.profile_base_lift_ms += started_at.elapsed().as_secs_f64() * 1000.0;
         }
-        let started_at = profile_timing.then(Instant::now);
+        let started_at = profile_direct_detail.then(Instant::now);
         self.prepare_group_coordinate_plan(mode_indices);
         if let Some(started_at) = started_at {
             self.profile_plan_ms += started_at.elapsed().as_secs_f64() * 1000.0;
         }
-        let started_at = profile_timing.then(Instant::now);
+        let started_at = profile_direct_detail.then(Instant::now);
         let overrides = {
             let plan = self
                 .group_coordinate_plans
@@ -4442,7 +4609,7 @@ impl PostDwaWeightLifter {
             self.profile_signature_ms += started_at.elapsed().as_secs_f64() * 1000.0;
         }
 
-        let started_at = profile_timing.then(Instant::now);
+        let started_at = profile_direct_detail.then(Instant::now);
         let lifted = base.with_sparse_tsid_overrides_intersection(&overrides, entry_domain);
         if let Some(started_at) = started_at {
             self.profile_apply_ms += started_at.elapsed().as_secs_f64() * 1000.0;
@@ -4467,6 +4634,7 @@ pub(crate) fn expand_representative_dwa_after_minimization(
     modes: &[TerminalNwaTransportMode],
 ) -> DWA {
     let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+    let profile_direct_detail = std::env::var_os("GLRMASK_PROFILE_TI_DIRECT_DETAIL").is_some();
     let coordinate_setup_started_at = profile_timing.then(Instant::now);
     assert!(
         !modes.is_empty(),
@@ -4573,6 +4741,24 @@ pub(crate) fn expand_representative_dwa_after_minimization(
         })
         .collect();
 
+    if profile_direct_detail {
+        let distinct_member_entry_weights = member_entry_weights
+            .iter()
+            .map(|(_, _, weight)| weight.ptr_key())
+            .collect::<FxHashSet<_>>()
+            .len();
+        let member_entry_outer_ranges = member_entry_weights
+            .iter()
+            .map(|(_, _, weight)| weight.outer_range_count())
+            .sum::<usize>();
+        eprintln!(
+            "[glrmask/profile][ti_post_dwa_member_entries] count={} distinct_weights={} total_outer_ranges={}",
+            member_entry_weights.len(),
+            distinct_member_entry_weights,
+            member_entry_outer_ranges,
+        );
+    }
+
     let all_member_entry_union =
         Weight::union_all(member_entry_weights.iter().map(|(_, _, weight)| weight));
     let member_entries_are_pairwise_disjoint = finite_weight_token_cardinality(&all_member_entry_union)
@@ -4675,88 +4861,102 @@ pub(crate) fn expand_representative_dwa_after_minimization(
         }
     }
     for core_state in 0..core_states.len() {
-        if !entry_weights_at_core_state[0][core_state].is_empty() {
-            mode_indices_at_core_state[0][core_state].push(0);
-        }
+    if !entry_weights_at_core_state[0][core_state].is_empty() {
+        mode_indices_at_core_state[0][core_state].push(0);
     }
-    // Member entry domains are determined solely by the exact active mode
-    // set. Several p0 suffix states share the complete 1,609-member set, so
-    // retain one exact union rather than rebuilding it per core state.
-    let mut member_entry_domain_by_mode_set = known_member_entry_domain_by_mode_set;
-    let entry_domain_at_core_state: Vec<Vec<Weight>> = entry_weights_at_core_state
-        .iter()
-        .enumerate()
-        .map(|(group_index, by_core_state)| {
-            by_core_state
-                .iter()
-                .enumerate()
-                .map(|(core_state, weights)| {
-                    if group_index == 0 {
-                        return Weight::union_all(weights.iter());
-                    }
-                    let mode_set = &mode_indices_at_core_state[group_index][core_state];
-                    if mode_set.is_empty() {
-                        return Weight::empty();
-                    }
-                    member_entry_domain_by_mode_set
-                        .entry(mode_set.clone())
-                        .or_insert_with(|| Weight::union_all(weights.iter()))
-                        .clone()
-                })
-                .collect()
-        })
-        .collect();
+}
+// Member entry domains are determined solely by the exact active mode
+// set. Several p0 suffix states share the complete 1,609-member set, so
+// retain one exact union rather than rebuilding it per core state.
+let mut member_entry_domain_by_mode_set = known_member_entry_domain_by_mode_set;
+let entry_domain_at_core_state: Vec<Vec<Weight>> = entry_weights_at_core_state
+    .iter()
+    .enumerate()
+    .map(|(group_index, by_core_state)| {
+        by_core_state
+            .iter()
+            .enumerate()
+            .map(|(core_state, weights)| {
+                if group_index == 0 {
+                    return Weight::union_all(weights.iter());
+                }
+                let mode_set = &mode_indices_at_core_state[group_index][core_state];
+                if mode_set.is_empty() {
+                    return Weight::empty();
+                }
+                member_entry_domain_by_mode_set
+                    .entry(mode_set.clone())
+                    .or_insert_with(|| Weight::union_all(weights.iter()))
+                    .clone()
+            })
+            .collect()
+    })
+    .collect();
 
-    let mut mode_set_id_by_contents = FxHashMap::<Vec<usize>, usize>::default();
-    let mode_set_id_at_core_state: Vec<Vec<Option<usize>>> = mode_indices_at_core_state
+let mut mode_set_id_by_contents = FxHashMap::<Vec<usize>, usize>::default();
+let mode_set_id_at_core_state: Vec<Vec<Option<usize>>> = mode_indices_at_core_state
+    .iter()
+    .map(|by_core_state| {
+        by_core_state
+            .iter()
+            .map(|mode_set| {
+                if mode_set.is_empty() {
+                    return None;
+                }
+                let next = mode_set_id_by_contents.len();
+                Some(*mode_set_id_by_contents
+                    .entry(mode_set.clone())
+                    .or_insert(next))
+            })
+            .collect()
+    })
+    .collect();
+
+let grouping_ms = grouping_started_at
+    .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+    .unwrap_or(0.0);
+
+if profile_direct_detail {
+    let member_group_count = mode_groups.len().saturating_sub(1);
+    let largest_member_group = mode_groups
+        .iter()
+        .skip(1)
+        .map(Vec::len)
+        .max()
+        .unwrap_or(0);
+    eprintln!(
+        "[glrmask/profile][ti_post_dwa_direct_groups] core_states={} active_modes={} member_groups={} largest_member_group={} direct_states_before_follow={}",
+        core_states.len(),
+        active_mode_indices.len(),
+        member_group_count,
+        largest_member_group,
+        1 + mode_groups.len() * core_states.len(),
+    );
+    let mode_counts_by_group = mode_indices_at_core_state
         .iter()
         .map(|by_core_state| {
             by_core_state
                 .iter()
-                .map(|mode_set| {
-                    if mode_set.is_empty() {
-                        return None;
-                    }
-                    let next = mode_set_id_by_contents.len();
-                    Some(*mode_set_id_by_contents
-                        .entry(mode_set.clone())
-                        .or_insert(next))
-                })
-                .collect()
+                .map(Vec::len)
+                .collect::<Vec<_>>()
         })
-        .collect();
-
-    let grouping_ms = grouping_started_at
-        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-
-    if profile_timing {
-        let member_group_count = mode_groups.len().saturating_sub(1);
-        let largest_member_group = mode_groups
-            .iter()
-            .skip(1)
-            .map(Vec::len)
-            .max()
-            .unwrap_or(0);
-        eprintln!(
-            "[glrmask/profile][ti_post_dwa_direct_groups] core_states={} active_modes={} member_groups={} largest_member_group={} direct_states_before_follow={}",
-            core_states.len(),
-            active_mode_indices.len(),
-            member_group_count,
-            largest_member_group,
-            1 + mode_groups.len() * core_states.len(),
-        );
-    }
+        .collect::<Vec<_>>();
+    eprintln!(
+        "[glrmask/profile][ti_post_dwa_mode_reachability] core_states={} mode_counts_by_group={:?}",
+        core_states.len(),
+        mode_counts_by_group,
+    );
+}
 
     let state_for = |group_index: usize, core_state_index: usize| -> u32 {
         (1 + group_index * core_states.len() + core_state_index) as u32
     };
-    let shared_build_started_at = profile_timing.then(Instant::now);
-    let mut final_lift_ms = 0.0;
-    let mut transition_lift_ms = 0.0;
-    let mut raw_label_insert_ms = 0.0;
-    let mut final_lift_calls = 0usize;
-    let mut transition_lift_calls = 0usize;
+    let shared_build_started_at = profile_direct_detail.then(Instant::now);
+let mut final_lift_ms = 0.0;
+let mut transition_lift_ms = 0.0;
+let mut raw_label_insert_ms = 0.0;
+let mut final_lift_calls = 0usize;
+let mut transition_lift_calls = 0usize;
     let mut raw_label_inserts = 0usize;
     let mut states = vec![DWAState::default(); 1 + mode_groups.len() * core_states.len()];
     for group_index in 0..mode_groups.len() {
@@ -4769,7 +4969,7 @@ pub(crate) fn expand_representative_dwa_after_minimization(
             let mode_set_id = mode_set_id_at_core_state[group_index][core_state_index]
                 .expect("active suffix state must have a mode-set id");
             let final_weight = core_state.final_weight.as_ref().map(|weight| {
-                let started_at = profile_timing.then(Instant::now);
+                let started_at = profile_direct_detail.then(Instant::now);
                 let lifted = lifter.lift_over_disjoint_group(weight, mode_set_id, mode_indices, entry_domain);
                 if let Some(started_at) = started_at {
                     final_lift_ms += started_at.elapsed().as_secs_f64() * 1000.0;
@@ -4779,7 +4979,7 @@ pub(crate) fn expand_representative_dwa_after_minimization(
             });
             let mut transitions = BTreeMap::new();
             for (&label, (target, weight)) in &core_state.transitions {
-                let lift_started_at = profile_timing.then(Instant::now);
+                let lift_started_at = profile_direct_detail.then(Instant::now);
                 let lifted_weight = lifter.lift_over_disjoint_group(
                     weight,
                     mode_set_id,
@@ -4807,12 +5007,12 @@ pub(crate) fn expand_representative_dwa_after_minimization(
                     continue;
                 }
                 let representative = label as TerminalID;
-                for &(member, _) in member_modes_by_representative
+                for &(member, member_mode_index) in member_modes_by_representative
                     .get(&representative)
                     .into_iter()
                     .flatten()
                 {
-                    let raw_label_started_at = profile_timing.then(Instant::now);
+                    let raw_label_started_at = profile_direct_detail.then(Instant::now);
                     assert!(
                         transitions
                             .insert(member as i32, (destination, lifted_weight.clone()))
@@ -4879,7 +5079,7 @@ pub(crate) fn expand_representative_dwa_after_minimization(
 
     if let Some(started_at) = shared_build_started_at {
         eprintln!(
-            "[glrmask/profile][ti_post_dwa_direct_detail] coordinate_setup_ms={:.3} active_filter_ms={:.3} grouping_ms={:.3} shared_build_ms={:.3} final_lift_calls={} final_lift_ms={:.3} transition_lift_calls={} transition_lift_ms={:.3} raw_label_inserts={} raw_label_insert_ms={:.3} base_lifts={} mode_lifts={} group_lifts={} coordinate_plans={} group_base_ms={:.3} group_plan_ms={:.3} group_signature_ms={:.3} group_apply_ms={:.3}",
+            "[glrmask/profile][ti_post_dwa_direct_detail] coordinate_setup_ms={:.3} active_filter_ms={:.3} grouping_ms={:.3} shared_build_ms={:.3} final_lift_calls={} final_lift_ms={:.3} transition_lift_calls={} transition_lift_ms={:.3} raw_label_inserts={} raw_label_insert_ms={:.3} base_lifts={} mode_lifts={} mode_lift_builds={} mode_raw_overrides={} mode_effective_overrides={} mode_unchanged={} group_lifts={} coordinate_plans={} group_base_ms={:.3} group_plan_ms={:.3} group_signature_ms={:.3} group_apply_ms={:.3}",
             coordinate_setup_ms,
             active_filter_ms,
             grouping_ms,
@@ -4892,6 +5092,10 @@ pub(crate) fn expand_representative_dwa_after_minimization(
             raw_label_insert_ms,
             lifter.base_lifts.len(),
             lifter.mode_lifts.len(),
+            lifter.profile_mode_lift_builds,
+            lifter.profile_mode_raw_overrides,
+            lifter.profile_mode_effective_overrides,
+            lifter.profile_mode_unchanged,
             lifter.group_lifts.len(),
             lifter.group_coordinate_plans.len(),
             lifter.profile_base_lift_ms,
@@ -5239,6 +5443,222 @@ fn forward_domains_fixed_point(dwa: &DWA) -> Vec<Weight> {
 /// This preserves every completed path while dropping unreachable
 /// transport-factor fragments before minimization without cloning the full
 /// raw-follow state vector a second time.
+/// Return exact source-coordinate domains while normalizing an acyclic DWA.
+/// The returned domain for each state is the coordinate set that can reach it
+/// from the start. The mutation is the same as the ordinary forward-domain
+/// restriction: every state-local final/transition weight is intersected with
+/// its source domain.
+pub(crate) fn restrict_weights_to_forward_domains_in_place_with_domains(
+    dwa: &mut DWA,
+) -> Option<Vec<Weight>> {
+    let state_count = dwa.states().len();
+    if state_count == 0 || (dwa.start_state() as usize) >= state_count {
+        return Some(vec![Weight::empty(); state_count]);
+    }
+
+    let Some(order) = forward_domain_topological_order(dwa) else {
+        let domains = forward_domains_fixed_point(dwa);
+        let mut restriction_cache = FxHashMap::<(usize, usize), Weight>::default();
+        for (state, domain) in dwa.states_mut().iter_mut().zip(domains.iter()) {
+            state.final_weight = state
+                .final_weight
+                .as_ref()
+                .map(|weight| forward_domain_intersection(&mut restriction_cache, weight, domain))
+                .filter(|weight| !weight.is_empty());
+            state.transitions.retain(|_, (_, weight)| {
+                *weight = forward_domain_intersection(&mut restriction_cache, weight, domain);
+                !weight.is_empty()
+            });
+        }
+        return None;
+    };
+
+    let start = dwa.start_state() as usize;
+    let mut domains = vec![Weight::empty(); state_count];
+    let mut pending = vec![Vec::<Weight>::new(); state_count];
+    pending[start].push(Weight::all());
+    let mut intersection_cache = FxHashMap::<(usize, usize), Weight>::default();
+
+    for source in order {
+        let source_domain = union_forward_domain_parts(&mut pending[source]);
+        domains[source] = source_domain.clone();
+        let state = &mut dwa.states_mut()[source];
+        if source_domain.is_empty() {
+            state.final_weight = None;
+            state.transitions.clear();
+            continue;
+        }
+
+        state.final_weight = state
+            .final_weight
+            .as_ref()
+            .map(|weight| forward_domain_intersection(&mut intersection_cache, weight, &source_domain))
+            .filter(|weight| !weight.is_empty());
+        state.transitions.retain(|_, (target, weight)| {
+            let normalized = forward_domain_intersection(
+                &mut intersection_cache,
+                weight,
+                &source_domain,
+            );
+            let target = *target as usize;
+            if target < state_count && !normalized.is_empty() {
+                pending[target].push(normalized.clone());
+            }
+            *weight = normalized;
+            !weight.is_empty()
+        });
+    }
+
+    Some(domains)
+}
+
+/// Overlay the ordinary and member suffix copies emitted by direct TI lifting.
+///
+/// Direct lifting emits a dispatcher plus one core-state copy for ordinary
+/// behavior and one for a pairwise-disjoint member group. Once forward-domain
+/// normalization proves corresponding copies receive disjoint coordinates, an
+/// overlay is an exact quotient: weights for matching labels/finals are simply
+/// unioned and each coordinate still follows exactly one old copy. Any shape or
+/// domain mismatch returns `None`, leaving the caller to use generic exact
+/// minimization.
+pub(crate) fn quotient_two_group_suffix_overlay_if_exact(
+    dwa: &DWA,
+    core_state_count: usize,
+    domains: &[Weight],
+) -> Option<DWA> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+    let allow_overlapping_domains = std::env::var_os(
+        "GLRMASK_EXPERIMENT_TI_FORCE_OVERLAP_SUFFIX_OVERLAY",
+    )
+    .is_some();
+    let expected_state_count = 1usize.checked_add(core_state_count.checked_mul(2)?)?;
+    if dwa.start_state() != 0
+        || core_state_count == 0
+        || dwa.states().len() != expected_state_count
+        || domains.len() != expected_state_count
+    {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][ti_post_dwa_direct_overlay] input_states={} domains={} core_states={} accepted=false reason=shape",
+                dwa.states().len(),
+                domains.len(),
+                core_state_count,
+            );
+        }
+        return None;
+    }
+
+    let state_for = |group: usize, core_state: usize| 1 + group * core_state_count + core_state;
+    let mut quotient_id_for_core = vec![None::<u32>; core_state_count];
+    let mut next_state_id = 1u32;
+    for core_state in 0..core_state_count {
+        let ordinary = state_for(0, core_state);
+        let member = state_for(1, core_state);
+        if !allow_overlapping_domains && !domains[ordinary].is_disjoint(&domains[member]) {
+            if profile {
+                eprintln!(
+                    "[glrmask/profile][ti_post_dwa_direct_overlay] input_states={} core_states={} accepted=false reason=overlap core_state={} ordinary_ranges={} member_ranges={}",
+                    expected_state_count,
+                    core_state_count,
+                    core_state,
+                    domains[ordinary].outer_range_count(),
+                    domains[member].outer_range_count(),
+                );
+            }
+            return None;
+        }
+        if !(domains[ordinary].is_empty() && domains[member].is_empty()) {
+            quotient_id_for_core[core_state] = Some(next_state_id);
+            next_state_id += 1;
+        }
+    }
+
+    let mut states = vec![DWAState::default(); next_state_id as usize];
+    for core_state in 0..core_state_count {
+        let Some(quotient_id) = quotient_id_for_core[core_state] else {
+            continue;
+        };
+        let mut final_weight = None::<Weight>;
+        let mut transitions = BTreeMap::<i32, (u32, Weight)>::new();
+        for group in 0..2 {
+            let old_state_id = state_for(group, core_state);
+            let old_state = &dwa.states()[old_state_id];
+            if let Some(weight) = &old_state.final_weight {
+                final_weight = Some(match final_weight {
+                    Some(existing) => existing.union(weight),
+                    None => weight.clone(),
+                });
+            }
+            for (&label, (target, weight)) in &old_state.transitions {
+                let target = *target as usize;
+                let group_start = state_for(group, 0);
+                let group_end = group_start + core_state_count;
+                if target < group_start || target >= group_end {
+                    return None;
+                }
+                let target_core = target - group_start;
+                let Some(quotient_target) = quotient_id_for_core[target_core] else {
+                    return None;
+                };
+                match transitions.entry(label) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert((quotient_target, weight.clone()));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        let (existing_target, existing_weight) = entry.get_mut();
+                        if *existing_target != quotient_target {
+                            return None;
+                        }
+                        *existing_weight = existing_weight.union(weight);
+                    }
+                }
+            }
+        }
+        states[quotient_id as usize] = DWAState {
+            transitions,
+            final_weight,
+        };
+    }
+
+    let mut dispatcher_transitions = BTreeMap::<i32, (u32, Weight)>::new();
+    for (&label, (target, weight)) in &dwa.states()[0].transitions {
+        let target = *target as usize;
+        if target == 0 || target >= expected_state_count {
+            return None;
+        }
+        let core_state = (target - 1) % core_state_count;
+        let Some(quotient_target) = quotient_id_for_core[core_state] else {
+            return None;
+        };
+        match dispatcher_transitions.entry(label) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert((quotient_target, weight.clone()));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let (existing_target, existing_weight) = entry.get_mut();
+                if *existing_target != quotient_target {
+                    return None;
+                }
+                *existing_weight = existing_weight.union(weight);
+            }
+        }
+    }
+    states[0] = DWAState {
+        transitions: dispatcher_transitions,
+        final_weight: dwa.states()[0].final_weight.clone(),
+    };
+
+    if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+        eprintln!(
+            "[glrmask/profile][ti_post_dwa_direct_overlay] input_states={} output_states={} core_states={} accepted=true",
+            expected_state_count,
+            states.len(),
+            core_state_count,
+        );
+    }
+    Some(DWA::from_parts(states, 0))
+}
+
 pub(crate) fn restrict_weights_to_forward_domains_in_place(dwa: &mut DWA) {
     let state_count = dwa.states().len();
     if state_count == 0 || (dwa.start_state() as usize) >= state_count {

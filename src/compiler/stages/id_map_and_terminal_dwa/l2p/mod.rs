@@ -43,10 +43,16 @@ use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nod
 use terminal_interchangeability::{
     active_terminals_for_partition, binary_transport_modes_from_witnesses,
     canonicalize_transport_mode_states, coalesced_disallowed_follows,
+    coalesced_disallowed_follows_full_domain,
     discover_one_round_with_transport_witnesses_in_context, fold_one_round_partition,
     expand_representative_dwa_after_minimization, partition_has_merges,
-    restrict_weights_to_forward_domains_in_place, restore_raw_follow_constraints_after_expansion,
-    singleton_partition, transport_coordinate_quotient, visible_output_raw_labels,
+    quotient_two_group_suffix_overlay_if_exact,
+    raw_follow_row_column_signature_ids,
+    restrict_weights_to_forward_domains_in_place,
+    restrict_weights_to_forward_domains_in_place_with_domains,
+    restore_raw_follow_constraints_after_expansion,
+    reorder_transport_coordinates_by_ordinary, singleton_partition, transport_coordinate_quotient,
+    visible_output_raw_labels,
     TiDiscoveryContext,
 };
 use postprocess::{
@@ -109,6 +115,7 @@ fn l2p_terminal_interchangeability_enabled() -> bool {
 fn l2p_terminal_interchangeability_bypassed_for_partition(partition_label: &str) -> bool {
     partition_label == "p8"
 }
+
 
 fn l2p_terminal_interchangeability_enabled_for_partition(partition_label: &str) -> bool {
     l2p_terminal_interchangeability_enabled()
@@ -217,6 +224,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
     // Repeatedly discover and immediately fold each transient exact partition.
     // Only the final flat original-member partition survives this loop.
+    let follow_congruent_signatures = (l2p_terminal_interchangeability_enabled_for_partition(
+        partition_label,
+    ) && std::env::var_os("GLRMASK_EXPERIMENT_TI_FOLLOW_CONGRUENT_CLASSES").is_some())
+    .then(|| {
+        raw_follow_row_column_signature_ids(disallowed_follows, grammar.num_terminals as usize)
+    });
     let ti_profile_timing = l2p_timing_profile_enabled();
     let ti_discovery_started_at = ti_profile_timing.then(Instant::now);
     let (
@@ -233,11 +246,25 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let mut round_count = 0usize;
             let mut first_round_class_count = None;
             loop {
+                let current_class_signatures = follow_congruent_signatures.as_ref().map(|signatures| {
+                    let mut signature_for_representative = vec![u32::MAX; signatures.len()];
+                    for (&representative, members) in &classes {
+                        let first_member = *members
+                            .iter()
+                            .next()
+                            .expect("TI class must be nonempty") as usize;
+                        let signature = signatures[first_member];
+                        assert!(members.iter().all(|&member| signatures[member as usize] == signature));
+                        signature_for_representative[representative as usize] = signature;
+                    }
+                    signature_for_representative
+                });
                 let round = discover_one_round_with_transport_witnesses_in_context(
                     tokenizer,
                     &active,
                     &discovery_context,
                     ignore_terminal,
+                    current_class_signatures.as_deref(),
                 );
                 let next_active = active_terminals_for_partition(&round.partition, active.len());
                 let next_classes = fold_one_round_partition(&classes, &round.partition);
@@ -272,6 +299,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // and symbolic comparison are a separate, explicit validation mode.
     let strict_reference = reference_terminal_expansion
         && l2p_terminal_interchangeability_strict_reference_enabled();
+    let ti_follow_congruent = reference_terminal_expansion && follow_congruent_signatures.is_some();
     let analysis_active_terminals = terminal_partition
         .as_ref()
         .map(|partition| active_terminals_for_partition(partition, active_terminals.len()))
@@ -289,13 +317,22 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     });
     let coalesced_disallowed_follows_started_at = ti_profile_timing.then(Instant::now);
     let coalesced_disallowed_follows = reference_terminal_expansion.then(|| {
-        coalesced_disallowed_follows(
-            terminal_partition
-                .as_ref()
-                .expect("active TI partition must be present"),
-            disallowed_follows,
-            grammar.num_terminals as usize,
-        )
+        let partition = terminal_partition
+            .as_ref()
+            .expect("active TI partition must be present");
+        if ti_follow_congruent {
+            coalesced_disallowed_follows_full_domain(
+                partition,
+                disallowed_follows,
+                grammar.num_terminals as usize,
+            )
+        } else {
+            coalesced_disallowed_follows(
+                partition,
+                disallowed_follows,
+                grammar.num_terminals as usize,
+            )
+        }
     });
     let ti_coalesced_disallowed_follows_ms = coalesced_disallowed_follows_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
@@ -623,6 +660,15 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
             let quotient_started_at = ti_profile_timing.then(Instant::now);
             let quotient = transport_coordinate_quotient(ordinary_state_map, &modes);
+            let quotient = if std::env::var_os(
+                "GLRMASK_EXPERIMENT_REORDER_TI_TRANSPORT_BY_ORDINARY",
+            )
+            .is_some()
+            {
+                reorder_transport_coordinates_by_ordinary(ordinary_state_map, &quotient)
+            } else {
+                quotient
+            };
             ti_transport_coordinate_quotient_ms = quotient_started_at
                 .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
                 .unwrap_or(0.0);
@@ -641,23 +687,51 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             .unwrap_or(0.0);
 
         let raw_follow_started_at = ti_profile_timing.then(Instant::now);
-        let raw_follow_restoration = restore_raw_follow_constraints_after_expansion(
-            &expanded_dwa,
-            disallowed_follows,
-            grammar.num_terminals as usize,
-            ignore_terminal,
-        );
-        let used_follow_row_quotient = raw_follow_restoration.used_follow_row_quotient;
-        let mut expanded_dwa = raw_follow_restoration.dwa;
+        let (used_follow_row_quotient, mut expanded_dwa) = if ti_follow_congruent {
+            // Every final TI class is homogeneous in the full raw follow row
+            // and column relation, so every representative-class pair has one
+            // exact raw-follow truth value. No product state is needed.
+            (false, expanded_dwa)
+        } else {
+            let restored = restore_raw_follow_constraints_after_expansion(
+                &expanded_dwa,
+                disallowed_follows,
+                grammar.num_terminals as usize,
+                ignore_terminal,
+            );
+            (restored.used_follow_row_quotient, restored.dwa)
+        };
         ti_raw_follow_restore_ms = raw_follow_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
 
         let forward_domain_started_at = ti_profile_timing.then(Instant::now);
-        restrict_weights_to_forward_domains_in_place(&mut expanded_dwa);
+        let forward_domains = if std::env::var_os(
+            "GLRMASK_EXPERIMENT_TI_DIRECT_FORWARD_OVERLAY_QUOTIENT",
+        )
+        .is_some()
+            && ti_follow_congruent
+        {
+            restrict_weights_to_forward_domains_in_place_with_domains(&mut expanded_dwa)
+        } else {
+            restrict_weights_to_forward_domains_in_place(&mut expanded_dwa);
+            None
+        };
         ti_forward_domain_normalize_ms = forward_domain_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
+
+        let mut direct_overlay_applied = false;
+        if let Some(domains) = forward_domains
+            && let Some(quotient) = quotient_two_group_suffix_overlay_if_exact(
+                &expanded_dwa,
+                core_dwa.states().len(),
+                &domains,
+            )
+        {
+            expanded_dwa = quotient;
+            direct_overlay_applied = true;
+        }
 
         // The transport-coordinate map is still finer than the final raw
         // coordinate domain. Compact it before minimization: otherwise the
@@ -667,13 +741,16 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         final_id_map.tokenizer_states = transport_coordinate_map;
         let mut expanded_artifact = MappedArtifact::new(expanded_dwa, final_id_map);
         let post_dwa_compact_started_at = Instant::now();
+        let mut pre_min_compact_report = None;
         // The compact follow-row product used by p1 already exposes the exact
         // pointwise grouping to minimization. Avoid rebuilding an equivalent
         // token layout before that pass; p0 retains the established precompact
         // canonicalization path.
-        if !(used_follow_row_quotient && expanded_artifact.artifact().stats().states <= 64) {
-            if profiling {
-                expanded_artifact.compact_dimensions_fast_with_stats();
+        if std::env::var_os("GLRMASK_EXPERIMENT_SKIP_TI_PREMIN_COMPACTION").is_none()
+            && !(used_follow_row_quotient && expanded_artifact.artifact().stats().states <= 64)
+        {
+            if profiling || std::env::var_os("GLRMASK_PROFILE_TI_COMPACTION_SHAPE").is_some() {
+                pre_min_compact_report = Some(expanded_artifact.compact_dimensions_fast_with_stats());
             } else {
                 expanded_artifact.compact_dimensions_fast();
             }
@@ -687,7 +764,16 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         // stable exact pointwise class order and avoid a second domain-ordering
         // pass. This is scoped to the post-DWA artifact.
         let pointwise_order = PointwiseClassOrder::Stable;
-        let minimized_dwa = minimize_owned_with_pointwise_class_order(expanded_dwa, pointwise_order);
+        let minimized_dwa = if direct_overlay_applied
+            && std::env::var_os("GLRMASK_EXPERIMENT_SKIP_TI_POST_OVERLAY_MINIMIZE").is_some()
+        {
+            expanded_dwa
+        } else if std::env::var_os("GLRMASK_EXPERIMENT_SKIP_TI_POST_DWA_MINIMIZE").is_some()
+        {
+            expanded_dwa
+        } else {
+            minimize_owned_with_pointwise_class_order(expanded_dwa, pointwise_order)
+        };
         ti_post_dwa_minimize_ms = post_dwa_minimize_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
@@ -697,12 +783,36 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         // already established before minimization.
         let mut minimized_artifact = MappedArtifact::new(minimized_dwa, final_id_map);
         let final_compact_started_at = Instant::now();
-        if profiling {
-            minimized_artifact.compact_dimensions_merge_only_fast_with_stats();
+        let skip_final_compaction = std::env::var_os(
+            "GLRMASK_EXPERIMENT_SKIP_TI_FINAL_COMPACTION",
+        )
+        .is_some();
+        let final_compact_report = if skip_final_compaction {
+            None
+        } else if profiling || std::env::var_os("GLRMASK_PROFILE_TI_COMPACTION_SHAPE").is_some() {
+            Some(minimized_artifact.compact_dimensions_merge_only_fast_with_stats())
         } else {
             minimized_artifact.compact_dimensions_merge_only_fast();
+            None
+        };
+        if !skip_final_compaction {
+            ti_post_dwa_compact_ms += final_compact_started_at.elapsed().as_secs_f64() * 1000.0;
         }
-        ti_post_dwa_compact_ms += final_compact_started_at.elapsed().as_secs_f64() * 1000.0;
+        if std::env::var_os("GLRMASK_PROFILE_TI_COMPACTION_SHAPE").is_some() {
+            let report_shape = |report: &crate::compiler::stages::mapped_artifact::CompactReport| {
+                let tsids = report.tsid_perm.iter().copied().max().map_or(0usize, |id| id as usize + 1);
+                let tokens = report.token_perm.iter().copied().max().map_or(0usize, |id| id as usize + 1);
+                (tsids, tokens)
+            };
+            let pre_shape = pre_min_compact_report.as_ref().map(report_shape);
+            let final_shape = final_compact_report.as_ref().map(report_shape);
+            eprintln!(
+                "[glrmask/profile][ti_post_dwa_compaction] partition={} pre_min={:?} final_merge_only={:?}",
+                partition_label,
+                pre_shape,
+                final_shape,
+            );
+        }
         let stats = minimized_artifact.artifact().stats();
         let (dwa, id_map) = minimized_artifact.into_parts();
         (dwa, id_map, stats)

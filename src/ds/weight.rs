@@ -2,11 +2,12 @@ use range_set_blaze::{CheckSortedDisjoint, RangeMapBlaze, RangeSetBlaze, SortedD
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use once_cell::sync::Lazy;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHasher};
 use dashmap::DashMap;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::hash::Hasher;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -439,9 +440,7 @@ fn intern_rangeset(tokens: RangeSetBlaze<u32>) -> SharedTokenSet {
 }
 
 fn weight_map_fingerprint(map: &WeightMap) -> u64 {
-    use std::hash::Hasher;
-
-    let mut hasher = rustc_hash::FxHasher::default();
+    let mut hasher = FxHasher::default();
     for (range, tokens) in map.range_values() {
         hasher.write_u32(*range.start());
         hasher.write_u32(*range.end());
@@ -471,6 +470,10 @@ fn weight_map_eq(left: &WeightMap, right: &WeightMap) -> bool {
 
 fn intern_weight_map(map: WeightMap) -> Arc<WeightMap> {
     let fingerprint = weight_map_fingerprint(&map);
+    intern_weight_map_with_fingerprint(map, fingerprint)
+}
+
+fn intern_weight_map_with_fingerprint(map: WeightMap, fingerprint: u64) -> Arc<WeightMap> {
     let mut bucket = GLOBAL_WEIGHTS.entry(fingerprint).or_default();
     let mut idx = 0usize;
     while idx < bucket.len() {
@@ -1217,6 +1220,7 @@ fn intersect_weight_with_index(sparse: &Weight, index: &WeightIntersectionIndex)
 
 struct CompactRangeBuilder {
     map: WeightMap,
+    fingerprint: FxHasher,
     pending_start: Option<u32>,
     pending_end: u32,
     pending_tokens: SharedTokenSet,
@@ -1226,6 +1230,7 @@ impl CompactRangeBuilder {
     fn new() -> Self {
         Self {
             map: WeightMap::new(),
+            fingerprint: FxHasher::default(),
             pending_start: None,
             pending_end: 0,
             pending_tokens: Arc::clone(&EMPTY_RANGESET),
@@ -1252,6 +1257,9 @@ impl CompactRangeBuilder {
     fn flush(&mut self) {
         if let Some(start) = self.pending_start.take() {
             let tokens = std::mem::replace(&mut self.pending_tokens, Arc::clone(&EMPTY_RANGESET));
+            self.fingerprint.write_u32(start);
+            self.fingerprint.write_u32(self.pending_end);
+            self.fingerprint.write_usize(Arc::as_ptr(&tokens) as usize);
             self.map
                 .extend_simple(std::iter::once((start..=self.pending_end, tokens)));
         }
@@ -1259,8 +1267,16 @@ impl CompactRangeBuilder {
 
     fn finish(mut self) -> Weight {
         self.flush();
-        finalize_weight_map(self.map)
+        if self.map.ranges().next().is_none() {
+            EMPTY_WEIGHT.clone()
+        } else {
+            Weight(intern_weight_map_with_fingerprint(
+                self.map,
+                self.fingerprint.finish(),
+            ))
+        }
     }
+
 }
 
 fn compact_entries(weight: &Weight) -> SmallVec<[WeightRangeEntry; 16]> {
