@@ -292,6 +292,20 @@ fn should_skip_max_length_for_partition(
     )
 }
 
+fn force_raw_quotient_for_partition(partition_label: &str) -> bool {
+    let forced_by_env = std::env::var("GLRMASK_FORCE_RAW_QUOTIENT_PARTITIONS")
+        .ok()
+        .map(|value| value.split(',').map(str::trim).any(|label| label == partition_label))
+        .unwrap_or(false);
+    let token_action_ti_enabled = std::env::var("GLRMASK_L2P_TOKEN_ACTION_TI")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false);
+    forced_by_env || (token_action_ti_enabled && matches!(partition_label, "p7" | "p8"))
+}
+
 const EXACT_REP_CONFIRMATION_MIN_STATES: usize = 2_000;
 const EXACT_REP_CONFIRMATION_MIN_TOKENS: usize = 200;
 const RAW_QUOTIENT_TINY_VOCAB_MAX_TOKENS: usize = 16;
@@ -448,7 +462,8 @@ fn try_analyze_equivalences_with_raw_quotient(
     // can retain too much raw topology for this to win.
     let tiny_raw_quotient = prepared.token_bytes.len() <= RAW_QUOTIENT_TINY_VOCAB_MAX_TOKENS
         && direct_token_bytes <= RAW_QUOTIENT_TINY_VOCAB_MAX_BYTES;
-    if skip_raw_quotient && !tiny_raw_quotient {
+    let force_raw_quotient = force_raw_quotient_for_partition(partition_label);
+    if skip_raw_quotient && !tiny_raw_quotient && !force_raw_quotient {
         return None;
     }
 
