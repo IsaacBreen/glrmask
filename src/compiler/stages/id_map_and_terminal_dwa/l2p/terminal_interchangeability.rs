@@ -1875,12 +1875,18 @@ struct ExactTokenMacroNode {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct ExactTokenMacroStateSignature(Box<[u32]>);
+struct ExactTokenMacroNodeKey {
+    endpoint: Option<(u32, u32)>,
+    edges: Box<[(TerminalID, u32)]>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ExactTokenMacroStateSignature(SmallVec<[u32; 64]>);
 
 struct ExactTokenMacroRound {
     classes: Vec<u32>,
     representative_by_class: Vec<usize>,
-    node_ids: FxHashMap<ExactTokenMacroNode, u32>,
+    node_ids: FxHashMap<ExactTokenMacroNodeKey, u32>,
     nodes_by_id: Vec<ExactTokenMacroNode>,
     action_nodes_by_class: Vec<Box<[u32]>>,
     state_classes: FxHashMap<ExactTokenMacroStateSignature, u32>,
@@ -1902,6 +1908,9 @@ enum DirectMacroInterchangeResult {
 struct ExactTokenMacroDfa {
     topology: Arc<TokenMacroTopology>,
     outputs: TokenMacroRoundOutputs,
+    output_pair_ids: FxHashMap<OutputPair, u32>,
+    output_pair_id_by_raw_state: Vec<u32>,
+    empty_output_pair_id: u32,
     identity_rounds: Vec<ExactTokenMacroRound>,
     root_terminal_supports: Vec<Vec<(usize, Box<[u8]>)>>,
     node_parents: Vec<Vec<u32>>,
@@ -1918,9 +1927,25 @@ impl ExactTokenMacroDfa {
 
     fn new(topology: Arc<TokenMacroTopology>, outputs: TokenMacroRoundOutputs) -> Self {
         let started_at = Instant::now();
+        let mut output_pair_ids = FxHashMap::<OutputPair, u32>::default();
+        let empty_output_pair_id = {
+            let id = output_pair_ids.len() as u32;
+            output_pair_ids.insert(outputs.empty.clone(), id);
+            id
+        };
+        let mut output_pair_id_by_raw_state = Vec::with_capacity(outputs.by_raw_state.len());
+        for output in &outputs.by_raw_state {
+            let next = output_pair_ids.len() as u32;
+            let id = *output_pair_ids.entry(output.clone()).or_insert(next);
+            output_pair_id_by_raw_state.push(id);
+        }
+
         let mut dfa = Self {
             topology,
             outputs,
+            output_pair_ids,
+            output_pair_id_by_raw_state,
+            empty_output_pair_id,
             identity_rounds: Vec::new(),
             root_terminal_supports: Vec::new(),
             node_parents: Vec::new(),
@@ -1961,15 +1986,14 @@ impl ExactTokenMacroDfa {
         }
     }
 
-    fn node_id(
+    fn swapped_node_id(
         &self,
         raw_start: u32,
         token_index: usize,
         offset: usize,
         previous: &[u32],
-        swap: Option<(TerminalID, TerminalID)>,
-        identity_nodes: Option<&FxHashMap<ExactTokenMacroNode, u32>>,
-        interned_nodes: &mut FxHashMap<ExactTokenMacroNode, u32>,
+        swap: (TerminalID, TerminalID),
+        identity: &ExactTokenMacroRound,
         cache: &mut FxHashMap<(u32, usize, usize), u32>,
     ) -> Option<u32> {
         if let Some(&id) = cache.get(&(raw_start, token_index, offset)) {
@@ -1977,9 +2001,86 @@ impl ExactTokenMacroDfa {
         }
         let scan = self.topology.scan(raw_start, token_index, offset);
 
+        let endpoint = if let Some(state) = scan.endpoint {
+            let c_state = self.topology.state_map.original_to_internal[state as usize] as usize;
+            let mapped_output = self.map_output(state, Some(swap));
+            let output_id = *self.output_pair_ids.get(&mapped_output)?;
+            Some((previous[c_state], output_id))
+        } else {
+            None
+        };
+        let token_len = self.topology.tokens[token_index].len();
+        let mut edges = Vec::with_capacity(scan.longest_matches.len());
+        for &(terminal, next_offset) in scan.longest_matches.iter() {
+            if !self.outputs.terminal_is_active(terminal) {
+                continue;
+            }
+            let child = if next_offset == token_len {
+                Self::ACCEPT_SINK
+            } else {
+                self.swapped_node_id(
+                    self.topology.initial_raw_state,
+                    token_index,
+                    next_offset,
+                    previous,
+                    swap,
+                    identity,
+                    cache,
+                )?
+            };
+            edges.push((Self::map_terminal(terminal, Some(swap)), child));
+        }
+        let node = ExactTokenMacroNodeKey {
+            endpoint,
+            edges: edges.into_boxed_slice(),
+        };
+        let id = *identity.node_ids.get(&node)?;
+        cache.insert((raw_start, token_index, offset), id);
+        Some(id)
+    }
+
+    #[inline]
+    fn dense_node_cache_index(
+        &self,
+        raw_start: u32,
+        token_index: usize,
+        offset: usize,
+        cache_stride: usize,
+    ) -> usize {
+        ((raw_start as usize * self.topology.tokens.len() + token_index) * cache_stride) + offset
+    }
+
+    fn identity_node_id_dense(
+        &self,
+        raw_start: u32,
+        token_index: usize,
+        offset: usize,
+        previous: &[u32],
+        interned_nodes: &mut FxHashMap<ExactTokenMacroNodeKey, u32>,
+        output_pair_id_by_raw_state: &[u32],
+        empty_output_pair_id: u32,
+        nodes_by_id: &mut Vec<ExactTokenMacroNode>,
+        cache: &mut [u32],
+        cache_stride: usize,
+    ) -> u32 {
+        let cache_index = self.dense_node_cache_index(raw_start, token_index, offset, cache_stride);
+        let cached = cache[cache_index];
+        if cached != u32::MAX {
+            return cached;
+        }
+        let scan = self.topology.scan(raw_start, token_index, offset);
+
         let endpoint = scan.endpoint.map(|state| {
             let c_state = self.topology.state_map.original_to_internal[state as usize] as usize;
-            (previous[c_state], self.map_output(state, swap))
+            (previous[c_state], self.map_output(state, None))
+        });
+        let endpoint_key = scan.endpoint.map(|state| {
+            let c_state = self.topology.state_map.original_to_internal[state as usize] as usize;
+            let output_id = output_pair_id_by_raw_state
+                .get(state as usize)
+                .copied()
+                .unwrap_or(empty_output_pair_id);
+            (previous[c_state], output_id)
         });
         let token_len = self.topology.tokens[token_index].len();
         let mut edges = Vec::with_capacity(scan.longest_matches.len());
@@ -1990,88 +2091,102 @@ impl ExactTokenMacroDfa {
             let child = if next_offset == token_len {
                 Self::ACCEPT_SINK
             } else {
-                self.node_id(
+                self.identity_node_id_dense(
                     self.topology.initial_raw_state,
                     token_index,
                     next_offset,
                     previous,
-                    swap,
-                    identity_nodes,
                     interned_nodes,
+                    output_pair_id_by_raw_state,
+                    empty_output_pair_id,
+                    nodes_by_id,
                     cache,
-                )?
+                    cache_stride,
+                )
             };
-            edges.push((Self::map_terminal(terminal, swap), child));
+            edges.push((terminal, child));
         }
+        let edges = edges.into_boxed_slice();
         let node = ExactTokenMacroNode {
             endpoint,
-            edges: edges.into_boxed_slice(),
+            edges: edges.clone(),
         };
-        let id = if let Some(identity_nodes) = identity_nodes {
-            *identity_nodes.get(&node)?
-        } else {
-            let next = interned_nodes.len() as u32;
-            *interned_nodes.entry(node).or_insert(next)
+        let key = ExactTokenMacroNodeKey {
+            endpoint: endpoint_key,
+            edges,
         };
-        cache.insert((raw_start, token_index, offset), id);
-        Some(id)
+        let id = match interned_nodes.entry(key) {
+            Entry::Vacant(entry) => {
+                let id = nodes_by_id.len() as u32;
+                nodes_by_id.push(node);
+                entry.insert(id);
+                id
+            }
+            Entry::Occupied(entry) => *entry.get(),
+        };
+        cache[cache_index] = id;
+        id
     }
 
     fn identity_round(&self, previous: &[u32]) -> ExactTokenMacroRound {
-        let mut node_ids = FxHashMap::<ExactTokenMacroNode, u32>::default();
-        let mut cache = FxHashMap::<(u32, usize, usize), u32>::default();
+        let mut node_ids = FxHashMap::<ExactTokenMacroNodeKey, u32>::default();
+        let mut nodes_by_id = Vec::<ExactTokenMacroNode>::new();
+        let cache_stride = self
+            .topology
+            .tokens
+            .iter()
+            .map(|token| token.len())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let mut cache = vec![
+            u32::MAX;
+            self.topology.state_map.original_to_internal.len()
+                * self.topology.tokens.len()
+                * cache_stride
+        ];
         let mut state_classes = FxHashMap::<ExactTokenMacroStateSignature, u32>::default();
         let mut classes = Vec::with_capacity(self.c_state_count());
         let mut representative_by_class = Vec::new();
-        let mut action_nodes_by_state = Vec::with_capacity(self.c_state_count());
+        let mut action_nodes_by_class = Vec::<Box<[u32]>>::new();
         for c_state in 0..self.c_state_count() {
             let raw_start = if c_state == self.topology.initial_state {
                 self.topology.initial_raw_state
             } else {
                 self.topology.state_map.representative_original_ids[c_state]
             };
-            let signature = (0..self.topology.tokens.len())
-                .map(|token_index| {
-                    self.node_id(
+            let signature = {
+                let mut signature = SmallVec::<[u32; 64]>::with_capacity(self.topology.tokens.len());
+                for token_index in 0..self.topology.tokens.len() {
+                    signature.push(
+                    self.identity_node_id_dense(
                         raw_start,
                         token_index,
                         0,
                         previous,
-                        None,
-                        None,
                         &mut node_ids,
+                        &self.output_pair_id_by_raw_state,
+                        self.empty_output_pair_id,
+                        &mut nodes_by_id,
                         &mut cache,
+                        cache_stride,
                     )
-                    .expect("identity token macro node must intern")
-                })
-                .collect::<Vec<_>>()
-                .into_boxed_slice();
-            let key = ExactTokenMacroStateSignature(signature.clone());
+                    );
+                }
+                signature
+            };
             let next = representative_by_class.len() as u32;
-            let class = *state_classes.entry(key).or_insert_with(|| {
-                representative_by_class.push(c_state);
-                next
-            });
+            let class = match state_classes.entry(ExactTokenMacroStateSignature(signature)) {
+                Entry::Vacant(entry) => {
+                    action_nodes_by_class.push(entry.key().0.iter().copied().collect());
+                    representative_by_class.push(c_state);
+                    entry.insert(next);
+                    next
+                }
+                Entry::Occupied(entry) => *entry.get(),
+            };
             classes.push(class);
-            action_nodes_by_state.push(signature);
         }
-        let mut nodes_by_id = vec![None; node_ids.len()];
-        for (node, &id) in &node_ids {
-            nodes_by_id[id as usize] = Some(node.clone());
-        }
-        let nodes_by_id = nodes_by_id
-            .into_iter()
-            .map(|node| node.expect("identity macro node id must be dense"))
-            .collect::<Vec<_>>();
-        let mut action_nodes_by_class = vec![None; representative_by_class.len()];
-        for (c_state, &class) in classes.iter().enumerate() {
-            action_nodes_by_class[class as usize]
-                .get_or_insert_with(|| action_nodes_by_state[c_state].clone());
-        }
-        let action_nodes_by_class = action_nodes_by_class
-            .into_iter()
-            .map(|nodes| nodes.expect("identity macro class must have a representative"))
-            .collect::<Vec<_>>();
         ExactTokenMacroRound {
             classes,
             representative_by_class,
@@ -2089,7 +2204,6 @@ impl ExactTokenMacroDfa {
         left: TerminalID,
         right: TerminalID,
     ) -> Option<Vec<u32>> {
-        let mut unused_nodes = FxHashMap::<ExactTokenMacroNode, u32>::default();
         let mut cache = FxHashMap::<(u32, usize, usize), u32>::default();
         let mut classes = Vec::with_capacity(self.c_state_count());
         for c_state in 0..self.c_state_count() {
@@ -2098,21 +2212,21 @@ impl ExactTokenMacroDfa {
             } else {
                 self.topology.state_map.representative_original_ids[c_state]
             };
-            let signature = (0..self.topology.tokens.len())
-                .map(|token_index| {
-                    self.node_id(
+            let signature = {
+                let mut signature = SmallVec::<[u32; 64]>::with_capacity(self.topology.tokens.len());
+                for token_index in 0..self.topology.tokens.len() {
+                    signature.push(self.swapped_node_id(
                         raw_start,
                         token_index,
                         0,
                         previous,
-                        Some((left, right)),
-                        Some(&identity.node_ids),
-                        &mut unused_nodes,
+                        (left, right),
+                        identity,
                         &mut cache,
-                    )
-                })
-                .collect::<Option<Vec<_>>>()?
-                .into_boxed_slice();
+                    )?);
+                }
+                signature
+            };
             classes.push(*identity
                 .state_classes
                 .get(&ExactTokenMacroStateSignature(signature))?);
@@ -2131,7 +2245,6 @@ impl ExactTokenMacroDfa {
         left: TerminalID,
         right: TerminalID,
     ) -> Option<Vec<u32>> {
-        let mut unused_nodes = FxHashMap::<ExactTokenMacroNode, u32>::default();
         let mut cache = FxHashMap::<(u32, usize, usize), u32>::default();
         let mut classes = Vec::with_capacity(identity.representative_by_class.len());
         for &c_state in &identity.representative_by_class {
@@ -2140,21 +2253,21 @@ impl ExactTokenMacroDfa {
             } else {
                 self.topology.state_map.representative_original_ids[c_state]
             };
-            let signature = (0..self.topology.tokens.len())
-                .map(|token_index| {
-                    self.node_id(
+            let signature = {
+                let mut signature = SmallVec::<[u32; 64]>::with_capacity(self.topology.tokens.len());
+                for token_index in 0..self.topology.tokens.len() {
+                    signature.push(self.swapped_node_id(
                         raw_start,
                         token_index,
                         0,
                         previous,
-                        Some((left, right)),
-                        Some(&identity.node_ids),
-                        &mut unused_nodes,
+                        (left, right),
+                        identity,
                         &mut cache,
-                    )
-                })
-                .collect::<Option<Vec<_>>>()?
-                .into_boxed_slice();
+                    )?);
+                }
+                signature
+            };
             classes.push(*identity
                 .state_classes
                 .get(&ExactTokenMacroStateSignature(signature))?);
