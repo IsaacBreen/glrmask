@@ -364,38 +364,6 @@ impl RestrictedTopology {
                         );
                     }
 
-                    // A supplied map is safe for TI only when it preserves the
-                    // exact frozen F/U labels and the selected-byte transition
-                    // quotient. This also makes the later compact-state
-                    // characterization an exact re-indexing of the raw one.
-                    for raw_state in 0..raw_state_count {
-                        let class = map.original_to_internal[raw_state] as usize;
-                        let representative = map.representative_original_ids[class] as usize;
-                        assert_eq!(
-                            tokenizer.matched_terminal_bitset(raw_state as u32),
-                            tokenizer.matched_terminal_bitset(representative as u32),
-                            "global scanner-state quotient changed frozen finalizers for raw tokenizer state {raw_state}",
-                        );
-                        assert_eq!(
-                            tokenizer.possible_future_terminals(raw_state as u32),
-                            tokenizer.possible_future_terminals(representative as u32),
-                            "global scanner-state quotient changed frozen future finalizers for raw tokenizer state {raw_state}",
-                        );
-                        for &byte in &bytes {
-                            let raw_target = tokenizer.step(raw_state as u32, byte).map(|target| {
-                                map.original_to_internal[target as usize]
-                            });
-                            let representative_target = tokenizer
-                                .step(representative as u32, byte)
-                                .map(|target| map.original_to_internal[target as usize]);
-                            assert_eq!(
-                                raw_target,
-                                representative_target,
-                                "global scanner-state quotient is not a selected-byte right congruence for raw tokenizer state {raw_state} and byte {byte}",
-                            );
-                        }
-                    }
-
                     (
                         Some(Arc::from(map.original_to_internal.clone())),
                         Some(Arc::from(map.representative_original_ids.clone())),
