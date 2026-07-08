@@ -1410,36 +1410,148 @@ fn token_macro_candidate_groups(
     active_terminals: &[bool],
     ignore_terminal: Option<TerminalID>,
 ) -> Vec<Vec<TerminalID>> {
-    let slot_count = topology
+    let output_slot_count = topology
         .tokens
         .iter()
         .map(|token| token.len() * 2)
         .sum::<usize>();
+    let root_match_slot_count = topology.tokens.iter().map(|token| token.len()).sum::<usize>();
+    let reset_match_slot_count = topology
+        .tokens
+        .iter()
+        .map(|token| token.len().saturating_sub(1) * token.len())
+        .sum::<usize>();
+    let reset_endpoint_slot_count = topology
+        .tokens
+        .iter()
+        .map(|token| token.len().saturating_sub(1) * 2)
+        .sum::<usize>();
+    let all_output_slot_count = output_slot_count;
+    let all_root_match_slot_count = root_match_slot_count;
+    let slot_count = output_slot_count
+        + root_match_slot_count
+        + reset_match_slot_count
+        + reset_endpoint_slot_count
+        + all_output_slot_count
+        + all_root_match_slot_count;
     let mut signatures = vec![vec![0u32; slot_count]; active_terminals.len()];
-    let mut token_offset = Vec::with_capacity(topology.tokens.len());
-    let mut offset = 0usize;
+
+    let mut output_token_offset = Vec::with_capacity(topology.tokens.len());
+    let mut root_match_token_offset = Vec::with_capacity(topology.tokens.len());
+    let mut reset_match_token_offset = Vec::with_capacity(topology.tokens.len());
+    let mut reset_endpoint_token_offset = Vec::with_capacity(topology.tokens.len());
+    let mut all_output_token_offset = Vec::with_capacity(topology.tokens.len());
+    let mut all_root_match_token_offset = Vec::with_capacity(topology.tokens.len());
+    let mut output_offset = 0usize;
+    let mut root_match_offset = output_slot_count;
+    let mut reset_match_offset = output_slot_count + root_match_slot_count;
+    let mut reset_endpoint_offset = output_slot_count + root_match_slot_count + reset_match_slot_count;
+    let mut all_output_offset = reset_endpoint_offset + reset_endpoint_slot_count;
+    let mut all_root_match_offset = all_output_offset + all_output_slot_count;
     for token in &topology.tokens {
-        token_offset.push(offset);
-        offset += token.len() * 2;
+        output_token_offset.push(output_offset);
+        root_match_token_offset.push(root_match_offset);
+        reset_match_token_offset.push(reset_match_offset);
+        reset_endpoint_token_offset.push(reset_endpoint_offset);
+        all_output_token_offset.push(all_output_offset);
+        all_root_match_token_offset.push(all_root_match_offset);
+        output_offset += token.len() * 2;
+        root_match_offset += token.len();
+        reset_match_offset += token.len().saturating_sub(1) * token.len();
+        reset_endpoint_offset += token.len().saturating_sub(1) * 2;
+        all_output_offset += token.len() * 2;
+        all_root_match_offset += token.len();
     }
+
     for (state, &reachable) in topology.reachable.iter().enumerate() {
         if !reachable {
             continue;
         }
         for action in 0..topology.tokens.len() {
             let edge = topology.edge(state, action);
-            let offset = token_offset[action];
+            let output_offset = output_token_offset[action];
             for (byte_index, &raw_state) in edge.output_states.iter().enumerate() {
                 let output = outputs.at(raw_state);
                 for &terminal in &output.finalizers.0 {
-                    signatures[terminal as usize][offset + byte_index * 2] += 1;
+                    signatures[terminal as usize][output_offset + byte_index * 2] += 1;
                 }
                 for &terminal in &output.future_finalizers.0 {
-                    signatures[terminal as usize][offset + byte_index * 2 + 1] += 1;
+                    signatures[terminal as usize][output_offset + byte_index * 2 + 1] += 1;
+                }
+            }
+
+            // A rooted token-macro isomorphism preserves the token action and
+            // the reset suffix offset reached by each terminal edge.  Counting
+            // active terminal matches at these positions is therefore a cheap
+            // exact rejection invariant before constructing the full macro DAG.
+            let root_offset = root_match_token_offset[action];
+            for &(terminal, next_offset) in topology.root_scans[state * topology.tokens.len() + action]
+                .longest_matches
+                .iter()
+            {
+                if outputs.terminal_is_active(terminal) {
+                    signatures[terminal as usize][root_offset + next_offset - 1] += 1;
                 }
             }
         }
     }
+
+    // Root reachability is the strongest cheap root observation, but accepted
+    // macro transports also have to map the whole scanner-coordinate domain.
+    // A second aggregate over every C source class cheaply exposes many pairs
+    // that only differ in unreachable macro classes. It is intentionally still
+    // only a prefilter: all surviving pairs pass the exact certificate below.
+    for state in 0..topology.state_map.representative_original_ids.len() {
+        for action in 0..topology.tokens.len() {
+            let edge = topology.edge(state, action);
+            let output_offset = all_output_token_offset[action];
+            for (byte_index, &raw_state) in edge.output_states.iter().enumerate() {
+                let output = outputs.at(raw_state);
+                for &terminal in &output.finalizers.0 {
+                    signatures[terminal as usize][output_offset + byte_index * 2] += 1;
+                }
+                for &terminal in &output.future_finalizers.0 {
+                    signatures[terminal as usize][output_offset + byte_index * 2 + 1] += 1;
+                }
+            }
+            let root_offset = all_root_match_token_offset[action];
+            for &(terminal, next_offset) in topology.root_scans[state * topology.tokens.len() + action]
+                .longest_matches
+                .iter()
+            {
+                if outputs.terminal_is_active(terminal) {
+                    signatures[terminal as usize][root_offset + next_offset - 1] += 1;
+                }
+            }
+        }
+    }
+
+    for (action, suffix_scans) in topology.reset_suffix_scans.iter().enumerate() {
+        let token_len = topology.tokens[action].len();
+        let token_match_offset = reset_match_token_offset[action];
+        let token_endpoint_offset = reset_endpoint_token_offset[action];
+        for offset in 1..token_len {
+            let scan = &suffix_scans[offset];
+            for &(terminal, next_offset) in scan.longest_matches.iter() {
+                if outputs.terminal_is_active(terminal) {
+                    signatures[terminal as usize]
+                        [token_match_offset + (offset - 1) * token_len + next_offset - 1] += 1;
+                }
+            }
+            if let Some(endpoint) = scan.endpoint {
+                let output = outputs.at(endpoint);
+                for &terminal in &output.finalizers.0 {
+                    signatures[terminal as usize]
+                        [token_endpoint_offset + (offset - 1) * 2] += 1;
+                }
+                for &terminal in &output.future_finalizers.0 {
+                    signatures[terminal as usize]
+                        [token_endpoint_offset + (offset - 1) * 2 + 1] += 1;
+                }
+            }
+        }
+    }
+
     let mut groups = FxHashMap::<Vec<u32>, Vec<TerminalID>>::default();
     for (terminal, &active) in active_terminals.iter().enumerate() {
         if active && Some(terminal as TerminalID) != ignore_terminal {
