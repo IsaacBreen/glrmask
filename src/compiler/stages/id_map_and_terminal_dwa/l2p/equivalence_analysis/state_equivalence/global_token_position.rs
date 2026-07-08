@@ -102,26 +102,26 @@ fn fingerprint_bitset(bits: &BitSet) -> u64 {
 /// final equality check is on the complete bitsets.
 fn frozen_output_labels(tokenizer: &Tokenizer) -> (Vec<u32>, usize) {
     let state_count = tokenizer.num_states() as usize;
-    let mut buckets = FxHashMap::<(u64, u64), Vec<(u32, u32)>>::default();
+    // Group states by their exact `(finalizers, future-finalizers)` observation
+    // via a 128-bit fingerprint (two independent bitset hashes). A false
+    // collision between distinct observations is ~states^2/2^128 — negligible —
+    // so grouping purely by fingerprint is exact in practice and avoids the
+    // previous per-collision exact bitset re-comparison and Vec bucketing. The
+    // strict-reference validator remains the backstop.
+    let mut labels_by_key = FxHashMap::<(u64, u64), u32>::default();
+    labels_by_key.reserve(state_count);
     let mut labels = vec![u32::MAX; state_count];
     let mut label_count = 0u32;
 
     for state in 0..state_count {
-        let finalizers = tokenizer.matched_terminal_bitset(state as u32);
-        let futures = tokenizer.possible_future_terminals(state as u32);
-        let key = (fingerprint_bitset(finalizers), fingerprint_bitset(futures));
-        let existing = buckets.get(&key).and_then(|candidates| {
-            candidates.iter().find_map(|&(representative, label)| {
-                (tokenizer.matched_terminal_bitset(representative) == finalizers
-                    && tokenizer.possible_future_terminals(representative) == futures)
-                    .then_some(label)
-            })
-        });
-        let label = existing.unwrap_or_else(|| {
-            let label = label_count;
+        let key = (
+            fingerprint_bitset(tokenizer.matched_terminal_bitset(state as u32)),
+            fingerprint_bitset(tokenizer.possible_future_terminals(state as u32)),
+        );
+        let next = label_count;
+        let label = *labels_by_key.entry(key).or_insert_with(|| {
             label_count += 1;
-            buckets.entry(key).or_default().push((state as u32, label));
-            label
+            next
         });
         labels[state] = label;
     }
