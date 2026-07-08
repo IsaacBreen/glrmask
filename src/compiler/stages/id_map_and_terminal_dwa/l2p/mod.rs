@@ -131,13 +131,8 @@ fn l2p_terminal_interchangeability_enabled() -> bool {
             .unwrap_or(true)
 }
 
-fn l2p_terminal_interchangeability_bypassed_for_partition(partition_label: &str) -> bool {
-    partition_label == "p8"
-}
-
-fn l2p_terminal_interchangeability_enabled_for_partition(partition_label: &str) -> bool {
+fn l2p_terminal_interchangeability_enabled_for_partition(_partition_label: &str) -> bool {
     l2p_terminal_interchangeability_enabled()
-        && !l2p_terminal_interchangeability_bypassed_for_partition(partition_label)
 }
 
 /// Rebuild the TI-off local artifact and symbolically compare it with TI-on.
@@ -1069,10 +1064,10 @@ mod ti_mre_tests {
     }
 
     #[test]
-    fn p8_bypasses_terminal_interchangeability_when_globally_enabled() {
+    fn p8_uses_terminal_interchangeability_when_globally_enabled() {
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
         let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
-        assert!(!super::l2p_terminal_interchangeability_enabled_for_partition("p8"));
+        assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p8"));
     }
 
     #[test]
