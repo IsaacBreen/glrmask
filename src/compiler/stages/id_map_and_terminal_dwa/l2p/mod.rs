@@ -43,9 +43,7 @@ use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nod
 use terminal_interchangeability::{
     active_terminals_for_partition, binary_transport_modes_from_witnesses,
     canonicalize_transport_mode_states, coalesced_disallowed_follows,
-    discover_one_round_with_token_macro_context,
     discover_one_round_with_transport_witnesses_in_context, fold_one_round_partition,
-    TokenMacroDiscoveryContext,
     expand_representative_dwa_after_minimization, partition_has_merges,
     restrict_weights_to_forward_domains_in_place, restore_raw_follow_constraints_after_expansion,
     singleton_partition, transport_coordinate_quotient, visible_output_raw_labels,
@@ -252,6 +250,19 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     }
 
     let token_position_partition_started_at = l2p_timing_profile_enabled().then(Instant::now);
+    // Byte-valid global token-position quotient C. `compute_..._state_quotient`
+    // closes the A∧B token-position seed to a stable right congruence, which
+    // makes it sound to feed directly into the byte-level TI oracle (unlike the
+    // raw token-boundary partition, which is only exact at token boundaries).
+    let global_state_quotient = (l2p_global_token_position_enabled()
+        && matches!(partition_label, "p7" | "p8"))
+        .then(|| {
+            equivalence_analysis::state_equivalence::global_token_position::
+                compute_global_token_position_state_quotient(tokenizer, vocab)
+                .0
+        });
+    // The token-boundary partition is still consumed by the representative-core
+    // equivalence-analysis path below; keep computing it for that consumer.
     let token_position_partition = (l2p_global_token_position_enabled()
         && matches!(partition_label, "p7" | "p8"))
         .then(|| {
@@ -267,10 +278,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             "[glrmask/profile][global_token_position_partition] partition={} raw_states={} representatives={} enabled={} build_ms={:.3}",
             partition_label,
             num_original_states,
-            token_position_partition.as_ref().map_or(0, |partition| {
-                partition.as_many_to_one().representative_original_ids.len()
+            global_state_quotient.as_ref().map_or(0, |quotient| {
+                quotient.as_many_to_one().representative_original_ids.len()
             }),
-            token_position_partition.is_some(),
+            global_state_quotient.is_some(),
             token_position_partition_ms,
         );
     }
@@ -288,47 +299,27 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         if l2p_terminal_interchangeability_enabled_for_partition(partition_label) {
             let mut active = active_terminals.to_vec();
             let mut classes = singleton_partition(&active);
-            let use_token_position_ti = matches!(partition_label, "p7" | "p8")
-                && token_position_partition.is_some();
-            let token_macro_context = use_token_position_ti
-                .then(|| {
-                    TokenMacroDiscoveryContext::new(
-                        tokenizer,
-                        vocab,
-                        token_position_partition
-                            .as_ref()
-                            .expect("token-position TI must retain its C partition"),
-                    )
-                })
-                .flatten();
-            let use_token_position_ti = use_token_position_ti && token_macro_context.is_some();
-            // Token-position TI owns its complete reset-aware observer. The
-            // generic byte-level context is expensive and unused on this path.
-            let discovery_context = (!use_token_position_ti)
-                .then(|| TiDiscoveryContext::new(tokenizer, &relevant_bytes));
+            // Always use the byte-level exact discovery oracle. When the global
+            // token-position quotient C is available (p7/p8), build discovery
+            // evidence over C representatives; otherwise over raw states.
+            let discovery_context = match global_state_quotient.as_ref() {
+                Some(quotient) => TiDiscoveryContext::new_with_global_state_quotient(
+                    tokenizer,
+                    &relevant_bytes,
+                    quotient,
+                ),
+                None => TiDiscoveryContext::new(tokenizer, &relevant_bytes),
+            };
             let mut transport_witness_rounds = Vec::new();
             let mut round_count = 0usize;
             let mut first_round_class_count = None;
             loop {
-                let round = if use_token_position_ti {
-                    discover_one_round_with_token_macro_context(
-                        tokenizer,
-                        token_macro_context
-                            .as_ref()
-                            .expect("token-position TI must retain its macro context"),
-                        &active,
-                        ignore_terminal,
-                    )
-                } else {
-                    discover_one_round_with_transport_witnesses_in_context(
-                        tokenizer,
-                        &active,
-                        discovery_context
-                            .as_ref()
-                            .expect("generic TI must retain its discovery context"),
-                        ignore_terminal,
-                    )
-                };
+                let round = discover_one_round_with_transport_witnesses_in_context(
+                    tokenizer,
+                    &active,
+                    &discovery_context,
+                    ignore_terminal,
+                );
                 let next_active = active_terminals_for_partition(&round.partition, active.len());
                 let next_classes = fold_one_round_partition(&classes, &round.partition);
                 round_count += 1;
