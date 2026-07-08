@@ -1166,6 +1166,9 @@ struct TokenMacroTopology {
 
 pub(crate) struct TokenMacroDiscoveryContext {
     topology: Arc<TokenMacroTopology>,
+    /// Round-invariant per-terminal candidate signatures, computed once with
+    /// every terminal active and reused for every round's candidate grouping.
+    candidate_signatures: std::sync::OnceLock<Vec<Vec<u32>>>,
 }
 
 impl TokenMacroDiscoveryContext {
@@ -1175,7 +1178,10 @@ impl TokenMacroDiscoveryContext {
         partition: &GlobalTokenPositionStatePartition,
     ) -> Option<Self> {
         TokenMacroTopology::new(tokenizer, vocab, partition)
-            .map(|topology| Self { topology: Arc::new(topology) })
+            .map(|topology| Self {
+                topology: Arc::new(topology),
+                candidate_signatures: std::sync::OnceLock::new(),
+            })
     }
 }
 
@@ -1404,12 +1410,17 @@ fn macro_edge_matches_after_swap(
             })
 }
 
-fn token_macro_candidate_groups(
+/// Per-terminal exact rejection signatures for token-macro TI candidate
+/// grouping.  A terminal's signature counts only its *own* occurrences at each
+/// (action, position) slot, so it is invariant across TI rounds for any
+/// terminal that stays active: shrinking the active set never changes an active
+/// terminal's counts.  The signatures are therefore computed once (with every
+/// terminal active) and reused for every round's grouping.
+fn compute_candidate_signatures(
     topology: &TokenMacroTopology,
     outputs: &TokenMacroRoundOutputs,
-    active_terminals: &[bool],
-    ignore_terminal: Option<TerminalID>,
-) -> Vec<Vec<TerminalID>> {
+    num_terminals: usize,
+) -> Vec<Vec<u32>> {
     let output_slot_count = topology
         .tokens
         .iter()
@@ -1434,7 +1445,7 @@ fn token_macro_candidate_groups(
         + reset_endpoint_slot_count
         + all_output_slot_count
         + all_root_match_slot_count;
-    let mut signatures = vec![vec![0u32; slot_count]; active_terminals.len()];
+    let mut signatures = vec![vec![0u32; slot_count]; num_terminals];
 
     let mut output_token_offset = Vec::with_capacity(topology.tokens.len());
     let mut root_match_token_offset = Vec::with_capacity(topology.tokens.len());
@@ -1552,11 +1563,21 @@ fn token_macro_candidate_groups(
         }
     }
 
-    let mut groups = FxHashMap::<Vec<u32>, Vec<TerminalID>>::default();
+    signatures
+}
+
+/// Group active terminals by identical precomputed rejection signature.  Only
+/// groups of 2+ terminals can possibly interchange, so singletons are dropped.
+fn token_macro_candidate_groups_from_signatures(
+    signatures: &[Vec<u32>],
+    active_terminals: &[bool],
+    ignore_terminal: Option<TerminalID>,
+) -> Vec<Vec<TerminalID>> {
+    let mut groups = FxHashMap::<&[u32], Vec<TerminalID>>::default();
     for (terminal, &active) in active_terminals.iter().enumerate() {
         if active && Some(terminal as TerminalID) != ignore_terminal {
             groups
-                .entry(std::mem::take(&mut signatures[terminal]))
+                .entry(signatures[terminal].as_slice())
                 .or_default()
                 .push(terminal as TerminalID);
         }
@@ -2721,19 +2742,24 @@ pub(crate) fn discover_one_round_with_token_macro_context(
     }
     let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
     let started_at = profile_timing.then(Instant::now);
-    let outputs = TokenMacroRoundOutputs::new(tokenizer, active_terminals);
-    let candidate_groups = token_macro_candidate_groups(
-        &topology,
-        &outputs,
-        active_terminals,
-        ignore_terminal,
-    );
-    // `token_macro_candidate_groups` keeps only groups of 2+ terminals whose
-    // exact rejection signatures collide. The signature is a necessary
-    // condition for interchangeability, so an empty result proves no merge is
-    // possible this round. Skip the expensive `ExactTokenMacroDfa` build (and
-    // its identity-round refinement) entirely; this eliminates the no-op
-    // fixed-point round that otherwise rebuilds the full macro DAG.
+    let signatures = context.candidate_signatures.get_or_init(|| {
+        // Signatures are round-invariant, so compute them once with every
+        // terminal active and reuse for every round. Building the full-active
+        // outputs here also keeps the no-op rounds from paying for a fresh
+        // per-round `TokenMacroRoundOutputs` scan of all raw states.
+        let all_active = vec![true; active_terminals.len()];
+        let full_outputs = TokenMacroRoundOutputs::new(tokenizer, &all_active);
+        compute_candidate_signatures(&topology, &full_outputs, active_terminals.len())
+    });
+    let candidate_groups =
+        token_macro_candidate_groups_from_signatures(signatures, active_terminals, ignore_terminal);
+    // `token_macro_candidate_groups_from_signatures` keeps only groups of 2+
+    // terminals whose exact rejection signatures collide. The signature is a
+    // necessary condition for interchangeability, so an empty result proves no
+    // merge is possible this round. Skip both the per-round outputs scan and
+    // the expensive `ExactTokenMacroDfa` build (and its identity-round
+    // refinement) entirely; this eliminates the no-op fixed-point round that
+    // otherwise rebuilds the full macro DAG.
     if candidate_groups.is_empty() {
         if profile_timing {
             eprintln!(
@@ -2747,6 +2773,7 @@ pub(crate) fn discover_one_round_with_token_macro_context(
         }
         return TiRoundTransportWitnesses::singleton(active_terminals);
     }
+    let outputs = TokenMacroRoundOutputs::new(tokenizer, active_terminals);
     let macro_dfa = ExactTokenMacroDfa::new(topology, outputs);
     let macro_identity_classes = macro_dfa
         .identity_rounds
