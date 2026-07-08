@@ -43,11 +43,12 @@ use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nod
 use terminal_interchangeability::{
     active_terminals_for_partition, binary_transport_modes_from_witnesses,
     canonicalize_transport_mode_states, coalesced_disallowed_follows,
+    discover_one_round_with_token_actions_in_context,
     discover_one_round_with_transport_witnesses_in_context, fold_one_round_partition,
     expand_representative_dwa_after_minimization, partition_has_merges,
     restrict_weights_to_forward_domains_in_place, restore_raw_follow_constraints_after_expansion,
     singleton_partition, transport_coordinate_quotient, visible_output_raw_labels,
-    TiDiscoveryContext,
+    TiDiscoveryContext, TokenActionContext,
 };
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
@@ -107,7 +108,17 @@ fn l2p_terminal_interchangeability_enabled() -> bool {
 }
 
 fn l2p_terminal_interchangeability_bypassed_for_partition(partition_label: &str) -> bool {
-    partition_label == "p8"
+    partition_label == "p8" && !l2p_token_action_ti_enabled_for_partition(partition_label)
+}
+
+fn l2p_token_action_ti_enabled_for_partition(partition_label: &str) -> bool {
+    matches!(partition_label, "p7" | "p8")
+        && std::env::var("GLRMASK_L2P_TOKEN_ACTION_TI")
+            .map(|value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false)
 }
 
 fn l2p_terminal_interchangeability_enabled_for_partition(partition_label: &str) -> bool {
@@ -187,6 +198,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
+    token_action_vocab: Option<&Vocab>,
     terminal_coloring: &TerminalColoring,
     use_terminal_coloring: bool,
     ignore_terminal: Option<TerminalID>,
@@ -228,17 +240,37 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         if l2p_terminal_interchangeability_enabled_for_partition(partition_label) {
             let mut active = active_terminals.to_vec();
             let mut classes = singleton_partition(&active);
-            let discovery_context = TiDiscoveryContext::new(tokenizer, &relevant_bytes);
+            let token_action_context = l2p_token_action_ti_enabled_for_partition(partition_label)
+                .then(|| {
+                    TokenActionContext::new(
+                        tokenizer,
+                        token_action_vocab.unwrap_or(vocab),
+                        &active,
+                    )
+                })
+                .flatten();
+            let discovery_context = token_action_context
+                .is_none()
+                .then(|| TiDiscoveryContext::new(tokenizer, &relevant_bytes));
             let mut transport_witness_rounds = Vec::new();
             let mut round_count = 0usize;
             let mut first_round_class_count = None;
             loop {
-                let round = discover_one_round_with_transport_witnesses_in_context(
-                    tokenizer,
-                    &active,
-                    &discovery_context,
-                    ignore_terminal,
-                );
+                let round = if let Some(context) = token_action_context.as_ref() {
+                    discover_one_round_with_token_actions_in_context(
+                        tokenizer,
+                        &active,
+                        context,
+                        ignore_terminal,
+                    )
+                } else {
+                    discover_one_round_with_transport_witnesses_in_context(
+                        tokenizer,
+                        &active,
+                        discovery_context.as_ref().expect("raw TI context must exist"),
+                        ignore_terminal,
+                    )
+                };
                 let next_active = active_terminals_for_partition(&round.partition, active.len());
                 let next_classes = fold_one_round_partition(&classes, &round.partition);
                 round_count += 1;
@@ -875,6 +907,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 partition_label,
                 tokenizer,
                 vocab,
+                token_action_vocab,
                 terminal_coloring,
                 use_terminal_coloring,
                 ignore_terminal,

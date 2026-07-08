@@ -27,6 +27,7 @@ use crate::compiler::stages::equiv_types::{GlobalScannerStateQuotient, ManyToOne
 use crate::ds::weight::{SharedTokenSet, Weight, shared_rangeset};
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
+use crate::Vocab;
 
 const CHARACTERIZATION_DOMAIN: &[u8] =
     b"glrmask terminal interchangeability characterize v1\0";
@@ -673,6 +674,1244 @@ impl TiDiscoveryContext {
     }
 }
 
+// Token-action TI is deliberately separate from byte-TI.  It reasons only
+// about actual vocabulary tokens and reset-reachable suffixes, which is the
+// language the transport NWA can scan after it applies a map at a root/reset.
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TokenActionEvent {
+    terminal: TerminalID,
+    positions: u16,
+}
+
+#[derive(Clone, Debug)]
+struct TokenAction {
+    next_state: u32,
+    end_raw_state: u32,
+    events: SmallVec<[TokenActionEvent; 2]>,
+}
+
+#[derive(Default)]
+struct TokenActionSuffixTrieNode {
+    children: SmallVec<[(u8, u32); 4]>,
+    symbol: Option<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct TokenActionRef<'a> {
+    next_state: u32,
+    end_raw_state: u32,
+    events: &'a [TokenActionEvent],
+}
+
+#[inline]
+fn token_event_positions(events: &[TokenActionEvent], terminal: TerminalID) -> u16 {
+    events
+        .binary_search_by_key(&terminal, |event| event.terminal)
+        .ok()
+        .map(|index| events[index].positions)
+        .unwrap_or(0)
+}
+
+fn token_action_trie_node_count(symbols: &[Box<[u8]>], selected_symbols: &[usize]) -> usize {
+    let mut trie = vec![TokenActionSuffixTrieNode::default()];
+    for &symbol in selected_symbols {
+        let mut node = 0usize;
+        for &byte in symbols[symbol].iter() {
+            let child = trie[node]
+                .children
+                .iter()
+                .find(|&&(candidate, _)| candidate == byte)
+                .map(|&(_, child)| child)
+                .unwrap_or_else(|| {
+                    let child = trie.len() as u32;
+                    trie.push(TokenActionSuffixTrieNode::default());
+                    trie[node].children.push((byte, child));
+                    child
+                });
+            node = child as usize;
+        }
+    }
+    trie.len()
+}
+
+/// Compact exact action table over first-byte destination classes.  For every
+/// nonempty token, all members of one class take the identical raw path after
+/// byte one, including every terminal match along that path.
+pub(crate) struct TokenActionContext {
+    raw_state_count: usize,
+    class_for_raw: Arc<[u32]>,
+    representative_raw_by_class: Arc<[u32]>,
+    state_count: usize,
+    dead_state: u32,
+    symbols: Arc<[Box<[u8]>]>,
+    full_symbol_for_token: Arc<[u32]>,
+    suffix_symbol_after_full_byte: Arc<[Box<[u32]>]>,
+    actions: Arc<[TokenAction]>,
+    profile: TokenActionContextProfile,
+}
+
+#[derive(Clone, Copy, Default)]
+struct TokenActionContextProfile {
+    first_byte_class_ms: f64,
+    symbol_intern_ms: f64,
+    suffix_trie_ms: f64,
+    action_build_ms: f64,
+    suffix_trie_nodes: usize,
+    full_token_trie_nodes: usize,
+}
+
+/// Identity quotient and sparse swap verifier over the token-action machine.
+/// The state quotient is constructed once per TI round; candidate swaps then
+/// inspect only the output-support cone they can affect.
+struct TokenActionDfa<'a> {
+    context: &'a TokenActionContext,
+    tokenizer: &'a Tokenizer,
+    active_terminals: &'a [bool],
+    output_ids: Box<[u32]>,
+    class_for_state: Box<[u32]>,
+    representative_state_by_class: Box<[u32]>,
+    raw_class_for_original: Arc<[u32]>,
+    raw_representative_for_class: Arc<[u32]>,
+    reverse_predecessors: Vec<Vec<u32>>,
+    root_class: u32,
+    terminal_signature: Vec<u64>,
+    terminal_supports: Vec<BitSet>,
+    event_state_signature: Box<[u64]>,
+    terminal_occurrences: Vec<Box<[(u32, u32)]>>,
+    future_by_raw_state: Vec<Option<OutputBits>>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+struct TerminalActionKey {
+    left: u64,
+    right: u64,
+}
+
+impl TokenActionContext {
+    fn supported_for_vocab(vocab: &Vocab) -> bool {
+        !vocab.entries.is_empty()
+            && vocab.entries.len() <= 128
+            && vocab.entries.values().all(|bytes| !bytes.is_empty() && bytes.len() <= 15)
+    }
+
+    pub(crate) fn new(
+        tokenizer: &Tokenizer,
+        vocab: &Vocab,
+        initially_active_terminals: &[bool],
+    ) -> Option<Self> {
+        if !Self::supported_for_vocab(vocab) {
+            return None;
+        }
+        let full_tokens = vocab.entries.values().cloned().collect::<Vec<_>>();
+        let mut first_bytes = full_tokens.iter().map(|bytes| bytes[0]).collect::<Vec<_>>();
+        first_bytes.sort_unstable();
+        first_bytes.dedup();
+
+        let first_byte_class_started_at = Instant::now();
+        let raw_state_count = tokenizer.num_states() as usize;
+        let mut class_for_raw = vec![u32::MAX; raw_state_count];
+        let mut representative_raw_by_class = Vec::<u32>::new();
+        let mut classes_by_first_destinations = FxHashMap::<Vec<u32>, u32>::default();
+        for raw_state in 0..raw_state_count {
+            let destinations = first_bytes
+                .iter()
+                .map(|&byte| tokenizer.step(raw_state as u32, byte).unwrap_or(u32::MAX))
+                .collect::<Vec<_>>();
+            let class = match classes_by_first_destinations.entry(destinations) {
+                Entry::Occupied(entry) => *entry.get(),
+                Entry::Vacant(entry) => {
+                    let class = representative_raw_by_class.len() as u32;
+                    representative_raw_by_class.push(raw_state as u32);
+                    entry.insert(class);
+                    class
+                }
+            };
+            class_for_raw[raw_state] = class;
+        }
+        let state_count = representative_raw_by_class.len();
+        let dead_state = state_count as u32;
+        let first_byte_class_ms = first_byte_class_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        let symbol_intern_started_at = Instant::now();
+        let mut symbol_ids = FxHashMap::<Vec<u8>, u32>::default();
+        let mut symbols = Vec::<Box<[u8]>>::new();
+        let mut full_symbol_for_token = Vec::<u32>::with_capacity(full_tokens.len());
+        let mut suffix_symbol_after_full_byte = Vec::<Box<[u32]>>::with_capacity(full_tokens.len());
+        for bytes in &full_tokens {
+            let mut suffixes = Vec::<u32>::with_capacity(bytes.len());
+            for start in 0..bytes.len() {
+                let suffix = bytes[start..].to_vec();
+                let id = match symbol_ids.entry(suffix.clone()) {
+                    Entry::Occupied(entry) => *entry.get(),
+                    Entry::Vacant(entry) => {
+                        let id = symbols.len() as u32;
+                        symbols.push(suffix.into_boxed_slice());
+                        entry.insert(id);
+                        id
+                    }
+                };
+                suffixes.push(id);
+            }
+            full_symbol_for_token.push(suffixes[0]);
+            suffix_symbol_after_full_byte.push(suffixes.into_boxed_slice());
+        }
+        let symbol_intern_ms = symbol_intern_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        // Every action symbol is a nonempty suffix of an actual vocabulary
+        // token. Rather than rescan every suffix independently, walk their
+        // shared prefix trie once from each first-byte state class.
+        let suffix_trie_started_at = Instant::now();
+        let mut suffix_trie = vec![TokenActionSuffixTrieNode::default()];
+        for (symbol, bytes) in symbols.iter().enumerate() {
+            let mut node = 0usize;
+            for &byte in bytes.iter() {
+                let child = suffix_trie[node]
+                    .children
+                    .iter()
+                    .find(|&&(candidate, _)| candidate == byte)
+                    .map(|&(_, child)| child);
+                let child = child.unwrap_or_else(|| {
+                    let child = suffix_trie.len() as u32;
+                    suffix_trie.push(TokenActionSuffixTrieNode::default());
+                    suffix_trie[node].children.push((byte, child));
+                    child
+                });
+                node = child as usize;
+            }
+            assert!(suffix_trie[node].symbol.replace(symbol as u32).is_none());
+        }
+        let suffix_trie_nodes = suffix_trie.len();
+        let suffix_trie_ms = suffix_trie_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        let symbol_count = symbols.len();
+        let action_build_started_at = Instant::now();
+        let mut actions = Vec::<TokenAction>::with_capacity(state_count * symbol_count);
+        for &raw_start in &representative_raw_by_class {
+            let mut state_actions = (0..symbol_count)
+                .map(|_| None::<TokenAction>)
+                .collect::<Vec<_>>();
+            let mut pending = Vec::<(usize, u32, bool, usize, SmallVec<[TokenActionEvent; 2]>)>::new();
+            pending.push((0, raw_start, true, 0, SmallVec::new()));
+            while let Some((node, raw_state, alive, depth, events)) = pending.pop() {
+                if let Some(symbol) = suffix_trie[node].symbol {
+                    let mut action_events = events.clone();
+                    action_events.sort_unstable_by_key(|event| event.terminal);
+                    let (next_state, end_raw_state) = if alive {
+                        (class_for_raw[raw_state as usize], raw_state)
+                    } else {
+                        (dead_state, u32::MAX)
+                    };
+                    state_actions[symbol as usize] = Some(TokenAction {
+                        next_state,
+                        end_raw_state,
+                        events: action_events,
+                    });
+                }
+                for &(byte, child) in suffix_trie[node].children.iter().rev() {
+                    let mut child_events = events.clone();
+                    let (child_raw_state, child_alive) = if alive {
+                        match tokenizer.step(raw_state, byte) {
+                            Some(next) => {
+                                let position_bit = 1u16 << depth;
+                                for terminal in tokenizer.matched_terminals_iter(next) {
+                                    if !initially_active_terminals
+                                        .get(terminal as usize)
+                                        .copied()
+                                        .unwrap_or(false)
+                                    {
+                                        continue;
+                                    }
+                                    if let Some(event) = child_events
+                                        .iter_mut()
+                                        .find(|event| event.terminal == terminal)
+                                    {
+                                        event.positions |= position_bit;
+                                    } else {
+                                        child_events.push(TokenActionEvent {
+                                            terminal,
+                                            positions: position_bit,
+                                        });
+                                    }
+                                }
+                                (next, true)
+                            }
+                            None => (raw_state, false),
+                        }
+                    } else {
+                        (raw_state, false)
+                    };
+                    pending.push((
+                        child as usize,
+                        child_raw_state,
+                        child_alive,
+                        depth + 1,
+                        child_events,
+                    ));
+                }
+            }
+            actions.extend(
+                state_actions
+                    .into_iter()
+                    .map(|action| action.expect("every suffix-trie terminal must produce one action")),
+            );
+        }
+        let action_build_ms = action_build_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        let full_token_old_symbols = full_symbol_for_token
+            .iter()
+            .map(|&symbol| symbol as usize)
+            .collect::<Vec<_>>();
+        let full_token_trie_nodes = token_action_trie_node_count(&symbols, &full_token_old_symbols);
+        Some(Self {
+            raw_state_count,
+            class_for_raw: class_for_raw.into(),
+            representative_raw_by_class: representative_raw_by_class.into(),
+            state_count,
+            dead_state,
+            symbols: symbols.into(),
+            full_symbol_for_token: full_symbol_for_token.into(),
+            suffix_symbol_after_full_byte: suffix_symbol_after_full_byte.into(),
+            actions: actions.into(),
+            profile: TokenActionContextProfile {
+                first_byte_class_ms,
+                symbol_intern_ms,
+                suffix_trie_ms,
+                action_build_ms,
+                suffix_trie_nodes,
+                full_token_trie_nodes,
+            },
+        })
+    }
+
+    #[inline]
+    fn action(&self, state: u32, symbol: u32) -> TokenActionRef<'_> {
+        if state == self.dead_state {
+            return TokenActionRef {
+                next_state: self.dead_state,
+                end_raw_state: u32::MAX,
+                events: &[],
+            };
+        }
+        let index = state as usize * self.symbols.len() + symbol as usize;
+        let action = &self.actions[index];
+        TokenActionRef {
+            next_state: action.next_state,
+            end_raw_state: action.end_raw_state,
+            events: &action.events,
+        }
+    }
+
+    fn root_candidate_groups(
+        &self,
+        tokenizer: &Tokenizer,
+        active_terminals: &[bool],
+        ignore_terminal: Option<TerminalID>,
+    ) -> BTreeMap<u64, Vec<TerminalID>> {
+        let root = self.class_for_raw[tokenizer.initial_state_id() as usize];
+        let mut groups = BTreeMap::<u64, Vec<TerminalID>>::new();
+        for (terminal, &active) in active_terminals.iter().enumerate() {
+            let terminal = terminal as TerminalID;
+            if !active || Some(terminal) == ignore_terminal {
+                continue;
+            }
+            let mut hash = 0x510e_527f_ade6_82d1;
+            for symbol in 0..self.symbols.len() as u32 {
+                let action = self.action(root, symbol);
+                let positions = token_event_positions(action.events, terminal);
+                let future_contains = action.end_raw_state != u32::MAX
+                    && tokenizer
+                        .possible_future_terminals(action.end_raw_state)
+                        .contains(terminal as usize);
+                hash = token_action_hash_mix(
+                    hash,
+                    ((symbol as u64) << 17) | ((future_contains as u64) << 16) | positions as u64,
+                );
+            }
+            groups.entry(hash).or_default().push(terminal);
+        }
+        groups
+    }
+
+    fn symbols_for_member_pair(
+        &self,
+        active_terminals: &[bool],
+        member: TerminalID,
+        representative: TerminalID,
+    ) -> Vec<u32> {
+        let mut selected = self.full_symbol_for_token.to_vec();
+        for (token_index, &full_symbol) in self.full_symbol_for_token.iter().enumerate() {
+            let suffixes = &self.suffix_symbol_after_full_byte[token_index];
+            for state in 0..self.state_count as u32 {
+                let action = self.action(state, full_symbol);
+                let mut positions = token_event_positions(action.events, member)
+                    | token_event_positions(action.events, representative);
+                for event in action.events {
+                    if active_terminals
+                        .get(event.terminal as usize)
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        positions |= event.positions;
+                    }
+                }
+                for position in 0..suffixes.len().saturating_sub(1) {
+                    if positions & (1u16 << position) != 0 {
+                        let suffix = suffixes[position + 1];
+                        debug_assert_ne!(
+                            suffix,
+                            u32::MAX,
+                            "reset-closed token-action alphabet omitted a reachable suffix",
+                        );
+                        if suffix != u32::MAX {
+                            selected.push(suffix);
+                        }
+                    }
+                }
+            }
+        }
+        selected.sort_unstable();
+        selected.dedup();
+        selected
+    }
+
+    /// Build a directed member -> representative transport map.  The source
+    /// side observes only `member`; the target side observes only
+    /// `representative`.  Their disjoint-union DFA is minimized exactly over
+    /// full tokens plus suffixes reachable after either terminal matches.
+    fn member_to_representative_map(
+        &self,
+        tokenizer: &Tokenizer,
+        active_terminals: &[bool],
+        member: TerminalID,
+        representative: TerminalID,
+    ) -> Option<TransportScannerStateMap> {
+        let symbols = self.symbols_for_member_pair(active_terminals, member, representative);
+        let side_state_count = self.state_count + 1;
+        let total_state_count = side_state_count * 2;
+        let width = symbols.len() * 3;
+        let mut classes = vec![0u32; total_state_count];
+        let mut class_count = 1usize;
+
+        loop {
+            let mut signatures = vec![0u32; total_state_count * width];
+            for side in 0..2usize {
+                let observed_terminal = if side == 0 { member } else { representative };
+                for state in 0..side_state_count as u32 {
+                    let row = side * side_state_count + state as usize;
+                    let signature = &mut signatures[row * width..(row + 1) * width];
+                    for (slot, &symbol) in symbols.iter().enumerate() {
+                        let action = self.action(state, symbol);
+                        let future_contains = action.end_raw_state != u32::MAX
+                            && tokenizer
+                                .possible_future_terminals(action.end_raw_state)
+                                .contains(observed_terminal as usize);
+                        signature[slot * 3] =
+                            token_event_positions(action.events, observed_terminal) as u32;
+                        signature[slot * 3 + 1] = u32::from(future_contains);
+                        signature[slot * 3 + 2] =
+                            classes[side * side_state_count + action.next_state as usize];
+                    }
+                }
+            }
+
+            let mut order = (0..total_state_count).collect::<Vec<_>>();
+            order.sort_unstable_by(|&left, &right| {
+                signatures[left * width..(left + 1) * width]
+                    .cmp(&signatures[right * width..(right + 1) * width])
+            });
+            let mut next_classes = vec![0u32; total_state_count];
+            let mut next_class = 0u32;
+            let mut previous = None::<usize>;
+            for state in order {
+                if previous.is_some_and(|previous| {
+                    signatures[previous * width..(previous + 1) * width]
+                        != signatures[state * width..(state + 1) * width]
+                }) {
+                    next_class += 1;
+                }
+                next_classes[state] = next_class;
+                previous = Some(state);
+            }
+            let next_class_count = next_class as usize + 1;
+            classes = next_classes;
+            if next_class_count == class_count {
+                break;
+            }
+            class_count = next_class_count;
+        }
+
+        let mut target_state_for_class = vec![u32::MAX; class_count];
+        for target_state in 0..self.state_count as u32 {
+            let class = classes[side_state_count + target_state as usize] as usize;
+            target_state_for_class[class] = target_state_for_class[class].min(target_state);
+        }
+        let mut deviations = Vec::<(u32, u32)>::new();
+        for source_state in 0..self.state_count as u32 {
+            let class = classes[source_state as usize] as usize;
+            let target_state = target_state_for_class[class];
+            if target_state == u32::MAX {
+                return None;
+            }
+            if target_state != source_state {
+                deviations.push((source_state, target_state));
+            }
+        }
+        Some(TransportScannerStateMap::Quotient {
+            state_count: self.raw_state_count,
+            class_for_original: Arc::clone(&self.class_for_raw),
+            representative_for_class: Arc::clone(&self.representative_raw_by_class),
+            source_class_for_target_deviations: deviations.into_boxed_slice(),
+        })
+    }
+}
+
+#[inline]
+fn token_action_hash_mix(hash: u64, value: u64) -> u64 {
+    hash.rotate_left(7)
+        ^ value.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ 0x517c_c1b7_2722_0a95
+}
+
+impl<'a> TokenActionDfa<'a> {
+    fn new(
+        context: &'a TokenActionContext,
+        tokenizer: &'a Tokenizer,
+        active_terminals: &'a [bool],
+    ) -> Self {
+        let state_count = context.state_count + 1;
+        let symbol_count = context.symbols.len();
+
+        // Future-output sets are frozen scanner labels. Cache the active slice
+        // for every raw endpoint occurring in the compact action table.
+        let mut endpoint_used = vec![false; context.raw_state_count];
+        for action in context.actions.iter() {
+            if action.end_raw_state != u32::MAX {
+                endpoint_used[action.end_raw_state as usize] = true;
+            }
+        }
+        let mut future_by_raw_state = vec![None; context.raw_state_count];
+        for (raw_state, used) in endpoint_used.into_iter().enumerate() {
+            if used {
+                let terminals = tokenizer
+                    .possible_future_terminals_iter(raw_state as u32)
+                    .filter(|&terminal| {
+                        active_terminals
+                            .get(terminal as usize)
+                            .copied()
+                            .unwrap_or(false)
+                    })
+                    .collect::<SmallVec<[TerminalID; 4]>>();
+                future_by_raw_state[raw_state] = Some(OutputBits(terminals));
+            }
+        }
+        let structural_colors = Self::structural_colors(
+            context,
+            active_terminals,
+            &future_by_raw_state,
+        );
+
+        let mut output_ids = vec![0u32; state_count * symbol_count];
+        let mut output_representatives = Vec::<usize>::new();
+        let mut output_buckets = FxHashMap::<u64, Vec<u32>>::default();
+        for state in 0..state_count as u32 {
+            for symbol in 0..symbol_count as u32 {
+                let entry = state as usize * symbol_count + symbol as usize;
+                let hash = Self::identity_output_hash(
+                    context,
+                    active_terminals,
+                    &future_by_raw_state,
+                    state,
+                    symbol,
+                );
+                let mut output_id = None;
+                if let Some(candidates) = output_buckets.get(&hash) {
+                    for &candidate in candidates {
+                        let representative = output_representatives[candidate as usize];
+                        let representative_state = (representative / symbol_count) as u32;
+                        let representative_symbol = (representative % symbol_count) as u32;
+                        if Self::identity_outputs_equal(
+                            context,
+                            active_terminals,
+                            &future_by_raw_state,
+                            state,
+                            symbol,
+                            representative_state,
+                            representative_symbol,
+                        ) {
+                            output_id = Some(candidate);
+                            break;
+                        }
+                    }
+                }
+                let output_id = output_id.unwrap_or_else(|| {
+                    let id = output_representatives.len() as u32;
+                    output_representatives.push(entry);
+                    output_buckets.entry(hash).or_default().push(id);
+                    id
+                });
+                output_ids[entry] = output_id;
+            }
+        }
+
+        // Seed the synthetic dead state separately so a real token-boundary
+        // state can never be represented by a non-raw dead coordinate.
+        let mut previous = vec![0u32; state_count];
+        previous[context.dead_state as usize] = 1;
+        let mut previous_class_count = 2usize;
+        let (class_for_state, representative_state_by_class) = loop {
+            let mut next = vec![0u32; state_count];
+            let mut representatives = Vec::<u32>::new();
+            let mut buckets = FxHashMap::<u64, Vec<u32>>::default();
+            for state in 0..state_count as u32 {
+                let hash = Self::state_signature_hash(context, &output_ids, &previous, state);
+                let mut assigned = None;
+                if let Some(candidates) = buckets.get(&hash) {
+                    for &candidate in candidates {
+                        let representative = representatives[candidate as usize];
+                        if Self::state_signatures_equal(
+                            context,
+                            &output_ids,
+                            &previous,
+                            state,
+                            representative,
+                        ) {
+                            assigned = Some(candidate);
+                            break;
+                        }
+                    }
+                }
+                let assigned = assigned.unwrap_or_else(|| {
+                    let class = representatives.len() as u32;
+                    representatives.push(state);
+                    buckets.entry(hash).or_default().push(class);
+                    class
+                });
+                next[state as usize] = assigned;
+            }
+            if representatives.len() == previous_class_count {
+                previous = next;
+                break (previous, representatives);
+            }
+            previous_class_count = representatives.len();
+            previous = next;
+        };
+        let class_count = representative_state_by_class.len();
+        let mut reverse_predecessors = vec![Vec::<u32>::new(); class_count];
+        for (class, &state) in representative_state_by_class.iter().enumerate() {
+            for symbol in 0..symbol_count as u32 {
+                let next_state = context.action(state, symbol).next_state;
+                let next_class = class_for_state[next_state as usize] as usize;
+                reverse_predecessors[next_class].push(class as u32);
+            }
+        }
+        for predecessors in &mut reverse_predecessors {
+            predecessors.sort_unstable();
+            predecessors.dedup();
+        }
+
+        let mut terminal_supports = (0..active_terminals.len())
+            .map(|_| BitSet::new(class_count))
+            .collect::<Vec<_>>();
+        let mut event_state_signature = vec![0u64; active_terminals.len() * class_count];
+        let mut terminal_occurrences = vec![Vec::<(u32, u32)>::new(); active_terminals.len()];
+        for (class, &state) in representative_state_by_class.iter().enumerate() {
+            for symbol in 0..symbol_count as u32 {
+                let action = context.action(state, symbol);
+                for event in action.events {
+                    let terminal = event.terminal as usize;
+                    if active_terminals.get(terminal).copied().unwrap_or(false) {
+                        terminal_supports[terminal].set(class);
+                        terminal_occurrences[terminal].push((class as u32, symbol));
+                        let slot = terminal * class_count + class;
+                        event_state_signature[slot] = token_action_hash_mix(
+                            event_state_signature[slot],
+                            ((symbol as u64) << 16) | event.positions as u64,
+                        );
+                    }
+                }
+                if action.end_raw_state != u32::MAX {
+                    for &terminal in &future_by_raw_state[action.end_raw_state as usize]
+                        .as_ref()
+                        .expect("used endpoint future output cached")
+                        .0
+                    {
+                        terminal_supports[terminal as usize].set(class);
+                        terminal_occurrences[terminal as usize].push((class as u32, symbol));
+                    }
+                }
+            }
+        }
+        for occurrences in &mut terminal_occurrences {
+            occurrences.sort_unstable();
+            occurrences.dedup();
+        }
+        let mut terminal_components = vec![SmallVec::<[u64; 4]>::new(); active_terminals.len()];
+        for (class, &state) in representative_state_by_class.iter().enumerate() {
+            let structural_color = structural_colors[state as usize] as u64;
+            for symbol in 0..symbol_count as u32 {
+                let action = context.action(state, symbol);
+                for event in action.events {
+                    let terminal = event.terminal as usize;
+                    if active_terminals.get(terminal).copied().unwrap_or(false) {
+                        terminal_components[terminal].push(token_action_hash_mix(
+                            token_action_hash_mix(structural_color, symbol as u64),
+                            event.positions as u64,
+                        ));
+                    }
+                }
+                if action.end_raw_state != u32::MAX {
+                    for &terminal in &future_by_raw_state[action.end_raw_state as usize]
+                        .as_ref()
+                        .expect("used endpoint future output cached")
+                        .0
+                    {
+                        terminal_components[terminal as usize].push(token_action_hash_mix(
+                            token_action_hash_mix(structural_color, symbol as u64),
+                            u16::MAX as u64,
+                        ));
+                    }
+                }
+            }
+        }
+        let mut terminal_signature = vec![0u64; active_terminals.len()];
+        for (terminal, &active) in active_terminals.iter().enumerate() {
+            if active {
+                let start = terminal * class_count;
+                let mut hash = token_action_hash_mix(
+                    0x6a09_e667_f3bc_c909,
+                    terminal_supports[terminal].count_ones() as u64,
+                );
+                let mut values = event_state_signature[start..start + class_count]
+                    .iter()
+                    .copied()
+                    .filter(|&value| value != 0)
+                    .collect::<SmallVec<[u64; 8]>>();
+                values.sort_unstable();
+                for value in values {
+                    hash = token_action_hash_mix(hash, value);
+                }
+                terminal_components[terminal].sort_unstable();
+                for value in terminal_components[terminal].drain(..) {
+                    hash = token_action_hash_mix(hash, value);
+                }
+                terminal_signature[terminal] = hash;
+            }
+        }
+
+        let initial_b_state = context.class_for_raw[tokenizer.initial_state_id() as usize];
+        let root_class = class_for_state[initial_b_state as usize];
+        let raw_class_for_original = context
+            .class_for_raw
+            .iter()
+            .map(|&boundary_class| class_for_state[boundary_class as usize])
+            .collect::<Vec<_>>()
+            .into();
+        let raw_representative_for_class = representative_state_by_class
+            .iter()
+            .map(|&boundary_state| {
+                if boundary_state == context.dead_state {
+                    tokenizer.initial_state_id()
+                } else {
+                    context.representative_raw_by_class[boundary_state as usize]
+                }
+            })
+            .collect::<Vec<_>>()
+            .into();
+        Self {
+            context,
+            tokenizer,
+            active_terminals,
+            output_ids: output_ids.into_boxed_slice(),
+            class_for_state: class_for_state.into_boxed_slice(),
+            representative_state_by_class: representative_state_by_class.into_boxed_slice(),
+            raw_class_for_original,
+            raw_representative_for_class,
+            reverse_predecessors,
+            root_class,
+            terminal_signature,
+            terminal_supports,
+            event_state_signature: event_state_signature.into_boxed_slice(),
+            terminal_occurrences: terminal_occurrences
+                .into_iter()
+                .map(Vec::into_boxed_slice)
+                .collect(),
+            future_by_raw_state,
+        }
+    }
+
+    fn identity_output_hash(
+        context: &TokenActionContext,
+        active_terminals: &[bool],
+        future_by_raw_state: &[Option<OutputBits>],
+        state: u32,
+        symbol: u32,
+    ) -> u64 {
+        let action = context.action(state, symbol);
+        let mut hash = 0x243f_6a88_85a3_08d3u64;
+        for event in action.events {
+            if active_terminals
+                .get(event.terminal as usize)
+                .copied()
+                .unwrap_or(false)
+            {
+                hash = token_action_hash_mix(
+                    hash,
+                    ((event.terminal as u64) << 16) | event.positions as u64,
+                );
+            }
+        }
+        if action.end_raw_state != u32::MAX {
+            for &terminal in &future_by_raw_state[action.end_raw_state as usize]
+                .as_ref()
+                .expect("used endpoint future output cached")
+                .0
+            {
+                hash = token_action_hash_mix(hash, terminal as u64);
+            }
+        }
+        hash
+    }
+
+    /// A terminal-name-independent color refinement. Any valid terminal
+    /// permutation preserves these colors, so they are safe to use in a
+    /// candidate filter. Counts include the ordered action position only as a
+    /// structural multiplicity, never as a terminal identity.
+    fn structural_colors(
+        context: &TokenActionContext,
+        active_terminals: &[bool],
+        future_by_raw_state: &[Option<OutputBits>],
+    ) -> Box<[u32]> {
+        let state_count = context.state_count + 1;
+        let symbol_count = context.symbols.len();
+        let mut previous = vec![0u32; state_count];
+        previous[context.dead_state as usize] = 1;
+        let mut previous_class_count = 2usize;
+        loop {
+            let mut next = vec![0u32; state_count];
+            let mut representatives = Vec::<u32>::new();
+            let mut buckets = FxHashMap::<u64, Vec<u32>>::default();
+            for state in 0..state_count as u32 {
+                let mut hash = token_action_hash_mix(0x3c6e_f372_fe94_f82b, previous[state as usize] as u64);
+                for symbol in 0..symbol_count as u32 {
+                    let action = context.action(state, symbol);
+                    let event_count = action
+                        .events
+                        .iter()
+                        .filter(|event| {
+                            active_terminals
+                                .get(event.terminal as usize)
+                                .copied()
+                                .unwrap_or(false)
+                        })
+                        .map(|event| event.positions.count_ones() as u64)
+                        .sum::<u64>();
+                    let future_count = if action.end_raw_state == u32::MAX {
+                        0
+                    } else {
+                        future_by_raw_state[action.end_raw_state as usize]
+                            .as_ref()
+                            .expect("used endpoint future output cached")
+                            .0
+                            .len() as u64
+                    };
+                    hash = token_action_hash_mix(
+                        hash,
+                        (event_count << 32)
+                            | ((future_count & 0xffff) << 16)
+                            | previous[action.next_state as usize] as u64,
+                    );
+                }
+                let mut assigned = None;
+                if let Some(candidates) = buckets.get(&hash) {
+                    'candidate: for &candidate in candidates {
+                        let representative = representatives[candidate as usize];
+                        if previous[state as usize] != previous[representative as usize] {
+                            continue;
+                        }
+                        for symbol in 0..symbol_count as u32 {
+                            let action = context.action(state, symbol);
+                            let representative_action = context.action(representative, symbol);
+                            let event_count = action
+                                .events
+                                .iter()
+                                .filter(|event| active_terminals[event.terminal as usize])
+                                .map(|event| event.positions.count_ones())
+                                .sum::<u32>();
+                            let representative_event_count = representative_action
+                                .events
+                                .iter()
+                                .filter(|event| active_terminals[event.terminal as usize])
+                                .map(|event| event.positions.count_ones())
+                                .sum::<u32>();
+                            let future_count = if action.end_raw_state == u32::MAX {
+                                0
+                            } else {
+                                future_by_raw_state[action.end_raw_state as usize]
+                                    .as_ref()
+                                    .expect("used endpoint future output cached")
+                                    .0
+                                    .len()
+                            };
+                            let representative_future_count = if representative_action.end_raw_state == u32::MAX {
+                                0
+                            } else {
+                                future_by_raw_state[representative_action.end_raw_state as usize]
+                                    .as_ref()
+                                    .expect("used endpoint future output cached")
+                                    .0
+                                    .len()
+                            };
+                            if event_count != representative_event_count
+                                || future_count != representative_future_count
+                                || previous[action.next_state as usize]
+                                    != previous[representative_action.next_state as usize]
+                            {
+                                continue 'candidate;
+                            }
+                        }
+                        assigned = Some(candidate);
+                        break;
+                    }
+                }
+                let assigned = assigned.unwrap_or_else(|| {
+                    let color = representatives.len() as u32;
+                    representatives.push(state);
+                    buckets.entry(hash).or_default().push(color);
+                    color
+                });
+                next[state as usize] = assigned;
+            }
+            if representatives.len() == previous_class_count {
+                return next.into_boxed_slice();
+            }
+            previous_class_count = representatives.len();
+            previous = next;
+        }
+    }
+
+    fn identity_outputs_equal(
+        context: &TokenActionContext,
+        active_terminals: &[bool],
+        future_by_raw_state: &[Option<OutputBits>],
+        left_state: u32,
+        left_symbol: u32,
+        right_state: u32,
+        right_symbol: u32,
+    ) -> bool {
+        let left = context.action(left_state, left_symbol);
+        let right = context.action(right_state, right_symbol);
+        if !Self::events_equal_filtered(left.events, right.events, active_terminals) {
+            return false;
+        }
+        Self::future_output(left.end_raw_state, future_by_raw_state)
+            == Self::future_output(right.end_raw_state, future_by_raw_state)
+    }
+
+    #[inline]
+    fn future_output<'b>(raw_state: u32, future_by_raw_state: &'b [Option<OutputBits>]) -> Option<&'b OutputBits> {
+        (raw_state != u32::MAX)
+            .then(|| future_by_raw_state[raw_state as usize].as_ref().expect("used endpoint future output cached"))
+    }
+
+    fn events_equal_filtered(
+        left: &[TokenActionEvent],
+        right: &[TokenActionEvent],
+        active_terminals: &[bool],
+    ) -> bool {
+        let mut left_index = 0usize;
+        let mut right_index = 0usize;
+        loop {
+            while left_index < left.len()
+                && !active_terminals
+                    .get(left[left_index].terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                left_index += 1;
+            }
+            while right_index < right.len()
+                && !active_terminals
+                    .get(right[right_index].terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                right_index += 1;
+            }
+            match (left.get(left_index), right.get(right_index)) {
+                (Some(left), Some(right)) if left == right => {
+                    left_index += 1;
+                    right_index += 1;
+                }
+                (None, None) => return true,
+                _ => return false,
+            }
+        }
+    }
+
+    fn state_signature_hash(
+        context: &TokenActionContext,
+        output_ids: &[u32],
+        previous: &[u32],
+        state: u32,
+    ) -> u64 {
+        let symbol_count = context.symbols.len();
+        let mut hash = token_action_hash_mix(0x1319_8a2e_0370_7344, previous[state as usize] as u64);
+        for symbol in 0..symbol_count as u32 {
+            let action = context.action(state, symbol);
+            let output = output_ids[state as usize * symbol_count + symbol as usize];
+            hash = token_action_hash_mix(hash, ((output as u64) << 32) | previous[action.next_state as usize] as u64);
+        }
+        hash
+    }
+
+    fn state_signatures_equal(
+        context: &TokenActionContext,
+        output_ids: &[u32],
+        previous: &[u32],
+        left: u32,
+        right: u32,
+    ) -> bool {
+        if previous[left as usize] != previous[right as usize] {
+            return false;
+        }
+        let symbol_count = context.symbols.len();
+        for symbol in 0..symbol_count as u32 {
+            let left_action = context.action(left, symbol);
+            let right_action = context.action(right, symbol);
+            if output_ids[left as usize * symbol_count + symbol as usize]
+                != output_ids[right as usize * symbol_count + symbol as usize]
+                || previous[left_action.next_state as usize] != previous[right_action.next_state as usize]
+            {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl<'a> TokenActionDfa<'a> {
+    #[inline]
+    fn class_count(&self) -> usize {
+        self.representative_state_by_class.len()
+    }
+
+    #[inline]
+    fn action_for_class(&self, class: u32, symbol: u32) -> TokenActionRef<'_> {
+        self.context
+            .action(self.representative_state_by_class[class as usize], symbol)
+    }
+
+    fn events_equal_swapped(
+        &self,
+        source: &[TokenActionEvent],
+        target: &[TokenActionEvent],
+        left: TerminalID,
+        right: TerminalID,
+    ) -> bool {
+        if token_event_positions(source, left) != token_event_positions(target, right)
+            || token_event_positions(source, right) != token_event_positions(target, left)
+        {
+            return false;
+        }
+        let mut source_index = 0usize;
+        let mut target_index = 0usize;
+        loop {
+            while source_index < source.len()
+                && (!self.active_terminals[source[source_index].terminal as usize]
+                    || source[source_index].terminal == left
+                    || source[source_index].terminal == right)
+            {
+                source_index += 1;
+            }
+            while target_index < target.len()
+                && (!self.active_terminals[target[target_index].terminal as usize]
+                    || target[target_index].terminal == left
+                    || target[target_index].terminal == right)
+            {
+                target_index += 1;
+            }
+            match (source.get(source_index), target.get(target_index)) {
+                (Some(source), Some(target)) if source == target => {
+                    source_index += 1;
+                    target_index += 1;
+                }
+                (None, None) => return true,
+                _ => return false,
+            }
+        }
+    }
+
+    fn output_equal_swapped(
+        &self,
+        source: TokenActionRef<'_>,
+        target: TokenActionRef<'_>,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> bool {
+        if !self.events_equal_swapped(source.events, target.events, left, right) {
+            return false;
+        }
+        let source_future = Self::future_output(source.end_raw_state, &self.future_by_raw_state)
+            .cloned()
+            .map(|output| output.mapped(Some((left as usize, right as usize))));
+        let target_future = Self::future_output(target.end_raw_state, &self.future_by_raw_state);
+        source_future.as_ref() == target_future
+    }
+
+    fn terminal_key(&self, class: usize, left: TerminalID, right: TerminalID) -> TerminalActionKey {
+        let class_count = self.class_count();
+        let mut left_hash = self.event_state_signature[left as usize * class_count + class];
+        let mut right_hash = self.event_state_signature[right as usize * class_count + class];
+        if self.terminal_supports[left as usize].contains(class) {
+            left_hash = token_action_hash_mix(left_hash, 0x8a5c_3d71);
+        }
+        if self.terminal_supports[right as usize].contains(class) {
+            right_hash = token_action_hash_mix(right_hash, 0x8a5c_3d71);
+        }
+        TerminalActionKey {
+            left: left_hash,
+            right: right_hash,
+        }
+    }
+
+    fn initial_swap_targets(&self, left: TerminalID, right: TerminalID) -> Option<Vec<u32>> {
+        let class_count = self.class_count();
+        let mut groups = BTreeMap::<TerminalActionKey, Vec<u32>>::new();
+        let mut relevant_classes = self.terminal_supports[left as usize]
+            .iter_ones()
+            .map(|class| class as u32)
+            .collect::<Vec<_>>();
+        relevant_classes.extend(
+            self.terminal_supports[right as usize]
+                .iter_ones()
+                .map(|class| class as u32),
+        );
+        relevant_classes.sort_unstable();
+        relevant_classes.dedup();
+        for class in relevant_classes {
+            groups
+                .entry(self.terminal_key(class as usize, left, right))
+                .or_default()
+                .push(class);
+        }
+        let mut targets = (0..class_count as u32).collect::<Vec<_>>();
+        let mut handled = FxHashSet::<TerminalActionKey>::default();
+        for (&key, classes) in &groups {
+            if !handled.insert(key) {
+                continue;
+            }
+            let inverse = TerminalActionKey {
+                left: key.right,
+                right: key.left,
+            };
+            let target_classes = groups.get(&inverse)?;
+            if classes.len() != target_classes.len() {
+                return None;
+            }
+            if key == inverse {
+                continue;
+            }
+            for (&source, &target) in classes.iter().zip(target_classes) {
+                targets[source as usize] = target;
+                targets[target as usize] = source;
+            }
+            handled.insert(inverse);
+        }
+        (targets[self.root_class as usize] == self.root_class).then_some(targets)
+    }
+
+    fn affected_cone(&self, targets: &[u32]) -> Vec<bool> {
+        let class_count = self.class_count();
+        let mut affected = vec![false; class_count];
+        let mut worklist = VecDeque::<u32>::new();
+        for class in 0..class_count {
+            if targets[class] != class as u32 {
+                affected[class] = true;
+                worklist.push_back(class as u32);
+            }
+        }
+        while let Some(class) = worklist.pop_front() {
+            for &predecessor in &self.reverse_predecessors[class as usize] {
+                if !affected[predecessor as usize] {
+                    affected[predecessor as usize] = true;
+                    worklist.push_back(predecessor);
+                }
+            }
+        }
+        affected
+    }
+
+    fn verify_swap(
+        &self,
+        targets: &[u32],
+        affected: &[bool],
+        left: TerminalID,
+        right: TerminalID,
+    ) -> bool {
+        let symbol_count = self.context.symbols.len();
+        // A fixed class is not in the predecessor cone. Its output can still
+        // mention either swapped terminal, so inspect only those sparse action
+        // occurrences and require the output to be self-swap-invariant.
+        for &(class, symbol) in self.terminal_occurrences[left as usize]
+            .iter()
+            .chain(self.terminal_occurrences[right as usize].iter())
+        {
+            if targets[class as usize] == class {
+                let action = self.action_for_class(class, symbol);
+                if !self.output_equal_swapped(action, action, left, right) {
+                    return false;
+                }
+            }
+        }
+        for (class, &is_affected) in affected.iter().enumerate() {
+            if !is_affected {
+                continue;
+            }
+            let target_class = targets[class];
+            for symbol in 0..symbol_count as u32 {
+                let source_action = self.action_for_class(class as u32, symbol);
+                let target_action = self.action_for_class(target_class, symbol);
+                let expected_next = targets[self.class_for_state[source_action.next_state as usize] as usize];
+                let actual_next = self.class_for_state[target_action.next_state as usize];
+                if expected_next != actual_next
+                    || !self.output_equal_swapped(source_action, target_action, left, right)
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn scanner_map_from_targets(&self, targets: &[u32]) -> Option<TransportScannerStateMap> {
+        let class_count = self.class_count();
+        let mut deviations = Vec::<(u32, u32)>::new();
+        for (source, &target) in targets.iter().enumerate() {
+            if source as u32 != target {
+                if source >= class_count || target as usize >= class_count {
+                    return None;
+                }
+                deviations.push((source as u32, target));
+            }
+        }
+        Some(TransportScannerStateMap::Quotient {
+            state_count: self.context.raw_state_count,
+            class_for_original: Arc::clone(&self.raw_class_for_original),
+            representative_for_class: Arc::clone(&self.raw_representative_for_class),
+            source_class_for_target_deviations: deviations.into_boxed_slice(),
+        })
+    }
+
+    fn interchange_map(&self, left: TerminalID, right: TerminalID) -> Option<TransportScannerStateMap> {
+        let targets = self.initial_swap_targets(left, right)?;
+        let affected = self.affected_cone(&targets);
+        self.verify_swap(&targets, &affected, left, right)
+            .then(|| self.scanner_map_from_targets(&targets))
+            .flatten()
+    }
+}
+
 /// Partition candidate terminals by a necessary-and-sufficient condition for
 /// the root part of the pair characterization.
 ///
@@ -1148,6 +2387,206 @@ impl TiRoundTransportWitnesses {
             partition: singleton_partition(active_terminals),
             maps: BTreeMap::new(),
         }
+    }
+}
+
+/// Discover directed representative/member transport witnesses over actual
+/// LLM-token actions. This is intentionally asymmetric: a member mode only
+/// needs its representative's raw scanner behavior, then relabels that one
+/// representative output back to the member.
+pub(crate) fn discover_one_round_with_token_actions(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    active_terminals: &[bool],
+    ignore_terminal: Option<TerminalID>,
+) -> Option<TiRoundTransportWitnesses> {
+    let context = TokenActionContext::new(tokenizer, vocab, active_terminals)?;
+    Some(discover_one_round_with_token_actions_in_context(
+        tokenizer,
+        active_terminals,
+        &context,
+        ignore_terminal,
+    ))
+}
+
+pub(crate) fn discover_one_round_with_token_actions_in_context(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+    context: &TokenActionContext,
+    ignore_terminal: Option<TerminalID>,
+) -> TiRoundTransportWitnesses {
+    let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+    let started_at = profile_timing.then(Instant::now);
+    if std::env::var_os("GLRMASK_TOKEN_ACTION_TI_DRY_RUN").is_some() {
+        let partition = singleton_partition(active_terminals);
+        if profile_timing {
+            eprintln!(
+                "[glrmask/profile][token_action_ti] dry_run=true active={} first_byte_classes={} symbols={} full_tokens={} classes={}",
+                active_terminals.iter().filter(|&&active| active).count(),
+                context.state_count,
+                context.symbols.len(),
+                context.full_symbol_for_token.len(),
+                partition.len(),
+            );
+        }
+        return TiRoundTransportWitnesses {
+            active_before_round: active_terminals.to_vec(),
+            partition,
+            maps: BTreeMap::new(),
+        };
+    }
+    let root_groups = context.root_candidate_groups(tokenizer, active_terminals, ignore_terminal);
+    let mut root_signature_by_terminal = vec![0u64; active_terminals.len()];
+    let mut root_candidate_pairs = 0usize;
+    for (&signature, terminals) in &root_groups {
+        root_candidate_pairs += terminals.len().saturating_sub(1);
+        for &terminal in terminals {
+            root_signature_by_terminal[terminal as usize] = signature;
+        }
+    }
+    if root_candidate_pairs == 0 {
+        let partition = singleton_partition(active_terminals);
+        if profile_timing {
+            eprintln!(
+                "[glrmask/profile][token_action_ti] active={} first_byte_classes={} symbols={} full_tokens={} root_candidate_pairs=0 root_early_exit=true classes={} total_ms={:.3}",
+                active_terminals.iter().filter(|&&active| active).count(),
+                context.state_count,
+                context.symbols.len(),
+                context.full_symbol_for_token.len(),
+                partition.len(),
+                started_at.map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0),
+            );
+        }
+        return TiRoundTransportWitnesses {
+            active_before_round: active_terminals.to_vec(),
+            partition,
+            maps: BTreeMap::new(),
+        };
+    }
+
+    let dfa_started_at = profile_timing.then(Instant::now);
+    let dfa = TokenActionDfa::new(context, tokenizer, active_terminals);
+    let dfa_ms = dfa_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let mut candidate_groups = BTreeMap::<(u64, u64), Vec<TerminalID>>::new();
+    for (terminal, &active) in active_terminals.iter().enumerate() {
+        let terminal = terminal as TerminalID;
+        if active && Some(terminal) != ignore_terminal {
+            candidate_groups
+                .entry((
+                    root_signature_by_terminal[terminal as usize],
+                    dfa.terminal_signature[terminal as usize],
+                ))
+                .or_default()
+                .push(terminal);
+        }
+    }
+    let mut partition = singleton_partition(active_terminals);
+    let mut maps = BTreeMap::<(TerminalID, TerminalID), Arc<TransportScannerStateMap>>::new();
+    let mut exact_checks = 0usize;
+    let mut accepted = 0usize;
+    let mut candidate_group_count = 0usize;
+    let mut candidate_group_pairs = 0usize;
+    let mut template_ns = 0u64;
+    let mut cone_ns = 0u64;
+    let mut verify_ns = 0u64;
+    let mut map_ns = 0u64;
+    let mut fixed_occurrence_checks = 0usize;
+    let mut cone_class_checks = 0usize;
+
+    for mut unresolved in candidate_groups.into_values() {
+        candidate_group_count += 1;
+        candidate_group_pairs += unresolved.len().saturating_sub(1);
+        while !unresolved.is_empty() {
+            let representative = unresolved[0];
+            let mut next_unresolved = Vec::with_capacity(unresolved.len().saturating_sub(1));
+            for &member in &unresolved[1..] {
+                exact_checks += 1;
+                let template_started = Instant::now();
+                let Some(targets) = dfa.initial_swap_targets(representative, member) else {
+                    template_ns += template_started.elapsed().as_nanos() as u64;
+                    next_unresolved.push(member);
+                    continue;
+                };
+                template_ns += template_started.elapsed().as_nanos() as u64;
+                let cone_started = Instant::now();
+                let affected = dfa.affected_cone(&targets);
+                cone_ns += cone_started.elapsed().as_nanos() as u64;
+                fixed_occurrence_checks += dfa.terminal_occurrences[representative as usize].len()
+                    + dfa.terminal_occurrences[member as usize].len();
+                cone_class_checks += affected.iter().filter(|&&affected| affected).count();
+                let verify_started = Instant::now();
+                let verified = dfa.verify_swap(
+                    &targets,
+                    &affected,
+                    representative,
+                    member,
+                );
+                verify_ns += verify_started.elapsed().as_nanos() as u64;
+                let map_started = Instant::now();
+                let map = verified.then(|| dfa.scanner_map_from_targets(&targets)).flatten();
+                map_ns += map_started.elapsed().as_nanos() as u64;
+                if let Some(map) = map {
+                    accepted += 1;
+                    partition
+                        .get_mut(&representative)
+                        .expect("token-action TI representative must be present")
+                        .insert(member);
+                    assert!(partition.remove(&member).is_some());
+                    maps.insert((representative, member), Arc::new(map));
+                } else {
+                    next_unresolved.push(member);
+                }
+            }
+            unresolved = next_unresolved;
+        }
+    }
+    assert_partition_invariants(&partition, active_terminals);
+    if std::env::var_os("GLRMASK_DUMP_TOKEN_ACTION_TI").is_some() {
+        eprintln!("[glrmask/dump][token_action_ti] classes={}", partition.len());
+        for (&representative, members) in &partition {
+            eprintln!(
+                "[glrmask/dump][token_action_ti] rep={} members={:?}",
+                representative,
+                members,
+            );
+        }
+    }
+    if profile_timing {
+        eprintln!(
+            "[glrmask/profile][token_action_ti] active={} first_byte_classes={} macro_classes={} symbols={} full_tokens={} suffix_trie_nodes={} full_token_trie_nodes={} root_candidate_pairs={} candidate_groups={} candidate_group_pairs={} exact_checks={} accepted={} classes={} fixed_occurrence_checks={} cone_class_checks={} context_first_byte_ms={:.3} context_symbol_ms={:.3} context_trie_ms={:.3} context_actions_ms={:.3} dfa_ms={:.3} template_ms={:.3} cone_ms={:.3} verify_ms={:.3} map_ms={:.3} total_ms={:.3}",
+            active_terminals.iter().filter(|&&active| active).count(),
+            context.state_count,
+            dfa.class_count(),
+            context.symbols.len(),
+            context.full_symbol_for_token.len(),
+            context.profile.suffix_trie_nodes,
+            context.profile.full_token_trie_nodes,
+            root_candidate_pairs,
+            candidate_group_count,
+            candidate_group_pairs,
+            exact_checks,
+            accepted,
+            partition.len(),
+            fixed_occurrence_checks,
+            cone_class_checks,
+            context.profile.first_byte_class_ms,
+            context.profile.symbol_intern_ms,
+            context.profile.suffix_trie_ms,
+            context.profile.action_build_ms,
+            dfa_ms,
+            template_ns as f64 / 1_000_000.0,
+            cone_ns as f64 / 1_000_000.0,
+            verify_ns as f64 / 1_000_000.0,
+            map_ns as f64 / 1_000_000.0,
+            started_at.map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0),
+        );
+    }
+    TiRoundTransportWitnesses {
+        active_before_round: active_terminals.to_vec(),
+        partition,
+        maps,
     }
 }
 
