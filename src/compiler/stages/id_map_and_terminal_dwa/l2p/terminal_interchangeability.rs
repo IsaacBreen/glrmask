@@ -2886,8 +2886,12 @@ pub(crate) fn discover_one_round_with_token_macro_context(
         }
         return TiRoundTransportWitnesses::singleton(active_terminals);
     }
+    let dfa_build_started = profile_timing.then(Instant::now);
     let outputs = TokenMacroRoundOutputs::new(tokenizer, active_terminals);
     let macro_dfa = ExactTokenMacroDfa::new(topology, outputs);
+    let dfa_build_ms = dfa_build_started
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
     let macro_identity_classes = macro_dfa
         .identity_rounds
         .last()
@@ -2903,6 +2907,8 @@ pub(crate) fn discover_one_round_with_token_macro_context(
     let mut direct_certificates = 0usize;
     let mut direct_impossible_rejections = 0usize;
     let mut refinement_fallbacks = 0usize;
+    let mut direct_ms = 0.0f64;
+    let mut refine_ms = 0.0f64;
     for initial_group in candidate_groups {
         let mut unresolved = initial_group;
         while !unresolved.is_empty() {
@@ -2910,7 +2916,12 @@ pub(crate) fn discover_one_round_with_token_macro_context(
             let mut next_unresolved = Vec::with_capacity(unresolved.len().saturating_sub(1));
             for &terminal in &unresolved[1..] {
                 exact_checks += 1;
-                let map = match macro_dfa.direct_interchange_attempt(representative, terminal) {
+                let direct_started = profile_timing.then(Instant::now);
+                let direct_result = macro_dfa.direct_interchange_attempt(representative, terminal);
+                if let Some(started) = direct_started {
+                    direct_ms += started.elapsed().as_secs_f64() * 1000.0;
+                }
+                let map = match direct_result {
                     DirectMacroInterchangeResult::Proven(map) => {
                         direct_certificates += 1;
                         Some(map)
@@ -2921,7 +2932,13 @@ pub(crate) fn discover_one_round_with_token_macro_context(
                     }
                     DirectMacroInterchangeResult::Inconclusive => {
                         refinement_fallbacks += 1;
-                        macro_dfa.refinement_interchange_map(representative, terminal)
+                        let refine_started = profile_timing.then(Instant::now);
+                        let refine_result =
+                            macro_dfa.refinement_interchange_map(representative, terminal);
+                        if let Some(started) = refine_started {
+                            refine_ms += started.elapsed().as_secs_f64() * 1000.0;
+                        }
+                        refine_result
                     }
                 };
                 if let Some(map) = map {
@@ -2941,12 +2958,15 @@ pub(crate) fn discover_one_round_with_token_macro_context(
     }
     if profile_timing {
         eprintln!(
-            "[glrmask/profile][terminal_interchangeability_token_macro] active={} c_classes={} macro_identity_classes={} macro_rounds={} identity_setup_ms={:.3} reachable_c_classes={} token_actions={} candidate_groups={} candidate_pairs={} exact_checks={} direct_certificates={} direct_impossible_rejections={} refinement_fallbacks={} accepted_members={} total_ms={:.3}",
+            "[glrmask/profile][terminal_interchangeability_token_macro] active={} c_classes={} macro_identity_classes={} macro_rounds={} identity_setup_ms={:.3} dfa_build_ms={:.3} direct_ms={:.3} refine_ms={:.3} reachable_c_classes={} token_actions={} candidate_groups={} candidate_pairs={} exact_checks={} direct_certificates={} direct_impossible_rejections={} refinement_fallbacks={} accepted_members={} total_ms={:.3}",
             candidates.len(),
             macro_dfa.topology.state_map.representative_original_ids.len(),
             macro_identity_classes,
             macro_dfa.stable_round,
             macro_dfa.identity_setup_ms,
+            dfa_build_ms,
+            direct_ms,
+            refine_ms,
             macro_dfa.topology.reachable.iter().filter(|&&reachable| reachable).count(),
             macro_dfa.topology.tokens.len(),
             result.values().filter(|members| members.len() >= 2).count(),
