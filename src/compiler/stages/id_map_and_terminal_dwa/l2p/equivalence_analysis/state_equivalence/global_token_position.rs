@@ -1,14 +1,15 @@
 //! Exact global scanner-state equivalence induced by token positions.
 //!
-//! The seed is built from three token-position observations:
+//! This is the token-position partition C, built from two token-position
+//! observations:
 //!
-//! * every first-byte destination is retained exactly;
-//! * every state reachable at byte position three or later is singleton; and
-//! * all frozen finalizer/future-finalizer observations remain equal.
+//! * every first-byte destination is retained exactly (partition A); and
+//! * every state reachable at byte position three or later is singleton
+//!   (partition B).
 //!
-//! The seed is then closed by stable refinement over every byte used by the
-//! vocabulary partition. That final closure is necessary before the quotient
-//! can be supplied to byte-level terminal interchangeability discovery.
+//! It is a token-boundary relation: a state class is only entered before the
+//! first byte of a vocabulary token. It is intentionally not strengthened by
+//! frozen-output equality nor closed to a raw-byte congruence.
 
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -19,9 +20,6 @@ use crate::Vocab;
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::{GlobalScannerStateQuotient, ManyToOneIdMap};
-use crate::ds::bitset::BitSet;
-
-use super::max_length::stable_refinement_from_initial_blocks;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GlobalTokenPositionEquivalenceProfile {
@@ -30,13 +28,9 @@ pub(crate) struct GlobalTokenPositionEquivalenceProfile {
     pub(crate) second_byte_count: usize,
     pub(crate) second_state_count: usize,
     pub(crate) third_plus_state_count: usize,
-    pub(crate) frozen_output_class_count: usize,
     pub(crate) first_destination_class_count: usize,
-    pub(crate) position_seed_class_count: usize,
     pub(crate) seed_class_count: usize,
-    pub(crate) exact_class_count: usize,
     pub(crate) seed_ms: f64,
-    pub(crate) closure_ms: f64,
     pub(crate) total_ms: f64,
 }
 
@@ -76,57 +70,8 @@ impl GlobalTokenPositionStatePartition {
 
 #[derive(Debug, Eq, Hash, PartialEq)]
 struct TokenPositionSeedKey {
-    frozen_output: u32,
     third_plus_singleton: u32,
     first_destinations: Box<[u32]>,
-}
-
-#[inline]
-fn mix_u64(mut value: u64) -> u64 {
-    value ^= value >> 30;
-    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    value ^= value >> 27;
-    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
-    value ^ (value >> 31)
-}
-
-fn fingerprint_bitset(bits: &BitSet) -> u64 {
-    bits.words().iter().fold(
-        mix_u64(bits.len() as u64 ^ 0x9e37_79b9_7f4a_7c15),
-        |hash, &word| mix_u64(hash ^ word.wrapping_add(0xa24b_aed4_963e_e407)),
-    )
-}
-
-/// Intern exact frozen `(finalizers, future-finalizers)` labels without
-/// cloning terminal bitsets. Fingerprints only select a collision bucket; the
-/// final equality check is on the complete bitsets.
-fn frozen_output_labels(tokenizer: &Tokenizer) -> (Vec<u32>, usize) {
-    let state_count = tokenizer.num_states() as usize;
-    // Group states by their exact `(finalizers, future-finalizers)` observation
-    // via a 128-bit fingerprint (two independent bitset hashes). A false
-    // collision between distinct observations is ~states^2/2^128 — negligible —
-    // so grouping purely by fingerprint is exact in practice and avoids the
-    // previous per-collision exact bitset re-comparison and Vec bucketing. The
-    // strict-reference validator remains the backstop.
-    let mut labels_by_key = FxHashMap::<(u64, u64), u32>::default();
-    labels_by_key.reserve(state_count);
-    let mut labels = vec![u32::MAX; state_count];
-    let mut label_count = 0u32;
-
-    for state in 0..state_count {
-        let key = (
-            fingerprint_bitset(tokenizer.matched_terminal_bitset(state as u32)),
-            fingerprint_bitset(tokenizer.possible_future_terminals(state as u32)),
-        );
-        let next = label_count;
-        let label = *labels_by_key.entry(key).or_insert_with(|| {
-            label_count += 1;
-            next
-        });
-        labels[state] = label;
-    }
-
-    (labels, label_count as usize)
 }
 
 fn token_position_byte_sets(vocab: &Vocab) -> ([bool; 256], [bool; 256], [bool; 256]) {
@@ -221,25 +166,23 @@ fn third_plus_states(
 fn seed_partition(
     tokenizer: &Tokenizer,
     first_bytes: &[u8],
-    frozen_outputs: &[u32],
     third_plus: &[bool],
 ) -> (Vec<u32>, usize) {
     let state_count = tokenizer.num_states() as usize;
-    // Group states by their exact seed key (frozen output, position->=3
-    // singleton marker, and first-byte destinations) via a 128-bit fingerprint.
-    // Position->=3 states fold their own index into the hash so they remain
-    // singletons. A false collision between distinct keys is ~states^2/2^128 --
-    // negligible -- and avoids allocating a Box<[u32]> destination key per
-    // state. Exactness is backstopped by the strict-reference validator.
+    // Group states by their exact A∧B seed key (first-byte destinations and a
+    // position->=3 singleton marker) via a 128-bit fingerprint. Position->=3
+    // states fold their own index into the hash so they remain singletons. A
+    // false collision between distinct keys is ~states^2/2^128 -- negligible --
+    // and avoids allocating a Box<[u32]> destination key per state. Exactness
+    // is backstopped by the strict-reference validator.
     let mut key_to_class = FxHashMap::<(u64, u64), u32>::default();
     key_to_class.reserve(state_count);
     let mut blocks = vec![u32::MAX; state_count];
     let mut class_count = 0u32;
 
     for state in 0..state_count {
-        let frozen = frozen_outputs[state] as u64;
-        let mut hash_a = 0x9e37_79b9_7f4a_7c15u64 ^ frozen;
-        let mut hash_b = 0xd1b5_4a32_d192_ed03u64 ^ frozen.rotate_left(17);
+        let mut hash_a = 0x9e37_79b9_7f4a_7c15u64;
+        let mut hash_b = 0xd1b5_4a32_d192_ed03u64;
         for &byte in first_bytes {
             let destination = tokenizer.get_transition(state as u32, byte) as u64;
             hash_a = hash_a
@@ -281,7 +224,6 @@ fn token_position_partition(
 
     for state in 0..state_count {
         let key = TokenPositionSeedKey {
-            frozen_output: 0,
             third_plus_singleton: third_plus[state].then_some(state as u32).unwrap_or(u32::MAX),
             first_destinations: first_bytes
                 .iter()
@@ -310,12 +252,10 @@ fn first_destination_partition_class_count(
     tokenizer: &Tokenizer,
     first_bytes: &[u8],
     third_plus: Option<&[bool]>,
-    frozen_outputs: Option<&[u32]>,
 ) -> usize {
     let mut classes = FxHashMap::<TokenPositionSeedKey, u32>::default();
     for state in 0..tokenizer.num_states() as usize {
         let key = TokenPositionSeedKey {
-            frozen_output: frozen_outputs.map_or(0, |labels| labels[state]),
             third_plus_singleton: third_plus
                 .is_some_and(|states| states[state])
                 .then_some(state as u32)
@@ -401,8 +341,7 @@ pub(crate) fn compute_global_token_position_state_partition(
     let second_bytes = selected_bytes(&second_set);
     let second_states = second_states(tokenizer, &first_bytes);
     let third_plus = third_plus_states(tokenizer, &second_states, &second_bytes);
-    let (frozen_outputs, _) = frozen_output_labels(tokenizer);
-    let (blocks, class_count) = seed_partition(tokenizer, &first_bytes, &frozen_outputs, &third_plus);
+    let (blocks, class_count) = seed_partition(tokenizer, &first_bytes, &third_plus);
     Some(GlobalTokenPositionStatePartition {
         map: map_from_blocks(blocks, class_count),
     })
@@ -426,10 +365,10 @@ fn map_from_blocks(blocks: Vec<u32>, class_count: usize) -> ManyToOneIdMap {
     }
 }
 
-/// Build an exact total scanner-state quotient before TI. `seed` is the
-/// requested A∧B construction, strengthened by frozen-output equality; the
-/// final stable closure makes it valid for byte-level TI as well as later
-/// token-level equivalence.
+/// Build the total scanner-state quotient before TI. This is exactly the
+/// requested A∧B token-position partition C: first-byte destinations plus
+/// position->=3 singletons, with no frozen-output strengthening and no
+/// raw-byte congruence closure.
 pub(crate) fn compute_global_token_position_state_quotient(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -443,46 +382,15 @@ pub(crate) fn compute_global_token_position_state_quotient(
     let seed_started_at = Instant::now();
     let second_states = second_states(tokenizer, &first_bytes);
     let third_plus = third_plus_states(tokenizer, &second_states, &second_bytes);
-    let (frozen_outputs, frozen_output_class_count) = frozen_output_labels(tokenizer);
     let first_destination_class_count =
-        first_destination_partition_class_count(tokenizer, &first_bytes, None, None);
-    let position_seed_class_count = first_destination_partition_class_count(
-        tokenizer,
-        &first_bytes,
-        Some(&third_plus),
-        None,
-    );
+        first_destination_partition_class_count(tokenizer, &first_bytes, None);
     let (seed_blocks, seed_class_count) =
-        seed_partition(tokenizer, &first_bytes, &frozen_outputs, &third_plus);
+        seed_partition(tokenizer, &first_bytes, &third_plus);
     let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    // TI's characterizer can traverse every byte that occurs anywhere in the
-    // partition vocabulary, not merely token first bytes. Completing the seed
-    // to a stable right congruence is what makes representative-only TI exact.
-    let closure_started_at = Instant::now();
-    let active_bytes = selected_bytes(&{
-        let mut all = first_set;
-        for byte in 0..256 {
-            all[byte] |= remaining_set[byte];
-        }
-        all
-    });
-    let exact_blocks = stable_refinement_from_initial_blocks(
-        tokenizer,
-        &active_bytes,
-        &seed_blocks,
-        seed_class_count,
-    );
-    let exact_class_count = exact_blocks
-        .iter()
-        .copied()
-        .max()
-        .map_or(0, |class| class as usize + 1);
-    let closure_ms = closure_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let state_count = tokenizer.num_states() as usize;
     let quotient = GlobalScannerStateQuotient::from_total_raw_state_map(
-        map_from_blocks(exact_blocks, exact_class_count),
+        map_from_blocks(seed_blocks, seed_class_count),
         state_count,
     );
     let profile = GlobalTokenPositionEquivalenceProfile {
@@ -491,15 +399,37 @@ pub(crate) fn compute_global_token_position_state_quotient(
         second_byte_count: second_bytes.len(),
         second_state_count: second_states.iter().filter(|&&present| present).count(),
         third_plus_state_count: third_plus.iter().filter(|&&present| present).count(),
-        frozen_output_class_count,
         first_destination_class_count,
-        position_seed_class_count,
         seed_class_count,
-        exact_class_count,
         seed_ms,
-        closure_ms,
         total_ms: started_at.elapsed().as_secs_f64() * 1000.0,
     };
+    if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+        let first_bytes_preview: String = first_bytes
+            .iter()
+            .take(40)
+            .map(|&b| {
+                if b.is_ascii_graphic() || b == b' ' {
+                    format!("{}", b as char)
+                } else {
+                    format!("\\x{:02x}", b)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        eprintln!(
+            "[glrmask/profile][global_token_position_quotient] raw_states={} first_byte_count={} second_byte_count={} remaining_byte_count={} first_destination_classes={} seed_classes={} seed_ms={:.3} total_ms={:.3} first_bytes[<=40]=\"{}\"",
+            state_count,
+            profile.first_byte_count,
+            profile.second_byte_count,
+            profile.remaining_byte_count,
+            profile.first_destination_class_count,
+            profile.seed_class_count,
+            profile.seed_ms,
+            profile.total_ms,
+            first_bytes_preview,
+        );
+    }
     (quotient, profile)
 }
 
@@ -527,25 +457,6 @@ mod tests {
                 .collect(),
             None,
         )
-    }
-
-    #[test]
-    fn one_byte_token_finalizers_remain_distinct() {
-        let tokenizer = tokenizer(vec![
-            Expr::U8Seq(b"a".to_vec()),
-            Expr::U8Seq(b"b".to_vec()),
-        ]);
-        let (quotient, _) = compute_global_token_position_state_quotient(
-            &tokenizer,
-            &vocab(&[(0, b"a"), (1, b"b")]),
-        );
-        let state_a = tokenizer.step(tokenizer.initial_state_id(), b'a').unwrap() as usize;
-        let state_b = tokenizer.step(tokenizer.initial_state_id(), b'b').unwrap() as usize;
-        assert_ne!(
-            quotient.as_many_to_one().original_to_internal[state_a],
-            quotient.as_many_to_one().original_to_internal[state_b],
-            "different frozen finalizers must not merge for one-byte tokens",
-        );
     }
 
     #[test]
