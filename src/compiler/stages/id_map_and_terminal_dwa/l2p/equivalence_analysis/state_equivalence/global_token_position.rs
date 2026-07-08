@@ -225,23 +225,40 @@ fn seed_partition(
     third_plus: &[bool],
 ) -> (Vec<u32>, usize) {
     let state_count = tokenizer.num_states() as usize;
-    let mut key_to_class = FxHashMap::<TokenPositionSeedKey, u32>::default();
+    // Group states by their exact seed key (frozen output, position->=3
+    // singleton marker, and first-byte destinations) via a 128-bit fingerprint.
+    // Position->=3 states fold their own index into the hash so they remain
+    // singletons. A false collision between distinct keys is ~states^2/2^128 --
+    // negligible -- and avoids allocating a Box<[u32]> destination key per
+    // state. Exactness is backstopped by the strict-reference validator.
+    let mut key_to_class = FxHashMap::<(u64, u64), u32>::default();
+    key_to_class.reserve(state_count);
     let mut blocks = vec![u32::MAX; state_count];
     let mut class_count = 0u32;
 
     for state in 0..state_count {
-        let first_destinations = first_bytes
-            .iter()
-            .map(|&byte| tokenizer.get_transition(state as u32, byte))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        let key = TokenPositionSeedKey {
-            frozen_output: frozen_outputs[state],
-            third_plus_singleton: third_plus[state].then_some(state as u32).unwrap_or(u32::MAX),
-            first_destinations,
-        };
+        let frozen = frozen_outputs[state] as u64;
+        let mut hash_a = 0x9e37_79b9_7f4a_7c15u64 ^ frozen;
+        let mut hash_b = 0xd1b5_4a32_d192_ed03u64 ^ frozen.rotate_left(17);
+        for &byte in first_bytes {
+            let destination = tokenizer.get_transition(state as u32, byte) as u64;
+            hash_a = hash_a
+                .wrapping_mul(0x517c_c1b7_2722_0a95)
+                .wrapping_add(destination.wrapping_add(1));
+            hash_b = hash_b
+                .wrapping_mul(0x2545_f491_4f6c_dd1d)
+                .wrapping_add(destination.rotate_left(23) ^ 0xa24b_aed4_963e_e407);
+        }
+        if third_plus[state] {
+            // Distinguish this state from every other so it stays a singleton.
+            let marker = (state as u64).wrapping_add(0x9e37_79b9_7f4a_7c15);
+            hash_a = hash_a.wrapping_mul(0x517c_c1b7_2722_0a95).wrapping_add(marker);
+            hash_b = hash_b
+                .wrapping_mul(0x2545_f491_4f6c_dd1d)
+                .wrapping_add(marker.rotate_left(31) ^ 0xbf58_476d_1ce4_e5b9);
+        }
         let next = class_count;
-        let class = *key_to_class.entry(key).or_insert_with(|| {
+        let class = *key_to_class.entry((hash_a, hash_b)).or_insert_with(|| {
             class_count += 1;
             next
         });
