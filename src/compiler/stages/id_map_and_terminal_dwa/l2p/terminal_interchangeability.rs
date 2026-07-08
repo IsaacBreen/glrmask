@@ -976,6 +976,105 @@ impl TokenActionContext {
         }
         let action_build_ms = action_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
+        // Optional exact action-alphabet pruning.  Full tokens are always
+        // observable.  A proper suffix is observable only if a terminal reset
+        // can land there from an already-observable action.  This is a fixed
+        // point over the *full* shared-trie action table above, so it does not
+        // repeat the earlier slow per-symbol construction experiment.
+        let prune_suffixes = std::env::var("GLRMASK_TOKEN_ACTION_TI_DISABLE_SUFFIX_PRUNING")
+            .map(|value| {
+                let value = value.trim();
+                value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(true);
+        let (symbols, full_symbol_for_token, suffix_symbol_after_full_byte, actions) = if prune_suffixes {
+            let mut suffixes_by_symbol = Vec::<Box<[u32]>>::with_capacity(symbol_count);
+            for bytes in &symbols {
+                let mut suffixes = Vec::<u32>::with_capacity(bytes.len());
+                for start in 0..bytes.len() {
+                    suffixes.push(
+                        *symbol_ids
+                            .get(&bytes[start..].to_vec())
+                            .expect("every suffix of an interned suffix is interned"),
+                    );
+                }
+                suffixes_by_symbol.push(suffixes.into_boxed_slice());
+            }
+            let mut needed = vec![false; symbol_count];
+            let mut pending = Vec::<usize>::new();
+            for &symbol in &full_symbol_for_token {
+                let symbol = symbol as usize;
+                if !needed[symbol] {
+                    needed[symbol] = true;
+                    pending.push(symbol);
+                }
+            }
+            while let Some(symbol) = pending.pop() {
+                let suffixes = &suffixes_by_symbol[symbol];
+                for state in 0..state_count {
+                    let action = &actions[state * symbol_count + symbol];
+                    for event in &action.events {
+                        let mut positions = event.positions;
+                        while positions != 0 {
+                            let position = positions.trailing_zeros() as usize;
+                            positions &= !(1u16 << position);
+                            if position + 1 >= suffixes.len() {
+                                continue;
+                            }
+                            let next_symbol = suffixes[position + 1] as usize;
+                            if !needed[next_symbol] {
+                                needed[next_symbol] = true;
+                                pending.push(next_symbol);
+                            }
+                        }
+                    }
+                }
+            }
+            let selected_symbols = needed
+                .iter()
+                .enumerate()
+                .filter_map(|(symbol, &needed)| needed.then_some(symbol))
+                .collect::<Vec<_>>();
+            let mut old_to_new = vec![u32::MAX; symbol_count];
+            for (new_symbol, &old_symbol) in selected_symbols.iter().enumerate() {
+                old_to_new[old_symbol] = new_symbol as u32;
+            }
+            let compact_symbols = selected_symbols
+                .iter()
+                .map(|&old_symbol| symbols[old_symbol].clone())
+                .collect::<Vec<_>>();
+            let compact_full_symbol_for_token = full_symbol_for_token
+                .iter()
+                .map(|&symbol| old_to_new[symbol as usize])
+                .collect::<Vec<_>>();
+            debug_assert!(compact_full_symbol_for_token.iter().all(|&symbol| symbol != u32::MAX));
+            let compact_suffix_symbol_after_full_byte = suffix_symbol_after_full_byte
+                .iter()
+                .map(|suffixes| {
+                    suffixes
+                        .iter()
+                        .map(|&symbol| old_to_new[symbol as usize])
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice()
+                })
+                .collect::<Vec<_>>();
+            let compact_symbol_count = selected_symbols.len();
+            let mut compact_actions = Vec::<TokenAction>::with_capacity(state_count * compact_symbol_count);
+            for state in 0..state_count {
+                for &old_symbol in &selected_symbols {
+                    compact_actions.push(actions[state * symbol_count + old_symbol].clone());
+                }
+            }
+            (
+                compact_symbols,
+                compact_full_symbol_for_token,
+                compact_suffix_symbol_after_full_byte,
+                compact_actions,
+            )
+        } else {
+            (symbols, full_symbol_for_token, suffix_symbol_after_full_byte, actions)
+        };
+
         let full_token_old_symbols = full_symbol_for_token
             .iter()
             .map(|&symbol| symbol as usize)
