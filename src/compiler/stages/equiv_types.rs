@@ -188,6 +188,7 @@ impl GlobalScannerStateQuotient {
     pub(crate) fn raw_state_count(&self) -> usize {
         self.map.original_to_internal.len()
     }
+
 }
 
 #[derive(Debug, Clone)]

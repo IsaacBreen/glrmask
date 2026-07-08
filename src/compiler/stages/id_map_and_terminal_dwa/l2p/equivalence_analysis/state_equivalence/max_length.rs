@@ -429,6 +429,50 @@ fn stable_refinement_blocks(
     blocks
 }
 
+
+/// Refine an already-formed total partition until it is a right congruence on
+/// `active_bytes`, while preserving that partition as a lower bound.
+pub(crate) fn stable_refinement_from_initial_blocks(
+    tokenizer: &Tokenizer,
+    active_bytes: &[u8],
+    initial_blocks: &[u32],
+    initial_block_count: usize,
+) -> Vec<u32> {
+    let n = tokenizer.num_states() as usize;
+    assert_eq!(initial_blocks.len(), n);
+    assert!(initial_blocks
+        .iter()
+        .all(|&block| (block as usize) < initial_block_count));
+    if initial_block_count == n || active_bytes.is_empty() {
+        return initial_blocks.to_vec();
+    }
+
+    let width = 1 + active_bytes.len();
+    let mut signatures = vec![0u32; n * width];
+    let mut row_hashes = vec![0u64; n];
+    let mut order: Vec<usize> = (0..n).collect();
+    let mut blocks = initial_blocks.to_vec();
+    let mut block_count = initial_block_count;
+    loop {
+        let (next_blocks, next_count) = refine_once_sorted(
+            tokenizer,
+            active_bytes,
+            initial_blocks,
+            &blocks,
+            &mut signatures,
+            &mut row_hashes,
+            &mut order,
+        );
+        let stable = same_partition(&blocks, block_count, &next_blocks, next_count);
+        blocks = next_blocks;
+        block_count = next_count;
+        if stable || block_count == n {
+            return blocks;
+        }
+    }
+}
+
+
 pub(crate) fn compute_statistic(vocab: &Vocab) -> MaxLengthStatistic {
     let mut relevant_bytes = [false; 256];
     let mut max_token_len = 0usize;

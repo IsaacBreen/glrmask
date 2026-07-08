@@ -1,6 +1,7 @@
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
 pub(crate) mod max_length;
+pub(crate) mod global_token_position;
 pub(crate) mod pipeline;
 pub(crate) mod restricted_observation;
 
