@@ -2728,6 +2728,25 @@ pub(crate) fn discover_one_round_with_token_macro_context(
         active_terminals,
         ignore_terminal,
     );
+    // `token_macro_candidate_groups` keeps only groups of 2+ terminals whose
+    // exact rejection signatures collide. The signature is a necessary
+    // condition for interchangeability, so an empty result proves no merge is
+    // possible this round. Skip the expensive `ExactTokenMacroDfa` build (and
+    // its identity-round refinement) entirely; this eliminates the no-op
+    // fixed-point round that otherwise rebuilds the full macro DAG.
+    if candidate_groups.is_empty() {
+        if profile_timing {
+            eprintln!(
+                "[glrmask/profile][terminal_interchangeability_token_macro] active={} c_classes={} macro_identity_classes=0 macro_rounds=0 identity_setup_ms=0.000 reachable_c_classes={} token_actions={} candidate_groups=0 candidate_pairs=0 exact_checks=0 direct_certificates=0 direct_impossible_rejections=0 refinement_fallbacks=0 accepted_members=0 total_ms={:.3}",
+                candidates.len(),
+                topology.state_map.representative_original_ids.len(),
+                topology.reachable.iter().filter(|&&reachable| reachable).count(),
+                topology.tokens.len(),
+                started_at.map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0),
+            );
+        }
+        return TiRoundTransportWitnesses::singleton(active_terminals);
+    }
     let macro_dfa = ExactTokenMacroDfa::new(topology, outputs);
     let macro_identity_classes = macro_dfa
         .identity_rounds
