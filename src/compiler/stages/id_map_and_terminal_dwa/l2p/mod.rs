@@ -43,10 +43,12 @@ use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nod
 use terminal_interchangeability::{
     active_terminals_for_partition, binary_transport_modes_from_witnesses,
     canonicalize_transport_mode_states, coalesced_disallowed_follows,
+    discover_one_round_with_literal_fiber_certificate_in_context,
     discover_one_round_with_transport_witnesses_in_context, fold_one_round_partition,
     expand_representative_dwa_after_minimization, partition_has_merges,
     restrict_weights_to_forward_domains_in_place, restore_raw_follow_constraints_after_expansion,
     singleton_partition, transport_coordinate_quotient, visible_output_raw_labels,
+    full_frozen_scanner_state_quotient, validate_full_frozen_scanner_state_quotient,
     TiDiscoveryContext,
 };
 use postprocess::{
@@ -90,6 +92,115 @@ fn l2p_env_enabled(name: &str) -> bool {
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         })
         .unwrap_or(false)
+}
+
+/// The token-position state quotient proposed for the global pre-TI pass.
+/// States that may be reached at byte two or later of a vocabulary token stay
+/// singleton. Every remaining state is identified by its complete first-byte
+/// destination vector, which is enough to preserve every nonempty token walk:
+/// after byte one, equivalent states have reached the same raw scanner state.
+fn profile_token_position_state_quotient(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    partition_label: &str,
+) {
+    let started_at = Instant::now();
+    let state_count = tokenizer.num_states() as usize;
+    let mut first_bytes = [false; 256];
+    let mut second_bytes = [false; 256];
+    let mut has_empty_token = false;
+    for bytes in vocab.entries.values() {
+        match bytes.as_slice() {
+            [] => has_empty_token = true,
+            [first] => first_bytes[*first as usize] = true,
+            [first, second, ..] => {
+                first_bytes[*first as usize] = true;
+                second_bytes[*second as usize] = true;
+            }
+        }
+    }
+    let first_bytes = (0..=255u8)
+        .filter(|&byte| first_bytes[byte as usize])
+        .collect::<Vec<_>>();
+    let second_bytes = (0..=255u8)
+        .filter(|&byte| second_bytes[byte as usize])
+        .collect::<Vec<_>>();
+    let mut second_states = vec![false; state_count];
+    for state in 0..state_count {
+        for &byte in &first_bytes {
+            if let Some(target) = tokenizer.step(state as u32, byte) {
+                second_states[target as usize] = true;
+            }
+        }
+    }
+    if second_states.iter().enumerate().any(|(state, &present)| {
+        present && tokenizer.matched_terminals_iter(state as u32).next().is_some()
+    }) {
+        second_states[tokenizer.initial_state_id() as usize] = true;
+    }
+    let mut reverse = vec![Vec::<u32>::new(); state_count];
+    for state in 0..state_count {
+        for (_, target) in tokenizer.transitions_from(state as u32) {
+            reverse[target as usize].push(state as u32);
+        }
+    }
+    let mut later_states = vec![false; state_count];
+    let mut queue = std::collections::VecDeque::<u32>::new();
+    for (state, &second_state) in second_states.iter().enumerate() {
+        if !second_state {
+            continue;
+        }
+        for &byte in &second_bytes {
+            if let Some(target) = tokenizer.step(state as u32, byte) {
+                if !later_states[target as usize] {
+                    later_states[target as usize] = true;
+                    queue.push_back(target);
+                }
+            }
+        }
+    }
+    while let Some(state) = queue.pop_front() {
+        for &predecessor in &reverse[state as usize] {
+            if !later_states[predecessor as usize] {
+                later_states[predecessor as usize] = true;
+                queue.push_back(predecessor);
+            }
+        }
+    }
+    let mut signatures = BTreeMap::<Vec<u32>, u32>::new();
+    let mut classes = vec![u32::MAX; state_count];
+    let mut class_count = 0u32;
+    for state in 0..state_count {
+        if has_empty_token || later_states[state] {
+            classes[state] = class_count;
+            class_count += 1;
+            continue;
+        }
+        let signature = first_bytes
+            .iter()
+            .map(|&byte| tokenizer.step(state as u32, byte).unwrap_or(u32::MAX))
+            .collect::<Vec<_>>();
+        let next = class_count;
+        let class = *signatures.entry(signature).or_insert_with(|| {
+            class_count += 1;
+            next
+        });
+        classes[state] = class;
+    }
+    let merged_states = state_count - class_count as usize;
+    eprintln!(
+        "[glrmask/profile][token_position_quotient] partition={} states={} first_bytes={} second_bytes={} second_states={} later_states={} classes={} merged_states={} empty_token={} total_ms={:.3}",
+        partition_label,
+        state_count,
+        first_bytes.len(),
+        second_bytes.len(),
+        second_states.iter().filter(|&&present| present).count(),
+        later_states.iter().filter(|&&present| present).count(),
+        class_count,
+        merged_states,
+        has_empty_token,
+        started_at.elapsed().as_secs_f64() * 1000.0,
+    );
 }
 
 /// Enable production terminal interchangeability. This changes only the
@@ -200,6 +311,33 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         }
     }
 
+    if l2p_env_enabled("GLRMASK_PROFILE_L2P_TOKEN_POSITION_QUOTIENT") {
+        profile_token_position_state_quotient(tokenizer, vocab, partition_label);
+    }
+
+    if l2p_env_enabled("GLRMASK_PROFILE_L2P_TOPOLOGY_SEED") {
+        let started_at = Instant::now();
+        let inactive_terminals = vec![false; active_terminals.len()];
+        let state_map = flat_trans.and_then(|transitions| {
+            equivalence_analysis::state_equivalence::restricted_observation::compute_state_map_raw(
+                tokenizer,
+                transitions,
+                &inactive_terminals,
+                &relevant_bytes,
+            )
+            .map(|result| result.state_map)
+        });
+        if let Some(state_map) = state_map {
+            eprintln!(
+                "[glrmask/profile][ti_topology_seed] partition={} raw_states={} representatives={} total_ms={:.3}",
+                partition_label,
+                tokenizer.num_states(),
+                state_map.num_internal_ids(),
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+    }
+
     // Repeatedly discover and immediately fold each transient exact partition.
     // Only the final flat original-member partition survives this loop.
     let ti_profile_timing = l2p_timing_profile_enabled();
@@ -211,21 +349,73 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         ti_additional_merged_members,
     ) =
         if l2p_terminal_interchangeability_enabled() {
+            let global_frozen_state_map = if l2p_env_enabled("GLRMASK_PROFILE_L2P_GLOBAL_FROZEN_QUOTIENT") {
+                let started_at = Instant::now();
+                let state_map = full_frozen_scanner_state_quotient(tokenizer, &relevant_bytes);
+                validate_full_frozen_scanner_state_quotient(tokenizer, &relevant_bytes, &state_map);
+                eprintln!(
+                    "[glrmask/profile][ti_global_frozen_quotient] partition={} raw_states={} representatives={} total_ms={:.3}",
+                    partition_label,
+                    tokenizer.num_states(),
+                    state_map.num_internal_ids(),
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+                Some(state_map)
+            } else {
+                None
+            };
             let mut active = active_terminals.to_vec();
             let mut classes = singleton_partition(&active);
-            let discovery_context = TiDiscoveryContext::new(tokenizer, &relevant_bytes);
+            let mut discovery_context = TiDiscoveryContext::new(
+                tokenizer,
+                &relevant_bytes,
+                global_frozen_state_map.as_ref(),
+            );
+            let base_discovery_context = discovery_context.clone();
             let mut transport_witness_rounds = Vec::new();
             let mut round_count = 0usize;
             let mut first_round_class_count = None;
+            // The literal-fibre certificate currently pays off on p0's large
+            // literal families. p1/p7 do not recover enough members to offset
+            // certificate preparation, so they retain the exact generic path.
+            // Keep an explicit diagnostic override for future family work.
+            let literal_fiber_certificate_enabled = partition_label == "p0"
+                || l2p_env_enabled("GLRMASK_PROFILE_L2P_LITERAL_CERTIFICATE_ALL")
+                || (partition_label == "p1"
+                    && l2p_env_enabled("GLRMASK_PROFILE_L2P_FIRST_ROUND_GLOBAL_HASH_FILTER_P1"));
+            let mut literal_fiber_certificate_attempted = false;
             loop {
-                let round = discover_one_round_with_transport_witnesses_in_context(
-                    tokenizer,
-                    &active,
-                    &discovery_context,
-                    ignore_terminal,
-                );
+                let round = if literal_fiber_certificate_enabled
+                    && !literal_fiber_certificate_attempted
+                {
+                    literal_fiber_certificate_attempted = true;
+                    discover_one_round_with_literal_fiber_certificate_in_context(
+                        tokenizer,
+                        &active,
+                        &discovery_context,
+                        ignore_terminal,
+                    )
+                } else {
+                    discover_one_round_with_transport_witnesses_in_context(
+                        tokenizer,
+                        &active,
+                        &discovery_context,
+                        ignore_terminal,
+                    )
+                };
                 let next_active = active_terminals_for_partition(&round.partition, active.len());
                 let next_classes = fold_one_round_partition(&classes, &round.partition);
+                let next_discovery_context = round
+                    .next_round_state_map
+                    .as_ref()
+                    .map(|state_map| {
+                        TiDiscoveryContext::from_base_with_state_map(
+                            tokenizer,
+                            &relevant_bytes,
+                            state_map,
+                            &base_discovery_context,
+                        )
+                    });
                 round_count += 1;
                 first_round_class_count.get_or_insert(next_classes.len());
                 classes = next_classes;
@@ -234,6 +424,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                     break;
                 }
                 active = next_active;
+                discovery_context = next_discovery_context
+                    .unwrap_or_else(|| TiDiscoveryContext::new(tokenizer, &relevant_bytes, None));
             }
             let additional_merged_members = first_round_class_count
                 .unwrap_or(classes.len())

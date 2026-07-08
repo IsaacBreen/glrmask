@@ -235,6 +235,28 @@ impl Tokenizer {
         self.matched_terminals_iter(state).collect()
     }
 
+    /// Return the exact bytes for a terminal that was compiled from one pure
+    /// literal expression.  Compile-time TI certificates use this only as a
+    /// conservative eligibility gate; all scanner/output evidence is still
+    /// verified against the frozen tokenizer DFA.
+    pub(crate) fn literal_terminal_bytes(&self, terminal: TerminalID) -> Option<Vec<u8>> {
+        fn append_literal_bytes(expr: &Expr, out: &mut Vec<u8>) -> bool {
+            match expr {
+                Expr::U8Seq(bytes) => {
+                    out.extend_from_slice(bytes);
+                    true
+                }
+                Expr::Shared(inner) => append_literal_bytes(inner, out),
+                Expr::Seq(parts) => parts.iter().all(|part| append_literal_bytes(part, out)),
+                _ => false,
+            }
+        }
+
+        let expr = self.exprs.as_deref()?.get(terminal as usize)?;
+        let mut bytes = Vec::new();
+        append_literal_bytes(expr, &mut bytes).then_some(bytes)
+    }
+
     fn matched_terminals_iter(
         &self,
         state: u32,
