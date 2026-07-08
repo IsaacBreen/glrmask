@@ -18,6 +18,7 @@ use std::time::Instant;
 use super::super::disallowed_follows::normalize_disallowed_follows;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
+use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::compile_profile_enabled;
 
 pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;
@@ -231,6 +232,141 @@ impl SharedVocabDfaBase {
         }
     }
 
+    /// Build a conservative local byte layout for a finite vocabulary. Every
+    /// relevant byte receives its own class; all other bytes share an unused
+    /// catch-all class. Token walks only observe relevant bytes, so this is an
+    /// exact replacement for full 256-column class discovery on that walk.
+    pub fn build_from_dfa_for_relevant_bytes(
+        dfa: &super::super::compat::FlatDfa,
+        relevant_bytes: &[bool; 256],
+    ) -> Option<Self> {
+        let relevant_count = relevant_bytes.iter().filter(|&&relevant| relevant).count();
+        if relevant_count >= 255 {
+            return None;
+        }
+        let mut byte_to_class = [0u8; 256];
+        let mut next_class = 1u8;
+        for byte in 0..=255u8 {
+            if relevant_bytes[byte as usize] {
+                byte_to_class[byte as usize] = next_class;
+                next_class += 1;
+            }
+        }
+        let num_classes = next_class as usize;
+        let mut self_loop_bytes = Vec::with_capacity(dfa.states.len());
+        for state in 0..dfa.states.len() {
+            let mut self_loops = U8Set::empty();
+            let base = state * 256;
+            for byte in 0..=255u8 {
+                if relevant_bytes[byte as usize]
+                    && dfa.transitions[base + byte as usize] == state as u32
+                {
+                    self_loops.insert(byte);
+                }
+            }
+            self_loop_bytes.push(self_loops);
+        }
+        let none_completion_hash = {
+            let mut h = new_hasher();
+            h.write_u8(0);
+            h.finish()
+        };
+        Some(Self {
+            byte_to_class,
+            num_classes,
+            class_representatives: Self::class_representatives(&byte_to_class, num_classes),
+            trans_by_class: OnceLock::new(),
+            trans_by_state_class: OnceLock::new(),
+            self_loop_bytes: Arc::from(self_loop_bytes),
+            none_completion_hash,
+            source_transitions: Arc::clone(&dfa.transitions),
+        })
+    }
+
+    /// Build a quotient's finite-vocabulary byte layout directly from raw
+    /// representative rows. This avoids materializing an otherwise-unused
+    /// quotient `states × 256` table: every relevant byte gets its own exact
+    /// class and all remaining bytes share a catch-all class.
+    pub(crate) fn build_from_raw_quotient_for_relevant_bytes(
+        raw_transitions: &Arc<[u32]>,
+        state_map: &ManyToOneIdMap,
+        relevant_bytes: &[bool; 256],
+    ) -> Option<Self> {
+        let relevant_count = relevant_bytes.iter().filter(|&&relevant| relevant).count();
+        if relevant_count >= 255 {
+            return None;
+        }
+        let raw_states = state_map.original_to_internal.len();
+        if raw_transitions.len() != raw_states * 256 {
+            return None;
+        }
+
+        let mut byte_to_class = [0u8; 256];
+        let mut next_class = 1u8;
+        for byte in 0..=255u8 {
+            if relevant_bytes[byte as usize] {
+                byte_to_class[byte as usize] = next_class;
+                next_class += 1;
+            }
+        }
+        let num_classes = next_class as usize;
+        let class_representatives = Self::class_representatives(&byte_to_class, num_classes);
+        let quotient_states = state_map.internal_to_originals.len();
+        let mut row_major = vec![NONE; quotient_states * num_classes];
+        let mut self_loop_bytes = Vec::with_capacity(quotient_states);
+        for (internal, &raw_representative) in state_map.representative_original_ids.iter().enumerate() {
+            let raw_representative = raw_representative as usize;
+            if raw_representative >= raw_states {
+                return None;
+            }
+            let raw_base = raw_representative * 256;
+            for class in 0..num_classes {
+                let target = raw_transitions[raw_base + class_representatives[class] as usize];
+                row_major[internal * num_classes + class] = if target == NONE {
+                    NONE
+                } else {
+                    state_map.original_to_internal[target as usize]
+                };
+            }
+            let mut self_loops = U8Set::empty();
+            for byte in 0..=255u8 {
+                if !relevant_bytes[byte as usize] {
+                    continue;
+                }
+                let target = raw_transitions[raw_base + byte as usize];
+                if target != NONE && state_map.original_to_internal[target as usize] == internal as u32 {
+                    self_loops.insert(byte);
+                }
+            }
+            self_loop_bytes.push(self_loops);
+        }
+        let mut class_major = vec![NONE; quotient_states * num_classes];
+        for state in 0..quotient_states {
+            for class in 0..num_classes {
+                class_major[class * quotient_states + state] = row_major[state * num_classes + class];
+            }
+        }
+        let row_lock = OnceLock::new();
+        let _ = row_lock.set(Arc::from(row_major));
+        let class_lock = OnceLock::new();
+        let _ = class_lock.set(Arc::from(class_major));
+        let none_completion_hash = {
+            let mut h = new_hasher();
+            h.write_u8(0);
+            h.finish()
+        };
+        Some(Self {
+            byte_to_class,
+            num_classes,
+            class_representatives,
+            trans_by_class: class_lock,
+            trans_by_state_class: row_lock,
+            self_loop_bytes: Arc::from(self_loop_bytes),
+            none_completion_hash,
+            source_transitions: Arc::from(Vec::<u32>::new()),
+        })
+    }
+
     /// Return the precomputed byte-to-class mapping.
     pub fn byte_to_class(&self) -> [u8; 256] {
         self.byte_to_class
@@ -262,6 +398,13 @@ impl SharedVocabDfaBase {
     /// Check full compatibility without forcing either lazy layout.
     pub fn is_compatible_with_dfa(&self, dfa: &super::super::compat::FlatDfa) -> bool {
         let num_dfa_states = dfa.states.len();
+        if self.source_transitions.is_empty() {
+            return self.self_loop_bytes.len() == num_dfa_states
+                && self
+                    .trans_by_state_class
+                    .get()
+                    .is_some_and(|transitions| transitions.len() == num_dfa_states * self.num_classes);
+        }
         self.self_loop_bytes.len() == num_dfa_states
             && self.source_transitions.len() == dfa.transitions.len()
             && (Arc::ptr_eq(&self.source_transitions, &dfa.transitions)

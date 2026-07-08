@@ -4,11 +4,11 @@
 //! it for determinization.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+
 use std::hash::{Hash, Hasher};
 
 use crate::automata::weighted::nwa::{NWA, NWAState as NWAStateType};
 use crate::grammar::flat::TerminalID;
-use super::equivalence_analysis::disallowed_follows::normalize_disallowed_follows;
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
 
@@ -585,28 +585,33 @@ pub(crate) fn collapse_always_allowed(
 /// Apply disallowed-follow constraints by subtracting a follow-pair DFA from
 /// the NWA. Takes the pre-computed `disallowed_follows` map and `num_terminals`.
 ///
-/// The normalized follow table is cheap to recompute and is intentionally not
-/// memoized across builds: a single shared cache cannot represent the different
-/// follow tables used by, e.g., the representative-coalesced interchangeability
-/// pass versus the canonical grammar table, and silently reusing one for the
-/// other corrupts results.
+/// Borrow each nonempty source row directly. The earlier dense normalization
+/// copied one `BitSet` per grammar terminal even though this product only needs
+/// indexed membership lookups; a pointer table preserves those lookups while
+/// avoiding the terminal-square allocation.
 pub(crate) fn apply_disallowed_follow_constraints(
     nwa: &mut NWA,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     num_terminals: usize,
     ignore_terminal: Option<TerminalID>,
 ) {
-    let normalized = normalize_disallowed_follows(num_terminals, disallowed_follows);
-    if normalized.iter().all(|bits| bits.is_zero()) {
+    let rows: Vec<Option<&BitSet>> = (0..num_terminals)
+        .map(|terminal| {
+            disallowed_follows
+                .get(&(terminal as u32))
+                .filter(|bits| !bits.is_zero())
+        })
+        .collect();
+    if rows.iter().all(Option::is_none) {
         return;
     }
 
-    *nwa = subtract_disallowed_follows_direct(nwa, &normalized, ignore_terminal);
+    *nwa = subtract_disallowed_follows_direct(nwa, &rows, ignore_terminal);
 }
 
 fn subtract_disallowed_follows_direct(
     nwa: &NWA,
-    disallowed_follows: &[BitSet],
+    disallowed_follows: &[Option<&BitSet>],
     ignore_terminal: Option<TerminalID>,
 ) -> NWA {
     type ProdState = (u32, Option<u32>);
@@ -662,7 +667,10 @@ fn subtract_disallowed_follows_direct(
             } else if (label as usize) < disallowed_follows.len() {
                 let terminal = label as usize;
                 if previous_terminal.is_some_and(|previous| {
-                    disallowed_follows[previous as usize].contains(terminal)
+                    disallowed_follows
+                        .get(previous as usize)
+                        .and_then(|row| *row)
+                        .is_some_and(|row| row.contains(terminal))
                 }) {
                     continue;
                 }

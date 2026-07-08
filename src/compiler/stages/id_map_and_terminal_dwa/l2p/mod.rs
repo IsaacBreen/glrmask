@@ -64,6 +64,9 @@ fn l2p_timing_profile_enabled() -> bool {
 
 thread_local! {
     static TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static TERMINAL_INTERCHANGEABILITY_BYPASS_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static P8_FIRST_BYTE_FACTORIZATION_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 struct SuppressTerminalInterchangeability;
@@ -79,6 +82,62 @@ impl Drop for SuppressTerminalInterchangeability {
     fn drop(&mut self) {
         TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH.with(|depth| {
             depth.set(depth.get().checked_sub(1).expect("unbalanced terminal interchangeability suppression"));
+        });
+    }
+}
+
+struct SuppressTerminalInterchangeabilityBypass;
+
+impl SuppressTerminalInterchangeabilityBypass {
+    fn new() -> Self {
+        TERMINAL_INTERCHANGEABILITY_BYPASS_SUPPRESS_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+impl Drop for SuppressTerminalInterchangeabilityBypass {
+    fn drop(&mut self) {
+        TERMINAL_INTERCHANGEABILITY_BYPASS_SUPPRESS_DEPTH.with(|depth| {
+            depth.set(depth.get().checked_sub(1).expect("unbalanced terminal interchangeability bypass suppression"));
+        });
+    }
+}
+
+struct SuppressTerminalInterchangeabilityStrictReference;
+
+impl SuppressTerminalInterchangeabilityStrictReference {
+    fn new() -> Self {
+        TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE_SUPPRESS_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+impl Drop for SuppressTerminalInterchangeabilityStrictReference {
+    fn drop(&mut self) {
+        TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE_SUPPRESS_DEPTH.with(|depth| {
+            depth.set(depth.get().checked_sub(1).expect("unbalanced terminal interchangeability strict-reference suppression"));
+        });
+    }
+}
+
+struct SuppressP8FirstByteFactorization;
+
+impl SuppressP8FirstByteFactorization {
+    fn new() -> Self {
+        P8_FIRST_BYTE_FACTORIZATION_SUPPRESS_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+impl Drop for SuppressP8FirstByteFactorization {
+    fn drop(&mut self) {
+        P8_FIRST_BYTE_FACTORIZATION_SUPPRESS_DEPTH.with(|depth| {
+            depth.set(
+                depth
+                    .get()
+                    .checked_sub(1)
+                    .expect("unbalanced P8 first-byte factorization suppression"),
+            );
         });
     }
 }
@@ -107,7 +166,13 @@ fn l2p_terminal_interchangeability_enabled() -> bool {
 }
 
 fn l2p_terminal_interchangeability_bypassed_for_partition(partition_label: &str) -> bool {
-    partition_label == "p8"
+    TERMINAL_INTERCHANGEABILITY_BYPASS_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
+        // The structural-boundary partitions have tiny local vocabularies.
+        // Their exact scanner quotient already does the useful reduction; on
+        // Catalog 512, P7's 31 TI merges force a much larger representative
+        // DWA transient than the direct construction. Retaining every terminal
+        // is exact and avoids discovery, transport, and expansion entirely.
+        && matches!(partition_label, "p7" | "p8")
 }
 
 fn l2p_terminal_interchangeability_enabled_for_partition(partition_label: &str) -> bool {
@@ -119,8 +184,14 @@ fn l2p_terminal_interchangeability_enabled_for_partition(partition_label: &str) 
 /// This is deliberately slow and is intended for tests and explicit validation,
 /// not ordinary TI compilation.
 fn l2p_terminal_interchangeability_strict_reference_enabled() -> bool {
-    l2p_env_enabled("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE")
+    TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
+        && l2p_env_enabled("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE")
 }
+
+pub(crate) fn p8_first_byte_factorization_allowed() -> bool {
+    P8_FIRST_BYTE_FACTORIZATION_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
+}
+
 
 #[derive(Clone, Copy)]
 struct L2PTokenLengthStats {
@@ -270,7 +341,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         .is_some_and(|partition| partition_has_merges(partition));
     // A successful merge activates production TI. The recursive TI-off rebuild
     // and symbolic comparison are a separate, explicit validation mode.
-    let strict_reference = reference_terminal_expansion
+    let local_bypass_strict_reference = l2p_terminal_interchangeability_bypassed_for_partition(partition_label)
+        && l2p_terminal_interchangeability_enabled()
+        && l2p_terminal_interchangeability_strict_reference_enabled();
+    let strict_reference = (reference_terminal_expansion || local_bypass_strict_reference)
         && l2p_terminal_interchangeability_strict_reference_enabled();
     let analysis_active_terminals = terminal_partition
         .as_ref()
@@ -864,13 +938,17 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
 
     if strict_reference {
-        // Rebuild the same local L2P artifact with TI suppressed, then compare
-        // completed weighted terminal languages in original tokenizer-state and
-        // token coordinates. This is an explicit correctness oracle, not part
-        // of normal TI production compilation.
+        // Compare completed weighted terminal languages in original
+        // tokenizer-state and token coordinates. For an active TI route the
+        // reference suppresses TI; for an explicit local bypass it suppresses
+        // only the bypass, forcing the full TI construction.
         let strict_baseline_started_at = Instant::now();
         let baseline = {
-            let _suppress = SuppressTerminalInterchangeability::new();
+            let _strict_reference_suppress = SuppressTerminalInterchangeabilityStrictReference::new();
+            let _suppress_p8_first_byte_factorization = SuppressP8FirstByteFactorization::new();
+            let _suppress_ti = reference_terminal_expansion.then(SuppressTerminalInterchangeability::new);
+            let _suppress_bypass = (!reference_terminal_expansion)
+                .then(SuppressTerminalInterchangeabilityBypass::new);
             build_l2p_id_map_and_terminal_dwa(
                 partition_label,
                 tokenizer,
@@ -950,10 +1028,11 @@ mod ti_mre_tests {
     }
 
     #[test]
-    fn p8_bypasses_terminal_interchangeability_when_globally_enabled() {
+    fn p7_and_p8_bypass_terminal_interchangeability_when_globally_enabled() {
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
         let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
 
+        assert!(!super::l2p_terminal_interchangeability_enabled_for_partition("p7"));
         assert!(!super::l2p_terminal_interchangeability_enabled_for_partition("p8"));
     }
 
@@ -963,7 +1042,7 @@ mod ti_mre_tests {
         let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
 
         assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p0"));
-        assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p7"));
+        assert!(!super::l2p_terminal_interchangeability_enabled_for_partition("p7"));
     }
 
     #[test]
@@ -981,6 +1060,65 @@ mod ti_mre_tests {
         assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p0"));
         let _disabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "0");
         assert!(!super::l2p_terminal_interchangeability_enabled_for_partition("p0"));
+    }
+
+    #[test]
+    fn p7_boundary_bypass_matches_forced_full_ti_reference() {
+        let grammar = r#"
+start S;
+t TRUE ::= "true";
+t FALSE ::= "false";
+t NULL ::= "null";
+nt S ::= TRUE | FALSE | NULL;
+"#;
+        let vocab = Vocab::new(
+            vec![
+                (0, b" true".to_vec()),
+                (1, b" false".to_vec()),
+                (2, b" null".to_vec()),
+                (3, b"[true".to_vec()),
+                (4, b" -".to_vec()),
+            ],
+            None,
+        );
+
+        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _structural = EnvVarGuard::set("GLRMASK_STRUCTURAL_BOUNDARY_LEXICAL_PARTITION", "1");
+        let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+        let _strict = EnvVarGuard::set(
+            "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
+            "1",
+        );
+        Constraint::from_glrm_grammar(grammar, &vocab)
+            .expect("P7 local TI bypass must match the forced full-TI artifact");
+    }
+
+    #[test]
+    fn p8_boundary_bypass_matches_forced_full_ti_reference() {
+        let grammar = r#"
+start S;
+t QUOTE ::= "\"";
+t IDENT ::= /[A-Za-z_][A-Za-z0-9_]*/;
+nt S ::= QUOTE IDENT;
+"#;
+        let vocab = Vocab::new(
+            vec![
+                (0, b"\"A".to_vec()),
+                (1, b"\"Z".to_vec()),
+                (2, b"\"_".to_vec()),
+            ],
+            None,
+        );
+
+        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _structural = EnvVarGuard::set("GLRMASK_STRUCTURAL_BOUNDARY_LEXICAL_PARTITION", "1");
+        let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+        let _strict = EnvVarGuard::set(
+            "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
+            "1",
+        );
+        Constraint::from_glrm_grammar(grammar, &vocab)
+            .expect("P8 local TI bypass must match the forced full-TI artifact");
     }
 
     #[test]

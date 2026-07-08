@@ -145,40 +145,66 @@ fn hash_future_groups_filtered(future_groups: &[usize], disallowed: &BitSet) -> 
     hash
 }
 
-#[derive(Clone)]
-struct FollowContextTable {
-    gid_to_context: Vec<usize>,
-    disallowed_by_context: Vec<BitSet>,
+#[derive(Clone, Copy)]
+enum FollowRows<'a> {
+    Dense(Option<&'a [BitSet]>),
+    Borrowed(&'a [Option<&'a BitSet>]),
+    Sparse(&'a BTreeMap<u32, BitSet>),
 }
 
-impl FollowContextTable {
-    fn new(num_groups: usize, disallowed_follows: Option<&[BitSet]>) -> Self {
-        let root = BitSet::new(num_groups);
-        let Some(disallowed_follows) = disallowed_follows else {
-            return Self {
-                gid_to_context: vec![0; num_groups],
-                disallowed_by_context: vec![root],
-            };
+impl FollowRows<'_> {
+    fn num_groups_hint(self) -> usize {
+        match self {
+            Self::Dense(rows) => rows.map_or(0, <[BitSet]>::len),
+            Self::Borrowed(rows) => rows.len(),
+            Self::Sparse(rows) => rows.iter().fold(0usize, |max_group, (&source, row)| {
+                let mut max_group = max_group.max(source as usize + 1);
+                for target in row.iter() {
+                    max_group = max_group.max(target + 1);
+                }
+                max_group
+            }),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct FollowContextTable<'a> {
+    gid_to_context: Vec<usize>,
+    disallowed_by_context: Vec<Option<&'a BitSet>>,
+}
+
+impl<'a> FollowContextTable<'a> {
+    fn new(num_groups: usize, rows: FollowRows<'a>) -> Self {
+        let row_for_gid = |gid: usize| match rows {
+            FollowRows::Dense(disallowed_follows) => disallowed_follows
+                .and_then(|rows| rows.get(gid))
+                .filter(|bits| !bits.is_zero()),
+            FollowRows::Borrowed(disallowed_follows) => disallowed_follows
+                .get(gid)
+                .and_then(|row| *row)
+                .filter(|bits| !bits.is_zero()),
+            FollowRows::Sparse(disallowed_follows) => disallowed_follows
+                .get(&(gid as u32))
+                .filter(|bits| !bits.is_zero()),
         };
 
         let mut gid_to_context = vec![0; num_groups];
-        let mut disallowed_by_context = vec![root];
-        let mut seen: std::collections::HashMap<BitSet, usize> = std::collections::HashMap::new();
+        let mut disallowed_by_context = vec![None];
+        let mut seen: std::collections::HashMap<&BitSet, usize> = std::collections::HashMap::new();
 
         for gid in 0..num_groups {
-            let bits = disallowed_follows
-                .get(gid)
-                .cloned()
-                .unwrap_or_else(|| BitSet::new(num_groups));
-            let ctx = if bits.is_zero() {
-                0
-            } else if let Some(&ctx) = seen.get(&bits) {
-                ctx
-            } else {
-                let ctx = disallowed_by_context.len();
-                seen.insert(bits.clone(), ctx);
-                disallowed_by_context.push(bits);
-                ctx
+            let ctx = match row_for_gid(gid) {
+                None => 0,
+                Some(bits) => match seen.get(&bits) {
+                    Some(&ctx) => ctx,
+                    None => {
+                        let ctx = disallowed_by_context.len();
+                        seen.insert(bits, ctx);
+                        disallowed_by_context.push(Some(bits));
+                        ctx
+                    }
+                },
             };
             gid_to_context[gid] = ctx;
         }
@@ -201,7 +227,7 @@ impl FollowContextTable {
 
     #[inline(always)]
     fn allows_follow(&self, context: usize, gid: usize) -> bool {
-        !self.disallowed_by_context[context].contains(gid)
+        !self.disallowed_by_context[context].is_some_and(|row| row.contains(gid))
     }
 }
 
@@ -226,19 +252,18 @@ impl TokenSuffixHashes {
 
 fn build_future_group_hashes_by_context(
     dfa_future_groups: &[&[usize]],
-    follow_contexts: &FollowContextTable,
+    follow_contexts: &FollowContextTable<'_>,
 ) -> Vec<Vec<u128>> {
     (0..follow_contexts.num_contexts())
         .map(|context| {
-            let disallowed = &follow_contexts.disallowed_by_context[context];
+            let disallowed = follow_contexts.disallowed_by_context[context];
             dfa_future_groups
                 .iter()
                 .map(|future_groups| {
-                    if disallowed.is_zero() {
-                        hash_future_groups(future_groups)
-                    } else {
-                        hash_future_groups_filtered(future_groups, disallowed)
-                    }
+                    disallowed.map_or_else(
+                        || hash_future_groups(future_groups),
+                        |disallowed| hash_future_groups_filtered(future_groups, disallowed),
+                    )
                 })
                 .collect()
         })
@@ -250,7 +275,7 @@ fn hash_suffix_node(
     pos: usize,
     nodes: &[SuffixNode],
     token_len: usize,
-    follow_contexts: &FollowContextTable,
+    follow_contexts: &FollowContextTable<'_>,
     future_group_hashes_by_context: &[Vec<u128>],
     memo: &mut [u128],
     ready: &mut [bool],
@@ -311,7 +336,7 @@ fn hash_suffix_node(
 
 fn build_token_suffix_hashes(
     nodes: Vec<SuffixNode>,
-    follow_contexts: &FollowContextTable,
+    follow_contexts: &FollowContextTable<'_>,
     future_group_hashes_by_context: &[Vec<u128>],
 ) -> TokenSuffixHashes {
     let len = nodes.len();
@@ -347,7 +372,7 @@ fn hash_trellis_node_from_positions(
     active_bits: &[u64],
     token_len: usize,
     future_group_hashes: &[u128],
-    follow_contexts: &FollowContextTable,
+    follow_contexts: &FollowContextTable<'_>,
     suffix_hashes: Option<&TokenSuffixHashes>,
 ) -> u128 {
     const DEAD_NODE_TAG: u128 = 0xDEAD_DEAD_DEAD_DEAD;
@@ -509,12 +534,124 @@ pub fn find_state_equivalence_classes_with_disallowed_and_shared_base<S: AsRef<[
         tokens,
         states,
         &[],
-        Some(disallowed_follows),
+        FollowRows::Dense(Some(disallowed_follows)),
         None,
         None,
         None,
         false,
         shared_base,
+        false,
+        false,
+    )
+}
+
+/// Exact sibling of the dense follow-table entry point. It borrows only the
+/// non-empty grammar rows and derives the same follow-row contexts by bitset
+/// equality, avoiding a dense terminal-square normalization for tiny vocab
+/// partitions with large active alphabets.
+pub(crate) fn find_state_equivalence_classes_with_sparse_disallowed_and_shared_base<
+    S: AsRef<[u8]> + Sync,
+>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    shared_base: Option<&SharedVocabDfaBase>,
+) -> Vec<usize> {
+    find_state_equivalence_classes_ex_inner(
+        tokenizer,
+        tokens,
+        states,
+        &[],
+        FollowRows::Sparse(disallowed_follows),
+        None,
+        None,
+        None,
+        false,
+        shared_base,
+        false,
+        false,
+    )
+}
+
+/// Dense-indexed but borrowed follow rows. This is equivalent to normalized
+/// dense rows while avoiding a clone of every grammar-terminal bitset.
+pub(crate) fn find_state_equivalence_classes_with_borrowed_disallowed_and_shared_base<
+    S: AsRef<[u8]> + Sync,
+>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    disallowed_follows: &[Option<&BitSet>],
+    shared_base: Option<&SharedVocabDfaBase>,
+) -> Vec<usize> {
+    find_state_equivalence_classes_ex_inner(
+        tokenizer,
+        tokens,
+        states,
+        &[],
+        FollowRows::Borrowed(disallowed_follows),
+        None,
+        None,
+        None,
+        false,
+        shared_base,
+        false,
+        false,
+    )
+}
+
+/// Exact sparse-row entry point for a deliberately small set of source
+/// states. It bypasses whole-DFA byte-class materialization and walks the raw
+/// transition table directly.
+pub(crate) fn find_state_equivalence_classes_with_sparse_disallowed_and_raw_transitions<
+    S: AsRef<[u8]> + Sync,
+>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+) -> Vec<usize> {
+    find_state_equivalence_classes_ex_inner(
+        tokenizer,
+        tokens,
+        states,
+        &[],
+        FollowRows::Sparse(disallowed_follows),
+        None,
+        None,
+        None,
+        false,
+        None,
+        true,
+        false,
+    )
+}
+
+/// Exact raw-table entry point that treats finalizers on each supplied start
+/// state as matches at byte position zero. This models a factored common
+/// prefix that has already been consumed before the remaining token suffix.
+pub(crate) fn find_state_equivalence_classes_with_sparse_disallowed_and_raw_transitions_with_initial_finalizers<
+    S: AsRef<[u8]> + Sync,
+>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+) -> Vec<usize> {
+    find_state_equivalence_classes_ex_inner(
+        tokenizer,
+        tokens,
+        states,
+        &[],
+        FollowRows::Sparse(disallowed_follows),
+        None,
+        None,
+        None,
+        false,
+        None,
+        true,
+        true,
     )
 }
 
@@ -558,12 +695,70 @@ pub fn find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_an
         tokens,
         states,
         &[],
-        Some(disallowed_follows),
+        FollowRows::Dense(Some(disallowed_follows)),
         max_batches,
         batch_size,
         early_stop_override,
         true,
         shared_base,
+        false,
+        false,
+    )
+}
+
+pub(crate) fn find_state_equivalence_classes_ex_with_rep_confirmation_and_sparse_disallowed_and_shared_base<
+    S: AsRef<[u8]> + Sync,
+>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    max_batches: Option<usize>,
+    batch_size: Option<usize>,
+    early_stop_override: Option<bool>,
+    shared_base: Option<&SharedVocabDfaBase>,
+) -> Vec<usize> {
+    find_state_equivalence_classes_ex_inner(
+        tokenizer,
+        tokens,
+        states,
+        &[],
+        FollowRows::Sparse(disallowed_follows),
+        max_batches,
+        batch_size,
+        early_stop_override,
+        true,
+        shared_base,
+        false,
+        false,
+    )
+}
+
+pub(crate) fn find_state_equivalence_classes_ex_with_rep_confirmation_and_borrowed_disallowed_and_shared_base<
+    S: AsRef<[u8]> + Sync,
+>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    disallowed_follows: &[Option<&BitSet>],
+    max_batches: Option<usize>,
+    batch_size: Option<usize>,
+    early_stop_override: Option<bool>,
+    shared_base: Option<&SharedVocabDfaBase>,
+) -> Vec<usize> {
+    find_state_equivalence_classes_ex_inner(
+        tokenizer,
+        tokens,
+        states,
+        &[],
+        FollowRows::Borrowed(disallowed_follows),
+        max_batches,
+        batch_size,
+        early_stop_override,
+        true,
+        shared_base,
+        false,
+        false,
     )
 }
 
@@ -572,12 +767,14 @@ fn find_state_equivalence_classes_ex_inner<S: AsRef<[u8]> + Sync>(
     tokens: &[S],
     states: &[usize],
     skip_groups: &[bool],
-    disallowed_follows: Option<&[BitSet]>,
+    follow_rows: FollowRows<'_>,
     max_batches: Option<usize>,
     batch_size: Option<usize>,
     early_stop_override: Option<bool>,
     rep_only_confirmation: bool,
     shared_base: Option<&SharedVocabDfaBase>,
+    force_raw_transitions: bool,
+    seed_initial_finalizers: bool,
 ) -> Vec<usize> {
     if states.is_empty() {
         return Vec::new();
@@ -588,12 +785,14 @@ fn find_state_equivalence_classes_ex_inner<S: AsRef<[u8]> + Sync>(
         tokens,
         states,
         skip_groups,
-        disallowed_follows,
+        follow_rows,
         max_batches,
         batch_size,
         early_stop_override,
         rep_only_confirmation,
         shared_base,
+        force_raw_transitions,
+        seed_initial_finalizers,
     )
 }
 
@@ -602,12 +801,14 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     tokens: &[S],
     states: &[usize],
     skip_groups: &[bool],
-    disallowed_follows: Option<&[BitSet]>,
+    follow_rows: FollowRows<'_>,
     max_batches: Option<usize>,
     custom_batch_size: Option<usize>,
     early_stop_override: Option<bool>,
     rep_only_confirmation: bool,
     shared_base: Option<&SharedVocabDfaBase>,
+    force_raw_transitions: bool,
+    seed_initial_finalizers: bool,
 ) -> Vec<usize> {
     use std::collections::{hash_map::Entry, HashMap};
 
@@ -623,11 +824,10 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     // outweighs the benefit.
     const COMPACT_THRESHOLD_STATES: usize = 16_000;
     let num_dfa_states = dfa.states.len();
-    let use_compact = num_dfa_states >= COMPACT_THRESHOLD_STATES;
     let identity_byte_class: [u8; 256] = std::array::from_fn(|i| i as u8);
-    let compatible_shared_base = use_compact
-        .then(|| shared_base.filter(|base| base.is_compatible_with_dfa(dfa)))
-        .flatten();
+    let compatible_shared_base = shared_base.filter(|base| base.is_compatible_with_dfa(dfa));
+    let use_compact = !force_raw_transitions
+        && (num_dfa_states >= COMPACT_THRESHOLD_STATES || compatible_shared_base.is_some());
     let computed_byte_class = (use_compact && compatible_shared_base.is_none())
         .then(|| super::super::compat::compute_byte_classes(dfa));
     let byte_to_class: &[u8; 256] = compatible_shared_base
@@ -681,11 +881,9 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         .max()
         .map(|m| m + 1)
         .unwrap_or(0);
-    if let Some(disallowed_follows) = disallowed_follows {
-        max_gid = max_gid.max(disallowed_follows.len());
-    }
+    max_gid = max_gid.max(follow_rows.num_groups_hint());
     let num_groups = max_gid;
-    let follow_contexts = FollowContextTable::new(num_groups, disallowed_follows);
+    let follow_contexts = FollowContextTable::new(num_groups, follow_rows);
     let future_group_hashes_by_context =
         build_future_group_hashes_by_context(&dfa_future_groups, &follow_contexts);
     let mut sorted_indices: Vec<usize> = (0..tokens.len()).collect();
@@ -892,13 +1090,24 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                         }
 
                         walk_frames.clear();
+                        clear_active_positions(positions, active_bits);
+                        changes.clear();
+                        if seed_initial_finalizers && num_groups > 0 {
+                            for &gid in dfa_finalizers[state as usize] {
+                                if gid >= num_groups
+                                    || (!skip_groups.is_empty() && skip_groups[gid])
+                                {
+                                    continue;
+                                }
+                                positions[gid] = 0;
+                                bitset_set(active_bits, gid);
+                            }
+                        }
                         walk_frames.push(WalkFrame {
                             state,
                             dead_at_depth: None,
                             changes_len: 0,
                         });
-                        clear_active_positions(positions, active_bits);
-                        changes.clear();
 
                         for token_idx in range_start..range_end {
                             let global_token_idx = batch_indices[token_idx];
