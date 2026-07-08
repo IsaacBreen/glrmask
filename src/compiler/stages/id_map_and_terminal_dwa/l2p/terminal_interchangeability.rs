@@ -1351,7 +1351,6 @@ impl<'a> TokenActionDfa<'a> {
                 let entry = state as usize * symbol_count + symbol as usize;
                 let hash = Self::identity_output_hash(
                     context,
-                    active_terminals,
                     &future_by_raw_state,
                     state,
                     symbol,
@@ -1364,7 +1363,6 @@ impl<'a> TokenActionDfa<'a> {
                         let representative_symbol = (representative % symbol_count) as u32;
                         if Self::identity_outputs_equal(
                             context,
-                            active_terminals,
                             &future_by_raw_state,
                             state,
                             symbol,
@@ -1458,15 +1456,13 @@ impl<'a> TokenActionDfa<'a> {
                 let action = context.action(state, symbol);
                 for event in action.events {
                     let terminal = event.terminal as usize;
-                    if active_terminals.get(terminal).copied().unwrap_or(false) {
-                        terminal_supports[terminal].set(class);
-                        terminal_occurrences[terminal].push((class as u32, symbol));
-                        let slot = terminal * class_count + class;
-                        event_state_signature[slot] = token_action_hash_mix(
-                            event_state_signature[slot],
-                            ((symbol as u64) << 16) | event.positions as u64,
-                        );
-                    }
+                    terminal_supports[terminal].set(class);
+                    terminal_occurrences[terminal].push((class as u32, symbol));
+                    let slot = terminal * class_count + class;
+                    event_state_signature[slot] = token_action_hash_mix(
+                        event_state_signature[slot],
+                        ((symbol as u64) << 16) | event.positions as u64,
+                    );
                 }
                 if action.end_raw_state != u32::MAX {
                     for &terminal in &future_by_raw_state[action.end_raw_state as usize]
@@ -1493,12 +1489,10 @@ impl<'a> TokenActionDfa<'a> {
                 let action = context.action(state, symbol);
                 for event in action.events {
                     let terminal = event.terminal as usize;
-                    if active_terminals.get(terminal).copied().unwrap_or(false) {
-                        terminal_components[terminal].push(token_action_hash_mix(
-                            token_action_hash_mix(structural_color, symbol as u64),
-                            event.positions as u64,
-                        ));
-                    }
+                    terminal_components[terminal].push(token_action_hash_mix(
+                        token_action_hash_mix(structural_color, symbol as u64),
+                        event.positions as u64,
+                    ));
                 }
                 if action.end_raw_state != u32::MAX {
                     for &terminal in &future_by_raw_state[action.end_raw_state as usize]
@@ -1592,7 +1586,6 @@ impl<'a> TokenActionDfa<'a> {
 
     fn identity_output_hash(
         context: &TokenActionContext,
-        active_terminals: &[bool],
         future_by_raw_state: &[Option<OutputBits>],
         state: u32,
         symbol: u32,
@@ -1600,16 +1593,10 @@ impl<'a> TokenActionDfa<'a> {
         let action = context.action(state, symbol);
         let mut hash = 0x243f_6a88_85a3_08d3u64;
         for event in action.events {
-            if active_terminals
-                .get(event.terminal as usize)
-                .copied()
-                .unwrap_or(false)
-            {
-                hash = token_action_hash_mix(
-                    hash,
-                    ((event.terminal as u64) << 16) | event.positions as u64,
-                );
-            }
+            hash = token_action_hash_mix(
+                hash,
+                ((event.terminal as u64) << 16) | event.positions as u64,
+            );
         }
         if action.end_raw_state != u32::MAX {
             for &terminal in &future_by_raw_state[action.end_raw_state as usize]
@@ -1742,7 +1729,6 @@ impl<'a> TokenActionDfa<'a> {
 
     fn identity_outputs_equal(
         context: &TokenActionContext,
-        active_terminals: &[bool],
         future_by_raw_state: &[Option<OutputBits>],
         left_state: u32,
         left_symbol: u32,
@@ -1751,7 +1737,7 @@ impl<'a> TokenActionDfa<'a> {
     ) -> bool {
         let left = context.action(left_state, left_symbol);
         let right = context.action(right_state, right_symbol);
-        if !Self::events_equal_filtered(left.events, right.events, active_terminals) {
+        if left.events != right.events {
             return false;
         }
         Self::future_output(left.end_raw_state, future_by_raw_state)

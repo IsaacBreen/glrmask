@@ -112,7 +112,7 @@ fn l2p_terminal_interchangeability_bypassed_for_partition(partition_label: &str)
 }
 
 fn l2p_token_action_ti_enabled_for_partition(partition_label: &str) -> bool {
-    matches!(partition_label, "p7" | "p8")
+    partition_label == "p7"
         && std::env::var("GLRMASK_L2P_TOKEN_ACTION_TI")
             .map(|value| {
                 let value = value.trim();

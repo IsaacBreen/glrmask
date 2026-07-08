@@ -303,7 +303,7 @@ fn force_raw_quotient_for_partition(partition_label: &str) -> bool {
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         })
         .unwrap_or(false);
-    forced_by_env || (token_action_ti_enabled && matches!(partition_label, "p7" | "p8"))
+    forced_by_env || partition_label == "p8" || (token_action_ti_enabled && partition_label == "p7")
 }
 
 const EXACT_REP_CONFIRMATION_MIN_STATES: usize = 2_000;
