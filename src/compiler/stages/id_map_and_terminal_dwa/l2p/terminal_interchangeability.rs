@@ -780,6 +780,18 @@ struct TokenActionDfa<'a> {
     event_state_signature: Box<[u64]>,
     terminal_occurrences: Vec<Box<[(u32, u32)]>>,
     future_by_raw_state: Vec<Option<OutputBits>>,
+    profile: TokenActionDfaProfile,
+}
+
+#[derive(Clone, Copy, Default)]
+struct TokenActionDfaProfile {
+    future_ms: f64,
+    structural_ms: f64,
+    output_ms: f64,
+    minimize_ms: f64,
+    reverse_ms: f64,
+    support_ms: f64,
+    signature_ms: f64,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -1179,6 +1191,7 @@ impl<'a> TokenActionDfa<'a> {
         tokenizer: &'a Tokenizer,
         active_terminals: &'a [bool],
     ) -> Self {
+        let future_started_at = Instant::now();
         let state_count = context.state_count + 1;
         let symbol_count = context.symbols.len();
 
@@ -1205,12 +1218,26 @@ impl<'a> TokenActionDfa<'a> {
                 future_by_raw_state[raw_state] = Some(OutputBits(terminals));
             }
         }
-        let structural_colors = Self::structural_colors(
-            context,
-            active_terminals,
-            &future_by_raw_state,
-        );
+        let future_ms = future_started_at.elapsed().as_secs_f64() * 1000.0;
+        let structural_started_at = Instant::now();
+        let structural_colors = if std::env::var("GLRMASK_TOKEN_ACTION_TI_STRUCTURAL_SIGNATURE")
+            .map(|value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false)
+        {
+            Self::structural_colors(
+                context,
+                active_terminals,
+                &future_by_raw_state,
+            )
+        } else {
+            vec![0u32; state_count].into_boxed_slice()
+        };
+        let structural_ms = structural_started_at.elapsed().as_secs_f64() * 1000.0;
 
+        let output_started_at = Instant::now();
         let mut output_ids = vec![0u32; state_count * symbol_count];
         let mut output_representatives = Vec::<usize>::new();
         let mut output_buckets = FxHashMap::<u64, Vec<u32>>::default();
@@ -1253,7 +1280,9 @@ impl<'a> TokenActionDfa<'a> {
                 output_ids[entry] = output_id;
             }
         }
+        let output_ms = output_started_at.elapsed().as_secs_f64() * 1000.0;
 
+        let minimize_started_at = Instant::now();
         // Seed the synthetic dead state separately so a real token-boundary
         // state can never be represented by a non-raw dead coordinate.
         let mut previous = vec![0u32; state_count];
@@ -1296,7 +1325,9 @@ impl<'a> TokenActionDfa<'a> {
             previous_class_count = representatives.len();
             previous = next;
         };
+        let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
         let class_count = representative_state_by_class.len();
+        let reverse_started_at = Instant::now();
         let mut reverse_predecessors = vec![Vec::<u32>::new(); class_count];
         for (class, &state) in representative_state_by_class.iter().enumerate() {
             for symbol in 0..symbol_count as u32 {
@@ -1309,7 +1340,9 @@ impl<'a> TokenActionDfa<'a> {
             predecessors.sort_unstable();
             predecessors.dedup();
         }
+        let reverse_ms = reverse_started_at.elapsed().as_secs_f64() * 1000.0;
 
+        let support_started_at = Instant::now();
         let mut terminal_supports = (0..active_terminals.len())
             .map(|_| BitSet::new(class_count))
             .collect::<Vec<_>>();
@@ -1346,6 +1379,8 @@ impl<'a> TokenActionDfa<'a> {
             occurrences.sort_unstable();
             occurrences.dedup();
         }
+        let support_ms = support_started_at.elapsed().as_secs_f64() * 1000.0;
+        let signature_started_at = Instant::now();
         let mut terminal_components = vec![SmallVec::<[u64; 4]>::new(); active_terminals.len()];
         for (class, &state) in representative_state_by_class.iter().enumerate() {
             let structural_color = structural_colors[state as usize] as u64;
@@ -1398,6 +1433,7 @@ impl<'a> TokenActionDfa<'a> {
                 terminal_signature[terminal] = hash;
             }
         }
+        let signature_ms = signature_started_at.elapsed().as_secs_f64() * 1000.0;
 
         let initial_b_state = context.class_for_raw[tokenizer.initial_state_id() as usize];
         let root_class = class_for_state[initial_b_state as usize];
@@ -1437,6 +1473,15 @@ impl<'a> TokenActionDfa<'a> {
                 .map(Vec::into_boxed_slice)
                 .collect(),
             future_by_raw_state,
+            profile: TokenActionDfaProfile {
+                future_ms,
+                structural_ms,
+                output_ms,
+                minimize_ms,
+                reverse_ms,
+                support_ms,
+                signature_ms,
+            },
         }
     }
 
@@ -2555,7 +2600,7 @@ pub(crate) fn discover_one_round_with_token_actions_in_context(
     }
     if profile_timing {
         eprintln!(
-            "[glrmask/profile][token_action_ti] active={} first_byte_classes={} macro_classes={} symbols={} full_tokens={} suffix_trie_nodes={} full_token_trie_nodes={} root_candidate_pairs={} candidate_groups={} candidate_group_pairs={} exact_checks={} accepted={} classes={} fixed_occurrence_checks={} cone_class_checks={} context_first_byte_ms={:.3} context_symbol_ms={:.3} context_trie_ms={:.3} context_actions_ms={:.3} dfa_ms={:.3} template_ms={:.3} cone_ms={:.3} verify_ms={:.3} map_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][token_action_ti] active={} first_byte_classes={} macro_classes={} symbols={} full_tokens={} suffix_trie_nodes={} full_token_trie_nodes={} root_candidate_pairs={} candidate_groups={} candidate_group_pairs={} exact_checks={} accepted={} classes={} fixed_occurrence_checks={} cone_class_checks={} context_first_byte_ms={:.3} context_symbol_ms={:.3} context_trie_ms={:.3} context_actions_ms={:.3} dfa_ms={:.3} dfa_future_ms={:.3} dfa_structural_ms={:.3} dfa_output_ms={:.3} dfa_minimize_ms={:.3} dfa_reverse_ms={:.3} dfa_support_ms={:.3} dfa_signature_ms={:.3} template_ms={:.3} cone_ms={:.3} verify_ms={:.3} map_ms={:.3} total_ms={:.3}",
             active_terminals.iter().filter(|&&active| active).count(),
             context.state_count,
             dfa.class_count(),
@@ -2576,6 +2621,13 @@ pub(crate) fn discover_one_round_with_token_actions_in_context(
             context.profile.suffix_trie_ms,
             context.profile.action_build_ms,
             dfa_ms,
+            dfa.profile.future_ms,
+            dfa.profile.structural_ms,
+            dfa.profile.output_ms,
+            dfa.profile.minimize_ms,
+            dfa.profile.reverse_ms,
+            dfa.profile.support_ms,
+            dfa.profile.signature_ms,
             template_ns as f64 / 1_000_000.0,
             cone_ns as f64 / 1_000_000.0,
             verify_ns as f64 / 1_000_000.0,
