@@ -45,7 +45,7 @@ use terminal_interchangeability::{
     canonicalize_transport_mode_states, coalesced_disallowed_follows,
     coalesced_disallowed_follows_full_domain,
     discover_one_round_with_transport_witnesses_in_context, fold_one_round_partition,
-    expand_representative_dwa_after_minimization, partition_has_merges,
+    expand_representative_dwa_after_minimization_with_domains, partition_has_merges,
     quotient_two_group_suffix_overlay_if_exact,
     raw_follow_row_column_signature_ids,
     restrict_weights_to_forward_domains_in_place,
@@ -676,7 +676,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         };
 
         let expansion_started_at = ti_profile_timing.then(Instant::now);
-        let expanded_dwa = expand_representative_dwa_after_minimization(
+        let (expanded_dwa, direct_entry_domains) = expand_representative_dwa_after_minimization_with_domains(
             &core_dwa,
             &core_id_map.tokenizer_states,
             &transport_coordinate_map,
@@ -706,7 +706,11 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             .unwrap_or(0.0);
 
         let forward_domain_started_at = ti_profile_timing.then(Instant::now);
-        let forward_domains = if std::env::var_os(
+        let forward_domains = if std::env::var_os("GLRMASK_EXPERIMENT_TI_USE_DIRECT_ENTRY_DOMAINS").is_some()
+            && ti_follow_congruent
+        {
+            direct_entry_domains
+        } else if std::env::var_os(
             "GLRMASK_EXPERIMENT_TI_DIRECT_FORWARD_OVERLAY_QUOTIENT",
         )
         .is_some()

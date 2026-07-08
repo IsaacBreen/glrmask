@@ -3883,6 +3883,11 @@ pub(crate) fn transport_coordinate_quotient(
         };
         groups[group_index].modes.push(mode_index);
     }
+    if std::env::var_os("GLRMASK_EXPERIMENT_TI_TRANSPORT_FIRST_GROUP_ONLY").is_some()
+        && groups.len() > 1
+    {
+        groups.truncate(1);
+    }
 
     let components_started_at = profile_timing.then(Instant::now);
     let mut source_class_mode_evaluations = 0usize;
@@ -4022,17 +4027,18 @@ pub(crate) fn transport_coordinate_quotient(
 
     let final_refinement_started_at = profile_timing.then(Instant::now);
     let mut class_for_state = Vec::with_capacity(state_count);
-    if groups.len() <= 2 {
+    let final_refinement_groups = groups.iter().collect::<Vec<_>>();
+    if final_refinement_groups.len() <= 2 {
         let mut class_for_signature = FxHashMap::<u128, u32>::default();
         for source_state in 0..state_count {
             let ordinary = ordinary_coordinate_key(source_state) as u128;
             let mut signature = ordinary << 64;
-            for (group_index, group) in groups.iter().enumerate() {
+            for (group_index, group) in final_refinement_groups.iter().enumerate() {
                 let source_class = modes[group.domain_mode]
                     .scanner_state_for_original
                     .innermost_source_class(source_state as u32);
                 signature |= (group.component_for_source_class[source_class] as u128)
-                    << (32 * (1 - group_index));
+                    << (32 * (1usize.saturating_sub(group_index)));
             }
             let next_class = class_for_signature.len() as u32;
             let class = *class_for_signature.entry(signature).or_insert(next_class);
@@ -4041,9 +4047,10 @@ pub(crate) fn transport_coordinate_quotient(
     } else {
         let mut class_for_signature = FxHashMap::<SmallVec<[u64; 8]>, u32>::default();
         for source_state in 0..state_count {
-            let mut signature = SmallVec::<[u64; 8]>::with_capacity(groups.len() + 1);
+            let mut signature =
+                SmallVec::<[u64; 8]>::with_capacity(final_refinement_groups.len() + 1);
             signature.push(ordinary_coordinate_key(source_state));
-            for group in &groups {
+            for group in &final_refinement_groups {
                 let source_class = modes[group.domain_mode]
                     .scanner_state_for_original
                     .innermost_source_class(source_state as u32);
@@ -4085,15 +4092,27 @@ pub(crate) fn transport_coordinate_quotient(
                     .innermost_source_class_count()
             })
             .collect::<Vec<_>>();
+        let group_component_counts = groups
+            .iter()
+            .map(|group| {
+                group
+                    .component_for_source_class
+                    .iter()
+                    .copied()
+                    .max()
+                    .map_or(0usize, |component| component as usize + 1)
+            })
+            .collect::<Vec<_>>();
         let group_mode_counts = groups
             .iter()
             .map(|group| group.modes.len())
             .collect::<Vec<_>>();
         eprintln!(
-            "[glrmask/profile][transport_coordinate_quotient] modes={} groups={} group_source_class_counts={:?} group_mode_counts={:?} source_class_mode_evaluations={} raw_state_group_lookups={} component_build_ms={:.3} final_refinement_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][transport_coordinate_quotient] modes={} groups={} group_source_class_counts={:?} group_component_counts={:?} group_mode_counts={:?} source_class_mode_evaluations={} raw_state_group_lookups={} component_build_ms={:.3} final_refinement_ms={:.3} total_ms={:.3}",
             modes.len(),
             groups.len(),
             group_source_class_counts,
+            group_component_counts,
             group_mode_counts,
             source_class_mode_evaluations,
             state_count * groups.len(),
@@ -4524,6 +4543,19 @@ impl PostDwaWeightLifter {
                 coordinates,
             },
         );
+        if std::env::var_os("GLRMASK_PROFILE_TI_DIRECT_DETAIL").is_some() {
+            let plan = self
+                .group_coordinate_plans
+                .get(mode_indices)
+                .expect("inserted group coordinate plan must be retained");
+            eprintln!(
+                "[glrmask/profile][ti_post_dwa_group_plan] modes={} overrides={} signatures={} coordinates={}",
+                mode_indices.len(),
+                plan.overrides.len(),
+                plan.signatures.len(),
+                plan.coordinates.len(),
+            );
+        }
     }
 
     /// Union the exact lifted weight over one proven-disjoint transport group.
@@ -4643,6 +4675,21 @@ pub(crate) fn expand_representative_dwa_after_minimization(
     final_state_map: &ManyToOneIdMap,
     modes: &[TerminalNwaTransportMode],
 ) -> DWA {
+    expand_representative_dwa_after_minimization_with_domains(
+        core_dwa,
+        core_state_map,
+        final_state_map,
+        modes,
+    )
+    .0
+}
+
+pub(crate) fn expand_representative_dwa_after_minimization_with_domains(
+    core_dwa: &DWA,
+    core_state_map: &ManyToOneIdMap,
+    final_state_map: &ManyToOneIdMap,
+    modes: &[TerminalNwaTransportMode],
+) -> (DWA, Option<Vec<Weight>>) {
     let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
     let profile_direct_detail = std::env::var_os("GLRMASK_PROFILE_TI_DIRECT_DETAIL").is_some();
     let coordinate_setup_started_at = profile_timing.then(Instant::now);
@@ -4939,6 +4986,18 @@ if profile_direct_detail {
     let state_for = |group_index: usize, core_state_index: usize| -> u32 {
         (1 + group_index * core_states.len() + core_state_index) as u32
     };
+    let direct_domains = std::env::var_os("GLRMASK_EXPERIMENT_TI_USE_DIRECT_ENTRY_DOMAINS")
+        .is_some()
+        .then(|| {
+            let mut domains = vec![Weight::all(); 1 + mode_groups.len() * core_states.len()];
+            for group_index in 0..mode_groups.len() {
+                for core_state_index in 0..core_states.len() {
+                    domains[state_for(group_index, core_state_index) as usize] =
+                        entry_domain_at_core_state[group_index][core_state_index].clone();
+                }
+            }
+            domains
+        });
     let shared_build_started_at = profile_direct_detail.then(Instant::now);
 let mut final_lift_ms = 0.0;
 let mut transition_lift_ms = 0.0;
@@ -5093,7 +5152,7 @@ let mut transition_lift_calls = 0usize;
         );
     }
 
-    DWA::from_parts(states, 0)
+    (DWA::from_parts(states, 0), direct_domains)
 }
 
 /// Restore the original raw-terminal follow relation after building and
