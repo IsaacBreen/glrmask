@@ -423,6 +423,153 @@ impl TokenizerView {
         )
     }
 
+    pub(crate) fn new_filtered_quotient_from_flat_trans_with_observation_cache(
+        flat_trans: &Arc<[u32]>,
+        tokenizer: &Tokenizer,
+        active_groups: &[bool],
+        state_map: &ManyToOneIdMap,
+        raw_observation_ids: &[u32],
+        observation_representatives: &[u32],
+    ) -> (Self, f64) {
+        let raw_states = tokenizer.num_states() as usize;
+        assert_eq!(flat_trans.len(), raw_states * 256, "invalid raw transition table");
+        assert_eq!(state_map.original_to_internal.len(), raw_states, "invalid state map");
+        assert_eq!(raw_observation_ids.len(), raw_states, "invalid observation IDs");
+
+        let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let started_at = profile_timing.then(Instant::now);
+        let observation_states = observation_representatives
+            .iter()
+            .map(|&representative| {
+                let representative = representative as usize;
+                assert!(representative < raw_states, "invalid observation representative");
+                FlatDfaState {
+                    finalizers: collect_filtered_group_ids(
+                        tokenizer.matched_terminals_iter(representative as u32),
+                        active_groups,
+                    ),
+                    possible_future_group_ids: collect_filtered_group_ids(
+                        tokenizer.possible_future_terminals_iter(representative as u32),
+                        active_groups,
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let quotient_states = state_map.internal_to_originals.len();
+        let mut transitions = vec![u32::MAX; quotient_states * 256];
+        let mut states = Vec::with_capacity(quotient_states);
+        for (internal, &representative) in state_map.representative_original_ids.iter().enumerate() {
+            let representative = representative as usize;
+            let observation = raw_observation_ids[representative] as usize;
+            states.push(
+                observation_states
+                    .get(observation)
+                    .expect("invalid observation class")
+                    .clone(),
+            );
+            let raw_base = representative * 256;
+            let quotient_base = internal * 256;
+            for byte in 0..256usize {
+                let target = flat_trans[raw_base + byte];
+                transitions[quotient_base + byte] = if target == u32::MAX {
+                    u32::MAX
+                } else {
+                    state_map.original_to_internal[target as usize]
+                };
+            }
+        }
+        let start_state = state_map.original_to_internal[tokenizer.start_state() as usize];
+        assert_ne!(start_state, u32::MAX, "quotient start state must be mapped");
+        (
+            Self {
+                flat_dfa: FlatDfa {
+                    states,
+                    start_state: start_state as usize,
+                    transitions: Arc::from(transitions),
+                },
+            },
+            started_at
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0),
+        )
+    }
+
+    /// Build the filtered quotient metadata together with a precompressed
+    /// finite-vocabulary transition base. The returned view deliberately has
+    /// no dense 256-column transition table; callers must use the returned
+    /// compatible base for all token walks.
+    pub(crate) fn new_filtered_quotient_from_flat_trans_with_observation_cache_and_relevant_base(
+        flat_trans: &Arc<[u32]>,
+        tokenizer: &Tokenizer,
+        active_groups: &[bool],
+        state_map: &ManyToOneIdMap,
+        raw_observation_ids: &[u32],
+        observation_representatives: &[u32],
+        relevant_bytes: &[bool; 256],
+    ) -> Option<(Self, super::vocab::fast::SharedVocabDfaBase, f64)> {
+        let raw_states = tokenizer.num_states() as usize;
+        if flat_trans.len() != raw_states * 256
+            || state_map.original_to_internal.len() != raw_states
+            || raw_observation_ids.len() != raw_states
+        {
+            return None;
+        }
+        let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let started_at = profile_timing.then(Instant::now);
+        let observation_states = observation_representatives
+            .iter()
+            .map(|&representative| {
+                let representative = representative as usize;
+                if representative >= raw_states {
+                    return None;
+                }
+                Some(FlatDfaState {
+                    finalizers: collect_filtered_group_ids(
+                        tokenizer.matched_terminals_iter(representative as u32),
+                        active_groups,
+                    ),
+                    possible_future_group_ids: collect_filtered_group_ids(
+                        tokenizer.possible_future_terminals_iter(representative as u32),
+                        active_groups,
+                    ),
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        let mut states = Vec::with_capacity(state_map.internal_to_originals.len());
+        for &representative in &state_map.representative_original_ids {
+            let representative = representative as usize;
+            if representative >= raw_states {
+                return None;
+            }
+            let observation = raw_observation_ids[representative] as usize;
+            states.push(observation_states.get(observation)?.clone());
+        }
+        let start_state = state_map.original_to_internal[tokenizer.start_state() as usize];
+        if start_state == u32::MAX {
+            return None;
+        }
+        let base = super::vocab::fast::SharedVocabDfaBase::build_from_raw_quotient_for_relevant_bytes(
+            flat_trans,
+            state_map,
+            relevant_bytes,
+        )?;
+        Some((
+            Self {
+                flat_dfa: FlatDfa {
+                    states,
+                    start_state: start_state as usize,
+                    transitions: Arc::from(Vec::<u32>::new()),
+                },
+            },
+            base,
+            started_at
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0),
+        ))
+    }
+
     /// Verify that `state_map` is an output-labelled right congruence for every
     /// byte that may occur in the active vocabulary. This is the exact condition
     /// needed to evaluate token paths in the quotient DFA.

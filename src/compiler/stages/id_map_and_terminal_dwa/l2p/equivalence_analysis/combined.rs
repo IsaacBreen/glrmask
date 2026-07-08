@@ -160,6 +160,29 @@ fn build_vocab_map(
     }
 }
 
+/// An identity map is an exact conservative token quotient. It is useful for
+/// small structural partitions where vocab equivalence has no materialization
+/// benefit, while its analysis cost dominates the enclosing partition wall.
+fn build_identity_vocab_map(token_ids: &[u32], max_token_id: u32) -> ManyToOneIdMap {
+    let mut token_ids = token_ids.to_vec();
+    token_ids.sort_unstable();
+    token_ids.dedup();
+
+    let mut original_to_internal = vec![u32::MAX; max_token_id as usize + 1];
+    let mut internal_to_originals = Vec::with_capacity(token_ids.len());
+    let mut representatives = Vec::with_capacity(token_ids.len());
+    for (internal, token_id) in token_ids.into_iter().enumerate() {
+        original_to_internal[token_id as usize] = internal as u32;
+        internal_to_originals.push(vec![token_id]);
+        representatives.push(token_id);
+    }
+    ManyToOneIdMap {
+        original_to_internal,
+        internal_to_originals,
+        representative_original_ids: representatives,
+    }
+}
+
 struct PreparedEquivalenceInputs<'a> {
     max_token_id: u32,
     token_ids: Vec<u32>,
@@ -296,6 +319,8 @@ const EXACT_REP_CONFIRMATION_MIN_STATES: usize = 2_000;
 const EXACT_REP_CONFIRMATION_MIN_TOKENS: usize = 200;
 const RAW_QUOTIENT_TINY_VOCAB_MAX_TOKENS: usize = 16;
 const RAW_QUOTIENT_TINY_VOCAB_MAX_BYTES: usize = 64;
+const RAW_QUOTIENT_STRUCTURAL_BOUNDARY_MAX_TOKENS: usize = 48;
+const RAW_QUOTIENT_STRUCTURAL_BOUNDARY_MAX_BYTES: usize = 256;
 
 fn token_length_stats(tokens: &[&[u8]]) -> TokenLengthStats {
     let mut stats = TokenLengthStats {
@@ -448,8 +473,175 @@ fn try_analyze_equivalences_with_raw_quotient(
     // can retain too much raw topology for this to win.
     let tiny_raw_quotient = prepared.token_bytes.len() <= RAW_QUOTIENT_TINY_VOCAB_MAX_TOKENS
         && direct_token_bytes <= RAW_QUOTIENT_TINY_VOCAB_MAX_BYTES;
-    if skip_raw_quotient && !tiny_raw_quotient {
+    let structural_boundary_raw_quotient = matches!(partition_label, "p7" | "p8")
+        && prepared.token_bytes.len() <= RAW_QUOTIENT_STRUCTURAL_BOUNDARY_MAX_TOKENS
+        && direct_token_bytes <= RAW_QUOTIENT_STRUCTURAL_BOUNDARY_MAX_BYTES;
+    if skip_raw_quotient && !tiny_raw_quotient && !structural_boundary_raw_quotient {
         return None;
+    }
+
+    // P8's local vocabulary has one common leading quote byte. For this one
+    // partition, the full behavior of a source state on every local token is
+    // determined by its quote successor. Evaluate one source representative
+    // per distinct successor, then lift the exact result back to all raw
+    // sources. This is a conservative factorization: equal quote successors
+    // have identical complete token paths by definition.
+    if partition_label == "p8" && super::super::p8_first_byte_factorization_allowed() {
+        let common_first = prepared
+            .token_bytes
+            .first()
+            .and_then(|token| token.first())
+            .copied()?;
+        if prepared
+            .token_bytes
+            .iter()
+            .any(|token| token.first().copied() != Some(common_first))
+        {
+            return None;
+        }
+
+        // Every production P8 token has a nonempty identifier prefix after
+        // the quote. Model terminal matches at the quote successor as
+        // zero-position events, then analyze only the remaining suffix.
+        // Retain the full-token path as a conservative fallback for any future
+        // P8 route that includes a one-byte quote token.
+        let use_seeded_suffix_factorization =
+            prepared.token_bytes.iter().all(|token| token.len() > 1);
+        let mut target_to_source = BTreeMap::<u32, usize>::new();
+        let mut source_representative = vec![usize::MAX; tokenizer.num_states() as usize];
+        let mut target_by_source = vec![u32::MAX; tokenizer.num_states() as usize];
+        for source in 0..tokenizer.num_states() as usize {
+            let target = flat_trans[source * 256 + common_first as usize];
+            if target == u32::MAX {
+                continue;
+            }
+            let representative = *target_to_source.entry(target).or_insert(source);
+            source_representative[source] = representative;
+            target_by_source[source] = target;
+        }
+        let representative_sources: Vec<usize> = target_to_source.values().copied().collect();
+        let quote_targets: Vec<usize> = target_to_source.keys().map(|&target| target as usize).collect();
+        let suffix_tokens: Vec<&[u8]> = prepared
+            .token_bytes
+            .iter()
+            .map(|token| &token[1..])
+            .collect();
+        if use_seeded_suffix_factorization && suffix_tokens.iter().any(|suffix| suffix.is_empty()) {
+            return None;
+        }
+        let view_started_at = Instant::now();
+        let analysis_view = TokenizerView::new_filtered_from_flat_trans(
+            flat_trans,
+            tokenizer,
+            active_groups,
+        );
+        let analysis_view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
+        let exact_started_at = Instant::now();
+        let representative_state_reps = if use_seeded_suffix_factorization {
+            state_equivalence_analysis::find_state_equivalence_classes_with_sparse_disallowed_and_raw_transitions_with_initial_finalizers(
+                &analysis_view,
+                &suffix_tokens,
+                &quote_targets,
+                effective_disallowed,
+            )
+        } else {
+            state_equivalence_analysis::find_state_equivalence_classes_with_sparse_disallowed_and_raw_transitions(
+                &analysis_view,
+                &prepared.token_bytes,
+                &representative_sources,
+                effective_disallowed,
+            )
+        };
+        let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
+        let mut source_rep_to_behavior_rep = HashMap::<usize, usize>::new();
+        if use_seeded_suffix_factorization {
+            for (&target, &behavior_rep) in quote_targets.iter().zip(&representative_state_reps) {
+                source_rep_to_behavior_rep.insert(target, behavior_rep);
+            }
+        } else {
+            for (&source, &behavior_rep) in representative_sources
+                .iter()
+                .zip(&representative_state_reps)
+            {
+                source_rep_to_behavior_rep.insert(source, behavior_rep);
+            }
+        }
+
+        let id_map_finalize_started_at = Instant::now();
+        let mut behavior_rep_to_internal = HashMap::<Option<usize>, u32>::new();
+        let mut original_to_internal = vec![u32::MAX; tokenizer.num_states() as usize];
+        let mut internal_to_originals = Vec::<Vec<u32>>::new();
+        let mut representative_original_ids = Vec::<u32>::new();
+        for source in 0..tokenizer.num_states() as usize {
+            let behavior_rep = if use_seeded_suffix_factorization {
+                (target_by_source[source] != u32::MAX)
+                    .then(|| source_rep_to_behavior_rep[&(target_by_source[source] as usize)])
+            } else {
+                (source_representative[source] != usize::MAX).then(|| {
+                    source_rep_to_behavior_rep[&source_representative[source]]
+                })
+            };
+            let next = internal_to_originals.len() as u32;
+            let internal = *behavior_rep_to_internal.entry(behavior_rep).or_insert_with(|| {
+                internal_to_originals.push(Vec::new());
+                representative_original_ids.push(source as u32);
+                next
+            });
+            original_to_internal[source] = internal;
+            internal_to_originals[internal as usize].push(source as u32);
+        }
+        let tokenizer_states = ManyToOneIdMap {
+            original_to_internal,
+            internal_to_originals,
+            representative_original_ids,
+        };
+        let exact_reps = tokenizer_states.num_internal_ids() as usize;
+        let internal_id_map = InternalIdMap {
+            tokenizer_states,
+            vocab_tokens: build_identity_vocab_map(&prepared.token_ids, prepared.max_token_id),
+        };
+        let id_map_finalize_ms = id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
+        if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+            eprintln!(
+                "[glrmask/profile][p8_first_byte_factorization] first_byte={} quote_targets={} seeded_suffix_factorized={} exact_reps={} view_ms={:.3} state_equiv_ms={:.3}",
+                common_first,
+                representative_sources.len(),
+                use_seeded_suffix_factorization,
+                exact_reps,
+                analysis_view_build_ms,
+                exact_state_equiv_ms,
+            );
+        }
+        return Some((
+            internal_id_map,
+            CombinedEquivalenceProfile {
+                initial_states_considered: prepared.initial_states.len(),
+                max_length_skipped: false,
+                max_token_len,
+                token_len_gt_4: token_len_stats.gt_4,
+                token_len_gt_8: token_len_stats.gt_8,
+                token_len_gt_16: token_len_stats.gt_16,
+                token_len_gt_32: token_len_stats.gt_32,
+                token_len_gt_64: token_len_stats.gt_64,
+                raw_analysis_base_init_ms: 0.0,
+                analysis_view_build_ms,
+                active_mask_filter_ms: 0.0,
+                effective_follows_normalize_ms: effective_follows_prepare_ms,
+                prepare_inputs_ms,
+                byte_class_setup_ms: 0.0,
+                vocab_analysis_dfa_build_ms: 0.0,
+                token_dedup_ms: 0.0,
+                restricted_observation_state_equiv_ms: 0.0,
+                max_length_state_equiv_ms: 0.0,
+                vocab_equiv_ms: 0.0,
+                exact_state_equiv_ms,
+                id_map_finalize_ms,
+                restricted_observation_reps: representative_sources.len(),
+                max_length_reps: representative_sources.len(),
+                exact_reps,
+                exact_rep_confirmation_used: false,
+            },
+        ));
     }
 
     let restricted_started_at = Instant::now();
@@ -472,55 +664,170 @@ fn try_analyze_equivalences_with_raw_quotient(
             raw_restricted.state_map.num_internal_ids(),
         );
     }
+    let raw_observation_ids = raw_restricted.raw_observation_ids;
+    let observation_representatives = raw_restricted.observation_representatives;
     let pre_state_map = raw_restricted.state_map;
 
+    let use_compact_quotient_view = partition_label == "p7"
+        && !super::super::l2p_terminal_interchangeability_strict_reference_enabled();
     let view_build_started_at = Instant::now();
-    let (analysis_view, active_mask_filter_ms) =
-        TokenizerView::new_filtered_quotient_from_flat_trans(
-            flat_trans,
-            tokenizer,
-            active_groups,
-            &pre_state_map,
-        );
+    let (analysis_view, prebuilt_local_base, active_mask_filter_ms) = if use_compact_quotient_view {
+        if let Some((view, base, build_ms)) =
+            TokenizerView::new_filtered_quotient_from_flat_trans_with_observation_cache_and_relevant_base(
+                flat_trans,
+                tokenizer,
+                active_groups,
+                &pre_state_map,
+                &raw_observation_ids,
+                &observation_representatives,
+                &raw_relevant_bytes,
+            )
+        {
+            (view, Some(base), build_ms)
+        } else {
+            let (view, build_ms) =
+                TokenizerView::new_filtered_quotient_from_flat_trans_with_observation_cache(
+                    flat_trans,
+                    tokenizer,
+                    active_groups,
+                    &pre_state_map,
+                    &raw_observation_ids,
+                    &observation_representatives,
+                );
+            (view, None, build_ms)
+        }
+    } else {
+        let (view, build_ms) =
+            TokenizerView::new_filtered_quotient_from_flat_trans_with_observation_cache(
+                flat_trans,
+                tokenizer,
+                active_groups,
+                &pre_state_map,
+                &raw_observation_ids,
+                &observation_representatives,
+            );
+        (view, None, build_ms)
+    };
     let analysis_view_build_ms = view_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // This exact byte partition is now over at most a few hundred quotient
     // rows. It replaces the previous 18k-state shared-base cold setup.
     let byte_class_setup_started_at = Instant::now();
-    let byte_to_class = super::compat::compute_byte_classes(analysis_view.dfa());
+    let local_shared_base = prebuilt_local_base.or_else(|| {
+        super::vocab::fast::SharedVocabDfaBase::build_from_dfa_for_relevant_bytes(
+            analysis_view.dfa(),
+            &raw_relevant_bytes,
+        )
+    });
+    let byte_to_class = local_shared_base
+        .as_ref()
+        .map(|base| base.byte_to_class())
+        .unwrap_or_else(|| super::compat::compute_byte_classes(analysis_view.dfa()));
     let byte_class_setup_ms = byte_class_setup_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let token_dedup_started_at = Instant::now();
     let dedup = deduplicate_tokens_by_byte_class(&prepared.token_bytes, &byte_to_class);
     let token_dedup_ms = token_dedup_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    // In strict-reference mode the primary build retains the old cloned dense
+    // representation. The recursive reference runs with the guard suppressed
+    // and therefore exercises the production borrowed/sparse form, so the
+    // existing terminal-DWA equality check crosses the representations.
+    let strict_reference_mode =
+        super::super::l2p_terminal_interchangeability_strict_reference_enabled();
+    let use_sparse_follow_rows = partition_label == "p8"
+        && !strict_reference_mode;
+    let use_borrowed_follow_rows = partition_label == "p7" && !strict_reference_mode;
     let follows_normalize_started_at = Instant::now();
-    let normalized_disallowed_follows =
-        normalize_disallowed_follows(tokenizer_group_count(&analysis_view), effective_disallowed);
-    let effective_follows_normalize_ms = effective_follows_prepare_ms
-        + follows_normalize_started_at.elapsed().as_secs_f64() * 1000.0;
+    let group_count = tokenizer_group_count(&analysis_view);
+    let normalized_disallowed_follows = (!use_sparse_follow_rows && !use_borrowed_follow_rows).then(|| {
+        normalize_disallowed_follows(group_count, effective_disallowed)
+    });
+    let borrowed_disallowed_follows = use_borrowed_follow_rows.then(|| {
+        (0..group_count)
+            .map(|terminal| {
+                effective_disallowed
+                    .get(&(terminal as u32))
+                    .filter(|bits| !bits.is_zero())
+            })
+            .collect::<Vec<_>>()
+    });
+    let effective_follows_normalize_ms = if use_sparse_follow_rows {
+        effective_follows_prepare_ms
+    } else {
+        effective_follows_prepare_ms
+            + follows_normalize_started_at.elapsed().as_secs_f64() * 1000.0
+    };
     let pre_reduced_states: Vec<usize> = (0..pre_state_map.internal_to_originals.len()).collect();
     let exact_rep_confirmation_used = pre_reduced_states.len() >= EXACT_REP_CONFIRMATION_MIN_STATES
         && dedup.representative_token_bytes.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
     let exact_started_at = Instant::now();
-    let reduced_state_reps_for_pre_reduced = if exact_rep_confirmation_used {
+    let reduced_state_reps_for_pre_reduced = if use_sparse_follow_rows {
+        if exact_rep_confirmation_used {
+            state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_sparse_disallowed_and_shared_base(
+                &analysis_view,
+                &dedup.representative_token_bytes,
+                &pre_reduced_states,
+                effective_disallowed,
+                None,
+                None,
+                Some(true),
+                local_shared_base.as_ref(),
+            )
+        } else {
+            state_equivalence_analysis::find_state_equivalence_classes_with_sparse_disallowed_and_shared_base(
+                &analysis_view,
+                &dedup.representative_token_bytes,
+                &pre_reduced_states,
+                effective_disallowed,
+                local_shared_base.as_ref(),
+            )
+        }
+    } else if use_borrowed_follow_rows && exact_rep_confirmation_used {
+        state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_borrowed_disallowed_and_shared_base(
+            &analysis_view,
+            &dedup.representative_token_bytes,
+            &pre_reduced_states,
+            borrowed_disallowed_follows
+                .as_deref()
+                .expect("borrowed follow rows must be present"),
+            None,
+            None,
+            Some(true),
+            local_shared_base.as_ref(),
+        )
+    } else if use_borrowed_follow_rows {
+        state_equivalence_analysis::find_state_equivalence_classes_with_borrowed_disallowed_and_shared_base(
+            &analysis_view,
+            &dedup.representative_token_bytes,
+            &pre_reduced_states,
+            borrowed_disallowed_follows
+                .as_deref()
+                .expect("borrowed follow rows must be present"),
+            local_shared_base.as_ref(),
+        )
+    } else if exact_rep_confirmation_used {
         state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
             &analysis_view,
             &dedup.representative_token_bytes,
             &pre_reduced_states,
-            &normalized_disallowed_follows,
+            normalized_disallowed_follows
+                .as_deref()
+                .expect("dense follow rows must be present"),
             None,
             None,
             Some(true),
-            None,
+            local_shared_base.as_ref(),
         )
     } else {
         state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
             &analysis_view,
             &dedup.representative_token_bytes,
             &pre_reduced_states,
-            &normalized_disallowed_follows,
-            None,
+            normalized_disallowed_follows
+                .as_deref()
+                .expect("dense follow rows must be present"),
+            local_shared_base.as_ref(),
         )
     };
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -528,6 +835,56 @@ fn try_analyze_equivalences_with_raw_quotient(
     let mut final_state_representatives = reduced_state_reps_for_pre_reduced.clone();
     final_state_representatives.sort_unstable();
     final_state_representatives.dedup();
+
+    // P8 is the structural-boundary route. Its local source vocabulary is
+    // deliberately tiny, while the generic token quotient can cost more than
+    // the entire NWA/DWA construction and frequently leaves every local token
+    // distinct. Retaining the identity token map is exact by construction: it
+    // only declines a possible compression, and leaves the independently exact
+    // scanner-state quotient unchanged.
+    if matches!(partition_label, "p7" | "p8") {
+        let id_map_finalize_started_at = Instant::now();
+        let tokenizer_states = compose_raw_quotient_state_map(
+            &pre_state_map,
+            &reduced_state_reps_for_pre_reduced,
+        );
+        let exact_reps = tokenizer_states.num_internal_ids() as usize;
+        let internal_id_map = InternalIdMap {
+            tokenizer_states,
+            vocab_tokens: build_identity_vocab_map(&prepared.token_ids, prepared.max_token_id),
+        };
+        let id_map_finalize_ms = id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
+        return Some((
+            internal_id_map,
+            CombinedEquivalenceProfile {
+                initial_states_considered: prepared.initial_states.len(),
+                max_length_skipped: false,
+                max_token_len,
+                token_len_gt_4: token_len_stats.gt_4,
+                token_len_gt_8: token_len_stats.gt_8,
+                token_len_gt_16: token_len_stats.gt_16,
+                token_len_gt_32: token_len_stats.gt_32,
+                token_len_gt_64: token_len_stats.gt_64,
+                raw_analysis_base_init_ms: 0.0,
+                analysis_view_build_ms,
+                active_mask_filter_ms,
+                effective_follows_normalize_ms,
+                prepare_inputs_ms,
+                byte_class_setup_ms,
+                vocab_analysis_dfa_build_ms: 0.0,
+                token_dedup_ms,
+                restricted_observation_state_equiv_ms,
+                max_length_state_equiv_ms: 0.0,
+                vocab_equiv_ms: 0.0,
+                exact_state_equiv_ms,
+                id_map_finalize_ms,
+                restricted_observation_reps: pre_state_map.num_internal_ids() as usize,
+                max_length_reps: pre_state_map.num_internal_ids() as usize,
+                exact_reps,
+                exact_rep_confirmation_used,
+            },
+        ));
+    }
 
     let vocab_equiv_started_at = Instant::now();
     let (dedup_vocab_classes, vocab_analysis_dfa_build_ms) =

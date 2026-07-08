@@ -23,10 +23,17 @@ const NO_CANDIDATE: usize = usize::MAX;
 
 pub(crate) struct RawRestrictedObservationResult {
     pub(crate) state_map: ManyToOneIdMap,
+    pub(crate) raw_observation_ids: Vec<u32>,
+    pub(crate) observation_representatives: Vec<u32>,
     pub(crate) label_ms: f64,
     pub(crate) refine_ms: f64,
     pub(crate) certificate_ms: f64,
     pub(crate) rounds: usize,
+}
+
+struct RawObservationIds {
+    ids: Vec<u32>,
+    representatives: Vec<u32>,
 }
 
 /// Intern visible terminal observations already normalized in the shared
@@ -378,10 +385,11 @@ fn hash_visible_observation_key(key: &[u64]) -> u64 {
     hash
 }
 
-fn raw_target_label_ids(tokenizer: &Tokenizer, active_groups: &[bool]) -> Vec<u32> {
+fn raw_target_label_ids(tokenizer: &Tokenizer, active_groups: &[bool]) -> RawObservationIds {
     let active_words = active_mask_words(active_groups);
     let mut ids = vec![0u32; tokenizer.num_states() as usize];
     let mut buckets = FxHashMap::<u64, Vec<(Vec<u64>, u32)>>::default();
+    let mut representatives = Vec::<u32>::new();
     let mut key = Vec::with_capacity(16);
     let mut next_id = 0u32;
     for state in 0..tokenizer.num_states() {
@@ -393,6 +401,7 @@ fn raw_target_label_ids(tokenizer: &Tokenizer, active_groups: &[bool]) -> Vec<u3
         } else {
             bucket.push((key.clone(), next_id));
             ids[state as usize] = next_id;
+            representatives.push(state);
             next_id += 1;
         }
     }
@@ -436,7 +445,10 @@ fn raw_target_label_ids(tokenizer: &Tokenizer, active_groups: &[bool]) -> Vec<u3
             nonempty_future_states,
         );
     }
-    ids
+    RawObservationIds {
+        ids,
+        representatives,
+    }
 }
 
 enum ExactSignatureBucket {
@@ -715,6 +727,15 @@ fn raw_map_is_relevant_byte_congruent(
     true
 }
 
+/// Exact finite-token state map for vocabularies whose tokens all begin with
+/// one of a small number of first bytes and have a nonempty suffix.
+///
+/// First minimize the raw scanner under the union of all suffix bytes. The
+/// resulting classes retain frozen visible observations and are a right
+/// congruence for every suffix continuation. A starting state is then fully
+/// characterized by the class reached by each possible first byte. This is
+/// exact for complete local-token walks: after consuming a first byte, every
+/// remaining byte is in the minimized suffix alphabet.
 pub(crate) fn compute_state_map_raw(
     tokenizer: &Tokenizer,
     transitions: &[u32],
@@ -727,7 +748,8 @@ pub(crate) fn compute_state_map_raw(
     }
     let active_bytes = active_byte_representatives(Some(relevant_bytes), None);
     let labels_started_at = Instant::now();
-    let target_labels = raw_target_label_ids(tokenizer, active_groups);
+    let observations = raw_target_label_ids(tokenizer, active_groups);
+    let target_labels = &observations.ids;
     let label_ms = labels_started_at.elapsed().as_secs_f64() * 1000.0;
     let refine_started_at = Instant::now();
     let mut current_classes = target_labels.clone();
@@ -751,6 +773,8 @@ pub(crate) fn compute_state_map_raw(
         ));
         return Some(RawRestrictedObservationResult {
             state_map,
+            raw_observation_ids: observations.ids,
+            observation_representatives: observations.representatives,
             label_ms,
             refine_ms,
             certificate_ms: 0.0,
@@ -823,6 +847,8 @@ pub(crate) fn compute_state_map_raw(
             ));
             return Some(RawRestrictedObservationResult {
                 state_map,
+                raw_observation_ids: observations.ids,
+                observation_representatives: observations.representatives,
                 label_ms,
                 refine_ms,
                 certificate_ms: 0.0,
