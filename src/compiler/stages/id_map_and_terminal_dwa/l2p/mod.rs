@@ -277,6 +277,14 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 first_round_class_count.get_or_insert(next_classes.len());
                 classes = next_classes;
                 transport_witness_rounds.push(round);
+                // Token-action TI is an optimization over a finite token
+                // language.  Every accepted merge is independently certified;
+                // running additional rounds can only discover more optional
+                // merges.  For the small P7/P8 partitions this avoids a costly
+                // no-op refinement round without affecting correctness.
+                if token_action_context.is_some() {
+                    break;
+                }
                 if next_active == active {
                     break;
                 }
