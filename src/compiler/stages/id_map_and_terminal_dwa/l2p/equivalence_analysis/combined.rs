@@ -402,8 +402,8 @@ fn try_analyze_equivalences_with_token_boundary_partition(
     vocab: &Vocab,
     effective_disallowed: &BTreeMap<u32, BitSet>,
     active_groups: Option<&[bool]>,
-    shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
-    shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
+    _shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
+    _shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     token_boundary_partition: &GlobalTokenPositionStatePartition,
     effective_follows_prepare_ms: f64,
@@ -447,13 +447,29 @@ fn try_analyze_equivalences_with_token_boundary_partition(
     };
     let analysis_view_build_ms = analysis_view_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let compatible_shared_base = shared_vocab_dfa_cache
-        .map(|cache| {
-            cache.get_or_init(|| {
-                vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa(tokenizer_view.dfa())
-            })
-        })
-        .filter(|base| base.is_compatible_with_dfa(tokenizer_view.dfa()));
+    // The C-seeded state/vocab equivalence walks only ever follow the
+    // partition's token bytes, so byte classes only need to be exact for the
+    // bytes that actually appear in the vocabulary. Restricting the byte-class
+    // scan to those relevant bytes makes base construction proportional to the
+    // partition's tiny alphabet instead of the full 18k-state x 256-byte table.
+    // The base is partition-local (its byte classes depend on this partition's
+    // relevant bytes), so it uses local caches rather than the cross-partition
+    // shared ones to avoid contaminating other partitions.
+    let mut relevant_bytes = [false; 256];
+    for token in &prepared.token_bytes {
+        for &byte in token.iter() {
+            relevant_bytes[byte as usize] = true;
+        }
+    }
+    let local_vocab_dfa_cache = vocab_equivalence_analysis::SharedVocabDfaCache::new();
+    let local_analysis_dfa_cache =
+        vocab_equivalence_analysis::SharedVocabAnalysisDfaCache::default();
+    let compatible_shared_base = Some(local_vocab_dfa_cache.get_or_init(|| {
+        vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa_relevant(
+            tokenizer_view.dfa(),
+            &relevant_bytes,
+        )
+    }));
 
     let follows_normalize_started_at = Instant::now();
     let owned_normalized_disallowed_follows;
@@ -544,8 +560,8 @@ fn try_analyze_equivalences_with_token_boundary_partition(
                 effective_disallowed,
                 Some(&byte_to_class),
                 None,
-                shared_vocab_dfa_cache,
-                shared_analysis_dfa_cache,
+                Some(&local_vocab_dfa_cache),
+                Some(&local_analysis_dfa_cache),
             );
         (
             expand_vocab_classes(

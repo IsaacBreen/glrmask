@@ -149,6 +149,59 @@ fn compute_byte_classes_and_self_loops(
     (byte_to_class, self_loop_bytes)
 }
 
+/// Like [`compute_byte_classes_and_self_loops`] but only distinguishes the
+/// `relevant_bytes`. All irrelevant bytes are mapped to a single reserved
+/// class (0); relevant bytes are grouped exactly by their 128-bit column
+/// fingerprint into classes `1..`. The per-state scan touches only the
+/// relevant columns, so cost is proportional to the number of relevant bytes.
+///
+/// Self-loop masks are likewise only populated for relevant bytes. This is
+/// exact for callers that only ever walk relevant bytes (e.g. token-based L2P
+/// equivalence): the collapsed irrelevant class is never indexed.
+fn compute_byte_classes_and_self_loops_relevant(
+    dfa: &super::super::compat::FlatDfa,
+    relevant_bytes: &[bool; 256],
+) -> ([u8; 256], Vec<U8Set>) {
+    let relevant: Vec<usize> = (0..256usize).filter(|&byte| relevant_bytes[byte]).collect();
+    let mut hash_a = [0u64; 256];
+    let mut hash_b = [0u64; 256];
+    let mut self_loop_bytes = Vec::with_capacity(dfa.states.len());
+    for state in 0..dfa.states.len() {
+        let mut self_loops = U8Set::empty();
+        let base = state * 256;
+        for &byte in &relevant {
+            let target = dfa.transitions[base + byte];
+            hash_a[byte] = hash_a[byte]
+                .wrapping_mul(0x517cc1b727220a95)
+                .wrapping_add(target as u64 + 1);
+            hash_b[byte] = hash_b[byte]
+                .wrapping_mul(0x9e3779b97f4a7c15)
+                .wrapping_add((target as u64).rotate_left(17) ^ 0xD1B54A32D192ED03);
+            if target == state as u32 {
+                self_loops.insert(byte as u8);
+            }
+        }
+        self_loop_bytes.push(self_loops);
+    }
+
+    // Class 0 is the reserved "irrelevant" dump class. Relevant bytes are
+    // grouped by fingerprint into classes starting at 1.
+    let mut byte_to_class = [0u8; 256];
+    let mut sorted = relevant.clone();
+    sorted.sort_unstable_by_key(|&byte| (hash_a[byte], hash_b[byte]));
+    let mut next_class = 0u8;
+    for (index, &byte) in sorted.iter().enumerate() {
+        if index == 0
+            || hash_a[byte] != hash_a[sorted[index - 1]]
+            || hash_b[byte] != hash_b[sorted[index - 1]]
+        {
+            next_class = next_class.wrapping_add(1);
+        }
+        byte_to_class[byte] = next_class;
+    }
+    (byte_to_class, self_loop_bytes)
+}
+
 impl SharedVocabDfaBase {
     fn class_representatives(byte_to_class: &[u8; 256], num_classes: usize) -> Arc<[u8]> {
         let mut representatives = vec![0u8; num_classes];
@@ -212,6 +265,43 @@ impl SharedVocabDfaBase {
     /// Build from a FlatDfa. Called lazily via OnceLock on first use.
     pub fn build_from_dfa(dfa: &super::super::compat::FlatDfa) -> Self {
         let (byte_to_class, self_loop_bytes) = compute_byte_classes_and_self_loops(dfa);
+        let num_classes = byte_to_class
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |max_class| max_class as usize + 1);
+        let none_completion_hash = {
+            let mut h = new_hasher();
+            h.write_u8(0);
+            h.finish()
+        };
+        Self {
+            byte_to_class,
+            num_classes,
+            class_representatives: Self::class_representatives(&byte_to_class, num_classes),
+            trans_by_class: OnceLock::new(),
+            trans_by_state_class: OnceLock::new(),
+            self_loop_bytes: Arc::from(self_loop_bytes),
+            none_completion_hash,
+            source_transitions: Arc::clone(&dfa.transitions),
+        }
+    }
+
+    /// Build a byte-class base that only distinguishes the *relevant* bytes
+    /// (those marked `true`), collapsing every other byte into a single class.
+    ///
+    /// This is exact for any analysis whose transition walks only ever follow
+    /// relevant bytes — e.g. the C-seeded L2P state/vocab equivalence, which
+    /// only steps through the partition's token bytes. Because irrelevant byte
+    /// columns are never indexed, merging them is unobservable. Restricting the
+    /// scan to relevant columns makes construction proportional to the number
+    /// of relevant bytes instead of the full 256-wide alphabet.
+    pub fn build_from_dfa_relevant(
+        dfa: &super::super::compat::FlatDfa,
+        relevant_bytes: &[bool; 256],
+    ) -> Self {
+        let (byte_to_class, self_loop_bytes) =
+            compute_byte_classes_and_self_loops_relevant(dfa, relevant_bytes);
         let num_classes = byte_to_class
             .iter()
             .copied()
