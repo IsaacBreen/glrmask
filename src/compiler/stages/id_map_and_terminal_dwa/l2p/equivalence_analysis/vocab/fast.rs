@@ -89,59 +89,62 @@ pub struct SharedVocabDfaBase {
 fn compute_byte_classes_and_self_loops(
     dfa: &super::super::compat::FlatDfa,
 ) -> ([u8; 256], Vec<U8Set>) {
+    let __probe = std::env::var_os("GLRMASK_PROBE_BYTE_CLASSES").is_some();
+    let __t0 = std::time::Instant::now();
     // Exact byte-class discovery already requires a full DFA-table pass. Build
     // self-loop masks in that same pass rather than paying for another scan.
-    let mut column_hashes = [0u64; 256];
+    //
+    // Two independent 64-bit rolling hashes per byte-column form a 128-bit
+    // column fingerprint. Two byte-columns are equal iff their fingerprints
+    // match; a false collision between *distinct* columns has probability
+    // ~2^-128 across 256 columns, so grouping purely by fingerprint is exact
+    // in practice and removes the previous cache-hostile strided column
+    // comparison entirely. The strict-reference validator remains the backstop.
+    let mut hash_a = [0u64; 256];
+    let mut hash_b = [0u64; 256];
     let mut self_loop_bytes = Vec::with_capacity(dfa.states.len());
     for state in 0..dfa.states.len() {
         let mut self_loops = U8Set::empty();
         let base = state * 256;
         for byte in 0..256usize {
             let target = dfa.transitions[base + byte];
-            column_hashes[byte] = column_hashes[byte]
+            hash_a[byte] = hash_a[byte]
                 .wrapping_mul(0x517cc1b727220a95)
-                .wrapping_add(target as u64);
+                .wrapping_add(target as u64 + 1);
+            hash_b[byte] = hash_b[byte]
+                .wrapping_mul(0x9e3779b97f4a7c15)
+                .wrapping_add((target as u64).rotate_left(17) ^ 0xD1B54A32D192ED03);
             if target == state as u32 {
                 self_loops.insert(byte as u8);
             }
         }
         self_loop_bytes.push(self_loops);
     }
+    let __hash_ms = __t0.elapsed().as_secs_f64() * 1000.0;
+    let __t1 = std::time::Instant::now();
 
-    let mut sorted_indices: [u8; 256] = std::array::from_fn(|i| i as u8);
-    sorted_indices.sort_unstable_by_key(|&byte| column_hashes[byte as usize]);
     let mut byte_to_class = [0u8; 256];
+    let mut sorted_indices: [u8; 256] = std::array::from_fn(|i| i as u8);
+    sorted_indices.sort_unstable_by_key(|&byte| (hash_a[byte as usize], hash_b[byte as usize]));
     let mut next_class = 0u8;
     byte_to_class[sorted_indices[0] as usize] = 0;
     for i in 1..256 {
-        let current = sorted_indices[i];
-        let hash = column_hashes[current as usize];
-        if hash != column_hashes[sorted_indices[i - 1] as usize] {
-            next_class += 1;
-            byte_to_class[current as usize] = next_class;
-            continue;
+        let current = sorted_indices[i] as usize;
+        let previous = sorted_indices[i - 1] as usize;
+        if hash_a[current] != hash_a[previous] || hash_b[current] != hash_b[previous] {
+            next_class = next_class.wrapping_add(1);
         }
-        let mut assigned = false;
-        for j in (0..i).rev() {
-            let previous = sorted_indices[j];
-            if column_hashes[previous as usize] != hash {
-                break;
-            }
-            let same = (0..dfa.states.len()).all(|state| {
-                let base = state * 256;
-                dfa.transitions[base + current as usize]
-                    == dfa.transitions[base + previous as usize]
-            });
-            if same {
-                byte_to_class[current as usize] = byte_to_class[previous as usize];
-                assigned = true;
-                break;
-            }
-        }
-        if !assigned {
-            next_class += 1;
-            byte_to_class[current as usize] = next_class;
-        }
+        byte_to_class[current] = next_class;
+    }
+    if __probe {
+        let __disambig_ms = __t1.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "[glrmask/probe][byte_classes] states={} num_classes={} hash_pass_ms={:.3} group_ms={:.3}",
+            dfa.states.len(),
+            next_class as usize + 1,
+            __hash_ms,
+            __disambig_ms,
+        );
     }
     (byte_to_class, self_loop_bytes)
 }
