@@ -898,6 +898,19 @@ impl TokenActionContext {
 
         let symbol_count = symbols.len();
         let action_build_started_at = Instant::now();
+        let active_matches_by_raw_state = (0..raw_state_count)
+            .map(|raw_state| {
+                tokenizer
+                    .matched_terminals_iter(raw_state as u32)
+                    .filter(|&terminal| {
+                        initially_active_terminals
+                            .get(terminal as usize)
+                            .copied()
+                            .unwrap_or(false)
+                    })
+                    .collect::<SmallVec<[TerminalID; 2]>>()
+            })
+            .collect::<Vec<_>>();
         let mut actions = Vec::<TokenAction>::with_capacity(state_count * symbol_count);
         for &raw_start in &representative_raw_by_class {
             let mut state_actions = (0..symbol_count)
@@ -926,14 +939,7 @@ impl TokenActionContext {
                         match tokenizer.step(raw_state, byte) {
                             Some(next) => {
                                 let position_bit = 1u16 << depth;
-                                for terminal in tokenizer.matched_terminals_iter(next) {
-                                    if !initially_active_terminals
-                                        .get(terminal as usize)
-                                        .copied()
-                                        .unwrap_or(false)
-                                    {
-                                        continue;
-                                    }
+                                for &terminal in &active_matches_by_raw_state[next as usize] {
                                     if let Some(event) = child_events
                                         .iter_mut()
                                         .find(|event| event.terminal == terminal)
