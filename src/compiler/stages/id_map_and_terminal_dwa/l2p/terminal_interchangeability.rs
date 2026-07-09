@@ -175,6 +175,14 @@ struct SupportQuotient {
     class_for_state: Arc<[u32]>,
     representative_by_class: Arc<[u32]>,
     reverse_predecessors: Vec<Vec<u32>>,
+    // Deviation-independent scanner projection for this quotient, precomputed
+    // once. Every accepted support-transposition map shares these two Arcs and
+    // only attaches its own per-pair deviations, so building an accepted map is
+    // O(deviations) instead of the O(raw_state_count) projection rebuild that
+    // `scanner_map_from_internal_quotient` performs from scratch.
+    scanner_state_count: usize,
+    scanner_class_for_original: Arc<[u32]>,
+    scanner_representative_for_class: Arc<[u32]>,
 }
 
 /// Per-swap output-label relabelling. The immutable base ids represent the
@@ -484,19 +492,18 @@ impl RestrictedTopology {
         TransportScannerStateMap::Explicit(raw_targets.into())
     }
 
-    fn scanner_map_from_internal_quotient(
+    /// Deviation-independent part of `scanner_map_from_internal_quotient`:
+    /// projects the internal quotient onto raw scanner states. The result
+    /// depends only on the quotient (not on any per-pair deviations), so callers
+    /// that certify many pairs against one quotient can compute it once and
+    /// share the two Arcs.
+    fn scanner_projection_from_internal_quotient(
         &self,
         class_for_state: Arc<[u32]>,
         representative_for_class: Arc<[u32]>,
-        source_class_for_target_deviations: Box<[(u32, u32)]>,
-    ) -> TransportScannerStateMap {
+    ) -> (usize, Arc<[u32]>, Arc<[u32]>) {
         if self.state_for_raw.is_none() {
-            return TransportScannerStateMap::Quotient {
-                state_count: self.real_state_count,
-                class_for_original: class_for_state,
-                representative_for_class,
-                source_class_for_target_deviations,
-            };
+            return (self.real_state_count, class_for_state, representative_for_class);
         }
         let state_for_raw = self
             .state_for_raw
@@ -506,14 +513,15 @@ impl RestrictedTopology {
             .raw_representative_by_state
             .as_ref()
             .expect("quotient topology must retain raw representatives");
-        let class_for_original = (0..self.raw_state_count)
+        let class_for_original: Arc<[u32]> = (0..self.raw_state_count)
             .map(|raw_state| class_for_state[state_for_raw[raw_state] as usize])
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+            .into();
         let unused_dead_representative = raw_representative_by_state
             .first()
             .copied()
             .unwrap_or(0);
-        let raw_representative_for_class = representative_for_class
+        let raw_representative_for_class: Arc<[u32]> = representative_for_class
             .iter()
             .map(|&state| {
                 raw_representative_by_state
@@ -524,11 +532,27 @@ impl RestrictedTopology {
                     // public transport-map shape still needs one in-range ID.
                     .unwrap_or(unused_dead_representative)
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+            .into();
+        (
+            self.raw_state_count,
+            class_for_original,
+            raw_representative_for_class,
+        )
+    }
+
+    fn scanner_map_from_internal_quotient(
+        &self,
+        class_for_state: Arc<[u32]>,
+        representative_for_class: Arc<[u32]>,
+        source_class_for_target_deviations: Box<[(u32, u32)]>,
+    ) -> TransportScannerStateMap {
+        let (state_count, class_for_original, representative_for_class) =
+            self.scanner_projection_from_internal_quotient(class_for_state, representative_for_class);
         TransportScannerStateMap::Quotient {
-            state_count: self.raw_state_count,
-            class_for_original: class_for_original.into(),
-            representative_for_class: raw_representative_for_class.into(),
+            state_count,
+            class_for_original,
+            representative_for_class,
             source_class_for_target_deviations,
         }
     }
@@ -3499,10 +3523,20 @@ impl InterchangeabilityDfa {
             predecessors.sort_unstable();
             predecessors.dedup();
         }
+        let class_for_state: Arc<[u32]> = class_for_state.into();
+        let representative_by_class: Arc<[u32]> = representative_by_class.into();
+        let (scanner_state_count, scanner_class_for_original, scanner_representative_for_class) =
+            self.topology.scanner_projection_from_internal_quotient(
+                Arc::clone(&class_for_state),
+                Arc::clone(&representative_by_class),
+            );
         self.support_quotient = Some(SupportQuotient {
-            class_for_state: class_for_state.into(),
-            representative_by_class: representative_by_class.into(),
+            class_for_state,
+            representative_by_class,
             reverse_predecessors,
+            scanner_state_count,
+            scanner_class_for_original,
+            scanner_representative_for_class,
         });
         if let Some(started_at) = quotient_build_started_at {
             self.support_quotient_build_ns += started_at.elapsed().as_nanos() as u64;
@@ -3785,11 +3819,12 @@ impl InterchangeabilityDfa {
         }
         self.support_transposition_certified += 1;
         Some(InterchangeMap {
-            scanner_state_map: self.topology.scanner_map_from_internal_quotient(
-                Arc::clone(&quotient.class_for_state),
-                Arc::clone(&quotient.representative_by_class),
-                deviations.into_boxed_slice(),
-            ),
+            scanner_state_map: TransportScannerStateMap::Quotient {
+                state_count: quotient.scanner_state_count,
+                class_for_original: Arc::clone(&quotient.scanner_class_for_original),
+                representative_for_class: Arc::clone(&quotient.scanner_representative_for_class),
+                source_class_for_target_deviations: deviations.into_boxed_slice(),
+            },
         })
     }
 
@@ -5711,11 +5746,12 @@ impl InterchangeabilityDfa {
             }
         }
         Some(InterchangeMap {
-            scanner_state_map: self.topology.scanner_map_from_internal_quotient(
-                Arc::clone(&quotient.class_for_state),
-                Arc::clone(&quotient.representative_by_class),
-                deviations.into_boxed_slice(),
-            ),
+            scanner_state_map: TransportScannerStateMap::Quotient {
+                state_count: quotient.scanner_state_count,
+                class_for_original: Arc::clone(&quotient.scanner_class_for_original),
+                representative_for_class: Arc::clone(&quotient.scanner_representative_for_class),
+                source_class_for_target_deviations: deviations.into_boxed_slice(),
+            },
         })
     }
 
