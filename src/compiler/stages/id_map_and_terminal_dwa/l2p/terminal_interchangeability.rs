@@ -6718,8 +6718,9 @@ impl<'a> PostDwaWeightLifter<'a> {
                 ))
                 .filter_map(|(&(final_tsid, signature), base_tokens)| {
                     let tokens = &transformed_tokens[signature as usize];
-                    (tokens.as_ref() != base_tokens.as_ref())
-                        .then(|| (final_tsid, Arc::clone(tokens)))
+                    let differs = !Arc::ptr_eq(tokens, &base_tokens)
+                        && tokens.as_ref() != base_tokens.as_ref();
+                    differs.then(|| (final_tsid, Arc::clone(tokens)))
                 })
                 .collect::<Vec<_>>()
         };
