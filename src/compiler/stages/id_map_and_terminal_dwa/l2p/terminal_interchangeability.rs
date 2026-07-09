@@ -6143,14 +6143,29 @@ pub(crate) fn transport_coordinate_quotient(
         .collect();
     let mut class_for_signature = FxHashMap::<SmallVec<[u64; 8]>, u32>::default();
     let mut class_for_state = Vec::with_capacity(state_count);
+    // Resolve each refining group's innermost class slice once. `None` means an
+    // `Explicit` innermost map where the source class equals the raw state, so
+    // the per-state signature assembly below is a plain array index instead of
+    // re-walking any `Composed` transport chain 9M times.
+    let refining_slices: Vec<(Option<&[u32]>, &[u32])> = refining_groups
+        .iter()
+        .map(|group| {
+            let domain = &modes[group.domain_mode].scanner_state_for_original;
+            (
+                domain.innermost_class_for_original(),
+                group.component_for_source_class.as_slice(),
+            )
+        })
+        .collect();
     for source_state in 0..state_count {
-        let mut signature = SmallVec::<[u64; 8]>::with_capacity(refining_groups.len() + 1);
+        let mut signature = SmallVec::<[u64; 8]>::with_capacity(refining_slices.len() + 1);
         signature.push(ordinary_coordinate_key(source_state));
-        for group in &refining_groups {
-            let source_class = modes[group.domain_mode]
-                .scanner_state_for_original
-                .innermost_source_class(source_state as u32);
-            signature.push(group.component_for_source_class[source_class] as u64);
+        for &(class_slice, components) in &refining_slices {
+            let source_class = match class_slice {
+                Some(slice) => slice[source_state] as usize,
+                None => source_state,
+            };
+            signature.push(components[source_class] as u64);
         }
         let next_class = class_for_signature.len() as u32;
         let class = *class_for_signature.entry(signature).or_insert(next_class);

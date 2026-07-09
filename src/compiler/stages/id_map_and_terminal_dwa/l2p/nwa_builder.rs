@@ -1598,6 +1598,26 @@ impl TransportScannerStateMap {
         }
     }
 
+    /// The innermost `class_for_original` slice (state -> source class), or
+    /// `None` when the innermost map is `Explicit`, where the class equals the
+    /// original state. Resolving the innermost map once and indexing this slice
+    /// avoids re-walking any `Composed` chain per state.
+    #[inline]
+    pub(crate) fn innermost_class_for_original(&self) -> Option<&[u32]> {
+        match self.innermost_source_map() {
+            Self::Explicit(_) => None,
+            Self::Quotient {
+                class_for_original,
+                ..
+            }
+            | Self::MacroQuotient {
+                class_for_original,
+                ..
+            } => Some(class_for_original),
+            Self::Composed { .. } => unreachable!("innermost transport map cannot be composed"),
+        }
+    }
+
     #[inline]
     pub(crate) fn innermost_source_representative(&self, class: usize) -> TokenizerState {
         match self.innermost_source_map() {
