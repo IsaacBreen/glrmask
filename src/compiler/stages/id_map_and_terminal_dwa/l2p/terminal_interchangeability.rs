@@ -6779,10 +6779,17 @@ pub(crate) fn expand_representative_dwa_after_minimization(
         .values()
         .map(|(_, weight)| lifter.lift_for_mode(weight, 0))
         .collect();
-    let ordinary_entry_union = Weight::union_all(ordinary_entry_weights.iter());
 
+    // `entry_union_by_group[0]` (group 0 = ordinary + any co-disjoint members)
+    // is written below but never read: the disjointness search only scans the
+    // member-derived groups (indices `1..`). We therefore avoid materializing
+    // the expensive `union_all` of every ordinary entry weight. The ordinary
+    // union being disjoint from the member union is exactly equivalent to every
+    // individual ordinary entry weight being disjoint from that member union.
     let ordinary_and_members_are_disjoint = member_entries_are_pairwise_disjoint
-        && ordinary_entry_union.is_disjoint(&all_member_entry_union);
+        && ordinary_entry_weights
+            .iter()
+            .all(|weight| weight.is_disjoint(&all_member_entry_union));
     if ordinary_and_members_are_disjoint {
         let modes_in_group: Vec<usize> = member_entry_weights
             .iter()
@@ -6792,7 +6799,8 @@ pub(crate) fn expand_representative_dwa_after_minimization(
             group_for_mode[mode_index] = Some(0);
         }
         mode_groups[0].extend(modes_in_group);
-        entry_union_by_group[0] = ordinary_entry_union.union(&all_member_entry_union);
+        // group-0 union is unused downstream; keep it cheap.
+        entry_union_by_group[0] = Weight::empty();
     } else if member_entries_are_pairwise_disjoint {
         let group_index = mode_groups.len();
         let modes_in_group: Vec<usize> = member_entry_weights
@@ -6820,10 +6828,14 @@ pub(crate) fn expand_representative_dwa_after_minimization(
             mode_groups[group_index].push(*mode_index);
             group_for_mode[*mode_index] = Some(group_index);
         }
-        entry_union_by_group[0] = ordinary_entry_union;
+        // group-0 union is unused downstream; keep it cheap.
+        entry_union_by_group[0] = Weight::empty();
     }
 
     let mut core_reachable_from = vec![vec![false; core_states.len()]; core_states.len()];
+    let grouping_pre_reach_ms = grouping_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
     for source in 0..core_states.len() {
         let mut stack = vec![source];
         while let Some(state) = stack.pop() {
@@ -6841,6 +6853,9 @@ pub(crate) fn expand_representative_dwa_after_minimization(
 
     let mut mode_indices_at_core_state =
         vec![vec![Vec::<usize>::new(); core_states.len()]; mode_groups.len()];
+    let grouping_reach_ms = grouping_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
     let mut entry_weights_at_core_state =
         vec![vec![Vec::<Weight>::new(); core_states.len()]; mode_groups.len()];
 
@@ -6920,6 +6935,17 @@ pub(crate) fn expand_representative_dwa_after_minimization(
     let grouping_ms = grouping_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
+    if profile_timing {
+        let grouping_entryw_ms = grouping_ms - grouping_reach_ms;
+        let grouping_reach_only_ms = grouping_reach_ms - grouping_pre_reach_ms;
+        eprintln!(
+            "[glrmask/profile][ti_post_dwa_grouping_split] pre_reach_ms={:.3} reach_ms={:.3} entryw_ms={:.3} total_ms={:.3}",
+            grouping_pre_reach_ms,
+            grouping_reach_only_ms,
+            grouping_entryw_ms,
+            grouping_ms,
+        );
+    }
 
     if profile_timing {
         let member_group_count = mode_groups.len().saturating_sub(1);
