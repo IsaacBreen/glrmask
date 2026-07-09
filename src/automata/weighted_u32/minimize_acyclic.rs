@@ -1728,6 +1728,17 @@ fn build_pointwise_profile(
         boundaries.sort_unstable();
         boundaries.dedup();
 
+        // Only transitions with at least one clipped range in this window can
+        // ever be active in an interval; skipping the empties keeps the sweep
+        // inner loop proportional to the live transitions rather than the full
+        // transition count. Indices stay ascending so push order is unchanged.
+        let active_indices: Vec<usize> = transition_ranges
+            .iter()
+            .enumerate()
+            .filter(|(_, ranges)| !ranges.is_empty())
+            .map(|(index, _)| index)
+            .collect();
+
         // Monotone cursors: TSID intervals are visited left to right, and every
         // clipped range list is sorted, so each cursor only advances forward.
         let mut final_cursor = 0usize;
@@ -1748,7 +1759,8 @@ fn build_pointwise_profile(
                 .filter(|(start, _, _)| *start <= tsid_start)
                 .map(|(_, _, tokens)| *tokens);
             let mut active_transitions = Vec::new();
-            for (index, (label, target, _)) in transitions.iter().enumerate() {
+            for &index in &active_indices {
+                let (label, target, _) = &transitions[index];
                 let ranges = &transition_ranges[index];
                 let cursor = &mut transition_cursors[index];
                 while *cursor < ranges.len() && ranges[*cursor].1 < tsid_start {
