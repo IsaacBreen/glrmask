@@ -720,7 +720,20 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 .unwrap_or(0.0);
 
             let quotient_started_at = ti_profile_timing.then(Instant::now);
-            let quotient = transport_coordinate_quotient(ordinary_state_map, &modes);
+            let mut quotient = transport_coordinate_quotient(ordinary_state_map, &modes);
+            // Cluster the final tsids by their core coordinate. Many final tsids
+            // collapse onto a few core coordinates during expansion; ordering
+            // them so equal-coordinate tsids are contiguous lets each lifted
+            // weight collapse to one range per coordinate instead of scattering
+            // into many. Pure relabel (masks are token-indexed, tsid names are
+            // internal), so the global digest is unchanged.
+            quotient.reorder_internal_by_representative_key(|representative| {
+                ordinary_state_map
+                    .original_to_internal
+                    .get(representative as usize)
+                    .copied()
+                    .unwrap_or(u32::MAX)
+            });
             ti_transport_coordinate_quotient_ms = quotient_started_at
                 .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
                 .unwrap_or(0.0);
