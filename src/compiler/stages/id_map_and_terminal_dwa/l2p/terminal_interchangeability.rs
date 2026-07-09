@@ -3940,44 +3940,131 @@ impl InterchangeabilityDfa {
             cached_hashes.clear();
             cached_hashes.resize(state_count, 0);
         }
+        if full {
+            let mut representative_by_class = Vec::<u32>::new();
+            let mut classes_by_signature_hash = FxHashMap::<u64, SmallVec<[u32; 1]>>::default();
+            let mut classes = Vec::with_capacity(state_count);
+            for state in 0..state_count {
+                let hash = self.canonical_identity_signature_hash(state, previous);
+                cached_hashes[state] = hash;
+                let existing = classes_by_signature_hash.get(&hash).and_then(|candidates| {
+                    candidates.iter().copied().find(|&class| {
+                        self.canonical_identity_signatures_equal(
+                            state,
+                            representative_by_class[class as usize] as usize,
+                            previous,
+                        )
+                    })
+                });
+                let class = existing.unwrap_or_else(|| {
+                    let class = representative_by_class.len() as u32;
+                    representative_by_class.push(state as u32);
+                    classes_by_signature_hash.entry(hash).or_default().push(class);
+                    class
+                });
+                classes.push(class);
+            }
+            return CanonicalRound {
+                classes,
+                representative_by_class,
+                classes_by_signature_hash,
+            };
+        }
+
+        // Incremental (non-full) refinement. Moore refinement only ever splits
+        // classes, so a round-(r-1) class stays whole unless one of its members
+        // is dirty (i.e. has a successor that changed class between prev_prev
+        // and previous). Clean members keep their unchanged signature, hence
+        // their class; only dirty members are regrouped within their class.
+        // This avoids the per-state signature-equality edge walk for the
+        // overwhelming majority of (clean) states, while still producing the
+        // exact same `classes`, `representative_by_class`, and
+        // `classes_by_signature_hash` as the full recompute (verified by the
+        // debug-only assertion in `ensure_canonical_identity_round`).
+        let prev_prev = prev_prev.expect("non-full pass has a previous partition");
         let mut dirty = vec![false; state_count];
-        if !full {
-            let prev_prev = prev_prev.expect("non-full pass has a previous partition");
-            for destination in 0..self.reverse_predecessors.len() {
-                if previous[destination] != prev_prev[destination] {
-                    for &source in &self.reverse_predecessors[destination] {
-                        dirty[source as usize] = true;
-                    }
+        for destination in 0..self.reverse_predecessors.len() {
+            if previous[destination] != prev_prev[destination] {
+                for &source in &self.reverse_predecessors[destination] {
+                    dirty[source as usize] = true;
                 }
             }
         }
-
+        let prev_class_count = previous
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |class| class as usize + 1);
+        let mut class_clean_rep = vec![u32::MAX; prev_class_count];
+        let mut class_dirty_members = vec![Vec::<u32>::new(); prev_class_count];
+        for state in 0..state_count {
+            let class = previous[state] as usize;
+            if dirty[state] {
+                cached_hashes[state] = self.canonical_identity_signature_hash(state, previous);
+                class_dirty_members[class].push(state as u32);
+            } else if class_clean_rep[class] == u32::MAX {
+                class_clean_rep[class] = state as u32;
+            }
+        }
+        // Group id per state: initialised to the old class id (correct for every
+        // clean state and every state of an untouched class). Dirty members are
+        // regrouped below; split-off sub-classes receive fresh ids.
+        let mut group_of_state = previous.to_vec();
+        let mut next_split_group = prev_class_count as u32;
+        for class in 0..prev_class_count {
+            if class_dirty_members[class].is_empty() {
+                continue;
+            }
+            let mut sub_reps: SmallVec<[(u32, u32); 4]> = SmallVec::new();
+            if class_clean_rep[class] != u32::MAX {
+                sub_reps.push((class_clean_rep[class], class as u32));
+            }
+            for &member in &class_dirty_members[class] {
+                let member_state = member as usize;
+                let matched = sub_reps.iter().copied().find(|&(rep, _)| {
+                    self.canonical_identity_signatures_equal(member_state, rep as usize, previous)
+                });
+                let group = match matched {
+                    Some((_, group)) => group,
+                    None => {
+                        let group = if sub_reps.is_empty() {
+                            class as u32
+                        } else {
+                            let g = next_split_group;
+                            next_split_group += 1;
+                            g
+                        };
+                        sub_reps.push((member, group));
+                        group
+                    }
+                };
+                group_of_state[member_state] = group;
+            }
+        }
+        // Canonical index-order renumbering. Two states share a group iff they
+        // share a round-r signature, and (by monotone refinement) states in
+        // different old classes never share a new signature, so first-appearance
+        // order of groups equals first-appearance order of signatures: the class
+        // ids, representatives, and hash buckets match the full recompute byte
+        // for byte.
+        let mut final_of_group = vec![u32::MAX; next_split_group as usize];
         let mut representative_by_class = Vec::<u32>::new();
         let mut classes_by_signature_hash = FxHashMap::<u64, SmallVec<[u32; 1]>>::default();
         let mut classes = Vec::with_capacity(state_count);
         for state in 0..state_count {
-            let hash = if full || dirty[state] {
-                let hash = self.canonical_identity_signature_hash(state, previous);
-                cached_hashes[state] = hash;
-                hash
-            } else {
-                cached_hashes[state]
-            };
-            let existing = classes_by_signature_hash.get(&hash).and_then(|candidates| {
-                candidates.iter().copied().find(|&class| {
-                    self.canonical_identity_signatures_equal(
-                        state,
-                        representative_by_class[class as usize] as usize,
-                        previous,
-                    )
-                })
-            });
-            let class = existing.unwrap_or_else(|| {
+            let group = group_of_state[state] as usize;
+            let class = if final_of_group[group] == u32::MAX {
                 let class = representative_by_class.len() as u32;
+                final_of_group[group] = class;
                 representative_by_class.push(state as u32);
-                classes_by_signature_hash.entry(hash).or_default().push(class);
+                classes_by_signature_hash
+                    .entry(cached_hashes[state])
+                    .or_default()
+                    .push(class);
                 class
-            });
+            } else {
+                final_of_group[group]
+            };
             classes.push(class);
         }
         CanonicalRound {
