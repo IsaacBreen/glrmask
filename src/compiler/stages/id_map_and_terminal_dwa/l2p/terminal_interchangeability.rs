@@ -6426,6 +6426,21 @@ pub(crate) fn transport_coordinate_quotient(
         .iter()
         .enumerate()
         .filter(|&(group_index, _)| !group_is_redundant[group_index])
+        // A group whose `component_for_source_class` is constant induces a
+        // constant column (every state maps to the same component), which
+        // refines nothing. The state-order loop below already drops constant
+        // columns via `next_canon <= 1`, but only after materializing all
+        // `state_count` entries. Checking the far smaller source-class vector
+        // here skips that materialization entirely — decisive when there are
+        // many single-mode groups over a large state space (each such group
+        // otherwise costs a full `state_count` scan plus a full-column hash).
+        .filter(|&(_, group)| {
+            let components = &group.component_for_source_class;
+            match components.first() {
+                Some(&first) => components.iter().any(|&c| c != first),
+                None => false,
+            }
+        })
         .map(|(_, group)| group)
         .collect();
     // Resolve each refining group's innermost class slice once. `None` means an
