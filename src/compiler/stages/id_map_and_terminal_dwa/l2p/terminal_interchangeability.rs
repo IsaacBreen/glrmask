@@ -606,10 +606,24 @@ pub(crate) struct TiDiscoveryContext {
 
 impl TiDiscoveryContext {
     pub(crate) fn new(tokenizer: &Tokenizer, relevant_bytes: &[bool; 256]) -> Self {
+        let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let t0 = Instant::now();
         let topology = Arc::new(RestrictedTopology::new(tokenizer, relevant_bytes));
+        let t1 = Instant::now();
         let raw = Arc::new(TiRawDiscoveryData::new(tokenizer, &topology));
+        let t2 = Instant::now();
         let (root_output_signatures, root_observed_states) =
             root_output_signatures(tokenizer, &topology);
+        let t3 = Instant::now();
+        if profile {
+            eprintln!(
+                "[glrmask/profile][terminal_interchangeability] ti_context_build topology_ms={:.3} raw_ms={:.3} root_sig_ms={:.3} total_ms={:.3}",
+                (t1 - t0).as_secs_f64() * 1000.0,
+                (t2 - t1).as_secs_f64() * 1000.0,
+                (t3 - t2).as_secs_f64() * 1000.0,
+                (t3 - t0).as_secs_f64() * 1000.0,
+            );
+        }
         Self {
             topology,
             raw,
@@ -6290,6 +6304,13 @@ impl<'a> PostDwaWeightLifter<'a> {
                 coordinate_runs.push((start as u32, (idx - 1) as u32, coordinate));
             }
         }
+        if std::env::var("GLRMASK_PROFILE_L2P_TIMING").is_ok() {
+            eprintln!(
+                "ti_post_dwa_lifter_setup final_sources={} coordinate_runs={}",
+                final_sources.len(),
+                coordinate_runs.len()
+            );
+        }
         let mut mode_deviations = vec![Vec::new(); modes.len()];
         let mut sparse_mode_ready = vec![false; modes.len()];
         let mut direct_modes_by_default = FxHashMap::<(usize, usize), Vec<usize>>::default();
@@ -6451,11 +6472,10 @@ impl<'a> PostDwaWeightLifter<'a> {
         // `core_coordinate(core_state_map, final_sources[final_tsid])`. Thousands
         // of final TSIDs collapse onto only a few core coordinates, so iterate
         // the precomputed contiguous coordinate runs and emit one range per run.
-        // The runs are clustered so each holds a distinct coordinate, so a
-        // per-call token cache would never hit; look the tokens up directly.
-        let lifted = Weight::from_tsid_runs_shared(self.coordinate_runs.iter().map(
-            |&(start, end, coordinate)| (start, end, weight.shared_tokens_for_tsid(coordinate)),
-        ));
+        // The runs are sorted by coordinate (post-clustering relabel), so lift
+        // them with a single linear merge against the weight's ranges instead
+        // of one binary-search `get` per run.
+        let lifted = weight.lift_sorted_coordinate_runs(&self.coordinate_runs);
         self.base_lifts.insert(key, lifted.clone());
         lifted
     }

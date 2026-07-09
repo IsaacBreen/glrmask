@@ -1988,6 +1988,41 @@ impl Weight {
         builder.finish()
     }
 
+    /// Lift a set of final-TSID runs whose `coordinate` field is sorted
+    /// ascending. Byte-identical to
+    /// `from_tsid_runs_shared(runs.map(|(s, e, c)| (s, e, self.shared_tokens_for_tsid(c))))`
+    /// but replaces the per-run binary-search `get` with a single linear
+    /// merge against this weight's ascending core-TSID ranges. Requires that
+    /// `self` is neither empty nor full and that `runs` is sorted by
+    /// `coordinate` (guaranteed by the post-clustering final-TSID relabel).
+    pub(crate) fn lift_sorted_coordinate_runs(&self, runs: &[(u32, u32, u32)]) -> Self {
+        debug_assert!(!self.is_full());
+        debug_assert!(
+            runs.windows(2).all(|pair| pair[0].2 <= pair[1].2),
+            "lift_sorted_coordinate_runs requires coordinate-sorted runs"
+        );
+        let mut builder = CompactRangeBuilder::new();
+        let mut ranges = self.0.range_values().peekable();
+        for &(start, end, coordinate) in runs {
+            // Ranges are sorted ascending; coordinates are non-decreasing, so a
+            // range whose end is below the coordinate can never match a later
+            // run either and can be dropped.
+            while let Some((range, _)) = ranges.peek() {
+                if *range.end() < coordinate {
+                    ranges.next();
+                } else {
+                    break;
+                }
+            }
+            if let Some((range, tokens)) = ranges.peek() {
+                if *range.start() <= coordinate {
+                    builder.push(start, end, (*tokens).clone());
+                }
+            }
+        }
+        builder.finish()
+    }
+
     /// Return the interned token set at one TSID without cloning its range
     /// contents. This is intentionally crate-visible for sparse coordinate
     /// remaps in the terminal-DWA compiler.
