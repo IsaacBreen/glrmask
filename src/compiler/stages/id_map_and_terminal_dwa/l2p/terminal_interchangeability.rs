@@ -3102,6 +3102,10 @@ struct InterchangeabilityDfa {
     sparse_quotient_map_ns: u64,
     canonical_stable_round: Option<usize>,
     canonical_identity_map: Option<InterchangeMap>,
+    /// Per-state canonical identity signature hash as of the last built round.
+    /// Reused across rounds so an incremental refinement step only rehashes
+    /// states whose successor classes changed. Empty until the first round.
+    canonical_identity_cached_hashes: Vec<u64>,
     signature_capacity: usize,
 }
 
@@ -3307,6 +3311,7 @@ impl InterchangeabilityDfa {
             sparse_quotient_map_ns: 0,
             canonical_stable_round: None,
             canonical_identity_map: None,
+            canonical_identity_cached_hashes: Vec::new(),
             signature_capacity,
         }
     }
@@ -3890,16 +3895,118 @@ impl InterchangeabilityDfa {
         }
     }
 
+    /// Exact incremental variant of [`Self::canonical_identity_round`].
+    ///
+    /// The full recompute rehashes every state each round. In Moore
+    /// refinement a state's signature can only change when one of its
+    /// successors changed class in the previous step, so this reuses the
+    /// per-state hashes from the last round and only rehashes the states that
+    /// have an edge into a class that changed between `prev_prev` and
+    /// `previous`. The grouping still runs over every state in index order,
+    /// so the resulting `classes`, `representative_by_class`, and
+    /// `classes_by_signature_hash` are byte-for-byte identical to the full
+    /// recompute. `cached_hashes` is updated in place to hold this round's
+    /// hashes for the next call.
+    fn canonical_identity_round_incremental(
+        &self,
+        previous: &[u32],
+        prev_prev: Option<&[u32]>,
+        cached_hashes: &mut Vec<u64>,
+    ) -> CanonicalRound {
+        let state_count = self.state_count();
+        let dead = self.dead_state();
+        // A full pass is required whenever there is no usable cache, or when the
+        // dead-state class moved (it sets the skip threshold for every state).
+        let full = match prev_prev {
+            Some(prev_prev)
+                if cached_hashes.len() == state_count && previous[dead] == prev_prev[dead] =>
+            {
+                false
+            }
+            _ => true,
+        };
+        if cached_hashes.len() != state_count {
+            cached_hashes.clear();
+            cached_hashes.resize(state_count, 0);
+        }
+        let mut dirty = vec![false; state_count];
+        if !full {
+            let prev_prev = prev_prev.expect("non-full pass has a previous partition");
+            for destination in 0..self.reverse_predecessors.len() {
+                if previous[destination] != prev_prev[destination] {
+                    for &source in &self.reverse_predecessors[destination] {
+                        dirty[source as usize] = true;
+                    }
+                }
+            }
+        }
+
+        let mut representative_by_class = Vec::<u32>::new();
+        let mut classes_by_signature_hash = FxHashMap::<u64, SmallVec<[u32; 1]>>::default();
+        let mut classes = Vec::with_capacity(state_count);
+        for state in 0..state_count {
+            let hash = if full || dirty[state] {
+                let hash = self.canonical_identity_signature_hash(state, previous);
+                cached_hashes[state] = hash;
+                hash
+            } else {
+                cached_hashes[state]
+            };
+            let existing = classes_by_signature_hash.get(&hash).and_then(|candidates| {
+                candidates.iter().copied().find(|&class| {
+                    self.canonical_identity_signatures_equal(
+                        state,
+                        representative_by_class[class as usize] as usize,
+                        previous,
+                    )
+                })
+            });
+            let class = existing.unwrap_or_else(|| {
+                let class = representative_by_class.len() as u32;
+                representative_by_class.push(state as u32);
+                classes_by_signature_hash.entry(hash).or_default().push(class);
+                class
+            });
+            classes.push(class);
+        }
+        CanonicalRound {
+            classes,
+            representative_by_class,
+            classes_by_signature_hash,
+        }
+    }
+
     fn ensure_canonical_identity_round(&mut self, round: usize) {
         while self.canonical_rounds.len() <= round {
             let started_at = Instant::now();
-            let previous = self
-                .canonical_rounds
-                .last()
-                .expect("round zero is always present")
-                .classes
-                .clone();
-            let next = self.canonical_identity_round(&previous);
+            let current = self.canonical_rounds.len();
+            let previous = self.canonical_rounds[current - 1].classes.clone();
+            let prev_prev = if current >= 2 {
+                Some(self.canonical_rounds[current - 2].classes.clone())
+            } else {
+                None
+            };
+            let mut cached_hashes = std::mem::take(&mut self.canonical_identity_cached_hashes);
+            let next = self.canonical_identity_round_incremental(
+                &previous,
+                prev_prev.as_deref(),
+                &mut cached_hashes,
+            );
+            self.canonical_identity_cached_hashes = cached_hashes;
+            if cfg!(debug_assertions) {
+                // The incremental refinement must be byte-for-byte identical to
+                // the full recompute; verify it in debug builds (this branch is
+                // never taken in release).
+                let full = self.canonical_identity_round(&previous);
+                debug_assert_eq!(
+                    next.classes, full.classes,
+                    "incremental identity round diverged from full recompute",
+                );
+                debug_assert_eq!(
+                    next.representative_by_class, full.representative_by_class,
+                    "incremental identity representatives diverged from full recompute",
+                );
+            }
             if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
                 eprintln!(
                     "[glrmask/profile][terminal_interchangeability] canonical_identity_round={} classes={} elapsed_ms={:.3}",
