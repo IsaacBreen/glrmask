@@ -1903,8 +1903,14 @@ impl ExactTokenMacroDfa {
         };
         let mut output_pair_id_by_raw_state = Vec::with_capacity(outputs.by_raw_state.len());
         for output in &outputs.by_raw_state {
-            let next = output_pair_ids.len() as u32;
-            let id = *output_pair_ids.entry(output.clone()).or_insert(next);
+            let id = match output_pair_ids.get(output) {
+                Some(&id) => id,
+                None => {
+                    let next = output_pair_ids.len() as u32;
+                    output_pair_ids.insert(output.clone(), next);
+                    next
+                }
+            };
             output_pair_id_by_raw_state.push(id);
         }
 
