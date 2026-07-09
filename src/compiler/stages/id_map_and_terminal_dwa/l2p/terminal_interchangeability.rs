@@ -3064,6 +3064,10 @@ struct InterchangeabilityDfa {
     canonical_round_one_source_marks: Vec<u32>,
     canonical_round_one_source_mark_epoch: u32,
     canonical_round_one_affected_sources: Vec<u32>,
+    /// Cache of the left/representative-side affected sources, reused across
+    /// the members sharing a fixed representative in the exact-verify loop.
+    canonical_round_one_left_terminal: Option<TerminalID>,
+    canonical_round_one_left_sources: Vec<u32>,
     canonical_round_one_changed_scratch: FxHashMap<u32, u32>,
     canonical_round_one_added_scratch: FxHashSet<u32>,
     support_quotient: Option<SupportQuotient>,
@@ -3080,6 +3084,7 @@ struct InterchangeabilityDfa {
     support_transposition_root_rejected: usize,
     support_transposition_signature_rejected: usize,
     support_transposition_support_setup_ns: u64,
+    support_quotient_build_ns: u64,
     support_transposition_template_ns: u64,
     support_transposition_cone_ns: u64,
     support_transposition_verify_ns: u64,
@@ -3270,6 +3275,8 @@ impl InterchangeabilityDfa {
             canonical_round_one_source_marks: vec![0; state_count - 1],
             canonical_round_one_source_mark_epoch: 0,
             canonical_round_one_affected_sources: Vec::new(),
+            canonical_round_one_left_terminal: None,
+            canonical_round_one_left_sources: Vec::new(),
             canonical_round_one_changed_scratch: FxHashMap::default(),
             canonical_round_one_added_scratch: FxHashSet::default(),
             support_quotient: None,
@@ -3282,6 +3289,7 @@ impl InterchangeabilityDfa {
             support_transposition_root_rejected: 0,
             support_transposition_signature_rejected: 0,
             support_transposition_support_setup_ns: 0,
+            support_quotient_build_ns: 0,
             support_transposition_template_ns: 0,
             support_transposition_cone_ns: 0,
             support_transposition_verify_ns: 0,
@@ -3309,6 +3317,8 @@ impl InterchangeabilityDfa {
         if self.support_quotient.is_some() {
             return;
         }
+        let quotient_build_started_at =
+            std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some().then(Instant::now);
         let stable_round = self.ensure_canonical_identity_stable_round();
         let class_for_state = self.canonical_rounds[stable_round].classes.clone();
         let class_count = self.canonical_rounds[stable_round]
@@ -3334,6 +3344,9 @@ impl InterchangeabilityDfa {
             representative_by_class: representative_by_class.into(),
             reverse_predecessors,
         });
+        if let Some(started_at) = quotient_build_started_at {
+            self.support_quotient_build_ns += started_at.elapsed().as_nanos() as u64;
+        }
     }
 
     fn ensure_terminal_quotient_output_support(&mut self, terminal: TerminalID) {
@@ -4658,10 +4671,40 @@ impl InterchangeabilityDfa {
             self.canonical_round_one_source_mark_epoch = 1;
         }
         let epoch = self.canonical_round_one_source_mark_epoch;
+
+        // The left/representative-side affected sources are identical for every
+        // member sharing this representative in the exact-verify loop, so gather
+        // them once and reuse them (re-marked under the fresh epoch) thereafter.
+        // The resulting affected-source SET is identical to gathering all four
+        // destination lists together; iteration order differs (left sources
+        // first) but the accept/reject result is order-independent.
+        if self.canonical_round_one_left_terminal != Some(left) {
+            self.canonical_round_one_left_sources.clear();
+            for destinations in [
+                &self.finalizer_states_by_terminal[left as usize],
+                &self.future_finalizer_states_by_terminal[left as usize],
+            ] {
+                for &destination in destinations {
+                    for &source in &self.reverse_predecessors[destination as usize] {
+                        let source = source as usize;
+                        if self.canonical_round_one_source_marks[source] != epoch {
+                            self.canonical_round_one_source_marks[source] = epoch;
+                            self.canonical_round_one_left_sources.push(source as u32);
+                        }
+                    }
+                }
+            }
+            self.canonical_round_one_left_terminal = Some(left);
+        } else {
+            for &source in &self.canonical_round_one_left_sources {
+                self.canonical_round_one_source_marks[source as usize] = epoch;
+            }
+        }
+
         self.canonical_round_one_affected_sources.clear();
+        self.canonical_round_one_affected_sources
+            .extend_from_slice(&self.canonical_round_one_left_sources);
         for destinations in [
-            &self.finalizer_states_by_terminal[left as usize],
-            &self.future_finalizer_states_by_terminal[left as usize],
             &self.finalizer_states_by_terminal[right as usize],
             &self.future_finalizer_states_by_terminal[right as usize],
         ] {
@@ -5440,7 +5483,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
 
         if profile_timing {
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
+                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
                 output_pair_rejections,
                 output_invariant_checks,
                 first_round_rejections,
@@ -5456,6 +5499,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 first_round_ns as f64 / 1_000_000.0,
                 support_transposition_ns as f64 / 1_000_000.0,
                 dfa.support_transposition_support_setup_ns as f64 / 1_000_000.0,
+                dfa.support_quotient_build_ns as f64 / 1_000_000.0,
                 dfa.support_transposition_template_ns as f64 / 1_000_000.0,
                 dfa.support_transposition_cone_ns as f64 / 1_000_000.0,
                 dfa.support_transposition_verify_ns as f64 / 1_000_000.0,
