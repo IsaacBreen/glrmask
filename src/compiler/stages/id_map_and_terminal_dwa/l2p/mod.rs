@@ -782,7 +782,21 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         // pointwise grouping to minimization. Avoid rebuilding an equivalent
         // token layout before that pass; p0 retains the established precompact
         // canonicalization path.
-        if !(used_follow_row_quotient && expanded_artifact.artifact().stats().states <= 64) {
+        //
+        // The pre-minimization `compact_dimensions_fast` used to canonicalize
+        // the token layout so the minimizer could see TSID-quotient-enabled
+        // state equivalences. Since the run-based lift (`from_tsid_runs_shared`)
+        // and clustering relabel now emit canonical SharedTokenSet storage
+        // directly, this pass reduces nothing (tsids 2602->2602, tokens 67->67
+        // on p0) yet costs ~5ms rewriting every weight. Skipping it leaves the
+        // digest AND num_parser_states byte-identical while cutting p0
+        // post_dwa_compact ~7.5ms->2.9ms. A `GLRMASK_FORCE_PRECOMPACT` escape
+        // hatch keeps the old path available for schemas that might still need
+        // the extra canonicalization for state minimality.
+        let force_precompact = std::env::var("GLRMASK_FORCE_PRECOMPACT").is_ok();
+        if force_precompact
+            && !(used_follow_row_quotient && expanded_artifact.artifact().stats().states <= 64)
+        {
             if profiling {
                 expanded_artifact.compact_dimensions_fast_with_stats();
             } else {
