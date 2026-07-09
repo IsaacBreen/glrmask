@@ -6450,17 +6450,11 @@ impl<'a> PostDwaWeightLifter<'a> {
         // `ordinary_coordinates[final_tsid]` is precomputed and identical to
         // `core_coordinate(core_state_map, final_sources[final_tsid])`. Thousands
         // of final TSIDs collapse onto only a few core coordinates, so iterate
-        // the precomputed contiguous coordinate runs and emit one range per run,
-        // caching each coordinate's token set to avoid redundant range lookups.
-        let mut coordinate_tokens_cache = FxHashMap::<u32, SharedTokenSet>::default();
+        // the precomputed contiguous coordinate runs and emit one range per run.
+        // The runs are clustered so each holds a distinct coordinate, so a
+        // per-call token cache would never hit; look the tokens up directly.
         let lifted = Weight::from_tsid_runs_shared(self.coordinate_runs.iter().map(
-            |&(start, end, coordinate)| {
-                let tokens = coordinate_tokens_cache
-                    .entry(coordinate)
-                    .or_insert_with(|| weight.shared_tokens_for_tsid(coordinate))
-                    .clone();
-                (start, end, tokens)
-            },
+            |&(start, end, coordinate)| (start, end, weight.shared_tokens_for_tsid(coordinate)),
         ));
         self.base_lifts.insert(key, lifted.clone());
         lifted
