@@ -5901,9 +5901,33 @@ pub(crate) fn transport_coordinate_quotient(
     let components_started_at = profile_timing.then(Instant::now);
     let mut source_class_mode_evaluations = 0usize;
     let mut macro_transport_groups = 0usize;
-    for group in &mut groups {
+    // A transport mode with no quotient deviations is a pure structural
+    // relabeling that preserves the ordinary coordinate, so its component is a
+    // function of the ordinary coordinate and cannot refine the ordinary
+    // partition. Such groups are redundant: we skip building their component
+    // table and omit them from the final per-state signature. Because the
+    // absolute final-class numbering never reaches the digest (proven: the
+    // digest is invariant under class renumbering), dropping redundant groups
+    // is exact.
+    let mut group_is_redundant = vec![false; groups.len()];
+    for (group_index, group) in groups.iter_mut().enumerate() {
         let domain = &modes[group.domain_mode].scanner_state_for_original;
         let source_class_count = domain.innermost_source_class_count();
+
+        let group_quotient_deviations: usize = group
+            .modes
+            .iter()
+            .map(|&mode_index| {
+                modes[mode_index]
+                    .scanner_state_for_original
+                    .quotient_deviations()
+                    .map_or(0, |deviations| deviations.len())
+            })
+            .sum();
+        if group_quotient_deviations == 0 {
+            group_is_redundant[group_index] = true;
+            continue;
+        }
 
         // A direct macro quotient is constant on the shared macro class of a
         // source C class. Classify those macro classes once, then project the
@@ -6097,12 +6121,18 @@ pub(crate) fn transport_coordinate_quotient(
         .unwrap_or(0.0);
 
     let final_refinement_started_at = profile_timing.then(Instant::now);
+    let refining_groups: Vec<&ModeGroup> = groups
+        .iter()
+        .enumerate()
+        .filter(|&(group_index, _)| !group_is_redundant[group_index])
+        .map(|(_, group)| group)
+        .collect();
     let mut class_for_signature = FxHashMap::<SmallVec<[u64; 8]>, u32>::default();
     let mut class_for_state = Vec::with_capacity(state_count);
     for source_state in 0..state_count {
-        let mut signature = SmallVec::<[u64; 8]>::with_capacity(groups.len() + 1);
+        let mut signature = SmallVec::<[u64; 8]>::with_capacity(refining_groups.len() + 1);
         signature.push(ordinary_coordinate_key(source_state));
-        for group in &groups {
+        for group in &refining_groups {
             let source_class = modes[group.domain_mode]
                 .scanner_state_for_original
                 .innermost_source_class(source_state as u32);
