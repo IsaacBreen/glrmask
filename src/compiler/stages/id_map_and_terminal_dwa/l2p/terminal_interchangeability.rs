@@ -6391,17 +6391,23 @@ impl<'a> PostDwaWeightLifter<'a> {
             return existing.clone();
         }
 
+        // `ordinary_coordinates[final_tsid]` is precomputed and identical to
+        // `core_coordinate(core_state_map, final_sources[final_tsid])`, so reuse
+        // it instead of re-deriving per call. Thousands of final TSIDs collapse
+        // onto only a few core coordinates, so cache each coordinate's token set
+        // to avoid redundant range lookups into the core weight.
+        let mut coordinate_tokens_cache = FxHashMap::<u32, SharedTokenSet>::default();
         let lifted = Weight::from_per_tsid_shared(
-            self.final_sources
+            self.ordinary_coordinates
                 .iter()
                 .enumerate()
-                .filter_map(|(final_tsid, &source)| {
-                    let coordinate = Self::core_coordinate(self.core_state_map, source);
+                .filter_map(|(final_tsid, &coordinate)| {
                     (coordinate != u32::MAX).then(|| {
-                        (
-                            final_tsid as u32,
-                            weight.shared_tokens_for_tsid(coordinate),
-                        )
+                        let tokens = coordinate_tokens_cache
+                            .entry(coordinate)
+                            .or_insert_with(|| weight.shared_tokens_for_tsid(coordinate))
+                            .clone();
+                        (final_tsid as u32, tokens)
                     })
                 }),
         );
