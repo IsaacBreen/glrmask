@@ -262,11 +262,18 @@ pub(crate) fn compute_state_map(
     } else {
         (vec![0u32; num_candidates], usize::from(num_candidates != 0))
     };
-    let mut signature = vec![0u64; 1 + active_bytes.len()];
+    let sig_len = 1 + active_bytes.len();
+    let mut signature = vec![0u64; sig_len];
 
     for _ in 0..num_candidates {
         let mut next_classes = vec![0u32; num_candidates];
-        let mut classes_by_signature = FxHashMap::<Vec<u64>, u32>::default();
+        // Bucket candidates by a cheap signature hash and resolve collisions by
+        // comparing against the flat per-class signature store. This assigns
+        // classes in order of first appearance (identical to the previous
+        // `FxHashMap<Vec<u64>, u32>` map) while avoiding a `Vec<u64>` clone per
+        // candidate: only one signature is stored per distinct class.
+        let mut classes_by_hash = FxHashMap::<u64, Vec<u32>>::default();
+        let mut class_signatures: Vec<u64> = Vec::new();
 
         for (candidate, &state) in candidate_representatives.iter().enumerate() {
             signature[0] = current_classes[candidate] as u64;
@@ -283,14 +290,22 @@ pub(crate) fn compute_state_map(
                 };
             }
 
-            let next_class = classes_by_signature.len() as u32;
-            let class = *classes_by_signature
-                .entry(signature.clone())
-                .or_insert(next_class);
+            let hash = hash_signature(&signature);
+            let bucket = classes_by_hash.entry(hash).or_default();
+            let existing = bucket.iter().copied().find(|&class| {
+                let base = class as usize * sig_len;
+                class_signatures[base..base + sig_len] == signature[..]
+            });
+            let class = existing.unwrap_or_else(|| {
+                let class = (class_signatures.len() / sig_len) as u32;
+                class_signatures.extend_from_slice(&signature);
+                bucket.push(class);
+                class
+            });
             next_classes[candidate] = class;
         }
 
-        let next_class_count = classes_by_signature.len();
+        let next_class_count = class_signatures.len() / sig_len;
         if next_class_count == current_class_count
             && same_candidate_partition(&current_classes, &next_classes)
         {
@@ -323,6 +338,15 @@ fn mix_observation_hash(mut hash: u64, word: u64) -> u64 {
     hash ^= word.wrapping_add(0x9e37_79b9_7f4a_7c15).rotate_left(17);
     hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
     hash ^ (hash >> 29)
+}
+
+#[inline]
+fn hash_signature(signature: &[u64]) -> u64 {
+    let mut hash = 0x2d35_83d7_4f1a_6e9bu64;
+    for &word in signature {
+        hash = mix_observation_hash(hash, word);
+    }
+    hash
 }
 
 /// Build an exact compact key for a masked finalizer/future observation.
