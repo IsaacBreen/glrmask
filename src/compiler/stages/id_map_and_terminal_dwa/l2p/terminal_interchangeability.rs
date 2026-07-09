@@ -6207,6 +6207,10 @@ struct PostDwaWeightLifter<'a> {
     core_state_map: &'a ManyToOneIdMap,
     final_sources: Vec<u32>,
     ordinary_coordinates: Vec<u32>,
+    // Maximal `(start_tsid, end_tsid, coordinate)` runs of consecutive final
+    // TSIDs sharing one non-MAX core coordinate. Precomputed once so `base_lift`
+    // can emit one range per run instead of iterating every final TSID.
+    coordinate_runs: Vec<(u32, u32, u32)>,
     mode_deviations: Vec<Vec<(u32, u32)>>,
     base_lifts: FxHashMap<usize, Weight>,
     mode_lifts: FxHashMap<(usize, usize), Weight>,
@@ -6265,6 +6269,27 @@ impl<'a> PostDwaWeightLifter<'a> {
             .iter()
             .map(|&source| Self::core_coordinate(core_state_map, source))
             .collect();
+        // Precompute maximal contiguous runs of equal, non-MAX coordinates so
+        // `base_lift` emits one range per run instead of iterating every final
+        // TSID. MAX coordinates break runs (they are skipped when lifting).
+        let mut coordinate_runs: Vec<(u32, u32, u32)> = Vec::new();
+        {
+            let mut idx = 0usize;
+            let n = ordinary_coordinates.len();
+            while idx < n {
+                let coordinate = ordinary_coordinates[idx];
+                if coordinate == u32::MAX {
+                    idx += 1;
+                    continue;
+                }
+                let start = idx;
+                idx += 1;
+                while idx < n && ordinary_coordinates[idx] == coordinate {
+                    idx += 1;
+                }
+                coordinate_runs.push((start as u32, (idx - 1) as u32, coordinate));
+            }
+        }
         let mut mode_deviations = vec![Vec::new(); modes.len()];
         let mut sparse_mode_ready = vec![false; modes.len()];
         let mut direct_modes_by_default = FxHashMap::<(usize, usize), Vec<usize>>::default();
@@ -6381,6 +6406,7 @@ impl<'a> PostDwaWeightLifter<'a> {
             core_state_map,
             final_sources,
             ordinary_coordinates,
+            coordinate_runs,
             mode_deviations,
             base_lifts: FxHashMap::default(),
             mode_lifts: FxHashMap::default(),
@@ -6422,25 +6448,20 @@ impl<'a> PostDwaWeightLifter<'a> {
         }
 
         // `ordinary_coordinates[final_tsid]` is precomputed and identical to
-        // `core_coordinate(core_state_map, final_sources[final_tsid])`, so reuse
-        // it instead of re-deriving per call. Thousands of final TSIDs collapse
-        // onto only a few core coordinates, so cache each coordinate's token set
-        // to avoid redundant range lookups into the core weight.
+        // `core_coordinate(core_state_map, final_sources[final_tsid])`. Thousands
+        // of final TSIDs collapse onto only a few core coordinates, so iterate
+        // the precomputed contiguous coordinate runs and emit one range per run,
+        // caching each coordinate's token set to avoid redundant range lookups.
         let mut coordinate_tokens_cache = FxHashMap::<u32, SharedTokenSet>::default();
-        let lifted = Weight::from_per_tsid_shared(
-            self.ordinary_coordinates
-                .iter()
-                .enumerate()
-                .filter_map(|(final_tsid, &coordinate)| {
-                    (coordinate != u32::MAX).then(|| {
-                        let tokens = coordinate_tokens_cache
-                            .entry(coordinate)
-                            .or_insert_with(|| weight.shared_tokens_for_tsid(coordinate))
-                            .clone();
-                        (final_tsid as u32, tokens)
-                    })
-                }),
-        );
+        let lifted = Weight::from_tsid_runs_shared(self.coordinate_runs.iter().map(
+            |&(start, end, coordinate)| {
+                let tokens = coordinate_tokens_cache
+                    .entry(coordinate)
+                    .or_insert_with(|| weight.shared_tokens_for_tsid(coordinate))
+                    .clone();
+                (start, end, tokens)
+            },
+        ));
         self.base_lifts.insert(key, lifted.clone());
         lifted
     }

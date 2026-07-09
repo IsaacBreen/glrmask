@@ -1970,6 +1970,24 @@ impl Weight {
         builder.finish()
     }
 
+    /// Like `from_per_tsid_shared` but accepts pre-grouped, sorted inclusive
+    /// `(start_tsid, end_tsid)` runs that each share one Arc token set. This is
+    /// byte-identical to pushing every TSID in `start..=end` individually (the
+    /// builder merges same-Arc contiguous TSIDs anyway) but skips the per-TSID
+    /// iteration when the caller already knows the contiguous coordinate runs.
+    pub(crate) fn from_tsid_runs_shared(
+        runs: impl IntoIterator<Item = (u32, u32, SharedTokenSet)>,
+    ) -> Self {
+        let mut builder = CompactRangeBuilder::new();
+        for (start, end, tokens) in runs {
+            if tokens.is_empty() {
+                continue;
+            }
+            builder.push(start, end, tokens);
+        }
+        builder.finish()
+    }
+
     /// Return the interned token set at one TSID without cloning its range
     /// contents. This is intentionally crate-visible for sparse coordinate
     /// remaps in the terminal-DWA compiler.
