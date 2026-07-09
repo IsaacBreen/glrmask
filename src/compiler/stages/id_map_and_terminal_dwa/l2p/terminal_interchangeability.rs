@@ -15,8 +15,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque, hash_map::Entry};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Instant;
 
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use super::nwa_builder::{TerminalNwaTransportMode, TransportScannerStateMap};
@@ -3094,6 +3096,12 @@ struct InterchangeabilityDfa {
     /// scratch, used to propose a tiny support-transposition witness before
     /// falling back to exact refinement.
     terminal_quotient_output_supports: Option<Vec<Option<Vec<(u32, u8)>>>>,
+    /// Thread-safe on-demand mirror of `terminal_quotient_output_supports` used
+    /// only by the parallel certification path. Each terminal's support is
+    /// pure given the (pre-built) global support quotient and immutable
+    /// topology, so workers build exactly the entries they touch — the same
+    /// set the sequential path would build lazily — with no `&mut self`.
+    parallel_terminal_supports: OnceLock<Vec<OnceLock<Vec<(u32, u8)>>>>,
     quotient_certified: usize,
     support_transposition_certified: usize,
     support_transposition_no_template: usize,
@@ -3118,6 +3126,135 @@ struct InterchangeabilityDfa {
     /// states whose successor classes changed. Empty until the first round.
     canonical_identity_cached_hashes: Vec<u64>,
     signature_capacity: usize,
+}
+
+/// Per-worker scratch for the parallel per-pair certification path. The heavy
+/// `InterchangeabilityDfa` state is immutable and lazily pre-built before the
+/// certification loop, so each rayon worker only needs its own epoch-marked
+/// scratch buffers plus counter accumulators. Allocated once per worker thread
+/// via `map_init` and reused across the tasks that land on that worker.
+struct CertScratch {
+    source_marks: Vec<u32>,
+    source_mark_epoch: u32,
+    affected_sources: Vec<u32>,
+    changed_scratch: FxHashMap<u32, u32>,
+    added_scratch: FxHashSet<u32>,
+    output_pair_marks: Vec<u32>,
+    output_pair_mark_epoch: u32,
+}
+
+impl CertScratch {
+    fn new(dfa: &InterchangeabilityDfa) -> Self {
+        CertScratch {
+            source_marks: vec![0; dfa.canonical_round_one_source_marks.len()],
+            source_mark_epoch: 0,
+            affected_sources: Vec::new(),
+            changed_scratch: FxHashMap::default(),
+            added_scratch: FxHashSet::default(),
+            output_pair_marks: vec![0; dfa.observed_output_pairs.len()],
+            output_pair_mark_epoch: 0,
+        }
+    }
+}
+
+/// Outcome of certifying one member terminal against a fixed representative in
+/// the parallel path. `NeedsExact` defers the rare exact fallback to the
+/// sequential apply phase (direct_exact_checks is ~0 on the hot partitions).
+enum MemberVerdict {
+    RejectOutputPair,
+    RejectFirstRound,
+    AcceptIdentity(InterchangeMap),
+    AcceptSupport(InterchangeMap),
+    NeedsExact,
+}
+
+/// Per-member certification result carried back from the parallel workers.
+/// Counter aggregation and the first-round memo merge happen sequentially in
+/// the apply phase so the workers stay purely `&self`.
+struct MemberResult {
+    verdict: MemberVerdict,
+    memo_update: Option<((TerminalID, TerminalID), bool)>,
+}
+
+/// Dedicated rayon thread pool for the per-pair TI certification loop. Built
+/// once from `GLRMASK_TI_PARALLEL_THREADS`; the rest of the compiler can run
+/// under `RAYON_NUM_THREADS=1` while this hot loop still fans out across cores.
+fn ti_certification_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    let pool = POOL
+        .get_or_init(|| {
+            let threads = std::env::var("GLRMASK_TI_PARALLEL_THREADS")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(1);
+            if threads <= 1 {
+                return None;
+            }
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .thread_name(|index| format!("ti-cert-{index}"))
+                .build()
+                .ok()
+        })
+        .as_ref()?;
+    // Optional keepalive: on macOS the first `pool.install` after the pool has
+    // been idle (e.g. between partitions) pays a ~100-300ms worker-wake handoff
+    // (thread park / E-core QoS demotion). A lightweight heartbeat that touches
+    // every worker keeps them warm so the handoff stays ~microseconds. Gated by
+    // env so it can be toggled for measurement; harmless on Linux.
+    static KEEPALIVE: OnceLock<()> = OnceLock::new();
+    KEEPALIVE.get_or_init(|| {
+        let enabled = std::env::var("GLRMASK_TI_PARALLEL_KEEPALIVE")
+            .ok()
+            .map(|value| value.trim() != "0" && !value.trim().is_empty())
+            .unwrap_or(false);
+        if enabled {
+            let threads = pool.current_num_threads();
+            std::thread::Builder::new()
+                .name("ti-cert-keepalive".to_string())
+                .spawn(move || loop {
+                    pool.install(|| {
+                        (0..threads).into_par_iter().for_each(|_| {
+                            std::hint::black_box(0u64);
+                        });
+                    });
+                    std::thread::sleep(std::time::Duration::from_micros(200));
+                })
+                .ok();
+        }
+    });
+    Some(pool)
+}
+
+/// Build (and, if configured, start the keepalive for) the TI certification
+/// thread pool ahead of first use. Intended to be called at Python module
+/// import so the pool is already hot when discovery begins, avoiding the
+/// first-use worker-wake handoff on macOS.
+pub(crate) fn warm_ti_pool() {
+    let _ = ti_certification_pool();
+}
+
+/// Run `f` inside the TI certification pool so that any nested parallel TI work
+/// executes as cheap in-pool work-stealing rather than paying a per-call
+/// external-thread block-and-wake handoff (a large, erratic latency on macOS).
+///
+/// When the pool is not configured (sequential mode) or the whole-compile wrap
+/// is disabled, `f` runs directly on the calling thread.
+pub(crate) fn with_ti_pool<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send,
+    R: Send,
+{
+    let enabled = std::env::var("GLRMASK_TI_PARALLEL_WHOLE_COMPILE")
+        .ok()
+        .map(|value| value.trim() != "0" && !value.trim().is_empty())
+        .unwrap_or(false);
+    if enabled {
+        if let Some(pool) = ti_certification_pool() {
+            return pool.install(f);
+        }
+    }
+    f()
 }
 
 impl InterchangeabilityDfa {
@@ -3303,6 +3440,7 @@ impl InterchangeabilityDfa {
             support_quotient: None,
             canonical_quotient: None,
             terminal_quotient_output_supports: None,
+            parallel_terminal_supports: OnceLock::new(),
             quotient_certified: 0,
             support_transposition_certified: 0,
             support_transposition_no_template: 0,
@@ -5179,6 +5317,472 @@ impl InterchangeabilityDfa {
                 == self.future_finalizer_states_by_terminal[right]
     }
 
+    // ----- Parallel per-pair certification path -------------------------------
+    //
+    // The methods below are `&self` mirrors of the hot per-pair checks, taking a
+    // per-worker `CertScratch` instead of the DFA's own scratch fields and
+    // profiling counters. They rely on every lazy build (canonical round 1,
+    // class counts, support quotient, per-terminal supports, canonical identity
+    // map) having been forced before the loop by `prebuild_certification_state`,
+    // so they perform no `&mut self` mutation and can run concurrently over an
+    // immutable `&InterchangeabilityDfa`.
+
+    /// Force every lazily built structure the certification path reads, so the
+    /// `&self` variants never trigger a build. `candidates` is the flattened set
+    /// of terminals that enter the certification loop.
+    fn prebuild_certification_state(&mut self, candidates: &[TerminalID]) {
+        self.ensure_canonical_identity_round(1);
+        if self.canonical_round_one_class_counts.is_none() {
+            let class_count = self.canonical_rounds[1].representative_by_class.len();
+            let mut counts = vec![0u32; class_count];
+            for &class in &self.canonical_rounds[1].classes[..self.topology.real_state_count] {
+                counts[class as usize] += 1;
+            }
+            self.canonical_round_one_class_counts = Some(counts);
+        }
+        self.ensure_support_quotient();
+        // Size the thread-safe on-demand support slots once; workers fill only
+        // the terminals they actually reach at the support stage.
+        let terminal_count = self.finalizer_states_by_terminal.len();
+        let _ = self.parallel_terminal_supports.get_or_init(|| {
+            (0..terminal_count).map(|_| OnceLock::new()).collect()
+        });
+        let _ = candidates;
+        // Force the canonical identity map used by the frozen-preserve branch.
+        let _ = self.canonical_identity_map();
+    }
+
+    /// Thread-safe, `&self` lazy build of one terminal's quotient output
+    /// support. Idempotent and pure given the pre-built global support
+    /// quotient, so racing workers converge on identical contents.
+    fn terminal_support_parallel(&self, terminal: TerminalID) -> &[(u32, u8)] {
+        let slots = self
+            .parallel_terminal_supports
+            .get()
+            .expect("parallel terminal supports sized before certification loop");
+        slots[terminal as usize].get_or_init(|| {
+            let class_for_state = &self
+                .support_quotient
+                .as_ref()
+                .expect("support quotient pre-built")
+                .class_for_state;
+            let terminal = terminal as usize;
+            let mut support = Vec::<(u32, u8)>::new();
+            for (destinations, mask) in [
+                (&self.finalizer_states_by_terminal[terminal], 1u8),
+                (&self.future_finalizer_states_by_terminal[terminal], 2u8),
+            ] {
+                for &destination in destinations {
+                    for &source in &self.reverse_predecessors[destination as usize] {
+                        support.push((class_for_state[source as usize], mask));
+                    }
+                }
+            }
+            support.sort_unstable_by_key(|&(class, _)| class);
+            let mut write = 0usize;
+            for read in 0..support.len() {
+                if write > 0 && support[write - 1].0 == support[read].0 {
+                    support[write - 1].1 |= support[read].1;
+                } else {
+                    support[write] = support[read];
+                    write += 1;
+                }
+            }
+            support.truncate(write);
+            support
+        })
+    }
+
+    /// Deduplicated set of characterization source rows affected by swapping in
+    /// the representative terminal. Computed once per representative and shared
+    /// read-only across all its members in the parallel loop.
+    fn representative_affected_sources(&self, representative: TerminalID, out: &mut Vec<u32>) {
+        out.clear();
+        for destinations in [
+            &self.finalizer_states_by_terminal[representative as usize],
+            &self.future_finalizer_states_by_terminal[representative as usize],
+        ] {
+            for &destination in destinations {
+                for &source in &self.reverse_predecessors[destination as usize] {
+                    out.push(source);
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
+
+    /// `&self` mirror of `canonical_identity_map`, reading the pre-built cache.
+    fn canonical_identity_map_prebuilt(&self) -> InterchangeMap {
+        self.canonical_identity_map
+            .as_ref()
+            .expect("canonical identity map pre-built before certification loop")
+            .clone()
+    }
+
+    /// `&self` + scratch mirror of `observed_output_pair_set_is_swap_closed`.
+    fn observed_output_pair_set_is_swap_closed_scratch(
+        &self,
+        scratch: &mut CertScratch,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> bool {
+        let left_terminal = left as usize;
+        let right_terminal = right as usize;
+        scratch.output_pair_mark_epoch = scratch.output_pair_mark_epoch.wrapping_add(1);
+        if scratch.output_pair_mark_epoch == 0 {
+            scratch.output_pair_marks.fill(0);
+            scratch.output_pair_mark_epoch = 1;
+        }
+        let epoch = scratch.output_pair_mark_epoch;
+        let swap = Some((left as usize, right as usize));
+        for ids in [
+            &self.observed_output_pair_ids_by_terminal[left_terminal],
+            &self.observed_output_pair_ids_by_terminal[right_terminal],
+        ] {
+            for &id in ids {
+                let id = id as usize;
+                if scratch.output_pair_marks[id] == epoch {
+                    continue;
+                }
+                scratch.output_pair_marks[id] = epoch;
+                let pair = &self.observed_output_pairs[id];
+                let finalizers_change =
+                    pair.finalizers.swap_changes(left as TerminalID, right as TerminalID);
+                let future_change = pair
+                    .future_finalizers
+                    .swap_changes(left as TerminalID, right as TerminalID);
+                if !finalizers_change && !future_change {
+                    continue;
+                }
+                let swapped = OutputPair {
+                    finalizers: if finalizers_change {
+                        pair.finalizers.mapped(swap)
+                    } else {
+                        pair.finalizers.clone()
+                    },
+                    future_finalizers: if future_change {
+                        pair.future_finalizers.mapped(swap)
+                    } else {
+                        pair.future_finalizers.clone()
+                    },
+                };
+                if !self.observed_output_pair_lookup.contains_key(&swapped) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// `&self` + scratch mirror of `canonical_round_one_still_possible`. The
+    /// representative-side affected sources are pre-computed and passed in as
+    /// `left_sources` (shared read-only across all members of the pivot).
+    fn canonical_round_one_still_possible_scratch(
+        &self,
+        scratch: &mut CertScratch,
+        left: TerminalID,
+        left_sources: &[u32],
+        right: TerminalID,
+    ) -> bool {
+        scratch.source_mark_epoch = scratch.source_mark_epoch.wrapping_add(1);
+        if scratch.source_mark_epoch == 0 {
+            scratch.source_marks.fill(0);
+            scratch.source_mark_epoch = 1;
+        }
+        let epoch = scratch.source_mark_epoch;
+
+        scratch.affected_sources.clear();
+        for &source in left_sources {
+            scratch.source_marks[source as usize] = epoch;
+            scratch.affected_sources.push(source);
+        }
+        for destinations in [
+            &self.finalizer_states_by_terminal[right as usize],
+            &self.future_finalizer_states_by_terminal[right as usize],
+        ] {
+            for &destination in destinations {
+                for &source in &self.reverse_predecessors[destination as usize] {
+                    let source = source as usize;
+                    if scratch.source_marks[source] != epoch {
+                        scratch.source_marks[source] = epoch;
+                        scratch.affected_sources.push(source as u32);
+                    }
+                }
+            }
+        }
+
+        let changed_by_identity_class = &mut scratch.changed_scratch;
+        changed_by_identity_class.clear();
+        let added_identity_classes = &mut scratch.added_scratch;
+        added_identity_classes.clear();
+        let identity = &self.canonical_rounds[1];
+        let identity_counts = self
+            .canonical_round_one_class_counts
+            .as_ref()
+            .expect("first-round counts pre-built");
+        let mut swapped_root_class = identity.classes[self.topology.initial_state];
+        let mut outputs = SwappedOutputIds::new(
+            &self.output_pairs,
+            &self.output_pair_lookup,
+            left as usize,
+            right as usize,
+        );
+        for &source in &scratch.affected_sources {
+            let source = source as usize;
+            let identity_class = identity.classes[source];
+            *changed_by_identity_class.entry(identity_class).or_default() += 1;
+            let signature = self.canonical_swapped_signature(
+                source,
+                &self.canonical_rounds[0].classes,
+                &mut outputs,
+            );
+            let Some(swapped_class) = self.canonical_round_identity_class_for_signature(
+                identity,
+                &self.canonical_rounds[0].classes,
+                &signature,
+            ) else {
+                return false;
+            };
+            added_identity_classes.insert(swapped_class);
+            if source == self.topology.initial_state {
+                swapped_root_class = swapped_class;
+            }
+        }
+
+        let root_matches = swapped_root_class == identity.classes[self.topology.initial_state];
+        root_matches
+            && changed_by_identity_class.iter().all(|(&class, &changed)| {
+                changed < identity_counts[class as usize]
+                    || added_identity_classes.contains(&class)
+            })
+    }
+
+    /// `&self` + scratch mirror of `support_transposition_interchange_map`.
+    fn support_transposition_interchange_map_scratch(
+        &self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<InterchangeMap> {
+        let deviations = self.support_transposition_deviations_scratch(left, right)?;
+        self.support_transposition_interchange_map_from_deviations_scratch(left, right, deviations)
+    }
+
+    /// `&self` mirror of `support_transposition_deviations` (reads pre-built
+    /// per-terminal supports; performs no lazy build and records no timing).
+    fn support_transposition_deviations_scratch(
+        &self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<Vec<(u32, u32)>> {
+        let left_support = self.terminal_support_parallel(left);
+        let right_support = self.terminal_support_parallel(right);
+        let mut deviations = Vec::with_capacity(left_support.len() + right_support.len());
+        for mask in 1..=3u8 {
+            let mut left_only = SmallVec::<[u32; 8]>::new();
+            let mut right_only = SmallVec::<[u32; 8]>::new();
+            let mut left_index = 0usize;
+            let mut right_index = 0usize;
+            loop {
+                while left_index < left_support.len() && left_support[left_index].1 != mask {
+                    left_index += 1;
+                }
+                while right_index < right_support.len() && right_support[right_index].1 != mask {
+                    right_index += 1;
+                }
+                match (left_support.get(left_index), right_support.get(right_index)) {
+                    (Some(&(left_class, _)), Some(&(right_class, _))) if left_class == right_class => {
+                        left_index += 1;
+                        right_index += 1;
+                    }
+                    (Some(&(left_class, _)), Some(&(right_class, _))) if left_class < right_class => {
+                        left_only.push(left_class);
+                        left_index += 1;
+                    }
+                    (Some(_), Some(&(right_class, _))) => {
+                        right_only.push(right_class);
+                        right_index += 1;
+                    }
+                    (Some(&(left_class, _)), None) => {
+                        left_only.push(left_class);
+                        left_index += 1;
+                    }
+                    (None, Some(&(right_class, _))) => {
+                        right_only.push(right_class);
+                        right_index += 1;
+                    }
+                    (None, None) => break,
+                }
+            }
+            if left_only.len() != right_only.len() {
+                return None;
+            }
+            for (left_class, right_class) in left_only.into_iter().zip(right_only) {
+                deviations.push((left_class, right_class));
+                deviations.push((right_class, left_class));
+            }
+        }
+        deviations.sort_unstable_by_key(|&(source, _)| source);
+        deviations
+            .windows(2)
+            .all(|pair| pair[0].0 != pair[1].0)
+            .then_some(deviations)
+    }
+
+    /// `&self` + scratch mirror of
+    /// `support_transposition_interchange_map_from_deviations`.
+    fn support_transposition_interchange_map_from_deviations_scratch(
+        &self,
+        left: TerminalID,
+        right: TerminalID,
+        deviations: Vec<(u32, u32)>,
+    ) -> Option<InterchangeMap> {
+        let quotient = self
+            .support_quotient
+            .as_ref()
+            .expect("support quotient pre-built");
+        let cone_classes = self.support_quotient_affected_cone_small(quotient, left, right);
+        debug_assert!(deviations.iter().all(|&(source, target)| {
+            (source as usize) < quotient.representative_by_class.len()
+                && (target as usize) < quotient.representative_by_class.len()
+                && cone_classes.contains(&(source as usize))
+                && cone_classes.contains(&(target as usize))
+        }));
+        let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
+        if Self::mapped_support_class(&deviations, root_class) != root_class as u32 {
+            return None;
+        }
+        let mut outputs = SparseSwappedOutputIds::new(
+            &self.output_pairs,
+            &self.output_pair_lookup,
+            left as usize,
+            right as usize,
+        );
+        for &class in &cone_classes {
+            let target = Self::mapped_support_class(&deviations, class);
+            let source_state = quotient.representative_by_class[class] as usize;
+            let target_state = quotient.representative_by_class[target as usize] as usize;
+            let source_edges = self.topology.edges_from(source_state);
+            let target_edges = self.topology.edges_from(target_state);
+            let mut source_index = 0usize;
+            let mut target_index = 0usize;
+            while source_index < source_edges.len() || target_index < target_edges.len() {
+                let (_byte, source_destination, target_destination) = match (
+                    source_edges.get(source_index),
+                    target_edges.get(target_index),
+                ) {
+                    (Some(&(source_byte, source_destination)), Some(&(target_byte, target_destination)))
+                        if source_byte == target_byte =>
+                    {
+                        source_index += 1;
+                        target_index += 1;
+                        (source_byte, source_destination as usize, target_destination as usize)
+                    }
+                    (Some(&(source_byte, source_destination)), Some(&(target_byte, _)))
+                        if source_byte < target_byte =>
+                    {
+                        source_index += 1;
+                        (source_byte, source_destination as usize, self.dead_state())
+                    }
+                    (Some(_), Some(&(target_byte, target_destination))) => {
+                        target_index += 1;
+                        (target_byte, self.dead_state(), target_destination as usize)
+                    }
+                    (Some(&(source_byte, source_destination)), None) => {
+                        source_index += 1;
+                        (source_byte, source_destination as usize, self.dead_state())
+                    }
+                    (None, Some(&(target_byte, target_destination))) => {
+                        target_index += 1;
+                        (target_byte, self.dead_state(), target_destination as usize)
+                    }
+                    (None, None) => unreachable!("sparse edge union loop is nonempty"),
+                };
+                let expected_destination = Self::mapped_support_class(
+                    &deviations,
+                    quotient.class_for_state[source_destination] as usize,
+                );
+                if quotient.class_for_state[target_destination] != expected_destination
+                    || outputs.id(self.output_pair_by_state[source_destination])
+                        != self.output_pair_by_state[target_destination]
+                {
+                    return None;
+                }
+            }
+        }
+        Some(InterchangeMap {
+            scanner_state_map: self.topology.scanner_map_from_internal_quotient(
+                Arc::clone(&quotient.class_for_state),
+                Arc::clone(&quotient.representative_by_class),
+                deviations.into_boxed_slice(),
+            ),
+        })
+    }
+
+    /// Certify one member terminal against a fixed representative using only
+    /// `&self` reads and per-worker scratch. `left_sources` is the pre-computed
+    /// representative-side affected source set. `memo_snapshot` is an immutable
+    /// snapshot of the cross-round first-round memo; misses are recorded in
+    /// `scratch.memo_updates` for a post-loop merge.
+    fn certify_member(
+        &self,
+        scratch: &mut CertScratch,
+        representative: TerminalID,
+        left_sources: &[u32],
+        terminal: TerminalID,
+        memo_snapshot: &FxHashMap<(TerminalID, TerminalID), bool>,
+    ) -> MemberResult {
+        let outpair_ok =
+            self.observed_output_pair_set_is_swap_closed_scratch(scratch, representative, terminal);
+        if !outpair_ok {
+            return MemberResult {
+                verdict: MemberVerdict::RejectOutputPair,
+                memo_update: None,
+            };
+        }
+        let frozen_preserved = self.swap_preserves_all_frozen_outputs(representative, terminal);
+        if frozen_preserved {
+            return MemberResult {
+                verdict: MemberVerdict::AcceptIdentity(self.canonical_identity_map_prebuilt()),
+                memo_update: None,
+            };
+        }
+        let memo_key = if representative <= terminal {
+            (representative, terminal)
+        } else {
+            (terminal, representative)
+        };
+        let mut memo_update = None;
+        let first_round_possible = match memo_snapshot.get(&memo_key).copied() {
+            Some(value) => value,
+            None => {
+                let value = self.canonical_round_one_still_possible_scratch(
+                    scratch,
+                    representative,
+                    left_sources,
+                    terminal,
+                );
+                memo_update = Some((memo_key, value));
+                value
+            }
+        };
+        if !first_round_possible {
+            return MemberResult {
+                verdict: MemberVerdict::RejectFirstRound,
+                memo_update,
+            };
+        }
+        let support = self.support_transposition_interchange_map_scratch(representative, terminal);
+        let verdict = match support {
+            Some(map) => MemberVerdict::AcceptSupport(map),
+            None => MemberVerdict::NeedsExact,
+        };
+        MemberResult {
+            verdict,
+            memo_update,
+        }
+    }
+
     fn characterize_pair(&mut self, left: TerminalID, right: TerminalID) -> PairCharacterization {
         let state_count = self.state_count();
         let swap = Some((
@@ -5629,6 +6233,146 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
         // (b c) imply (a c) by conjugation, so interchangeability is an
         // equivalence relation. Partition each candidate group by pivots,
         // keeping only the representative-to-member maps transport requires.
+        if let Some(pool) = ti_certification_pool() {
+            // Parallel per-pair certification. For a fixed representative every
+            // member of `unresolved[1..]` is tested independently against that
+            // representative, so the verdicts fan out across `pool`; they are
+            // then applied sequentially in the original member order, which
+            // preserves the pivot sequence and hence the exact partition.
+            let all_candidates: Vec<TerminalID> =
+                candidate_groups.iter().flatten().copied().collect();
+            dfa.prebuild_certification_state(&all_candidates);
+            // Within a single discover-one-round call the same unordered pair is
+            // never certified twice (a member accepted by a pivot is removed;
+            // rejected members form fresh pairs against later pivots). The
+            // first-round memo therefore only serves reuse *across* rounds, so we
+            // snapshot it once here (immutable, read by all parallel workers) and
+            // merge every new entry back in a single sweep after the round.
+            let memo_snapshot = context.first_round_memo.borrow().clone();
+            let mut memo_additions: Vec<((TerminalID, TerminalID), bool)> = Vec::new();
+            let mut rep_sources = Vec::<u32>::new();
+            // Per-item certification work is only microseconds, so rayon's
+            // fork/join and pool-wake latency dwarfs it for small pivots. Only
+            // fan out when a pivot has enough members to amortize that overhead;
+            // otherwise certify sequentially reusing a single scratch (which
+            // matches the sequential path's cost exactly, no pool involved).
+            let min_members = std::env::var("GLRMASK_TI_PARALLEL_MIN_MEMBERS")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(256);
+            let mut seq_scratch = CertScratch::new(&dfa);
+            // Enter the pool exactly ONCE for the whole pivot loop. Every nested
+            // `par_iter` then runs on the already-hot pool, avoiding the ~2.7ms
+            // cold pool-entry (worker wake) latency that a per-pivot
+            // `pool.install` was paying (111 forks * 2.7ms = ~300ms on the p0
+            // heavy round). `install` runs this closure on a pool worker and
+            // blocks the caller, so the captured `&mut` state is used single
+            // threaded here; only the `par_iter` bodies fan out.
+            pool.install(|| {
+            for initial_group in candidate_groups {
+                let mut unresolved = initial_group;
+                while !unresolved.is_empty() {
+                    let representative = unresolved[0];
+                    dfa.representative_affected_sources(representative, &mut rep_sources);
+                    let member_count = unresolved.len() - 1;
+                    let results: Vec<MemberResult> = if member_count >= min_members {
+                        let dfa_ref = &dfa;
+                        let rep_sources_ref = &rep_sources;
+                        let memo_snapshot_ref = &memo_snapshot;
+                        // NOTE: no per-pivot `pool.install` here. The whole pivot
+                        // loop runs inside a single `pool.install` below, so these
+                        // nested `par_iter`s reuse the already-hot pool instead of
+                        // paying a cold pool-entry (worker wake) latency per pivot.
+                        let forked: Vec<MemberResult> = unresolved[1..]
+                            .par_iter()
+                            .map_init(
+                                || CertScratch::new(dfa_ref),
+                                |scratch, &terminal| {
+                                    dfa_ref.certify_member(
+                                        scratch,
+                                        representative,
+                                        rep_sources_ref,
+                                        terminal,
+                                        memo_snapshot_ref,
+                                    )
+                                },
+                            )
+                            .collect();
+                        forked
+                    } else {
+                        unresolved[1..]
+                            .iter()
+                            .map(|&terminal| {
+                                dfa.certify_member(
+                                    &mut seq_scratch,
+                                    representative,
+                                    &rep_sources,
+                                    terminal,
+                                    &memo_snapshot,
+                                )
+                            })
+                            .collect()
+                    };
+                    for member_result in &results {
+                        if let Some(update) = member_result.memo_update {
+                            memo_additions.push(update);
+                        }
+                    }
+                    let members: Vec<TerminalID> = unresolved[1..].to_vec();
+                    let mut next_unresolved =
+                        Vec::with_capacity(unresolved.len().saturating_sub(1));
+                    for (terminal, member_result) in members.into_iter().zip(results) {
+                        let map = match member_result.verdict {
+                            MemberVerdict::RejectOutputPair => {
+                                output_pair_rejections += 1;
+                                None
+                            }
+                            MemberVerdict::RejectFirstRound => {
+                                first_round_rejections += 1;
+                                None
+                            }
+                            MemberVerdict::AcceptIdentity(map) => {
+                                output_invariant_checks += 1;
+                                Some(map)
+                            }
+                            MemberVerdict::AcceptSupport(map) => {
+                                support_transposition_checks += 1;
+                                Some(map)
+                            }
+                            MemberVerdict::NeedsExact => {
+                                support_transposition_checks += 1;
+                                direct_exact_checks += 1;
+                                dfa.interchange_map(representative, terminal)
+                            }
+                        };
+                        if let Some(map) = map {
+                            accepted_representative_members += 1;
+                            result
+                                .get_mut(&representative)
+                                .expect("TI representative must retain its singleton partition entry")
+                                .insert(terminal);
+                            let removed = result.remove(&terminal);
+                            debug_assert!(removed.is_some(), "TI member must retain its singleton partition entry");
+                            let replaced = accepted_maps.insert(
+                                (representative, terminal),
+                                Arc::new(map.scanner_state_map()),
+                            );
+                            debug_assert!(replaced.is_none(), "TI round must accept each pair once");
+                        } else {
+                            next_unresolved.push(terminal);
+                        }
+                    }
+                    unresolved = next_unresolved;
+                }
+            }
+            });
+            if !memo_additions.is_empty() {
+                let mut memo = context.first_round_memo.borrow_mut();
+                for (key, value) in memo_additions {
+                    memo.insert(key, value);
+                }
+            }
+        } else {
         for initial_group in candidate_groups {
             let mut unresolved = initial_group;
             while !unresolved.is_empty() {
@@ -5722,6 +6466,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 }
                 unresolved = next_unresolved;
             }
+        }
         }
 
         if profile_timing {

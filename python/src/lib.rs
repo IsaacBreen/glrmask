@@ -15,6 +15,9 @@
 //! dependent relationship. The only handwritten `unsafe` in this file is the
 //! NumPy `i32` to `u32` bitmask view cast used by `fill_mask`.
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use numpy::{PyArray1, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -879,6 +882,7 @@ impl PyConstraintState {
 
 #[pymodule]
 fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    glrmask::warm_ti_pool();
     m.add_class::<PyVocab>()?;
     m.add_class::<PyConstraint>()?;
     m.add_class::<PyConstraintState>()?;

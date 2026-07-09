@@ -15,6 +15,9 @@ pub(crate) mod postprocess;
 mod terminal_dwa_equivalence;
 mod terminal_interchangeability;
 
+pub(crate) use terminal_interchangeability::warm_ti_pool;
+pub(crate) use terminal_interchangeability::with_ti_pool;
+
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
