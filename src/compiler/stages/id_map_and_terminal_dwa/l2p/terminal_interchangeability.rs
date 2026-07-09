@@ -6675,11 +6675,7 @@ impl<'a> PostDwaWeightLifter<'a> {
                 .get(mode_indices)
                 .expect("prepared group coordinate plan must be retained");
             let mut union_for_token_signature = FxHashMap::<Vec<usize>, SharedTokenSet>::default();
-            let coordinate_tokens = plan
-                .coordinates
-                .iter()
-                .map(|&coordinate| Self::tokens_for_coordinate(weight, coordinate))
-                .collect::<Vec<_>>();
+            let coordinate_tokens = weight.shared_tokens_for_sorted_tsids(&plan.coordinates);
             let transformed_tokens: Vec<SharedTokenSet> = plan
                 .signatures
                 .iter()
@@ -6713,8 +6709,14 @@ impl<'a> PostDwaWeightLifter<'a> {
                 .collect();
             plan.overrides
                 .iter()
-                .filter_map(|&(final_tsid, signature)| {
-                    let base_tokens = base.shared_tokens_for_tsid(final_tsid);
+                .zip(base.shared_tokens_for_sorted_tsids(
+                    &plan
+                        .overrides
+                        .iter()
+                        .map(|&(final_tsid, _)| final_tsid)
+                        .collect::<Vec<_>>(),
+                ))
+                .filter_map(|(&(final_tsid, signature), base_tokens)| {
                     let tokens = &transformed_tokens[signature as usize];
                     (tokens.as_ref() != base_tokens.as_ref())
                         .then(|| (final_tsid, Arc::clone(tokens)))

@@ -2042,6 +2042,50 @@ impl Weight {
             .unwrap_or_else(|| Arc::clone(&EMPTY_RANGESET))
     }
 
+    /// Batched, sorted equivalent of [`shared_tokens_for_tsid`] for a slice of
+    /// strictly-ascending tsids. A single linear merge over the weight's ranges
+    /// replaces one binary-search point lookup per tsid, which is the dominant
+    /// cost of the post-DWA group-signature step. `u32::MAX` is the "no
+    /// coordinate" sentinel and always yields the empty token set, matching the
+    /// point helper's caller contract.
+    pub(crate) fn shared_tokens_for_sorted_tsids(&self, tsids: &[u32]) -> Vec<SharedTokenSet> {
+        debug_assert!(
+            tsids.windows(2).all(|pair| pair[0] < pair[1]),
+            "shared_tokens_for_sorted_tsids requires strictly-ascending tsids"
+        );
+        if self.is_full() {
+            let sentinel = self
+                .0
+                .range_values()
+                .next()
+                .expect("full weight must retain its sentinel token set")
+                .1
+                .clone();
+            return tsids.iter().map(|_| sentinel.clone()).collect();
+        }
+        let mut result = Vec::with_capacity(tsids.len());
+        let mut ranges = self.0.range_values().peekable();
+        for &tsid in tsids {
+            if tsid == u32::MAX {
+                result.push(Arc::clone(&EMPTY_RANGESET));
+                continue;
+            }
+            while let Some((range, _)) = ranges.peek() {
+                if *range.end() < tsid {
+                    ranges.next();
+                } else {
+                    break;
+                }
+            }
+            let tokens = match ranges.peek() {
+                Some((range, tokens)) if *range.start() <= tsid => (*tokens).clone(),
+                _ => Arc::clone(&EMPTY_RANGESET),
+            };
+            result.push(tokens);
+        }
+        result
+    }
+
     /// Apply a sorted, unique set of point-TSID token-set overrides without
     /// expanding the unchanged ranges of `self`. Empty override token sets
     /// remove that point from the result.
