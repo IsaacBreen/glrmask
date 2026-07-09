@@ -3050,6 +3050,8 @@ struct InterchangeabilityDfa {
     canonical_round_one_source_marks: Vec<u32>,
     canonical_round_one_source_mark_epoch: u32,
     canonical_round_one_affected_sources: Vec<u32>,
+    canonical_round_one_changed_scratch: FxHashMap<u32, u32>,
+    canonical_round_one_added_scratch: FxHashSet<u32>,
     support_quotient: Option<SupportQuotient>,
     canonical_quotient: Option<CanonicalQuotient>,
     /// Per raw terminal, the canonical quotient classes whose representative
@@ -3254,6 +3256,8 @@ impl InterchangeabilityDfa {
             canonical_round_one_source_marks: vec![0; state_count - 1],
             canonical_round_one_source_mark_epoch: 0,
             canonical_round_one_affected_sources: Vec::new(),
+            canonical_round_one_changed_scratch: FxHashMap::default(),
+            canonical_round_one_added_scratch: FxHashSet::default(),
             support_quotient: None,
             canonical_quotient: None,
             terminal_quotient_output_supports: None,
@@ -4661,13 +4665,17 @@ impl InterchangeabilityDfa {
         // Move the scratch list out while comparing exact cached signatures so
         // immutable borrows of the DFA do not conflict with scratch reuse.
         let affected_sources = std::mem::take(&mut self.canonical_round_one_affected_sources);
+        let mut changed_by_identity_class =
+            std::mem::take(&mut self.canonical_round_one_changed_scratch);
+        changed_by_identity_class.clear();
+        let mut added_identity_classes =
+            std::mem::take(&mut self.canonical_round_one_added_scratch);
+        added_identity_classes.clear();
         let identity = &self.canonical_rounds[1];
         let identity_counts = self
             .canonical_round_one_class_counts
             .as_ref()
             .expect("first-round counts initialized");
-        let mut changed_by_identity_class = FxHashMap::<u32, u32>::default();
-        let mut added_identity_classes = FxHashSet::<u32>::default();
         let mut swapped_root_class = identity.classes[self.topology.initial_state];
         let mut outputs = SwappedOutputIds::new(
             &self.output_pairs,
@@ -4690,6 +4698,8 @@ impl InterchangeabilityDfa {
                 &signature,
             ) else {
                 self.canonical_round_one_affected_sources = affected_sources;
+                self.canonical_round_one_changed_scratch = changed_by_identity_class;
+                self.canonical_round_one_added_scratch = added_identity_classes;
                 return false;
             };
             added_identity_classes.insert(swapped_class);
@@ -4699,12 +4709,15 @@ impl InterchangeabilityDfa {
         }
         self.canonical_round_one_affected_sources = affected_sources;
 
-        if swapped_root_class != identity.classes[self.topology.initial_state] {
-            return false;
-        }
-        changed_by_identity_class.into_iter().all(|(class, changed)| {
-            changed < identity_counts[class as usize] || added_identity_classes.contains(&class)
-        })
+        let root_matches = swapped_root_class == identity.classes[self.topology.initial_state];
+        let accepted = root_matches
+            && changed_by_identity_class.iter().all(|(&class, &changed)| {
+                changed < identity_counts[class as usize]
+                    || added_identity_classes.contains(&class)
+            });
+        self.canonical_round_one_changed_scratch = changed_by_identity_class;
+        self.canonical_round_one_added_scratch = added_identity_classes;
+        accepted
     }
 
     /// Collision-free exact refinement. This deliberately recomputes every
