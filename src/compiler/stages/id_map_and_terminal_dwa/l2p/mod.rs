@@ -26,6 +26,7 @@ use crate::automata::weighted::minimize::{
     PointwiseClassOrder, minimize_owned, minimize_owned_with_pointwise_class_order,
 };
 use crate::automata::weighted::nwa::NWA;
+use crate::automata::weighted_u32::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
@@ -195,6 +196,104 @@ fn l2p_token_length_stats(vocab: &Vocab) -> L2PTokenLengthStats {
     }
 
     stats
+}
+
+/// Collapse byte-identical states in a TI-expanded DWA before minimization.
+///
+/// TI mode expansion materializes many states that are exact duplicates: same
+/// `final_weight` and same `(label -> dst, weight)` transitions, where weight
+/// equality is exact because the lifted weights and their token sets are
+/// interned (Arc-ptr equality == value equality). Merging such states is a
+/// sound bisimulation quotient — it preserves the language and every weight —
+/// so the subsequent pointwise minimization reaches the identical canonical
+/// automaton (byte-identical digest) from a smaller input. This shrinks the
+/// input to `push_weights` and the pointwise coloring, which dominate the
+/// post-DWA minimize cost, without attempting the deeper pointwise-value
+/// equivalences that only that machinery can find.
+///
+/// The partition is refined to a fixpoint over `(final_weight ptr,
+/// [(label, class(dst), weight ptr)])`; the destination is compared up to its
+/// class so that duplicate states whose only difference is pointing at
+/// (mutually duplicate) destinations still collapse.
+fn quotient_exact_duplicate_states(dwa: DWA) -> DWA {
+    use crate::automata::weighted_u32::dwa::DWAState;
+    use std::collections::BTreeMap as StdBTreeMap;
+    use std::sync::Arc;
+
+    let states = dwa.states();
+    let n = states.len();
+    if n <= 1 {
+        return dwa;
+    }
+    let wptr = |w: &Weight| Arc::as_ptr(&w.0) as u64;
+
+    // Initial partition by local output signature (ignores destinations).
+    let mut class: Vec<u32> = vec![0; n];
+    let mut init_map: StdBTreeMap<Vec<u64>, u32> = StdBTreeMap::new();
+    for (i, state) in states.iter().enumerate() {
+        let mut sig: Vec<u64> = Vec::with_capacity(1 + state.transitions.len() * 2);
+        sig.push(match &state.final_weight {
+            Some(fw) => wptr(fw),
+            None => 0,
+        });
+        for (label, (_dst, w)) in state.transitions.iter() {
+            sig.push(*label as u64);
+            sig.push(wptr(w));
+        }
+        let next = init_map.len() as u32;
+        class[i] = *init_map.entry(sig).or_insert(next);
+    }
+    let mut num_classes = init_map.len();
+
+    // Refine to fixpoint, now distinguishing destinations by their class.
+    loop {
+        let mut refine_map: StdBTreeMap<Vec<u64>, u32> = StdBTreeMap::new();
+        let mut new_class: Vec<u32> = vec![0; n];
+        for (i, state) in states.iter().enumerate() {
+            let mut sig: Vec<u64> = Vec::with_capacity(1 + state.transitions.len() * 3);
+            sig.push(class[i] as u64);
+            for (label, (dst, w)) in state.transitions.iter() {
+                sig.push(*label as u64);
+                sig.push(wptr(w));
+                sig.push(class[*dst as usize] as u64);
+            }
+            let next = refine_map.len() as u32;
+            new_class[i] = *refine_map.entry(sig).or_insert(next);
+        }
+        let new_num = refine_map.len();
+        class = new_class;
+        if new_num == num_classes {
+            break;
+        }
+        num_classes = new_num;
+    }
+
+    if num_classes == n {
+        return dwa;
+    }
+
+    // Representative (first-seen) state per class; new state id == class id.
+    let mut rep_of_class: Vec<Option<usize>> = vec![None; num_classes];
+    for (i, &c) in class.iter().enumerate() {
+        rep_of_class[c as usize].get_or_insert(i);
+    }
+
+    let mut new_states: Vec<DWAState> = Vec::with_capacity(num_classes);
+    for c in 0..num_classes {
+        let rep = rep_of_class[c].expect("every class has a representative");
+        let old = &states[rep];
+        let transitions = old
+            .transitions
+            .iter()
+            .map(|(label, (dst, w))| (*label, (class[*dst as usize], w.clone())))
+            .collect();
+        new_states.push(DWAState {
+            transitions,
+            final_weight: old.final_weight.clone(),
+        });
+    }
+    let new_start = class[dwa.start_state() as usize];
+    DWA::from_parts(new_states, new_start)
 }
 
 /// Build an L2+ id_map and terminal DWA for the given vocab and terminal set.
@@ -805,6 +904,25 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         }
         ti_post_dwa_compact_ms = post_dwa_compact_started_at.elapsed().as_secs_f64() * 1000.0;
         let (expanded_dwa, final_id_map) = expanded_artifact.into_parts();
+
+        // Exact-duplicate state quotient before minimization. TI mode expansion
+        // materializes many states that are byte-identical (same final weight
+        // and same (label -> dst, interned weight-Arc) transitions). Because the
+        // token sets and lifted weights are interned, Arc-ptr equality is exact
+        // value equality, so merging these states is a sound bisimulation
+        // quotient that leaves the language and weights unchanged. Doing it here
+        // shrinks the input to `push_weights` and the pointwise coloring inside
+        // minimization without touching the deeper pointwise-value equivalences
+        // that only that machinery can find. Ptr-based fixpoint refinement adds
+        // nothing beyond the single exact-dup pass (measured: p0 156->106 in one
+        // pass, fixpoint identical), so a single hash pass captures the whole
+        // cheap win.
+        let premerge_disabled = std::env::var("GLRMASK_DISABLE_TI_PREMERGE").is_ok();
+        let expanded_dwa = if premerge_disabled {
+            expanded_dwa
+        } else {
+            quotient_exact_duplicate_states(expanded_dwa)
+        };
 
         let post_dwa_minimize_started_at = ti_profile_timing.then(Instant::now);
         // TI lifting creates partial source domains. Let the densest exact
