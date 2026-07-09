@@ -608,6 +608,15 @@ pub(crate) struct TiDiscoveryContext {
     raw: Arc<TiRawDiscoveryData>,
     root_output_signatures: Vec<RootOutputSignature>,
     root_observed_states: usize,
+    /// Cross-round memo of the first-round necessary-condition filter.
+    /// `canonical_round_one_still_possible(a, b)` depends only on the fixed DFA
+    /// topology, canonical Moore rounds, and per-terminal finalizer states -
+    /// none of which change between discovery rounds - and is symmetric in its
+    /// two terminals (it tests the transposition `(a b)`).  The fixed-point
+    /// loop re-tests a barely-shrinking candidate set each round, so caching
+    /// the verdict under the unordered pair key eliminates the redundant
+    /// recomputation across rounds.
+    first_round_memo: std::cell::RefCell<FxHashMap<(TerminalID, TerminalID), bool>>,
 }
 
 impl TiDiscoveryContext {
@@ -635,6 +644,7 @@ impl TiDiscoveryContext {
             raw,
             root_output_signatures,
             root_observed_states,
+            first_round_memo: std::cell::RefCell::new(FxHashMap::default()),
         }
     }
 
@@ -659,6 +669,7 @@ impl TiDiscoveryContext {
             raw,
             root_output_signatures,
             root_observed_states,
+            first_round_memo: std::cell::RefCell::new(FxHashMap::default()),
         }
     }
 }
@@ -5559,8 +5570,21 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                         Some(dfa.canonical_identity_map())
                     } else {
                         let first_round_started_at = profile_timing.then(Instant::now);
-                        let first_round_possible =
-                            dfa.canonical_round_one_still_possible(representative, terminal);
+                        let memo_key = if representative <= terminal {
+                            (representative, terminal)
+                        } else {
+                            (terminal, representative)
+                        };
+                        let cached = context.first_round_memo.borrow().get(&memo_key).copied();
+                        let first_round_possible = match cached {
+                            Some(value) => value,
+                            None => {
+                                let value =
+                                    dfa.canonical_round_one_still_possible(representative, terminal);
+                                context.first_round_memo.borrow_mut().insert(memo_key, value);
+                                value
+                            }
+                        };
                         if let Some(started_at) = first_round_started_at {
                             first_round_ns += started_at.elapsed().as_nanos() as u64;
                         }
