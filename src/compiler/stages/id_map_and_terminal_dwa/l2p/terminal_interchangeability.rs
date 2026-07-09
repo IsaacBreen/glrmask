@@ -75,6 +75,12 @@ impl OutputBits {
         self.0.binary_search(&(terminal as TerminalID)).is_ok()
     }
 
+    /// True iff swapping `left` and `right` changes this set, i.e. exactly one
+    /// of them is present. When false, `mapped` would return an identical set.
+    fn swap_changes(&self, left: TerminalID, right: TerminalID) -> bool {
+        self.0.binary_search(&left).is_ok() != self.0.binary_search(&right).is_ok()
+    }
+
     fn mapped(&self, swap: Option<(usize, usize)>) -> Self {
         let Some((left, right)) = swap else { return self.clone(); };
         if left == right { return self.clone(); }
@@ -4929,9 +4935,28 @@ impl InterchangeabilityDfa {
                 }
                 self.observed_output_pair_marks[id] = epoch;
                 let pair = &self.observed_output_pairs[id];
+                // If neither component changes under the swap, the pair maps to
+                // itself. Since it is an observed pair it is trivially in the
+                // lookup, so skip the allocation and hash lookup entirely.
+                let finalizers_change =
+                    pair.finalizers.swap_changes(left as TerminalID, right as TerminalID);
+                let future_change = pair
+                    .future_finalizers
+                    .swap_changes(left as TerminalID, right as TerminalID);
+                if !finalizers_change && !future_change {
+                    continue;
+                }
                 let swapped = OutputPair {
-                    finalizers: pair.finalizers.mapped(swap),
-                    future_finalizers: pair.future_finalizers.mapped(swap),
+                    finalizers: if finalizers_change {
+                        pair.finalizers.mapped(swap)
+                    } else {
+                        pair.finalizers.clone()
+                    },
+                    future_finalizers: if future_change {
+                        pair.future_finalizers.mapped(swap)
+                    } else {
+                        pair.future_finalizers.clone()
+                    },
                 };
                 if !self.observed_output_pair_lookup.contains_key(&swapped) {
                     return false;
