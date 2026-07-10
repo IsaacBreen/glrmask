@@ -56,6 +56,23 @@ pub(crate) struct LocalIdMapTerminalDwa {
     pub(crate) profile: TerminalDwaPhaseProfile,
 }
 
+/// The independently-built terminal-DWA pieces produced by one vocabulary
+/// partition.  The third slot is the cheap L1 construction over tokens split
+/// away from an L2P terminal set because they never cross an L2P boundary.
+#[derive(Debug, Default)]
+pub(crate) struct PartitionTerminalDwas {
+    pub(crate) l1: Option<LocalIdMapTerminalDwa>,
+    pub(crate) l2p: Option<LocalIdMapTerminalDwa>,
+    pub(crate) l2p_single_l1: Option<LocalIdMapTerminalDwa>,
+    pub(crate) profile: TerminalDwaPhaseProfile,
+}
+
+impl PartitionTerminalDwas {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.l1.is_none() && self.l2p.is_none() && self.l2p_single_l1.is_none()
+    }
+}
+
 impl TerminalDwaPhaseProfile {
     pub(crate) fn total_ms(self) -> f64 {
         self.id_map_ms + self.terminal_dwa_ms + self.compact_ms
