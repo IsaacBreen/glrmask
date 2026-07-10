@@ -3111,8 +3111,8 @@ struct InterchangeabilityDfa {
     /// the members sharing a fixed representative in the exact-verify loop.
     canonical_round_one_left_terminal: Option<TerminalID>,
     canonical_round_one_left_sources: Vec<u32>,
-    canonical_round_one_changed_scratch: FxHashMap<u32, u32>,
-    canonical_round_one_added_scratch: FxHashSet<u32>,
+    canonical_round_one_changed_scratch: SmallVec<[(u32, u32); 16]>,
+    canonical_round_one_added_scratch: SmallVec<[u32; 16]>,
     support_quotient: Option<SupportQuotient>,
     canonical_quotient: Option<CanonicalQuotient>,
     /// Per raw terminal, the canonical quotient classes whose representative
@@ -3161,8 +3161,8 @@ struct CertScratch {
     source_marks: Vec<u32>,
     source_mark_epoch: u32,
     affected_sources: Vec<u32>,
-    changed_scratch: FxHashMap<u32, u32>,
-    added_scratch: FxHashSet<u32>,
+    changed_scratch: SmallVec<[(u32, u32); 16]>,
+    added_scratch: SmallVec<[u32; 16]>,
     output_pair_marks: Vec<u32>,
     output_pair_mark_epoch: u32,
 }
@@ -3173,8 +3173,8 @@ impl CertScratch {
             source_marks: vec![0; dfa.canonical_round_one_source_marks.len()],
             source_mark_epoch: 0,
             affected_sources: Vec::new(),
-            changed_scratch: FxHashMap::default(),
-            added_scratch: FxHashSet::default(),
+            changed_scratch: SmallVec::new(),
+            added_scratch: SmallVec::new(),
             output_pair_marks: vec![0; dfa.observed_output_pairs.len()],
             output_pair_mark_epoch: 0,
         }
@@ -3459,8 +3459,8 @@ impl InterchangeabilityDfa {
             canonical_round_one_affected_sources: Vec::new(),
             canonical_round_one_left_terminal: None,
             canonical_round_one_left_sources: Vec::new(),
-            canonical_round_one_changed_scratch: FxHashMap::default(),
-            canonical_round_one_added_scratch: FxHashSet::default(),
+            canonical_round_one_changed_scratch: SmallVec::new(),
+            canonical_round_one_added_scratch: SmallVec::new(),
             support_quotient: None,
             canonical_quotient: None,
             terminal_quotient_output_supports: None,
@@ -5155,7 +5155,14 @@ impl InterchangeabilityDfa {
         for &source in &affected_sources {
             let source = source as usize;
             let identity_class = identity.classes[source];
-            *changed_by_identity_class.entry(identity_class).or_default() += 1;
+            if let Some((_, changed)) = changed_by_identity_class
+                .iter_mut()
+                .find(|(class, _)| *class == identity_class)
+            {
+                *changed += 1;
+            } else {
+                changed_by_identity_class.push((identity_class, 1));
+            }
             let signature = self.canonical_swapped_signature_sparse(
                 source,
                 &self.canonical_rounds[0].classes,
@@ -5171,7 +5178,9 @@ impl InterchangeabilityDfa {
                 self.canonical_round_one_added_scratch = added_identity_classes;
                 return false;
             };
-            added_identity_classes.insert(swapped_class);
+            if !added_identity_classes.contains(&swapped_class) {
+                added_identity_classes.push(swapped_class);
+            }
             if source == self.topology.initial_state {
                 swapped_root_class = swapped_class;
             }
@@ -5180,7 +5189,7 @@ impl InterchangeabilityDfa {
 
         let root_matches = swapped_root_class == identity.classes[self.topology.initial_state];
         let accepted = root_matches
-            && changed_by_identity_class.iter().all(|(&class, &changed)| {
+            && changed_by_identity_class.iter().all(|&(class, changed)| {
                 changed < identity_counts[class as usize]
                     || added_identity_classes.contains(&class)
             });
@@ -5594,7 +5603,14 @@ impl InterchangeabilityDfa {
         for &source in &scratch.affected_sources {
             let source = source as usize;
             let identity_class = identity.classes[source];
-            *changed_by_identity_class.entry(identity_class).or_default() += 1;
+            if let Some((_, changed)) = changed_by_identity_class
+                .iter_mut()
+                .find(|(class, _)| *class == identity_class)
+            {
+                *changed += 1;
+            } else {
+                changed_by_identity_class.push((identity_class, 1));
+            }
             let signature = self.canonical_swapped_signature_sparse(
                 source,
                 &self.canonical_rounds[0].classes,
@@ -5607,7 +5623,9 @@ impl InterchangeabilityDfa {
             ) else {
                 return false;
             };
-            added_identity_classes.insert(swapped_class);
+            if !added_identity_classes.contains(&swapped_class) {
+                added_identity_classes.push(swapped_class);
+            }
             if source == self.topology.initial_state {
                 swapped_root_class = swapped_class;
             }
@@ -5615,7 +5633,7 @@ impl InterchangeabilityDfa {
 
         let root_matches = swapped_root_class == identity.classes[self.topology.initial_state];
         root_matches
-            && changed_by_identity_class.iter().all(|(&class, &changed)| {
+            && changed_by_identity_class.iter().all(|&(class, changed)| {
                 changed < identity_counts[class as usize]
                     || added_identity_classes.contains(&class)
             })
@@ -6437,6 +6455,10 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 }
             }
         } else {
+        // Sequential discovery owns this partition-local context for the whole
+        // round. Hold the memo borrow once instead of entering the RefCell for
+        // every candidate pair (a get plus a possible insert per miss).
+        let mut first_round_memo = context.first_round_memo.borrow_mut();
         for initial_group in candidate_groups {
             let mut unresolved = initial_group;
             while !unresolved.is_empty() {
@@ -6470,13 +6492,12 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                         } else {
                             (terminal, representative)
                         };
-                        let cached = context.first_round_memo.borrow().get(&memo_key).copied();
-                        let first_round_possible = match cached {
+                        let first_round_possible = match first_round_memo.get(&memo_key).copied() {
                             Some(value) => value,
                             None => {
                                 let value =
                                     dfa.canonical_round_one_still_possible(representative, terminal);
-                                context.first_round_memo.borrow_mut().insert(memo_key, value);
+                                first_round_memo.insert(memo_key, value);
                                 value
                             }
                         };
