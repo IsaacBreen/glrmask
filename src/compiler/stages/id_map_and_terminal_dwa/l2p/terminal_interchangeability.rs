@@ -4049,6 +4049,34 @@ impl InterchangeabilityDfa {
         CanonicalSignature(components.into())
     }
 
+    /// Sparse-output-cache variant for the first-round rejection filter. That
+    /// filter usually touches only a handful of distinct output-pair ids per
+    /// candidate, so inline linear lookup avoids constructing two hash maps for
+    /// every tested terminal pair. The produced signature is byte-for-byte
+    /// identical to `canonical_swapped_signature`.
+    fn canonical_swapped_signature_sparse(
+        &self,
+        state: usize,
+        previous: &[u32],
+        outputs: &mut SparseSwappedOutputIds<'_>,
+    ) -> CanonicalSignature {
+        let default_class = previous[self.dead_state()];
+        let mut components = SmallVec::<[CanonicalComponent; 8]>::new();
+        for &(byte, destination) in self.topology.edges_from(state) {
+            let destination = destination as usize;
+            let output = outputs.id(self.output_pair_by_state[destination]);
+            if previous[destination] == default_class && output == 0 {
+                continue;
+            }
+            components.push(CanonicalComponent {
+                byte,
+                previous_class: previous[destination],
+                output,
+            });
+        }
+        CanonicalSignature(components.into())
+    }
+
     fn canonical_identity_round(&self, previous: &[u32]) -> CanonicalRound {
         let mut representative_by_class = Vec::<u32>::new();
         let mut classes_by_signature_hash = FxHashMap::<u64, SmallVec<[u32; 1]>>::default();
@@ -5118,7 +5146,7 @@ impl InterchangeabilityDfa {
             .as_ref()
             .expect("first-round counts initialized");
         let mut swapped_root_class = identity.classes[self.topology.initial_state];
-        let mut outputs = SwappedOutputIds::new(
+        let mut outputs = SparseSwappedOutputIds::new(
             &self.output_pairs,
             &self.output_pair_lookup,
             left as usize,
@@ -5128,7 +5156,7 @@ impl InterchangeabilityDfa {
             let source = source as usize;
             let identity_class = identity.classes[source];
             *changed_by_identity_class.entry(identity_class).or_default() += 1;
-            let signature = self.canonical_swapped_signature(
+            let signature = self.canonical_swapped_signature_sparse(
                 source,
                 &self.canonical_rounds[0].classes,
                 &mut outputs,
@@ -5557,7 +5585,7 @@ impl InterchangeabilityDfa {
             .as_ref()
             .expect("first-round counts pre-built");
         let mut swapped_root_class = identity.classes[self.topology.initial_state];
-        let mut outputs = SwappedOutputIds::new(
+        let mut outputs = SparseSwappedOutputIds::new(
             &self.output_pairs,
             &self.output_pair_lookup,
             left as usize,
@@ -5567,7 +5595,7 @@ impl InterchangeabilityDfa {
             let source = source as usize;
             let identity_class = identity.classes[source];
             *changed_by_identity_class.entry(identity_class).or_default() += 1;
-            let signature = self.canonical_swapped_signature(
+            let signature = self.canonical_swapped_signature_sparse(
                 source,
                 &self.canonical_rounds[0].classes,
                 &mut outputs,
