@@ -147,18 +147,13 @@ fn l2p_env_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Enable production terminal interchangeability by default. This changes only
-/// representative-terminal construction and post-DWA expansion; strict reference
-/// validation remains separately opt-in. Set `GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY=0`
-/// or `false` to disable production TI explicitly.
+/// Production terminal interchangeability remains opt-in. The implementation
+/// is available for profiling and strict-reference validation, but it must not
+/// affect ordinary compilation until its remaining correctness gaps are closed.
+/// Set `GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY=1` to enable it explicitly.
 fn l2p_terminal_interchangeability_enabled() -> bool {
     TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
-        && std::env::var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY")
-            .map(|value| {
-                let value = value.trim();
-                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-            })
-            .unwrap_or(true)
+        && l2p_env_enabled("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY")
 }
 
 fn l2p_terminal_interchangeability_enabled_for_partition(_partition_label: &str) -> bool {
@@ -177,7 +172,9 @@ fn l2p_terminal_interchangeability_strict_reference_enabled() -> bool {
 /// global-token-position validation suppresses C itself while retaining all
 /// other local optimizations on both sides of the comparison.
 pub(crate) fn p8_first_byte_factorization_allowed() -> bool {
-    true
+    // Forced-all-L2P is a diagnostic route that does not preserve the normal
+    // classifier invariants of the structural-boundary partition.
+    !l2p_env_enabled("GLRMASK_FORCE_ALL_L2P")
 }
 
 fn l2p_global_token_position_enabled() -> bool {
@@ -1264,7 +1261,7 @@ mod ti_mre_tests {
     }
 
     #[test]
-    fn terminal_interchangeability_policy_defaults_enabled_and_honors_explicit_disable() {
+    fn terminal_interchangeability_policy_defaults_disabled_and_honors_explicit_enable() {
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
         let original = env::var_os("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
         unsafe {
@@ -1275,7 +1272,10 @@ mod ti_mre_tests {
             original,
         };
 
+        assert!(!super::l2p_terminal_interchangeability_enabled_for_partition("p0"));
+        let enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
         assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p0"));
+        drop(enabled);
         let _disabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "0");
         assert!(!super::l2p_terminal_interchangeability_enabled_for_partition("p0"));
     }
@@ -1337,6 +1337,30 @@ nt S ::= QUOTE IDENT;
         );
         Constraint::from_glrm_grammar(grammar, &vocab)
             .expect("P8 local TI bypass must match the forced full-TI artifact");
+    }
+
+    #[test]
+    fn forced_all_l2p_enum_skips_p8_first_byte_factorization() {
+        let vocab = Vocab::new(
+            vec![
+                (0, b"\"red\"".to_vec()),
+                (1, b"\"blue\"".to_vec()),
+                (2, b"\"green\"".to_vec()),
+            ],
+            None,
+        );
+
+        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+        let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+        let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+        let _strict = EnvVarGuard::set(
+            "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
+            "1",
+        );
+
+        Constraint::from_json_schema(r#"{"enum":["red","blue"]}"#, &vocab)
+            .expect("forced-all-L2P enum must match the strict TI reference");
     }
 
     #[test]

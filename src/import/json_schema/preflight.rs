@@ -10,6 +10,24 @@ const DEFAULT_MAX_NODES: usize = 100_000;
 const ALLOW_LARGE_ENV: &str = "GLRMASK_JSON_SCHEMA_ALLOW_LARGE";
 const MAX_NODES_ENV: &str = "GLRMASK_JSON_SCHEMA_MAX_NODES";
 
+#[cfg(test)]
+std::thread_local! {
+    static MAX_NODES_TEST_OVERRIDE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+    static ALLOW_LARGE_TEST_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn swap_max_nodes_test_override(value: Option<String>) -> Option<String> {
+    MAX_NODES_TEST_OVERRIDE.with(|override_value| override_value.replace(value))
+}
+
+#[cfg(test)]
+pub(crate) fn swap_allow_large_test_override(value: Option<bool>) -> Option<bool> {
+    ALLOW_LARGE_TEST_OVERRIDE.with(|override_value| override_value.replace(value))
+}
+
 #[derive(Debug, Default)]
 struct SchemaSizeMetrics {
     nodes: usize,
@@ -163,29 +181,43 @@ fn check_pattern_properties_object(value: &Value) -> ImportResult<()> {
 }
 
 fn max_nodes_limit() -> ImportResult<usize> {
+    #[cfg(test)]
+    if let Some(raw) = MAX_NODES_TEST_OVERRIDE.with(|value| value.borrow().clone()) {
+        return parse_max_nodes_limit(&raw);
+    }
+
     match env::var(MAX_NODES_ENV) {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                return Ok(DEFAULT_MAX_NODES);
-            }
-            let parsed = trimmed.parse::<usize>().map_err(|_| {
-                SchemaImportError::new(format!(
-                    "{MAX_NODES_ENV} must be a positive integer node limit, got {raw:?}"
-                ))
-            })?;
-            if parsed == 0 {
-                return Err(SchemaImportError::new(format!(
-                    "{MAX_NODES_ENV} must be a positive integer node limit, got {raw:?}"
-                )));
-            }
-            Ok(parsed)
-        }
+        Ok(raw) => parse_max_nodes_limit(&raw),
         Err(_) => Ok(DEFAULT_MAX_NODES),
     }
 }
 
+fn parse_max_nodes_limit(raw: &str) -> ImportResult<usize> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_MAX_NODES);
+    }
+    let parsed = trimmed.parse::<usize>().map_err(|_| {
+        SchemaImportError::new(format!(
+            "{MAX_NODES_ENV} must be a positive integer node limit, got {raw:?}"
+        ))
+    })?;
+    if parsed == 0 {
+        return Err(SchemaImportError::new(format!(
+            "{MAX_NODES_ENV} must be a positive integer node limit, got {raw:?}"
+        )));
+    }
+    Ok(parsed)
+}
+
 fn env_flag_enabled(key: &str) -> bool {
+    #[cfg(test)]
+    if key == ALLOW_LARGE_ENV
+        && let Some(value) = ALLOW_LARGE_TEST_OVERRIDE.with(std::cell::Cell::get)
+    {
+        return value;
+    }
+
     env::var(key)
         .map(|value| {
             let trimmed = value.trim();

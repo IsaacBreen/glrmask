@@ -456,6 +456,59 @@ fn find_indirect_lr_cycle(
     find_cycle(graph, 2, false)
 }
 
+pub(crate) fn has_indirect_left_recursion(rules: &[Rule]) -> bool {
+    let nullable = compute_nullable(rules, max_nt_id(rules) + 1);
+    has_indirect_left_recursion_with_nullable(rules, &nullable)
+}
+
+fn has_indirect_left_recursion_with_nullable(
+    rules: &[Rule],
+    nullable: &BTreeSet<NonterminalID>,
+) -> bool {
+    let num_nonterminals = (max_nt_id(rules) + 1) as usize;
+    let mut nullable_mask = vec![false; num_nonterminals];
+    for &nonterminal in nullable {
+        nullable_mask[nonterminal as usize] = true;
+    }
+
+    let mut successors = vec![Vec::<NonterminalID>::new(); num_nonterminals];
+    let mut indegree = vec![0usize; num_nonterminals];
+    for rule in rules {
+        for symbol in &rule.rhs {
+            let Symbol::Nonterminal(target) = symbol else {
+                break;
+            };
+            if *target != rule.lhs {
+                successors[rule.lhs as usize].push(*target);
+                indegree[*target as usize] += 1;
+            }
+            if !nullable_mask[*target as usize] {
+                break;
+            }
+        }
+    }
+
+    let mut queue = VecDeque::new();
+    for (node, &degree) in indegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(node as NonterminalID);
+        }
+    }
+
+    let mut removed = 0usize;
+    while let Some(node) = queue.pop_front() {
+        removed += 1;
+        for &successor in &successors[node as usize] {
+            let degree = &mut indegree[successor as usize];
+            *degree -= 1;
+            if *degree == 0 {
+                queue.push_back(successor);
+            }
+        }
+    }
+    removed != num_nonterminals
+}
+
 fn find_nontrivial_sccs(
     graph: &BTreeMap<NonterminalID, BTreeSet<NonterminalID>>,
 ) -> Vec<BTreeSet<NonterminalID>> {
@@ -2540,10 +2593,13 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
         let hidden_left_recursion_changed = with_resynced_next_nonterminal(rules, &next_nt, |rules| {
             let nullable = compute_nullable(rules, max_nt_id(rules) + 1);
             nullable_count = nullable.len();
-            // Hidden left recursion requires a nullable prefix. Once epsilon
-            // inlining has removed every nullable nonterminal, the graph pass
-            // cannot add or replace a rule.
-            if nullable.is_empty() {
+            // With no nullable prefix, the pass still resolves ordinary
+            // indirect left recursion. Avoid its more expensive SCC and rule
+            // expansion work when a cheap reachability check proves there is
+            // no such cycle.
+            if nullable.is_empty()
+                && !has_indirect_left_recursion_with_nullable(rules, &nullable)
+            {
                 false
             } else {
                 eliminate_hidden_left_recursion(rules, &nullable, iteration + 1)
@@ -2604,8 +2660,9 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
             && right_recursion_completed
             && !hidden_left_recursion_changed
         {
-            // Subsequent passes cannot create nullability, indirect right
-            // recursion, or hidden left recursion: dedup only removes rules.
+            // Subsequent normalization passes cannot create nullability or
+            // indirect right recursion. Post-merge transforms perform their
+            // own indirect-left-recursion recovery.
             nullable_eliminated_before_exit = true;
             break;
         }
@@ -2931,6 +2988,41 @@ mod tests {
         let error = grammar.check_table_build_normal_form().unwrap_err();
         assert!(error.contains("nullable nonterminals reachable"));
         assert!(error.contains("zero-length productions reachable"));
+    }
+
+    #[test]
+    fn indirect_left_recursion_precheck_observes_nullable_prefixes() {
+        let rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(2), Symbol::Nonterminal(1)],
+            },
+            Rule {
+                lhs: 1,
+                rhs: vec![Symbol::Nonterminal(0), Symbol::Terminal(0)],
+            },
+            Rule { lhs: 2, rhs: Vec::new() },
+        ];
+        let nullable = compute_nullable(&rules, 3);
+
+        assert!(has_indirect_left_recursion_with_nullable(&rules, &nullable));
+    }
+
+    #[test]
+    fn indirect_left_recursion_precheck_ignores_direct_self_recursion() {
+        let rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(0), Symbol::Terminal(0)],
+            },
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            },
+        ];
+        let nullable = compute_nullable(&rules, 1);
+
+        assert!(!has_indirect_left_recursion_with_nullable(&rules, &nullable));
     }
 
     #[test]

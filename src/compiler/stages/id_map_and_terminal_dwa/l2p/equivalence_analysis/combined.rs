@@ -723,10 +723,14 @@ fn try_analyze_equivalences_with_raw_quotient(
         // Every production P8 token has a nonempty identifier prefix after
         // the quote. Model terminal matches at the quote successor as
         // zero-position events, then analyze only the remaining suffix.
-        // Retain the full-token path as a conservative fallback for any future
-        // P8 route that includes a one-byte quote token.
+        // A one-byte quote token invalidates that factorization: its acceptance
+        // is observed at the quote successor itself, not after a nonempty
+        // suffix. Let the generic exact route handle such atypical partitions.
         let use_seeded_suffix_factorization =
             prepared.token_bytes.iter().all(|token| token.len() > 1);
+        if !use_seeded_suffix_factorization {
+            return None;
+        }
         let mut target_to_source = BTreeMap::<u32, usize>::new();
         let mut source_representative = vec![usize::MAX; tokenizer.num_states() as usize];
         let mut target_by_source = vec![u32::MAX; tokenizer.num_states() as usize];
@@ -746,9 +750,7 @@ fn try_analyze_equivalences_with_raw_quotient(
             .iter()
             .map(|token| &token[1..])
             .collect();
-        if use_seeded_suffix_factorization && suffix_tokens.iter().any(|suffix| suffix.is_empty()) {
-            return None;
-        }
+        debug_assert!(suffix_tokens.iter().all(|suffix| !suffix.is_empty()));
         let view_started_at = Instant::now();
         let analysis_view = TokenizerView::new_filtered_from_flat_trans(
             flat_trans,

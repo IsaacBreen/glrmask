@@ -1275,6 +1275,18 @@ impl Constraint {
             }
         }
 
+        for final_weight in self.parser_top_accept.values() {
+            if final_weight.is_full() || final_weight.is_empty() {
+                continue;
+            }
+            for (_tsid_range, token_set) in final_weight.0.range_values() {
+                let key = Arc::as_ptr(token_set) as usize;
+                if final_keys.insert(key) {
+                    final_sets.push((key, token_set));
+                }
+            }
+        }
+
         WeightTokenSetInventory {
             final_sets,
             transition_sets,

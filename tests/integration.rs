@@ -1,12 +1,16 @@
 //! End-to-end smoke tests for grammar/schema construction, masks, commits, and
 //! serialization. Narrow regressions live in dedicated test files.
 
-use std::{env, ffi::OsString, sync::Mutex};
+use std::{
+    env,
+    ffi::OsString,
+    sync::{Mutex, RwLock},
+};
 
 use glrmask::{Constraint, ConstraintState, Vocab};
 
 static URI_ENV_LOCK: Mutex<()> = Mutex::new(());
-static TI_ENV_LOCK: Mutex<()> = Mutex::new(());
+static TI_ENV_LOCK: RwLock<()> = RwLock::new(());
 
 struct EnvVarGuard {
     key: &'static str,
@@ -72,20 +76,29 @@ fn bytes_vocab() -> Vocab {
     Vocab::new((0u8..=255).map(|b| (b as u32, vec![b])).collect(), None)
 }
 
-fn ebnf(entries: &[&str], grammar: &str) -> Constraint {
-    Constraint::from_ebnf(grammar, &vocab(entries)).unwrap()
+fn with_stable_ti_env<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = TI_ENV_LOCK.read().expect("TI env lock poisoned");
+    f()
 }
 
-fn lark(entries: &[&str], grammar: &str) -> Constraint {
+fn ebnf(entries: &[&str], grammar: &str) -> Constraint {
+    with_stable_ti_env(|| Constraint::from_ebnf(grammar, &vocab(entries)).unwrap())
+}
+
+fn lark_unlocked(entries: &[&str], grammar: &str) -> Constraint {
     Constraint::from_lark(grammar, &vocab(entries)).unwrap()
 }
 
+fn lark(entries: &[&str], grammar: &str) -> Constraint {
+    with_stable_ti_env(|| lark_unlocked(entries, grammar))
+}
+
 fn schema(entries: &[&str], schema: &str) -> Constraint {
-    Constraint::from_json_schema(schema, &vocab(entries)).unwrap()
+    with_stable_ti_env(|| Constraint::from_json_schema(schema, &vocab(entries)).unwrap())
 }
 
 fn byte_schema(schema: &str) -> Constraint {
-    Constraint::from_json_schema(schema, &bytes_vocab()).unwrap()
+    with_stable_ti_env(|| Constraint::from_json_schema(schema, &bytes_vocab()).unwrap())
 }
 
 fn allowed(mask: &[u32]) -> Vec<usize> {
@@ -201,14 +214,16 @@ fn lark_literals_choices_and_terminals() {
 
 #[test]
 fn lark_rejects_parser_refs_inside_terminals() {
-    let result = Constraint::from_lark(
-        r#"
-        start: A
-        A: inner
-        inner: "a"
-        "#,
-        &vocab(&["a"]),
-    );
+    let result = with_stable_ti_env(|| {
+        Constraint::from_lark(
+            r#"
+            start: A
+            A: inner
+            inner: "a"
+            "#,
+            &vocab(&["a"]),
+        )
+    });
     assert!(result.is_err());
 }
 
@@ -1181,7 +1196,8 @@ fn nullable_repeat_alternative_accepts_nonempty_branch_before_nullable_suffix() 
     "#;
 
     let tiny_vocab = vocab(&["a", "b"]);
-    let constraint = Constraint::from_glrm_grammar(grammar, &tiny_vocab).unwrap();
+    let constraint =
+        with_stable_ti_env(|| Constraint::from_glrm_grammar(grammar, &tiny_vocab).unwrap());
 
     let mut empty_host = constraint.start();
     empty_host.commit_bytes(b"aa").unwrap();
@@ -1224,6 +1240,29 @@ fn save_load_roundtrip_preserves_behavior() {
 }
 
 #[test]
+fn runtime_payload_v1_roundtrip_preserves_behavior_without_overlay() {
+    let constraint = ebnf(&["a", "b"], r#"start ::= "a" "b""#);
+    let bytes = constraint.save_runtime_payload_v1();
+    let loaded = Constraint::load_runtime_payload_v1(&bytes).unwrap();
+    assert_accepts_tokens(&loaded, &[0, 1]);
+}
+
+#[test]
+fn runtime_payload_v2_roundtrip_preserves_split_parser_overlay() {
+    let constraint = lark(
+        &["!", "aaa"],
+        r#"
+            start: "!" | WORD
+            WORD: /[a-z]+/
+        "#,
+    );
+    let bytes = constraint.save_runtime_payload_v2();
+    let loaded = Constraint::load_runtime_payload_v2(&bytes).unwrap();
+    assert_accepts_tokens(&loaded, &[0]);
+    assert_accepts_tokens(&loaded, &[1]);
+}
+
+#[test]
 fn plan_style_mask_buffer_matches_mask() {
     let constraint = ebnf(&["a", "b"], r#"start ::= "a" "b""#);
     let mut state = constraint.start();
@@ -1258,7 +1297,9 @@ fn direct_glrm_ordered_suffix_model_has_stack_ambiguity() {
         nt start ::= v0 | v1 | v2;
     "#;
 
-    let constraint = Constraint::from_glrm_grammar(grammar, &bytes_vocab()).unwrap();
+    let constraint = with_stable_ti_env(|| {
+        Constraint::from_glrm_grammar(grammar, &bytes_vocab()).unwrap()
+    });
     let (max_paths, max_stacks) = max_paths_and_stacks(&constraint, "a,b,c,d,e,f,g,h");
     assert_eq!((max_paths, max_stacks), (3, 3));
 }
@@ -1282,7 +1323,9 @@ fn json_schema_kubernetes_container_ports_prefix_has_single_stack_path() {
     }"####;
     const K8S_ORDERED_PORTS_PREFIX: &[u8] = br####"{"a": [{"x": "", ""####;
 
-    let constraint = Constraint::from_json_schema(K8S_ORDERED_PORTS_SCHEMA_FRAGMENT, &bytes_vocab()).unwrap();
+    let constraint = with_stable_ti_env(|| {
+        Constraint::from_json_schema(K8S_ORDERED_PORTS_SCHEMA_FRAGMENT, &bytes_vocab()).unwrap()
+    });
     let mut state = constraint.start();
     state.commit_bytes(K8S_ORDERED_PORTS_PREFIX).unwrap();
 
@@ -1305,7 +1348,9 @@ fn json_schema_kubernetes_container_ports_prefix_has_single_stack_path() {
 #[test]
 fn direct_glrm_minimized_lowered_schema_has_two_stack_split() {
     let grammar = r#"start s;nt k::="a""b"*;nt i::=k"b"?;nt s::="d"i;"#;
-    let constraint = Constraint::from_glrm_grammar(grammar, &bytes_vocab()).unwrap();
+    let constraint = with_stable_ti_env(|| {
+        Constraint::from_glrm_grammar(grammar, &bytes_vocab()).unwrap()
+    });
 
     let mut state = constraint.start();
     for &byte in b"dab" {
@@ -1336,7 +1381,9 @@ fn direct_glrm_minimized_lowered_schema_has_two_stack_split() {
 #[test]
 fn direct_glrm_minimized_lowered_schema_collapses_when_tail_token_differs() {
     let grammar = r#"start s;nt k::="a""b"*;nt i::=k"c"?;nt s::="d"i;"#;
-    let constraint = Constraint::from_glrm_grammar(grammar, &bytes_vocab()).unwrap();
+    let constraint = with_stable_ti_env(|| {
+        Constraint::from_glrm_grammar(grammar, &bytes_vocab()).unwrap()
+    });
 
     let mut state = constraint.start();
     for &byte in b"dab" {
@@ -1355,7 +1402,7 @@ fn direct_glrm_minimized_lowered_schema_collapses_when_tail_token_differs() {
 
 #[test]
 fn terminal_interchangeability_minimal_two_byte_counterexample_matches_baseline() {
-    let _lock = TI_ENV_LOCK.lock().unwrap();
+    let _lock = TI_ENV_LOCK.write().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
     let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
     let _disable_feature = EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
@@ -1370,7 +1417,7 @@ fn terminal_interchangeability_minimal_two_byte_counterexample_matches_baseline(
         A: /a(aaaa)*/
         B: /aaa(aaaa)*/
     "#;
-    let baseline = lark(&entries, grammar);
+    let baseline = lark_unlocked(&entries, grammar);
 
     drop(_disable_feature);
     drop(_disable_validation);
@@ -1379,7 +1426,7 @@ fn terminal_interchangeability_minimal_two_byte_counterexample_matches_baseline(
         "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
         "1",
     );
-    let expanded = lark(&entries, grammar);
+    let expanded = lark_unlocked(&entries, grammar);
 
     let observe = |constraint: &Constraint, sequence: &[u32]| {
         let mut state = constraint.start();
@@ -1421,7 +1468,7 @@ fn terminal_interchangeability_minimal_two_byte_counterexample_matches_baseline(
 
 #[test]
 fn strict_terminal_interchangeability_reference_matches_baseline_l2p_artifact() {
-    let _lock = TI_ENV_LOCK.lock().unwrap();
+    let _lock = TI_ENV_LOCK.write().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
     let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
     let _disable_feature = EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
@@ -1439,7 +1486,7 @@ fn strict_terminal_interchangeability_reference_matches_baseline_l2p_artifact() 
         A: /a(?:aaaa)*/
         B: /aaa(?:aaaa)*/
     "#;
-    let baseline = lark(&entries, grammar);
+    let baseline = lark_unlocked(&entries, grammar);
 
     drop(_disable_feature);
     drop(_disable_validation);
@@ -1448,7 +1495,7 @@ fn strict_terminal_interchangeability_reference_matches_baseline_l2p_artifact() 
         "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
         "1",
     );
-    let expanded = lark(&entries, grammar);
+    let expanded = lark_unlocked(&entries, grammar);
 
     let observe = |constraint: &Constraint, sequence: &[u32]| {
         let mut state = constraint.start();
@@ -1490,7 +1537,7 @@ fn strict_terminal_interchangeability_reference_matches_baseline_l2p_artifact() 
 
 #[test]
 fn strict_terminal_interchangeability_reference_validates_one_terminal_position() {
-    let _lock = TI_ENV_LOCK.lock().unwrap();
+    let _lock = TI_ENV_LOCK.write().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
     let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
     let _feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
@@ -1504,12 +1551,12 @@ fn strict_terminal_interchangeability_reference_validates_one_terminal_position(
         A: /a(?:aaaa)*/
         B: /aaa(?:aaaa)*/
     "#;
-    let _ = lark(&entries, grammar);
+    let _ = lark_unlocked(&entries, grammar);
 }
 
 #[test]
 fn transported_terminal_interchangeability_with_ignore_equals_baseline_artifact() {
-    let _lock = TI_ENV_LOCK.lock().unwrap();
+    let _lock = TI_ENV_LOCK.write().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
     let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
     let _feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
@@ -1529,12 +1576,12 @@ fn transported_terminal_interchangeability_with_ignore_equals_baseline_artifact(
         WS: / +/
         %ignore WS
     "#;
-    let _ = lark(&entries, grammar);
+    let _ = lark_unlocked(&entries, grammar);
 }
 
 #[test]
 fn three_member_terminal_interchangeability_equals_baseline_artifact() {
-    let _lock = TI_ENV_LOCK.lock().unwrap();
+    let _lock = TI_ENV_LOCK.write().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
     let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
     let _feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
@@ -1551,12 +1598,12 @@ fn three_member_terminal_interchangeability_equals_baseline_artifact() {
         B: "x"
         C: "x"
     "#;
-    let _ = lark(&entries, grammar);
+    let _ = lark_unlocked(&entries, grammar);
 }
 
 #[test]
 fn independent_terminal_interchangeability_classes_equal_baseline_artifact() {
-    let _lock = TI_ENV_LOCK.lock().unwrap();
+    let _lock = TI_ENV_LOCK.write().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
     let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
     let _feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
@@ -1574,5 +1621,5 @@ fn independent_terminal_interchangeability_classes_equal_baseline_artifact() {
         C: "y"
         D: "y"
     "#;
-    let _ = lark(&entries, grammar);
+    let _ = lark_unlocked(&entries, grammar);
 }

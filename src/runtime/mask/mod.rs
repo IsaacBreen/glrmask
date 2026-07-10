@@ -815,6 +815,24 @@ impl<'a> ConstraintState<'a> {
                 stack_idx += 1;
 
                 let positive_label = encode_positive_label(parser_state);
+                if stack_idx == 1 {
+                    if let Some(accept_weight) = self
+                        .constraint
+                        .parser_top_accept
+                        .get(&positive_label)
+                        .or_else(|| self.constraint.parser_top_accept.get(&DEFAULT_LABEL))
+                    {
+                        used_direct_final = true;
+                        self.merge_final_weight_to_internal(
+                            accept_weight,
+                            &acc,
+                            precomputed,
+                            &mut merged,
+                            Some(&mut *buf),
+                            &mut direct_buf_dirty,
+                        );
+                    }
+                }
                 let fast_transitions = &self.constraint.dwa_fast_transitions[dwa_state_id as usize];
                 let Some((target, weight)) = fast_transitions
                     .get(&positive_label)
@@ -1115,6 +1133,31 @@ impl<'a> ConstraintState<'a> {
             }
 
             for (parser_state, popped) in &decomposed {
+                let positive_label = encode_positive_label(*parser_state);
+                if let Some(accept_weight) = self
+                    .constraint
+                    .parser_top_accept
+                    .get(&positive_label)
+                    .or_else(|| self.constraint.parser_top_accept.get(&DEFAULT_LABEL))
+                {
+                    let accumulate_start = if profile.is_some() {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
+                    *direct_buf_used = true;
+                    *direct_buf_possible &= self.merge_final_weight_for_gss(
+                        accept_weight,
+                        popped,
+                        precomputed,
+                        merged,
+                        direct_buf,
+                        direct_buf_dirty,
+                    );
+                    if let (Some(profile), Some(start)) = (profile.as_mut(), accumulate_start) {
+                        profile.token_accumulation_ns += elapsed_ns(start);
+                    }
+                }
                 queue.record_seed_decompose_callback();
                 enqueue_parser_state_transition(
                     queue,
