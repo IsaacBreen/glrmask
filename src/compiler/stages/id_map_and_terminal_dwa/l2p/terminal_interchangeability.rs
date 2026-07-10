@@ -5839,6 +5839,58 @@ impl InterchangeabilityDfa {
         Some(code)
     }
 
+    fn support_petal_code_for_class_order(
+        &self,
+        quotient: &SupportQuotient,
+        class_order: &[usize],
+        self_terminal: TerminalID,
+        group_membership: &[bool],
+        group_size: usize,
+        union_petals: &[bool],
+    ) -> Option<Vec<u64>> {
+        let mut canonical_index = SmallVec::<[(usize, usize); 8]>::new();
+        for (index, &class) in class_order.iter().enumerate() {
+            canonical_index.push((class, index));
+        }
+        let mut code = Vec::<u64>::new();
+        code.push(class_order.len() as u64);
+        for &class in class_order {
+            let state = quotient.representative_by_class[class] as usize;
+            code.push((state == self.topology.initial_state) as u64);
+            let edges = self.topology.edges_from(state);
+            code.push(edges.len() as u64);
+            for &(byte, destination) in edges {
+                let destination = destination as usize;
+                let target_class = quotient.class_for_state[destination] as usize;
+                code.push(byte as u64);
+                if let Some((_, target_index)) = canonical_index
+                    .iter()
+                    .find(|(seen_class, _)| *seen_class == target_class)
+                {
+                    code.push(0);
+                    code.push(*target_index as u64);
+                } else {
+                    if union_petals[target_class] {
+                        return None;
+                    }
+                    code.push(1);
+                    code.push(target_class as u64);
+                }
+                let pair = &self.output_pairs[self.output_pair_by_state[destination] as usize];
+                if !Self::normalized_group_output_code(
+                    pair,
+                    self_terminal,
+                    group_membership,
+                    group_size,
+                    &mut code,
+                ) {
+                    return None;
+                }
+            }
+        }
+        Some(code)
+    }
+
     fn support_petal_canonical_form(
         &self,
         quotient: &SupportQuotient,
@@ -6261,6 +6313,33 @@ impl InterchangeabilityDfa {
                 }
             }
         }
+
+        // The color order is only a proposal. Compare the complete labelled
+        // quotient rows in that order, with the current terminal normalized to
+        // SELF. Equality proves every petal bijection at once; together with
+        // reverse closure, disjointness, and the fixed-core check above, this
+        // is a complete group-level automorphism certificate. No per-member
+        // whole-cone verification is then necessary.
+        let mut exact_code: Option<Vec<u64>> = None;
+        for ((&terminal, class_order), terminal_index) in members
+            .iter()
+            .zip(&canonical_orders)
+            .zip(0usize..)
+        {
+            let code = self.support_petal_code_for_class_order(
+                quotient,
+                class_order,
+                terminal,
+                &group_membership,
+                members.len(),
+                &union_petals,
+            )?;
+            if exact_code.as_ref().is_some_and(|expected| *expected != code) {
+                return None;
+            }
+            exact_code.get_or_insert(code);
+            debug_assert_eq!(terminal_index + 1, canonical_orders[..=terminal_index].len());
+        }
         Some(canonical_orders)
     }
 
@@ -6419,20 +6498,20 @@ impl InterchangeabilityDfa {
             if deviations.windows(2).any(|pair| pair[0].0 == pair[1].0) {
                 return None;
             }
-            let member_index = maps.len() + 1;
-            let cone_classes = self.support_quotient_affected_cone_small(
-                quotient,
-                members[0],
-                members[member_index],
-            );
-            if !self.support_deviations_are_valid(
-                quotient,
-                members[0],
-                members[member_index],
-                &cone_classes,
-                &deviations,
-            ) {
-                return None;
+            if cfg!(debug_assertions) {
+                let member_index = maps.len() + 1;
+                let cone_classes = self.support_quotient_affected_cone_small(
+                    quotient,
+                    members[0],
+                    members[member_index],
+                );
+                debug_assert!(self.support_deviations_are_valid(
+                    quotient,
+                    members[0],
+                    members[member_index],
+                    &cone_classes,
+                    &deviations,
+                ));
             }
             maps.push(InterchangeMap {
                 scanner_state_map: TransportScannerStateMap::Quotient {
