@@ -206,8 +206,7 @@ struct SupportQuotient {
 #[derive(Clone)]
 struct SupportPartitionSeed {
     active_terminals: Arc<[bool]>,
-    class_for_state: Arc<[u32]>,
-    representative_by_class: Arc<[u32]>,
+    quotient: Arc<SupportQuotient>,
 }
 
 /// Exact round-local active output alphabet retained for projection into the
@@ -3488,7 +3487,7 @@ struct InterchangeabilityDfa {
     canonical_round_one_changed_scratch: SmallVec<[(u32, u32); 16]>,
     canonical_round_one_added_scratch: SmallVec<[u32; 16]>,
     support_partition_seed: Option<SupportPartitionSeed>,
-    support_quotient: Option<SupportQuotient>,
+    support_quotient: Option<Arc<SupportQuotient>>,
     canonical_quotient: Option<CanonicalQuotient>,
     /// Per raw terminal, the canonical quotient classes whose representative
     /// frozen output mentions that terminal.  This is build-local discovery
@@ -3710,7 +3709,7 @@ impl InterchangeabilityDfa {
             .borrow()
             .as_ref()
             .filter(|seed| {
-                seed.class_for_state.len() == context.topology.state_count()
+                seed.quotient.class_for_state.len() == context.topology.state_count()
                     && is_monotone_seed(&seed.active_terminals)
             })
             .cloned();
@@ -3938,6 +3937,21 @@ impl InterchangeabilityDfa {
                 * (1 + blake3::OUT_LEN + 2 * (size_of::<u32>() + 4 * size_of::<TerminalID>()));
         let seed = CharacterizationHash::seed();
         let observed_output_pair_count = observed_output_pairs.len();
+        // A support quotient built for a larger active output alphabet remains
+        // an exact (possibly finer) congruence after projecting terminals away.
+        // Reusing it can only make the sufficient support certificate more
+        // conservative; any missed certificate still falls through to the
+        // ordinary exact checker.
+        let support_quotient = std::env::var_os(
+            "GLRMASK_TI_DISABLE_FINE_SUPPORT_QUOTIENT_REUSE",
+        )
+            .is_none()
+            .then(|| {
+                support_partition_seed
+                    .as_ref()
+                    .map(|seed| Arc::clone(&seed.quotient))
+            })
+            .flatten();
         Self {
             topology,
             observed_output_pairs,
@@ -3970,7 +3984,7 @@ impl InterchangeabilityDfa {
             canonical_round_one_changed_scratch: SmallVec::new(),
             canonical_round_one_added_scratch: SmallVec::new(),
             support_partition_seed,
-            support_quotient: None,
+            support_quotient,
             canonical_quotient: None,
             terminal_quotient_output_supports: None,
             parallel_terminal_supports: OnceLock::new(),
@@ -4493,8 +4507,8 @@ impl InterchangeabilityDfa {
         &self,
         seed: &SupportPartitionSeed,
     ) -> (Vec<u32>, Vec<u32>) {
-        let old_class_count = seed.representative_by_class.len();
-        let dead_old_class = seed.class_for_state[self.dead_state()] as usize;
+        let old_class_count = seed.quotient.representative_by_class.len();
+        let dead_old_class = seed.quotient.class_for_state[self.dead_state()] as usize;
         let mut previous = vec![0u32; old_class_count];
         for _ in 1..=old_class_count.saturating_mul(2).max(1) {
             let default_class = previous[dead_old_class];
@@ -4503,11 +4517,11 @@ impl InterchangeabilityDfa {
             let mut next = Vec::with_capacity(old_class_count);
             let mut representative_old_class = Vec::<u32>::new();
             for old_class in 0..old_class_count {
-                let state = seed.representative_by_class[old_class] as usize;
+                let state = seed.quotient.representative_by_class[old_class] as usize;
                 let mut components = SmallVec::<[CanonicalComponent; 8]>::new();
                 for &(byte, destination) in self.topology.edges_from(state) {
                     let destination = destination as usize;
-                    let target_old_class = seed.class_for_state[destination] as usize;
+                    let target_old_class = seed.quotient.class_for_state[destination] as usize;
                     let previous_class = previous[target_old_class];
                     let output = self.output_pair_by_state[destination];
                     if previous_class == default_class && output == 0 {
@@ -4529,13 +4543,14 @@ impl InterchangeabilityDfa {
             }
             if same_equality_partition_u32(&previous, &next) {
                 let class_for_state = seed
+                    .quotient
                     .class_for_state
                     .iter()
                     .map(|&old_class| next[old_class as usize])
                     .collect::<Vec<_>>();
                 let representative_by_class = representative_old_class
                     .into_iter()
-                    .map(|old_class| seed.representative_by_class[old_class as usize])
+                    .map(|old_class| seed.quotient.representative_by_class[old_class as usize])
                     .collect::<Vec<_>>();
                 return (class_for_state, representative_by_class);
             }
@@ -4593,14 +4608,14 @@ impl InterchangeabilityDfa {
                 Arc::clone(&class_for_state),
                 Arc::clone(&representative_by_class),
             );
-        self.support_quotient = Some(SupportQuotient {
+        self.support_quotient = Some(Arc::new(SupportQuotient {
             class_for_state,
             representative_by_class,
             reverse_predecessors,
             scanner_state_count,
             scanner_class_for_original,
             scanner_representative_for_class,
-        });
+        }));
         if let Some(started_at) = quotient_build_started_at {
             self.support_quotient_build_ns += started_at.elapsed().as_nanos() as u64;
         }
@@ -9392,8 +9407,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
         if let Some(quotient) = dfa.support_quotient.as_ref() {
             *context.support_partition_seed.borrow_mut() = Some(SupportPartitionSeed {
                 active_terminals: Arc::from(active_terminals.to_vec()),
-                class_for_state: Arc::clone(&quotient.class_for_state),
-                representative_by_class: Arc::clone(&quotient.representative_by_class),
+                quotient: Arc::clone(quotient),
             });
         }
         *context.output_projection_seed.borrow_mut() = Some(OutputProjectionSeed {
