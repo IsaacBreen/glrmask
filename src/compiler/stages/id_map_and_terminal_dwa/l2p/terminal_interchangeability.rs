@@ -6146,8 +6146,8 @@ impl InterchangeabilityDfa {
         &self,
         quotient: &SupportQuotient,
         terminal: TerminalID,
-    ) -> Vec<usize> {
-        let mut cone = Vec::<usize>::new();
+    ) -> SmallVec<[usize; 8]> {
+        let mut cone = SmallVec::<[usize; 8]>::new();
         for destinations in [
             &self.finalizer_states_by_terminal[terminal as usize],
             &self.future_finalizer_states_by_terminal[terminal as usize],
@@ -6543,6 +6543,56 @@ impl InterchangeabilityDfa {
         candidate_membership: &[bool],
         pair_stats: Option<&[GenericOutputPairStats]>,
     ) -> (SmallVec<[u64; 8]>, Option<SmallVec<[usize; 8]>>) {
+        // A one-class cone has a forced canonical order. Evaluate the same two
+        // fingerprint rounds directly, without allocating an index, row table,
+        // color vectors, or sorting a singleton. The exact batch certificate
+        // remains the sole accepting proof.
+        if std::env::var_os("GLRMASK_TI_DISABLE_SINGLETON_CONE_FAST").is_none()
+            && let [class] = cone
+        {
+            let state = quotient.representative_by_class[*class] as usize;
+            let root = state == self.topology.initial_state;
+            let mut color = 0u64;
+            for round in 0..2usize {
+                let mut fingerprint =
+                    mix_structural_fingerprint(0x510e_527f_ade6_82d1, round as u64);
+                fingerprint = mix_structural_fingerprint(fingerprint, root as u64);
+                for &(byte, destination) in self.topology.edges_from(state) {
+                    let destination = destination as usize;
+                    let target_class = quotient.class_for_state[destination] as usize;
+                    fingerprint = mix_structural_fingerprint(fingerprint, byte as u64 + 1);
+                    if target_class == *class {
+                        fingerprint = mix_structural_fingerprint(fingerprint, 0);
+                        fingerprint = mix_structural_fingerprint(fingerprint, color);
+                    } else {
+                        fingerprint = mix_structural_fingerprint(fingerprint, 1);
+                        fingerprint =
+                            mix_structural_fingerprint(fingerprint, target_class as u64 + 1);
+                    }
+                    let output_id = self.output_pair_by_state[destination] as usize;
+                    let pair = &self.output_pairs[output_id];
+                    let output = match pair_stats {
+                        Some(pair_stats) => Self::generic_terminal_output_fingerprint(
+                            pair,
+                            pair_stats[output_id],
+                            terminal,
+                        ),
+                        None => Self::generic_terminal_output_fingerprint_direct(
+                            pair,
+                            terminal,
+                            candidate_membership,
+                        ),
+                    };
+                    fingerprint = mix_structural_fingerprint(fingerprint, output);
+                }
+                color = fingerprint;
+            }
+            return (
+                SmallVec::from_slice(&[1, color]),
+                Some(SmallVec::from_slice(&[*class])),
+            );
+        }
+
         #[derive(Clone, Copy)]
         struct GenericEdge {
             byte: u8,
@@ -6953,7 +7003,10 @@ impl InterchangeabilityDfa {
             .iter()
             .map(|&terminal| self.support_quotient_terminal_cone(quotient, terminal))
             .collect::<Vec<_>>();
-        let cones = owned_cones.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let cones = owned_cones
+            .iter()
+            .map(|cone| cone.as_slice())
+            .collect::<Vec<_>>();
         self.support_petal_batch_certificate_with_cones(quotient, members, &cones)
     }
 
@@ -8827,7 +8880,8 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 .as_ref()
                 .expect("support quotient initialized for petal batching");
             let mut residual_groups = Vec::<Vec<TerminalID>>::new();
-            let mut cone_by_terminal = vec![None::<Vec<usize>>; active_terminals.len()];
+            let mut cone_by_terminal =
+                vec![None::<SmallVec<[usize; 8]>>; active_terminals.len()];
             let mut order_by_terminal =
                 vec![None::<SmallVec<[usize; 8]>>; active_terminals.len()];
             let parallel_petal_min_terminals = std::env::var(
@@ -9340,7 +9394,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                                 }
                             }
                         }
-                        intersection
+                        intersection.into()
                     },
                 );
                 let petals = cones
@@ -9402,7 +9456,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 }
                 let mut component_sizes = component_sizes.into_values().collect::<Vec<_>>();
                 component_sizes.sort_unstable_by(|a, b| b.cmp(a));
-                let mut cone_sizes = cones.iter().map(Vec::len).collect::<Vec<_>>();
+                let mut cone_sizes = cones.iter().map(|cone| cone.len()).collect::<Vec<_>>();
                 cone_sizes.sort_unstable();
                 let batch_certified = dfa
                     .support_petal_batch_certificate(quotient, &members)
