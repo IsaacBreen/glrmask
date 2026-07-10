@@ -752,6 +752,11 @@ pub(crate) struct TiDiscoveryContext {
     /// rounds only remove active terminals, so they may solve exactly on this
     /// quotient rather than over every discovery-domain state again.
     support_partition_seed: std::cell::RefCell<Option<SupportPartitionSeed>>,
+    /// Positive observed-output closure proofs retained across a monotone
+    /// shrinking active mask. Projection commutes with a terminal transposition,
+    /// so the image of a swap-closed output alphabet remains swap-closed.
+    output_pair_closed_memo: std::cell::RefCell<FxHashSet<(TerminalID, TerminalID)>>,
+    output_pair_closed_active: std::cell::RefCell<Option<Vec<bool>>>,
     /// Cross-round memo of the first-round necessary-condition filter.
     /// `canonical_round_one_still_possible(a, b)` depends only on the fixed DFA
     /// topology, canonical Moore rounds, and per-terminal finalizer states -
@@ -801,6 +806,8 @@ impl TiDiscoveryContext {
             root_output_signatures,
             root_observed_states,
             support_partition_seed: std::cell::RefCell::new(None),
+            output_pair_closed_memo: std::cell::RefCell::new(FxHashSet::default()),
+            output_pair_closed_active: std::cell::RefCell::new(None),
             first_round_memo: std::cell::RefCell::new(FxHashMap::default()),
         }
     }
@@ -845,6 +852,8 @@ impl TiDiscoveryContext {
             root_output_signatures,
             root_observed_states,
             support_partition_seed: std::cell::RefCell::new(None),
+            output_pair_closed_memo: std::cell::RefCell::new(FxHashSet::default()),
+            output_pair_closed_active: std::cell::RefCell::new(None),
             first_round_memo: std::cell::RefCell::new(FxHashMap::default()),
         }
     }
@@ -6772,6 +6781,21 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
             return TiRoundTransportWitnesses::singleton(active_terminals);
         }
 
+        {
+            let mut previous_active = context.output_pair_closed_active.borrow_mut();
+            let monotone_subset = previous_active.as_ref().is_some_and(|previous| {
+                previous.len() == active_terminals.len()
+                    && active_terminals
+                        .iter()
+                        .zip(previous)
+                        .all(|(&current, &old)| !current || old)
+            });
+            if !monotone_subset {
+                context.output_pair_closed_memo.borrow_mut().clear();
+            }
+            *previous_active = Some(active_terminals.to_vec());
+        }
+
         let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
         let started_at = profile_timing.then(Instant::now);
         let topology = Arc::clone(&context.topology);
@@ -6881,6 +6905,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
         let mut result = singleton_partition(active_terminals);
         let mut accepted_maps = BTreeMap::<(TerminalID, TerminalID), Arc<TransportScannerStateMap>>::new();
         let mut output_pair_rejections = 0usize;
+        let mut output_pair_cached_closed = 0usize;
         let mut output_invariant_checks = 0usize;
         let mut first_round_rejections = 0usize;
         let mut support_transposition_checks = 0usize;
@@ -7048,13 +7073,26 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 let mut next_unresolved = Vec::with_capacity(unresolved.len().saturating_sub(1));
                 for &terminal in &unresolved[1..] {
                     let output_pair_started_at = profile_timing.then(Instant::now);
+                    let memo_key = if representative <= terminal {
+                        (representative, terminal)
+                    } else {
+                        (terminal, representative)
+                    };
                     let mut mapped_output_ids = SmallVec::new();
-                    let output_pair_is_closed = dfa
-                        .observed_output_pair_set_is_swap_closed_with_mapping(
+                    let cached_closed = context
+                        .output_pair_closed_memo
+                        .borrow()
+                        .contains(&memo_key);
+                    let output_pair_is_closed = if cached_closed {
+                        output_pair_cached_closed += 1;
+                        true
+                    } else {
+                        dfa.observed_output_pair_set_is_swap_closed_with_mapping(
                             representative,
                             terminal,
                             &mut mapped_output_ids,
-                        );
+                        )
+                    };
                     if let Some(started_at) = output_pair_started_at {
                         output_pair_filter_ns += started_at.elapsed().as_nanos() as u64;
                     }
@@ -7062,6 +7100,9 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                         output_pair_rejections += 1;
                         next_unresolved.push(terminal);
                         continue;
+                    }
+                    if !cached_closed {
+                        context.output_pair_closed_memo.borrow_mut().insert(memo_key);
                     }
                     let frozen_output_started_at = profile_timing.then(Instant::now);
                     let preserves_frozen_outputs =
@@ -7074,11 +7115,6 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                         Some(dfa.canonical_identity_map())
                     } else {
                         let first_round_started_at = profile_timing.then(Instant::now);
-                        let memo_key = if representative <= terminal {
-                            (representative, terminal)
-                        } else {
-                            (terminal, representative)
-                        };
                         let first_round_possible = match first_round_memo.get(&memo_key).copied() {
                             Some(value) => value,
                             None => {
@@ -7147,8 +7183,9 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
 
         if profile_timing {
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
+                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_pair_cached_closed={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
                 output_pair_rejections,
+                output_pair_cached_closed,
                 output_invariant_checks,
                 first_round_rejections,
                 support_transposition_checks,
