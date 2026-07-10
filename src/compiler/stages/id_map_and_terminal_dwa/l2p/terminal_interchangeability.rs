@@ -258,12 +258,22 @@ impl<'a> SparseSwappedOutputIds<'a> {
         left: usize,
         right: usize,
     ) -> Self {
+        Self::with_mapped(base_pairs, base_lookup, left, right, SmallVec::new())
+    }
+
+    fn with_mapped(
+        base_pairs: &'a [OutputPair],
+        base_lookup: &'a FxHashMap<OutputPair, u32>,
+        left: usize,
+        right: usize,
+        mapped: SmallVec<[(u32, u32); 16]>,
+    ) -> Self {
         Self {
             base_pairs,
             base_lookup,
             left,
             right,
-            mapped: SmallVec::new(),
+            mapped,
             local: SmallVec::new(),
         }
     }
@@ -272,11 +282,18 @@ impl<'a> SparseSwappedOutputIds<'a> {
         if let Some((_, id)) = self.mapped.iter().find(|&&(seen, _)| seen == output) {
             return *id;
         }
+        let pair = &self.base_pairs[output as usize];
+        let left = self.left as TerminalID;
+        let right = self.right as TerminalID;
+        if !pair.finalizers.swap_changes(left, right)
+            && !pair.future_finalizers.swap_changes(left, right)
+        {
+            self.mapped.push((output, output));
+            return output;
+        }
         let mapped = OutputPair {
-            finalizers: self.base_pairs[output as usize]
-                .finalizers
-                .mapped(Some((self.left, self.right))),
-            future_finalizers: self.base_pairs[output as usize]
+            finalizers: pair.finalizers.mapped(Some((self.left, self.right))),
+            future_finalizers: pair
                 .future_finalizers
                 .mapped(Some((self.left, self.right))),
         };
@@ -3076,7 +3093,11 @@ struct InterchangeabilityDfa {
     finalizers: Vec<OutputBits>,
     future_finalizers: Vec<OutputBits>,
     observed_output_pairs: Vec<OutputPair>,
-    observed_output_pair_lookup: FxHashMap<OutputPair, u32>,
+    /// Canonical all-output-pair id for each entry in `observed_output_pairs`.
+    observed_output_pair_canonical_ids: Vec<u32>,
+    /// Membership of each canonical all-output-pair id in the enabled-byte
+    /// destination observation set.
+    observed_output_pair_is_observed: Vec<bool>,
     observed_output_pair_ids_by_terminal: Vec<Vec<u32>>,
     /// For each active terminal, its exact membership counts across the
     /// deduplicated observed frozen-output pairs. A valid terminal swap maps
@@ -3331,23 +3352,54 @@ impl InterchangeabilityDfa {
             .iter()
             .map(|terminals| terminal_bits(terminals))
             .collect::<Vec<_>>();
-        let observed_destinations = &raw.observed_destinations;
-        let mut observed_output_pairs = Vec::<OutputPair>::new();
-        let mut observed_output_pair_lookup = FxHashMap::<OutputPair, u32>::default();
+        // Intern the complete round-local output alphabet once. The observed
+        // enabled-destination alphabet below is a subset of these canonical ids;
+        // deriving it by id avoids a second OutputPair hash-interning pass.
+        let empty_output = OutputBits::new(0);
+        let empty_pair = OutputPair {
+            finalizers: empty_output.clone(),
+            future_finalizers: empty_output.clone(),
+        };
+        let mut output_pairs = vec![empty_pair.clone()];
+        let mut output_pair_lookup = FxHashMap::<OutputPair, u32>::default();
+        output_pair_lookup.insert(empty_pair, 0);
+        let mut output_pair_by_state = Vec::with_capacity(state_count);
         for state in 0..topology.real_state_count {
-            if !observed_destinations[state] {
-                continue;
-            }
             let pair = OutputPair {
                 finalizers: finalizers[state].clone(),
                 future_finalizers: future_finalizers[state].clone(),
             };
-            if !observed_output_pair_lookup.contains_key(&pair) {
-                let id = observed_output_pairs.len() as u32;
-                observed_output_pair_lookup.insert(pair.clone(), id);
-                observed_output_pairs.push(pair);
+            let id = match output_pair_lookup.entry(pair) {
+                Entry::Occupied(entry) => *entry.get(),
+                Entry::Vacant(entry) => {
+                    let id = output_pairs.len() as u32;
+                    output_pairs.push(entry.key().clone());
+                    entry.insert(id);
+                    id
+                }
+            };
+            output_pair_by_state.push(id);
+        }
+        // The synthetic dead destination has the all-empty frozen output.
+        output_pair_by_state.push(0);
+
+        let observed_destinations = &raw.observed_destinations;
+        let mut observed_output_pair_is_observed = vec![false; output_pairs.len()];
+        let mut observed_output_pair_canonical_ids = Vec::<u32>::new();
+        for state in 0..topology.real_state_count {
+            if !observed_destinations[state] {
+                continue;
+            }
+            let canonical_id = output_pair_by_state[state];
+            if !observed_output_pair_is_observed[canonical_id as usize] {
+                observed_output_pair_is_observed[canonical_id as usize] = true;
+                observed_output_pair_canonical_ids.push(canonical_id);
             }
         }
+        let observed_output_pairs = observed_output_pair_canonical_ids
+            .iter()
+            .map(|&id| output_pairs[id as usize].clone())
+            .collect::<Vec<_>>();
         let mut observed_output_pair_ids_by_terminal =
             vec![Vec::<u32>::new(); observed_terminals.len()];
         let mut observed_output_pair_support_shapes_by_terminal =
@@ -3395,46 +3447,20 @@ impl InterchangeabilityDfa {
                 }
             }
         }
-        let empty_output = OutputBits::new(0);
-        let empty_pair = OutputPair {
-            finalizers: empty_output.clone(),
-            future_finalizers: empty_output.clone(),
-        };
-        let mut output_pairs = vec![empty_pair.clone()];
-        let mut output_pair_lookup = FxHashMap::<OutputPair, u32>::default();
-        output_pair_lookup.insert(empty_pair, 0);
-        let mut output_pair_by_state = Vec::with_capacity(state_count);
-        for state in 0..topology.real_state_count {
-            let pair = OutputPair {
-                finalizers: finalizers[state].clone(),
-                future_finalizers: future_finalizers[state].clone(),
-            };
-            let id = match output_pair_lookup.entry(pair) {
-                Entry::Occupied(entry) => *entry.get(),
-                Entry::Vacant(entry) => {
-                    let id = output_pairs.len() as u32;
-                    output_pairs.push(entry.key().clone());
-                    entry.insert(id);
-                    id
-                }
-            };
-            output_pair_by_state.push(id);
-        }
-        // The synthetic dead destination has the all-empty frozen output.
-        output_pair_by_state.push(0);
         let signature_capacity = CHARACTERIZATION_DOMAIN.len()
             + 4
             + topology.max_outdegree
                 * (1 + blake3::OUT_LEN + 2 * (size_of::<u32>() + 4 * size_of::<TerminalID>()));
         let seed = CharacterizationHash::seed();
-        let observed_output_pair_count = observed_output_pair_lookup.len();
+        let observed_output_pair_count = observed_output_pairs.len();
         Self {
             topology,
             empty_output,
             finalizers,
             future_finalizers,
             observed_output_pairs,
-            observed_output_pair_lookup,
+            observed_output_pair_canonical_ids,
+            observed_output_pair_is_observed,
             observed_output_pair_ids_by_terminal,
             observed_output_pair_support_shapes_by_terminal,
             observed_output_pair_marks: vec![0; observed_output_pair_count],
@@ -5066,6 +5092,19 @@ impl InterchangeabilityDfa {
         left: TerminalID,
         right: TerminalID,
     ) -> bool {
+        self.canonical_round_one_still_possible_with_mapped(
+            left,
+            right,
+            SmallVec::new(),
+        )
+    }
+
+    fn canonical_round_one_still_possible_with_mapped(
+        &mut self,
+        left: TerminalID,
+        right: TerminalID,
+        mapped_output_ids: SmallVec<[(u32, u32); 16]>,
+    ) -> bool {
         self.ensure_canonical_identity_round(1);
         if self.canonical_round_one_class_counts.is_none() {
             let class_count = self.canonical_rounds[1].representative_by_class.len();
@@ -5146,11 +5185,12 @@ impl InterchangeabilityDfa {
             .as_ref()
             .expect("first-round counts initialized");
         let mut swapped_root_class = identity.classes[self.topology.initial_state];
-        let mut outputs = SparseSwappedOutputIds::new(
+        let mut outputs = SparseSwappedOutputIds::with_mapped(
             &self.output_pairs,
             &self.output_pair_lookup,
             left as usize,
             right as usize,
+            mapped_output_ids,
         );
         for &source in &affected_sources {
             let source = source as usize;
@@ -5327,6 +5367,21 @@ impl InterchangeabilityDfa {
         left: TerminalID,
         right: TerminalID,
     ) -> bool {
+        let mut mapped_output_ids = SmallVec::new();
+        self.observed_output_pair_set_is_swap_closed_with_mapping(
+            left,
+            right,
+            &mut mapped_output_ids,
+        )
+    }
+
+    fn observed_output_pair_set_is_swap_closed_with_mapping(
+        &mut self,
+        left: TerminalID,
+        right: TerminalID,
+        mapped_output_ids: &mut SmallVec<[(u32, u32); 16]>,
+    ) -> bool {
+        mapped_output_ids.clear();
         let left_terminal = left as usize;
         let right_terminal = right as usize;
         self.observed_output_pair_mark_epoch = self.observed_output_pair_mark_epoch.wrapping_add(1);
@@ -5373,9 +5428,19 @@ impl InterchangeabilityDfa {
                         pair.future_finalizers.clone()
                     },
                 };
-                if !self.observed_output_pair_lookup.contains_key(&swapped) {
+                let Some(&mapped_id) = self.output_pair_lookup.get(&swapped) else {
+                    return false;
+                };
+                if !self
+                    .observed_output_pair_is_observed
+                    .get(mapped_id as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
                     return false;
                 }
+                let canonical_id = self.observed_output_pair_canonical_ids[id];
+                mapped_output_ids.push((canonical_id, mapped_id));
             }
         }
         true
@@ -5539,7 +5604,15 @@ impl InterchangeabilityDfa {
                         pair.future_finalizers.clone()
                     },
                 };
-                if !self.observed_output_pair_lookup.contains_key(&swapped) {
+                let Some(&mapped_id) = self.output_pair_lookup.get(&swapped) else {
+                    return false;
+                };
+                if !self
+                    .observed_output_pair_is_observed
+                    .get(mapped_id as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
                     return false;
                 }
             }
@@ -6466,8 +6539,13 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 let mut next_unresolved = Vec::with_capacity(unresolved.len().saturating_sub(1));
                 for &terminal in &unresolved[1..] {
                     let output_pair_started_at = profile_timing.then(Instant::now);
-                    let output_pair_is_closed =
-                        dfa.observed_output_pair_set_is_swap_closed(representative, terminal);
+                    let mut mapped_output_ids = SmallVec::new();
+                    let output_pair_is_closed = dfa
+                        .observed_output_pair_set_is_swap_closed_with_mapping(
+                            representative,
+                            terminal,
+                            &mut mapped_output_ids,
+                        );
                     if let Some(started_at) = output_pair_started_at {
                         output_pair_filter_ns += started_at.elapsed().as_nanos() as u64;
                     }
@@ -6495,8 +6573,12 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                         let first_round_possible = match first_round_memo.get(&memo_key).copied() {
                             Some(value) => value,
                             None => {
-                                let value =
-                                    dfa.canonical_round_one_still_possible(representative, terminal);
+                                let value = dfa
+                                    .canonical_round_one_still_possible_with_mapped(
+                                        representative,
+                                        terminal,
+                                        mapped_output_ids,
+                                    );
                                 first_round_memo.insert(memo_key, value);
                                 value
                             }
