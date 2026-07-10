@@ -10170,59 +10170,22 @@ pub(crate) fn transport_coordinate_quotient(
             )
         })
         .collect();
-    // Dedup refining groups by the partition they induce over the source
-    // states. Many groups differ only by component *labels* (e.g. `[0,1,0]`
-    // vs `[1,0,1]`) yet induce the same partition; others induce identical
-    // partitions outright. The final quotient is the intersection of every
-    // group partition with the ordinary key, so collapsing partition-equal
-    // groups to a single canonical column leaves the intersection — and thus
-    // the resulting partition — unchanged. (Class *numbering* here is later
-    // re-canonicalized by `reorder_internal_by_representative_key`, so only the
-    // partition matters for correctness.) Relabeling each column to
-    // first-appearance-canonical form both detects label-permuted duplicates
-    // and keeps the per-state signature narrow enough to stay inline in the
-    // `SmallVec` below, eliminating the per-state heap allocation that
-    // dominated this loop.
-    let mut canonical_columns: Vec<Vec<u32>> = Vec::new();
-    let mut seen_columns = FxHashMap::<Vec<u32>, ()>::default();
-    for &(class_slice, components) in &refining_slices {
-        let mut column = Vec::with_capacity(state_count);
-        // Components are dense in `[0, components.len())`, so a direct-indexed
-        // relabel table is used instead of a hash map: `relabel[comp]` holds the
-        // first-appearance-canonical id for that component (or `u32::MAX` until
-        // seen). This makes the per-state relabel a plain array access.
-        let mut relabel = vec![u32::MAX; components.len()];
-        let mut next_canon = 0u32;
-        for source_state in 0..state_count {
+    // Component ids are exact equality labels within each group. Their numeric
+    // names do not matter: including the raw labels directly in the joint
+    // signature yields the same partition intersection. This avoids building,
+    // relabelling, hashing, and then rereading one full raw-state column per
+    // group.
+    let mut class_for_signature = FxHashMap::<SmallVec<[u64; 8]>, u32>::default();
+    let mut class_for_state = Vec::with_capacity(state_count);
+    for source_state in 0..state_count {
+        let mut signature = SmallVec::<[u64; 8]>::with_capacity(refining_slices.len() + 1);
+        signature.push(ordinary_coordinate_key(source_state));
+        for &(class_slice, components) in &refining_slices {
             let source_class = match class_slice {
                 Some(slice) => slice[source_state] as usize,
                 None => source_state,
             };
-            let comp = components[source_class] as usize;
-            let mut canon = relabel[comp];
-            if canon == u32::MAX {
-                canon = next_canon;
-                relabel[comp] = canon;
-                next_canon += 1;
-            }
-            column.push(canon);
-        }
-        if next_canon <= 1 {
-            // Constant column: refines nothing, drop it.
-            continue;
-        }
-        if !seen_columns.contains_key(&column) {
-            seen_columns.insert(column.clone(), ());
-            canonical_columns.push(column);
-        }
-    }
-    let mut class_for_signature = FxHashMap::<SmallVec<[u64; 8]>, u32>::default();
-    let mut class_for_state = Vec::with_capacity(state_count);
-    for source_state in 0..state_count {
-        let mut signature = SmallVec::<[u64; 8]>::with_capacity(canonical_columns.len() + 1);
-        signature.push(ordinary_coordinate_key(source_state));
-        for column in &canonical_columns {
-            signature.push(column[source_state] as u64);
+            signature.push(components[source_class] as u64);
         }
         let next_class = class_for_signature.len() as u32;
         let class = *class_for_signature.entry(signature).or_insert(next_class);
