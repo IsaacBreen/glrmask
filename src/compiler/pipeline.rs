@@ -1,6 +1,6 @@
 use crate::automata::lexer::Lexer;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use once_cell::sync::Lazy;
@@ -14,6 +14,8 @@ use crate::automata::lexer::compile::{
 use crate::automata::lexer::regex::parse_regex;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::regex::Expr;
+use crate::automata::weighted::dwa::DWA;
+use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_possible_matches as cpm;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{GLRTable, GlrTableConstruction};
@@ -27,6 +29,11 @@ use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::{
     compute_terminal_coloring,
     ignore_transparent_disallowed_follows,
 };
+use crate::compiler::stages::id_map_and_terminal_dwa::types::{
+    TerminalColoring,
+    TerminalDwaPhaseProfile,
+};
+use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::compiler::stages::mapped_artifact::{
     MappedArtifact,
     WeightRefs,
@@ -68,6 +75,10 @@ fn compact_possible_matches_before_reconcile_enabled() -> bool {
 
 fn commit_template_dfas_enabled() -> bool {
     env_flag_enabled("GLRMASK_ENABLE_COMMIT_TEMPLATE_DFAS")
+}
+
+fn terminal_coloring_enabled() -> bool {
+    env_flag_enabled("GLRMASK_TERMINAL_COLORING")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,7 +151,7 @@ fn dwa_possible_matches_mode() -> DwaPossibleMatchesMode {
             // PM compaction remains available via `GLRMASK_DWA_PM_MODE=terminal_compact`,
             // `parser_pm_compact`, and `both`, but it is not the default because large
             // schemas can pay substantial compile time for small artifact-size wins.
-            DwaPossibleMatchesMode::TerminalReconcile
+            DwaPossibleMatchesMode::ParserReconcile
         }
     }
 }
@@ -439,6 +450,467 @@ fn finalize_constraint(mut constraint: Constraint) -> Constraint {
     constraint
 }
 
+fn build_templates_for_compile(
+    table: &GLRTable,
+    analyzed_grammar: &AnalyzedGrammar,
+    ignore_terminal: Option<u32>,
+) -> (
+    Templates,
+    Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
+    f64,
+) {
+    let templates_started_at = Instant::now();
+    let (characterizations, characterization_profile) =
+        characterize_terminals_profiled(table, analyzed_grammar);
+    let (mut templates, template_profile) =
+        Templates::from_characterizations_profiled(&characterizations);
+    if let Some(ignore_terminal) = ignore_terminal {
+        templates.install_identity_template(ignore_terminal);
+    }
+    let mut template_dfas_by_terminal = vec![None; analyzed_grammar.num_terminals as usize];
+    let commit_template_dfas_enabled = commit_template_dfas_enabled();
+    let mut commit_template_dfas_built = 0usize;
+    if commit_template_dfas_enabled {
+        for (&terminal, dfa) in &templates.by_terminal {
+            if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
+                let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
+                let split_commit_dfas = split_commit_template_dfas(&commit_dfa);
+                *slot = Some(Arc::new(split_commit_dfas));
+                commit_template_dfas_built += 1;
+            }
+        }
+    }
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][templates] terminals={} action_signature_classes={} action_quotient_hits={} max_action_signature_multiplicity={} characterization_signature_ms={:.3} characterization_ms={:.3} characterization_fanout_ms={:.3} characterization_validation_ms={:.3} characterization_total_ms={:.3} characterization_quotient_disabled={} unique_characterizations={} compiled_characterizations={} template_quotient_hits={} max_characterization_multiplicity={} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} template_fanout_ms={:.3} template_validation_ms={:.3} template_total_ms={:.3} template_wall_ms={:.3} template_minimize_skipped={} avg_nfa_states={:.2} avg_nfa_transitions={:.2} avg_premin_dfa_states={:.2} avg_premin_dfa_transitions={:.2} avg_dfa_states={:.2} avg_dfa_transitions={:.2} max_dfa_states={} max_dfa_transitions={} commit_template_dfas_enabled={} commit_template_dfas_built={}",
+            characterization_profile.terminals,
+            characterization_profile.unique_action_signatures,
+            characterization_profile.quotient_hits,
+            characterization_profile.max_action_signature_multiplicity,
+            characterization_profile.signature_ms,
+            characterization_profile.characterize_ms,
+            characterization_profile.fanout_ms,
+            characterization_profile.validation_ms,
+            characterization_profile.total_ms,
+            characterization_profile.quotient_disabled,
+            template_profile.unique_characterizations,
+            template_profile.compiled_characterizations,
+            template_profile.quotient_hits,
+            template_profile.max_characterization_multiplicity,
+            template_profile.build_nfa_ms,
+            template_profile.determinize_ms,
+            template_profile.minimize_ms,
+            template_profile.fanout_ms,
+            template_profile.validation_ms,
+            template_profile.total_ms,
+            template_profile.wall_ms,
+            template_profile.minimize_skipped,
+            template_profile.avg_nfa_states(),
+            template_profile.avg_nfa_transitions(),
+            template_profile.avg_premin_dfa_states(),
+            template_profile.avg_premin_dfa_transitions(),
+            template_profile.avg_dfa_states(),
+            template_profile.avg_dfa_transitions(),
+            template_profile.max_dfa_states,
+            template_profile.max_dfa_transitions,
+            commit_template_dfas_enabled,
+            commit_template_dfas_built,
+        );
+    }
+    (
+        templates,
+        template_dfas_by_terminal,
+        elapsed_ms(templates_started_at),
+    )
+}
+
+#[derive(Clone)]
+struct TokenizerDagLane {
+    tokenizer: Arc<Tokenizer>,
+    tokenizer_build_ms: f64,
+    tokenizer_ready_ms: f64,
+}
+
+struct FlatGlobalDagLane {
+    flat_trans: Arc<[u32]>,
+    flat_trans_ms: f64,
+    global_max_length_state_map: ManyToOneIdMap,
+    global_max_length_ms: f64,
+    started_ms: f64,
+    finished_ms: f64,
+}
+
+#[derive(Clone)]
+struct AnalysisDagLane {
+    analyzed_grammar: Arc<AnalyzedGrammar>,
+    analyze_grammar_ms: f64,
+    disallowed_follows: Arc<BTreeMap<u32, BitSet>>,
+    disallowed_follows_ms: f64,
+    analysis_ready_ms: f64,
+}
+
+struct ClassifyDagLane {
+    shared_classify_cache: SharedClassifyCache,
+    classify_ms: f64,
+    started_ms: f64,
+    finished_ms: f64,
+}
+
+struct ColoringDagLane {
+    terminal_coloring: TerminalColoring,
+    terminal_coloring_ms: f64,
+}
+
+#[derive(Default)]
+struct TerminalDagJoinState {
+    tokenizer: Option<TokenizerDagLane>,
+    flat_global: Option<FlatGlobalDagLane>,
+    analysis: Option<AnalysisDagLane>,
+    classify: Option<ClassifyDagLane>,
+    coloring: Option<ColoringDagLane>,
+    classify_launched: bool,
+    terminal_launched: bool,
+}
+
+struct TerminalDagResult {
+    tokenizer: TokenizerDagLane,
+    analysis: AnalysisDagLane,
+    terminal_coloring_ms: f64,
+    terminal_dwa: MappedArtifact<TerminalAutomaton>,
+    terminal_phase_profile: TerminalDwaPhaseProfile,
+    classify_ms: f64,
+    flat_trans_ms: f64,
+    global_max_length_ms: f64,
+    flat_global_started_ms: f64,
+    flat_global_finished_ms: f64,
+    classify_started_ms: f64,
+    classify_finished_ms: f64,
+    terminal_dwa_started_ms: f64,
+    terminal_dwa_finished_ms: f64,
+}
+
+struct TemplatesDagResult {
+    table: Arc<GLRTable>,
+    glr_table_ms: f64,
+    glr_ready_ms: f64,
+    templates: Templates,
+    template_dfas_by_terminal: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
+    templates_ms: f64,
+    templates_started_ms: f64,
+    templates_finished_ms: f64,
+}
+
+#[derive(Default)]
+struct ParserDagJoinState {
+    terminal: Option<TerminalDagResult>,
+    templates: Option<TemplatesDagResult>,
+    launched: bool,
+}
+
+struct CompileDagResult {
+    tokenizer: Arc<Tokenizer>,
+    tokenizer_build_ms: f64,
+    tokenizer_ready_ms: f64,
+    analyzed_grammar: Arc<AnalyzedGrammar>,
+    analyze_grammar_ms: f64,
+    disallowed_follows_ms: f64,
+    analysis_ready_ms: f64,
+    table: Arc<GLRTable>,
+    glr_table_ms: f64,
+    glr_ready_ms: f64,
+    terminal_coloring_ms: f64,
+    terminal_dwa: MappedArtifact<TerminalAutomaton>,
+    terminal_phase_profile: TerminalDwaPhaseProfile,
+    templates: Option<Templates>,
+    template_dfas_by_terminal: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
+    templates_ms: f64,
+    classify_ms: f64,
+    flat_trans_ms: f64,
+    global_max_length_ms: f64,
+    flat_global_started_ms: f64,
+    flat_global_finished_ms: f64,
+    classify_started_ms: f64,
+    classify_finished_ms: f64,
+    terminal_dwa_started_ms: f64,
+    terminal_dwa_finished_ms: f64,
+    templates_started_ms: f64,
+    templates_finished_ms: f64,
+    prebuilt_parser_dwa: Option<(MappedArtifact<DWA>, f64, f64, f64)>,
+}
+
+fn launch_parser_dag_if_ready<'scope>(
+    scope: &rayon::Scope<'scope>,
+    parser_state: &'scope Mutex<ParserDagJoinState>,
+    result: &'scope Mutex<Option<CompileDagResult>>,
+    vocab: &'scope Vocab,
+    dwa_pm_mode: DwaPossibleMatchesMode,
+    compile_started_at: Instant,
+) {
+    let ready = {
+        let mut state = parser_state.lock().expect("parser DAG join state poisoned");
+        if state.launched || state.terminal.is_none() || state.templates.is_none() {
+            None
+        } else {
+            state.launched = true;
+            Some((
+                state.terminal.take().expect("terminal DAG result ready"),
+                state.templates.take().expect("templates DAG result ready"),
+            ))
+        }
+    };
+
+    let Some((terminal, templates)) = ready else {
+        return;
+    };
+
+    scope.spawn(move |_| {
+        let TerminalDagResult {
+            tokenizer,
+            analysis,
+            terminal_coloring_ms,
+            terminal_dwa,
+            terminal_phase_profile,
+            classify_ms,
+            flat_trans_ms,
+            global_max_length_ms,
+            flat_global_started_ms,
+            flat_global_finished_ms,
+            classify_started_ms,
+            classify_finished_ms,
+            terminal_dwa_started_ms,
+            terminal_dwa_finished_ms,
+        } = terminal;
+        let TemplatesDagResult {
+            table,
+            glr_table_ms,
+            glr_ready_ms,
+            templates,
+            template_dfas_by_terminal,
+            templates_ms,
+            templates_started_ms,
+            templates_finished_ms,
+        } = templates;
+
+        let (templates, prebuilt_parser_dwa) = if dwa_pm_mode.does_terminal_reconcile() {
+            (Some(templates), None)
+        } else {
+            let internal_ids = terminal_dwa.id_map().clone();
+            let parser_dwa_started_at = Instant::now();
+            let parser_dwa_started_ms = elapsed_ms(compile_started_at.clone());
+            let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+                table.num_states,
+                &analysis.analyzed_grammar,
+                terminal_dwa.artifact(),
+                templates,
+                vocab,
+                &internal_ids,
+            );
+            let parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
+            let parser_dwa_finished_ms = elapsed_ms(compile_started_at);
+            (
+                None,
+                Some((
+                    MappedArtifact::new(parser_dwa, internal_ids),
+                    parser_dwa_ms,
+                    parser_dwa_started_ms,
+                    parser_dwa_finished_ms,
+                )),
+            )
+        };
+
+        *result.lock().expect("compile DAG result poisoned") = Some(CompileDagResult {
+            tokenizer: tokenizer.tokenizer,
+            tokenizer_build_ms: tokenizer.tokenizer_build_ms,
+            tokenizer_ready_ms: tokenizer.tokenizer_ready_ms,
+            analyzed_grammar: analysis.analyzed_grammar,
+            analyze_grammar_ms: analysis.analyze_grammar_ms,
+            disallowed_follows_ms: analysis.disallowed_follows_ms,
+            analysis_ready_ms: analysis.analysis_ready_ms,
+            table,
+            glr_table_ms,
+            glr_ready_ms,
+            terminal_coloring_ms,
+            terminal_dwa,
+            terminal_phase_profile,
+            templates,
+            template_dfas_by_terminal,
+            templates_ms,
+            classify_ms,
+            flat_trans_ms,
+            global_max_length_ms,
+            flat_global_started_ms,
+            flat_global_finished_ms,
+            classify_started_ms,
+            classify_finished_ms,
+            terminal_dwa_started_ms,
+            terminal_dwa_finished_ms,
+            templates_started_ms,
+            templates_finished_ms,
+            prebuilt_parser_dwa,
+        });
+    });
+}
+
+fn launch_terminal_dag_if_ready<'scope>(
+    scope: &rayon::Scope<'scope>,
+    terminal_state: &'scope Mutex<TerminalDagJoinState>,
+    parser_state: &'scope Mutex<ParserDagJoinState>,
+    result: &'scope Mutex<Option<CompileDagResult>>,
+    prepared_grammar: &'scope GrammarDef,
+    vocab: &'scope Vocab,
+    dwa_pm_mode: DwaPossibleMatchesMode,
+    use_terminal_coloring: bool,
+    compile_started_at: Instant,
+) {
+    let ready = {
+        let mut state = terminal_state.lock().expect("terminal DAG join state poisoned");
+        let coloring_ready = !use_terminal_coloring || state.coloring.is_some();
+        if state.terminal_launched
+            || state.tokenizer.is_none()
+            || state.flat_global.is_none()
+            || state.analysis.is_none()
+            || state.classify.is_none()
+            || !coloring_ready
+        {
+            None
+        } else {
+            state.terminal_launched = true;
+            Some((
+                state.tokenizer.take().expect("tokenizer DAG result ready"),
+                state.flat_global.take().expect("flat/global DAG result ready"),
+                state.analysis.take().expect("analysis DAG result ready"),
+                state.classify.take().expect("classification DAG result ready"),
+                state.coloring.take(),
+            ))
+        }
+    };
+
+    let Some((tokenizer, flat_global, analysis, classify, coloring)) = ready else {
+        return;
+    };
+
+    scope.spawn(move |scope| {
+        let ColoringDagLane { terminal_coloring, terminal_coloring_ms } = coloring.unwrap_or_else(|| {
+            ColoringDagLane {
+                terminal_coloring: TerminalColoring::identity(analysis.analyzed_grammar.num_terminals as usize),
+                terminal_coloring_ms: 0.0,
+            }
+        });
+        let terminal_dwa_started_ms = elapsed_ms(compile_started_at.clone());
+        let (terminal_dwa, terminal_phase_profile) =
+            crate::compiler::stages::id_map_and_terminal_dwa::build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
+                &tokenizer.tokenizer,
+                vocab,
+                &terminal_coloring,
+                use_terminal_coloring,
+                prepared_grammar.ignore_terminal,
+                &analysis.analyzed_grammar,
+                &analysis.disallowed_follows,
+                Arc::clone(&flat_global.flat_trans),
+                &flat_global.global_max_length_state_map,
+                Some(&classify.shared_classify_cache),
+            );
+        let terminal_dwa_finished_ms = elapsed_ms(compile_started_at.clone());
+
+        parser_state
+            .lock()
+            .expect("parser DAG join state poisoned")
+            .terminal = Some(TerminalDagResult {
+                tokenizer,
+                analysis,
+                terminal_coloring_ms,
+                terminal_dwa,
+                terminal_phase_profile,
+                classify_ms: classify.classify_ms,
+                flat_trans_ms: flat_global.flat_trans_ms,
+                global_max_length_ms: flat_global.global_max_length_ms,
+                flat_global_started_ms: flat_global.started_ms,
+                flat_global_finished_ms: flat_global.finished_ms,
+                classify_started_ms: classify.started_ms,
+                classify_finished_ms: classify.finished_ms,
+                terminal_dwa_started_ms,
+                terminal_dwa_finished_ms,
+            });
+        launch_parser_dag_if_ready(
+            scope,
+            parser_state,
+            result,
+            vocab,
+            dwa_pm_mode,
+            compile_started_at,
+        );
+    });
+}
+
+fn launch_classify_dag_if_ready<'scope>(
+    scope: &rayon::Scope<'scope>,
+    terminal_state: &'scope Mutex<TerminalDagJoinState>,
+    parser_state: &'scope Mutex<ParserDagJoinState>,
+    result: &'scope Mutex<Option<CompileDagResult>>,
+    prepared_grammar: &'scope GrammarDef,
+    vocab: &'scope Vocab,
+    dwa_pm_mode: DwaPossibleMatchesMode,
+    use_terminal_coloring: bool,
+    compile_started_at: Instant,
+) {
+    let ready = {
+        let mut state = terminal_state.lock().expect("terminal DAG join state poisoned");
+        if state.classify_launched || state.tokenizer.is_none() || state.analysis.is_none() {
+            None
+        } else {
+            state.classify_launched = true;
+            Some((
+                state.tokenizer.as_ref().expect("tokenizer DAG result ready").clone(),
+                state.analysis.as_ref().expect("analysis DAG result ready").clone(),
+            ))
+        }
+    };
+
+    let Some((tokenizer, analysis)) = ready else {
+        return;
+    };
+
+    scope.spawn(move |scope| {
+        let token_path_disallowed_follows = ignore_transparent_disallowed_follows(
+            &analysis.disallowed_follows,
+            prepared_grammar.ignore_terminal,
+        );
+        let shared_classify_cache = SharedClassifyCache::new();
+        let classify_started_ms = elapsed_ms(compile_started_at.clone());
+        let classify_started_at = Instant::now();
+        let _terminal_path_lengths = classify_terminal_path_lengths(
+            &tokenizer.tokenizer,
+            vocab,
+            &token_path_disallowed_follows,
+            analysis.analyzed_grammar.num_terminals,
+            Some(&shared_classify_cache),
+        );
+        let classify_ms = elapsed_ms(classify_started_at);
+        let classify_finished_ms = elapsed_ms(compile_started_at.clone());
+
+        terminal_state
+            .lock()
+            .expect("terminal DAG join state poisoned")
+            .classify = Some(ClassifyDagLane {
+            shared_classify_cache,
+            classify_ms,
+            started_ms: classify_started_ms,
+            finished_ms: classify_finished_ms,
+        });
+        launch_terminal_dag_if_ready(
+            scope,
+            terminal_state,
+            parser_state,
+            result,
+            prepared_grammar,
+            vocab,
+            dwa_pm_mode,
+            use_terminal_coloring,
+            compile_started_at,
+        );
+    });
+}
+
 fn compile_prepared_with_profile(
     prepared_grammar: GrammarDef,
     vocab: &Vocab,
@@ -461,22 +933,25 @@ fn compile_prepared_with_profile_and_table_construction(
         let mut profile = CompilePhaseProfile::default();
 
         let analysis_started_at = Instant::now();
-        let (
-            (tokenizer, tokenizer_build_ms),
-            (
-                analyzed_grammar,
-                analyze_grammar_ms,
-                table,
-                glr_table_ms,
-                terminal_coloring,
-                terminal_coloring_ms,
-                disallowed_follows,
-                disallowed_follows_ms,
-            ),
-        ) = rayon::join(
-            || {
+        let dwa_pm_mode = dwa_possible_matches_mode();
+        let use_terminal_coloring = terminal_coloring_enabled();
+        let terminal_state = Mutex::new(TerminalDagJoinState::default());
+        let parser_state = Mutex::new(ParserDagJoinState::default());
+        let compile_dag_result = Mutex::new(None);
+        let cpm_result = Mutex::new(None);
+
+        rayon::scope(|scope| {
+            let terminal_state_ref = &terminal_state;
+            let parser_state_ref = &parser_state;
+            let compile_dag_result_ref = &compile_dag_result;
+            let cpm_result_ref = &cpm_result;
+            let prepared_grammar_ref = &prepared_grammar;
+            let analysis_started_for_tokenizer = analysis_started_at.clone();
+            let compile_started_for_tokenizer = compile_started_at.clone();
+
+            scope.spawn(move |scope| {
                 let tok_started = Instant::now();
-                let mut tokenizer = build_tokenizer(&prepared_grammar);
+                let mut tokenizer = build_tokenizer(prepared_grammar_ref);
                 let tokenizer_construct_ms = elapsed_ms(tok_started);
                 let isolate_started = Instant::now();
                 tokenizer.isolate_start_state_and_drain_nullable_terminals();
@@ -488,47 +963,280 @@ fn compile_prepared_with_profile_and_table_construction(
                         elapsed_ms(tok_started),
                     );
                 }
-                (tokenizer, elapsed_ms(tok_started))
-            },
-            || {
-                let analyze_grammar_started_at = Instant::now();
-                let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
-                let analyze_grammar_ms = elapsed_ms(analyze_grammar_started_at);
+                let tokenizer_lane = TokenizerDagLane {
+                    tokenizer: Arc::new(tokenizer),
+                    tokenizer_build_ms: elapsed_ms(tok_started),
+                    tokenizer_ready_ms: elapsed_ms(analysis_started_for_tokenizer),
+                };
 
+                let possible_matches_tokenizer = Arc::clone(&tokenizer_lane.tokenizer);
+                let compile_started_for_cpm = compile_started_for_tokenizer.clone();
+                scope.spawn(move |_| {
+                    let possible_matches_started_ms = elapsed_ms(compile_started_for_cpm.clone());
+                    let result = cpm::compute_constraint_possible_matches_for_vocab(
+                        &possible_matches_tokenizer,
+                        vocab,
+                        cpm::ConstraintPossibleMatchesConfig,
+                    );
+                    let possible_matches_finished_ms = elapsed_ms(compile_started_for_cpm);
+                    *cpm_result_ref
+                        .lock()
+                        .expect("possible-matches result slot poisoned") = Some((
+                        result,
+                        possible_matches_started_ms,
+                        possible_matches_finished_ms,
+                    ));
+                });
+
+                let flat_global_tokenizer = Arc::clone(&tokenizer_lane.tokenizer);
+                let compile_started_for_terminal = compile_started_for_tokenizer.clone();
+                scope.spawn(move |scope| {
+                    let flat_global_started_ms = elapsed_ms(compile_started_for_terminal.clone());
+                    let flat_trans_started_at = Instant::now();
+                    let flat_trans: Arc<[u32]> = Arc::from(
+                        crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table(
+                            &flat_global_tokenizer,
+                        ),
+                    );
+                    let flat_trans_ms = elapsed_ms(flat_trans_started_at);
+                    let global_max_length_started_at = Instant::now();
+                    let global_max_length_state_map =
+                        crate::compiler::stages::id_map_and_terminal_dwa::build_global_max_length_state_map(
+                            &flat_global_tokenizer,
+                            vocab,
+                            &flat_trans,
+                        );
+                    let global_max_length_ms = elapsed_ms(global_max_length_started_at);
+                    let flat_global_finished_ms = elapsed_ms(compile_started_for_terminal.clone());
+                    terminal_state_ref
+                        .lock()
+                        .expect("terminal DAG join state poisoned")
+                        .flat_global = Some(FlatGlobalDagLane {
+                        flat_trans,
+                        flat_trans_ms,
+                        global_max_length_state_map,
+                        global_max_length_ms,
+                        started_ms: flat_global_started_ms,
+                        finished_ms: flat_global_finished_ms,
+                    });
+                    launch_terminal_dag_if_ready(
+                        scope,
+                        terminal_state_ref,
+                        parser_state_ref,
+                        compile_dag_result_ref,
+                        prepared_grammar_ref,
+                        vocab,
+                        dwa_pm_mode,
+                        use_terminal_coloring,
+                        compile_started_for_terminal,
+                    );
+                });
+
+                terminal_state_ref
+                    .lock()
+                    .expect("terminal DAG join state poisoned")
+                    .tokenizer = Some(tokenizer_lane);
+                launch_classify_dag_if_ready(
+                    scope,
+                    terminal_state_ref,
+                    parser_state_ref,
+                    compile_dag_result_ref,
+                    prepared_grammar_ref,
+                    vocab,
+                    dwa_pm_mode,
+                    use_terminal_coloring,
+                    compile_started_for_tokenizer.clone(),
+                );
+                launch_terminal_dag_if_ready(
+                    scope,
+                    terminal_state_ref,
+                    parser_state_ref,
+                    compile_dag_result_ref,
+                    prepared_grammar_ref,
+                    vocab,
+                    dwa_pm_mode,
+                    use_terminal_coloring,
+                    compile_started_for_tokenizer,
+                );
+            });
+
+            let terminal_state_ref = &terminal_state;
+            let parser_state_ref = &parser_state;
+            let compile_dag_result_ref = &compile_dag_result;
+            let prepared_grammar_ref = &prepared_grammar;
+            let analysis_started_for_analysis = analysis_started_at.clone();
+            let compile_started_for_analysis = compile_started_at.clone();
+            let table_construction = default_table_construction.clone();
+
+            scope.spawn(move |scope| {
+                let analyze_grammar_started_at = Instant::now();
+                let analyzed_grammar = Arc::new(AnalyzedGrammar::from_grammar_def(prepared_grammar_ref));
+                let analyze_grammar_ms = elapsed_ms(analyze_grammar_started_at);
                 if let Err(message) = analyzed_grammar.check_table_build_normal_form() {
                     panic!("[glrmask] grammar precondition violations:\n{}", message);
                 }
 
-                let table_started_at = Instant::now();
-                let table = GLRTable::build_with_default_construction(
-                    &analyzed_grammar,
-                    default_table_construction,
-                );
-                let glr_table_ms = elapsed_ms(table_started_at);
-                if std::env::var_os("GLRMASK_STOP_AFTER_GLR_TABLE").is_some() {
-                    panic!("[glrmask] stopped after GLR table build by GLRMASK_STOP_AFTER_GLR_TABLE");
-                }
+                let glr_analyzed_grammar = Arc::clone(&analyzed_grammar);
+                let analysis_started_for_glr = analysis_started_for_analysis.clone();
+                let compile_started_for_glr = compile_started_for_analysis.clone();
+                scope.spawn(move |scope| {
+                    let table_started_at = Instant::now();
+                    let table = Arc::new(GLRTable::build_with_default_construction(
+                        &glr_analyzed_grammar,
+                        table_construction,
+                    ));
+                    let glr_table_ms = elapsed_ms(table_started_at);
+                    if std::env::var_os("GLRMASK_STOP_AFTER_GLR_TABLE").is_some() {
+                        panic!("[glrmask] stopped after GLR table build by GLRMASK_STOP_AFTER_GLR_TABLE");
+                    }
+                    let glr_ready_ms = elapsed_ms(analysis_started_for_glr);
 
-                let terminal_coloring_started_at = Instant::now();
-                let terminal_coloring = compute_terminal_coloring(&table);
-                let terminal_coloring_ms = elapsed_ms(terminal_coloring_started_at);
+                    if use_terminal_coloring {
+                        let coloring_table = Arc::clone(&table);
+                        let compile_started_for_coloring = compile_started_for_glr.clone();
+                        scope.spawn(move |scope| {
+                            let terminal_coloring_started_at = Instant::now();
+                            let terminal_coloring = compute_terminal_coloring(&coloring_table);
+                            let terminal_coloring_ms = elapsed_ms(terminal_coloring_started_at);
+                            terminal_state_ref
+                                .lock()
+                                .expect("terminal DAG join state poisoned")
+                                .coloring = Some(ColoringDagLane {
+                                terminal_coloring,
+                                terminal_coloring_ms,
+                            });
+                            launch_terminal_dag_if_ready(
+                                scope,
+                                terminal_state_ref,
+                                parser_state_ref,
+                                compile_dag_result_ref,
+                                prepared_grammar_ref,
+                                vocab,
+                                dwa_pm_mode,
+                                use_terminal_coloring,
+                                compile_started_for_coloring,
+                            );
+                        });
+                    }
+
+                    let templates_table = Arc::clone(&table);
+                    let templates_analyzed_grammar = Arc::clone(&glr_analyzed_grammar);
+                    let compile_started_for_templates = compile_started_for_glr;
+                    scope.spawn(move |scope| {
+                        let templates_started_ms = elapsed_ms(compile_started_for_templates.clone());
+                        let (templates, template_dfas_by_terminal, templates_ms) =
+                            build_templates_for_compile(
+                                &templates_table,
+                                &templates_analyzed_grammar,
+                                prepared_grammar_ref.ignore_terminal,
+                            );
+                        let templates_finished_ms = elapsed_ms(compile_started_for_templates.clone());
+                        parser_state_ref
+                            .lock()
+                            .expect("parser DAG join state poisoned")
+                            .templates = Some(TemplatesDagResult {
+                            table: templates_table,
+                            glr_table_ms,
+                            glr_ready_ms,
+                            templates,
+                            template_dfas_by_terminal,
+                            templates_ms,
+                            templates_started_ms,
+                            templates_finished_ms,
+                        });
+                        launch_parser_dag_if_ready(
+                            scope,
+                            parser_state_ref,
+                            compile_dag_result_ref,
+                            vocab,
+                            dwa_pm_mode,
+                            compile_started_for_templates,
+                        );
+                    });
+                });
 
                 let disallowed_follows_started_at = Instant::now();
-                let disallowed_follows = compute_disallowed_follows(&analyzed_grammar);
-                let disallowed_follows_ms = elapsed_ms(disallowed_follows_started_at);
-
-                (
+                let disallowed_follows = Arc::new(compute_disallowed_follows(&analyzed_grammar));
+                let analysis_lane = AnalysisDagLane {
                     analyzed_grammar,
                     analyze_grammar_ms,
-                    table,
-                    glr_table_ms,
-                    terminal_coloring,
-                    terminal_coloring_ms,
                     disallowed_follows,
-                    disallowed_follows_ms,
-                )
-            },
-        );
+                    disallowed_follows_ms: elapsed_ms(disallowed_follows_started_at),
+                    analysis_ready_ms: elapsed_ms(analysis_started_for_analysis),
+                };
+                terminal_state_ref
+                    .lock()
+                    .expect("terminal DAG join state poisoned")
+                    .analysis = Some(analysis_lane);
+                launch_classify_dag_if_ready(
+                    scope,
+                    terminal_state_ref,
+                    parser_state_ref,
+                    compile_dag_result_ref,
+                    prepared_grammar_ref,
+                    vocab,
+                    dwa_pm_mode,
+                    use_terminal_coloring,
+                    compile_started_for_analysis.clone(),
+                );
+                launch_terminal_dag_if_ready(
+                    scope,
+                    terminal_state_ref,
+                    parser_state_ref,
+                    compile_dag_result_ref,
+                    prepared_grammar_ref,
+                    vocab,
+                    dwa_pm_mode,
+                    use_terminal_coloring,
+                    compile_started_for_analysis,
+                );
+            });
+        });
+
+        let (cpm_result, possible_matches_started_ms, possible_matches_finished_ms) = cpm_result
+            .into_inner()
+            .expect("possible-matches result slot poisoned")
+            .expect("possible-matches task did not complete");
+        let CompileDagResult {
+            tokenizer,
+            tokenizer_build_ms,
+            tokenizer_ready_ms,
+            analyzed_grammar,
+            analyze_grammar_ms,
+            disallowed_follows_ms,
+            analysis_ready_ms,
+            table,
+            glr_table_ms,
+            glr_ready_ms,
+            terminal_coloring_ms,
+            mut terminal_dwa,
+            mut terminal_phase_profile,
+            mut templates,
+            template_dfas_by_terminal,
+            templates_ms,
+            classify_ms,
+            flat_trans_ms,
+            global_max_length_ms,
+            flat_global_started_ms,
+            flat_global_finished_ms,
+            classify_started_ms,
+            classify_finished_ms,
+            terminal_dwa_started_ms,
+            terminal_dwa_finished_ms,
+            templates_started_ms,
+            templates_finished_ms,
+            prebuilt_parser_dwa,
+        } = compile_dag_result
+            .into_inner()
+            .expect("compile DAG result slot poisoned")
+            .expect("compile DAG did not produce a result");
+        let tokenizer = Arc::try_unwrap(tokenizer)
+            .unwrap_or_else(|_| panic!("tokenizer references outlived compile DAG"));
+        let analyzed_grammar = Arc::try_unwrap(analyzed_grammar)
+            .unwrap_or_else(|_| panic!("analyzed grammar references outlived compile DAG"));
+        let table = Arc::try_unwrap(table)
+            .unwrap_or_else(|_| panic!("GLR table references outlived compile DAG"));
+
         profile.tokenizer_build_ms = tokenizer_build_ms;
         profile.tokenizer_final_states = tokenizer.num_states() as usize;
         profile.tokenizer_final_transitions = tokenizer.transition_count();
@@ -536,136 +1244,8 @@ fn compile_prepared_with_profile_and_table_construction(
         profile.glr_table_ms = glr_table_ms;
         profile.terminal_coloring_ms = terminal_coloring_ms;
         profile.disallowed_follows_ms = disallowed_follows_ms;
-        profile.analysis_wall_ms = elapsed_ms(analysis_started_at);
-
-        let token_path_disallowed_follows = ignore_transparent_disallowed_follows(
-            &disallowed_follows,
-            prepared_grammar.ignore_terminal,
-        );
-        let disallowed_follows_for_classification = &token_path_disallowed_follows;
-        let shared_classify_cache = SharedClassifyCache::new();
-        let classify_started_at = Instant::now();
-        let _terminal_path_lengths = classify_terminal_path_lengths(
-            &tokenizer,
-            vocab,
-            disallowed_follows_for_classification,
-            analyzed_grammar.num_terminals,
-            Some(&shared_classify_cache),
-        );
-        profile.classify_ms = elapsed_ms(classify_started_at);
-
-        let flat_trans_started_at = Instant::now();
-        let flat_trans: Arc<[u32]> = Arc::from(
-            crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table(
-                &tokenizer,
-            ),
-        );
-        let flat_trans_ms = elapsed_ms(flat_trans_started_at);
-
-        let global_max_length_started_at = Instant::now();
-        let global_max_length_state_map =
-            crate::compiler::stages::id_map_and_terminal_dwa::build_global_max_length_state_map(
-                &tokenizer,
-                vocab,
-                &flat_trans,
-            );
-        let global_max_length_ms = elapsed_ms(global_max_length_started_at);
-
-        let (
-            ((mut terminal_dwa, mut terminal_phase_profile), cpm_result),
-            (templates, template_dfas_by_terminal, templates_ms),
-        ) = rayon::join(
-            || {
-                rayon::join(
-                    || {
-                        crate::compiler::stages::id_map_and_terminal_dwa::build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
-                            &tokenizer,
-                            vocab,
-                            &terminal_coloring,
-                            true,
-                            prepared_grammar.ignore_terminal,
-                            &analyzed_grammar,
-                            &disallowed_follows,
-                            Arc::clone(&flat_trans),
-                            &global_max_length_state_map,
-                            Some(&shared_classify_cache),
-                        )
-                    },
-                    || cpm::compute_constraint_possible_matches_for_vocab(
-                        &tokenizer,
-                        vocab,
-                        cpm::ConstraintPossibleMatchesConfig,
-                    ),
-                )
-            },
-            || {
-                let templates_started_at = Instant::now();
-                let (characterizations, characterization_profile) =
-                    characterize_terminals_profiled(&table, &analyzed_grammar);
-                let (mut templates, template_profile) =
-                    Templates::from_characterizations_profiled(&characterizations);
-                if let Some(ignore_terminal) = prepared_grammar.ignore_terminal {
-                    templates.install_identity_template(ignore_terminal);
-                }
-                let mut template_dfas_by_terminal =
-                    vec![None; analyzed_grammar.num_terminals as usize];
-                let commit_template_dfas_enabled = commit_template_dfas_enabled();
-                let mut commit_template_dfas_built = 0usize;
-                if commit_template_dfas_enabled {
-                    for (&terminal, dfa) in &templates.by_terminal {
-                        if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
-                            let commit_dfa =
-                                specialize_template_dfa_defaults_for_commit_split_input(dfa);
-                            let split_commit_dfas = split_commit_template_dfas(&commit_dfa);
-                            *slot = Some(Arc::new(split_commit_dfas));
-                            commit_template_dfas_built += 1;
-                        }
-                    }
-                }
-                if compile_profile_enabled() {
-                    eprintln!(
-                        "[glrmask/profile][templates] terminals={} action_signature_classes={} action_quotient_hits={} max_action_signature_multiplicity={} characterization_signature_ms={:.3} characterization_ms={:.3} characterization_fanout_ms={:.3} characterization_validation_ms={:.3} characterization_total_ms={:.3} characterization_quotient_disabled={} unique_characterizations={} compiled_characterizations={} template_quotient_hits={} max_characterization_multiplicity={} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} template_fanout_ms={:.3} template_validation_ms={:.3} template_total_ms={:.3} template_wall_ms={:.3} template_minimize_skipped={} avg_nfa_states={:.2} avg_nfa_transitions={:.2} avg_premin_dfa_states={:.2} avg_premin_dfa_transitions={:.2} avg_dfa_states={:.2} avg_dfa_transitions={:.2} max_dfa_states={} max_dfa_transitions={} commit_template_dfas_enabled={} commit_template_dfas_built={}",
-                        characterization_profile.terminals,
-                        characterization_profile.unique_action_signatures,
-                        characterization_profile.quotient_hits,
-                        characterization_profile.max_action_signature_multiplicity,
-                        characterization_profile.signature_ms,
-                        characterization_profile.characterize_ms,
-                        characterization_profile.fanout_ms,
-                        characterization_profile.validation_ms,
-                        characterization_profile.total_ms,
-                        characterization_profile.quotient_disabled,
-                        template_profile.unique_characterizations,
-                        template_profile.compiled_characterizations,
-                        template_profile.quotient_hits,
-                        template_profile.max_characterization_multiplicity,
-                        template_profile.build_nfa_ms,
-                        template_profile.determinize_ms,
-                        template_profile.minimize_ms,
-                        template_profile.fanout_ms,
-                        template_profile.validation_ms,
-                        template_profile.total_ms,
-                        template_profile.wall_ms,
-                        template_profile.minimize_skipped,
-                        template_profile.avg_nfa_states(),
-                        template_profile.avg_nfa_transitions(),
-                        template_profile.avg_premin_dfa_states(),
-                        template_profile.avg_premin_dfa_transitions(),
-                        template_profile.avg_dfa_states(),
-                        template_profile.avg_dfa_transitions(),
-                        template_profile.max_dfa_states,
-                        template_profile.max_dfa_transitions,
-                        commit_template_dfas_enabled,
-                        commit_template_dfas_built,
-                    );
-                }
-                (
-                    templates,
-                    template_dfas_by_terminal,
-                    elapsed_ms(templates_started_at),
-                )
-            },
-        );
+        profile.analysis_wall_ms = tokenizer_ready_ms.max(analysis_ready_ms).max(glr_ready_ms);
+        profile.classify_ms = classify_ms;
         terminal_phase_profile.terminal_dwa_ms += flat_trans_ms;
         terminal_phase_profile.id_map_ms += global_max_length_ms;
         profile.templates_ms = templates_ms;
@@ -678,7 +1258,9 @@ fn compile_prepared_with_profile_and_table_construction(
         let runtime_dynamic_vocab = cpm_result.runtime_dynamic_vocab;
         let mut possible_matches = cpm_result.mapped_possible_matches;
         let cpm_profile = cpm_result.profile;
-        let dwa_pm_mode = dwa_possible_matches_mode();
+        let parser_dag_timing = prebuilt_parser_dwa
+            .as_ref()
+            .map(|(_, _, started_ms, finished_ms)| (*started_ms, *finished_ms));
 
         let mut shared_id_reconcile_ms = 0.0;
         if compact_possible_matches_before_reconcile_enabled() {
@@ -697,7 +1279,15 @@ fn compile_prepared_with_profile_and_table_construction(
         let terminal_pm_joint_interned_ranges_before_reconcile =
             joint_interned_range_count_for_artifacts(terminal_dwa.artifact_mut(), possible_matches.artifact_mut());
         let mut internal_ids = terminal_dwa.id_map().clone();
-        let (mut parser_dwa, parser_dwa_ms) = if dwa_pm_mode.does_terminal_compact() {
+        let (mut parser_dwa, parser_dwa_ms) = if let Some((
+            parser_dwa,
+            parser_dwa_ms,
+            _,
+            _,
+        )) = prebuilt_parser_dwa
+        {
+            (parser_dwa, parser_dwa_ms)
+        } else if dwa_pm_mode.does_terminal_compact() {
             let shared_id_reconcile_started_at = Instant::now();
             let mut terminal_pm_pair = MappedArtifact::from((terminal_dwa, possible_matches));
             shared_id_reconcile_ms += elapsed_ms(shared_id_reconcile_started_at);
@@ -718,10 +1308,12 @@ fn compile_prepared_with_profile_and_table_construction(
                     || {
                         let parser_dwa_started_at = Instant::now();
                         let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
-                            &table,
+                            table.num_states,
                             &analyzed_grammar,
                             terminal_dwa.artifact(),
-                            templates,
+                            templates
+                                .take()
+                                .expect("terminal compaction mode retains templates"),
                             vocab,
                             &internal_ids,
                         );
@@ -749,10 +1341,12 @@ fn compile_prepared_with_profile_and_table_construction(
                         || {
                             let parser_dwa_started_at = Instant::now();
                             let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
-                                &table,
+                                table.num_states,
                                 &analyzed_grammar,
                                 &terminal_pm_pair.artifact().0,
-                                templates,
+                                templates
+                                    .take()
+                                    .expect("terminal compaction mode retains templates"),
                                 vocab,
                                 &pre_compact_ids,
                             );
@@ -781,16 +1375,45 @@ fn compile_prepared_with_profile_and_table_construction(
             }
             let parser_dwa_started_at = Instant::now();
             let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
-                &table,
+                table.num_states,
                 &analyzed_grammar,
                 terminal_dwa.artifact(),
-                templates,
+                templates
+                    .take()
+                    .expect("terminal reconciliation mode retains templates"),
                 vocab,
                 &internal_ids,
             );
             let parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
             (MappedArtifact::new(parser_dwa, internal_ids.clone()), parser_dwa_ms)
         };
+
+        if compile_profile_enabled() {
+            if let Some((parser_dwa_started_ms, parser_dwa_finished_ms)) = parser_dag_timing {
+                let overlap_ms = possible_matches_finished_ms.min(parser_dwa_finished_ms)
+                    - possible_matches_started_ms.max(parser_dwa_started_ms);
+                eprintln!(
+                    "[glrmask/profile][compile_dag] tokenizer_ready_ms={:.3} analysis_ready_ms={:.3} glr_ready_ms={:.3} flat_global_started_ms={:.3} flat_global_finished_ms={:.3} classify_started_ms={:.3} classify_finished_ms={:.3} templates_started_ms={:.3} templates_finished_ms={:.3} terminal_dwa_started_ms={:.3} terminal_dwa_finished_ms={:.3} possible_matches_started_ms={:.3} possible_matches_finished_ms={:.3} parser_dwa_started_ms={:.3} parser_dwa_finished_ms={:.3} possible_matches_parser_overlap_ms={:.3} parser_waited_for_possible_matches=false terminal_coloring_enabled={}",
+                    tokenizer_ready_ms,
+                    analysis_ready_ms,
+                    glr_ready_ms,
+                    flat_global_started_ms,
+                    flat_global_finished_ms,
+                    classify_started_ms,
+                    classify_finished_ms,
+                    templates_started_ms,
+                    templates_finished_ms,
+                    terminal_dwa_started_ms,
+                    terminal_dwa_finished_ms,
+                    possible_matches_started_ms,
+                    possible_matches_finished_ms,
+                    parser_dwa_started_ms,
+                    parser_dwa_finished_ms,
+                    overlap_ms.max(0.0),
+                    use_terminal_coloring,
+                );
+            }
+        }
 
         let terminal_pm_joint_interned_ranges =
             joint_interned_range_count_for_artifacts(terminal_dwa.artifact_mut(), possible_matches.artifact_mut());

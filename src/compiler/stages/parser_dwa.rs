@@ -12,7 +12,6 @@ use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
-use crate::compiler::glr::table::GLRTable;
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::compile_profile_enabled;
@@ -2143,7 +2142,7 @@ fn build_parser_nwa_from_terminal_dwa(
 }
 
 pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
-    table: &GLRTable,
+    num_parser_states: u32,
     grammar: &AnalyzedGrammar,
     terminal_dwa: &TerminalAutomaton,
     templates: Templates,
@@ -2178,7 +2177,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let resolve_negative_ms = elapsed_ms(resolve_negative_started_at);
 
     let support_determinize_started_at = Instant::now();
-    let determinized = determinize_with_supports(&parser_nwa, Some(table.num_states));
+    let determinized = determinize_with_supports(&parser_nwa, Some(num_parser_states));
     let support_determinize_ms = elapsed_ms(support_determinize_started_at);
     let mut parser_dwa_pre_minimize = determinized.dwa;
 
@@ -2186,7 +2185,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let possible_by_state = build_possible_outgoing_ids_by_state(
         &parser_nwa,
         &determinized.supports,
-        table.num_states,
+        num_parser_states,
     );
     let possible_outgoing_ms = elapsed_ms(possible_outgoing_started_at);
 
@@ -2194,7 +2193,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     optimize_parser_dwa_defaults(
         &mut parser_dwa_pre_minimize,
         &possible_by_state,
-        table.num_states,
+        num_parser_states,
     );
     let default_opt_ms = elapsed_ms(default_opt_started_at);
 
@@ -2206,7 +2205,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     parser_dwa_pre_minimize = determinize_parser_dwa_with_fallbacks(
         &parser_dwa_pre_minimize,
         &possible_by_state,
-        table.num_states,
+        num_parser_states,
     );
     let fallback_determinize_ms = elapsed_ms(fallback_determinize_started_at);
 
