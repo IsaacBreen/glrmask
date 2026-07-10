@@ -446,6 +446,8 @@ mod tests {
             start: "start".into(),
             ignore: None,
             lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         let lowered = lower(&grammar).expect("ExprNFA should lower");

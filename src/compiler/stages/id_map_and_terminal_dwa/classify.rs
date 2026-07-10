@@ -607,6 +607,13 @@ pub(crate) fn classify_terminal_path_lengths(
     shared_classify_cache: Option<&SharedClassifyCache>,
 ) -> Vec<TerminalPathLength> {
     let nt = num_terminals as usize;
+    // Every accelerated classification below assumes one deterministic lexer
+    // state after each byte. Routing every terminal through L2P is conservative
+    // and exact for epsilon tokenizers, and protects future callers that do not
+    // know about the pipeline-level guard.
+    if tokenizer.has_epsilon_transitions() {
+        return vec![TerminalPathLength::TwoPlus; nt];
+    }
 
     // 1. Vocab byte bitset: all bytes appearing in any vocab token.
     let vocab_bytes = vocab_byte_set(vocab);
@@ -1554,6 +1561,20 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
     shared_classify_cache: Option<&SharedClassifyCache>,
 ) -> L2pVocabBoundarySplit {
     let split_started_at = std::time::Instant::now();
+    // The split is only an optimization. For epsilon tokenizers, conservatively
+    // send every vocabulary entry through the general boundary-capable builder.
+    if tokenizer.has_epsilon_transitions() {
+        let boundary_token_ids = vocab.entries.keys().copied().collect::<Vec<_>>();
+        let boundary_tokens = boundary_token_ids.len();
+        return L2pVocabBoundarySplit {
+            boundary_token_ids,
+            single_token_ids: Vec::new(),
+            adjacent_tokens: boundary_tokens,
+            boundary_tokens,
+            single_tokens: 0,
+            irrelevant_tokens: 0,
+        };
+    }
     let owned_bytesets: Option<SharedClassifyBytesets>;
     let bytesets = if let Some(cache) = shared_classify_cache {
         cache.get_or_init(|| SharedClassifyBytesets::build(tokenizer, num_terminals))

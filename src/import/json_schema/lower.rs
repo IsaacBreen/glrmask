@@ -43,6 +43,9 @@ pub(crate) const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE: &str =
 pub(crate) const MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS: usize = 256;
 const STRING_ENUM_REGEX_MIN_VALUES: usize = 64;
 const STRING_ENUM_REGEX_MIN_ENCODED_BYTES: usize = 1024;
+pub(crate) const JSON_LITERAL_LEXER_PARTITION: &str = "json_literals";
+pub(crate) const JSON_BOUNDED_LEXER_PARTITION: &str = "json_bounded_repetitions";
+pub(crate) const JSON_PATTERN_LEXER_PARTITION: &str = "json_patterns";
 
 #[derive(Default)]
 pub(crate) struct FixedObjectShapeProfile {
@@ -117,6 +120,186 @@ pub(crate) struct Lowerer<'a> {
     definition_by_pointer: BTreeMap<String, &'a Schema>,
     used_rule_names: BTreeSet<String>,
     next_rule_id: usize,
+}
+
+/// Recompute the JSON importer's lexer partition policy from the current named
+/// grammar. This is intentionally safe to call again after factoring or other
+/// named-grammar transforms.
+pub(crate) fn assign_default_lexer_partitions(grammar: &mut NamedGrammar) {
+    let rule_exprs = grammar
+        .rules
+        .iter()
+        .map(|rule| (rule.name.as_str(), &rule.expr))
+        .collect::<HashMap<_, _>>();
+
+    grammar.lexer_partitions.clear();
+    grammar.lexer_literal_partitions.clear();
+    grammar.default_lexer_partition = Some(JSON_PATTERN_LEXER_PARTITION.to_string());
+
+    for rule in &grammar.rules {
+        if !rule.is_terminal || rule.is_internal {
+            continue;
+        }
+        let partition = if rule.name.starts_with("json_literal_") {
+            Some(JSON_LITERAL_LEXER_PARTITION)
+        } else if rule.name.contains("bounded")
+            || expr_contains_bounded_repetition(&rule.expr, &rule_exprs, &mut BTreeSet::new())
+        {
+            Some(JSON_BOUNDED_LEXER_PARTITION)
+        } else if expr_is_finite_literal_language(
+            &rule.expr,
+            &rule_exprs,
+            &mut BTreeSet::new(),
+        ) {
+            Some(JSON_LITERAL_LEXER_PARTITION)
+        } else {
+            None
+        };
+        if let Some(partition) = partition {
+            grammar
+                .lexer_partitions
+                .insert(rule.name.clone(), partition.to_string());
+        }
+    }
+
+    for literal in grammar.emitted_anonymous_literals() {
+        grammar
+            .lexer_literal_partitions
+            .insert(literal, JSON_LITERAL_LEXER_PARTITION.to_string());
+    }
+}
+
+fn expr_contains_bounded_repetition<'a>(
+    expr: &'a GrammarExpr,
+    rules: &HashMap<&'a str, &'a GrammarExpr>,
+    visiting: &mut BTreeSet<&'a str>,
+) -> bool {
+    match expr {
+        GrammarExpr::Quantified(_, Quantifier::Range(_, Some(_))) => true,
+        GrammarExpr::Quantified(inner, _) | GrammarExpr::Grouped(inner) => {
+            expr_contains_bounded_repetition(inner, rules, visiting)
+        }
+        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => parts
+            .iter()
+            .any(|part| expr_contains_bounded_repetition(part, rules, visiting)),
+        GrammarExpr::Ref(name) => {
+            if !visiting.insert(name.as_str()) {
+                return false;
+            }
+            let result = rules
+                .get(name.as_str())
+                .is_some_and(|expr| expr_contains_bounded_repetition(expr, rules, visiting));
+            visiting.remove(name.as_str());
+            result
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            expr_contains_bounded_repetition(expr, rules, visiting)
+                || expr_contains_bounded_repetition(exclude, rules, visiting)
+        }
+        GrammarExpr::Intersect { expr, intersect } => {
+            expr_contains_bounded_repetition(expr, rules, visiting)
+                || expr_contains_bounded_repetition(intersect, rules, visiting)
+        }
+        GrammarExpr::SeparatedSequence {
+            items, separator, ..
+        } => {
+            items.iter().any(|(item, quantifier)| {
+                matches!(quantifier, Some(Quantifier::Range(_, Some(_))))
+                    || expr_contains_bounded_repetition(item, rules, visiting)
+            }) || expr_contains_bounded_repetition(separator, rules, visiting)
+        }
+        GrammarExpr::ExprNFA(expr_nfa) => expr_nfa
+            .symbols
+            .iter()
+            .any(|symbol| expr_contains_bounded_repetition(symbol, rules, visiting)),
+        GrammarExpr::RawRegex(pattern) => raw_regex_contains_significant_bounded_repetition(pattern),
+        GrammarExpr::Epsilon
+        | GrammarExpr::Literal(_)
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte => false,
+    }
+}
+
+fn expr_is_finite_literal_language<'a>(
+    expr: &'a GrammarExpr,
+    rules: &HashMap<&'a str, &'a GrammarExpr>,
+    visiting: &mut BTreeSet<&'a str>,
+) -> bool {
+    match expr {
+        GrammarExpr::Epsilon | GrammarExpr::Literal(_) => true,
+        GrammarExpr::Grouped(inner) => expr_is_finite_literal_language(inner, rules, visiting),
+        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => parts
+            .iter()
+            .all(|part| expr_is_finite_literal_language(part, rules, visiting)),
+        GrammarExpr::Quantified(inner, Quantifier::Optional)
+        | GrammarExpr::Quantified(inner, Quantifier::Range(_, Some(_))) => {
+            expr_is_finite_literal_language(inner, rules, visiting)
+        }
+        GrammarExpr::Quantified(_, _) => false,
+        GrammarExpr::Ref(name) => {
+            if !visiting.insert(name.as_str()) {
+                return false;
+            }
+            let result = rules
+                .get(name.as_str())
+                .is_some_and(|expr| expr_is_finite_literal_language(expr, rules, visiting));
+            visiting.remove(name.as_str());
+            result
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            expr_is_finite_literal_language(expr, rules, visiting)
+                && expr_is_finite_literal_language(exclude, rules, visiting)
+        }
+        GrammarExpr::Intersect { expr, intersect } => {
+            expr_is_finite_literal_language(expr, rules, visiting)
+                && expr_is_finite_literal_language(intersect, rules, visiting)
+        }
+        GrammarExpr::RawRegex(pattern) => raw_regex_is_finite_literal_language(pattern),
+        GrammarExpr::CharClass { .. }
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte
+        | GrammarExpr::SeparatedSequence { .. }
+        | GrammarExpr::ExprNFA(_) => false,
+    }
+}
+
+fn raw_regex_is_finite_literal_language(pattern: &str) -> bool {
+    let Ok(hir) = regex_syntax::Parser::new().parse(pattern) else {
+        return false;
+    };
+    fn visit(hir: &regex_syntax::hir::Hir) -> bool {
+        use regex_syntax::hir::HirKind;
+        match hir.kind() {
+            HirKind::Empty | HirKind::Literal(_) | HirKind::Look(_) => true,
+            HirKind::Capture(capture) => visit(&capture.sub),
+            HirKind::Concat(parts) | HirKind::Alternation(parts) => parts.iter().all(visit),
+            HirKind::Repetition(repetition) => repetition.max.is_some() && visit(&repetition.sub),
+            HirKind::Class(_) => false,
+        }
+    }
+    visit(&hir)
+}
+
+fn raw_regex_contains_significant_bounded_repetition(pattern: &str) -> bool {
+    let Ok(hir) = regex_syntax::Parser::new().parse(pattern) else {
+        return false;
+    };
+    fn visit(hir: &regex_syntax::hir::Hir) -> bool {
+        use regex_syntax::hir::HirKind;
+        match hir.kind() {
+            HirKind::Repetition(repetition) => {
+                let significant = repetition.max.is_some_and(|max| {
+                    max > 4 || (max > 1 && repetition.min != max)
+                });
+                significant || visit(&repetition.sub)
+            }
+            HirKind::Capture(capture) => visit(&capture.sub),
+            HirKind::Concat(parts) | HirKind::Alternation(parts) => parts.iter().any(visit),
+            HirKind::Empty | HirKind::Literal(_) | HirKind::Class(_) | HirKind::Look(_) => false,
+        }
+    }
+    visit(&hir)
 }
 
 fn quoted_repeated_char_rule_expr(char_rule: &str) -> GrammarExpr {
@@ -279,8 +462,11 @@ impl<'a> Lowerer<'a> {
             start: "start".to_string(),
             ignore: None,
             lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
         simplify_named_grammar_expressions(&mut grammar);
+        assign_default_lexer_partitions(&mut grammar);
         if let Some(simplify_started_at) = simplify_started_at {
             eprintln!(
                 "[glrmask/profile][json_schema_lower_finish] root_lower_ms={:.3} simplify_ms={:.3} rules={}",
@@ -494,7 +680,12 @@ impl<'a> Lowerer<'a> {
                 })
                 .collect::<ImportResult<Vec<_>>>()?;
             if let Some(encoded_literals) = large_string_enum_regex_literals(assertions, &values)? {
-                return Ok(GrammarExpr::RawRegex(string_enum_regex(&encoded_literals)));
+                let name = self.fresh_rule_name("json_literal_string_enum");
+                self.add_terminal_rule(
+                    &name,
+                    GrammarExpr::RawRegex(string_enum_regex(&encoded_literals)),
+                );
+                return Ok(r(&name));
             }
             if let Some(expr) = factored_small_string_enum_expr(&values) {
                 return Ok(expr);

@@ -489,6 +489,8 @@ mod tests {
             start: "start".into(),
             ignore: None,
             lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         let stats = promote_choice_terminals_exact(&mut grammar, false);
@@ -523,6 +525,8 @@ mod tests {
             start: "start".into(),
             ignore: None,
             lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         let stats = promote_choice_terminals_exact(&mut grammar, false);
@@ -541,6 +545,8 @@ mod tests {
             start: "start".into(),
             ignore: None,
             lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         let before = grammar.rules[0].expr.clone();
@@ -561,6 +567,8 @@ mod tests {
             start: "start".into(),
             ignore: None,
             lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         let stats = promote_choice_terminals_exact(&mut grammar, false);

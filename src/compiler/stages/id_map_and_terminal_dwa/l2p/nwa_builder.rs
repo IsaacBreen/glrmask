@@ -479,6 +479,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         node: &VocabPrefixTreeNode,
         tokenizer_state: TokenizerState,
     ) -> bool {
+        if self.tokenizer.has_epsilon_transitions() {
+            return false;
+        }
         let self_loop_bytes = self
             .self_loop_bytes
             .entry(tokenizer_state)
@@ -677,6 +680,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         roots_by_tokenizer_state: &NodesByTokenizerState,
         id_map: &InternalIdMap,
     ) {
+        assert!(
+            !self.tokenizer.has_epsilon_transitions(),
+            "L1 flat-state construction is not valid for epsilon tokenizers",
+        );
         // Pre-populate flat transition tables for ALL tokenizer states.
         let num_states = self.tokenizer.num_states() as usize;
         for state_idx in 0..num_states {
@@ -865,8 +872,13 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 for matched in &matches_buf {
                     let next_offset = offset + matched.width;
 
-                    if next_offset == segment_bytes.len() && child_node.has_token() &&
-                        !end_states.iter().copied().any(|s| self.possible_future_terminals_for_state(s).contains(&matched.id)) // This one's optional. Might make it a little faster but functionally no difference.
+                    if next_offset == segment_bytes.len()
+                        && child_node.has_token()
+                        && (self.tokenizer.has_epsilon_transitions()
+                            || !end_states.iter().copied().any(|s| {
+                                self.possible_future_terminals_for_state(s)
+                                    .contains(&matched.id)
+                            }))
                     {
                         self.profile.match_transition_additions += source_nodes.len() as u64;
                         self.add_leaf_token_from_sources(
@@ -2235,6 +2247,10 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
     modes: &[TerminalNwaTransportMode],
 ) -> TerminalDwaBuildProfile {
     assert!(!modes.is_empty());
+    assert!(
+        !tokenizer.has_epsilon_transitions(),
+        "TI transport construction requires a deterministic tokenizer",
+    );
     let mut roots = NodesByTransportContext::default();
     let mut initial_source_states = Vec::<bool>::new();
     let mut transport = TransportModePlanner::new(modes, visible_output_raw_labels);

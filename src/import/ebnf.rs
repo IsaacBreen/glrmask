@@ -313,6 +313,8 @@ impl Parser {
             start,
             ignore: None,
             lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         })
     }
 

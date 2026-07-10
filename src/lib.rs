@@ -68,6 +68,7 @@ pub fn dump_json_schema_grammar_glrm(schema_json: &str) -> Result<String> {
     if import::json_schema::promote_literal_choices_enabled() {
         grammar::terminal_choice_promotion::promote_choice_terminals_exact(&mut factored, false);
     }
+    import::json_schema::assign_default_lexer_partitions(&mut factored);
     Ok(grammar::glrm::to_glrm(&factored))
 }
 

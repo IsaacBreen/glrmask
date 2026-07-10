@@ -779,6 +779,8 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
         start: output_start,
         ignore: grammar.ignore,
         lexer_partitions: grammar.lexer_partitions,
+        lexer_literal_partitions: Default::default(),
+        default_lexer_partition: None,
     })
 }
 
@@ -950,6 +952,8 @@ impl Parser {
             start,
             ignore,
             lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         })
     }
 

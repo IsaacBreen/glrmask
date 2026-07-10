@@ -20,10 +20,11 @@ pub use error::{Error, GlrMaskError, Result};
 pub use runtime::{Constraint, ConstraintState};
 
 /// Versioned envelope for browser and provider runtime artifacts.
-/// The payload is the explicit v1 execution-state contract, not `Constraint`'s
+/// The payload is an explicit execution-state contract, not `Constraint`'s
 /// incidental serde layout.
 pub const ARTIFACT_MAGIC: [u8; 8] = *b"GLRMASK\0";
-pub const ARTIFACT_VERSION: u16 = 2;
+pub const LEGACY_ARTIFACT_VERSION: u16 = 2;
+pub const ARTIFACT_VERSION: u16 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeArtifact {
@@ -32,7 +33,7 @@ pub struct RuntimeArtifact {
 
 impl RuntimeArtifact {
     pub fn from_compiled_constraint(constraint: &Constraint) -> Self {
-        Self::from_runtime_payload_v1(constraint.save_runtime_payload_v1())
+        Self::from_runtime_payload_v2(constraint.save_runtime_payload_v2())
     }
 
     /// Wrap bytes produced by `Constraint::save_runtime_payload_v1`.
@@ -40,9 +41,18 @@ impl RuntimeArtifact {
     /// This accepts bytes instead of a `Constraint` so a native compiler and a
     /// separately linked runtime crate can share the same artifact contract.
     pub fn from_runtime_payload_v1(payload: Vec<u8>) -> Self {
+        Self::from_versioned_payload(LEGACY_ARTIFACT_VERSION, payload)
+    }
+
+    /// Wrap bytes produced by `Constraint::save_runtime_payload_v2`.
+    pub fn from_runtime_payload_v2(payload: Vec<u8>) -> Self {
+        Self::from_versioned_payload(ARTIFACT_VERSION, payload)
+    }
+
+    fn from_versioned_payload(version: u16, payload: Vec<u8>) -> Self {
         let mut bytes = Vec::with_capacity(ARTIFACT_MAGIC.len() + 2 + 8 + payload.len());
         bytes.extend_from_slice(&ARTIFACT_MAGIC);
-        bytes.extend_from_slice(&ARTIFACT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&version.to_le_bytes());
         bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&payload);
         Self { bytes }
@@ -56,10 +66,17 @@ impl RuntimeArtifact {
             return Err(GlrMaskError::Serialization("invalid glrmask runtime artifact magic".to_owned()));
         }
         let version = u16::from_le_bytes([bytes[8], bytes[9]]);
-        if version != ARTIFACT_VERSION {
+        if !matches!(version, LEGACY_ARTIFACT_VERSION | ARTIFACT_VERSION) {
             return Err(GlrMaskError::Serialization(format!("unsupported glrmask runtime artifact version {version}")));
         }
-        let length = u64::from_le_bytes(bytes[10..18].try_into().expect("fixed artifact header")) as usize;
+        let length = usize::try_from(u64::from_le_bytes(
+            bytes[10..18].try_into().expect("fixed artifact header"),
+        ))
+        .map_err(|_| {
+            GlrMaskError::Serialization(
+                "glrmask runtime artifact payload length does not fit this platform".to_owned(),
+            )
+        })?;
         if bytes.len() != HEADER.saturating_add(length) {
             return Err(GlrMaskError::Serialization("invalid glrmask runtime artifact payload length".to_owned()));
         }
@@ -67,7 +84,12 @@ impl RuntimeArtifact {
     }
 
     pub fn into_constraint(self) -> Result<Constraint> {
-        Constraint::load_runtime_payload_v1(&self.bytes[18..])
+        let version = u16::from_le_bytes([self.bytes[8], self.bytes[9]]);
+        match version {
+            LEGACY_ARTIFACT_VERSION => Constraint::load_runtime_payload_v1(&self.bytes[18..]),
+            ARTIFACT_VERSION => Constraint::load_runtime_payload_v2(&self.bytes[18..]),
+            _ => unreachable!("RuntimeArtifact::from_bytes validates the envelope version"),
+        }
     }
 }
 

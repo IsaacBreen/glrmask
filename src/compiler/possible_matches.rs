@@ -87,6 +87,9 @@ impl<'a> PossibleMatchesComputer<'a> {
         node: &VocabPrefixTreeNode,
         tokenizer_state: u32,
     ) -> bool {
+        if self.tokenizer.has_epsilon_transitions() {
+            return false;
+        }
         let self_loop_bytes = self
             .self_loop_bytes
             .entry(tokenizer_state)

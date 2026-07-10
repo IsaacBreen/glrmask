@@ -86,6 +86,7 @@ fn lower_factored_named_grammar(
             promote_choice_terminals_exact(&mut factored, false);
             emit_import_phase_end("promote_choice_terminals_exact", promote_started_at);
         }
+        json_schema::assign_default_lexer_partitions(&mut factored);
     }
 
     let ast_lower_started_at = emit_import_phase_start("ast_lower");

@@ -616,13 +616,20 @@ fn compile_prepared_with_profile_and_table_construction(
         let disallowed_follows_for_classification = &token_path_disallowed_follows;
         let shared_classify_cache = SharedClassifyCache::new();
         let classify_started_at = Instant::now();
-        let _terminal_path_lengths = classify_terminal_path_lengths(
-            &tokenizer,
-            vocab,
-            disallowed_follows_for_classification,
-            analyzed_grammar.num_terminals,
-            Some(&shared_classify_cache),
-        );
+        // The classifier's accelerated suffix and boundary analyses are
+        // defined over one deterministic scanner state. Epsilon tokenizers are
+        // routed wholly through the general L2P builder, so pre-classification
+        // would be both unnecessary and capable of seeding an invalid scalar
+        // transition cache.
+        if !tokenizer.has_epsilon_transitions() {
+            let _terminal_path_lengths = classify_terminal_path_lengths(
+                &tokenizer,
+                vocab,
+                disallowed_follows_for_classification,
+                analyzed_grammar.num_terminals,
+                Some(&shared_classify_cache),
+            );
+        }
         profile.classify_ms = elapsed_ms(classify_started_at);
 
         let flat_trans_started_at = Instant::now();

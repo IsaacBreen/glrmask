@@ -2385,13 +2385,15 @@ fn build_regex_nfa_impl(exprs: &[Expr]) -> NFA {
 #[cfg(test)]
 mod tests {
     use super::super::Lexer;
-    use super::build_regex;
+    use super::{build_regex, build_regex_monolithic, build_regex_partitioned};
     use super::compile_product_component_dfa_direct;
     use super::factor_regex_expr;
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::regex::parse_regex;
     use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::ds::u8set::U8Set;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
     use std::sync::Arc;
 
     fn byte_expr(byte: u8) -> Expr {
@@ -2413,6 +2415,265 @@ mod tests {
         exec.matches
             .iter()
             .any(|matched| matched.id == 0 && matched.width == input.len())
+    }
+
+    fn enumerate_inputs(alphabet: &[u8], max_len: usize) -> Vec<Vec<u8>> {
+        fn extend(out: &mut Vec<Vec<u8>>, prefix: &mut Vec<u8>, alphabet: &[u8], max_len: usize) {
+            out.push(prefix.clone());
+            if prefix.len() == max_len {
+                return;
+            }
+            for &byte in alphabet {
+                prefix.push(byte);
+                extend(out, prefix, alphabet, max_len);
+                prefix.pop();
+            }
+        }
+
+        let mut out = Vec::new();
+        extend(&mut out, &mut Vec::new(), alphabet, max_len);
+        out
+    }
+
+    fn tokenizer_observation(
+        tokenizer: &Tokenizer,
+        input: &[u8],
+    ) -> (Vec<(u32, usize)>, Vec<u32>, bool) {
+        let execution = tokenizer.execute_from_state_all_widths(input, tokenizer.initial_state());
+        let mut matches = execution
+            .matches
+            .iter()
+            .map(|matched| (matched.id, matched.width))
+            .collect::<Vec<_>>();
+        matches.sort_unstable();
+        matches.dedup();
+
+        let mut futures = execution
+            .end_state
+            .iter()
+            .flat_map(|&state| tokenizer.possible_future_terminals_iter(state))
+            .collect::<Vec<_>>();
+        futures.sort_unstable();
+        futures.dedup();
+        (matches, futures, execution.end_state.is_empty())
+    }
+
+    fn execute_state_set_observation(
+        tokenizer: &Tokenizer,
+        roots: &[u32],
+        input: &[u8],
+    ) -> (Vec<(u32, usize)>, Vec<u32>) {
+        let mut matches = Vec::new();
+        let mut end_states = Vec::new();
+        for &root in roots {
+            let execution = tokenizer.execute_from_state_all_widths(input, root);
+            matches.extend(
+                execution
+                    .matches
+                    .into_iter()
+                    .map(|matched| (matched.id, matched.width)),
+            );
+            end_states.extend(execution.end_state);
+        }
+        matches.sort_unstable();
+        matches.dedup();
+        end_states.sort_unstable();
+        end_states.dedup();
+
+        let mut futures = end_states
+            .iter()
+            .flat_map(|&state| tokenizer.possible_future_terminals_iter(state))
+            .collect::<Vec<_>>();
+        futures.sort_unstable();
+        futures.dedup();
+        (matches, futures)
+    }
+
+    fn random_small_expr(rng: &mut StdRng, depth: usize) -> Expr {
+        let atom = |rng: &mut StdRng| match rng.gen_range(0..4) {
+            0 => Expr::U8Seq(vec![b'a' + rng.gen_range(0..3)]),
+            1 => {
+                let len = rng.gen_range(1..=3);
+                Expr::U8Seq(
+                    (0..len)
+                        .map(|_| b'a' + rng.gen_range(0..3))
+                        .collect(),
+                )
+            }
+            2 => {
+                let mut bytes = Vec::new();
+                for byte in b'a'..=b'c' {
+                    if rng.gen_bool(0.5) {
+                        bytes.push(byte);
+                    }
+                }
+                if bytes.is_empty() {
+                    bytes.push(b'a' + rng.gen_range(0..3));
+                }
+                Expr::U8Class(U8Set::from_bytes(&bytes))
+            }
+            _ => Expr::Epsilon,
+        };
+
+        if depth == 0 {
+            return atom(rng);
+        }
+        match rng.gen_range(0..9) {
+            0..=2 => atom(rng),
+            3 => Expr::Choice(vec![
+                random_small_expr(rng, depth - 1),
+                random_small_expr(rng, depth - 1),
+            ]),
+            4 => Expr::Seq(vec![
+                random_small_expr(rng, depth - 1),
+                random_small_expr(rng, depth - 1),
+            ]),
+            5 => Expr::Repeat {
+                expr: Box::new(random_small_expr(rng, depth - 1)),
+                min: rng.gen_range(0..=1),
+                max: Some(rng.gen_range(1..=3)),
+            },
+            6 => Expr::Repeat {
+                expr: Box::new(atom(rng)),
+                min: rng.gen_range(0..=1),
+                max: None,
+            },
+            7 => Expr::Exclude {
+                expr: Box::new(random_small_expr(rng, depth - 1)),
+                exclude: Box::new(random_small_expr(rng, depth - 1)),
+            },
+            _ => Expr::Intersect {
+                expr: Box::new(random_small_expr(rng, depth - 1)),
+                intersect: Box::new(random_small_expr(rng, depth - 1)),
+            },
+        }
+    }
+
+    #[test]
+    fn partitioned_lexer_matches_monolithic_semantics_exhaustively() {
+        let shared_tail = Arc::new(Expr::Choice(vec![
+            Expr::U8Seq(b"b".to_vec()),
+            Expr::U8Seq(b"c".to_vec()),
+        ]));
+        let exprs = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::Choice(vec![
+                Expr::U8Seq(b"ab".to_vec()),
+                Expr::U8Seq(b"ac".to_vec()),
+            ]),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                min: 1,
+                max: None,
+            },
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b" ".to_vec())),
+                    min: 0,
+                    max: Some(2),
+                },
+                Expr::Shared(Arc::clone(&shared_tail)),
+            ]),
+            Expr::Exclude {
+                expr: Box::new(byte_choice(b"abc")),
+                exclude: Box::new(byte_expr(b'b')),
+            },
+            Expr::Intersect {
+                expr: Box::new(byte_choice(b"ab")),
+                intersect: Box::new(byte_choice(b"bc")),
+            },
+            Expr::Seq(vec![
+                Expr::U8Seq(b"a".to_vec()),
+                Expr::Shared(shared_tail),
+            ]),
+        ];
+        let monolithic = build_regex_monolithic(&exprs).into_tokenizer(
+            exprs.len() as u32,
+            Some(Arc::from(exprs.clone().into_boxed_slice())),
+        );
+        let partitionings = [
+            (0..exprs.len() as u32).collect::<Vec<_>>(),
+            vec![0, 0, 1, 1, 2, 2, 1],
+        ];
+        let inputs = enumerate_inputs(b"abc ", 5);
+
+        for partitions in partitionings {
+            let partitioned = build_regex_partitioned(&exprs, &partitions).into_tokenizer(
+                exprs.len() as u32,
+                Some(Arc::from(exprs.clone().into_boxed_slice())),
+            );
+            for input in &inputs {
+                assert_eq!(
+                    tokenizer_observation(&partitioned, input),
+                    tokenizer_observation(&monolithic, input),
+                    "partitioned lexer differed for partitions={partitions:?} input={input:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn seeded_partitioned_lexer_differential_fuzz() {
+        let mut rng = StdRng::seed_from_u64(0xE051_10FA_2026_0710);
+        let prefixes = enumerate_inputs(b"abc", 3);
+        let suffixes = enumerate_inputs(b"abc", 3);
+
+        for case in 0..48 {
+            let expr_count = rng.gen_range(2..=6);
+            let exprs = (0..expr_count)
+                .map(|_| random_small_expr(&mut rng, 2))
+                .collect::<Vec<_>>();
+            let monolithic = build_regex_monolithic(&exprs).into_tokenizer(
+                exprs.len() as u32,
+                Some(Arc::from(exprs.clone().into_boxed_slice())),
+            );
+
+            for partition_case in 0..3 {
+                let partitions = match partition_case {
+                    0 => (0..expr_count as u32).collect::<Vec<_>>(),
+                    1 => (0..expr_count)
+                        .map(|_| rng.gen_range(0..3))
+                        .collect::<Vec<_>>(),
+                    _ => vec![0; expr_count],
+                };
+                let partitioned = build_regex_partitioned(&exprs, &partitions).into_tokenizer(
+                    exprs.len() as u32,
+                    Some(Arc::from(exprs.clone().into_boxed_slice())),
+                );
+
+                for prefix in &prefixes {
+                    assert_eq!(
+                        tokenizer_observation(&partitioned, prefix),
+                        tokenizer_observation(&monolithic, prefix),
+                        "top-level mismatch case={case} partitions={partitions:?} prefix={prefix:?} exprs={exprs:?}",
+                    );
+
+                    let partitioned_roots = partitioned.execute_from_state_end_only(
+                        prefix,
+                        partitioned.initial_state(),
+                    );
+                    let monolithic_roots = monolithic.execute_from_state_end_only(
+                        prefix,
+                        monolithic.initial_state(),
+                    );
+                    for suffix in &suffixes {
+                        assert_eq!(
+                            execute_state_set_observation(
+                                &partitioned,
+                                &partitioned_roots,
+                                suffix,
+                            ),
+                            execute_state_set_observation(
+                                &monolithic,
+                                &monolithic_roots,
+                                suffix,
+                            ),
+                            "residual mismatch case={case} partitions={partitions:?} prefix={prefix:?} suffix={suffix:?} exprs={exprs:?}",
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

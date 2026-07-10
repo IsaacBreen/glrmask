@@ -117,13 +117,17 @@ pub(crate) trait Lexer {
     ) -> (BitSet, TokenizerStateSet);
 }
 
-fn into_longest_matches(matches: FxHashMap<TerminalID, (usize, u32)>) -> Vec<TokenizerMatch> {
+fn into_longest_matches(
+    matches: FxHashMap<TerminalID, (usize, TokenizerStateSet)>,
+) -> Vec<TokenizerMatch> {
     matches
         .into_iter()
-        .map(|(id, (width, end_state))| TokenizerMatch {
-            id,
-            width,
-            end_state,
+        .flat_map(|(id, (width, end_states))| {
+            end_states.into_iter().map(move |end_state| TokenizerMatch {
+                id,
+                width,
+                end_state,
+            })
         })
         .collect()
 }
@@ -210,31 +214,83 @@ impl Tokenizer {
     /// the set.  After this call the tokenizer no longer reports those
     /// terminals as matched at state 0.
     pub fn isolate_start_state_and_drain_nullable_terminals(&mut self) -> BTreeSet<TerminalID> {
-        self.isolate_start_state();
+        let start = self.start_state();
+        let initial_closure = self.dfa.epsilon_closure(&[start]);
         let mut nullable = BTreeSet::new();
-        for state in self.dfa.epsilon_closure(&[self.start_state()]) {
+        for &state in &initial_closure {
             nullable.extend(
                 self.dfa
-                    .clear_finalizers_for_state(state)
+                    .finalizers(state)
                     .iter()
                     .map(|terminal| terminal as TerminalID),
             );
         }
-        nullable
-    }
-
-    /// Ensure that no byte transition in the DFA targets the start state.
-    ///
-    /// If any transition does, a copy of the start state is created and all
-    /// such transitions are redirected to the copy.  This keeps the DFA
-    /// equivalent while guaranteeing the start state is only reachable at
-    /// position 0.
-    fn isolate_start_state(&mut self) {
-        let start = self.start_state();
-        let clone_id = self.dfa.clone_state(start);
-        if !self.dfa.redirect_transitions(start, clone_id) {
-            self.dfa.discard_last_state(clone_id);
+        if nullable.is_empty() {
+            return nullable;
         }
+
+        // The whole initial epsilon closure represents the zero-byte scanner
+        // configuration. A component root can also be reached later after a
+        // byte transition (for example, a nullable `a*` terminal looping to its
+        // root). Clearing its finalizers in place would then remove legitimate
+        // non-empty matches. Clone the closure as the post-consumption version,
+        // redirect byte entries and external epsilon entries to those clones,
+        // and drain finalizers only from the original zero-byte closure.
+        let original_state_count = self.dfa.num_states();
+        let mut post_byte_state = vec![u32::MAX; original_state_count];
+        for &state in &initial_closure {
+            let clone = self.dfa.clone_state(state);
+            post_byte_state[state as usize] = clone;
+        }
+
+        let in_initial_closure = |state: u32| {
+            (state as usize) < post_byte_state.len()
+                && post_byte_state[state as usize] != u32::MAX
+        };
+
+        // Rewrite the cloned closure so all of its internal epsilon structure
+        // remains in the post-byte coordinate.
+        for &state in &initial_closure {
+            let clone = post_byte_state[state as usize];
+            let clone_state = &mut self.dfa.states_mut()[clone as usize];
+            for (_, target) in clone_state.transitions.iter_mut() {
+                if in_initial_closure(*target) {
+                    *target = post_byte_state[*target as usize];
+                }
+            }
+            for target in &mut clone_state.epsilon_transitions {
+                if in_initial_closure(*target) {
+                    *target = post_byte_state[*target as usize];
+                }
+            }
+        }
+
+        // A byte edge always enters the post-byte coordinate. An epsilon edge
+        // from outside the initial closure can only be traversed after input has
+        // already been consumed, so it does too. Epsilon edges within the
+        // original closure remain untouched for the initial zero-byte closure.
+        for source in 0..original_state_count {
+            let source_in_initial_closure = in_initial_closure(source as u32);
+            let state = &mut self.dfa.states_mut()[source];
+            for (_, target) in state.transitions.iter_mut() {
+                if in_initial_closure(*target) {
+                    *target = post_byte_state[*target as usize];
+                }
+            }
+            if !source_in_initial_closure {
+                for target in &mut state.epsilon_transitions {
+                    if in_initial_closure(*target) {
+                        *target = post_byte_state[*target as usize];
+                    }
+                }
+            }
+        }
+
+        for state in initial_closure {
+            self.dfa.clear_finalizers_for_state(state);
+        }
+        self.dfa.recompute_possible_futures();
+        nullable
     }
 
     fn step(&self, state: u32, byte: u8) -> Option<u32> {
@@ -319,7 +375,7 @@ impl Tokenizer {
     }
 
     fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult {
-        let mut matches = FxHashMap::<TerminalID, (usize, u32)>::default();
+        let mut matches = FxHashMap::<TerminalID, (usize, TokenizerStateSet)>::default();
         let end_states = self.scan_input(input, start, &mut matches, |tokenizer, matches, state, width| {
             tokenizer.record_longest_matches(matches, state, width);
         });
@@ -426,12 +482,21 @@ impl Tokenizer {
 
     fn record_longest_matches(
         &self,
-        matches: &mut FxHashMap<TerminalID, (usize, u32)>,
+        matches: &mut FxHashMap<TerminalID, (usize, TokenizerStateSet)>,
         state: u32,
         width: usize,
     ) {
         for terminal in self.matched_terminals_iter(state) {
-            matches.insert(terminal, (width, state));
+            let entry = matches
+                .entry(terminal)
+                .or_insert_with(|| (width, TokenizerStateSet::new()));
+            if width > entry.0 {
+                entry.0 = width;
+                entry.1.clear();
+            }
+            if width == entry.0 && !entry.1.contains(&state) {
+                entry.1.push(state);
+            }
         }
     }
 
@@ -493,4 +558,102 @@ impl Lexer for Tokenizer {
 pub struct TokenizerResult {
     pub end_state: TokenizerStateSet,
     pub matches: Vec<(usize, BTreeSet<TerminalID>)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automata::lexer::dfa::DFA;
+
+    #[test]
+    fn execution_handles_epsilon_edges_before_and_after_a_byte() {
+        let mut dfa = DFA::new(6);
+        dfa.ensure_group_capacity(2);
+        dfa.add_epsilon_transition(0, 1);
+        dfa.add_epsilon_transition(1, 2);
+        dfa.add_epsilon_transition(2, 1);
+        dfa.add_transition(1, b'a', 3);
+        dfa.add_transition(2, b'a', 4);
+        dfa.add_epsilon_transition(3, 5);
+
+        let mut terminal_zero = BitSet::new(2);
+        terminal_zero.set(0);
+        dfa.overwrite_state_metadata(5, terminal_zero, BitSet::new(2));
+        let mut terminal_one = BitSet::new(2);
+        terminal_one.set(1);
+        dfa.overwrite_state_metadata(4, terminal_one, BitSet::new(2));
+        dfa.recompute_possible_futures();
+
+        let tokenizer = Tokenizer::from_parts(dfa, 2, None);
+        let execution = tokenizer.execute_from_state_all_widths(b"a", 0);
+        let mut matches = execution
+            .matches
+            .iter()
+            .map(|matched| (matched.id, matched.width))
+            .collect::<Vec<_>>();
+        matches.sort_unstable();
+        assert_eq!(matches, vec![(0, 1), (1, 1)]);
+        assert!(execution.end_state.is_empty());
+        let longest = tokenizer.execute_from_state(b"a", 0);
+        assert_eq!(longest.end_state.as_slice(), &[3, 4, 5]);
+        assert_eq!(tokenizer.matched_terminals(3), BTreeSet::from([0]));
+
+        let interests = BitSet::all(2);
+        let (matched, continuation) =
+            tokenizer.scan_terminal_matches_from_state(b"a", 0, &interests);
+        assert!(matched.contains(0));
+        assert!(matched.contains(1));
+        assert!(continuation.is_empty());
+    }
+
+    #[test]
+    fn draining_nullable_initial_closure_preserves_later_root_matches() {
+        let mut dfa = DFA::new(2);
+        dfa.ensure_group_capacity(1);
+        dfa.add_epsilon_transition(0, 1);
+        dfa.add_transition(1, b'a', 1);
+        let mut accepting = BitSet::new(1);
+        accepting.set(0);
+        dfa.overwrite_state_metadata(1, accepting, BitSet::new(1));
+        dfa.recompute_possible_futures();
+
+        let mut tokenizer = Tokenizer::from_parts(dfa, 1, None);
+        assert_eq!(tokenizer.matched_terminals(0), BTreeSet::from([0]));
+        assert_eq!(
+            tokenizer.isolate_start_state_and_drain_nullable_terminals(),
+            BTreeSet::from([0]),
+        );
+        assert!(tokenizer.matched_terminals(0).is_empty());
+
+        let one = tokenizer.execute_from_state(b"a", tokenizer.initial_state());
+        assert!(one.matches.iter().any(|matched| matched.id == 0 && matched.width == 1));
+        let two = tokenizer.execute_from_state(b"aa", tokenizer.initial_state());
+        assert!(two.matches.iter().any(|matched| matched.id == 0 && matched.width == 2));
+    }
+
+    #[test]
+    fn longest_match_preserves_every_accepting_end_state_for_one_terminal() {
+        let mut dfa = DFA::new(5);
+        dfa.ensure_group_capacity(1);
+        dfa.add_epsilon_transition(0, 1);
+        dfa.add_epsilon_transition(0, 2);
+        dfa.add_transition(1, b'a', 3);
+        dfa.add_transition(2, b'a', 4);
+        let mut accepting = BitSet::new(1);
+        accepting.set(0);
+        dfa.overwrite_state_metadata(3, accepting.clone(), BitSet::new(1));
+        dfa.overwrite_state_metadata(4, accepting, BitSet::new(1));
+        dfa.recompute_possible_futures();
+
+        let tokenizer = Tokenizer::from_parts(dfa, 1, None);
+        let mut end_states = tokenizer
+            .execute_from_state(b"a", 0)
+            .matches
+            .into_iter()
+            .filter(|matched| matched.id == 0 && matched.width == 1)
+            .map(|matched| matched.end_state)
+            .collect::<Vec<_>>();
+        end_states.sort_unstable();
+        assert_eq!(end_states, vec![3, 4]);
+    }
 }

@@ -12,7 +12,7 @@
 //!
 //! start <nt-name>;
 //! [ignore <TM-NAME>;]
-//! [lexer group <partition-name> ::= <TM-NAME>, ...;]
+//! [lexer group <partition-name> ::= <TM-NAME> | "literal" | @literals | *, ...;]
 //!
 //! // Nonterminal rules
 //! nt rule_name ::= <expr>;
@@ -62,19 +62,70 @@ pub fn to_glrm(grammar: &NamedGrammar) -> String {
     if let Some(ref ign) = grammar.ignore {
         out.push_str(&format!("ignore {};\n", ign));
     }
-    let mut lexer_groups = BTreeMap::<&str, Vec<&str>>::new();
+    let anonymous_literals = grammar.emitted_anonymous_literals();
+    let literal_selector_partition = if !anonymous_literals.is_empty()
+        && anonymous_literals
+            .iter()
+            .all(|literal| grammar.lexer_literal_partitions.contains_key(literal))
+    {
+        let mut counts = BTreeMap::<&str, usize>::new();
+        for literal in &anonymous_literals {
+            let partition = grammar
+                .lexer_literal_partitions
+                .get(literal)
+                .expect("all anonymous literals checked above");
+            *counts.entry(partition.as_str()).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .max_by(|(left_name, left_count), (right_name, right_count)| {
+                left_name
+                    .contains("literal")
+                    .cmp(&right_name.contains("literal"))
+                    .then_with(|| left_count.cmp(right_count))
+                    .then_with(|| right_name.cmp(left_name))
+            })
+            .map(|(partition, _)| partition)
+    } else {
+        None
+    };
+
+    let mut lexer_groups = BTreeMap::<&str, Vec<String>>::new();
     for (terminal, partition) in &grammar.lexer_partitions {
         lexer_groups
             .entry(partition.as_str())
             .or_default()
-            .push(terminal.as_str());
+            .push(terminal.clone());
     }
-    for (partition, mut terminals) in lexer_groups {
-        terminals.sort_unstable();
+    for (literal, partition) in &grammar.lexer_literal_partitions {
+        if literal_selector_partition == Some(partition.as_str())
+            && anonymous_literals.contains(literal)
+        {
+            continue;
+        }
+        lexer_groups
+            .entry(partition.as_str())
+            .or_default()
+            .push(format!("\"{}\"", escape_bytes_for_string(literal)));
+    }
+    if let Some(partition) = literal_selector_partition {
+        lexer_groups
+            .entry(partition)
+            .or_default()
+            .push("@literals".to_string());
+    }
+    if let Some(partition) = grammar.default_lexer_partition.as_deref() {
+        lexer_groups
+            .entry(partition)
+            .or_default()
+            .push("*".to_string());
+    }
+    for (partition, mut members) in lexer_groups {
+        members.sort_unstable();
         out.push_str(&format!(
             "lexer group {} ::= {};\n",
             partition,
-            terminals.join(", "),
+            members.join(", "),
         ));
     }
     out.push('\n');
@@ -379,6 +430,8 @@ enum Tok {
     Tilde,
     /// `*`
     Star,
+    /// `@`
+    At,
     /// `+`
     Plus,
     /// `?`
@@ -591,6 +644,7 @@ impl<'a> Lexer<'a> {
                         }
                         b'~' => tokens.push(Tok::Tilde),
                         b'*' => tokens.push(Tok::Star),
+                        b'@' => tokens.push(Tok::At),
                         b'+' => tokens.push(Tok::Plus),
                         b'?' => tokens.push(Tok::Quest),
                         b',' => tokens.push(Tok::Comma),
@@ -679,6 +733,9 @@ impl GlrmParser {
         let mut ignore: Option<String> = None;
         let mut rules: Vec<NamedRule> = Vec::new();
         let mut lexer_partitions = BTreeMap::<String, String>::new();
+        let mut lexer_literal_partitions = BTreeMap::<Vec<u8>, String>::new();
+        let mut default_lexer_partition = None::<String>;
+        let mut all_literals_partition = None::<String>;
 
         loop {
             match self.peek().clone() {
@@ -710,14 +767,62 @@ impl GlrmParser {
                         let partition = self.expect_ident()?;
                         self.consume(&Tok::DeclEq)?;
                         loop {
-                            let terminal = self.expect_ident()?;
-                            if lexer_partitions
-                                .insert(terminal.clone(), partition.clone())
-                                .is_some()
-                            {
-                                return Err(err(&format!(
-                                    "terminal '{terminal}' is assigned to more than one lexer group",
-                                )));
+                            match self.advance().clone() {
+                                Tok::Ident(terminal) => {
+                                    if lexer_partitions
+                                        .insert(terminal.clone(), partition.clone())
+                                        .is_some()
+                                    {
+                                        return Err(err(&format!(
+                                            "terminal '{terminal}' is assigned to more than one lexer group",
+                                        )));
+                                    }
+                                }
+                                Tok::StringLit(literal) => {
+                                    if lexer_literal_partitions
+                                        .insert(literal.clone(), partition.clone())
+                                        .is_some()
+                                    {
+                                        return Err(err(&format!(
+                                            "literal {:?} is assigned to more than one lexer group",
+                                            String::from_utf8_lossy(&literal),
+                                        )));
+                                    }
+                                }
+                                Tok::Star => {
+                                    if default_lexer_partition
+                                        .replace(partition.clone())
+                                        .is_some()
+                                    {
+                                        return Err(err(
+                                            "the catch-all '*' is assigned to more than one lexer group",
+                                        ));
+                                    }
+                                }
+                                Tok::At => match self.advance().clone() {
+                                    Tok::Ident(selector) if selector == "literals" => {
+                                        if all_literals_partition
+                                            .replace(partition.clone())
+                                            .is_some()
+                                        {
+                                            return Err(err(
+                                                "'@literals' is assigned to more than one lexer group",
+                                            ));
+                                        }
+                                    }
+                                    other => {
+                                        return Err(err(&format!(
+                                            "expected 'literals' after '@', got {:?}",
+                                            other,
+                                        )));
+                                    }
+                                },
+                                other => {
+                                    return Err(err(&format!(
+                                        "expected terminal name, literal, or '*', got {:?}",
+                                        other,
+                                    )));
+                                }
                             }
                             if matches!(self.peek(), Tok::Comma) {
                                 self.advance();
@@ -755,12 +860,23 @@ impl GlrmParser {
         }
 
         let start = start.ok_or_else(|| err("grammar has no 'start' declaration"))?;
-        Ok(NamedGrammar {
+        let mut grammar = NamedGrammar {
             rules,
             start,
             ignore,
             lexer_partitions,
-        })
+            lexer_literal_partitions,
+            default_lexer_partition,
+        };
+        if let Some(partition) = all_literals_partition {
+            for literal in grammar.emitted_anonymous_literals() {
+                grammar
+                    .lexer_literal_partitions
+                    .entry(literal)
+                    .or_insert_with(|| partition.clone());
+            }
+        }
+        Ok(grammar)
     }
 
     fn parse_rule(&mut self, is_terminal: bool, is_internal: bool) -> Result<NamedRule, GlrMaskError> {
@@ -1476,6 +1592,8 @@ accept 1;
             start: "start".to_string(),
             ignore: None,
             lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         let err = lower(&grammar).unwrap_err().to_string();
@@ -1516,6 +1634,117 @@ nt s ::= A | B | C;
     }
 
     #[test]
+    fn lexer_groups_accept_anonymous_literals_and_a_catch_all() {
+        let grammar = from_glrm(
+            r#"
+start s;
+lexer group punctuation ::= "{";
+lexer group literals ::= @literals;
+lexer group patterns ::= *;
+t WORD ::= /[a-z]+/;
+nt s ::= "{" WORD "}";
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            grammar
+                .lexer_literal_partitions
+                .get(b"{".as_slice())
+                .map(String::as_str),
+            Some("punctuation"),
+        );
+        assert_eq!(
+            grammar
+                .lexer_literal_partitions
+                .get(b"}".as_slice())
+                .map(String::as_str),
+            Some("literals"),
+        );
+        assert_eq!(grammar.default_lexer_partition.as_deref(), Some("patterns"));
+
+        let dumped = to_glrm(&grammar);
+        assert!(
+            dumped.contains("lexer group punctuation ::= \"{\";"),
+            "{dumped}",
+        );
+        assert!(
+            dumped.contains("lexer group literals ::= @literals;"),
+            "{dumped}",
+        );
+        assert!(dumped.contains("lexer group patterns ::= *;"), "{dumped}");
+        let reparsed = from_glrm(&dumped).unwrap();
+        assert_eq!(
+            reparsed.lexer_literal_partitions,
+            grammar.lexer_literal_partitions,
+        );
+        assert_eq!(
+            reparsed.default_lexer_partition,
+            grammar.default_lexer_partition,
+        );
+
+        let lowered = lower(&grammar).unwrap();
+        assert_eq!(lowered.lexer_partitions.len(), lowered.terminals.len());
+        let punctuation = lowered
+            .lexer_partitions
+            .values()
+            .filter(|partition| partition.as_str() == "punctuation")
+            .count();
+        let patterns = lowered
+            .lexer_partitions
+            .values()
+            .filter(|partition| partition.as_str() == "patterns")
+            .count();
+        assert_eq!(punctuation, 1);
+        assert_eq!(patterns, 1);
+        assert_eq!(
+            lowered
+                .lexer_partitions
+                .values()
+                .filter(|partition| partition.as_str() == "literals")
+                .count(),
+            1,
+        );
+    }
+
+    #[test]
+    fn lexer_group_assignments_follow_deduplicated_terminal_aliases() {
+        let grammar = from_glrm(
+            r#"
+start s;
+lexer group same ::= A, B;
+t A ::= "a";
+t B ::= "a";
+nt s ::= A | B;
+"#,
+        )
+        .unwrap();
+        let lowered = lower(&grammar).unwrap();
+        assert_eq!(lowered.terminals.len(), 1);
+        assert_eq!(lowered.lexer_partitions.len(), 1);
+        assert_eq!(
+            lowered.lexer_partitions.values().next().map(String::as_str),
+            Some("same"),
+        );
+    }
+
+    #[test]
+    fn conflicting_groups_for_deduplicated_terminal_aliases_are_rejected() {
+        let grammar = from_glrm(
+            r#"
+start s;
+lexer group left ::= A;
+lexer group right ::= B;
+t A ::= "a";
+t B ::= "a";
+nt s ::= A | B;
+"#,
+        )
+        .unwrap();
+        let error = lower(&grammar).unwrap_err().to_string();
+        assert!(error.contains("both lexer groups"), "{error}");
+    }
+
+    #[test]
     fn named_grammar_isolate_terminal_is_lowered_to_a_partition() {
         let mut grammar = from_glrm(
             r#"
@@ -1537,6 +1766,25 @@ nt s ::= A B;
         assert_eq!(
             lowered.lexer_partitions.get(&b_id).map(String::as_str),
             Some("__isolated_B"),
+        );
+    }
+
+    #[test]
+    fn named_grammar_isolate_terminal_avoids_existing_partition_name() {
+        let mut grammar = from_glrm(
+            r#"
+start s;
+t A ::= "a";
+t B ::= "b";
+nt s ::= A B;
+"#,
+        )
+        .unwrap();
+        grammar.set_lexer_partition("__isolated_B", ["A"]);
+        grammar.isolate_terminal("B");
+        assert_eq!(
+            grammar.lexer_partitions.get("B").map(String::as_str),
+            Some("__isolated_B_2"),
         );
     }
 

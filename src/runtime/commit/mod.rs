@@ -892,6 +892,9 @@ fn commit_bytes_fast_path(
     tokenizer_state: u32,
     exec_result: &TokenizerExecResult,
 ) -> Option<Result<(), String>> {
+    if constraint.tokenizer.has_epsilon_transitions() {
+        return None;
+    }
     let gss = state.values().next().unwrap();
     let ignore_terminal = constraint.ignore_terminal;
 
@@ -1034,6 +1037,9 @@ fn commit_bytes_full_width_fast_path(
     state: &mut BTreeMap<u32, ParserGSS>,
     bytes: &[u8],
 ) -> Option<Result<(), String>> {
+    if constraint.tokenizer.has_epsilon_transitions() {
+        return None;
+    }
     if state.len() > 2 {
         return None;
     }
@@ -1151,9 +1157,12 @@ fn commit_bytes_small_queue_fast_path(
     state: &mut BTreeMap<u32, ParserGSS>,
     bytes: &[u8],
 ) -> Option<Result<(), String>> {
-      if bytes.len() > 8 || state.len() > 2 {
-          return None;
-      }
+    if constraint.tokenizer.has_epsilon_transitions() {
+        return None;
+    }
+    if bytes.len() > 8 || state.len() > 2 {
+        return None;
+    }
 
       let mut processing_queue: Vec<SmallVec<[(u32, ParserGSS); 4]>> =
           (0..=bytes.len()).map(|_| SmallVec::new()).collect();
@@ -2040,7 +2049,7 @@ fn commit_bytes_impl_profiled(
 
     let ignore_terminal = constraint.ignore_terminal;
 
-    if allow_fast_paths && state.len() == 1 {
+    if allow_fast_paths && !constraint.tokenizer.has_epsilon_transitions() && state.len() == 1 {
         let (&tokenizer_state, parser_gss) = state.iter().next().unwrap();
         if parser_gss.single_exclusive_top_value().is_some() {
             let direct_start = Instant::now();
@@ -2945,7 +2954,7 @@ fn commit_bytes_impl(
 
     let ignore_terminal = constraint.ignore_terminal;
 
-    if state.len() == 1 {
+    if !constraint.tokenizer.has_epsilon_transitions() && state.len() == 1 {
         let (&tokenizer_state, _) = state.iter().next().unwrap();
         let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
         if let Some(result) = commit_bytes_fast_path(
@@ -2960,7 +2969,7 @@ fn commit_bytes_impl(
     }
 
     // Single tokenizer state: execute tokenizer ONCE, try fast path, reuse result
-    if state.len() == 1 {
+    if !constraint.tokenizer.has_epsilon_transitions() && state.len() == 1 {
         let (&tokenizer_state, parser_gss) = state.iter().next().unwrap();
         if parser_gss.single_exclusive_top_value().is_some() {
             if let Some(result) = commit_bytes_direct_linear_fast_path(
@@ -2998,7 +3007,7 @@ fn commit_bytes_impl(
         return result;
     }
 
-    if state.len() == 1 {
+    if !constraint.tokenizer.has_epsilon_transitions() && state.len() == 1 {
         let (&tokenizer_state, _) = state.iter().next().unwrap();
         let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
 
@@ -3428,5 +3437,92 @@ impl<'a> ConstraintState<'a> {
             self.commit_token(token)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Constraint, Vocab};
+
+    #[test]
+    fn epsilon_commit_fast_paths_match_no_fast_path_reference() {
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+                (2, b"c".to_vec()),
+                (3, b"aa".to_vec()),
+                (4, b"ab".to_vec()),
+                (5, b" ".to_vec()),
+                (6, b" a".to_vec()),
+                (7, b"a ".to_vec()),
+                (8, b" a ".to_vec()),
+                (9, b"abc".to_vec()),
+                (10, b"aab".to_vec()),
+            ],
+            None,
+        );
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                ignore WS;
+                t WS ::= " "+;
+                t A ::= "a"+;
+                t B ::= "b";
+                t C ::= "c";
+                nt item ::= A | B | C;
+                nt start ::= item item? item?;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        assert!(constraint.tokenizer.has_epsilon_transitions());
+
+        let mut frontier = vec![(constraint.start(), constraint.start(), Vec::<u32>::new())];
+        for depth in 0..=3 {
+            let mut next = Vec::new();
+            for (fast, slow, path) in frontier {
+                assert_eq!(
+                    fast.mask(),
+                    slow.mask(),
+                    "mask mismatch after path {path:?}",
+                );
+                assert_eq!(
+                    fast.is_finished(),
+                    slow.is_finished(),
+                    "completion mismatch after path {path:?}",
+                );
+                if depth == 3 {
+                    continue;
+                }
+
+                for (&token_id, bytes) in vocab.entries.iter() {
+                    let mut next_fast = fast.clone();
+                    let mut next_slow = slow.clone();
+                    let fast_result = next_fast.commit_token(token_id);
+                    let slow_result = commit_bytes_impl_profiled(
+                        &constraint,
+                        &mut next_slow.state,
+                        bytes,
+                        &mut next_slow.buffers,
+                        None,
+                        false,
+                    );
+                    next_slow.generation += 1;
+                    assert_eq!(
+                        fast_result.is_ok(),
+                        slow_result.is_ok(),
+                        "commit result mismatch for token {token_id} after path {path:?}",
+                    );
+                    if fast_result.is_ok() {
+                        let mut next_path = path.clone();
+                        next_path.push(token_id);
+                        next.push((next_fast, next_slow, next_path));
+                    }
+                }
+            }
+            frontier = next;
+        }
     }
 }
