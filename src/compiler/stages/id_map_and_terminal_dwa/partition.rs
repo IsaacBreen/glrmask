@@ -54,12 +54,14 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     token_path_disallowed_follows: &Arc<BTreeMap<u32, BitSet>>,
+    normalized_token_path_disallowed_follows: &Arc<[BitSet]>,
     flat_trans: &Arc<[u32]>,
     initial_state_map: Option<&ManyToOneIdMap>,
     shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_original_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_original_vocab_analysis_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_transition_cache: Option<&std::sync::OnceLock<super::l2p::equivalence_analysis::compat::FlatTransitionCache>>,
+    shared_ti_output_cache: Option<&super::l2p::SharedTiTokenizerOutputCache>,
     shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
@@ -194,10 +196,13 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                         grammar,
                         &l2p_mask,
                         disallowed_follows,
+                        Some(token_path_disallowed_follows.as_ref()),
+                        Some(normalized_token_path_disallowed_follows.as_ref()),
                         shared_vocab_dfa_cache,
                         shared_original_vocab_dfa_cache,
                         shared_original_vocab_analysis_dfa_cache,
                         shared_transition_cache,
+                        shared_ti_output_cache,
                         // All L2P work keeps raw lexer-state coordinates; equivalence
                         // analysis verifies flat-table compatibility before using it.
                         Some(flat_trans),
@@ -231,6 +236,23 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                         } else {
                             let started_at = Instant::now();
                             let boundary_vocab = split.boundary_vocab(vocab);
+                            if std::env::var_os("GLRMASK_DUMP_L2P_BOUNDARY_VOCAB").is_some()
+                                && matches!(partition_label, "p7" | "p8")
+                            {
+                                eprintln!(
+                                    "[glrmask/dump][l2p_boundary_vocab] partition={} count={}",
+                                    partition_label,
+                                    boundary_vocab.entries.len(),
+                                );
+                                for (&token_id, bytes) in boundary_vocab.entries.iter() {
+                                    eprintln!(
+                                        "[glrmask/dump][l2p_boundary_vocab] partition={} token_id={} bytes={:?}",
+                                        partition_label,
+                                        token_id,
+                                        bytes,
+                                    );
+                                }
+                            }
                             let result = super::l2p::build_l2p_id_map_and_terminal_dwa(
                                 partition_label,
                                 tokenizer,
@@ -241,10 +263,13 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                 grammar,
                                 &l2p_mask,
                                 disallowed_follows,
+                                Some(token_path_disallowed_follows.as_ref()),
+                                Some(normalized_token_path_disallowed_follows.as_ref()),
                                 shared_vocab_dfa_cache,
                                 shared_original_vocab_dfa_cache,
                                 shared_original_vocab_analysis_dfa_cache,
                                 shared_transition_cache,
+                                shared_ti_output_cache,
                                         // All L2P work keeps raw lexer-state coordinates; equivalence
                                 // analysis verifies flat-table compatibility before using it.
                                 Some(flat_trans),

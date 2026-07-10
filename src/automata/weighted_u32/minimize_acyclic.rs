@@ -1649,34 +1649,100 @@ fn build_pointwise_profile(
         .iter()
         .map(|(label, weight)| Some((*label, profile_target_for_label(profile, *label)?, weight)))
         .collect::<Option<_>>()?;
+
+    // The domain is fragmented into many small compact windows. Collect each
+    // source's full sorted TSID range list ONCE up front; re-scanning every
+    // transition's complete range list per window would be O(windows * ranges).
+    // Monotone cursors below then advance forward as windows advance, making the
+    // per-window range gathering O(ranges + overlaps) overall.
+    let final_full: Vec<(u32, u32, &RangeSetBlaze<u32>)> = profile
+        .final_weight
+        .as_ref()
+        .map(|fw| {
+            fw.0.range_values()
+                .map(|(r, tokens)| (*r.start(), *r.end(), tokens.as_ref()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let transition_full: Vec<Vec<(u32, u32, &RangeSetBlaze<u32>)>> = transitions
+        .iter()
+        .map(|(_, _, weight)| {
+            weight
+                .0
+                .range_values()
+                .map(|(r, tokens)| (*r.start(), *r.end(), tokens.as_ref()))
+                .collect()
+        })
+        .collect();
+
     let mut by_tsid = Vec::new();
+    let mut final_scan = 0usize;
+    let mut transition_scan = vec![0usize; transitions.len()];
     for (domain_start, domain_end, domain_tokens) in domain.compact_entries()? {
+        // Build the TSID boundaries and, in the same pass, collect each source's
+        // token-set ranges clipped to the domain window. The clipped range lists
+        // let a coordinated sweep read the active token set per interval with a
+        // monotone cursor instead of a binary-search `get` per interval per
+        // transition, which is the dominant color-step cost.
         let mut boundaries = vec![u64::from(domain_start), u64::from(domain_end) + 1];
-        if let Some(final_weight) = &profile.final_weight {
-            for (tsid_range, _) in final_weight.0.range_values() {
-                add_tsid_boundary_if_overlapping(
-                    &mut boundaries,
-                    domain_start,
-                    domain_end,
-                    *tsid_range.start(),
-                    *tsid_range.end(),
-                );
-            }
+        let mut final_ranges: Vec<(u32, u32, &RangeSetBlaze<u32>)> = Vec::new();
+        // Advance the monotone scan cursor past ranges ending before this window;
+        // windows are visited left to right so earlier ranges are never revisited.
+        while final_scan < final_full.len() && final_full[final_scan].1 < domain_start {
+            final_scan += 1;
         }
-        for (_, _, weight) in &transitions {
-            for (tsid_range, _) in weight.0.range_values() {
-                add_tsid_boundary_if_overlapping(
-                    &mut boundaries,
-                    domain_start,
-                    domain_end,
-                    *tsid_range.start(),
-                    *tsid_range.end(),
-                );
+        let mut peek = final_scan;
+        while peek < final_full.len() && final_full[peek].0 <= domain_end {
+            let (range_start, range_end, tokens) = final_full[peek];
+            let start = domain_start.max(range_start);
+            let end = domain_end.min(range_end);
+            if start <= end {
+                boundaries.push(u64::from(start));
+                boundaries.push(u64::from(end) + 1);
+                final_ranges.push((start, end, tokens));
             }
+            peek += 1;
+        }
+        let mut transition_ranges: Vec<Vec<(u32, u32, &RangeSetBlaze<u32>)>> =
+            Vec::with_capacity(transitions.len());
+        for (index, full) in transition_full.iter().enumerate() {
+            let cursor = &mut transition_scan[index];
+            while *cursor < full.len() && full[*cursor].1 < domain_start {
+                *cursor += 1;
+            }
+            let mut clipped: Vec<(u32, u32, &RangeSetBlaze<u32>)> = Vec::new();
+            let mut peek = *cursor;
+            while peek < full.len() && full[peek].0 <= domain_end {
+                let (range_start, range_end, tokens) = full[peek];
+                let start = domain_start.max(range_start);
+                let end = domain_end.min(range_end);
+                if start <= end {
+                    boundaries.push(u64::from(start));
+                    boundaries.push(u64::from(end) + 1);
+                    clipped.push((start, end, tokens));
+                }
+                peek += 1;
+            }
+            transition_ranges.push(clipped);
         }
         boundaries.sort_unstable();
         boundaries.dedup();
 
+        // Only transitions with at least one clipped range in this window can
+        // ever be active in an interval; skipping the empties keeps the sweep
+        // inner loop proportional to the live transitions rather than the full
+        // transition count. Indices stay ascending so push order is unchanged.
+        let active_indices: Vec<usize> = transition_ranges
+            .iter()
+            .enumerate()
+            .filter(|(_, ranges)| !ranges.is_empty())
+            .map(|(index, _)| index)
+            .collect();
+
+        // Monotone cursors: TSID intervals are visited left to right, and every
+        // clipped range list is sorted, so each cursor only advances forward.
+        let mut final_cursor = 0usize;
+        let mut transition_cursors = vec![0usize; transitions.len()];
         for pair in boundaries.windows(2) {
             let start64 = pair[0];
             let next = pair[1];
@@ -1685,15 +1751,25 @@ fn build_pointwise_profile(
             }
             let tsid_start = start64 as u32;
             let tsid_end = (next - 1) as u32;
-            let final_tokens = profile
-                .final_weight
-                .as_ref()
-                .and_then(|weight| weight.0.get(tsid_start))
-                .map(|tokens| tokens.as_ref());
+            while final_cursor < final_ranges.len() && final_ranges[final_cursor].1 < tsid_start {
+                final_cursor += 1;
+            }
+            let final_tokens = final_ranges
+                .get(final_cursor)
+                .filter(|(start, _, _)| *start <= tsid_start)
+                .map(|(_, _, tokens)| *tokens);
             let mut active_transitions = Vec::new();
-            for (label, target, weight) in &transitions {
-                if let Some(tokens) = weight.0.get(tsid_start) {
-                    active_transitions.push((*label, *target, tokens.as_ref()));
+            for &index in &active_indices {
+                let (label, target, _) = &transitions[index];
+                let ranges = &transition_ranges[index];
+                let cursor = &mut transition_cursors[index];
+                while *cursor < ranges.len() && ranges[*cursor].1 < tsid_start {
+                    *cursor += 1;
+                }
+                if let Some((start, _, tokens)) = ranges.get(*cursor) {
+                    if *start <= tsid_start {
+                        active_transitions.push((*label, *target, *tokens));
+                    }
                 }
             }
             let region = build_token_behavior_region(

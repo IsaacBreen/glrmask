@@ -14,19 +14,24 @@
 //! sides.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque, hash_map::Entry};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Instant;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rayon::prelude::*;
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::SmallVec;
 use super::nwa_builder::{TerminalNwaTransportMode, TransportScannerStateMap};
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
 use crate::automata::weighted::dwa::{DWAState, DWA};
 use crate::compiler::stages::equiv_types::{GlobalScannerStateQuotient, ManyToOneIdMap};
+use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::state_equivalence::global_token_position::GlobalTokenPositionStatePartition;
 use crate::ds::weight::{SharedTokenSet, Weight, shared_rangeset};
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
+use crate::Vocab;
 
 const CHARACTERIZATION_DOMAIN: &[u8] =
     b"glrmask terminal interchangeability characterize v1\0";
@@ -73,6 +78,12 @@ impl OutputBits {
         self.0.binary_search(&(terminal as TerminalID)).is_ok()
     }
 
+    /// True iff swapping `left` and `right` changes this set, i.e. exactly one
+    /// of them is present. When false, `mapped` would return an identical set.
+    fn swap_changes(&self, left: TerminalID, right: TerminalID) -> bool {
+        self.0.binary_search(&left).is_ok() != self.0.binary_search(&right).is_ok()
+    }
+
     fn mapped(&self, swap: Option<(usize, usize)>) -> Self {
         let Some((left, right)) = swap else { return self.clone(); };
         if left == right { return self.clone(); }
@@ -110,6 +121,19 @@ impl OutputBits {
 struct OutputPair {
     finalizers: OutputBits,
     future_finalizers: OutputBits,
+}
+
+#[derive(Clone, Copy, Default)]
+struct GenericOutputTrackStats {
+    group_count: u32,
+    outside_count: u32,
+    outside_hash: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct GenericOutputPairStats {
+    finalizers: GenericOutputTrackStats,
+    future_finalizers: GenericOutputTrackStats,
 }
 
 /// One exact component of the sparse characterization tuple. The output id
@@ -165,7 +189,38 @@ struct SupportQuotient {
     class_for_state: Arc<[u32]>,
     representative_by_class: Arc<[u32]>,
     reverse_predecessors: Vec<Vec<u32>>,
+    // Deviation-independent scanner projection for this quotient, precomputed
+    // once. Every accepted support-transposition map shares these two Arcs and
+    // only attaches its own per-pair deviations, so building an accepted map is
+    // O(deviations) instead of the O(raw_state_count) projection rebuild that
+    // `scanner_map_from_internal_quotient` performs from scratch.
+    scanner_state_count: usize,
+    scanner_class_for_original: Arc<[u32]>,
+    scanner_representative_for_class: Arc<[u32]>,
 }
+
+/// Exact stable support partition retained across iterative TI rounds. Removing
+/// active terminals only projects labels away, so the next round's stable
+/// partition can only coarsen this one. The active mask guards against using the
+/// seed outside that monotone discovery sequence.
+#[derive(Clone)]
+struct SupportPartitionSeed {
+    active_terminals: Arc<[bool]>,
+    class_for_state: Arc<[u32]>,
+    representative_by_class: Arc<[u32]>,
+}
+
+/// Exact round-local active output alphabet retained for projection into the
+/// next monotone active mask. Output-pair projection commutes with removing
+/// inactive terminal labels, so remapping distinct pairs is enough; raw states
+/// only replay their previous compact pair id.
+#[derive(Clone)]
+struct OutputProjectionSeed {
+    active_terminals: Arc<[bool]>,
+    output_pairs: Arc<[OutputPair]>,
+    output_pair_by_state: Arc<[u32]>,
+}
+
 
 /// Per-swap output-label relabelling. The immutable base ids represent the
 /// original frozen output pairs; ids allocated after `base_count` are local to
@@ -240,12 +295,22 @@ impl<'a> SparseSwappedOutputIds<'a> {
         left: usize,
         right: usize,
     ) -> Self {
+        Self::with_mapped(base_pairs, base_lookup, left, right, SmallVec::new())
+    }
+
+    fn with_mapped(
+        base_pairs: &'a [OutputPair],
+        base_lookup: &'a FxHashMap<OutputPair, u32>,
+        left: usize,
+        right: usize,
+        mapped: SmallVec<[(u32, u32); 16]>,
+    ) -> Self {
         Self {
             base_pairs,
             base_lookup,
             left,
             right,
-            mapped: SmallVec::new(),
+            mapped,
             local: SmallVec::new(),
         }
     }
@@ -254,11 +319,18 @@ impl<'a> SparseSwappedOutputIds<'a> {
         if let Some((_, id)) = self.mapped.iter().find(|&&(seen, _)| seen == output) {
             return *id;
         }
+        let pair = &self.base_pairs[output as usize];
+        let left = self.left as TerminalID;
+        let right = self.right as TerminalID;
+        if !pair.finalizers.swap_changes(left, right)
+            && !pair.future_finalizers.swap_changes(left, right)
+        {
+            self.mapped.push((output, output));
+            return output;
+        }
         let mapped = OutputPair {
-            finalizers: self.base_pairs[output as usize]
-                .finalizers
-                .mapped(Some((self.left, self.right))),
-            future_finalizers: self.base_pairs[output as usize]
+            finalizers: pair.finalizers.mapped(Some((self.left, self.right))),
+            future_finalizers: pair
                 .future_finalizers
                 .mapped(Some((self.left, self.right))),
         };
@@ -286,6 +358,8 @@ struct RestrictedTopology {
     bytes: Vec<u8>,
     edge_offsets: Vec<u32>,
     edges: Vec<(u8, u32)>,
+    reverse_predecessors: Arc<[Vec<u32>]>,
+    observed_destinations: Arc<[bool]>,
     /// Number of raw tokenizer states. Transport witnesses must retain this
     /// external scanner coordinate even when discovery runs on a quotient.
     raw_state_count: usize,
@@ -362,38 +436,6 @@ impl RestrictedTopology {
                         );
                     }
 
-                    // A supplied map is safe for TI only when it preserves the
-                    // exact frozen F/U labels and the selected-byte transition
-                    // quotient. This also makes the later compact-state
-                    // characterization an exact re-indexing of the raw one.
-                    for raw_state in 0..raw_state_count {
-                        let class = map.original_to_internal[raw_state] as usize;
-                        let representative = map.representative_original_ids[class] as usize;
-                        assert_eq!(
-                            tokenizer.matched_terminal_bitset(raw_state as u32),
-                            tokenizer.matched_terminal_bitset(representative as u32),
-                            "global scanner-state quotient changed frozen finalizers for raw tokenizer state {raw_state}",
-                        );
-                        assert_eq!(
-                            tokenizer.possible_future_terminals(raw_state as u32),
-                            tokenizer.possible_future_terminals(representative as u32),
-                            "global scanner-state quotient changed frozen future finalizers for raw tokenizer state {raw_state}",
-                        );
-                        for &byte in &bytes {
-                            let raw_target = tokenizer.step(raw_state as u32, byte).map(|target| {
-                                map.original_to_internal[target as usize]
-                            });
-                            let representative_target = tokenizer
-                                .step(representative as u32, byte)
-                                .map(|target| map.original_to_internal[target as usize]);
-                            assert_eq!(
-                                raw_target,
-                                representative_target,
-                                "global scanner-state quotient is not a selected-byte right congruence for raw tokenizer state {raw_state} and byte {byte}",
-                            );
-                        }
-                    }
-
                     (
                         Some(Arc::from(map.original_to_internal.clone())),
                         Some(Arc::from(map.representative_original_ids.clone())),
@@ -406,6 +448,8 @@ impl RestrictedTopology {
             .map_or(raw_state_count, |representatives| representatives.len());
         let mut edge_offsets = Vec::with_capacity(real_state_count + 2);
         let mut edges = Vec::new();
+        let mut reverse_predecessors = vec![Vec::<u32>::new(); real_state_count];
+        let mut observed_destinations = vec![false; real_state_count + 1];
         let mut max_outdegree = 0usize;
         edge_offsets.push(0);
         for state in 0..real_state_count {
@@ -419,6 +463,8 @@ impl RestrictedTopology {
                         .as_ref()
                         .map_or(target, |classes| classes[target as usize]);
                     edges.push((byte, target));
+                    reverse_predecessors[target as usize].push(state as u32);
+                    observed_destinations[target as usize] = true;
                 }
             }
             max_outdegree = max_outdegree.max(edges.len() - start);
@@ -435,6 +481,8 @@ impl RestrictedTopology {
             bytes,
             edge_offsets,
             edges,
+            reverse_predecessors: reverse_predecessors.into(),
+            observed_destinations: observed_destinations.into(),
             raw_state_count,
             raw_representative_by_state,
             state_for_raw,
@@ -469,12 +517,12 @@ impl RestrictedTopology {
             .unwrap_or_else(|| self.dead_state())
     }
 
-    fn observed_destinations(&self) -> Vec<bool> {
-        let mut observed = vec![false; self.state_count()];
-        for &(_, destination) in &self.edges {
-            observed[destination as usize] = true;
-        }
-        observed
+    fn observed_destinations(&self) -> Arc<[bool]> {
+        Arc::clone(&self.observed_destinations)
+    }
+
+    fn reverse_predecessors(&self) -> Arc<[Vec<u32>]> {
+        Arc::clone(&self.reverse_predecessors)
     }
 
     #[inline]
@@ -506,19 +554,18 @@ impl RestrictedTopology {
         TransportScannerStateMap::Explicit(raw_targets.into())
     }
 
-    fn scanner_map_from_internal_quotient(
+    /// Deviation-independent part of `scanner_map_from_internal_quotient`:
+    /// projects the internal quotient onto raw scanner states. The result
+    /// depends only on the quotient (not on any per-pair deviations), so callers
+    /// that certify many pairs against one quotient can compute it once and
+    /// share the two Arcs.
+    fn scanner_projection_from_internal_quotient(
         &self,
         class_for_state: Arc<[u32]>,
         representative_for_class: Arc<[u32]>,
-        source_class_for_target_deviations: Box<[(u32, u32)]>,
-    ) -> TransportScannerStateMap {
+    ) -> (usize, Arc<[u32]>, Arc<[u32]>) {
         if self.state_for_raw.is_none() {
-            return TransportScannerStateMap::Quotient {
-                state_count: self.real_state_count,
-                class_for_original: class_for_state,
-                representative_for_class,
-                source_class_for_target_deviations,
-            };
+            return (self.real_state_count, class_for_state, representative_for_class);
         }
         let state_for_raw = self
             .state_for_raw
@@ -528,14 +575,15 @@ impl RestrictedTopology {
             .raw_representative_by_state
             .as_ref()
             .expect("quotient topology must retain raw representatives");
-        let class_for_original = (0..self.raw_state_count)
+        let class_for_original: Arc<[u32]> = (0..self.raw_state_count)
             .map(|raw_state| class_for_state[state_for_raw[raw_state] as usize])
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+            .into();
         let unused_dead_representative = raw_representative_by_state
             .first()
             .copied()
             .unwrap_or(0);
-        let raw_representative_for_class = representative_for_class
+        let raw_representative_for_class: Arc<[u32]> = representative_for_class
             .iter()
             .map(|&state| {
                 raw_representative_by_state
@@ -546,11 +594,27 @@ impl RestrictedTopology {
                     // public transport-map shape still needs one in-range ID.
                     .unwrap_or(unused_dead_representative)
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+            .into();
+        (
+            self.raw_state_count,
+            class_for_original,
+            raw_representative_for_class,
+        )
+    }
+
+    fn scanner_map_from_internal_quotient(
+        &self,
+        class_for_state: Arc<[u32]>,
+        representative_for_class: Arc<[u32]>,
+        source_class_for_target_deviations: Box<[(u32, u32)]>,
+    ) -> TransportScannerStateMap {
+        let (state_count, class_for_original, representative_for_class) =
+            self.scanner_projection_from_internal_quotient(class_for_state, representative_for_class);
         TransportScannerStateMap::Quotient {
-            state_count: self.raw_state_count,
-            class_for_original: class_for_original.into(),
-            representative_for_class: raw_representative_for_class.into(),
+            state_count,
+            class_for_original,
+            representative_for_class,
             source_class_for_target_deviations,
         }
     }
@@ -566,63 +630,326 @@ struct RootOutputSignature {
     future_finalizer_states: Box<[u32]>,
 }
 
-/// Immutable raw lexer evidence that is independent of a historical TI round's
-/// active-terminal mask.  The projected `OutputBits` remain round-local, but
-/// their source columns and the reverse restricted topology are reusable.
-struct TiRawDiscoveryData {
-    finalizer_terminals_by_state: Vec<Box<[TerminalID]>>,
-    future_finalizer_terminals_by_state: Vec<Box<[TerminalID]>>,
-    finalizer_states_by_terminal: Arc<[Vec<u32>]>,
-    future_finalizer_states_by_terminal: Arc<[Vec<u32>]>,
-    reverse_predecessors: Arc<[Vec<u32>]>,
-    observed_destinations: Arc<[bool]>,
+/// Tokenizer output columns independent of vocabulary partition and enabled
+/// bytes. Every L2P partition uses the same frozen lexer metadata, so build
+/// these raw-state indexes once and share them across partition contexts.
+struct TiTokenizerOutputData {
+    finalizer_terminals_by_raw_state: Arc<[Box<[TerminalID]>]>,
+    future_finalizer_terminals_by_raw_state: Arc<[Box<[TerminalID]>]>,
+    finalizer_raw_states_by_terminal: Arc<[Vec<u32>]>,
+    future_finalizer_raw_states_by_terminal: Arc<[Vec<u32>]>,
+    full_output_projection: OnceLock<(Arc<[OutputPair]>, Arc<[u32]>)>,
 }
 
-impl TiRawDiscoveryData {
-    fn new(tokenizer: &Tokenizer, topology: &RestrictedTopology) -> Self {
-        let terminal_count = tokenizer.num_terminals() as usize;
-        let mut finalizer_terminals_by_state = Vec::with_capacity(topology.real_state_count);
-        let mut future_finalizer_terminals_by_state =
-            Vec::with_capacity(topology.real_state_count);
-        let mut finalizer_states_by_terminal = vec![Vec::<u32>::new(); terminal_count];
-        let mut future_finalizer_states_by_terminal = vec![Vec::<u32>::new(); terminal_count];
+impl TiTokenizerOutputData {
+    fn full_output_pair_hash(
+        finalizers: &[TerminalID],
+        future_finalizers: &[TerminalID],
+    ) -> u64 {
+        let mut hasher = FxHasher::default();
+        finalizers.hash(&mut hasher);
+        future_finalizers.hash(&mut hasher);
+        hasher.finish()
+    }
 
-        for state in 0..topology.real_state_count {
-            let raw_state = topology.raw_state_for_state(state);
+    fn full_output_projection(&self) -> (Arc<[OutputPair]>, Arc<[u32]>) {
+        let (pairs, by_state) = self.full_output_projection.get_or_init(|| {
+            let empty = OutputPair {
+                finalizers: OutputBits::new(0),
+                future_finalizers: OutputBits::new(0),
+            };
+            let mut pairs = vec![empty];
+            let mut buckets = FxHashMap::<u64, SmallVec<[u32; 1]>>::default();
+            buckets
+                .entry(Self::full_output_pair_hash(&[], &[]))
+                .or_default()
+                .push(0);
+            let mut by_state = Vec::with_capacity(self.finalizer_terminals_by_raw_state.len());
+            for (finalizers, future_finalizers) in self
+                .finalizer_terminals_by_raw_state
+                .iter()
+                .zip(self.future_finalizer_terminals_by_raw_state.iter())
+            {
+                let hash = Self::full_output_pair_hash(finalizers, future_finalizers);
+                let existing = buckets.get(&hash).and_then(|candidates| {
+                    candidates.iter().copied().find(|&id| {
+                        let pair = &pairs[id as usize];
+                        pair.finalizers.0.as_slice() == finalizers.as_ref()
+                            && pair.future_finalizers.0.as_slice()
+                                == future_finalizers.as_ref()
+                    })
+                });
+                let id = existing.unwrap_or_else(|| {
+                    let id = pairs.len() as u32;
+                    pairs.push(OutputPair {
+                        finalizers: OutputBits(finalizers.iter().copied().collect()),
+                        future_finalizers: OutputBits(
+                            future_finalizers.iter().copied().collect(),
+                        ),
+                    });
+                    buckets.entry(hash).or_default().push(id);
+                    id
+                });
+                by_state.push(id);
+            }
+            (Arc::from(pairs), Arc::from(by_state))
+        });
+        (Arc::clone(pairs), Arc::clone(by_state))
+    }
+
+    fn new(tokenizer: &Tokenizer) -> Self {
+        let state_count = tokenizer.num_states() as usize;
+        let terminal_count = tokenizer.num_terminals() as usize;
+        let parallel_output_min_states = std::env::var(
+            "GLRMASK_TI_PARALLEL_OUTPUT_INDEX_MIN_STATES",
+        )
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(4096);
+        if state_count >= parallel_output_min_states {
+            if let Some(pool) = ti_certification_pool() {
+                let chunk_count = pool.current_num_threads().min(state_count).max(1);
+                let build_chunks = || {
+                    (0..chunk_count)
+                        .into_par_iter()
+                        .map(|chunk| {
+                            let start = state_count * chunk / chunk_count;
+                            let end = state_count * (chunk + 1) / chunk_count;
+                            let mut finalizer_rows = Vec::with_capacity(end - start);
+                            let mut future_rows = Vec::with_capacity(end - start);
+                            let mut finalizer_states =
+                                vec![Vec::<u32>::new(); terminal_count];
+                            let mut future_states = vec![Vec::<u32>::new(); terminal_count];
+                            for raw_state in start as u32..end as u32 {
+                                let finalizers = tokenizer
+                                    .matched_terminals_iter(raw_state)
+                                    .collect::<Vec<_>>();
+                                for &terminal in &finalizers {
+                                    finalizer_states[terminal as usize].push(raw_state);
+                                }
+                                finalizer_rows.push(finalizers.into_boxed_slice());
+
+                                let future_finalizers = tokenizer
+                                    .possible_future_terminals_iter(raw_state)
+                                    .collect::<Vec<_>>();
+                                for &terminal in &future_finalizers {
+                                    future_states[terminal as usize].push(raw_state);
+                                }
+                                future_rows.push(future_finalizers.into_boxed_slice());
+                            }
+                            (
+                                finalizer_rows,
+                                future_rows,
+                                finalizer_states,
+                                future_states,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let chunks = if pool.current_thread_index().is_some() {
+                    build_chunks()
+                } else {
+                    pool.install(build_chunks)
+                };
+                let merge_terminal_columns = || {
+                    rayon::join(
+                        || {
+                            (0..terminal_count)
+                                .into_par_iter()
+                                .map(|terminal| {
+                                    let len = chunks
+                                        .iter()
+                                        .map(|chunk| chunk.2[terminal].len())
+                                        .sum();
+                                    let mut states = Vec::with_capacity(len);
+                                    for chunk in &chunks {
+                                        states.extend_from_slice(&chunk.2[terminal]);
+                                    }
+                                    states
+                                })
+                                .collect::<Vec<_>>()
+                        },
+                        || {
+                            (0..terminal_count)
+                                .into_par_iter()
+                                .map(|terminal| {
+                                    let len = chunks
+                                        .iter()
+                                        .map(|chunk| chunk.3[terminal].len())
+                                        .sum();
+                                    let mut states = Vec::with_capacity(len);
+                                    for chunk in &chunks {
+                                        states.extend_from_slice(&chunk.3[terminal]);
+                                    }
+                                    states
+                                })
+                                .collect::<Vec<_>>()
+                        },
+                    )
+                };
+                let (finalizer_raw_states_by_terminal, future_finalizer_raw_states_by_terminal) =
+                    if pool.current_thread_index().is_some() {
+                        merge_terminal_columns()
+                    } else {
+                        pool.install(merge_terminal_columns)
+                    };
+                let mut finalizer_terminals_by_raw_state = Vec::with_capacity(state_count);
+                let mut future_finalizer_terminals_by_raw_state =
+                    Vec::with_capacity(state_count);
+                for (finalizer_rows, future_rows, _, _) in chunks {
+                    finalizer_terminals_by_raw_state.extend(finalizer_rows);
+                    future_finalizer_terminals_by_raw_state.extend(future_rows);
+                }
+                return Self {
+                    finalizer_terminals_by_raw_state: finalizer_terminals_by_raw_state.into(),
+                    future_finalizer_terminals_by_raw_state:
+                        future_finalizer_terminals_by_raw_state.into(),
+                    finalizer_raw_states_by_terminal: finalizer_raw_states_by_terminal.into(),
+                    future_finalizer_raw_states_by_terminal:
+                        future_finalizer_raw_states_by_terminal.into(),
+                    full_output_projection: OnceLock::new(),
+                };
+            }
+        }
+        let mut finalizer_terminals_by_raw_state = Vec::with_capacity(state_count);
+        let mut future_finalizer_terminals_by_raw_state = Vec::with_capacity(state_count);
+        let mut finalizer_raw_states_by_terminal = vec![Vec::<u32>::new(); terminal_count];
+        let mut future_finalizer_raw_states_by_terminal = vec![Vec::<u32>::new(); terminal_count];
+        for raw_state in 0..state_count as u32 {
             let finalizers = tokenizer
                 .matched_terminals_iter(raw_state)
                 .collect::<Vec<_>>();
             for &terminal in &finalizers {
-                finalizer_states_by_terminal[terminal as usize].push(state as u32);
+                finalizer_raw_states_by_terminal[terminal as usize].push(raw_state);
             }
-            finalizer_terminals_by_state.push(finalizers.into_boxed_slice());
+            finalizer_terminals_by_raw_state.push(finalizers.into_boxed_slice());
 
             let future_finalizers = tokenizer
                 .possible_future_terminals_iter(raw_state)
                 .collect::<Vec<_>>();
             for &terminal in &future_finalizers {
-                future_finalizer_states_by_terminal[terminal as usize].push(state as u32);
+                future_finalizer_raw_states_by_terminal[terminal as usize].push(raw_state);
             }
-            future_finalizer_terminals_by_state.push(future_finalizers.into_boxed_slice());
+            future_finalizer_terminals_by_raw_state.push(future_finalizers.into_boxed_slice());
         }
+        Self {
+            finalizer_terminals_by_raw_state: finalizer_terminals_by_raw_state.into(),
+            future_finalizer_terminals_by_raw_state: future_finalizer_terminals_by_raw_state.into(),
+            finalizer_raw_states_by_terminal: finalizer_raw_states_by_terminal.into(),
+            future_finalizer_raw_states_by_terminal: future_finalizer_raw_states_by_terminal.into(),
+            full_output_projection: OnceLock::new(),
+        }
+    }
+}
 
-        let mut reverse_predecessors = vec![Vec::<u32>::new(); topology.real_state_count];
-        for source in 0..topology.real_state_count {
-            for &(_, destination) in topology.edges_from(source) {
-                reverse_predecessors[destination as usize].push(source as u32);
+/// Thread-safe compile-local cache shared by all vocabulary partitions.
+#[derive(Default)]
+pub(crate) struct SharedTiTokenizerOutputCache {
+    data: OnceLock<Arc<TiTokenizerOutputData>>,
+}
+
+impl SharedTiTokenizerOutputCache {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn get(&self, tokenizer: &Tokenizer) -> Arc<TiTokenizerOutputData> {
+        Arc::clone(
+            self.data
+                .get_or_init(|| Arc::new(TiTokenizerOutputData::new(tokenizer))),
+        )
+    }
+}
+
+/// Immutable raw lexer evidence that is independent of a historical TI round's
+/// active-terminal mask.  The projected `OutputBits` remain round-local, but
+/// their source columns and the reverse restricted topology are reusable.
+struct TiRawDiscoveryData {
+    finalizer_terminals_by_state: Arc<[Box<[TerminalID]>]>,
+    future_finalizer_terminals_by_state: Arc<[Box<[TerminalID]>]>,
+    finalizer_states_by_terminal: Arc<[Vec<u32>]>,
+    future_finalizer_states_by_terminal: Arc<[Vec<u32>]>,
+    reverse_predecessors: Arc<[Vec<u32>]>,
+    observed_destinations: Arc<[bool]>,
+    full_output_projection_seed: OutputProjectionSeed,
+}
+
+impl TiRawDiscoveryData {
+    fn new(
+        tokenizer: &Tokenizer,
+        topology: &RestrictedTopology,
+        shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+    ) -> Self {
+        let outputs = shared_output_cache
+            .map(|cache| cache.get(tokenizer))
+            .unwrap_or_else(|| Arc::new(TiTokenizerOutputData::new(tokenizer)));
+
+        let (
+            finalizer_terminals_by_state,
+            future_finalizer_terminals_by_state,
+            finalizer_states_by_terminal,
+            future_finalizer_states_by_terminal,
+        ) = if topology.raw_representative_by_state.is_none() {
+            (
+                Arc::clone(&outputs.finalizer_terminals_by_raw_state),
+                Arc::clone(&outputs.future_finalizer_terminals_by_raw_state),
+                Arc::clone(&outputs.finalizer_raw_states_by_terminal),
+                Arc::clone(&outputs.future_finalizer_raw_states_by_terminal),
+            )
+        } else {
+            let terminal_count = tokenizer.num_terminals() as usize;
+            let mut finalizers_by_state = Vec::with_capacity(topology.real_state_count);
+            let mut future_by_state = Vec::with_capacity(topology.real_state_count);
+            let mut finalizer_states = vec![Vec::<u32>::new(); terminal_count];
+            let mut future_states = vec![Vec::<u32>::new(); terminal_count];
+            for state in 0..topology.real_state_count {
+                let raw_state = topology.raw_state_for_state(state) as usize;
+                let finalizers = outputs.finalizer_terminals_by_raw_state[raw_state].clone();
+                for &terminal in finalizers.iter() {
+                    finalizer_states[terminal as usize].push(state as u32);
+                }
+                finalizers_by_state.push(finalizers);
+                let future = outputs.future_finalizer_terminals_by_raw_state[raw_state].clone();
+                for &terminal in future.iter() {
+                    future_states[terminal as usize].push(state as u32);
+                }
+                future_by_state.push(future);
             }
+            (
+                Arc::from(finalizers_by_state),
+                Arc::from(future_by_state),
+                Arc::from(finalizer_states),
+                Arc::from(future_states),
+            )
+        };
+
+        let reverse_predecessors = topology.reverse_predecessors();
+        let (full_output_pairs, full_output_pair_by_raw_state) =
+            outputs.full_output_projection();
+        let mut full_output_pair_by_state = Vec::with_capacity(topology.state_count());
+        for state in 0..topology.real_state_count {
+            let raw_state = topology.raw_state_for_state(state) as usize;
+            full_output_pair_by_state.push(full_output_pair_by_raw_state[raw_state]);
         }
+        full_output_pair_by_state.push(0);
+        let full_output_projection_seed = OutputProjectionSeed {
+            active_terminals: Arc::from(vec![true; tokenizer.num_terminals() as usize]),
+            output_pairs: full_output_pairs,
+            output_pair_by_state: Arc::from(full_output_pair_by_state),
+        };
 
         Self {
             finalizer_terminals_by_state,
             future_finalizer_terminals_by_state,
-            finalizer_states_by_terminal: finalizer_states_by_terminal.into(),
-            future_finalizer_states_by_terminal: future_finalizer_states_by_terminal.into(),
-            reverse_predecessors: reverse_predecessors.into(),
-            observed_destinations: topology.observed_destinations().into(),
+            finalizer_states_by_terminal,
+            future_finalizer_states_by_terminal,
+            reverse_predecessors,
+            observed_destinations: topology.observed_destinations(),
+            full_output_projection_seed,
         }
     }
 }
+
 
 /// Static per-L2P-partition TI data.  The restricted raw lexer topology and
 /// root observation depend only on vocabulary bytes, not on the historical
@@ -632,19 +959,69 @@ pub(crate) struct TiDiscoveryContext {
     raw: Arc<TiRawDiscoveryData>,
     root_output_signatures: Vec<RootOutputSignature>,
     root_observed_states: usize,
+    /// Stable support partition from the latest round that needed one. Later
+    /// rounds only remove active terminals, so they may solve exactly on this
+    /// quotient rather than over every discovery-domain state again.
+    support_partition_seed: std::cell::RefCell<Option<SupportPartitionSeed>>,
+    output_projection_seed: std::cell::RefCell<Option<OutputProjectionSeed>>,
+    /// Positive observed-output closure proofs retained across a monotone
+    /// shrinking active mask. Projection commutes with a terminal transposition,
+    /// so the image of a swap-closed output alphabet remains swap-closed.
+    output_pair_closed_memo: std::cell::RefCell<FxHashSet<(TerminalID, TerminalID)>>,
+    output_pair_closed_active: std::cell::RefCell<Option<Vec<bool>>>,
+    /// Cross-round memo of the first-round necessary-condition filter.
+    /// `canonical_round_one_still_possible(a, b)` depends only on the fixed DFA
+    /// topology, canonical Moore rounds, and per-terminal finalizer states -
+    /// none of which change between discovery rounds - and is symmetric in its
+    /// two terminals (it tests the transposition `(a b)`).  The fixed-point
+    /// loop re-tests a barely-shrinking candidate set each round, so caching
+    /// the verdict under the unordered pair key eliminates the redundant
+    /// recomputation across rounds.
+    first_round_memo: std::cell::RefCell<FxHashMap<(TerminalID, TerminalID), bool>>,
 }
 
 impl TiDiscoveryContext {
     pub(crate) fn new(tokenizer: &Tokenizer, relevant_bytes: &[bool; 256]) -> Self {
+        Self::new_with_output_cache(tokenizer, relevant_bytes, None)
+    }
+
+    pub(crate) fn new_with_output_cache(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+    ) -> Self {
+        let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let t0 = Instant::now();
         let topology = Arc::new(RestrictedTopology::new(tokenizer, relevant_bytes));
-        let raw = Arc::new(TiRawDiscoveryData::new(tokenizer, &topology));
+        let t1 = Instant::now();
+        let raw = Arc::new(TiRawDiscoveryData::new(
+            tokenizer,
+            &topology,
+            shared_output_cache,
+        ));
+        let t2 = Instant::now();
         let (root_output_signatures, root_observed_states) =
             root_output_signatures(tokenizer, &topology);
+        let t3 = Instant::now();
+        if profile {
+            eprintln!(
+                "[glrmask/profile][terminal_interchangeability] ti_context_build topology_ms={:.3} raw_ms={:.3} root_sig_ms={:.3} total_ms={:.3}",
+                (t1 - t0).as_secs_f64() * 1000.0,
+                (t2 - t1).as_secs_f64() * 1000.0,
+                (t3 - t2).as_secs_f64() * 1000.0,
+                (t3 - t0).as_secs_f64() * 1000.0,
+            );
+        }
         Self {
             topology,
             raw,
             root_output_signatures,
             root_observed_states,
+            support_partition_seed: std::cell::RefCell::new(None),
+            output_projection_seed: std::cell::RefCell::new(None),
+            output_pair_closed_memo: std::cell::RefCell::new(FxHashSet::default()),
+            output_pair_closed_active: std::cell::RefCell::new(None),
+            first_round_memo: std::cell::RefCell::new(FxHashMap::default()),
         }
     }
 
@@ -656,12 +1033,30 @@ impl TiDiscoveryContext {
         relevant_bytes: &[bool; 256],
         global_state_quotient: &GlobalScannerStateQuotient,
     ) -> Self {
+        Self::new_with_global_state_quotient_and_output_cache(
+            tokenizer,
+            relevant_bytes,
+            global_state_quotient,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_global_state_quotient_and_output_cache(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        global_state_quotient: &GlobalScannerStateQuotient,
+        shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+    ) -> Self {
         let topology = Arc::new(RestrictedTopology::new_with_global_state_quotient(
             tokenizer,
             relevant_bytes,
             global_state_quotient,
         ));
-        let raw = Arc::new(TiRawDiscoveryData::new(tokenizer, &topology));
+        let raw = Arc::new(TiRawDiscoveryData::new(
+            tokenizer,
+            &topology,
+            shared_output_cache,
+        ));
         let (root_output_signatures, root_observed_states) =
             root_output_signatures(tokenizer, &topology);
         Self {
@@ -669,6 +1064,11 @@ impl TiDiscoveryContext {
             raw,
             root_output_signatures,
             root_observed_states,
+            support_partition_seed: std::cell::RefCell::new(None),
+            output_projection_seed: std::cell::RefCell::new(None),
+            output_pair_closed_memo: std::cell::RefCell::new(FxHashSet::default()),
+            output_pair_closed_active: std::cell::RefCell::new(None),
+            first_round_memo: std::cell::RefCell::new(FxHashMap::default()),
         }
     }
 }
@@ -1127,6 +1527,1870 @@ struct InterchangeMap {
     scanner_state_map: TransportScannerStateMap,
 }
 
+
+/// Exact token-macro observer used with the global C partition.
+///
+/// The existing TI observer follows arbitrary selected bytes.  C is instead a
+/// relation at vocabulary-token boundaries: equivalent sources share the raw
+/// destination of every token-first byte, after which the complete remaining
+/// token trajectory is identical.  This topology therefore records the raw
+/// frozen-output trace for every whole vocabulary token and only transitions
+/// between C classes at token boundaries.
+#[derive(Clone)]
+struct TokenMacroEdge {
+    destination: u32,
+    output_states: Box<[u32]>,
+}
+
+#[derive(Clone)]
+struct TokenMacroScan {
+    endpoint: Option<u32>,
+    longest_matches: Box<[(TerminalID, usize)]>,
+}
+
+struct TokenMacroTopology {
+    state_map: ManyToOneIdMap,
+    class_for_original: Arc<[u32]>,
+    representative_for_source_class: Arc<[u32]>,
+    tokens: Vec<Box<[u8]>>,
+    edges: Vec<TokenMacroEdge>,
+    root_scans: Vec<TokenMacroScan>,
+    reset_suffix_scans: Vec<Vec<TokenMacroScan>>,
+    reachable: Vec<bool>,
+    initial_state: usize,
+    initial_raw_state: u32,
+    dead_state: usize,
+}
+
+pub(crate) struct TokenMacroDiscoveryContext {
+    topology: Arc<TokenMacroTopology>,
+    /// Round-invariant per-terminal candidate signatures, computed once with
+    /// every terminal active and reused for every round's candidate grouping.
+    candidate_signatures: std::sync::OnceLock<Vec<Vec<u32>>>,
+}
+
+impl TokenMacroDiscoveryContext {
+    pub(crate) fn new(
+        tokenizer: &Tokenizer,
+        vocab: &Vocab,
+        partition: &GlobalTokenPositionStatePartition,
+    ) -> Option<Self> {
+        TokenMacroTopology::new(tokenizer, vocab, partition)
+            .map(|topology| Self {
+                topology: Arc::new(topology),
+                candidate_signatures: std::sync::OnceLock::new(),
+            })
+    }
+}
+
+impl TokenMacroTopology {
+    fn scan_suffix(tokenizer: &Tokenizer, start: u32, token: &[u8], offset: usize) -> TokenMacroScan {
+        let mut state = Some(start);
+        let mut matches = BTreeMap::<TerminalID, usize>::new();
+        for (relative, &byte) in token[offset..].iter().enumerate() {
+            state = state.and_then(|current| tokenizer.step(current, byte));
+            match state {
+                Some(current) => {
+                    for terminal in tokenizer.matched_terminals_iter(current) {
+                        matches.insert(terminal, offset + relative + 1);
+                    }
+                }
+                None => break,
+            }
+        }
+        TokenMacroScan {
+            endpoint: state,
+            longest_matches: matches.into_iter().collect::<Vec<_>>().into(),
+        }
+    }
+
+    fn new(
+        tokenizer: &Tokenizer,
+        vocab: &Vocab,
+        partition: &GlobalTokenPositionStatePartition,
+    ) -> Option<Self> {
+        let state_map = partition.as_many_to_one().clone();
+        let raw_state_count = tokenizer.num_states() as usize;
+        if state_map.original_to_internal.len() != raw_state_count
+            || state_map.representative_original_ids.is_empty()
+        {
+            return None;
+        }
+        let mut tokens = vocab.entries.values().cloned().collect::<Vec<_>>();
+        if tokens.iter().any(Vec::is_empty) {
+            return None;
+        }
+        tokens.sort_unstable();
+        tokens.dedup();
+        if tokens.is_empty() {
+            return None;
+        }
+        let tokens = tokens
+            .into_iter()
+            .map(Vec::into_boxed_slice)
+            .collect::<Vec<_>>();
+        let class_count = state_map.representative_original_ids.len();
+        let class_for_original: Arc<[u32]> = Arc::from(state_map.original_to_internal.clone());
+        let dead_state = class_count;
+        let mut edges = Vec::with_capacity(class_count * tokens.len());
+        let mut root_scans = Vec::with_capacity(class_count * tokens.len());
+        let initial_raw_state = tokenizer.initial_state_id();
+        let initial_class = state_map.original_to_internal[initial_raw_state as usize] as usize;
+        let mut representative_for_source_class = state_map.representative_original_ids.clone();
+        representative_for_source_class[initial_class] = initial_raw_state;
+        for (class, &representative) in state_map.representative_original_ids.iter().enumerate() {
+            let representative = if class == initial_class {
+                initial_raw_state as usize
+            } else {
+                representative as usize
+            };
+            if representative >= raw_state_count {
+                return None;
+            }
+            for token in &tokens {
+                let mut state = Some(representative as u32);
+                let mut output_states = Vec::with_capacity(token.len());
+                for &byte in token.iter() {
+                    state = state.and_then(|current| tokenizer.step(current, byte));
+                    output_states.push(state.unwrap_or(u32::MAX));
+                }
+                let destination = state
+                    .map(|state| state_map.original_to_internal[state as usize])
+                    .unwrap_or(dead_state as u32);
+                if destination != dead_state as u32 && destination as usize >= class_count {
+                    return None;
+                }
+                edges.push(TokenMacroEdge {
+                    destination,
+                    output_states: output_states.into_boxed_slice(),
+                });
+                root_scans.push(Self::scan_suffix(
+                    tokenizer,
+                    representative as u32,
+                    token,
+                    0,
+                ));
+            }
+        }
+        let reset_suffix_scans = tokens
+            .iter()
+            .map(|token| {
+                (0..token.len())
+                    .map(|offset| Self::scan_suffix(tokenizer, initial_raw_state, token, offset))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let initial_state = state_map.original_to_internal[initial_raw_state as usize] as usize;
+        if initial_state >= class_count {
+            return None;
+        }
+        let mut reachable = vec![false; class_count];
+        reachable[initial_state] = true;
+        let mut worklist = vec![initial_state];
+        while let Some(state) = worklist.pop() {
+            for action in 0..tokens.len() {
+                let destination = edges[state * tokens.len() + action].destination as usize;
+                if destination != dead_state && !reachable[destination] {
+                    reachable[destination] = true;
+                    worklist.push(destination);
+                }
+            }
+        }
+        Some(Self {
+            state_map,
+            class_for_original,
+            representative_for_source_class: representative_for_source_class.into(),
+            tokens,
+            edges,
+            root_scans,
+            reset_suffix_scans,
+            reachable,
+            initial_state,
+            initial_raw_state,
+            dead_state,
+        })
+    }
+
+    #[inline]
+    fn edge(&self, state: usize, action: usize) -> &TokenMacroEdge {
+        &self.edges[state * self.tokens.len() + action]
+    }
+
+    #[inline]
+    fn scan(&self, raw_start: u32, token: usize, offset: usize) -> &TokenMacroScan {
+        if offset == 0 {
+            let c_state = self.state_map.original_to_internal[raw_start as usize] as usize;
+            &self.root_scans[c_state * self.tokens.len() + token]
+        } else {
+            debug_assert_eq!(raw_start, self.initial_raw_state);
+            &self.reset_suffix_scans[token][offset]
+        }
+    }
+}
+
+struct TokenMacroRoundOutputs {
+    by_raw_state: Vec<OutputPair>,
+    empty: OutputPair,
+    active: Vec<bool>,
+}
+
+impl TokenMacroRoundOutputs {
+    fn new(tokenizer: &Tokenizer, active_terminals: &[bool]) -> Self {
+        let by_raw_state = (0..tokenizer.num_states() as usize)
+            .map(|state| OutputPair {
+                finalizers: OutputBits::from_active(
+                    &tokenizer
+                        .matched_terminals_iter(state as u32)
+                        .collect::<Vec<_>>(),
+                    active_terminals,
+                ),
+                future_finalizers: OutputBits::from_active(
+                    &tokenizer
+                        .possible_future_terminals_iter(state as u32)
+                        .collect::<Vec<_>>(),
+                    active_terminals,
+                ),
+            })
+            .collect();
+        Self {
+            by_raw_state,
+            empty: OutputPair {
+                finalizers: OutputBits::new(0),
+                future_finalizers: OutputBits::new(0),
+            },
+            active: active_terminals.to_vec(),
+        }
+    }
+
+    #[inline]
+    fn at(&self, raw_state: u32) -> &OutputPair {
+        self.by_raw_state.get(raw_state as usize).unwrap_or(&self.empty)
+    }
+
+    #[inline]
+    fn terminal_is_active(&self, terminal: TerminalID) -> bool {
+        self.active.get(terminal as usize).copied().unwrap_or(false)
+    }
+}
+
+fn macro_output_pair_matches_after_swap(
+    identity: &OutputPair,
+    swapped: &OutputPair,
+    left: TerminalID,
+    right: TerminalID,
+) -> bool {
+    identity.finalizers == swapped.finalizers.mapped(Some((left as usize, right as usize)))
+        && identity.future_finalizers
+            == swapped
+                .future_finalizers
+                .mapped(Some((left as usize, right as usize)))
+}
+
+fn macro_edge_matches_after_swap(
+    identity: &TokenMacroEdge,
+    swapped: &TokenMacroEdge,
+    outputs: &TokenMacroRoundOutputs,
+    left: TerminalID,
+    right: TerminalID,
+) -> bool {
+    identity.output_states.len() == swapped.output_states.len()
+        && identity
+            .output_states
+            .iter()
+            .zip(&swapped.output_states)
+            .all(|(&identity_state, &swapped_state)| {
+                macro_output_pair_matches_after_swap(
+                    outputs.at(identity_state),
+                    outputs.at(swapped_state),
+                    left,
+                    right,
+                )
+            })
+}
+
+/// Per-terminal exact rejection signatures for token-macro TI candidate
+/// grouping.  A terminal's signature counts only its *own* occurrences at each
+/// (action, position) slot, so it is invariant across TI rounds for any
+/// terminal that stays active: shrinking the active set never changes an active
+/// terminal's counts.  The signatures are therefore computed once (with every
+/// terminal active) and reused for every round's grouping.
+fn compute_candidate_signatures(
+    topology: &TokenMacroTopology,
+    outputs: &TokenMacroRoundOutputs,
+    num_terminals: usize,
+) -> Vec<Vec<u32>> {
+    let output_slot_count = topology
+        .tokens
+        .iter()
+        .map(|token| token.len() * 2)
+        .sum::<usize>();
+    let root_match_slot_count = topology.tokens.iter().map(|token| token.len()).sum::<usize>();
+    let reset_match_slot_count = topology
+        .tokens
+        .iter()
+        .map(|token| token.len().saturating_sub(1) * token.len())
+        .sum::<usize>();
+    let reset_endpoint_slot_count = topology
+        .tokens
+        .iter()
+        .map(|token| token.len().saturating_sub(1) * 2)
+        .sum::<usize>();
+    let all_output_slot_count = output_slot_count;
+    let all_root_match_slot_count = root_match_slot_count;
+    let slot_count = output_slot_count
+        + root_match_slot_count
+        + reset_match_slot_count
+        + reset_endpoint_slot_count
+        + all_output_slot_count
+        + all_root_match_slot_count;
+    let mut signatures = vec![vec![0u32; slot_count]; num_terminals];
+
+    let mut output_token_offset = Vec::with_capacity(topology.tokens.len());
+    let mut root_match_token_offset = Vec::with_capacity(topology.tokens.len());
+    let mut reset_match_token_offset = Vec::with_capacity(topology.tokens.len());
+    let mut reset_endpoint_token_offset = Vec::with_capacity(topology.tokens.len());
+    let mut all_output_token_offset = Vec::with_capacity(topology.tokens.len());
+    let mut all_root_match_token_offset = Vec::with_capacity(topology.tokens.len());
+    let mut output_offset = 0usize;
+    let mut root_match_offset = output_slot_count;
+    let mut reset_match_offset = output_slot_count + root_match_slot_count;
+    let mut reset_endpoint_offset = output_slot_count + root_match_slot_count + reset_match_slot_count;
+    let mut all_output_offset = reset_endpoint_offset + reset_endpoint_slot_count;
+    let mut all_root_match_offset = all_output_offset + all_output_slot_count;
+    for token in &topology.tokens {
+        output_token_offset.push(output_offset);
+        root_match_token_offset.push(root_match_offset);
+        reset_match_token_offset.push(reset_match_offset);
+        reset_endpoint_token_offset.push(reset_endpoint_offset);
+        all_output_token_offset.push(all_output_offset);
+        all_root_match_token_offset.push(all_root_match_offset);
+        output_offset += token.len() * 2;
+        root_match_offset += token.len();
+        reset_match_offset += token.len().saturating_sub(1) * token.len();
+        reset_endpoint_offset += token.len().saturating_sub(1) * 2;
+        all_output_offset += token.len() * 2;
+        all_root_match_offset += token.len();
+    }
+
+    for (state, &reachable) in topology.reachable.iter().enumerate() {
+        if !reachable {
+            continue;
+        }
+        for action in 0..topology.tokens.len() {
+            let edge = topology.edge(state, action);
+            let output_offset = output_token_offset[action];
+            for (byte_index, &raw_state) in edge.output_states.iter().enumerate() {
+                let output = outputs.at(raw_state);
+                for &terminal in &output.finalizers.0 {
+                    signatures[terminal as usize][output_offset + byte_index * 2] += 1;
+                }
+                for &terminal in &output.future_finalizers.0 {
+                    signatures[terminal as usize][output_offset + byte_index * 2 + 1] += 1;
+                }
+            }
+
+            // A rooted token-macro isomorphism preserves the token action and
+            // the reset suffix offset reached by each terminal edge.  Counting
+            // active terminal matches at these positions is therefore a cheap
+            // exact rejection invariant before constructing the full macro DAG.
+            let root_offset = root_match_token_offset[action];
+            for &(terminal, next_offset) in topology.root_scans[state * topology.tokens.len() + action]
+                .longest_matches
+                .iter()
+            {
+                if outputs.terminal_is_active(terminal) {
+                    signatures[terminal as usize][root_offset + next_offset - 1] += 1;
+                }
+            }
+        }
+    }
+
+    // Root reachability is the strongest cheap root observation, but accepted
+    // macro transports also have to map the whole scanner-coordinate domain.
+    // A second aggregate over every C source class cheaply exposes many pairs
+    // that only differ in unreachable macro classes. It is intentionally still
+    // only a prefilter: all surviving pairs pass the exact certificate below.
+    for state in 0..topology.state_map.representative_original_ids.len() {
+        for action in 0..topology.tokens.len() {
+            let edge = topology.edge(state, action);
+            let output_offset = all_output_token_offset[action];
+            for (byte_index, &raw_state) in edge.output_states.iter().enumerate() {
+                let output = outputs.at(raw_state);
+                for &terminal in &output.finalizers.0 {
+                    signatures[terminal as usize][output_offset + byte_index * 2] += 1;
+                }
+                for &terminal in &output.future_finalizers.0 {
+                    signatures[terminal as usize][output_offset + byte_index * 2 + 1] += 1;
+                }
+            }
+            let root_offset = all_root_match_token_offset[action];
+            for &(terminal, next_offset) in topology.root_scans[state * topology.tokens.len() + action]
+                .longest_matches
+                .iter()
+            {
+                if outputs.terminal_is_active(terminal) {
+                    signatures[terminal as usize][root_offset + next_offset - 1] += 1;
+                }
+            }
+        }
+    }
+
+    for (action, suffix_scans) in topology.reset_suffix_scans.iter().enumerate() {
+        let token_len = topology.tokens[action].len();
+        let token_match_offset = reset_match_token_offset[action];
+        let token_endpoint_offset = reset_endpoint_token_offset[action];
+        for offset in 1..token_len {
+            let scan = &suffix_scans[offset];
+            for &(terminal, next_offset) in scan.longest_matches.iter() {
+                if outputs.terminal_is_active(terminal) {
+                    signatures[terminal as usize]
+                        [token_match_offset + (offset - 1) * token_len + next_offset - 1] += 1;
+                }
+            }
+            if let Some(endpoint) = scan.endpoint {
+                let output = outputs.at(endpoint);
+                for &terminal in &output.finalizers.0 {
+                    signatures[terminal as usize]
+                        [token_endpoint_offset + (offset - 1) * 2] += 1;
+                }
+                for &terminal in &output.future_finalizers.0 {
+                    signatures[terminal as usize]
+                        [token_endpoint_offset + (offset - 1) * 2 + 1] += 1;
+                }
+            }
+        }
+    }
+
+    signatures
+}
+
+/// Group active terminals by identical precomputed rejection signature.  Only
+/// groups of 2+ terminals can possibly interchange, so singletons are dropped.
+fn token_macro_candidate_groups_from_signatures(
+    signatures: &[Vec<u32>],
+    active_terminals: &[bool],
+    ignore_terminal: Option<TerminalID>,
+) -> Vec<Vec<TerminalID>> {
+    let mut groups = FxHashMap::<&[u32], Vec<TerminalID>>::default();
+    for (terminal, &active) in active_terminals.iter().enumerate() {
+        if active && Some(terminal as TerminalID) != ignore_terminal {
+            groups
+                .entry(signatures[terminal].as_slice())
+                .or_default()
+                .push(terminal as TerminalID);
+        }
+    }
+    groups
+        .into_values()
+        .filter(|group| group.len() >= 2)
+        .collect()
+}
+
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TokenMacroSignature(Box<[(u32, u32)]>);
+
+struct TokenMacroIdentityRound {
+    classes: Vec<u32>,
+    representative_by_class: Vec<u32>,
+    class_by_signature: FxHashMap<TokenMacroSignature, u32>,
+}
+
+struct TokenMacroDfa {
+    topology: Arc<TokenMacroTopology>,
+    outputs: TokenMacroRoundOutputs,
+    identity_trace_ids: Vec<u32>,
+    dead_trace_ids: Vec<u32>,
+    identity_trace_lookup: FxHashMap<Box<[OutputPair]>, u32>,
+    identity_rounds: Vec<TokenMacroIdentityRound>,
+    stable_round: usize,
+}
+
+impl TokenMacroDfa {
+    fn output_trace_for_edge(&self, edge: &TokenMacroEdge) -> Box<[OutputPair]> {
+        edge.output_states
+            .iter()
+            .map(|&state| self.outputs.at(state).clone())
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    }
+
+    fn dead_output_trace(&self, action: usize) -> Box<[OutputPair]> {
+        vec![self.outputs.empty.clone(); self.topology.tokens[action].len()].into_boxed_slice()
+    }
+
+    fn new(topology: Arc<TokenMacroTopology>, outputs: TokenMacroRoundOutputs) -> Self {
+        let mut trace_lookup = FxHashMap::<Box<[OutputPair]>, u32>::default();
+        let mut next_trace_id = 0u32;
+        let mut intern = |trace: Box<[OutputPair]>| {
+            if let Some(&id) = trace_lookup.get(&trace) {
+                id
+            } else {
+                let id = next_trace_id;
+                next_trace_id += 1;
+                trace_lookup.insert(trace, id);
+                id
+            }
+        };
+        let identity_trace_ids = topology
+            .edges
+            .iter()
+            .map(|edge| {
+                let trace = edge
+                    .output_states
+                    .iter()
+                    .map(|&state| outputs.at(state).clone())
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                intern(trace)
+            })
+            .collect::<Vec<_>>();
+        let dead_trace_ids = topology
+            .tokens
+            .iter()
+            .map(|token| intern(vec![outputs.empty.clone(); token.len()].into_boxed_slice()))
+            .collect::<Vec<_>>();
+        let mut dfa = Self {
+            topology,
+            outputs,
+            identity_trace_ids,
+            dead_trace_ids,
+            identity_trace_lookup: trace_lookup,
+            identity_rounds: Vec::new(),
+            stable_round: 0,
+        };
+        dfa.build_identity_rounds();
+        dfa
+    }
+
+    fn state_count(&self) -> usize {
+        self.topology.state_map.representative_original_ids.len() + 1
+    }
+
+    fn signature(&self, state: usize, previous: &[u32], trace_ids: &[u32], dead_trace_ids: &[u32]) -> TokenMacroSignature {
+        let mut components = Vec::with_capacity(self.topology.tokens.len());
+        if state == self.topology.dead_state {
+            for (action, &trace) in dead_trace_ids.iter().enumerate() {
+                let _ = action;
+                components.push((previous[self.topology.dead_state], trace));
+            }
+        } else {
+            for action in 0..self.topology.tokens.len() {
+                let edge = self.topology.edge(state, action);
+                components.push((previous[edge.destination as usize], trace_ids[state * self.topology.tokens.len() + action]));
+            }
+        }
+        TokenMacroSignature(components.into_boxed_slice())
+    }
+
+    fn identity_round(&self, previous: &[u32]) -> TokenMacroIdentityRound {
+        let mut classes = Vec::with_capacity(self.state_count());
+        let mut representative_by_class = Vec::<u32>::new();
+        let mut class_by_signature = FxHashMap::<TokenMacroSignature, u32>::default();
+        for state in 0..self.state_count() {
+            let signature = self.signature(
+                state,
+                previous,
+                &self.identity_trace_ids,
+                &self.dead_trace_ids,
+            );
+            let next = representative_by_class.len() as u32;
+            let class = *class_by_signature.entry(signature).or_insert_with(|| {
+                representative_by_class.push(state as u32);
+                next
+            });
+            classes.push(class);
+        }
+        TokenMacroIdentityRound {
+            classes,
+            representative_by_class,
+            class_by_signature,
+        }
+    }
+
+    fn build_identity_rounds(&mut self) {
+        let initial = vec![0u32; self.state_count()];
+        self.identity_rounds.push(TokenMacroIdentityRound {
+            classes: initial,
+            representative_by_class: vec![0],
+            class_by_signature: FxHashMap::default(),
+        });
+        for round in 1..=self.state_count() {
+            let next = self.identity_round(&self.identity_rounds[round - 1].classes);
+            let stable = same_equality_partition_u32(
+                &self.identity_rounds[round - 1].classes,
+                &next.classes,
+            );
+            self.identity_rounds.push(next);
+            if stable {
+                self.stable_round = round;
+                return;
+            }
+        }
+        panic!("token-macro TI identity refinement did not stabilize");
+    }
+
+    fn swapped_trace_ids(&self, left: TerminalID, right: TerminalID) -> (Vec<u32>, Vec<u32>) {
+        let mut local = FxHashMap::<Box<[OutputPair]>, u32>::default();
+        let base = self.identity_trace_lookup.len() as u32;
+        let mut intern = |trace: Box<[OutputPair]>| {
+            if let Some(&id) = self.identity_trace_lookup.get(&trace) {
+                id
+            } else {
+                let next = base + local.len() as u32;
+                *local.entry(trace).or_insert(next)
+            }
+        };
+        let edge_ids = self
+            .topology
+            .edges
+            .iter()
+            .map(|edge| {
+                let trace = edge
+                    .output_states
+                    .iter()
+                    .map(|&state| {
+                        let output = self.outputs.at(state);
+                        OutputPair {
+                            finalizers: output.finalizers.mapped(Some((left as usize, right as usize))),
+                            future_finalizers: output
+                                .future_finalizers
+                                .mapped(Some((left as usize, right as usize))),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                intern(trace)
+            })
+            .collect::<Vec<_>>();
+        let dead_ids = self
+            .topology
+            .tokens
+            .iter()
+            .map(|token| intern(vec![self.outputs.empty.clone(); token.len()].into_boxed_slice()))
+            .collect::<Vec<_>>();
+        (edge_ids, dead_ids)
+    }
+
+    fn class_counts(classes: &[u32], class_count: usize) -> Option<Vec<u32>> {
+        let mut counts = vec![0u32; class_count];
+        for &class in classes {
+            let count = counts.get_mut(class as usize)?;
+            *count += 1;
+        }
+        Some(counts)
+    }
+
+    fn interchange_map(&self, left: TerminalID, right: TerminalID) -> Option<InterchangeMap> {
+        let (swapped_trace_ids, swapped_dead_trace_ids) = self.swapped_trace_ids(left, right);
+        let mut swapped_previous = vec![0u32; self.state_count()];
+        for round in 1..=self.stable_round {
+            let identity = &self.identity_rounds[round];
+            let mut swapped_next = Vec::with_capacity(self.state_count());
+            for state in 0..self.state_count() {
+                let signature = self.signature(
+                    state,
+                    &swapped_previous,
+                    &swapped_trace_ids,
+                    &swapped_dead_trace_ids,
+                );
+                let identity_class = *identity.class_by_signature.get(&signature)?;
+                swapped_next.push(identity_class);
+            }
+            let identity_counts = Self::class_counts(
+                &identity.classes,
+                identity.representative_by_class.len(),
+            )?;
+            if Self::class_counts(&swapped_next, identity.representative_by_class.len())? != identity_counts {
+                return None;
+            }
+            let root_identity = identity.classes[self.topology.initial_state];
+            if swapped_next[self.topology.initial_state] != root_identity {
+                return None;
+            }
+            if round == self.stable_round {
+                if !same_equality_partition_pair_u32(
+                    &self.identity_rounds[round - 1].classes,
+                    &swapped_previous,
+                    &identity.classes,
+                    &swapped_next,
+                ) {
+                    return None;
+                }
+                let class_count = identity.representative_by_class.len();
+                let mut target_class_for_source_class = vec![u32::MAX; class_count];
+                for state in 0..self.topology.dead_state {
+                    let source_class = identity.classes[state] as usize;
+                    let target_class = swapped_next[state];
+                    let slot = &mut target_class_for_source_class[source_class];
+                    if *slot == u32::MAX {
+                        *slot = target_class;
+                    } else if *slot != target_class {
+                        return None;
+                    }
+                }
+                if target_class_for_source_class.iter().any(|&class| class == u32::MAX) {
+                    return None;
+                }
+                let mut target_for_c_state = vec![0usize; self.topology.dead_state];
+                for c_state in 0..self.topology.dead_state {
+                    let source_class = identity.classes[c_state] as usize;
+                    let target_class = target_class_for_source_class[source_class] as usize;
+                    target_for_c_state[c_state] = identity.representative_by_class[target_class] as usize;
+                }
+                target_for_c_state[self.topology.initial_state] = self.topology.initial_state;
+                let mut representative_for_class =
+                    self.topology.state_map.representative_original_ids.clone();
+                representative_for_class[self.topology.initial_state] = self.topology.initial_raw_state;
+                let source_class_for_target_deviations = target_for_c_state
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(source_class, &target_class)| {
+                        (source_class != target_class)
+                            .then_some((source_class as u32, target_class as u32))
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                return Some(InterchangeMap {
+                    scanner_state_map: TransportScannerStateMap::Quotient {
+                        state_count: self.topology.state_map.original_to_internal.len(),
+                        class_for_original: Arc::clone(&self.topology.class_for_original),
+                        representative_for_class: representative_for_class.into(),
+                        source_class_for_target_deviations,
+                    },
+                });
+            }
+            swapped_previous = swapped_next;
+        }
+        None
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ExactTokenMacroNode {
+    endpoint: Option<(u32, OutputPair)>,
+    edges: Box<[(TerminalID, u32)]>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ExactTokenMacroNodeKey {
+    endpoint: Option<(u32, u32)>,
+    edges: Box<[(TerminalID, u32)]>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ExactTokenMacroStateSignature(SmallVec<[u32; 64]>);
+
+struct ExactTokenMacroRound {
+    classes: Vec<u32>,
+    representative_by_class: Vec<usize>,
+    node_ids: FxHashMap<ExactTokenMacroNodeKey, u32>,
+    nodes_by_id: Vec<ExactTokenMacroNode>,
+    action_nodes_by_class: Vec<Box<[u32]>>,
+    state_classes: FxHashMap<ExactTokenMacroStateSignature, u32>,
+}
+
+/// Result of the fast macro-automorphism proposal. `Impossible` is a proof
+/// from a necessary root-support cardinality invariant; `Inconclusive` keeps
+/// the legacy exact refinement available for ambiguous support buckets.
+enum DirectMacroInterchangeResult {
+    Proven(InterchangeMap),
+    Impossible,
+    Inconclusive,
+}
+
+/// Exact reset-aware token observer for C-assisted TI.  Boundary states are C
+/// representatives; each byte within a token remains a raw tokenizer state.
+/// A terminal match produces a labelled edge to a suffix scanned from the
+/// actual lexer initial state, matching `TerminalNwaBuilder::process_child_segment`.
+struct ExactTokenMacroDfa {
+    topology: Arc<TokenMacroTopology>,
+    outputs: TokenMacroRoundOutputs,
+    output_pair_ids: FxHashMap<OutputPair, u32>,
+    output_pair_id_by_raw_state: Vec<u32>,
+    empty_output_pair_id: u32,
+    identity_rounds: Vec<ExactTokenMacroRound>,
+    root_terminal_supports: Vec<Vec<(usize, Box<[u8]>)>>,
+    node_parents: Vec<Vec<u32>>,
+    nodes_by_terminal: Vec<Vec<u32>>,
+    nodes_by_previous_class: Vec<Vec<u32>>,
+    macro_class_for_source_class: Arc<[u32]>,
+    representative_for_macro_class: Arc<[u32]>,
+    stable_round: usize,
+    identity_setup_ms: f64,
+}
+
+impl ExactTokenMacroDfa {
+    const ACCEPT_SINK: u32 = u32::MAX;
+
+    fn new(topology: Arc<TokenMacroTopology>, outputs: TokenMacroRoundOutputs) -> Self {
+        let started_at = Instant::now();
+        let mut output_pair_ids = FxHashMap::<OutputPair, u32>::default();
+        let empty_output_pair_id = {
+            let id = output_pair_ids.len() as u32;
+            output_pair_ids.insert(outputs.empty.clone(), id);
+            id
+        };
+        let mut output_pair_id_by_raw_state = Vec::with_capacity(outputs.by_raw_state.len());
+        for output in &outputs.by_raw_state {
+            let id = match output_pair_ids.get(output) {
+                Some(&id) => id,
+                None => {
+                    let next = output_pair_ids.len() as u32;
+                    output_pair_ids.insert(output.clone(), next);
+                    next
+                }
+            };
+            output_pair_id_by_raw_state.push(id);
+        }
+
+        let mut dfa = Self {
+            topology,
+            outputs,
+            output_pair_ids,
+            output_pair_id_by_raw_state,
+            empty_output_pair_id,
+            identity_rounds: Vec::new(),
+            root_terminal_supports: Vec::new(),
+            node_parents: Vec::new(),
+            nodes_by_terminal: Vec::new(),
+            nodes_by_previous_class: Vec::new(),
+            macro_class_for_source_class: Arc::from([]),
+            representative_for_macro_class: Arc::from([]),
+            stable_round: 0,
+            identity_setup_ms: 0.0,
+        };
+        dfa.build_identity_rounds();
+        dfa.build_macro_transport_quotient();
+        dfa.root_terminal_supports = dfa.build_root_terminal_supports();
+        dfa.build_node_reverse_indices();
+        dfa.identity_setup_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        dfa
+    }
+
+    #[inline]
+    fn c_state_count(&self) -> usize {
+        self.topology.state_map.representative_original_ids.len()
+    }
+
+    fn map_terminal(terminal: TerminalID, swap: Option<(TerminalID, TerminalID)>) -> TerminalID {
+        match swap {
+            Some((left, right)) if terminal == left => right,
+            Some((left, right)) if terminal == right => left,
+            _ => terminal,
+        }
+    }
+
+    fn map_output(&self, raw_state: u32, swap: Option<(TerminalID, TerminalID)>) -> OutputPair {
+        let output = self.outputs.at(raw_state);
+        let swap = swap.map(|(left, right)| (left as usize, right as usize));
+        OutputPair {
+            finalizers: output.finalizers.mapped(swap),
+            future_finalizers: output.future_finalizers.mapped(swap),
+        }
+    }
+
+    fn swapped_node_id(
+        &self,
+        raw_start: u32,
+        token_index: usize,
+        offset: usize,
+        previous: &[u32],
+        swap: (TerminalID, TerminalID),
+        identity: &ExactTokenMacroRound,
+        cache: &mut FxHashMap<(u32, usize, usize), u32>,
+    ) -> Option<u32> {
+        if let Some(&id) = cache.get(&(raw_start, token_index, offset)) {
+            return Some(id);
+        }
+        let scan = self.topology.scan(raw_start, token_index, offset);
+
+        let endpoint = if let Some(state) = scan.endpoint {
+            let c_state = self.topology.state_map.original_to_internal[state as usize] as usize;
+            let mapped_output = self.map_output(state, Some(swap));
+            let output_id = *self.output_pair_ids.get(&mapped_output)?;
+            Some((previous[c_state], output_id))
+        } else {
+            None
+        };
+        let token_len = self.topology.tokens[token_index].len();
+        let mut edges = Vec::with_capacity(scan.longest_matches.len());
+        for &(terminal, next_offset) in scan.longest_matches.iter() {
+            if !self.outputs.terminal_is_active(terminal) {
+                continue;
+            }
+            let child = if next_offset == token_len {
+                Self::ACCEPT_SINK
+            } else {
+                self.swapped_node_id(
+                    self.topology.initial_raw_state,
+                    token_index,
+                    next_offset,
+                    previous,
+                    swap,
+                    identity,
+                    cache,
+                )?
+            };
+            edges.push((Self::map_terminal(terminal, Some(swap)), child));
+        }
+        let node = ExactTokenMacroNodeKey {
+            endpoint,
+            edges: edges.into_boxed_slice(),
+        };
+        let id = *identity.node_ids.get(&node)?;
+        cache.insert((raw_start, token_index, offset), id);
+        Some(id)
+    }
+
+    #[inline]
+    fn dense_node_cache_index(
+        &self,
+        raw_start: u32,
+        token_index: usize,
+        offset: usize,
+        cache_stride: usize,
+    ) -> usize {
+        ((raw_start as usize * self.topology.tokens.len() + token_index) * cache_stride) + offset
+    }
+
+    fn identity_node_id_dense(
+        &self,
+        raw_start: u32,
+        token_index: usize,
+        offset: usize,
+        previous: &[u32],
+        interned_nodes: &mut FxHashMap<ExactTokenMacroNodeKey, u32>,
+        output_pair_id_by_raw_state: &[u32],
+        empty_output_pair_id: u32,
+        nodes_by_id: &mut Vec<ExactTokenMacroNode>,
+        cache: &mut [u32],
+        cache_stride: usize,
+    ) -> u32 {
+        let cache_index = self.dense_node_cache_index(raw_start, token_index, offset, cache_stride);
+        let cached = cache[cache_index];
+        if cached != u32::MAX {
+            return cached;
+        }
+        let scan = self.topology.scan(raw_start, token_index, offset);
+
+        let endpoint = scan.endpoint.map(|state| {
+            let c_state = self.topology.state_map.original_to_internal[state as usize] as usize;
+            (previous[c_state], self.map_output(state, None))
+        });
+        let endpoint_key = scan.endpoint.map(|state| {
+            let c_state = self.topology.state_map.original_to_internal[state as usize] as usize;
+            let output_id = output_pair_id_by_raw_state
+                .get(state as usize)
+                .copied()
+                .unwrap_or(empty_output_pair_id);
+            (previous[c_state], output_id)
+        });
+        let token_len = self.topology.tokens[token_index].len();
+        let mut edges = Vec::with_capacity(scan.longest_matches.len());
+        for &(terminal, next_offset) in scan.longest_matches.iter() {
+            if !self.outputs.terminal_is_active(terminal) {
+                continue;
+            }
+            let child = if next_offset == token_len {
+                Self::ACCEPT_SINK
+            } else {
+                self.identity_node_id_dense(
+                    self.topology.initial_raw_state,
+                    token_index,
+                    next_offset,
+                    previous,
+                    interned_nodes,
+                    output_pair_id_by_raw_state,
+                    empty_output_pair_id,
+                    nodes_by_id,
+                    cache,
+                    cache_stride,
+                )
+            };
+            edges.push((terminal, child));
+        }
+        let edges = edges.into_boxed_slice();
+        let node = ExactTokenMacroNode {
+            endpoint,
+            edges: edges.clone(),
+        };
+        let key = ExactTokenMacroNodeKey {
+            endpoint: endpoint_key,
+            edges,
+        };
+        let id = match interned_nodes.entry(key) {
+            Entry::Vacant(entry) => {
+                let id = nodes_by_id.len() as u32;
+                nodes_by_id.push(node);
+                entry.insert(id);
+                id
+            }
+            Entry::Occupied(entry) => *entry.get(),
+        };
+        cache[cache_index] = id;
+        id
+    }
+
+    fn identity_round(&self, previous: &[u32]) -> ExactTokenMacroRound {
+        let mut node_ids = FxHashMap::<ExactTokenMacroNodeKey, u32>::default();
+        let mut nodes_by_id = Vec::<ExactTokenMacroNode>::new();
+        let cache_stride = self
+            .topology
+            .tokens
+            .iter()
+            .map(|token| token.len())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let mut cache = vec![
+            u32::MAX;
+            self.topology.state_map.original_to_internal.len()
+                * self.topology.tokens.len()
+                * cache_stride
+        ];
+        let mut state_classes = FxHashMap::<ExactTokenMacroStateSignature, u32>::default();
+        let mut classes = Vec::with_capacity(self.c_state_count());
+        let mut representative_by_class = Vec::new();
+        let mut action_nodes_by_class = Vec::<Box<[u32]>>::new();
+        for c_state in 0..self.c_state_count() {
+            let raw_start = if c_state == self.topology.initial_state {
+                self.topology.initial_raw_state
+            } else {
+                self.topology.state_map.representative_original_ids[c_state]
+            };
+            let signature = {
+                let mut signature = SmallVec::<[u32; 64]>::with_capacity(self.topology.tokens.len());
+                for token_index in 0..self.topology.tokens.len() {
+                    signature.push(
+                    self.identity_node_id_dense(
+                        raw_start,
+                        token_index,
+                        0,
+                        previous,
+                        &mut node_ids,
+                        &self.output_pair_id_by_raw_state,
+                        self.empty_output_pair_id,
+                        &mut nodes_by_id,
+                        &mut cache,
+                        cache_stride,
+                    )
+                    );
+                }
+                signature
+            };
+            let next = representative_by_class.len() as u32;
+            let class = match state_classes.entry(ExactTokenMacroStateSignature(signature)) {
+                Entry::Vacant(entry) => {
+                    action_nodes_by_class.push(entry.key().0.iter().copied().collect());
+                    representative_by_class.push(c_state);
+                    entry.insert(next);
+                    next
+                }
+                Entry::Occupied(entry) => *entry.get(),
+            };
+            classes.push(class);
+        }
+        ExactTokenMacroRound {
+            classes,
+            representative_by_class,
+            node_ids,
+            nodes_by_id,
+            action_nodes_by_class,
+            state_classes,
+        }
+    }
+
+    fn swapped_round(
+        &self,
+        previous: &[u32],
+        identity: &ExactTokenMacroRound,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<Vec<u32>> {
+        let mut cache = FxHashMap::<(u32, usize, usize), u32>::default();
+        let mut classes = Vec::with_capacity(self.c_state_count());
+        for c_state in 0..self.c_state_count() {
+            let raw_start = if c_state == self.topology.initial_state {
+                self.topology.initial_raw_state
+            } else {
+                self.topology.state_map.representative_original_ids[c_state]
+            };
+            let signature = {
+                let mut signature = SmallVec::<[u32; 64]>::with_capacity(self.topology.tokens.len());
+                for token_index in 0..self.topology.tokens.len() {
+                    signature.push(self.swapped_node_id(
+                        raw_start,
+                        token_index,
+                        0,
+                        previous,
+                        (left, right),
+                        identity,
+                        &mut cache,
+                    )?);
+                }
+                signature
+            };
+            classes.push(*identity
+                .state_classes
+                .get(&ExactTokenMacroStateSignature(signature))?);
+        }
+        Some(classes)
+    }
+
+    /// Evaluate one representative of every exact identity macro class.  A
+    /// class is a complete structural equality of reset-aware token behavior,
+    /// so applying a global label swap cannot split its members.  This avoids
+    /// repeating the same swapped macro construction for all C members.
+    fn swapped_round_by_identity_class(
+        &self,
+        previous: &[u32],
+        identity: &ExactTokenMacroRound,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<Vec<u32>> {
+        let mut cache = FxHashMap::<(u32, usize, usize), u32>::default();
+        let mut classes = Vec::with_capacity(identity.representative_by_class.len());
+        for &c_state in &identity.representative_by_class {
+            let raw_start = if c_state == self.topology.initial_state {
+                self.topology.initial_raw_state
+            } else {
+                self.topology.state_map.representative_original_ids[c_state]
+            };
+            let signature = {
+                let mut signature = SmallVec::<[u32; 64]>::with_capacity(self.topology.tokens.len());
+                for token_index in 0..self.topology.tokens.len() {
+                    signature.push(self.swapped_node_id(
+                        raw_start,
+                        token_index,
+                        0,
+                        previous,
+                        (left, right),
+                        identity,
+                        &mut cache,
+                    )?);
+                }
+                signature
+            };
+            classes.push(*identity
+                .state_classes
+                .get(&ExactTokenMacroStateSignature(signature))?);
+        }
+        Some(classes)
+    }
+
+    fn build_identity_rounds(&mut self) {
+        let mut previous = vec![0u32; self.c_state_count()];
+        for round in 1..=self.c_state_count().saturating_mul(2).max(1) {
+            let next = self.identity_round(&previous);
+            let stable = same_equality_partition_u32(&previous, &next.classes);
+            self.identity_rounds.push(next);
+            if stable {
+                self.stable_round = round;
+                return;
+            }
+            previous = self.identity_rounds[round - 1].classes.clone();
+        }
+        panic!("exact token-macro TI identity refinement did not stabilize");
+    }
+
+    fn build_macro_transport_quotient(&mut self) {
+        let identity = &self.identity_rounds[self.stable_round - 1];
+        self.macro_class_for_source_class = Arc::from(identity.classes.clone());
+        self.representative_for_macro_class = identity
+            .representative_by_class
+            .iter()
+            .map(|&source_class| self.topology.representative_for_source_class[source_class])
+            .collect::<Vec<_>>()
+            .into();
+    }
+
+    fn build_root_terminal_supports(&self) -> Vec<Vec<(usize, Box<[u8]>)>> {
+        let identity = &self.identity_rounds[self.stable_round - 1];
+        let mut supports = vec![Vec::new(); self.outputs.active.len()];
+        for (class, action_nodes) in identity.action_nodes_by_class.iter().enumerate() {
+            let mut per_terminal = FxHashMap::<TerminalID, Vec<u8>>::default();
+            for (action, &node_id) in action_nodes.iter().enumerate() {
+                let node = &identity.nodes_by_id[node_id as usize];
+                for &(terminal, _) in node.edges.iter() {
+                    let bits = per_terminal
+                        .entry(terminal)
+                        .or_insert_with(|| vec![0; action_nodes.len()]);
+                    bits[action] |= 1;
+                }
+                if let Some((_, output)) = &node.endpoint {
+                    for &terminal in output.finalizers.0.iter() {
+                        let bits = per_terminal
+                            .entry(terminal)
+                            .or_insert_with(|| vec![0; action_nodes.len()]);
+                        bits[action] |= 2;
+                    }
+                    for &terminal in output.future_finalizers.0.iter() {
+                        let bits = per_terminal
+                            .entry(terminal)
+                            .or_insert_with(|| vec![0; action_nodes.len()]);
+                        bits[action] |= 4;
+                    }
+                }
+            }
+            for (terminal, bits) in per_terminal {
+                supports[terminal as usize].push((class, bits.into_boxed_slice()));
+            }
+        }
+        supports
+    }
+
+    fn build_node_reverse_indices(&mut self) {
+        let identity = &self.identity_rounds[self.stable_round - 1];
+        let previous_class_count = if self.stable_round == 1 {
+            1
+        } else {
+            self.identity_rounds[self.stable_round - 2]
+                .representative_by_class
+                .len()
+        };
+        self.node_parents = vec![Vec::new(); identity.nodes_by_id.len()];
+        self.nodes_by_terminal = vec![Vec::new(); self.outputs.active.len()];
+        self.nodes_by_previous_class = vec![Vec::new(); previous_class_count];
+        for (node_id, node) in identity.nodes_by_id.iter().enumerate() {
+            if let Some((previous_class, output)) = &node.endpoint {
+                self.nodes_by_previous_class[*previous_class as usize].push(node_id as u32);
+                for &terminal in output.finalizers.0.iter() {
+                    self.nodes_by_terminal[terminal as usize].push(node_id as u32);
+                }
+                for &terminal in output.future_finalizers.0.iter() {
+                    self.nodes_by_terminal[terminal as usize].push(node_id as u32);
+                }
+            }
+            for &(terminal, child) in node.edges.iter() {
+                self.nodes_by_terminal[terminal as usize].push(node_id as u32);
+                if child != Self::ACCEPT_SINK {
+                    self.node_parents[child as usize].push(node_id as u32);
+                }
+            }
+        }
+        for nodes in &mut self.node_parents {
+            nodes.sort_unstable();
+            nodes.dedup();
+        }
+        for nodes in &mut self.nodes_by_terminal {
+            nodes.sort_unstable();
+            nodes.dedup();
+        }
+        for nodes in &mut self.nodes_by_previous_class {
+            nodes.sort_unstable();
+            nodes.dedup();
+        }
+    }
+
+    fn class_counts(classes: &[u32], count: usize) -> Option<Vec<u32>> {
+        let mut result = vec![0u32; count];
+        for &class in classes {
+            *result.get_mut(class as usize)? += 1;
+        }
+        Some(result)
+    }
+
+    /// Candidate macro permutation from direct root support.  This is only a
+    /// proposal. `verify_macro_permutation` proves every endpoint and reset
+    /// suffix node before it can be used.
+    fn candidate_macro_permutation(
+        &self,
+        identity: &ExactTokenMacroRound,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Result<Vec<usize>, ()> {
+        let left_supports = self.root_terminal_supports.get(left as usize).ok_or(())?;
+        let right_supports = self.root_terminal_supports.get(right as usize).ok_or(())?;
+        let empty_signature = vec![0u8; self.topology.tokens.len()];
+        let mut buckets = BTreeMap::<(Box<[u8]>, Box<[u8]>), Vec<usize>>::new();
+        let mut left_index = 0usize;
+        let mut right_index = 0usize;
+        while left_index < left_supports.len() || right_index < right_supports.len() {
+            let left_class = left_supports.get(left_index).map(|&(class, _)| class);
+            let right_class = right_supports.get(right_index).map(|&(class, _)| class);
+            let class = match (left_class, right_class) {
+                (Some(left_class), Some(right_class)) => left_class.min(right_class),
+                (Some(left_class), None) => left_class,
+                (None, Some(right_class)) => right_class,
+                (None, None) => unreachable!("nonempty support merge must have a class"),
+            };
+            let left_signature = if left_class == Some(class) {
+                let signature = &left_supports[left_index].1;
+                left_index += 1;
+                signature.as_ref()
+            } else {
+                empty_signature.as_slice()
+            };
+            let right_signature = if right_class == Some(class) {
+                let signature = &right_supports[right_index].1;
+                right_index += 1;
+                signature.as_ref()
+            } else {
+                empty_signature.as_slice()
+            };
+            if left_signature != right_signature {
+                buckets
+                    .entry((left_signature.into(), right_signature.into()))
+                    .or_default()
+                    .push(class);
+            }
+        }
+
+        let mut permutation: Vec<usize> = (0..identity.representative_by_class.len()).collect();
+        for (signature, sources) in &buckets {
+            let reverse = (signature.1.clone(), signature.0.clone());
+            if signature > &reverse {
+                continue;
+            }
+            let targets = buckets.get(&reverse).ok_or(())?;
+            if sources.len() != targets.len() {
+                return Err(());
+            }
+            if signature == &reverse {
+                continue;
+            }
+            for (&source, &target) in sources.iter().zip(targets) {
+                permutation[source] = target;
+                permutation[target] = source;
+            }
+        }
+        (permutation[self.identity_rounds[self.stable_round - 1].classes[self.topology.initial_state]
+            as usize]
+            == self.identity_rounds[self.stable_round - 1].classes[self.topology.initial_state]
+                as usize)
+            .then_some(permutation)
+            .ok_or(())
+    }
+
+    fn previous_permutation(
+        &self,
+        identity: &ExactTokenMacroRound,
+        permutation: &[usize],
+    ) -> Option<Vec<usize>> {
+        if self.stable_round == 1 {
+            return Some(vec![0]);
+        }
+        let previous = &self.identity_rounds[self.stable_round - 2];
+        let class_count = previous.representative_by_class.len();
+        let mut result = vec![usize::MAX; class_count];
+        for (source_final, &target_final) in permutation.iter().enumerate() {
+            let source_c_state = identity.representative_by_class[source_final];
+            let target_c_state = identity.representative_by_class[target_final];
+            let source_previous = previous.classes[source_c_state] as usize;
+            let target_previous = previous.classes[target_c_state] as usize;
+            let slot = &mut result[source_previous];
+            if *slot == usize::MAX {
+                *slot = target_previous;
+            } else if *slot != target_previous {
+                return None;
+            }
+        }
+        result.iter().all(|&class| class != usize::MAX).then_some(result)
+    }
+
+    fn impacted_nodes(
+        &self,
+        previous_permutation: &[usize],
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Vec<bool> {
+        let mut impacted = vec![false; self.node_parents.len()];
+        let mut worklist = Vec::<u32>::new();
+        let seed = |node: u32, impacted: &mut [bool], worklist: &mut Vec<u32>| {
+            if !impacted[node as usize] {
+                impacted[node as usize] = true;
+                worklist.push(node);
+            }
+        };
+        for &node in self
+            .nodes_by_terminal
+            .get(left as usize)
+            .into_iter()
+            .flatten()
+            .chain(
+                self.nodes_by_terminal
+                    .get(right as usize)
+                    .into_iter()
+                    .flatten(),
+            )
+        {
+            seed(node, &mut impacted, &mut worklist);
+        }
+        for (previous_class, &target_class) in previous_permutation.iter().enumerate() {
+            if previous_class == target_class {
+                continue;
+            }
+            for &node in &self.nodes_by_previous_class[previous_class] {
+                seed(node, &mut impacted, &mut worklist);
+            }
+        }
+        while let Some(node) = worklist.pop() {
+            for &parent in &self.node_parents[node as usize] {
+                seed(parent, &mut impacted, &mut worklist);
+            }
+        }
+        impacted
+    }
+
+    fn node_pair_matches_permutation(
+        identity: &ExactTokenMacroRound,
+        source_node: u32,
+        target_node: u32,
+        previous_permutation: &[usize],
+        left: TerminalID,
+        right: TerminalID,
+        memo: &mut FxHashMap<(u32, u32), bool>,
+    ) -> bool {
+        if let Some(&result) = memo.get(&(source_node, target_node)) {
+            return result;
+        }
+        let source = &identity.nodes_by_id[source_node as usize];
+        let target = &identity.nodes_by_id[target_node as usize];
+        let mut result = source.edges.len() == target.edges.len();
+        if result {
+            result = match (&source.endpoint, &target.endpoint) {
+                (None, None) => true,
+                (Some((source_previous, source_output)), Some((target_previous, target_output))) => {
+                    *target_previous as usize
+                        == previous_permutation[*source_previous as usize]
+                        && *target_output
+                            == OutputPair {
+                                finalizers: source_output
+                                    .finalizers
+                                    .mapped(Some((left as usize, right as usize))),
+                                future_finalizers: source_output
+                                    .future_finalizers
+                                    .mapped(Some((left as usize, right as usize))),
+                            }
+                }
+                _ => false,
+            };
+        }
+        if result {
+            for &(source_label, source_child) in source.edges.iter() {
+                let mapped_label = Self::map_terminal(source_label, Some((left, right)));
+                let Ok(target_index) = target
+                    .edges
+                    .binary_search_by_key(&mapped_label, |&(label, _)| label)
+                else {
+                    result = false;
+                    break;
+                };
+                let target_child = target.edges[target_index].1;
+                if source_child == Self::ACCEPT_SINK || target_child == Self::ACCEPT_SINK {
+                    if source_child != target_child {
+                        result = false;
+                        break;
+                    }
+                } else if !Self::node_pair_matches_permutation(
+                    identity,
+                    source_child,
+                    target_child,
+                    previous_permutation,
+                    left,
+                    right,
+                    memo,
+                ) {
+                    result = false;
+                    break;
+                }
+            }
+        }
+        memo.insert((source_node, target_node), result);
+        result
+    }
+
+    fn verify_macro_permutation(
+        &self,
+        identity: &ExactTokenMacroRound,
+        permutation: &[usize],
+        left: TerminalID,
+        right: TerminalID,
+    ) -> bool {
+        // The proposal starts from identity and swaps disjoint reverse
+        // signature buckets, so it is an involutive bijection by construction.
+        if permutation.len() != identity.representative_by_class.len() {
+            return false;
+        }
+        let Some(previous_permutation) = self.previous_permutation(identity, permutation) else {
+            return false;
+        };
+        let impacted = self.impacted_nodes(&previous_permutation, left, right);
+        let mut memo = FxHashMap::<(u32, u32), bool>::default();
+        for source_class in 0..permutation.len() {
+            let target_class = permutation[source_class];
+            for (&source_node, &target_node) in identity.action_nodes_by_class[source_class]
+                .iter()
+                .zip(identity.action_nodes_by_class[target_class].iter())
+            {
+                if source_class == target_class && !impacted[source_node as usize] {
+                    continue;
+                }
+                if !Self::node_pair_matches_permutation(
+                    identity,
+                    source_node,
+                    target_node,
+                    &previous_permutation,
+                    left,
+                    right,
+                    &mut memo,
+                ) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn interchange_map_from_macro_permutation(
+        &self,
+        identity: &ExactTokenMacroRound,
+        permutation: &[usize],
+    ) -> Option<InterchangeMap> {
+        let root_class = identity.classes[self.topology.initial_state] as usize;
+        if permutation.get(root_class).copied()? != root_class {
+            return None;
+        }
+        let deviations = permutation
+            .iter()
+            .enumerate()
+            .filter_map(|(source, &target)| (source != target).then_some((source as u32, target as u32)))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Some(InterchangeMap {
+            scanner_state_map: TransportScannerStateMap::MacroQuotient {
+                state_count: self.topology.state_map.original_to_internal.len(),
+                class_for_original: Arc::clone(&self.topology.class_for_original),
+                representative_for_source_class: Arc::clone(
+                    &self.topology.representative_for_source_class,
+                ),
+                macro_class_for_source_class: Arc::clone(&self.macro_class_for_source_class),
+                representative_for_macro_class: Arc::clone(&self.representative_for_macro_class),
+                source_macro_for_target_deviations: deviations,
+            },
+        })
+    }
+
+    fn direct_interchange_attempt(
+        &self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> DirectMacroInterchangeResult {
+        let stable_identity = &self.identity_rounds[self.stable_round - 1];
+        let permutation = match self.candidate_macro_permutation(stable_identity, left, right) {
+            Ok(permutation) => permutation,
+            Err(()) => return DirectMacroInterchangeResult::Impossible,
+        };
+        if !self.verify_macro_permutation(stable_identity, &permutation, left, right) {
+            return DirectMacroInterchangeResult::Inconclusive;
+        }
+        self.interchange_map_from_macro_permutation(stable_identity, &permutation)
+            .map(DirectMacroInterchangeResult::Proven)
+            .unwrap_or(DirectMacroInterchangeResult::Inconclusive)
+    }
+
+    fn refinement_interchange_map(&self, left: TerminalID, right: TerminalID) -> Option<InterchangeMap> {
+        let mut swapped_previous_by_class = vec![0u32; 1];
+        for round in 1..=self.stable_round {
+            let identity = &self.identity_rounds[round - 1];
+            let previous = if round == 1 {
+                vec![0u32; self.c_state_count()]
+            } else {
+                let identity_previous = &self.identity_rounds[round - 2];
+                identity_previous
+                    .classes
+                    .iter()
+                    .map(|&class| swapped_previous_by_class[class as usize])
+                    .collect::<Vec<_>>()
+            };
+            let swapped_next = self.swapped_round_by_identity_class(
+                &previous,
+                identity,
+                left,
+                right,
+            )?;
+            let counts = Self::class_counts(&identity.classes, identity.representative_by_class.len())?;
+            let mut swapped_counts = vec![0u32; counts.len()];
+            for (target_class, &source_class) in swapped_next.iter().enumerate() {
+                swapped_counts[source_class as usize] += counts[target_class];
+            }
+            if swapped_counts != counts {
+                return None;
+            }
+            let root_class = identity.classes[self.topology.initial_state] as usize;
+            if swapped_next[root_class] != root_class as u32 {
+                return None;
+            }
+            if round == self.stable_round {
+                if round > 1 && swapped_next != swapped_previous_by_class {
+                    return None;
+                }
+                let mut target_for_identity_class = vec![None; identity.representative_by_class.len()];
+                for (candidate_class, &identity_class) in swapped_next.iter().enumerate() {
+                    target_for_identity_class[identity_class as usize]
+                        .get_or_insert(identity.representative_by_class[candidate_class]);
+                }
+                target_for_identity_class[root_class] = Some(self.topology.initial_state);
+                let target_for_c_state = identity
+                    .classes
+                    .iter()
+                    .map(|&identity_class| target_for_identity_class[identity_class as usize])
+                    .collect::<Option<Vec<_>>>()?;
+                let mut representatives = self.topology.state_map.representative_original_ids.clone();
+                representatives[self.topology.initial_state] = self.topology.initial_raw_state;
+                let deviations = target_for_c_state
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(source, &target)| (source != target).then_some((source as u32, target as u32)))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                return Some(InterchangeMap {
+                    scanner_state_map: TransportScannerStateMap::Quotient {
+                        state_count: self.topology.state_map.original_to_internal.len(),
+                        class_for_original: Arc::clone(&self.topology.class_for_original),
+                        representative_for_class: representatives.into(),
+                        source_class_for_target_deviations: deviations,
+                    },
+                });
+            }
+            swapped_previous_by_class = swapped_next;
+        }
+        None
+    }
+}
+
+impl ExactTokenMacroDfa {
+    fn interchange_map(&self, left: TerminalID, right: TerminalID) -> Option<InterchangeMap> {
+        match self.direct_interchange_attempt(left, right) {
+            DirectMacroInterchangeResult::Proven(map) => Some(map),
+            DirectMacroInterchangeResult::Impossible => None,
+            DirectMacroInterchangeResult::Inconclusive => self.refinement_interchange_map(left, right),
+        }
+    }
+}
+
+fn token_macro_interchange_map(
+    topology: &TokenMacroTopology,
+    outputs: &TokenMacroRoundOutputs,
+    left: TerminalID,
+    right: TerminalID,
+) -> Option<InterchangeMap> {
+    let class_count = topology.state_map.representative_original_ids.len();
+    let mut target_for_source = vec![u32::MAX; class_count];
+    let mut source_for_target = vec![u32::MAX; class_count];
+    target_for_source[topology.initial_state] = topology.initial_state as u32;
+    source_for_target[topology.initial_state] = topology.initial_state as u32;
+    let mut worklist = vec![topology.initial_state];
+
+    while let Some(source) = worklist.pop() {
+        let target = target_for_source[source] as usize;
+        for action in 0..topology.tokens.len() {
+            let identity_edge = topology.edge(source, action);
+            let swapped_edge = topology.edge(target, action);
+            if !macro_edge_matches_after_swap(identity_edge, swapped_edge, outputs, left, right) {
+                return None;
+            }
+            let identity_destination = identity_edge.destination as usize;
+            let swapped_destination = swapped_edge.destination as usize;
+            if identity_destination == topology.dead_state || swapped_destination == topology.dead_state {
+                if identity_destination != swapped_destination {
+                    return None;
+                }
+                continue;
+            }
+            match target_for_source[identity_destination] {
+                u32::MAX => {
+                    if source_for_target[swapped_destination] != u32::MAX {
+                        return None;
+                    }
+                    target_for_source[identity_destination] = swapped_destination as u32;
+                    source_for_target[swapped_destination] = identity_destination as u32;
+                    worklist.push(identity_destination);
+                }
+                mapped if mapped as usize != swapped_destination => return None,
+                _ => {}
+            }
+        }
+    }
+
+    let initial_class = topology.initial_state;
+    let initial_raw = topology.initial_raw_state;
+    let raw_targets = topology
+        .state_map
+        .original_to_internal
+        .iter()
+        .map(|&source_class| {
+            let source_class = source_class as usize;
+            let mapped = target_for_source[source_class];
+            let target_class = (mapped != u32::MAX)
+                .then_some(mapped as usize)
+                .unwrap_or(source_class);
+            if target_class == initial_class {
+                initial_raw
+            } else {
+                topology.state_map.representative_original_ids[target_class]
+            }
+        })
+        .collect::<Vec<_>>();
+    Some(InterchangeMap {
+        scanner_state_map: TransportScannerStateMap::Explicit(raw_targets.into()),
+    })
+}
+
+/// Discover one exact token-macro TI round using the global C partition.  The
+/// certificate is over complete vocabulary tokens, which is the coordinate at
+/// which transport maps are consumed by the terminal NWA builder.
+pub(crate) fn discover_one_round_with_token_macro_context(
+    tokenizer: &Tokenizer,
+    context: &TokenMacroDiscoveryContext,
+    active_terminals: &[bool],
+    ignore_terminal: Option<TerminalID>,
+) -> TiRoundTransportWitnesses {
+    let topology = Arc::clone(&context.topology);
+    let candidates = active_terminals
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, &active)| active.then_some(terminal as TerminalID))
+        .filter(|&terminal| Some(terminal) != ignore_terminal)
+        .collect::<Vec<_>>();
+    if candidates.len() < 2 {
+        return TiRoundTransportWitnesses::singleton(active_terminals);
+    }
+    let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+    let started_at = profile_timing.then(Instant::now);
+    let signatures = context.candidate_signatures.get_or_init(|| {
+        // Signatures are round-invariant, so compute them once with every
+        // terminal active and reuse for every round. Building the full-active
+        // outputs here also keeps the no-op rounds from paying for a fresh
+        // per-round `TokenMacroRoundOutputs` scan of all raw states.
+        let all_active = vec![true; active_terminals.len()];
+        let full_outputs = TokenMacroRoundOutputs::new(tokenizer, &all_active);
+        compute_candidate_signatures(&topology, &full_outputs, active_terminals.len())
+    });
+    let candidate_groups =
+        token_macro_candidate_groups_from_signatures(signatures, active_terminals, ignore_terminal);
+    // `token_macro_candidate_groups_from_signatures` keeps only groups of 2+
+    // terminals whose exact rejection signatures collide. The signature is a
+    // necessary condition for interchangeability, so an empty result proves no
+    // merge is possible this round. Skip both the per-round outputs scan and
+    // the expensive `ExactTokenMacroDfa` build (and its identity-round
+    // refinement) entirely; this eliminates the no-op fixed-point round that
+    // otherwise rebuilds the full macro DAG.
+    if candidate_groups.is_empty() {
+        if profile_timing {
+            eprintln!(
+                "[glrmask/profile][terminal_interchangeability_token_macro] active={} c_classes={} macro_identity_classes=0 macro_rounds=0 identity_setup_ms=0.000 reachable_c_classes={} token_actions={} candidate_groups=0 candidate_pairs=0 exact_checks=0 direct_certificates=0 direct_impossible_rejections=0 refinement_fallbacks=0 accepted_members=0 total_ms={:.3}",
+                candidates.len(),
+                topology.state_map.representative_original_ids.len(),
+                topology.reachable.iter().filter(|&&reachable| reachable).count(),
+                topology.tokens.len(),
+                started_at.map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0),
+            );
+        }
+        return TiRoundTransportWitnesses::singleton(active_terminals);
+    }
+    let dfa_build_started = profile_timing.then(Instant::now);
+    let outputs = TokenMacroRoundOutputs::new(tokenizer, active_terminals);
+    let macro_dfa = ExactTokenMacroDfa::new(topology, outputs);
+    let dfa_build_ms = dfa_build_started
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let macro_identity_classes = macro_dfa
+        .identity_rounds
+        .last()
+        .map_or(0, |round| round.representative_by_class.len());
+    let candidate_pairs = candidate_groups
+        .iter()
+        .map(|group| group.len() * group.len().saturating_sub(1) / 2)
+        .sum::<usize>();
+    let mut result = singleton_partition(active_terminals);
+    let mut maps = BTreeMap::<(TerminalID, TerminalID), Arc<TransportScannerStateMap>>::new();
+    let mut exact_checks = 0usize;
+    let mut accepted = 0usize;
+    let mut direct_certificates = 0usize;
+    let mut direct_impossible_rejections = 0usize;
+    let mut refinement_fallbacks = 0usize;
+    let mut direct_ms = 0.0f64;
+    let mut refine_ms = 0.0f64;
+    for initial_group in candidate_groups {
+        let mut unresolved = initial_group;
+        while !unresolved.is_empty() {
+            let representative = unresolved[0];
+            let mut next_unresolved = Vec::with_capacity(unresolved.len().saturating_sub(1));
+            for &terminal in &unresolved[1..] {
+                exact_checks += 1;
+                let direct_started = profile_timing.then(Instant::now);
+                let direct_result = macro_dfa.direct_interchange_attempt(representative, terminal);
+                if let Some(started) = direct_started {
+                    direct_ms += started.elapsed().as_secs_f64() * 1000.0;
+                }
+                let map = match direct_result {
+                    DirectMacroInterchangeResult::Proven(map) => {
+                        direct_certificates += 1;
+                        Some(map)
+                    }
+                    DirectMacroInterchangeResult::Impossible => {
+                        direct_impossible_rejections += 1;
+                        None
+                    }
+                    DirectMacroInterchangeResult::Inconclusive => {
+                        refinement_fallbacks += 1;
+                        let refine_started = profile_timing.then(Instant::now);
+                        let refine_result =
+                            macro_dfa.refinement_interchange_map(representative, terminal);
+                        if let Some(started) = refine_started {
+                            refine_ms += started.elapsed().as_secs_f64() * 1000.0;
+                        }
+                        refine_result
+                    }
+                };
+                if let Some(map) = map {
+                    accepted += 1;
+                    result
+                        .get_mut(&representative)
+                        .expect("token-macro TI representative must exist")
+                        .insert(terminal);
+                    result.remove(&terminal);
+                    maps.insert((representative, terminal), Arc::new(map.scanner_state_map()));
+                } else {
+                    next_unresolved.push(terminal);
+                }
+            }
+            unresolved = next_unresolved;
+        }
+    }
+    if profile_timing {
+        eprintln!(
+            "[glrmask/profile][terminal_interchangeability_token_macro] active={} c_classes={} macro_identity_classes={} macro_rounds={} identity_setup_ms={:.3} dfa_build_ms={:.3} direct_ms={:.3} refine_ms={:.3} reachable_c_classes={} token_actions={} candidate_groups={} candidate_pairs={} exact_checks={} direct_certificates={} direct_impossible_rejections={} refinement_fallbacks={} accepted_members={} total_ms={:.3}",
+            candidates.len(),
+            macro_dfa.topology.state_map.representative_original_ids.len(),
+            macro_identity_classes,
+            macro_dfa.stable_round,
+            macro_dfa.identity_setup_ms,
+            dfa_build_ms,
+            direct_ms,
+            refine_ms,
+            macro_dfa.topology.reachable.iter().filter(|&&reachable| reachable).count(),
+            macro_dfa.topology.tokens.len(),
+            result.values().filter(|members| members.len() >= 2).count(),
+            candidate_pairs,
+            exact_checks,
+            direct_certificates,
+            direct_impossible_rejections,
+            refinement_fallbacks,
+            accepted,
+            started_at.map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0),
+        );
+    }
+    assert_partition_invariants(&result, active_terminals);
+    TiRoundTransportWitnesses {
+        active_before_round: active_terminals.to_vec(),
+        partition: result,
+        maps,
+    }
+}
+
 /// One transient exact TI round.  This is deliberately build-local: the only
 /// durable TI result remains the final flat terminal partition.  Keeping the
 /// already-certified witnesses avoids re-running terminal discovery after the
@@ -1181,11 +3445,12 @@ struct PairCharacterization {
 
 struct InterchangeabilityDfa {
     topology: Arc<RestrictedTopology>,
-    empty_output: OutputBits,
-    finalizers: Vec<OutputBits>,
-    future_finalizers: Vec<OutputBits>,
     observed_output_pairs: Vec<OutputPair>,
-    observed_output_pair_lookup: FxHashMap<OutputPair, u32>,
+    /// Canonical all-output-pair id for each entry in `observed_output_pairs`.
+    observed_output_pair_canonical_ids: Vec<u32>,
+    /// Membership of each canonical all-output-pair id in the enabled-byte
+    /// destination observation set.
+    observed_output_pair_is_observed: Vec<bool>,
     observed_output_pair_ids_by_terminal: Vec<Vec<u32>>,
     /// For each active terminal, its exact membership counts across the
     /// deduplicated observed frozen-output pairs. A valid terminal swap maps
@@ -1204,9 +3469,9 @@ struct InterchangeabilityDfa {
     /// Canonical, collision-free characterization cache used by the hot path.
     /// It describes the same raw restricted topology as `identity_rounds` and
     /// never merges or rewrites tokenizer states.
-    output_pairs: Vec<OutputPair>,
+    output_pairs: Arc<[OutputPair]>,
     output_pair_lookup: FxHashMap<OutputPair, u32>,
-    output_pair_by_state: Vec<u32>,
+    output_pair_by_state: Arc<[u32]>,
     /// Reverse enabled-byte edges, used only by the exact first-round
     /// rejection prefilter. Each changed frozen output can affect only these
     /// source rows in the characterization tuple.
@@ -1216,6 +3481,13 @@ struct InterchangeabilityDfa {
     canonical_round_one_source_marks: Vec<u32>,
     canonical_round_one_source_mark_epoch: u32,
     canonical_round_one_affected_sources: Vec<u32>,
+    /// Cache of the left/representative-side affected sources, reused across
+    /// the members sharing a fixed representative in the exact-verify loop.
+    canonical_round_one_left_terminal: Option<TerminalID>,
+    canonical_round_one_left_sources: Vec<u32>,
+    canonical_round_one_changed_scratch: SmallVec<[(u32, u32); 16]>,
+    canonical_round_one_added_scratch: SmallVec<[u32; 16]>,
+    support_partition_seed: Option<SupportPartitionSeed>,
     support_quotient: Option<SupportQuotient>,
     canonical_quotient: Option<CanonicalQuotient>,
     /// Per raw terminal, the canonical quotient classes whose representative
@@ -1223,6 +3495,12 @@ struct InterchangeabilityDfa {
     /// scratch, used to propose a tiny support-transposition witness before
     /// falling back to exact refinement.
     terminal_quotient_output_supports: Option<Vec<Option<Vec<(u32, u8)>>>>,
+    /// Thread-safe on-demand mirror of `terminal_quotient_output_supports` used
+    /// only by the parallel certification path. Each terminal's support is
+    /// pure given the (pre-built) global support quotient and immutable
+    /// topology, so workers build exactly the entries they touch — the same
+    /// set the sequential path would build lazily — with no `&mut self`.
+    parallel_terminal_supports: OnceLock<Vec<OnceLock<Vec<(u32, u8)>>>>,
     quotient_certified: usize,
     support_transposition_certified: usize,
     support_transposition_no_template: usize,
@@ -1230,6 +3508,7 @@ struct InterchangeabilityDfa {
     support_transposition_root_rejected: usize,
     support_transposition_signature_rejected: usize,
     support_transposition_support_setup_ns: u64,
+    support_quotient_build_ns: u64,
     support_transposition_template_ns: u64,
     support_transposition_cone_ns: u64,
     support_transposition_verify_ns: u64,
@@ -1241,7 +3520,159 @@ struct InterchangeabilityDfa {
     sparse_quotient_map_ns: u64,
     canonical_stable_round: Option<usize>,
     canonical_identity_map: Option<InterchangeMap>,
+    /// Per-state canonical identity signature hash as of the last built round.
+    /// Reused across rounds so an incremental refinement step only rehashes
+    /// states whose successor classes changed. Empty until the first round.
+    canonical_identity_cached_hashes: Vec<u64>,
     signature_capacity: usize,
+}
+
+/// Per-worker scratch for the parallel per-pair certification path. The heavy
+/// `InterchangeabilityDfa` state is immutable and lazily pre-built before the
+/// certification loop, so each rayon worker only needs its own epoch-marked
+/// scratch buffers plus counter accumulators. Allocated once per worker thread
+/// via `map_init` and reused across the tasks that land on that worker.
+struct CertScratch {
+    source_marks: Vec<u32>,
+    source_mark_epoch: u32,
+    affected_sources: Vec<u32>,
+    changed_scratch: SmallVec<[(u32, u32); 16]>,
+    added_scratch: SmallVec<[u32; 16]>,
+    output_pair_marks: Vec<u32>,
+    output_pair_mark_epoch: u32,
+}
+
+impl CertScratch {
+    fn new(dfa: &InterchangeabilityDfa) -> Self {
+        CertScratch {
+            source_marks: vec![0; dfa.canonical_round_one_source_marks.len()],
+            source_mark_epoch: 0,
+            affected_sources: Vec::new(),
+            changed_scratch: SmallVec::new(),
+            added_scratch: SmallVec::new(),
+            output_pair_marks: vec![0; dfa.observed_output_pairs.len()],
+            output_pair_mark_epoch: 0,
+        }
+    }
+}
+
+/// Outcome of certifying one member terminal against a fixed representative in
+/// the parallel path. `NeedsExact` defers the rare exact fallback to the
+/// sequential apply phase (direct_exact_checks is ~0 on the hot partitions).
+enum MemberVerdict {
+    RejectOutputPair,
+    RejectFirstRound,
+    AcceptIdentity(InterchangeMap),
+    AcceptSupport(InterchangeMap),
+    NeedsExact,
+}
+
+/// Per-member certification result carried back from the parallel workers.
+/// Counter aggregation and the first-round memo merge happen sequentially in
+/// the apply phase so the workers stay purely `&self`.
+struct MemberResult {
+    verdict: MemberVerdict,
+    memo_update: Option<((TerminalID, TerminalID), bool)>,
+    closed_update: Option<(TerminalID, TerminalID)>,
+    used_cached_closed: bool,
+}
+
+/// Dedicated rayon thread pool for the per-pair TI certification loop. Built
+/// once from `GLRMASK_TI_PARALLEL_THREADS`; the rest of the compiler can run
+/// under `RAYON_NUM_THREADS=1` while this hot loop still fans out across cores.
+fn ti_certification_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    let pool = POOL
+        .get_or_init(|| {
+            let threads = std::env::var("GLRMASK_TI_PARALLEL_THREADS")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(1);
+            if threads <= 1 {
+                return None;
+            }
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .thread_name(|index| format!("ti-cert-{index}"))
+                .build()
+                .ok()
+        })
+        .as_ref()?;
+    // Optional keepalive: on macOS the first `pool.install` after the pool has
+    // been idle (e.g. between partitions) pays a ~100-300ms worker-wake handoff
+    // (thread park / E-core QoS demotion). A lightweight heartbeat that touches
+    // every worker keeps them warm so the handoff stays ~microseconds. Gated by
+    // env so it can be toggled for measurement; harmless on Linux.
+    static KEEPALIVE: OnceLock<()> = OnceLock::new();
+    KEEPALIVE.get_or_init(|| {
+        let enabled = std::env::var("GLRMASK_TI_PARALLEL_KEEPALIVE")
+            .ok()
+            .map(|value| value.trim() != "0" && !value.trim().is_empty())
+            .unwrap_or(false);
+        if enabled {
+            let threads = pool.current_num_threads();
+            std::thread::Builder::new()
+                .name("ti-cert-keepalive".to_string())
+                .spawn(move || loop {
+                    pool.install(|| {
+                        (0..threads).into_par_iter().for_each(|_| {
+                            std::hint::black_box(0u64);
+                        });
+                    });
+                    std::thread::sleep(std::time::Duration::from_micros(200));
+                })
+                .ok();
+        }
+    });
+    Some(pool)
+}
+
+/// Execute one parallel TI phase on the dedicated pool. When the caller is
+/// already a member of that pool (the whole-compile mode), run the closure
+/// directly so nested rayon work stays in the current registry without another
+/// external-thread install handoff.
+fn with_ti_parallel_pool<F, R>(f: F) -> Option<R>
+where
+    F: FnOnce() -> R + Send,
+    R: Send,
+{
+    let pool = ti_certification_pool()?;
+    Some(if pool.current_thread_index().is_some() {
+        f()
+    } else {
+        pool.install(f)
+    })
+}
+
+/// Build (and, if configured, start the keepalive for) the TI certification
+/// thread pool ahead of first use. Intended to be called at Python module
+/// import so the pool is already hot when discovery begins, avoiding the
+/// first-use worker-wake handoff on macOS.
+pub(crate) fn warm_ti_pool() {
+    let _ = ti_certification_pool();
+}
+
+/// Run `f` inside the TI certification pool so that any nested parallel TI work
+/// executes as cheap in-pool work-stealing rather than paying a per-call
+/// external-thread block-and-wake handoff (a large, erratic latency on macOS).
+///
+/// When the pool is not configured (sequential mode) or the whole-compile wrap
+/// is disabled, `f` runs directly on the calling thread.
+pub(crate) fn with_ti_pool<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send,
+    R: Send,
+{
+    let enabled = std::env::var("GLRMASK_TI_PARALLEL_WHOLE_COMPILE")
+        .ok()
+        .map(|value| value.trim() != "0" && !value.trim().is_empty())
+        .unwrap_or(false);
+    if enabled {
+        if let Some(pool) = ti_certification_pool() {
+            return pool.install(f);
+        }
+    }
+    f()
 }
 
 impl InterchangeabilityDfa {
@@ -1262,15 +3693,42 @@ impl InterchangeabilityDfa {
         observed_terminals: &[bool],
         topology: Arc<RestrictedTopology>,
     ) -> Self {
-        let raw = Arc::new(TiRawDiscoveryData::new(tokenizer, &topology));
-        Self::from_raw_discovery_data(observed_terminals, topology, raw)
+        let raw = Arc::new(TiRawDiscoveryData::new(tokenizer, &topology, None));
+        Self::from_raw_discovery_data(observed_terminals, topology, raw, None, None)
     }
 
     fn from_context(observed_terminals: &[bool], context: &TiDiscoveryContext) -> Self {
+        let is_monotone_seed = |seed_active: &[bool]| {
+            observed_terminals.len() == seed_active.len()
+                && observed_terminals
+                    .iter()
+                    .zip(seed_active)
+                    .all(|(&current, &old)| !current || old)
+        };
+        let support_partition_seed = context
+            .support_partition_seed
+            .borrow()
+            .as_ref()
+            .filter(|seed| {
+                seed.class_for_state.len() == context.topology.state_count()
+                    && is_monotone_seed(&seed.active_terminals)
+            })
+            .cloned();
+        let output_projection_seed = context
+            .output_projection_seed
+            .borrow()
+            .as_ref()
+            .filter(|seed| {
+                seed.output_pair_by_state.len() == context.topology.state_count()
+                    && is_monotone_seed(&seed.active_terminals)
+            })
+            .cloned();
         Self::from_raw_discovery_data(
             observed_terminals,
             Arc::clone(&context.topology),
             Arc::clone(&context.raw),
+            support_partition_seed,
+            output_projection_seed,
         )
     }
 
@@ -1278,39 +3736,155 @@ impl InterchangeabilityDfa {
         observed_terminals: &[bool],
         topology: Arc<RestrictedTopology>,
         raw: Arc<TiRawDiscoveryData>,
+        support_partition_seed: Option<SupportPartitionSeed>,
+        output_projection_seed: Option<OutputProjectionSeed>,
     ) -> Self {
         let state_count = topology.state_count();
-        let terminal_bits = |terminals: &[TerminalID]| {
-            OutputBits::from_active(terminals, observed_terminals)
+        let output_projection_seed =
+            output_projection_seed.or_else(|| Some(raw.full_output_projection_seed.clone()));
+        let empty_pair = OutputPair {
+            finalizers: OutputBits::new(0),
+            future_finalizers: OutputBits::new(0),
         };
-        let finalizers = raw
-            .finalizer_terminals_by_state
-            .iter()
-            .map(|terminals| terminal_bits(terminals))
-            .collect::<Vec<_>>();
-        // These are the tokenizer's original, frozen future-finalizer sets.
-        let future_finalizers = raw
-            .future_finalizer_terminals_by_state
-            .iter()
-            .map(|terminals| terminal_bits(terminals))
-            .collect::<Vec<_>>();
+        let (output_pairs, output_pair_lookup, output_pair_by_state): (
+            Arc<[OutputPair]>,
+            FxHashMap<OutputPair, u32>,
+            Arc<[u32]>,
+        ) = if let Some(seed) = output_projection_seed {
+            let mut output_pairs = vec![empty_pair.clone()];
+            let mut output_pair_lookup = FxHashMap::<OutputPair, u32>::default();
+            output_pair_lookup.insert(empty_pair.clone(), 0);
+            let parallel_dfa_min_states = std::env::var(
+                "GLRMASK_TI_PARALLEL_DFA_MIN_STATES",
+            )
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(4096);
+            let project_pair = |pair: &OutputPair| OutputPair {
+                finalizers: OutputBits::from_active(&pair.finalizers.0, observed_terminals),
+                future_finalizers: OutputBits::from_active(
+                    &pair.future_finalizers.0,
+                    observed_terminals,
+                ),
+            };
+            let projected_pairs = if seed.output_pairs.len() >= parallel_dfa_min_states {
+                with_ti_parallel_pool(|| {
+                    seed.output_pairs
+                        .par_iter()
+                        .map(project_pair)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| seed.output_pairs.iter().map(project_pair).collect())
+            } else {
+                seed.output_pairs.iter().map(project_pair).collect()
+            };
+            let mut projected_id = Vec::with_capacity(seed.output_pairs.len());
+            for projected in projected_pairs {
+                let id = match output_pair_lookup.entry(projected) {
+                    Entry::Occupied(entry) => *entry.get(),
+                    Entry::Vacant(entry) => {
+                        let id = output_pairs.len() as u32;
+                        output_pairs.push(entry.key().clone());
+                        entry.insert(id);
+                        id
+                    }
+                };
+                projected_id.push(id);
+            }
+            let map_state = |&old_id: &u32| projected_id[old_id as usize];
+            let output_pair_by_state = if seed.output_pair_by_state.len()
+                >= parallel_dfa_min_states
+            {
+                with_ti_parallel_pool(|| {
+                    seed.output_pair_by_state
+                        .par_iter()
+                        .map(map_state)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| seed.output_pair_by_state.iter().map(map_state).collect())
+            } else {
+                seed.output_pair_by_state.iter().map(map_state).collect()
+            };
+            (
+                Arc::from(output_pairs),
+                output_pair_lookup,
+                Arc::from(output_pair_by_state),
+            )
+        } else {
+            let parallel_dfa_min_states = std::env::var(
+                "GLRMASK_TI_PARALLEL_DFA_MIN_STATES",
+            )
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(4096);
+            let project_state = |state: usize| OutputPair {
+                finalizers: OutputBits::from_active(
+                    &raw.finalizer_terminals_by_state[state],
+                    observed_terminals,
+                ),
+                future_finalizers: OutputBits::from_active(
+                    &raw.future_finalizer_terminals_by_state[state],
+                    observed_terminals,
+                ),
+            };
+            let projected_pairs = if topology.real_state_count >= parallel_dfa_min_states {
+                with_ti_parallel_pool(|| {
+                    (0..topology.real_state_count)
+                        .into_par_iter()
+                        .map(project_state)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| {
+                    (0..topology.real_state_count)
+                        .map(project_state)
+                        .collect()
+                })
+            } else {
+                (0..topology.real_state_count)
+                    .map(project_state)
+                    .collect()
+            };
+            let mut output_pairs = vec![empty_pair.clone()];
+            let mut output_pair_lookup = FxHashMap::<OutputPair, u32>::default();
+            output_pair_lookup.insert(empty_pair, 0);
+            let mut output_pair_by_state = Vec::with_capacity(state_count);
+            for pair in projected_pairs {
+                let id = match output_pair_lookup.entry(pair) {
+                    Entry::Occupied(entry) => *entry.get(),
+                    Entry::Vacant(entry) => {
+                        let id = output_pairs.len() as u32;
+                        output_pairs.push(entry.key().clone());
+                        entry.insert(id);
+                        id
+                    }
+                };
+                output_pair_by_state.push(id);
+            }
+            output_pair_by_state.push(0);
+            (
+                Arc::from(output_pairs),
+                output_pair_lookup,
+                Arc::from(output_pair_by_state),
+            )
+        };
+
         let observed_destinations = &raw.observed_destinations;
-        let mut observed_output_pairs = Vec::<OutputPair>::new();
-        let mut observed_output_pair_lookup = FxHashMap::<OutputPair, u32>::default();
+        let mut observed_output_pair_is_observed = vec![false; output_pairs.len()];
+        let mut observed_output_pair_canonical_ids = Vec::<u32>::new();
         for state in 0..topology.real_state_count {
             if !observed_destinations[state] {
                 continue;
             }
-            let pair = OutputPair {
-                finalizers: finalizers[state].clone(),
-                future_finalizers: future_finalizers[state].clone(),
-            };
-            if !observed_output_pair_lookup.contains_key(&pair) {
-                let id = observed_output_pairs.len() as u32;
-                observed_output_pair_lookup.insert(pair.clone(), id);
-                observed_output_pairs.push(pair);
+            let canonical_id = output_pair_by_state[state];
+            if !observed_output_pair_is_observed[canonical_id as usize] {
+                observed_output_pair_is_observed[canonical_id as usize] = true;
+                observed_output_pair_canonical_ids.push(canonical_id);
             }
         }
+        let observed_output_pairs = observed_output_pair_canonical_ids
+            .iter()
+            .map(|&id| output_pairs[id as usize].clone())
+            .collect::<Vec<_>>();
         let mut observed_output_pair_ids_by_terminal =
             vec![Vec::<u32>::new(); observed_terminals.len()];
         let mut observed_output_pair_support_shapes_by_terminal =
@@ -1358,46 +3932,17 @@ impl InterchangeabilityDfa {
                 }
             }
         }
-        let empty_output = OutputBits::new(0);
-        let empty_pair = OutputPair {
-            finalizers: empty_output.clone(),
-            future_finalizers: empty_output.clone(),
-        };
-        let mut output_pairs = vec![empty_pair.clone()];
-        let mut output_pair_lookup = FxHashMap::<OutputPair, u32>::default();
-        output_pair_lookup.insert(empty_pair, 0);
-        let mut output_pair_by_state = Vec::with_capacity(state_count);
-        for state in 0..topology.real_state_count {
-            let pair = OutputPair {
-                finalizers: finalizers[state].clone(),
-                future_finalizers: future_finalizers[state].clone(),
-            };
-            let id = match output_pair_lookup.entry(pair) {
-                Entry::Occupied(entry) => *entry.get(),
-                Entry::Vacant(entry) => {
-                    let id = output_pairs.len() as u32;
-                    output_pairs.push(entry.key().clone());
-                    entry.insert(id);
-                    id
-                }
-            };
-            output_pair_by_state.push(id);
-        }
-        // The synthetic dead destination has the all-empty frozen output.
-        output_pair_by_state.push(0);
         let signature_capacity = CHARACTERIZATION_DOMAIN.len()
             + 4
             + topology.max_outdegree
                 * (1 + blake3::OUT_LEN + 2 * (size_of::<u32>() + 4 * size_of::<TerminalID>()));
         let seed = CharacterizationHash::seed();
-        let observed_output_pair_count = observed_output_pair_lookup.len();
+        let observed_output_pair_count = observed_output_pairs.len();
         Self {
             topology,
-            empty_output,
-            finalizers,
-            future_finalizers,
             observed_output_pairs,
-            observed_output_pair_lookup,
+            observed_output_pair_canonical_ids,
+            observed_output_pair_is_observed,
             observed_output_pair_ids_by_terminal,
             observed_output_pair_support_shapes_by_terminal,
             observed_output_pair_marks: vec![0; observed_output_pair_count],
@@ -1420,9 +3965,15 @@ impl InterchangeabilityDfa {
             canonical_round_one_source_marks: vec![0; state_count - 1],
             canonical_round_one_source_mark_epoch: 0,
             canonical_round_one_affected_sources: Vec::new(),
+            canonical_round_one_left_terminal: None,
+            canonical_round_one_left_sources: Vec::new(),
+            canonical_round_one_changed_scratch: SmallVec::new(),
+            canonical_round_one_added_scratch: SmallVec::new(),
+            support_partition_seed,
             support_quotient: None,
             canonical_quotient: None,
             terminal_quotient_output_supports: None,
+            parallel_terminal_supports: OnceLock::new(),
             quotient_certified: 0,
             support_transposition_certified: 0,
             support_transposition_no_template: 0,
@@ -1430,6 +3981,7 @@ impl InterchangeabilityDfa {
             support_transposition_root_rejected: 0,
             support_transposition_signature_rejected: 0,
             support_transposition_support_setup_ns: 0,
+            support_quotient_build_ns: 0,
             support_transposition_template_ns: 0,
             support_transposition_cone_ns: 0,
             support_transposition_verify_ns: 0,
@@ -1441,6 +3993,7 @@ impl InterchangeabilityDfa {
             sparse_quotient_map_ns: 0,
             canonical_stable_round: None,
             canonical_identity_map: None,
+            canonical_identity_cached_hashes: Vec::new(),
             signature_capacity,
         }
     }
@@ -1453,18 +4006,574 @@ impl InterchangeabilityDfa {
         self.topology.dead_state()
     }
 
+    /// Compute only the final canonical identity partition needed by the
+    /// support-transposition proof. Unlike the generic exact fallback, support
+    /// certification never reads historical round projections or signature
+    /// indexes, so retaining every intermediate `CanonicalRound` is redundant.
+    fn support_identity_stable_partition_moore(&mut self) -> (Vec<u32>, Vec<u32>) {
+        self.ensure_canonical_identity_round(1);
+        let mut prev_prev = self.canonical_rounds[0].classes.clone();
+        let mut previous = self.canonical_rounds[1].classes.clone();
+        let mut cached_hashes = self.canonical_identity_cached_hashes.clone();
+        let state_count = self.state_count();
+        for _ in 2..=state_count * 2 {
+            let next = self.canonical_identity_round_incremental(
+                &previous,
+                Some(&prev_prev),
+                &mut cached_hashes,
+                false,
+            );
+            if same_equality_partition_u32(&previous, &next.classes) {
+                if cfg!(debug_assertions) {
+                    let stable_round = self.ensure_canonical_identity_stable_round();
+                    debug_assert!(same_equality_partition_u32(
+                        &next.classes,
+                        &self.canonical_rounds[stable_round].classes,
+                    ));
+                }
+                return (next.classes, next.representative_by_class);
+            }
+            prev_prev = previous;
+            previous = next.classes;
+        }
+        panic!(
+            "support terminal interchangeability characterization did not stabilize within {} rounds",
+            state_count * 2,
+        );
+    }
+
+    /// Exact sparse stabilization from canonical round one. Most round-one
+    /// classes are already stable: compare each member directly with its class
+    /// representative, and allocate signature-grouping machinery only for the
+    /// classes that actually fail. Subsequent work is confined to predecessor
+    /// classes of states moved by a split.
+    fn support_identity_stable_partition_sparse_worklist(&mut self) -> (Vec<u32>, Vec<u32>) {
+        self.ensure_canonical_identity_round(1);
+        let state_count = self.state_count();
+        let dead_state = self.dead_state();
+        let mut class_for_state = self.canonical_rounds[1].classes.clone();
+        let initial_class_count = self.canonical_rounds[1].representative_by_class.len();
+        let mut members_by_class = vec![Vec::<u32>::new(); initial_class_count];
+        for (state, &class) in class_for_state.iter().enumerate() {
+            members_by_class[class as usize].push(state as u32);
+        }
+        let mut queue = VecDeque::<usize>::new();
+        let mut queued = vec![false; initial_class_count];
+        for class in 0..initial_class_count {
+            let members = &members_by_class[class];
+            if members.len() <= 1 {
+                continue;
+            }
+            let representative = members[0] as usize;
+            if members[1..].iter().any(|&state| {
+                !self.canonical_identity_signatures_equal(
+                    representative,
+                    state as usize,
+                    &class_for_state,
+                )
+            }) {
+                queued[class] = true;
+                queue.push_back(class);
+            }
+        }
+
+        while let Some(class) = queue.pop_front() {
+            queued[class] = false;
+            if members_by_class[class].len() <= 1 {
+                continue;
+            }
+            let members = std::mem::take(&mut members_by_class[class]);
+            let representative = if members.binary_search(&(dead_state as u32)).is_ok() {
+                dead_state as u32
+            } else {
+                members[0]
+            };
+            let mut retained = Vec::<u32>::with_capacity(members.len());
+            let mut deviants = Vec::<u32>::new();
+            for &member in &members {
+                if self.canonical_identity_signatures_equal(
+                    representative as usize,
+                    member as usize,
+                    &class_for_state,
+                ) {
+                    retained.push(member);
+                } else {
+                    deviants.push(member);
+                }
+            }
+            if deviants.is_empty() {
+                members_by_class[class] = retained;
+                continue;
+            }
+
+            // Most unstable classes differ from their representative by only
+            // a tiny exceptional set. Group just those deviants instead of
+            // rehashing every representative-equivalent member.
+            let mut groups = Vec::<Vec<u32>>::new();
+            let mut groups_by_hash = FxHashMap::<u64, SmallVec<[usize; 2]>>::default();
+            for &member in &deviants {
+                let state = member as usize;
+                let hash = self.canonical_identity_signature_hash(state, &class_for_state);
+                let matched = groups_by_hash.get(&hash).and_then(|candidates| {
+                    candidates.iter().copied().find(|&group_index| {
+                        self.canonical_identity_signatures_equal(
+                            state,
+                            groups[group_index][0] as usize,
+                            &class_for_state,
+                        )
+                    })
+                });
+                let group_index = matched.unwrap_or_else(|| {
+                    let group_index = groups.len();
+                    groups.push(Vec::new());
+                    groups_by_hash.entry(hash).or_default().push(group_index);
+                    group_index
+                });
+                groups[group_index].push(member);
+            }
+
+            members_by_class[class] = retained;
+            for &state in &members_by_class[class] {
+                class_for_state[state as usize] = class as u32;
+            }
+
+            for group in groups {
+                let new_class = members_by_class.len();
+                queued.push(false);
+                for &state in &group {
+                    class_for_state[state as usize] = new_class as u32;
+                }
+                for &state in &group {
+                    let state = state as usize;
+                    if state >= self.reverse_predecessors.len() {
+                        continue;
+                    }
+                    for &source in &self.reverse_predecessors[state] {
+                        let source_class = class_for_state[source as usize] as usize;
+                        if members_by_class[source_class].len() > 1 && !queued[source_class] {
+                            queued[source_class] = true;
+                            queue.push_back(source_class);
+                        }
+                    }
+                }
+                members_by_class.push(group);
+            }
+        }
+
+        let mut canonical_for_class = vec![u32::MAX; members_by_class.len()];
+        let mut representative_by_class = Vec::<u32>::new();
+        let mut canonical_classes = Vec::with_capacity(state_count);
+        for state in 0..state_count {
+            let class = class_for_state[state] as usize;
+            let canonical = if canonical_for_class[class] == u32::MAX {
+                let canonical = representative_by_class.len() as u32;
+                canonical_for_class[class] = canonical;
+                representative_by_class.push(state as u32);
+                canonical
+            } else {
+                canonical_for_class[class]
+            };
+            canonical_classes.push(canonical);
+        }
+        (canonical_classes, representative_by_class)
+    }
+
+    /// Exact worklist refinement from canonical round one. The relation only
+    /// splits: when a target class splits, only predecessor classes of states
+    /// that moved can become unstable. This is the sparse counterpart of the
+    /// global Moore ladder and is especially effective when stabilization adds
+    /// only a handful of classes.
+    fn support_identity_stable_partition_worklist(&mut self) -> (Vec<u32>, Vec<u32>) {
+        self.ensure_canonical_identity_round(1);
+        let state_count = self.state_count();
+        let dead_state = self.dead_state();
+        let mut class_for_state = self.canonical_rounds[1].classes.clone();
+        let initial_class_count = self.canonical_rounds[1].representative_by_class.len();
+        let mut members_by_class = vec![Vec::<u32>::new(); initial_class_count];
+        for (state, &class) in class_for_state.iter().enumerate() {
+            members_by_class[class as usize].push(state as u32);
+        }
+        let mut queue = VecDeque::<usize>::new();
+        let mut queued = vec![false; initial_class_count];
+        for class in 0..initial_class_count {
+            if members_by_class[class].len() > 1 {
+                queue.push_back(class);
+                queued[class] = true;
+            }
+        }
+
+        while let Some(class) = queue.pop_front() {
+            queued[class] = false;
+            if members_by_class[class].len() <= 1 {
+                continue;
+            }
+            let members = members_by_class[class].clone();
+            let mut groups = Vec::<Vec<u32>>::new();
+            let mut group_hashes = Vec::<u64>::new();
+            let mut groups_by_hash = FxHashMap::<u64, SmallVec<[usize; 2]>>::default();
+            for &member in &members {
+                let state = member as usize;
+                let hash = self.canonical_identity_signature_hash(state, &class_for_state);
+                let matched = groups_by_hash.get(&hash).and_then(|candidates| {
+                    candidates.iter().copied().find(|&group_index| {
+                        self.canonical_identity_signatures_equal(
+                            state,
+                            groups[group_index][0] as usize,
+                            &class_for_state,
+                        )
+                    })
+                });
+                let group_index = matched.unwrap_or_else(|| {
+                    let group_index = groups.len();
+                    groups.push(Vec::new());
+                    group_hashes.push(hash);
+                    groups_by_hash.entry(hash).or_default().push(group_index);
+                    group_index
+                });
+                groups[group_index].push(member);
+            }
+            if groups.len() == 1 {
+                continue;
+            }
+
+            // Keep the synthetic dead state's subgroup on the old id so the
+            // implicit missing-edge target does not globally change identity.
+            let retained = groups
+                .iter()
+                .position(|group| group.binary_search(&(dead_state as u32)).is_ok())
+                .unwrap_or(0);
+            groups.swap(0, retained);
+            members_by_class[class] = std::mem::take(&mut groups[0]);
+            for &state in &members_by_class[class] {
+                class_for_state[state as usize] = class as u32;
+            }
+
+            for mut group in groups.into_iter().skip(1) {
+                let new_class = members_by_class.len();
+                queued.push(false);
+                for &state in &group {
+                    class_for_state[state as usize] = new_class as u32;
+                }
+                // Only predecessors of moved states can observe the split.
+                for &state in &group {
+                    let state = state as usize;
+                    if state >= self.reverse_predecessors.len() {
+                        continue;
+                    }
+                    for &source in &self.reverse_predecessors[state] {
+                        let source_class = class_for_state[source as usize] as usize;
+                        if members_by_class[source_class].len() > 1 && !queued[source_class] {
+                            queued[source_class] = true;
+                            queue.push_back(source_class);
+                        }
+                    }
+                }
+                group.shrink_to_fit();
+                members_by_class.push(group);
+            }
+        }
+
+        // Canonical first-state numbering keeps downstream representatives
+        // deterministic while discarding any empty historical ids.
+        let mut canonical_for_class = vec![u32::MAX; members_by_class.len()];
+        let mut representative_by_class = Vec::<u32>::new();
+        let mut canonical_classes = Vec::with_capacity(state_count);
+        for state in 0..state_count {
+            let class = class_for_state[state] as usize;
+            let canonical = if canonical_for_class[class] == u32::MAX {
+                let canonical = representative_by_class.len() as u32;
+                canonical_for_class[class] = canonical;
+                representative_by_class.push(state as u32);
+                canonical
+            } else {
+                canonical_for_class[class]
+            };
+            canonical_classes.push(canonical);
+        }
+
+        if cfg!(debug_assertions) {
+            let moore = self.support_identity_stable_partition_moore();
+            debug_assert!(same_equality_partition_u32(&canonical_classes, &moore.0));
+        }
+        (canonical_classes, representative_by_class)
+    }
+
+    /// Hopcroft-style exact refinement from canonical round one. Output labels
+    /// are already part of round-one classes, so stabilization only needs to
+    /// split source classes by destination classes. Processing every non-dead
+    /// block as an incoming-edge splitter is complete; the dead preimage is the
+    /// complement of all non-dead preimages for each byte and is therefore
+    /// redundant.
+    fn support_identity_stable_partition_full(&mut self) -> (Vec<u32>, Vec<u32>) {
+        self.ensure_canonical_identity_round(1);
+        let state_count = self.state_count();
+        let dead_state = self.dead_state();
+        let mut class_for_state = self.canonical_rounds[1].classes.clone();
+        let initial_class_count = self.canonical_rounds[1].representative_by_class.len();
+        let mut members_by_class = vec![Vec::<u32>::new(); initial_class_count];
+        for (state, &class) in class_for_state.iter().enumerate() {
+            members_by_class[class as usize].push(state as u32);
+        }
+        let dead_class = class_for_state[dead_state] as usize;
+
+        // Flat reverse-edge CSR retaining byte labels.
+        let mut reverse_counts = vec![0usize; state_count];
+        let mut edge_count = 0usize;
+        for source in 0..state_count {
+            for &(_, destination) in self.topology.edges_from(source) {
+                reverse_counts[destination as usize] += 1;
+                edge_count += 1;
+            }
+        }
+        let mut reverse_offsets = Vec::with_capacity(state_count + 1);
+        reverse_offsets.push(0usize);
+        for &count in &reverse_counts {
+            reverse_offsets.push(reverse_offsets.last().copied().unwrap() + count);
+        }
+        let mut next_offset = reverse_offsets[..state_count].to_vec();
+        let mut reverse_edges = vec![(0u8, 0u32); edge_count];
+        for source in 0..state_count {
+            for &(byte, destination) in self.topology.edges_from(source) {
+                let offset = &mut next_offset[destination as usize];
+                reverse_edges[*offset] = (byte, source as u32);
+                *offset += 1;
+            }
+        }
+
+        let mut queue = VecDeque::<usize>::new();
+        let mut queued = vec![false; initial_class_count];
+        for class in 0..initial_class_count {
+            if class != dead_class {
+                queue.push_back(class);
+                queued[class] = true;
+            }
+        }
+        let mut incoming_by_byte = (0..256)
+            .map(|_| Vec::<u32>::new())
+            .collect::<Vec<_>>();
+        let mut touched_bytes = Vec::<u8>::new();
+        let mut source_marks = vec![0u32; state_count];
+        let mut mark_epoch = 0u32;
+        let mut class_counts = vec![0usize; initial_class_count];
+        let mut touched_classes = Vec::<usize>::new();
+
+        while let Some(splitter) = queue.pop_front() {
+            queued[splitter] = false;
+            if members_by_class[splitter].is_empty() {
+                continue;
+            }
+            touched_bytes.clear();
+            for &destination in &members_by_class[splitter] {
+                let destination = destination as usize;
+                for &(byte, source) in
+                    &reverse_edges[reverse_offsets[destination]..reverse_offsets[destination + 1]]
+                {
+                    let bucket = &mut incoming_by_byte[byte as usize];
+                    if bucket.is_empty() {
+                        touched_bytes.push(byte);
+                    }
+                    bucket.push(source);
+                }
+            }
+
+            for &byte in &touched_bytes {
+                let sources = &incoming_by_byte[byte as usize];
+                mark_epoch = mark_epoch.wrapping_add(1);
+                if mark_epoch == 0 {
+                    source_marks.fill(0);
+                    mark_epoch = 1;
+                }
+                touched_classes.clear();
+                for &source in sources {
+                    let source = source as usize;
+                    if source_marks[source] == mark_epoch {
+                        continue;
+                    }
+                    source_marks[source] = mark_epoch;
+                    let class = class_for_state[source] as usize;
+                    if class_counts[class] == 0 {
+                        touched_classes.push(class);
+                    }
+                    class_counts[class] += 1;
+                }
+
+                for &class in &touched_classes {
+                    let marked_count = class_counts[class];
+                    class_counts[class] = 0;
+                    let class_len = members_by_class[class].len();
+                    if marked_count == 0 || marked_count == class_len {
+                        continue;
+                    }
+                    let old_members = std::mem::take(&mut members_by_class[class]);
+                    let mut marked = Vec::with_capacity(marked_count);
+                    let mut unmarked = Vec::with_capacity(class_len - marked_count);
+                    for state in old_members {
+                        if source_marks[state as usize] == mark_epoch {
+                            marked.push(state);
+                        } else {
+                            unmarked.push(state);
+                        }
+                    }
+
+                    let contains_dead_marked = marked.binary_search(&(dead_state as u32)).is_ok();
+                    let contains_dead_unmarked =
+                        unmarked.binary_search(&(dead_state as u32)).is_ok();
+                    let was_queued = queued[class];
+                    let (retained, moved) = if contains_dead_marked {
+                        (marked, unmarked)
+                    } else if contains_dead_unmarked {
+                        (unmarked, marked)
+                    } else if was_queued || marked.len() >= unmarked.len() {
+                        (marked, unmarked)
+                    } else {
+                        (unmarked, marked)
+                    };
+                    members_by_class[class] = retained;
+                    for &state in &members_by_class[class] {
+                        class_for_state[state as usize] = class as u32;
+                    }
+                    let new_class = members_by_class.len();
+                    for &state in &moved {
+                        class_for_state[state as usize] = new_class as u32;
+                    }
+                    members_by_class.push(moved);
+                    queued.push(false);
+                    class_counts.push(0);
+
+                    // If the old block was already pending, both halves must be
+                    // pending. Otherwise only the smaller/non-dead half is
+                    // needed by Hopcroft's splitter theorem. The retained block
+                    // was chosen large unless it contains dead.
+                    if was_queued {
+                        if new_class != dead_class {
+                            queued[new_class] = true;
+                            queue.push_back(new_class);
+                        }
+                    } else if class == dead_class {
+                        queued[new_class] = true;
+                        queue.push_back(new_class);
+                    } else {
+                        queued[new_class] = true;
+                        queue.push_back(new_class);
+                    }
+                }
+                incoming_by_byte[byte as usize].clear();
+            }
+        }
+
+        let mut canonical_for_class = vec![u32::MAX; members_by_class.len()];
+        let mut representative_by_class = Vec::<u32>::new();
+        let mut canonical_classes = Vec::with_capacity(state_count);
+        for state in 0..state_count {
+            let class = class_for_state[state] as usize;
+            let canonical = if canonical_for_class[class] == u32::MAX {
+                let canonical = representative_by_class.len() as u32;
+                canonical_for_class[class] = canonical;
+                representative_by_class.push(state as u32);
+                canonical
+            } else {
+                canonical_for_class[class]
+            };
+            canonical_classes.push(canonical);
+        }
+        if cfg!(debug_assertions) {
+            let moore = self.support_identity_stable_partition_moore();
+            debug_assert!(same_equality_partition_u32(&canonical_classes, &moore.0));
+        }
+        (canonical_classes, representative_by_class)
+    }
+
+    /// Recompute the current stable partition on a previous round's exact
+    /// quotient. For every old class and byte, old equivalence guarantees a
+    /// unique old target class and old destination output; projection to the
+    /// current active mask preserves that uniformity. Solving the same fixed
+    /// point over old classes is therefore exactly equivalent to solving over
+    /// all states, then lifting the resulting coarsening back.
+    fn support_identity_stable_partition_from_seed(
+        &self,
+        seed: &SupportPartitionSeed,
+    ) -> (Vec<u32>, Vec<u32>) {
+        let old_class_count = seed.representative_by_class.len();
+        let dead_old_class = seed.class_for_state[self.dead_state()] as usize;
+        let mut previous = vec![0u32; old_class_count];
+        for _ in 1..=old_class_count.saturating_mul(2).max(1) {
+            let default_class = previous[dead_old_class];
+            let mut classes_by_signature =
+                FxHashMap::<CanonicalSignature, u32>::default();
+            let mut next = Vec::with_capacity(old_class_count);
+            let mut representative_old_class = Vec::<u32>::new();
+            for old_class in 0..old_class_count {
+                let state = seed.representative_by_class[old_class] as usize;
+                let mut components = SmallVec::<[CanonicalComponent; 8]>::new();
+                for &(byte, destination) in self.topology.edges_from(state) {
+                    let destination = destination as usize;
+                    let target_old_class = seed.class_for_state[destination] as usize;
+                    let previous_class = previous[target_old_class];
+                    let output = self.output_pair_by_state[destination];
+                    if previous_class == default_class && output == 0 {
+                        continue;
+                    }
+                    components.push(CanonicalComponent {
+                        byte,
+                        previous_class,
+                        output,
+                    });
+                }
+                let signature = CanonicalSignature(components);
+                let next_id = classes_by_signature.len() as u32;
+                let class = *classes_by_signature.entry(signature).or_insert_with(|| {
+                    representative_old_class.push(old_class as u32);
+                    next_id
+                });
+                next.push(class);
+            }
+            if same_equality_partition_u32(&previous, &next) {
+                let class_for_state = seed
+                    .class_for_state
+                    .iter()
+                    .map(|&old_class| next[old_class as usize])
+                    .collect::<Vec<_>>();
+                let representative_by_class = representative_old_class
+                    .into_iter()
+                    .map(|old_class| seed.representative_by_class[old_class as usize])
+                    .collect::<Vec<_>>();
+                return (class_for_state, representative_by_class);
+            }
+            previous = next;
+        }
+        panic!(
+            "seeded support terminal interchangeability characterization did not stabilize within {} rounds",
+            old_class_count.saturating_mul(2).max(1),
+        );
+    }
+
+    fn support_identity_stable_partition(&mut self) -> (Vec<u32>, Vec<u32>) {
+        if let Some(seed) = self.support_partition_seed.clone() {
+            let reduced = self.support_identity_stable_partition_from_seed(&seed);
+            if cfg!(debug_assertions) {
+                let full = self.support_identity_stable_partition_full();
+                debug_assert!(same_equality_partition_u32(&reduced.0, &full.0));
+            }
+            reduced
+        } else {
+            let sparse = self.support_identity_stable_partition_sparse_worklist();
+            if std::env::var_os("GLRMASK_TI_SPARSE_WORKLIST_QUOTIENT_VERIFY").is_some() {
+                let full = self.support_identity_stable_partition_full();
+                assert!(same_equality_partition_u32(&sparse.0, &full.0));
+            }
+            sparse
+        }
+    }
+
     fn ensure_support_quotient(&mut self) {
         if self.support_quotient.is_some() {
             return;
         }
-        let stable_round = self.ensure_canonical_identity_stable_round();
-        let class_for_state = self.canonical_rounds[stable_round].classes.clone();
-        let class_count = self.canonical_rounds[stable_round]
-            .representative_by_class
-            .len();
-        let representative_by_class = self.canonical_rounds[stable_round]
-            .representative_by_class
-            .clone();
+        let quotient_build_started_at =
+            std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some().then(Instant::now);
+        let (class_for_state, representative_by_class) =
+            self.support_identity_stable_partition();
+        let class_count = representative_by_class.len();
         let mut reverse_predecessors = vec![Vec::<u32>::new(); class_count];
         for (class, &representative) in representative_by_class.iter().enumerate() {
             let state = representative as usize;
@@ -1477,11 +4586,24 @@ impl InterchangeabilityDfa {
             predecessors.sort_unstable();
             predecessors.dedup();
         }
+        let class_for_state: Arc<[u32]> = class_for_state.into();
+        let representative_by_class: Arc<[u32]> = representative_by_class.into();
+        let (scanner_state_count, scanner_class_for_original, scanner_representative_for_class) =
+            self.topology.scanner_projection_from_internal_quotient(
+                Arc::clone(&class_for_state),
+                Arc::clone(&representative_by_class),
+            );
         self.support_quotient = Some(SupportQuotient {
-            class_for_state: class_for_state.into(),
-            representative_by_class: representative_by_class.into(),
+            class_for_state,
+            representative_by_class,
             reverse_predecessors,
+            scanner_state_count,
+            scanner_class_for_original,
+            scanner_representative_for_class,
         });
+        if let Some(started_at) = quotient_build_started_at {
+            self.support_quotient_build_ns += started_at.elapsed().as_nanos() as u64;
+        }
     }
 
     fn ensure_terminal_quotient_output_support(&mut self, terminal: TerminalID) {
@@ -1651,15 +4773,323 @@ impl InterchangeabilityDfa {
         CanonicalSignature(components.into())
     }
 
+    fn support_mask_for_class(support: &[(u32, u8)], class: usize) -> u8 {
+        support
+            .binary_search_by_key(&(class as u32), |&(seen, _)| seen)
+            .ok()
+            .map_or(0, |index| support[index].1)
+    }
+
+    /// Necessary row condition for a quotient-class image under a terminal
+    /// swap, ignoring only the recursive destination-class permutation. This
+    /// sharply constrains the tiny exact cone search without accepting a map.
+    fn support_output_rows_match_after_swap(
+        &self,
+        source_state: usize,
+        target_state: usize,
+        outputs: &mut SparseSwappedOutputIds<'_>,
+    ) -> bool {
+        let source_edges = self.topology.edges_from(source_state);
+        let target_edges = self.topology.edges_from(target_state);
+        let mut source_index = 0usize;
+        let mut target_index = 0usize;
+        while source_index < source_edges.len() || target_index < target_edges.len() {
+            let (source_destination, target_destination) = match (
+                source_edges.get(source_index),
+                target_edges.get(target_index),
+            ) {
+                (Some(&(source_byte, source_destination)), Some(&(target_byte, target_destination)))
+                    if source_byte == target_byte =>
+                {
+                    source_index += 1;
+                    target_index += 1;
+                    (source_destination as usize, target_destination as usize)
+                }
+                (Some(&(source_byte, source_destination)), Some(&(target_byte, _)))
+                    if source_byte < target_byte =>
+                {
+                    source_index += 1;
+                    (source_destination as usize, self.dead_state())
+                }
+                (Some(_), Some(&(_, target_destination))) => {
+                    target_index += 1;
+                    (self.dead_state(), target_destination as usize)
+                }
+                (Some(&(_, source_destination)), None) => {
+                    source_index += 1;
+                    (source_destination as usize, self.dead_state())
+                }
+                (None, Some(&(_, target_destination))) => {
+                    target_index += 1;
+                    (self.dead_state(), target_destination as usize)
+                }
+                (None, None) => unreachable!("sparse edge union loop is nonempty"),
+            };
+            if outputs.id(self.output_pair_by_state[source_destination])
+                != self.output_pair_by_state[target_destination]
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Full exact quotient automorphism check for a proposed sparse class
+    /// permutation. The affected cone is reverse-closed, so every class outside
+    /// it is identity and cannot transition into a moved class.
+    fn support_deviations_are_valid(
+        &self,
+        quotient: &SupportQuotient,
+        left: TerminalID,
+        right: TerminalID,
+        cone_classes: &[usize],
+        deviations: &[(u32, u32)],
+    ) -> bool {
+        let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
+        if Self::mapped_support_class(deviations, root_class) != root_class as u32 {
+            return false;
+        }
+        let mut outputs = SparseSwappedOutputIds::new(
+            &self.output_pairs,
+            &self.output_pair_lookup,
+            left as usize,
+            right as usize,
+        );
+        for &class in cone_classes {
+            let target = Self::mapped_support_class(deviations, class);
+            let source_state = quotient.representative_by_class[class] as usize;
+            let target_state = quotient.representative_by_class[target as usize] as usize;
+            let source_edges = self.topology.edges_from(source_state);
+            let target_edges = self.topology.edges_from(target_state);
+            let mut source_index = 0usize;
+            let mut target_index = 0usize;
+            while source_index < source_edges.len() || target_index < target_edges.len() {
+                let (source_destination, target_destination) = match (
+                    source_edges.get(source_index),
+                    target_edges.get(target_index),
+                ) {
+                    (Some(&(source_byte, source_destination)), Some(&(target_byte, target_destination)))
+                        if source_byte == target_byte =>
+                    {
+                        source_index += 1;
+                        target_index += 1;
+                        (source_destination as usize, target_destination as usize)
+                    }
+                    (Some(&(source_byte, source_destination)), Some(&(target_byte, _)))
+                        if source_byte < target_byte =>
+                    {
+                        source_index += 1;
+                        (source_destination as usize, self.dead_state())
+                    }
+                    (Some(_), Some(&(_, target_destination))) => {
+                        target_index += 1;
+                        (self.dead_state(), target_destination as usize)
+                    }
+                    (Some(&(_, source_destination)), None) => {
+                        source_index += 1;
+                        (source_destination as usize, self.dead_state())
+                    }
+                    (None, Some(&(_, target_destination))) => {
+                        target_index += 1;
+                        (self.dead_state(), target_destination as usize)
+                    }
+                    (None, None) => unreachable!("sparse edge union loop is nonempty"),
+                };
+                let expected_destination = Self::mapped_support_class(
+                    deviations,
+                    quotient.class_for_state[source_destination] as usize,
+                );
+                if quotient.class_for_state[target_destination] != expected_destination
+                    || outputs.id(self.output_pair_by_state[source_destination])
+                        != self.output_pair_by_state[target_destination]
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn search_support_cone_permutation(
+        &self,
+        quotient: &SupportQuotient,
+        left: TerminalID,
+        right: TerminalID,
+        cone_classes: &[usize],
+        candidates: &[SmallVec<[usize; 8]>],
+        order: &[usize],
+        depth: usize,
+        assignment: &mut [usize],
+        used_targets: &mut [bool],
+        search_nodes: &mut usize,
+    ) -> Option<Vec<(u32, u32)>> {
+        const MAX_SEARCH_NODES: usize = 50_000;
+        if *search_nodes >= MAX_SEARCH_NODES {
+            return None;
+        }
+        if depth == order.len() {
+            let mut deviations = cone_classes
+                .iter()
+                .enumerate()
+                .filter_map(|(source_index, &source_class)| {
+                    let target_class = cone_classes[assignment[source_index]];
+                    (source_class != target_class)
+                        .then_some((source_class as u32, target_class as u32))
+                })
+                .collect::<Vec<_>>();
+            deviations.sort_unstable_by_key(|&(source, _)| source);
+            return self
+                .support_deviations_are_valid(
+                    quotient,
+                    left,
+                    right,
+                    cone_classes,
+                    &deviations,
+                )
+                .then_some(deviations);
+        }
+        let source_index = order[depth];
+        for &target_index in &candidates[source_index] {
+            if used_targets[target_index] {
+                continue;
+            }
+            *search_nodes += 1;
+            assignment[source_index] = target_index;
+            used_targets[target_index] = true;
+            if let Some(found) = self.search_support_cone_permutation(
+                quotient,
+                left,
+                right,
+                cone_classes,
+                candidates,
+                order,
+                depth + 1,
+                assignment,
+                used_targets,
+                search_nodes,
+            ) {
+                return Some(found);
+            }
+            used_targets[target_index] = false;
+            assignment[source_index] = usize::MAX;
+            if *search_nodes >= MAX_SEARCH_NODES {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Exact small-cone fallback for support templates whose numeric-order
+    /// pairing is wrong. Candidate images must swap the two terminal support
+    /// masks and match the complete destination-output row; backtracking then
+    /// verifies the full recursive quotient automorphism before acceptance.
+    fn support_transposition_search_deviations(
+        &mut self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<Vec<(u32, u32)>> {
+        self.ensure_terminal_quotient_output_support(left);
+        self.ensure_terminal_quotient_output_support(right);
+        let supports = self
+            .terminal_quotient_output_supports
+            .as_ref()
+            .expect("terminal quotient output supports initialized");
+        let left_support = supports[left as usize].as_ref()?;
+        let right_support = supports[right as usize].as_ref()?;
+        self.support_transposition_search_deviations_with_supports(
+            left,
+            right,
+            left_support,
+            right_support,
+        )
+    }
+
+    fn support_transposition_search_deviations_with_supports(
+        &self,
+        left: TerminalID,
+        right: TerminalID,
+        left_support: &[(u32, u8)],
+        right_support: &[(u32, u8)],
+    ) -> Option<Vec<(u32, u32)>> {
+        let quotient = self
+            .support_quotient
+            .as_ref()
+            .expect("support quotient initialized");
+        let cone_classes = self.support_quotient_affected_cone_small(quotient, left, right);
+        if cone_classes.len() > 12 {
+            return None;
+        }
+        let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
+        let dead_class = quotient.class_for_state[self.dead_state()] as usize;
+        let mut outputs = SparseSwappedOutputIds::new(
+            &self.output_pairs,
+            &self.output_pair_lookup,
+            left as usize,
+            right as usize,
+        );
+        let mut candidates = vec![SmallVec::<[usize; 8]>::new(); cone_classes.len()];
+        for (source_index, &source_class) in cone_classes.iter().enumerate() {
+            let source_left = Self::support_mask_for_class(left_support, source_class);
+            let source_right = Self::support_mask_for_class(right_support, source_class);
+            let source_state = quotient.representative_by_class[source_class] as usize;
+            for (target_index, &target_class) in cone_classes.iter().enumerate() {
+                if (source_class == root_class && target_class != root_class)
+                    || (source_class == dead_class && target_class != dead_class)
+                {
+                    continue;
+                }
+                let target_left = Self::support_mask_for_class(left_support, target_class);
+                let target_right = Self::support_mask_for_class(right_support, target_class);
+                if target_left != source_right || target_right != source_left {
+                    continue;
+                }
+                let target_state = quotient.representative_by_class[target_class] as usize;
+                if self.support_output_rows_match_after_swap(
+                    source_state,
+                    target_state,
+                    &mut outputs,
+                ) {
+                    candidates[source_index].push(target_index);
+                }
+            }
+            if candidates[source_index].is_empty() {
+                return None;
+            }
+        }
+        let mut order = (0..cone_classes.len()).collect::<Vec<_>>();
+        order.sort_unstable_by_key(|&source_index| candidates[source_index].len());
+        let mut assignment = vec![usize::MAX; cone_classes.len()];
+        let mut used_targets = vec![false; cone_classes.len()];
+        let mut search_nodes = 0usize;
+        self.search_support_cone_permutation(
+            quotient,
+            left,
+            right,
+            &cone_classes,
+            &candidates,
+            &order,
+            0,
+            &mut assignment,
+            &mut used_targets,
+            &mut search_nodes,
+        )
+    }
+
     fn support_transposition_interchange_map(
         &mut self,
         left: TerminalID,
         right: TerminalID,
     ) -> Option<InterchangeMap> {
-        let Some(deviations) = self.support_transposition_deviations(left, right) else {
+        if let Some(deviations) = self.support_transposition_deviations(left, right) {
+            if let Some(map) =
+                self.support_transposition_interchange_map_from_deviations(left, right, deviations)
+            {
+                return Some(map);
+            }
+        } else {
             self.support_transposition_no_template += 1;
-            return None;
-        };
+        }
+        let deviations = self.support_transposition_search_deviations(left, right)?;
         self.support_transposition_interchange_map_from_deviations(left, right, deviations)
     }
 
@@ -1692,79 +5122,30 @@ impl InterchangeabilityDfa {
             return None;
         }
         let verify_started_at = profile_timing.then(Instant::now);
-        let mut outputs = SparseSwappedOutputIds::new(
-            &self.output_pairs,
-            &self.output_pair_lookup,
-            left as usize,
-            right as usize,
-        );
-        for &class in &cone_classes {
-            let target = Self::mapped_support_class(&deviations, class);
-            let source_state = quotient.representative_by_class[class] as usize;
-            let target_state = quotient.representative_by_class[target as usize] as usize;
-            let source_edges = self.topology.edges_from(source_state);
-            let target_edges = self.topology.edges_from(target_state);
-            let mut source_index = 0usize;
-            let mut target_index = 0usize;
-            while source_index < source_edges.len() || target_index < target_edges.len() {
-                let (byte, source_destination, target_destination) = match (
-                    source_edges.get(source_index),
-                    target_edges.get(target_index),
-                ) {
-                    (Some(&(source_byte, source_destination)), Some(&(target_byte, target_destination)))
-                        if source_byte == target_byte =>
-                    {
-                        source_index += 1;
-                        target_index += 1;
-                        (source_byte, source_destination as usize, target_destination as usize)
-                    }
-                    (Some(&(source_byte, source_destination)), Some(&(target_byte, _)))
-                        if source_byte < target_byte =>
-                    {
-                        source_index += 1;
-                        (source_byte, source_destination as usize, self.dead_state())
-                    }
-                    (Some(_), Some(&(target_byte, target_destination))) => {
-                        target_index += 1;
-                        (target_byte, self.dead_state(), target_destination as usize)
-                    }
-                    (Some(&(source_byte, source_destination)), None) => {
-                        source_index += 1;
-                        (source_byte, source_destination as usize, self.dead_state())
-                    }
-                    (None, Some(&(target_byte, target_destination))) => {
-                        target_index += 1;
-                        (target_byte, self.dead_state(), target_destination as usize)
-                    }
-                    (None, None) => unreachable!("sparse edge union loop is nonempty"),
-                };
-                let expected_destination = Self::mapped_support_class(
-                    &deviations,
-                    quotient.class_for_state[source_destination] as usize,
-                );
-                if quotient.class_for_state[target_destination] != expected_destination
-                    || outputs.id(self.output_pair_by_state[source_destination])
-                        != self.output_pair_by_state[target_destination]
-                {
-                    self.support_transposition_signature_rejected += 1;
-                    if let Some(started_at) = verify_started_at {
-                        self.support_transposition_verify_ns +=
-                            started_at.elapsed().as_nanos() as u64;
-                    }
-                    return None;
-                }
+        if !self.support_deviations_are_valid(
+            quotient,
+            left,
+            right,
+            &cone_classes,
+            &deviations,
+        ) {
+            self.support_transposition_signature_rejected += 1;
+            if let Some(started_at) = verify_started_at {
+                self.support_transposition_verify_ns += started_at.elapsed().as_nanos() as u64;
             }
+            return None;
         }
         if let Some(started_at) = verify_started_at {
             self.support_transposition_verify_ns += started_at.elapsed().as_nanos() as u64;
         }
         self.support_transposition_certified += 1;
         Some(InterchangeMap {
-            scanner_state_map: self.topology.scanner_map_from_internal_quotient(
-                Arc::clone(&quotient.class_for_state),
-                Arc::clone(&quotient.representative_by_class),
-                deviations.into_boxed_slice(),
-            ),
+            scanner_state_map: TransportScannerStateMap::Quotient {
+                state_count: quotient.scanner_state_count,
+                class_for_original: Arc::clone(&quotient.scanner_class_for_original),
+                representative_for_class: Arc::clone(&quotient.scanner_representative_for_class),
+                source_class_for_target_deviations: deviations.into_boxed_slice(),
+            },
         })
     }
 
@@ -1775,19 +5156,14 @@ impl InterchangeabilityDfa {
             .destination_for_byte(state, self.topology.bytes[byte_slot])
     }
 
-    fn output_at<'a>(&'a self, outputs: &'a [OutputBits], state: usize) -> &'a OutputBits {
-        outputs.get(state).unwrap_or(&self.empty_output)
-    }
-
     /// Hash the canonical sparse form of one reference characterization tuple.
-    /// Missing byte transitions have the common dead component. A byte is
-    /// recorded exactly when its component differs from that default, so two
-    /// full tuples are equal iff their sparse forms are equal.
+    /// Missing byte transitions have the common dead component. Frozen outputs
+    /// are read through the canonical per-state output-pair id, avoiding two
+    /// eagerly materialized state-length output vectors on the hot path.
     fn characterize_round(
         &self,
         previous: &[CharacterizationHash],
-        finalizers: &[OutputBits],
-        future_finalizers: &[OutputBits],
+        output_pairs: &[OutputPair],
     ) -> Vec<CharacterizationHash> {
         debug_assert_eq!(previous.len(), self.state_count());
         let mut next = Vec::with_capacity(self.state_count());
@@ -1800,18 +5176,15 @@ impl InterchangeabilityDfa {
             tuple.extend_from_slice(&(self.topology.bytes.len() as u32).to_le_bytes());
             for &(byte, destination) in self.topology.edges_from(state) {
                 let destination = destination as usize;
-                let finalizers = self.output_at(finalizers, destination);
-                let future_finalizers = self.output_at(future_finalizers, destination);
-                if previous[destination] == default_hash
-                    && finalizers == &self.empty_output
-                    && future_finalizers == &self.empty_output
-                {
+                let output_id = self.output_pair_by_state[destination] as usize;
+                if previous[destination] == default_hash && output_id == 0 {
                     continue;
                 }
+                let output = &output_pairs[output_id];
                 tuple.push(byte);
                 tuple.extend_from_slice(&previous[destination].0);
-                finalizers.append_to(&mut tuple);
-                future_finalizers.append_to(&mut tuple);
+                output.finalizers.append_to(&mut tuple);
+                output.future_finalizers.append_to(&mut tuple);
             }
             next.push(CharacterizationHash(*blake3::hash(&tuple).as_bytes()));
         }
@@ -1823,8 +5196,7 @@ impl InterchangeabilityDfa {
             let previous_index = self.identity_rounds.len() - 1;
             let next = self.characterize_round(
                 &self.identity_rounds[previous_index],
-                &self.finalizers,
-                &self.future_finalizers,
+                &self.output_pairs,
             );
             self.identity_rounds.push(next);
         }
@@ -1989,6 +5361,34 @@ impl InterchangeabilityDfa {
         CanonicalSignature(components.into())
     }
 
+    /// Sparse-output-cache variant for the first-round rejection filter. That
+    /// filter usually touches only a handful of distinct output-pair ids per
+    /// candidate, so inline linear lookup avoids constructing two hash maps for
+    /// every tested terminal pair. The produced signature is byte-for-byte
+    /// identical to `canonical_swapped_signature`.
+    fn canonical_swapped_signature_sparse(
+        &self,
+        state: usize,
+        previous: &[u32],
+        outputs: &mut SparseSwappedOutputIds<'_>,
+    ) -> CanonicalSignature {
+        let default_class = previous[self.dead_state()];
+        let mut components = SmallVec::<[CanonicalComponent; 8]>::new();
+        for &(byte, destination) in self.topology.edges_from(state) {
+            let destination = destination as usize;
+            let output = outputs.id(self.output_pair_by_state[destination]);
+            if previous[destination] == default_class && output == 0 {
+                continue;
+            }
+            components.push(CanonicalComponent {
+                byte,
+                previous_class: previous[destination],
+                output,
+            });
+        }
+        CanonicalSignature(components.into())
+    }
+
     fn canonical_identity_round(&self, previous: &[u32]) -> CanonicalRound {
         let mut representative_by_class = Vec::<u32>::new();
         let mut classes_by_signature_hash = FxHashMap::<u64, SmallVec<[u32; 1]>>::default();
@@ -2019,16 +5419,213 @@ impl InterchangeabilityDfa {
         }
     }
 
+    /// Exact incremental variant of [`Self::canonical_identity_round`].
+    ///
+    /// The full recompute rehashes every state each round. In Moore
+    /// refinement a state's signature can only change when one of its
+    /// successors changed class in the previous step, so this reuses the
+    /// per-state hashes from the last round and only rehashes the states that
+    /// have an edge into a class that changed between `prev_prev` and
+    /// `previous`. The grouping still runs over every state in index order,
+    /// so the resulting `classes`, `representative_by_class`, and
+    /// `classes_by_signature_hash` are byte-for-byte identical to the full
+    /// recompute. `cached_hashes` is updated in place to hold this round's
+    /// hashes for the next call.
+    fn canonical_identity_round_incremental(
+        &self,
+        previous: &[u32],
+        prev_prev: Option<&[u32]>,
+        cached_hashes: &mut Vec<u64>,
+        retain_signature_index: bool,
+    ) -> CanonicalRound {
+        let state_count = self.state_count();
+        let dead = self.dead_state();
+        // A full pass is required whenever there is no usable cache, or when the
+        // dead-state class moved (it sets the skip threshold for every state).
+        let full = match prev_prev {
+            Some(prev_prev)
+                if cached_hashes.len() == state_count && previous[dead] == prev_prev[dead] =>
+            {
+                false
+            }
+            _ => true,
+        };
+        if cached_hashes.len() != state_count {
+            cached_hashes.clear();
+            cached_hashes.resize(state_count, 0);
+        }
+        if full {
+            let mut representative_by_class = Vec::<u32>::new();
+            let mut classes_by_signature_hash = FxHashMap::<u64, SmallVec<[u32; 1]>>::default();
+            let mut classes = Vec::with_capacity(state_count);
+            for state in 0..state_count {
+                let hash = self.canonical_identity_signature_hash(state, previous);
+                cached_hashes[state] = hash;
+                let existing = classes_by_signature_hash.get(&hash).and_then(|candidates| {
+                    candidates.iter().copied().find(|&class| {
+                        self.canonical_identity_signatures_equal(
+                            state,
+                            representative_by_class[class as usize] as usize,
+                            previous,
+                        )
+                    })
+                });
+                let class = existing.unwrap_or_else(|| {
+                    let class = representative_by_class.len() as u32;
+                    representative_by_class.push(state as u32);
+                    classes_by_signature_hash.entry(hash).or_default().push(class);
+                    class
+                });
+                classes.push(class);
+            }
+            return CanonicalRound {
+                classes,
+                representative_by_class,
+                classes_by_signature_hash: if retain_signature_index {
+                    classes_by_signature_hash
+                } else {
+                    FxHashMap::default()
+                },
+            };
+        }
+
+        // Incremental (non-full) refinement. Moore refinement only ever splits
+        // classes, so a round-(r-1) class stays whole unless one of its members
+        // is dirty (i.e. has a successor that changed class between prev_prev
+        // and previous). Clean members keep their unchanged signature, hence
+        // their class; only dirty members are regrouped within their class.
+        // This avoids the per-state signature-equality edge walk for the
+        // overwhelming majority of (clean) states, while still producing the
+        // exact same `classes`, `representative_by_class`, and
+        // `classes_by_signature_hash` as the full recompute (verified by the
+        // debug-only assertion in `ensure_canonical_identity_round`).
+        let prev_prev = prev_prev.expect("non-full pass has a previous partition");
+        let mut dirty = vec![false; state_count];
+        for destination in 0..self.reverse_predecessors.len() {
+            if previous[destination] != prev_prev[destination] {
+                for &source in &self.reverse_predecessors[destination] {
+                    dirty[source as usize] = true;
+                }
+            }
+        }
+        let prev_class_count = previous
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |class| class as usize + 1);
+        let mut class_clean_rep = vec![u32::MAX; prev_class_count];
+        let mut class_dirty_members = vec![Vec::<u32>::new(); prev_class_count];
+        for state in 0..state_count {
+            let class = previous[state] as usize;
+            if dirty[state] {
+                cached_hashes[state] = self.canonical_identity_signature_hash(state, previous);
+                class_dirty_members[class].push(state as u32);
+            } else if class_clean_rep[class] == u32::MAX {
+                class_clean_rep[class] = state as u32;
+            }
+        }
+        // Group id per state: initialised to the old class id (correct for every
+        // clean state and every state of an untouched class). Dirty members are
+        // regrouped below; split-off sub-classes receive fresh ids.
+        let mut group_of_state = previous.to_vec();
+        let mut next_split_group = prev_class_count as u32;
+        for class in 0..prev_class_count {
+            if class_dirty_members[class].is_empty() {
+                continue;
+            }
+            let mut sub_reps: SmallVec<[(u32, u32); 4]> = SmallVec::new();
+            if class_clean_rep[class] != u32::MAX {
+                sub_reps.push((class_clean_rep[class], class as u32));
+            }
+            for &member in &class_dirty_members[class] {
+                let member_state = member as usize;
+                let matched = sub_reps.iter().copied().find(|&(rep, _)| {
+                    self.canonical_identity_signatures_equal(member_state, rep as usize, previous)
+                });
+                let group = match matched {
+                    Some((_, group)) => group,
+                    None => {
+                        let group = if sub_reps.is_empty() {
+                            class as u32
+                        } else {
+                            let g = next_split_group;
+                            next_split_group += 1;
+                            g
+                        };
+                        sub_reps.push((member, group));
+                        group
+                    }
+                };
+                group_of_state[member_state] = group;
+            }
+        }
+        // Canonical index-order renumbering. Two states share a group iff they
+        // share a round-r signature, and (by monotone refinement) states in
+        // different old classes never share a new signature, so first-appearance
+        // order of groups equals first-appearance order of signatures: the class
+        // ids, representatives, and hash buckets match the full recompute byte
+        // for byte.
+        let mut final_of_group = vec![u32::MAX; next_split_group as usize];
+        let mut representative_by_class = Vec::<u32>::new();
+        let mut classes_by_signature_hash = FxHashMap::<u64, SmallVec<[u32; 1]>>::default();
+        let mut classes = Vec::with_capacity(state_count);
+        for state in 0..state_count {
+            let group = group_of_state[state] as usize;
+            let class = if final_of_group[group] == u32::MAX {
+                let class = representative_by_class.len() as u32;
+                final_of_group[group] = class;
+                representative_by_class.push(state as u32);
+                if retain_signature_index {
+                    classes_by_signature_hash
+                        .entry(cached_hashes[state])
+                        .or_default()
+                        .push(class);
+                }
+                class
+            } else {
+                final_of_group[group]
+            };
+            classes.push(class);
+        }
+        CanonicalRound {
+            classes,
+            representative_by_class,
+            classes_by_signature_hash,
+        }
+    }
+
     fn ensure_canonical_identity_round(&mut self, round: usize) {
         while self.canonical_rounds.len() <= round {
             let started_at = Instant::now();
-            let previous = self
-                .canonical_rounds
-                .last()
-                .expect("round zero is always present")
-                .classes
-                .clone();
-            let next = self.canonical_identity_round(&previous);
+            let current = self.canonical_rounds.len();
+            let previous = self.canonical_rounds[current - 1].classes.clone();
+            let prev_prev = if current >= 2 {
+                Some(self.canonical_rounds[current - 2].classes.clone())
+            } else {
+                None
+            };
+            let mut cached_hashes = std::mem::take(&mut self.canonical_identity_cached_hashes);
+            let next = self.canonical_identity_round_incremental(
+                &previous,
+                prev_prev.as_deref(),
+                &mut cached_hashes,
+                true,
+            );
+            self.canonical_identity_cached_hashes = cached_hashes;
+            if cfg!(debug_assertions) {
+                // The incremental refinement must be byte-for-byte identical to
+                // the full recompute; verify it in debug builds (this branch is
+                // never taken in release).
+                let full = self.canonical_identity_round(&previous);
+                debug_assert_eq!(
+                    next.classes, full.classes,
+                    "incremental identity round diverged from full recompute",
+                );
+                debug_assert_eq!(
+                    next.representative_by_class, full.representative_by_class,
+                    "incremental identity representatives diverged from full recompute",
+                );
+            }
             if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
                 eprintln!(
                     "[glrmask/profile][terminal_interchangeability] canonical_identity_round={} classes={} elapsed_ms={:.3}",
@@ -2468,6 +6065,987 @@ impl InterchangeabilityDfa {
         cone
     }
 
+    fn support_quotient_terminal_cone(
+        &self,
+        quotient: &SupportQuotient,
+        terminal: TerminalID,
+    ) -> Vec<usize> {
+        let mut cone = Vec::<usize>::new();
+        for destinations in [
+            &self.finalizer_states_by_terminal[terminal as usize],
+            &self.future_finalizer_states_by_terminal[terminal as usize],
+        ] {
+            for &destination in destinations {
+                for &source in &self.reverse_predecessors[destination as usize] {
+                    let class = quotient.class_for_state[source as usize] as usize;
+                    if !cone.contains(&class) {
+                        cone.push(class);
+                    }
+                }
+            }
+        }
+        let mut next = 0usize;
+        while next < cone.len() {
+            let class = cone[next];
+            next += 1;
+            for &predecessor in &quotient.reverse_predecessors[class] {
+                let predecessor = predecessor as usize;
+                if !cone.contains(&predecessor) {
+                    cone.push(predecessor);
+                }
+            }
+        }
+        cone.sort_unstable();
+        cone
+    }
+
+    fn normalized_group_output_code(
+        pair: &OutputPair,
+        self_terminal: TerminalID,
+        group_membership: &[bool],
+        group_size: usize,
+        out: &mut Vec<u64>,
+    ) -> bool {
+        for track in [&pair.finalizers, &pair.future_finalizers] {
+            let mut group_count = 0usize;
+            let mut self_present = false;
+            let mut outside = SmallVec::<[TerminalID; 4]>::new();
+            for &terminal in &track.0 {
+                if group_membership
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    group_count += 1;
+                    self_present |= terminal == self_terminal;
+                } else {
+                    outside.push(terminal);
+                }
+            }
+            let tag = if group_count == 0 {
+                0u64
+            } else if group_count == group_size {
+                1u64
+            } else if group_count == 1 && self_present {
+                2u64
+            } else {
+                return false;
+            };
+            out.push(tag);
+            out.push(outside.len() as u64);
+            out.extend(outside.into_iter().map(|terminal| terminal as u64));
+        }
+        true
+    }
+
+    fn support_petal_code_for_order(
+        &self,
+        quotient: &SupportQuotient,
+        petal: &[usize],
+        order: &[usize],
+        self_terminal: TerminalID,
+        group_membership: &[bool],
+        group_size: usize,
+        union_petals: &[bool],
+    ) -> Option<Vec<u64>> {
+        let mut canonical_index = FxHashMap::<usize, usize>::default();
+        for (index, &petal_index) in order.iter().enumerate() {
+            canonical_index.insert(petal[petal_index], index);
+        }
+        let mut code = Vec::<u64>::new();
+        code.push(order.len() as u64);
+        for &petal_index in order {
+            let class = petal[petal_index];
+            let state = quotient.representative_by_class[class] as usize;
+            code.push((state == self.topology.initial_state) as u64);
+            let edges = self.topology.edges_from(state);
+            code.push(edges.len() as u64);
+            for &(byte, destination) in edges {
+                let destination = destination as usize;
+                let target_class = quotient.class_for_state[destination] as usize;
+                code.push(byte as u64);
+                if let Some(&target_index) = canonical_index.get(&target_class) {
+                    code.push(0);
+                    code.push(target_index as u64);
+                } else {
+                    if union_petals[target_class] {
+                        return None;
+                    }
+                    code.push(1);
+                    code.push(target_class as u64);
+                }
+                let pair = &self.output_pairs[self.output_pair_by_state[destination] as usize];
+                if !Self::normalized_group_output_code(
+                    pair,
+                    self_terminal,
+                    group_membership,
+                    group_size,
+                    &mut code,
+                ) {
+                    return None;
+                }
+            }
+        }
+        Some(code)
+    }
+
+    fn support_petal_code_for_class_order(
+        &self,
+        quotient: &SupportQuotient,
+        class_order: &[usize],
+        self_terminal: TerminalID,
+        group_membership: &[bool],
+        group_size: usize,
+        union_petals: &[bool],
+    ) -> Option<Vec<u64>> {
+        let mut canonical_index = SmallVec::<[(usize, usize); 8]>::new();
+        for (index, &class) in class_order.iter().enumerate() {
+            canonical_index.push((class, index));
+        }
+        let mut code = Vec::<u64>::new();
+        code.push(class_order.len() as u64);
+        for &class in class_order {
+            let state = quotient.representative_by_class[class] as usize;
+            code.push((state == self.topology.initial_state) as u64);
+            let edges = self.topology.edges_from(state);
+            code.push(edges.len() as u64);
+            for &(byte, destination) in edges {
+                let destination = destination as usize;
+                let target_class = quotient.class_for_state[destination] as usize;
+                code.push(byte as u64);
+                if let Some((_, target_index)) = canonical_index
+                    .iter()
+                    .find(|(seen_class, _)| *seen_class == target_class)
+                {
+                    code.push(0);
+                    code.push(*target_index as u64);
+                } else {
+                    if union_petals[target_class] {
+                        return None;
+                    }
+                    code.push(1);
+                    code.push(target_class as u64);
+                }
+                let pair = &self.output_pairs[self.output_pair_by_state[destination] as usize];
+                if !Self::normalized_group_output_code(
+                    pair,
+                    self_terminal,
+                    group_membership,
+                    group_size,
+                    &mut code,
+                ) {
+                    return None;
+                }
+            }
+        }
+        Some(code)
+    }
+
+    fn support_petal_canonical_form(
+        &self,
+        quotient: &SupportQuotient,
+        petal: &[usize],
+        self_terminal: TerminalID,
+        group_membership: &[bool],
+        group_size: usize,
+        union_petals: &[bool],
+    ) -> Option<(Vec<u64>, Vec<usize>)> {
+        let mut index_by_class = FxHashMap::<usize, usize>::default();
+        for (index, &class) in petal.iter().enumerate() {
+            index_by_class.insert(class, index);
+        }
+        let mut colors = vec![0u32; petal.len()];
+        let mut final_signatures = Vec::<Vec<u64>>::new();
+        for _ in 0..=petal.len() {
+            let mut signatures = Vec::with_capacity(petal.len());
+            for &class in petal {
+                let state = quotient.representative_by_class[class] as usize;
+                let mut signature = Vec::<u64>::new();
+                signature.push((state == self.topology.initial_state) as u64);
+                let edges = self.topology.edges_from(state);
+                signature.push(edges.len() as u64);
+                for &(byte, destination) in edges {
+                    let destination = destination as usize;
+                    let target_class = quotient.class_for_state[destination] as usize;
+                    signature.push(byte as u64);
+                    if let Some(&target_index) = index_by_class.get(&target_class) {
+                        signature.push(0);
+                        signature.push(colors[target_index] as u64);
+                    } else {
+                        if union_petals[target_class] {
+                            return None;
+                        }
+                        signature.push(1);
+                        signature.push(target_class as u64);
+                    }
+                    let pair =
+                        &self.output_pairs[self.output_pair_by_state[destination] as usize];
+                    if !Self::normalized_group_output_code(
+                        pair,
+                        self_terminal,
+                        group_membership,
+                        group_size,
+                        &mut signature,
+                    ) {
+                        return None;
+                    }
+                }
+                signatures.push(signature);
+            }
+            let mut unique = signatures.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            let next = signatures
+                .iter()
+                .map(|signature| unique.binary_search(signature).unwrap() as u32)
+                .collect::<Vec<_>>();
+            final_signatures = signatures;
+            if next == colors {
+                break;
+            }
+            colors = next;
+        }
+        let mut seen = FxHashSet::<u32>::default();
+        if colors.iter().any(|&color| !seen.insert(color)) {
+            return None;
+        }
+        let mut canonical_order = (0..petal.len()).collect::<Vec<_>>();
+        canonical_order.sort_unstable_by_key(|&index| colors[index]);
+        let mut code = Vec::<u64>::new();
+        code.push(petal.len() as u64);
+        for &index in &canonical_order {
+            code.push(final_signatures[index].len() as u64);
+            code.extend_from_slice(&final_signatures[index]);
+        }
+        Some((
+            code,
+            canonical_order
+                .into_iter()
+                .map(|index| petal[index])
+                .collect(),
+        ))
+    }
+
+    fn generic_terminal_output_code(
+        pair: &OutputPair,
+        self_terminal: TerminalID,
+        candidate_membership: &[bool],
+        out: &mut Vec<u64>,
+    ) {
+        for track in [&pair.finalizers, &pair.future_finalizers] {
+            let mut self_present = false;
+            let mut peer_count = 0usize;
+            let mut outside = SmallVec::<[TerminalID; 4]>::new();
+            for &terminal in &track.0 {
+                if terminal == self_terminal {
+                    self_present = true;
+                } else if candidate_membership
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    peer_count += 1;
+                } else {
+                    outside.push(terminal);
+                }
+            }
+            out.push(self_present as u64);
+            out.push(peer_count as u64);
+            out.push(outside.len() as u64);
+            out.extend(outside.into_iter().map(|terminal| terminal as u64));
+        }
+    }
+
+    fn generic_output_pair_stats(
+        &self,
+        candidate_membership: &[bool],
+    ) -> Vec<GenericOutputPairStats> {
+        self.output_pairs
+            .iter()
+            .map(|pair| {
+                let track_stats = |track: &OutputBits| {
+                    let mut stats = GenericOutputTrackStats {
+                        outside_hash: 0xbb67_ae85_84ca_a73b,
+                        ..GenericOutputTrackStats::default()
+                    };
+                    for &terminal in &track.0 {
+                        if candidate_membership
+                            .get(terminal as usize)
+                            .copied()
+                            .unwrap_or(false)
+                        {
+                            stats.group_count += 1;
+                        } else {
+                            stats.outside_count += 1;
+                            stats.outside_hash = mix_structural_fingerprint(
+                                stats.outside_hash,
+                                terminal as u64 + 1,
+                            );
+                        }
+                    }
+                    stats
+                };
+                GenericOutputPairStats {
+                    finalizers: track_stats(&pair.finalizers),
+                    future_finalizers: track_stats(&pair.future_finalizers),
+                }
+            })
+            .collect()
+    }
+
+    fn generic_terminal_output_fingerprint_direct(
+        pair: &OutputPair,
+        self_terminal: TerminalID,
+        candidate_membership: &[bool],
+    ) -> u64 {
+        let mut fingerprint = 0x6a09_e667_f3bc_c909u64;
+        for (track_index, track) in [&pair.finalizers, &pair.future_finalizers]
+            .into_iter()
+            .enumerate()
+        {
+            let mut self_present = false;
+            let mut peer_count = 0usize;
+            let mut outside_count = 0usize;
+            let mut outside_hash = 0xbb67_ae85_84ca_a73bu64;
+            for &terminal in &track.0 {
+                if terminal == self_terminal {
+                    self_present = true;
+                } else if candidate_membership
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    peer_count += 1;
+                } else {
+                    outside_count += 1;
+                    outside_hash = mix_structural_fingerprint(
+                        outside_hash,
+                        terminal as u64 + 1,
+                    );
+                }
+            }
+            fingerprint = mix_structural_fingerprint(fingerprint, track_index as u64);
+            fingerprint = mix_structural_fingerprint(fingerprint, self_present as u64);
+            fingerprint = mix_structural_fingerprint(fingerprint, peer_count as u64);
+            fingerprint = mix_structural_fingerprint(fingerprint, outside_count as u64);
+            fingerprint = mix_structural_fingerprint(fingerprint, outside_hash);
+        }
+        fingerprint
+    }
+
+    fn generic_terminal_output_fingerprint(
+        pair: &OutputPair,
+        stats: GenericOutputPairStats,
+        self_terminal: TerminalID,
+    ) -> u64 {
+        let mut fingerprint = 0x6a09_e667_f3bc_c909u64;
+        for (track_index, (track, track_stats)) in [
+            (&pair.finalizers, stats.finalizers),
+            (&pair.future_finalizers, stats.future_finalizers),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let self_present = track.0.binary_search(&self_terminal).is_ok();
+            let peer_count = track_stats.group_count - u32::from(self_present);
+            fingerprint = mix_structural_fingerprint(fingerprint, track_index as u64);
+            fingerprint = mix_structural_fingerprint(fingerprint, self_present as u64);
+            fingerprint = mix_structural_fingerprint(fingerprint, peer_count as u64);
+            fingerprint =
+                mix_structural_fingerprint(fingerprint, track_stats.outside_count as u64);
+            fingerprint = mix_structural_fingerprint(fingerprint, track_stats.outside_hash);
+        }
+        fingerprint
+    }
+
+    fn support_terminal_cone_generic_form(
+        &self,
+        quotient: &SupportQuotient,
+        cone: &[usize],
+        terminal: TerminalID,
+        candidate_membership: &[bool],
+        pair_stats: Option<&[GenericOutputPairStats]>,
+    ) -> (SmallVec<[u64; 8]>, Option<SmallVec<[usize; 8]>>) {
+        #[derive(Clone, Copy)]
+        struct GenericEdge {
+            byte: u8,
+            internal_target: Option<usize>,
+            external_target: usize,
+            output: u64,
+        }
+
+        let mut index_by_class = SmallVec::<[(usize, usize); 8]>::new();
+        for (index, &class) in cone.iter().enumerate() {
+            index_by_class.push((class, index));
+        }
+        let mut rows = SmallVec::<[SmallVec<[GenericEdge; 8]>; 8]>::new();
+        let mut root_flags = SmallVec::<[bool; 8]>::new();
+        rows.reserve(cone.len());
+        root_flags.reserve(cone.len());
+        for &class in cone {
+            let state = quotient.representative_by_class[class] as usize;
+            root_flags.push(state == self.topology.initial_state);
+            let mut row = SmallVec::<[GenericEdge; 8]>::new();
+            for &(byte, destination) in self.topology.edges_from(state) {
+                let destination = destination as usize;
+                let target_class = quotient.class_for_state[destination] as usize;
+                let internal_target = index_by_class
+                    .iter()
+                    .find(|(seen_class, _)| *seen_class == target_class)
+                    .map(|(_, index)| *index);
+                let pair = &self.output_pairs[self.output_pair_by_state[destination] as usize];
+                row.push(GenericEdge {
+                    byte,
+                    internal_target,
+                    external_target: target_class,
+                    output: match pair_stats {
+                        Some(pair_stats) => Self::generic_terminal_output_fingerprint(
+                            pair,
+                            pair_stats[self.output_pair_by_state[destination] as usize],
+                            terminal,
+                        ),
+                        None => Self::generic_terminal_output_fingerprint_direct(
+                            pair,
+                            terminal,
+                            candidate_membership,
+                        ),
+                    },
+                });
+            }
+            rows.push(row);
+        }
+
+        let mut colors = SmallVec::<[u64; 8]>::new();
+        let mut next = SmallVec::<[u64; 8]>::new();
+        colors.resize(cone.len(), 0);
+        next.resize(cone.len(), 0);
+        // Fixed-depth refinement is an isomorphism invariant. Hash collisions
+        // only coarsen candidate groups; the exact petal certificate below is
+        // the sole accepting proof.
+        for round in 0..2usize {
+            for index in 0..cone.len() {
+                let mut fingerprint = mix_structural_fingerprint(
+                    0x510e_527f_ade6_82d1,
+                    round as u64,
+                );
+                fingerprint = mix_structural_fingerprint(
+                    fingerprint,
+                    root_flags[index] as u64,
+                );
+                for edge in &rows[index] {
+                    fingerprint =
+                        mix_structural_fingerprint(fingerprint, edge.byte as u64 + 1);
+                    if let Some(target_index) = edge.internal_target {
+                        fingerprint = mix_structural_fingerprint(fingerprint, 0);
+                        fingerprint =
+                            mix_structural_fingerprint(fingerprint, colors[target_index]);
+                    } else {
+                        fingerprint = mix_structural_fingerprint(fingerprint, 1);
+                        fingerprint = mix_structural_fingerprint(
+                            fingerprint,
+                            edge.external_target as u64 + 1,
+                        );
+                    }
+                    fingerprint = mix_structural_fingerprint(fingerprint, edge.output);
+                }
+                next[index] = fingerprint;
+            }
+            std::mem::swap(&mut colors, &mut next);
+        }
+        let mut order = (0..colors.len()).collect::<SmallVec<[usize; 8]>>();
+        order.sort_unstable_by_key(|&index| colors[index]);
+        let unique = order
+            .windows(2)
+            .all(|pair| colors[pair[0]] != colors[pair[1]]);
+        let mut sorted_colors = colors.clone();
+        sorted_colors.sort_unstable();
+        let mut code = SmallVec::<[u64; 8]>::new();
+        code.reserve(sorted_colors.len() + 1);
+        code.push(cone.len() as u64);
+        code.extend(sorted_colors);
+        let canonical_order = unique.then(|| {
+            order
+                .into_iter()
+                .map(|index| cone[index])
+                .collect::<SmallVec<[usize; 8]>>()
+        });
+        (code, canonical_order)
+    }
+
+    fn normalized_group_track_equal(
+        left: &OutputBits,
+        left_self: TerminalID,
+        right: &OutputBits,
+        right_self: TerminalID,
+        group_membership: &[bool],
+        group_size: usize,
+    ) -> bool {
+        let classify = |track: &OutputBits, self_terminal: TerminalID| {
+            let mut group_count = 0usize;
+            let mut self_present = false;
+            for &terminal in &track.0 {
+                if group_membership
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    group_count += 1;
+                    self_present |= terminal == self_terminal;
+                }
+            }
+            if group_count == 0 {
+                Some(0u8)
+            } else if group_count == group_size {
+                Some(1u8)
+            } else if group_count == 1 && self_present {
+                Some(2u8)
+            } else {
+                None
+            }
+        };
+        if classify(left, left_self) != classify(right, right_self) {
+            return false;
+        }
+        left.0
+            .iter()
+            .copied()
+            .filter(|&terminal| {
+                !group_membership
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+            })
+            .eq(right.0.iter().copied().filter(|&terminal| {
+                !group_membership
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+            }))
+    }
+
+    fn normalized_group_output_equal(
+        left: &OutputPair,
+        left_self: TerminalID,
+        right: &OutputPair,
+        right_self: TerminalID,
+        group_membership: &[bool],
+        group_size: usize,
+    ) -> bool {
+        Self::normalized_group_track_equal(
+            &left.finalizers,
+            left_self,
+            &right.finalizers,
+            right_self,
+            group_membership,
+            group_size,
+        ) && Self::normalized_group_track_equal(
+            &left.future_finalizers,
+            left_self,
+            &right.future_finalizers,
+            right_self,
+            group_membership,
+            group_size,
+        )
+    }
+
+    fn singleton_petal_rows_match(
+        &self,
+        quotient: &SupportQuotient,
+        left_class: usize,
+        left_terminal: TerminalID,
+        right_class: usize,
+        right_terminal: TerminalID,
+        union_petals: &[bool],
+        group_membership: &[bool],
+        group_size: usize,
+    ) -> bool {
+        let left_state = quotient.representative_by_class[left_class] as usize;
+        let right_state = quotient.representative_by_class[right_class] as usize;
+        if (left_state == self.topology.initial_state)
+            != (right_state == self.topology.initial_state)
+        {
+            return false;
+        }
+        let left_edges = self.topology.edges_from(left_state);
+        let right_edges = self.topology.edges_from(right_state);
+        if left_edges.len() != right_edges.len() {
+            return false;
+        }
+        for (&(left_byte, left_destination), &(right_byte, right_destination)) in
+            left_edges.iter().zip(right_edges)
+        {
+            if left_byte != right_byte {
+                return false;
+            }
+            let left_destination = left_destination as usize;
+            let right_destination = right_destination as usize;
+            let left_target = quotient.class_for_state[left_destination] as usize;
+            let right_target = quotient.class_for_state[right_destination] as usize;
+            let left_internal = left_target == left_class;
+            let right_internal = right_target == right_class;
+            if left_internal != right_internal {
+                return false;
+            }
+            if !left_internal {
+                if union_petals[left_target]
+                    || union_petals[right_target]
+                    || left_target != right_target
+                {
+                    return false;
+                }
+            }
+            let left_output =
+                &self.output_pairs[self.output_pair_by_state[left_destination] as usize];
+            let right_output =
+                &self.output_pairs[self.output_pair_by_state[right_destination] as usize];
+            if !Self::normalized_group_output_equal(
+                left_output,
+                left_terminal,
+                right_output,
+                right_terminal,
+                group_membership,
+                group_size,
+            ) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Fast exact batch certificate. The fixed-depth cone colors only propose
+    /// one class order per terminal. Hash collisions or insufficient color
+    /// refinement are harmless: every resulting sparse permutation is checked
+    /// by `support_deviations_are_valid` before acceptance.
+    fn support_petal_batch_certificate_from_orders(
+        &self,
+        quotient: &SupportQuotient,
+        members: &[TerminalID],
+        cones: &[&[usize]],
+        proposed_orders: &[&[usize]],
+    ) -> Option<Vec<Vec<usize>>> {
+        if members.len() < 2
+            || members.len() != cones.len()
+            || members.len() != proposed_orders.len()
+        {
+            return None;
+        }
+        let common = cones.iter().skip(1).fold(cones[0].to_vec(), |common, cone| {
+            let mut intersection = Vec::new();
+            let mut i = 0usize;
+            let mut j = 0usize;
+            while i < common.len() && j < cone.len() {
+                match common[i].cmp(&cone[j]) {
+                    std::cmp::Ordering::Less => i += 1,
+                    std::cmp::Ordering::Greater => j += 1,
+                    std::cmp::Ordering::Equal => {
+                        intersection.push(common[i]);
+                        i += 1;
+                        j += 1;
+                    }
+                }
+            }
+            intersection
+        });
+        let class_count = quotient.representative_by_class.len();
+        let mut owner = vec![usize::MAX; class_count];
+        let mut canonical_orders = Vec::with_capacity(members.len());
+        for (terminal_index, (cone, proposed_order)) in
+            cones.iter().zip(proposed_orders).enumerate()
+        {
+            if proposed_order.len() != cone.len() {
+                return None;
+            }
+            let mut petal_order = Vec::new();
+            for &class in *proposed_order {
+                if cone.binary_search(&class).is_err() {
+                    return None;
+                }
+                if common.binary_search(&class).is_ok() {
+                    continue;
+                }
+                if owner[class] != usize::MAX {
+                    return None;
+                }
+                owner[class] = terminal_index;
+                petal_order.push(class);
+            }
+            canonical_orders.push(petal_order);
+        }
+        if canonical_orders
+            .iter()
+            .skip(1)
+            .any(|order| order.len() != canonical_orders[0].len())
+        {
+            return None;
+        }
+
+        let union_petals = owner
+            .iter()
+            .map(|&owner| owner != usize::MAX)
+            .collect::<Vec<_>>();
+        let mut group_membership = vec![false; self.finalizer_states_by_terminal.len()];
+        for &terminal in members {
+            group_membership[terminal as usize] = true;
+        }
+        for &class in &common {
+            let state = quotient.representative_by_class[class] as usize;
+            for &(_, destination) in self.topology.edges_from(state) {
+                let destination = destination as usize;
+                let target_class = quotient.class_for_state[destination] as usize;
+                if union_petals[target_class] {
+                    return None;
+                }
+                let pair = &self.output_pairs[self.output_pair_by_state[destination] as usize];
+                let mut ignored = Vec::new();
+                if !Self::normalized_group_output_code(
+                    pair,
+                    u32::MAX,
+                    &group_membership,
+                    members.len(),
+                    &mut ignored,
+                ) {
+                    return None;
+                }
+            }
+        }
+
+        // The overwhelmingly common case is one moved quotient class per
+        // terminal. Compare those rows directly, normalizing SELF and the one
+        // internal petal target. This is the same exact certificate as the
+        // canonical code below without allocating one Vec<u64> per member.
+        if canonical_orders.iter().all(|order| order.len() == 1) {
+            let representative_class = canonical_orders[0][0];
+            let representative_terminal = members[0];
+            for (&terminal, order) in members[1..].iter().zip(&canonical_orders[1..]) {
+                if !self.singleton_petal_rows_match(
+                    quotient,
+                    representative_class,
+                    representative_terminal,
+                    order[0],
+                    terminal,
+                    &union_petals,
+                    &group_membership,
+                    members.len(),
+                ) {
+                    return None;
+                }
+            }
+            return Some(canonical_orders);
+        }
+
+        // The color order is only a proposal. Compare the complete labelled
+        // quotient rows in that order, with the current terminal normalized to
+        // SELF. Equality proves every petal bijection at once; together with
+        // reverse closure, disjointness, and the fixed-core check above, this
+        // is a complete group-level automorphism certificate. No per-member
+        // whole-cone verification is then necessary.
+        let mut exact_code: Option<Vec<u64>> = None;
+        for ((&terminal, class_order), terminal_index) in members
+            .iter()
+            .zip(&canonical_orders)
+            .zip(0usize..)
+        {
+            let code = self.support_petal_code_for_class_order(
+                quotient,
+                class_order,
+                terminal,
+                &group_membership,
+                members.len(),
+                &union_petals,
+            )?;
+            if exact_code.as_ref().is_some_and(|expected| *expected != code) {
+                return None;
+            }
+            exact_code.get_or_insert(code);
+            debug_assert_eq!(terminal_index + 1, canonical_orders[..=terminal_index].len());
+        }
+        Some(canonical_orders)
+    }
+
+    /// Sufficient whole-class certificate: all mutable behavior is contained in
+    /// pairwise-disjoint reverse-closed petals with one common canonical form;
+    /// the complement is fixed and invariant under every permutation of the
+    /// terminal group. Then the canonical petal bijections extend by identity
+    /// to an action of the full symmetric group.
+    fn support_petal_batch_certificate(
+        &self,
+        quotient: &SupportQuotient,
+        members: &[TerminalID],
+    ) -> Option<Vec<Vec<usize>>> {
+        let owned_cones = members
+            .iter()
+            .map(|&terminal| self.support_quotient_terminal_cone(quotient, terminal))
+            .collect::<Vec<_>>();
+        let cones = owned_cones.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        self.support_petal_batch_certificate_with_cones(quotient, members, &cones)
+    }
+
+    fn support_petal_batch_certificate_with_cones(
+        &self,
+        quotient: &SupportQuotient,
+        members: &[TerminalID],
+        cones: &[&[usize]],
+    ) -> Option<Vec<Vec<usize>>> {
+        if members.len() < 2 || members.len() != cones.len() {
+            return None;
+        }
+        let common = cones.iter().skip(1).fold(cones[0].to_vec(), |common, cone| {
+            let mut intersection = Vec::new();
+            let mut i = 0usize;
+            let mut j = 0usize;
+            while i < common.len() && j < cone.len() {
+                match common[i].cmp(&cone[j]) {
+                    std::cmp::Ordering::Less => i += 1,
+                    std::cmp::Ordering::Greater => j += 1,
+                    std::cmp::Ordering::Equal => {
+                        intersection.push(common[i]);
+                        i += 1;
+                        j += 1;
+                    }
+                }
+            }
+            intersection
+        });
+        let petals = cones
+            .iter()
+            .map(|cone| {
+                cone.iter()
+                    .copied()
+                    .filter(|class| common.binary_search(class).is_err())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let class_count = quotient.representative_by_class.len();
+        let mut owner = vec![usize::MAX; class_count];
+        for (terminal_index, petal) in petals.iter().enumerate() {
+            for &class in petal {
+                if owner[class] != usize::MAX {
+                    return None;
+                }
+                owner[class] = terminal_index;
+            }
+        }
+        let union_petals = owner
+            .iter()
+            .map(|&owner| owner != usize::MAX)
+            .collect::<Vec<_>>();
+        let terminal_count = self.finalizer_states_by_terminal.len();
+        let mut group_membership = vec![false; terminal_count];
+        for &terminal in members {
+            group_membership[terminal as usize] = true;
+        }
+
+        // Every C_t is reverse-closed, hence their union is reverse-closed:
+        // no class outside the union can enter a moved petal or observe a
+        // group-terminal output. Only the intersection K remains inside every
+        // cone while fixed by the petal action, so only K needs an invariance
+        // check.
+        for &class in &common {
+            let state = quotient.representative_by_class[class] as usize;
+            for &(_, destination) in self.topology.edges_from(state) {
+                let destination = destination as usize;
+                let target_class = quotient.class_for_state[destination] as usize;
+                if union_petals[target_class] {
+                    return None;
+                }
+                let pair = &self.output_pairs[self.output_pair_by_state[destination] as usize];
+                let mut ignored = Vec::new();
+                // Use a sentinel outside the group: only empty/all-group tracks
+                // are accepted in the fixed common core.
+                if !Self::normalized_group_output_code(
+                    pair,
+                    u32::MAX,
+                    &group_membership,
+                    members.len(),
+                    &mut ignored,
+                ) {
+                    return None;
+                }
+            }
+        }
+
+        let mut canonical_code: Option<Vec<u64>> = None;
+        let mut canonical_orders = Vec::with_capacity(members.len());
+        for (&terminal, petal) in members.iter().zip(&petals) {
+            let (code, order) = self.support_petal_canonical_form(
+                quotient,
+                petal,
+                terminal,
+                &group_membership,
+                members.len(),
+                &union_petals,
+            )?;
+            if canonical_code.as_ref().is_some_and(|expected| *expected != code) {
+                return None;
+            }
+            canonical_code.get_or_insert(code);
+            canonical_orders.push(order);
+        }
+        Some(canonical_orders)
+    }
+
+    fn support_petal_batch_maps(
+        &self,
+        quotient: &SupportQuotient,
+        members: &[TerminalID],
+        canonical_orders: &[Vec<usize>],
+    ) -> Option<Vec<InterchangeMap>> {
+        if members.len() != canonical_orders.len() || members.len() < 2 {
+            return None;
+        }
+        let representative_order = &canonical_orders[0];
+        let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
+        let mut maps = Vec::with_capacity(members.len() - 1);
+        for member_order in &canonical_orders[1..] {
+            if member_order.len() != representative_order.len() {
+                return None;
+            }
+            let mut deviations = Vec::<(u32, u32)>::with_capacity(member_order.len() * 2);
+            for (&representative_class, &member_class) in
+                representative_order.iter().zip(member_order)
+            {
+                if representative_class == member_class {
+                    continue;
+                }
+                if representative_class == root_class || member_class == root_class {
+                    return None;
+                }
+                deviations.push((representative_class as u32, member_class as u32));
+                deviations.push((member_class as u32, representative_class as u32));
+            }
+            deviations.sort_unstable_by_key(|&(source, _)| source);
+            if deviations.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                return None;
+            }
+            if cfg!(debug_assertions) {
+                let member_index = maps.len() + 1;
+                let cone_classes = self.support_quotient_affected_cone_small(
+                    quotient,
+                    members[0],
+                    members[member_index],
+                );
+                debug_assert!(self.support_deviations_are_valid(
+                    quotient,
+                    members[0],
+                    members[member_index],
+                    &cone_classes,
+                    &deviations,
+                ));
+            }
+            maps.push(InterchangeMap {
+                scanner_state_map: TransportScannerStateMap::Quotient {
+                    state_count: quotient.scanner_state_count,
+                    class_for_original: Arc::clone(&quotient.scanner_class_for_original),
+                    representative_for_class: Arc::clone(
+                        &quotient.scanner_representative_for_class,
+                    ),
+                    source_class_for_target_deviations: deviations.into_boxed_slice(),
+                },
+            });
+        }
+        Some(maps)
+    }
+
     fn canonical_quotient_affected_cone_small(
         &self,
         quotient: &CanonicalQuotient,
@@ -2789,6 +7367,19 @@ impl InterchangeabilityDfa {
         left: TerminalID,
         right: TerminalID,
     ) -> bool {
+        self.canonical_round_one_still_possible_with_mapped(
+            left,
+            right,
+            SmallVec::new(),
+        )
+    }
+
+    fn canonical_round_one_still_possible_with_mapped(
+        &mut self,
+        left: TerminalID,
+        right: TerminalID,
+        mapped_output_ids: SmallVec<[(u32, u32); 16]>,
+    ) -> bool {
         self.ensure_canonical_identity_round(1);
         if self.canonical_round_one_class_counts.is_none() {
             let class_count = self.canonical_rounds[1].representative_by_class.len();
@@ -2806,10 +7397,40 @@ impl InterchangeabilityDfa {
             self.canonical_round_one_source_mark_epoch = 1;
         }
         let epoch = self.canonical_round_one_source_mark_epoch;
+
+        // The left/representative-side affected sources are identical for every
+        // member sharing this representative in the exact-verify loop, so gather
+        // them once and reuse them (re-marked under the fresh epoch) thereafter.
+        // The resulting affected-source SET is identical to gathering all four
+        // destination lists together; iteration order differs (left sources
+        // first) but the accept/reject result is order-independent.
+        if self.canonical_round_one_left_terminal != Some(left) {
+            self.canonical_round_one_left_sources.clear();
+            for destinations in [
+                &self.finalizer_states_by_terminal[left as usize],
+                &self.future_finalizer_states_by_terminal[left as usize],
+            ] {
+                for &destination in destinations {
+                    for &source in &self.reverse_predecessors[destination as usize] {
+                        let source = source as usize;
+                        if self.canonical_round_one_source_marks[source] != epoch {
+                            self.canonical_round_one_source_marks[source] = epoch;
+                            self.canonical_round_one_left_sources.push(source as u32);
+                        }
+                    }
+                }
+            }
+            self.canonical_round_one_left_terminal = Some(left);
+        } else {
+            for &source in &self.canonical_round_one_left_sources {
+                self.canonical_round_one_source_marks[source as usize] = epoch;
+            }
+        }
+
         self.canonical_round_one_affected_sources.clear();
+        self.canonical_round_one_affected_sources
+            .extend_from_slice(&self.canonical_round_one_left_sources);
         for destinations in [
-            &self.finalizer_states_by_terminal[left as usize],
-            &self.future_finalizer_states_by_terminal[left as usize],
             &self.finalizer_states_by_terminal[right as usize],
             &self.future_finalizer_states_by_terminal[right as usize],
         ] {
@@ -2827,25 +7448,37 @@ impl InterchangeabilityDfa {
         // Move the scratch list out while comparing exact cached signatures so
         // immutable borrows of the DFA do not conflict with scratch reuse.
         let affected_sources = std::mem::take(&mut self.canonical_round_one_affected_sources);
+        let mut changed_by_identity_class =
+            std::mem::take(&mut self.canonical_round_one_changed_scratch);
+        changed_by_identity_class.clear();
+        let mut added_identity_classes =
+            std::mem::take(&mut self.canonical_round_one_added_scratch);
+        added_identity_classes.clear();
         let identity = &self.canonical_rounds[1];
         let identity_counts = self
             .canonical_round_one_class_counts
             .as_ref()
             .expect("first-round counts initialized");
-        let mut changed_by_identity_class = FxHashMap::<u32, u32>::default();
-        let mut added_identity_classes = FxHashSet::<u32>::default();
         let mut swapped_root_class = identity.classes[self.topology.initial_state];
-        let mut outputs = SwappedOutputIds::new(
+        let mut outputs = SparseSwappedOutputIds::with_mapped(
             &self.output_pairs,
             &self.output_pair_lookup,
             left as usize,
             right as usize,
+            mapped_output_ids,
         );
         for &source in &affected_sources {
             let source = source as usize;
             let identity_class = identity.classes[source];
-            *changed_by_identity_class.entry(identity_class).or_default() += 1;
-            let signature = self.canonical_swapped_signature(
+            if let Some((_, changed)) = changed_by_identity_class
+                .iter_mut()
+                .find(|(class, _)| *class == identity_class)
+            {
+                *changed += 1;
+            } else {
+                changed_by_identity_class.push((identity_class, 1));
+            }
+            let signature = self.canonical_swapped_signature_sparse(
                 source,
                 &self.canonical_rounds[0].classes,
                 &mut outputs,
@@ -2856,21 +7489,28 @@ impl InterchangeabilityDfa {
                 &signature,
             ) else {
                 self.canonical_round_one_affected_sources = affected_sources;
+                self.canonical_round_one_changed_scratch = changed_by_identity_class;
+                self.canonical_round_one_added_scratch = added_identity_classes;
                 return false;
             };
-            added_identity_classes.insert(swapped_class);
+            if !added_identity_classes.contains(&swapped_class) {
+                added_identity_classes.push(swapped_class);
+            }
             if source == self.topology.initial_state {
                 swapped_root_class = swapped_class;
             }
         }
         self.canonical_round_one_affected_sources = affected_sources;
 
-        if swapped_root_class != identity.classes[self.topology.initial_state] {
-            return false;
-        }
-        changed_by_identity_class.into_iter().all(|(class, changed)| {
-            changed < identity_counts[class as usize] || added_identity_classes.contains(&class)
-        })
+        let root_matches = swapped_root_class == identity.classes[self.topology.initial_state];
+        let accepted = root_matches
+            && changed_by_identity_class.iter().all(|&(class, changed)| {
+                changed < identity_counts[class as usize]
+                    || added_identity_classes.contains(&class)
+            });
+        self.canonical_round_one_changed_scratch = changed_by_identity_class;
+        self.canonical_round_one_added_scratch = added_identity_classes;
+        accepted
     }
 
     /// Collision-free exact refinement. This deliberately recomputes every
@@ -3002,6 +7642,21 @@ impl InterchangeabilityDfa {
         left: TerminalID,
         right: TerminalID,
     ) -> bool {
+        let mut mapped_output_ids = SmallVec::new();
+        self.observed_output_pair_set_is_swap_closed_with_mapping(
+            left,
+            right,
+            &mut mapped_output_ids,
+        )
+    }
+
+    fn observed_output_pair_set_is_swap_closed_with_mapping(
+        &mut self,
+        left: TerminalID,
+        right: TerminalID,
+        mapped_output_ids: &mut SmallVec<[(u32, u32); 16]>,
+    ) -> bool {
+        mapped_output_ids.clear();
         let left_terminal = left as usize;
         let right_terminal = right as usize;
         self.observed_output_pair_mark_epoch = self.observed_output_pair_mark_epoch.wrapping_add(1);
@@ -3025,13 +7680,42 @@ impl InterchangeabilityDfa {
                 }
                 self.observed_output_pair_marks[id] = epoch;
                 let pair = &self.observed_output_pairs[id];
+                // If neither component changes under the swap, the pair maps to
+                // itself. Since it is an observed pair it is trivially in the
+                // lookup, so skip the allocation and hash lookup entirely.
+                let finalizers_change =
+                    pair.finalizers.swap_changes(left as TerminalID, right as TerminalID);
+                let future_change = pair
+                    .future_finalizers
+                    .swap_changes(left as TerminalID, right as TerminalID);
+                if !finalizers_change && !future_change {
+                    continue;
+                }
                 let swapped = OutputPair {
-                    finalizers: pair.finalizers.mapped(swap),
-                    future_finalizers: pair.future_finalizers.mapped(swap),
+                    finalizers: if finalizers_change {
+                        pair.finalizers.mapped(swap)
+                    } else {
+                        pair.finalizers.clone()
+                    },
+                    future_finalizers: if future_change {
+                        pair.future_finalizers.mapped(swap)
+                    } else {
+                        pair.future_finalizers.clone()
+                    },
                 };
-                if !self.observed_output_pair_lookup.contains_key(&swapped) {
+                let Some(&mapped_id) = self.output_pair_lookup.get(&swapped) else {
+                    return false;
+                };
+                if !self
+                    .observed_output_pair_is_observed
+                    .get(mapped_id as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
                     return false;
                 }
+                let canonical_id = self.observed_output_pair_canonical_ids[id];
+                mapped_output_ids.push((canonical_id, mapped_id));
             }
         }
         true
@@ -3045,21 +7729,531 @@ impl InterchangeabilityDfa {
                 == self.future_finalizer_states_by_terminal[right]
     }
 
-    fn characterize_pair(&mut self, left: TerminalID, right: TerminalID) -> PairCharacterization {
-        let state_count = self.state_count();
-        let swap = Some((
+    // ----- Parallel per-pair certification path -------------------------------
+    //
+    // The methods below are `&self` mirrors of the hot per-pair checks, taking a
+    // per-worker `CertScratch` instead of the DFA's own scratch fields and
+    // profiling counters. They rely on every lazy build (canonical round 1,
+    // class counts, support quotient, per-terminal supports, canonical identity
+    // map) having been forced before the loop by `prebuild_certification_state`,
+    // so they perform no `&mut self` mutation and can run concurrently over an
+    // immutable `&InterchangeabilityDfa`.
+
+    /// Force every lazily built structure the certification path reads, so the
+    /// `&self` variants never trigger a build. `candidates` is the flattened set
+    /// of terminals that enter the certification loop.
+    fn prebuild_certification_state(&mut self, candidates: &[TerminalID]) {
+        self.ensure_canonical_identity_round(1);
+        if self.canonical_round_one_class_counts.is_none() {
+            let class_count = self.canonical_rounds[1].representative_by_class.len();
+            let mut counts = vec![0u32; class_count];
+            for &class in &self.canonical_rounds[1].classes[..self.topology.real_state_count] {
+                counts[class as usize] += 1;
+            }
+            self.canonical_round_one_class_counts = Some(counts);
+        }
+        self.ensure_support_quotient();
+        // Size the thread-safe on-demand support slots once; workers fill only
+        // the terminals they actually reach at the support stage.
+        let terminal_count = self.finalizer_states_by_terminal.len();
+        let _ = self.parallel_terminal_supports.get_or_init(|| {
+            (0..terminal_count).map(|_| OnceLock::new()).collect()
+        });
+        let _ = candidates;
+        // Force the canonical identity map used by the frozen-preserve branch.
+        let _ = self.canonical_identity_map();
+    }
+
+    /// Thread-safe, `&self` lazy build of one terminal's quotient output
+    /// support. Idempotent and pure given the pre-built global support
+    /// quotient, so racing workers converge on identical contents.
+    fn terminal_support_parallel(&self, terminal: TerminalID) -> &[(u32, u8)] {
+        let slots = self
+            .parallel_terminal_supports
+            .get()
+            .expect("parallel terminal supports sized before certification loop");
+        slots[terminal as usize].get_or_init(|| {
+            let class_for_state = &self
+                .support_quotient
+                .as_ref()
+                .expect("support quotient pre-built")
+                .class_for_state;
+            let terminal = terminal as usize;
+            let mut support = Vec::<(u32, u8)>::new();
+            for (destinations, mask) in [
+                (&self.finalizer_states_by_terminal[terminal], 1u8),
+                (&self.future_finalizer_states_by_terminal[terminal], 2u8),
+            ] {
+                for &destination in destinations {
+                    for &source in &self.reverse_predecessors[destination as usize] {
+                        support.push((class_for_state[source as usize], mask));
+                    }
+                }
+            }
+            support.sort_unstable_by_key(|&(class, _)| class);
+            let mut write = 0usize;
+            for read in 0..support.len() {
+                if write > 0 && support[write - 1].0 == support[read].0 {
+                    support[write - 1].1 |= support[read].1;
+                } else {
+                    support[write] = support[read];
+                    write += 1;
+                }
+            }
+            support.truncate(write);
+            support
+        })
+    }
+
+    /// Deduplicated set of characterization source rows affected by swapping in
+    /// the representative terminal. Computed once per representative and shared
+    /// read-only across all its members in the parallel loop.
+    fn representative_affected_sources(&self, representative: TerminalID, out: &mut Vec<u32>) {
+        out.clear();
+        for destinations in [
+            &self.finalizer_states_by_terminal[representative as usize],
+            &self.future_finalizer_states_by_terminal[representative as usize],
+        ] {
+            for &destination in destinations {
+                for &source in &self.reverse_predecessors[destination as usize] {
+                    out.push(source);
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+    }
+
+    /// `&self` mirror of `canonical_identity_map`, reading the pre-built cache.
+    fn canonical_identity_map_prebuilt(&self) -> InterchangeMap {
+        self.canonical_identity_map
+            .as_ref()
+            .expect("canonical identity map pre-built before certification loop")
+            .clone()
+    }
+
+    /// `&self` + scratch mirror of `observed_output_pair_set_is_swap_closed`.
+    fn observed_output_pair_set_is_swap_closed_scratch(
+        &self,
+        scratch: &mut CertScratch,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> bool {
+        let left_terminal = left as usize;
+        let right_terminal = right as usize;
+        scratch.output_pair_mark_epoch = scratch.output_pair_mark_epoch.wrapping_add(1);
+        if scratch.output_pair_mark_epoch == 0 {
+            scratch.output_pair_marks.fill(0);
+            scratch.output_pair_mark_epoch = 1;
+        }
+        let epoch = scratch.output_pair_mark_epoch;
+        let swap = Some((left as usize, right as usize));
+        for ids in [
+            &self.observed_output_pair_ids_by_terminal[left_terminal],
+            &self.observed_output_pair_ids_by_terminal[right_terminal],
+        ] {
+            for &id in ids {
+                let id = id as usize;
+                if scratch.output_pair_marks[id] == epoch {
+                    continue;
+                }
+                scratch.output_pair_marks[id] = epoch;
+                let pair = &self.observed_output_pairs[id];
+                let finalizers_change =
+                    pair.finalizers.swap_changes(left as TerminalID, right as TerminalID);
+                let future_change = pair
+                    .future_finalizers
+                    .swap_changes(left as TerminalID, right as TerminalID);
+                if !finalizers_change && !future_change {
+                    continue;
+                }
+                let swapped = OutputPair {
+                    finalizers: if finalizers_change {
+                        pair.finalizers.mapped(swap)
+                    } else {
+                        pair.finalizers.clone()
+                    },
+                    future_finalizers: if future_change {
+                        pair.future_finalizers.mapped(swap)
+                    } else {
+                        pair.future_finalizers.clone()
+                    },
+                };
+                let Some(&mapped_id) = self.output_pair_lookup.get(&swapped) else {
+                    return false;
+                };
+                if !self
+                    .observed_output_pair_is_observed
+                    .get(mapped_id as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// `&self` + scratch mirror of `canonical_round_one_still_possible`. The
+    /// representative-side affected sources are pre-computed and passed in as
+    /// `left_sources` (shared read-only across all members of the pivot).
+    fn canonical_round_one_still_possible_scratch(
+        &self,
+        scratch: &mut CertScratch,
+        left: TerminalID,
+        left_sources: &[u32],
+        right: TerminalID,
+    ) -> bool {
+        scratch.source_mark_epoch = scratch.source_mark_epoch.wrapping_add(1);
+        if scratch.source_mark_epoch == 0 {
+            scratch.source_marks.fill(0);
+            scratch.source_mark_epoch = 1;
+        }
+        let epoch = scratch.source_mark_epoch;
+
+        scratch.affected_sources.clear();
+        for &source in left_sources {
+            scratch.source_marks[source as usize] = epoch;
+            scratch.affected_sources.push(source);
+        }
+        for destinations in [
+            &self.finalizer_states_by_terminal[right as usize],
+            &self.future_finalizer_states_by_terminal[right as usize],
+        ] {
+            for &destination in destinations {
+                for &source in &self.reverse_predecessors[destination as usize] {
+                    let source = source as usize;
+                    if scratch.source_marks[source] != epoch {
+                        scratch.source_marks[source] = epoch;
+                        scratch.affected_sources.push(source as u32);
+                    }
+                }
+            }
+        }
+
+        let changed_by_identity_class = &mut scratch.changed_scratch;
+        changed_by_identity_class.clear();
+        let added_identity_classes = &mut scratch.added_scratch;
+        added_identity_classes.clear();
+        let identity = &self.canonical_rounds[1];
+        let identity_counts = self
+            .canonical_round_one_class_counts
+            .as_ref()
+            .expect("first-round counts pre-built");
+        let mut swapped_root_class = identity.classes[self.topology.initial_state];
+        let mut outputs = SparseSwappedOutputIds::new(
+            &self.output_pairs,
+            &self.output_pair_lookup,
             left as usize,
             right as usize,
-        ));
-        let swapped_finalizers = self
-            .finalizers
+        );
+        for &source in &scratch.affected_sources {
+            let source = source as usize;
+            let identity_class = identity.classes[source];
+            if let Some((_, changed)) = changed_by_identity_class
+                .iter_mut()
+                .find(|(class, _)| *class == identity_class)
+            {
+                *changed += 1;
+            } else {
+                changed_by_identity_class.push((identity_class, 1));
+            }
+            let signature = self.canonical_swapped_signature_sparse(
+                source,
+                &self.canonical_rounds[0].classes,
+                &mut outputs,
+            );
+            let Some(swapped_class) = self.canonical_round_identity_class_for_signature(
+                identity,
+                &self.canonical_rounds[0].classes,
+                &signature,
+            ) else {
+                return false;
+            };
+            if !added_identity_classes.contains(&swapped_class) {
+                added_identity_classes.push(swapped_class);
+            }
+            if source == self.topology.initial_state {
+                swapped_root_class = swapped_class;
+            }
+        }
+
+        let root_matches = swapped_root_class == identity.classes[self.topology.initial_state];
+        root_matches
+            && changed_by_identity_class.iter().all(|&(class, changed)| {
+                changed < identity_counts[class as usize]
+                    || added_identity_classes.contains(&class)
+            })
+    }
+
+    /// `&self` + scratch mirror of `support_transposition_interchange_map`.
+    fn support_transposition_interchange_map_scratch(
+        &self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<InterchangeMap> {
+        if let Some(deviations) = self.support_transposition_deviations_scratch(left, right) {
+            if let Some(map) = self.support_transposition_interchange_map_from_deviations_scratch(
+                left,
+                right,
+                deviations,
+            ) {
+                return Some(map);
+            }
+        }
+        let left_support = self.terminal_support_parallel(left);
+        let right_support = self.terminal_support_parallel(right);
+        let deviations = self.support_transposition_search_deviations_with_supports(
+            left,
+            right,
+            left_support,
+            right_support,
+        )?;
+        self.support_transposition_interchange_map_from_deviations_scratch(left, right, deviations)
+    }
+
+    /// `&self` mirror of `support_transposition_deviations` (reads pre-built
+    /// per-terminal supports; performs no lazy build and records no timing).
+    fn support_transposition_deviations_scratch(
+        &self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<Vec<(u32, u32)>> {
+        let left_support = self.terminal_support_parallel(left);
+        let right_support = self.terminal_support_parallel(right);
+        let mut deviations = Vec::with_capacity(left_support.len() + right_support.len());
+        for mask in 1..=3u8 {
+            let mut left_only = SmallVec::<[u32; 8]>::new();
+            let mut right_only = SmallVec::<[u32; 8]>::new();
+            let mut left_index = 0usize;
+            let mut right_index = 0usize;
+            loop {
+                while left_index < left_support.len() && left_support[left_index].1 != mask {
+                    left_index += 1;
+                }
+                while right_index < right_support.len() && right_support[right_index].1 != mask {
+                    right_index += 1;
+                }
+                match (left_support.get(left_index), right_support.get(right_index)) {
+                    (Some(&(left_class, _)), Some(&(right_class, _))) if left_class == right_class => {
+                        left_index += 1;
+                        right_index += 1;
+                    }
+                    (Some(&(left_class, _)), Some(&(right_class, _))) if left_class < right_class => {
+                        left_only.push(left_class);
+                        left_index += 1;
+                    }
+                    (Some(_), Some(&(right_class, _))) => {
+                        right_only.push(right_class);
+                        right_index += 1;
+                    }
+                    (Some(&(left_class, _)), None) => {
+                        left_only.push(left_class);
+                        left_index += 1;
+                    }
+                    (None, Some(&(right_class, _))) => {
+                        right_only.push(right_class);
+                        right_index += 1;
+                    }
+                    (None, None) => break,
+                }
+            }
+            if left_only.len() != right_only.len() {
+                return None;
+            }
+            for (left_class, right_class) in left_only.into_iter().zip(right_only) {
+                deviations.push((left_class, right_class));
+                deviations.push((right_class, left_class));
+            }
+        }
+        deviations.sort_unstable_by_key(|&(source, _)| source);
+        deviations
+            .windows(2)
+            .all(|pair| pair[0].0 != pair[1].0)
+            .then_some(deviations)
+    }
+
+    /// `&self` + scratch mirror of
+    /// `support_transposition_interchange_map_from_deviations`.
+    fn support_transposition_interchange_map_from_deviations_scratch(
+        &self,
+        left: TerminalID,
+        right: TerminalID,
+        deviations: Vec<(u32, u32)>,
+    ) -> Option<InterchangeMap> {
+        let quotient = self
+            .support_quotient
+            .as_ref()
+            .expect("support quotient pre-built");
+        let cone_classes = self.support_quotient_affected_cone_small(quotient, left, right);
+        debug_assert!(deviations.iter().all(|&(source, target)| {
+            (source as usize) < quotient.representative_by_class.len()
+                && (target as usize) < quotient.representative_by_class.len()
+                && cone_classes.contains(&(source as usize))
+                && cone_classes.contains(&(target as usize))
+        }));
+        let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
+        if Self::mapped_support_class(&deviations, root_class) != root_class as u32 {
+            return None;
+        }
+        let mut outputs = SparseSwappedOutputIds::new(
+            &self.output_pairs,
+            &self.output_pair_lookup,
+            left as usize,
+            right as usize,
+        );
+        for &class in &cone_classes {
+            let target = Self::mapped_support_class(&deviations, class);
+            let source_state = quotient.representative_by_class[class] as usize;
+            let target_state = quotient.representative_by_class[target as usize] as usize;
+            let source_edges = self.topology.edges_from(source_state);
+            let target_edges = self.topology.edges_from(target_state);
+            let mut source_index = 0usize;
+            let mut target_index = 0usize;
+            while source_index < source_edges.len() || target_index < target_edges.len() {
+                let (_byte, source_destination, target_destination) = match (
+                    source_edges.get(source_index),
+                    target_edges.get(target_index),
+                ) {
+                    (Some(&(source_byte, source_destination)), Some(&(target_byte, target_destination)))
+                        if source_byte == target_byte =>
+                    {
+                        source_index += 1;
+                        target_index += 1;
+                        (source_byte, source_destination as usize, target_destination as usize)
+                    }
+                    (Some(&(source_byte, source_destination)), Some(&(target_byte, _)))
+                        if source_byte < target_byte =>
+                    {
+                        source_index += 1;
+                        (source_byte, source_destination as usize, self.dead_state())
+                    }
+                    (Some(_), Some(&(target_byte, target_destination))) => {
+                        target_index += 1;
+                        (target_byte, self.dead_state(), target_destination as usize)
+                    }
+                    (Some(&(source_byte, source_destination)), None) => {
+                        source_index += 1;
+                        (source_byte, source_destination as usize, self.dead_state())
+                    }
+                    (None, Some(&(target_byte, target_destination))) => {
+                        target_index += 1;
+                        (target_byte, self.dead_state(), target_destination as usize)
+                    }
+                    (None, None) => unreachable!("sparse edge union loop is nonempty"),
+                };
+                let expected_destination = Self::mapped_support_class(
+                    &deviations,
+                    quotient.class_for_state[source_destination] as usize,
+                );
+                if quotient.class_for_state[target_destination] != expected_destination
+                    || outputs.id(self.output_pair_by_state[source_destination])
+                        != self.output_pair_by_state[target_destination]
+                {
+                    return None;
+                }
+            }
+        }
+        Some(InterchangeMap {
+            scanner_state_map: TransportScannerStateMap::Quotient {
+                state_count: quotient.scanner_state_count,
+                class_for_original: Arc::clone(&quotient.scanner_class_for_original),
+                representative_for_class: Arc::clone(&quotient.scanner_representative_for_class),
+                source_class_for_target_deviations: deviations.into_boxed_slice(),
+            },
+        })
+    }
+
+    /// Certify one member terminal against a fixed representative using only
+    /// `&self` reads and per-worker scratch. `left_sources` is the pre-computed
+    /// representative-side affected source set. `memo_snapshot` is an immutable
+    /// snapshot of the cross-round first-round memo; misses are recorded in
+    /// `scratch.memo_updates` for a post-loop merge.
+    fn certify_member(
+        &self,
+        scratch: &mut CertScratch,
+        representative: TerminalID,
+        left_sources: &[u32],
+        terminal: TerminalID,
+        memo_snapshot: &FxHashMap<(TerminalID, TerminalID), bool>,
+        closed_snapshot: &FxHashSet<(TerminalID, TerminalID)>,
+    ) -> MemberResult {
+        let memo_key = if representative <= terminal {
+            (representative, terminal)
+        } else {
+            (terminal, representative)
+        };
+        let used_cached_closed = closed_snapshot.contains(&memo_key);
+        let outpair_ok = used_cached_closed
+            || self.observed_output_pair_set_is_swap_closed_scratch(
+                scratch,
+                representative,
+                terminal,
+            );
+        if !outpair_ok {
+            return MemberResult {
+                verdict: MemberVerdict::RejectOutputPair,
+                memo_update: None,
+                closed_update: None,
+                used_cached_closed,
+            };
+        }
+        let closed_update = (!used_cached_closed).then_some(memo_key);
+        let frozen_preserved = self.swap_preserves_all_frozen_outputs(representative, terminal);
+        if frozen_preserved {
+            return MemberResult {
+                verdict: MemberVerdict::AcceptIdentity(self.canonical_identity_map_prebuilt()),
+                memo_update: None,
+                closed_update,
+                used_cached_closed,
+            };
+        }
+        let mut memo_update = None;
+        let first_round_possible = match memo_snapshot.get(&memo_key).copied() {
+            Some(value) => value,
+            None => {
+                let value = self.canonical_round_one_still_possible_scratch(
+                    scratch,
+                    representative,
+                    left_sources,
+                    terminal,
+                );
+                memo_update = Some((memo_key, value));
+                value
+            }
+        };
+        if !first_round_possible {
+            return MemberResult {
+                verdict: MemberVerdict::RejectFirstRound,
+                memo_update,
+                closed_update,
+                used_cached_closed,
+            };
+        }
+        let support = self.support_transposition_interchange_map_scratch(representative, terminal);
+        let verdict = match support {
+            Some(map) => MemberVerdict::AcceptSupport(map),
+            None => MemberVerdict::NeedsExact,
+        };
+        MemberResult {
+            verdict,
+            memo_update,
+            closed_update,
+            used_cached_closed,
+        }
+    }
+
+    fn characterize_pair(&mut self, left: TerminalID, right: TerminalID) -> PairCharacterization {
+        let state_count = self.state_count();
+        let swap = Some((left as usize, right as usize));
+        let swapped_output_pairs = self
+            .output_pairs
             .iter()
-            .map(|outputs| outputs.mapped(swap))
-            .collect::<Vec<_>>();
-        let swapped_future_finalizers = self
-            .future_finalizers
-            .iter()
-            .map(|outputs| outputs.mapped(swap))
+            .map(|pair| OutputPair {
+                finalizers: pair.finalizers.mapped(swap),
+                future_finalizers: pair.future_finalizers.mapped(swap),
+            })
             .collect::<Vec<_>>();
         let mut swapped_previous = self.identity_rounds[0].clone();
 
@@ -3074,11 +8268,8 @@ impl InterchangeabilityDfa {
                     self.identity_rounds.len(),
                 );
             }
-            let swapped_next = self.characterize_round(
-                &swapped_previous,
-                &swapped_finalizers,
-                &swapped_future_finalizers,
-            );
+            let swapped_next =
+                self.characterize_round(&swapped_previous, &swapped_output_pairs);
             if !rooted_class_bijection_still_possible(
                 &self.identity_rounds[rounds],
                 &swapped_next,
@@ -3370,6 +8561,21 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
             return TiRoundTransportWitnesses::singleton(active_terminals);
         }
 
+        {
+            let mut previous_active = context.output_pair_closed_active.borrow_mut();
+            let monotone_subset = previous_active.as_ref().is_some_and(|previous| {
+                previous.len() == active_terminals.len()
+                    && active_terminals
+                        .iter()
+                        .zip(previous)
+                        .all(|(&current, &old)| !current || old)
+            });
+            if !monotone_subset {
+                context.output_pair_closed_memo.borrow_mut().clear();
+            }
+            *previous_active = Some(active_terminals.to_vec());
+        }
+
         let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
         let started_at = profile_timing.then(Instant::now);
         let topology = Arc::clone(&context.topology);
@@ -3437,6 +8643,9 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
             .iter()
             .map(|group| group.len() * group.len().saturating_sub(1) / 2)
             .sum::<usize>();
+        let diagnostic_candidate_groups = std::env::var_os("GLRMASK_DUMP_TI_CONE_COMPONENTS")
+            .is_some()
+            .then(|| candidate_groups.clone());
         let output_hypergraph_filter_ms = output_hypergraph_filter_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
@@ -3479,6 +8688,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
         let mut result = singleton_partition(active_terminals);
         let mut accepted_maps = BTreeMap::<(TerminalID, TerminalID), Arc<TransportScannerStateMap>>::new();
         let mut output_pair_rejections = 0usize;
+        let mut output_pair_cached_closed = 0usize;
         let mut output_invariant_checks = 0usize;
         let mut first_round_rejections = 0usize;
         let mut support_transposition_checks = 0usize;
@@ -3491,10 +8701,355 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
         let mut exact_map_ns = 0u64;
         let mut accepted_map_storage_ns = 0u64;
 
+        if let Some(groups) = diagnostic_candidate_groups.as_ref() {
+            dfa.ensure_support_quotient();
+            let quotient = dfa
+                .support_quotient
+                .as_ref()
+                .expect("support quotient initialized for candidate batch diagnostics");
+            let mut certified_groups = 0usize;
+            let mut certified_members = 0usize;
+            let mut failed_sizes = Vec::new();
+            for group in groups {
+                if dfa.support_petal_batch_certificate(quotient, group).is_some() {
+                    certified_groups += 1;
+                    certified_members += group.len();
+                } else {
+                    failed_sizes.push(group.len());
+                }
+            }
+            failed_sizes.sort_unstable_by(|a, b| b.cmp(a));
+            eprintln!(
+                "[glrmask/dump][ti_candidate_batches] groups={} members={} certified_groups={} certified_members={} failed_sizes={:?}",
+                groups.len(),
+                groups.iter().map(Vec::len).sum::<usize>(),
+                certified_groups,
+                certified_members,
+                failed_sizes,
+            );
+        }
+
+        let petal_batch_enabled = std::env::var("GLRMASK_TI_PETAL_BATCH")
+            .ok()
+            .map(|value| {
+                let value = value.trim();
+                value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
+            })
+            .unwrap_or(false);
+        let mut petal_batch_groups = 0usize;
+        let mut petal_batch_members = 0usize;
+        let mut petal_batch_grouping_ns = 0u64;
+        let mut petal_batch_certificate_ns = 0u64;
+        let mut petal_batch_map_ns = 0u64;
+        let candidate_groups = if petal_batch_enabled
+            && dfa.topology.raw_representative_by_state.is_none()
+        {
+            dfa.ensure_support_quotient();
+            let quotient = dfa
+                .support_quotient
+                .as_ref()
+                .expect("support quotient initialized for petal batching");
+            let mut residual_groups = Vec::<Vec<TerminalID>>::new();
+            let mut cone_by_terminal = vec![None::<Vec<usize>>; active_terminals.len()];
+            let mut order_by_terminal =
+                vec![None::<SmallVec<[usize; 8]>>; active_terminals.len()];
+            let parallel_petal_min_terminals = std::env::var(
+                "GLRMASK_TI_PARALLEL_PETAL_MIN_TERMINALS",
+            )
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(64);
+            for candidate_group in candidate_groups {
+                let grouping_started_at = Instant::now();
+                let mut membership = vec![false; active_terminals.len()];
+                for &terminal in &candidate_group {
+                    membership[terminal as usize] = true;
+                }
+                let pair_stats = (candidate_group.len() >= 64)
+                    .then(|| dfa.generic_output_pair_stats(&membership));
+                let mut by_code =
+                    BTreeMap::<SmallVec<[u64; 8]>, Vec<TerminalID>>::new();
+                let classify_terminal = |terminal: TerminalID| {
+                    let cone = dfa.support_quotient_terminal_cone(quotient, terminal);
+                    let (code, order) = dfa.support_terminal_cone_generic_form(
+                        quotient,
+                        &cone,
+                        terminal,
+                        &membership,
+                        pair_stats.as_deref(),
+                    );
+                    (terminal, cone, code, order)
+                };
+                let classified = if candidate_group.len() >= parallel_petal_min_terminals {
+                    if let Some(classified) = with_ti_parallel_pool(|| {
+                            candidate_group
+                                .par_iter()
+                                .copied()
+                                .map(classify_terminal)
+                                .collect::<Vec<_>>()
+                        })
+                    {
+                        classified
+                    } else {
+                        candidate_group
+                            .iter()
+                            .copied()
+                            .map(classify_terminal)
+                            .collect::<Vec<_>>()
+                    }
+                } else {
+                    candidate_group
+                        .iter()
+                        .copied()
+                        .map(classify_terminal)
+                        .collect::<Vec<_>>()
+                };
+                // `par_iter` over a slice is indexed, so collection preserves
+                // the original terminal order. Apply cache updates and BTree
+                // grouping sequentially to keep witness ordering byte-stable.
+                for (terminal, cone, code, order) in classified {
+                    cone_by_terminal[terminal as usize] = Some(cone);
+                    order_by_terminal[terminal as usize] = order;
+                    by_code.entry(code).or_default().push(terminal);
+                }
+                petal_batch_grouping_ns += grouping_started_at.elapsed().as_nanos() as u64;
+                for group in by_code.into_values().filter(|group| group.len() >= 2) {
+                    let certificate_started_at = Instant::now();
+                    let group_cones = group
+                        .iter()
+                        .map(|&terminal| {
+                            cone_by_terminal[terminal as usize]
+                                .as_deref()
+                                .expect("petal batch terminal cone cached during grouping")
+                        })
+                        .collect::<Vec<_>>();
+                    let group_orders = group
+                        .iter()
+                        .map(|&terminal| {
+                            order_by_terminal[terminal as usize]
+                                .as_deref()
+                                .ok_or(())
+                        })
+                        .collect::<Result<Vec<_>, _>>();
+                    let Some(canonical_orders) = group_orders.ok().and_then(|group_orders| {
+                        dfa.support_petal_batch_certificate_from_orders(
+                            quotient,
+                            &group,
+                            &group_cones,
+                            &group_orders,
+                        )
+                    }) else {
+                        petal_batch_certificate_ns +=
+                            certificate_started_at.elapsed().as_nanos() as u64;
+                        residual_groups.push(group);
+                        continue;
+                    };
+                    petal_batch_certificate_ns +=
+                        certificate_started_at.elapsed().as_nanos() as u64;
+                    let map_started_at = Instant::now();
+                    let Some(maps) = dfa.support_petal_batch_maps(
+                        quotient,
+                        &group,
+                        &canonical_orders,
+                    ) else {
+                        petal_batch_map_ns += map_started_at.elapsed().as_nanos() as u64;
+                        residual_groups.push(group);
+                        continue;
+                    };
+                    petal_batch_map_ns += map_started_at.elapsed().as_nanos() as u64;
+                    let representative = group[0];
+                    petal_batch_groups += 1;
+                    petal_batch_members += group.len() - 1;
+                    support_transposition_checks += group.len() - 1;
+                    accepted_representative_members += group.len() - 1;
+                    for (&terminal, map) in group[1..].iter().zip(maps) {
+                        result
+                            .get_mut(&representative)
+                            .expect("TI batch representative must retain its singleton partition entry")
+                            .insert(terminal);
+                        let removed = result.remove(&terminal);
+                        debug_assert!(
+                            removed.is_some(),
+                            "TI batch member must retain its singleton partition entry"
+                        );
+                        let replaced = accepted_maps.insert(
+                            (representative, terminal),
+                            Arc::new(map.scanner_state_map()),
+                        );
+                        debug_assert!(replaced.is_none(), "TI batch must accept each pair once");
+                    }
+                }
+            }
+            residual_groups
+        } else {
+            candidate_groups
+        };
+
         // Accepted terminal swaps are automorphisms. Therefore (a b) and
         // (b c) imply (a c) by conjugation, so interchangeability is an
         // equivalence relation. Partition each candidate group by pivots,
         // keeping only the representative-to-member maps transport requires.
+        if let Some(pool) = ti_certification_pool() {
+            // Parallel per-pair certification. For a fixed representative every
+            // member of `unresolved[1..]` is tested independently against that
+            // representative, so the verdicts fan out across `pool`; they are
+            // then applied sequentially in the original member order, which
+            // preserves the pivot sequence and hence the exact partition.
+            let all_candidates: Vec<TerminalID> =
+                candidate_groups.iter().flatten().copied().collect();
+            dfa.prebuild_certification_state(&all_candidates);
+            // Within a single discover-one-round call the same unordered pair is
+            // never certified twice (a member accepted by a pivot is removed;
+            // rejected members form fresh pairs against later pivots). The
+            // first-round memo therefore only serves reuse *across* rounds, so we
+            // snapshot it once here (immutable, read by all parallel workers) and
+            // merge every new entry back in a single sweep after the round.
+            let memo_snapshot = context.first_round_memo.borrow().clone();
+            let closed_snapshot = context.output_pair_closed_memo.borrow().clone();
+            let mut memo_additions: Vec<((TerminalID, TerminalID), bool)> = Vec::new();
+            let mut closed_additions: Vec<(TerminalID, TerminalID)> = Vec::new();
+            let mut rep_sources = Vec::<u32>::new();
+            // Per-item certification work is only microseconds, so rayon's
+            // fork/join and pool-wake latency dwarfs it for small pivots. Only
+            // fan out when a pivot has enough members to amortize that overhead;
+            // otherwise certify sequentially reusing a single scratch (which
+            // matches the sequential path's cost exactly, no pool involved).
+            let min_members = std::env::var("GLRMASK_TI_PARALLEL_MIN_MEMBERS")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(256);
+            let mut seq_scratch = CertScratch::new(&dfa);
+            // Enter the pool exactly ONCE for the whole pivot loop. Every nested
+            // `par_iter` then runs on the already-hot pool, avoiding the ~2.7ms
+            // cold pool-entry (worker wake) latency that a per-pivot
+            // `pool.install` was paying (111 forks * 2.7ms = ~300ms on the p0
+            // heavy round). `install` runs this closure on a pool worker and
+            // blocks the caller, so the captured `&mut` state is used single
+            // threaded here; only the `par_iter` bodies fan out.
+            pool.install(|| {
+            for initial_group in candidate_groups {
+                let mut unresolved = initial_group;
+                while !unresolved.is_empty() {
+                    let representative = unresolved[0];
+                    dfa.representative_affected_sources(representative, &mut rep_sources);
+                    let member_count = unresolved.len() - 1;
+                    let results: Vec<MemberResult> = if member_count >= min_members {
+                        let dfa_ref = &dfa;
+                        let rep_sources_ref = &rep_sources;
+                        let memo_snapshot_ref = &memo_snapshot;
+                        let closed_snapshot_ref = &closed_snapshot;
+                        // NOTE: no per-pivot `pool.install` here. The whole pivot
+                        // loop runs inside a single `pool.install` below, so these
+                        // nested `par_iter`s reuse the already-hot pool instead of
+                        // paying a cold pool-entry (worker wake) latency per pivot.
+                        let forked: Vec<MemberResult> = unresolved[1..]
+                            .par_iter()
+                            .map_init(
+                                || CertScratch::new(dfa_ref),
+                                |scratch, &terminal| {
+                                    dfa_ref.certify_member(
+                                        scratch,
+                                        representative,
+                                        rep_sources_ref,
+                                        terminal,
+                                        memo_snapshot_ref,
+                                        closed_snapshot_ref,
+                                    )
+                                },
+                            )
+                            .collect();
+                        forked
+                    } else {
+                        unresolved[1..]
+                            .iter()
+                            .map(|&terminal| {
+                                dfa.certify_member(
+                                    &mut seq_scratch,
+                                    representative,
+                                    &rep_sources,
+                                    terminal,
+                                    &memo_snapshot,
+                                    &closed_snapshot,
+                                )
+                            })
+                            .collect()
+                    };
+                    for member_result in &results {
+                        if let Some(update) = member_result.memo_update {
+                            memo_additions.push(update);
+                        }
+                        if let Some(update) = member_result.closed_update {
+                            closed_additions.push(update);
+                        }
+                        if member_result.used_cached_closed {
+                            output_pair_cached_closed += 1;
+                        }
+                    }
+                    let members: Vec<TerminalID> = unresolved[1..].to_vec();
+                    let mut next_unresolved =
+                        Vec::with_capacity(unresolved.len().saturating_sub(1));
+                    for (terminal, member_result) in members.into_iter().zip(results) {
+                        let map = match member_result.verdict {
+                            MemberVerdict::RejectOutputPair => {
+                                output_pair_rejections += 1;
+                                None
+                            }
+                            MemberVerdict::RejectFirstRound => {
+                                first_round_rejections += 1;
+                                None
+                            }
+                            MemberVerdict::AcceptIdentity(map) => {
+                                output_invariant_checks += 1;
+                                Some(map)
+                            }
+                            MemberVerdict::AcceptSupport(map) => {
+                                support_transposition_checks += 1;
+                                Some(map)
+                            }
+                            MemberVerdict::NeedsExact => {
+                                support_transposition_checks += 1;
+                                direct_exact_checks += 1;
+                                dfa.interchange_map(representative, terminal)
+                            }
+                        };
+                        if let Some(map) = map {
+                            accepted_representative_members += 1;
+                            result
+                                .get_mut(&representative)
+                                .expect("TI representative must retain its singleton partition entry")
+                                .insert(terminal);
+                            let removed = result.remove(&terminal);
+                            debug_assert!(removed.is_some(), "TI member must retain its singleton partition entry");
+                            let replaced = accepted_maps.insert(
+                                (representative, terminal),
+                                Arc::new(map.scanner_state_map()),
+                            );
+                            debug_assert!(replaced.is_none(), "TI round must accept each pair once");
+                        } else {
+                            next_unresolved.push(terminal);
+                        }
+                    }
+                    unresolved = next_unresolved;
+                }
+            }
+            });
+            if !memo_additions.is_empty() {
+                let mut memo = context.first_round_memo.borrow_mut();
+                for (key, value) in memo_additions {
+                    memo.insert(key, value);
+                }
+            }
+            if !closed_additions.is_empty() {
+                context
+                    .output_pair_closed_memo
+                    .borrow_mut()
+                    .extend(closed_additions);
+            }
+        } else {
+        // Sequential discovery owns this partition-local context for the whole
+        // round. Hold the memo borrow once instead of entering the RefCell for
+        // every candidate pair (a get plus a possible insert per miss).
+        let mut first_round_memo = context.first_round_memo.borrow_mut();
         for initial_group in candidate_groups {
             let mut unresolved = initial_group;
             while !unresolved.is_empty() {
@@ -3502,8 +9057,26 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 let mut next_unresolved = Vec::with_capacity(unresolved.len().saturating_sub(1));
                 for &terminal in &unresolved[1..] {
                     let output_pair_started_at = profile_timing.then(Instant::now);
-                    let output_pair_is_closed =
-                        dfa.observed_output_pair_set_is_swap_closed(representative, terminal);
+                    let memo_key = if representative <= terminal {
+                        (representative, terminal)
+                    } else {
+                        (terminal, representative)
+                    };
+                    let mut mapped_output_ids = SmallVec::new();
+                    let cached_closed = context
+                        .output_pair_closed_memo
+                        .borrow()
+                        .contains(&memo_key);
+                    let output_pair_is_closed = if cached_closed {
+                        output_pair_cached_closed += 1;
+                        true
+                    } else {
+                        dfa.observed_output_pair_set_is_swap_closed_with_mapping(
+                            representative,
+                            terminal,
+                            &mut mapped_output_ids,
+                        )
+                    };
                     if let Some(started_at) = output_pair_started_at {
                         output_pair_filter_ns += started_at.elapsed().as_nanos() as u64;
                     }
@@ -3511,6 +9084,9 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                         output_pair_rejections += 1;
                         next_unresolved.push(terminal);
                         continue;
+                    }
+                    if !cached_closed {
+                        context.output_pair_closed_memo.borrow_mut().insert(memo_key);
                     }
                     let frozen_output_started_at = profile_timing.then(Instant::now);
                     let preserves_frozen_outputs =
@@ -3523,8 +9099,19 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                         Some(dfa.canonical_identity_map())
                     } else {
                         let first_round_started_at = profile_timing.then(Instant::now);
-                        let first_round_possible =
-                            dfa.canonical_round_one_still_possible(representative, terminal);
+                        let first_round_possible = match first_round_memo.get(&memo_key).copied() {
+                            Some(value) => value,
+                            None => {
+                                let value = dfa
+                                    .canonical_round_one_still_possible_with_mapped(
+                                        representative,
+                                        terminal,
+                                        mapped_output_ids,
+                                    );
+                                first_round_memo.insert(memo_key, value);
+                                value
+                            }
+                        };
                         if let Some(started_at) = first_round_started_at {
                             first_round_ns += started_at.elapsed().as_nanos() as u64;
                         }
@@ -3576,14 +9163,200 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 unresolved = next_unresolved;
             }
         }
+        }
+
+        if std::env::var_os("GLRMASK_DUMP_TI_CONE_COMPONENTS").is_some() {
+            dfa.ensure_support_quotient();
+            let quotient = dfa
+                .support_quotient
+                .as_ref()
+                .expect("support quotient initialized for cone diagnostics");
+            if let Some(candidate_groups) = diagnostic_candidate_groups.as_ref() {
+                let mut final_class_by_terminal = vec![u32::MAX; active_terminals.len()];
+                for (&representative, members) in &result {
+                    for &member in members {
+                        final_class_by_terminal[member as usize] = representative;
+                    }
+                }
+                let mut predicted_groups = 0usize;
+                let mut predicted_members = 0usize;
+                let mut certified_groups = 0usize;
+                let mut certified_members = 0usize;
+                let mut impure_groups = 0usize;
+                let mut exact_final_groups = 0usize;
+                for candidate_group in candidate_groups {
+                    let mut membership = vec![false; active_terminals.len()];
+                    for &terminal in candidate_group {
+                        membership[terminal as usize] = true;
+                    }
+                    let pair_stats = (candidate_group.len() >= 64)
+                        .then(|| dfa.generic_output_pair_stats(&membership));
+                    let mut by_code =
+                        BTreeMap::<SmallVec<[u64; 8]>, Vec<TerminalID>>::new();
+                    for &terminal in candidate_group {
+                        let cone = dfa.support_quotient_terminal_cone(quotient, terminal);
+                        let (code, _) = dfa.support_terminal_cone_generic_form(
+                            quotient,
+                            &cone,
+                            terminal,
+                            &membership,
+                            pair_stats.as_deref(),
+                        );
+                        by_code.entry(code).or_default().push(terminal);
+                    }
+                    for predicted in by_code.into_values().filter(|group| group.len() >= 2) {
+                        predicted_groups += 1;
+                        predicted_members += predicted.len();
+                        let first_class = final_class_by_terminal[predicted[0] as usize];
+                        let pure = predicted.iter().all(|&terminal| {
+                            final_class_by_terminal[terminal as usize] == first_class
+                        });
+                        impure_groups += usize::from(!pure);
+                        if pure {
+                            let final_size = result
+                                .get(&first_class)
+                                .map_or(0, BTreeSet::len);
+                            exact_final_groups += usize::from(final_size == predicted.len());
+                        }
+                        if dfa
+                            .support_petal_batch_certificate(quotient, &predicted)
+                            .is_some()
+                        {
+                            certified_groups += 1;
+                            certified_members += predicted.len();
+                        }
+                    }
+                }
+                eprintln!(
+                    "[glrmask/dump][ti_generic_cone_groups] predicted_groups={} predicted_members={} certified_groups={} certified_members={} impure_groups={} exact_final_groups={}",
+                    predicted_groups,
+                    predicted_members,
+                    certified_groups,
+                    certified_members,
+                    impure_groups,
+                    exact_final_groups,
+                );
+            }
+            for (&representative, members) in &result {
+                if members.len() < 2 {
+                    continue;
+                }
+                let members = members.iter().copied().collect::<Vec<_>>();
+                let cones = members
+                    .iter()
+                    .map(|&terminal| dfa.support_quotient_terminal_cone(quotient, terminal))
+                    .collect::<Vec<_>>();
+                let common_cone = cones.iter().skip(1).fold(
+                    cones.first().cloned().unwrap_or_default(),
+                    |common, cone| {
+                        let mut intersection = Vec::new();
+                        let mut i = 0usize;
+                        let mut j = 0usize;
+                        while i < common.len() && j < cone.len() {
+                            match common[i].cmp(&cone[j]) {
+                                std::cmp::Ordering::Less => i += 1,
+                                std::cmp::Ordering::Greater => j += 1,
+                                std::cmp::Ordering::Equal => {
+                                    intersection.push(common[i]);
+                                    i += 1;
+                                    j += 1;
+                                }
+                            }
+                        }
+                        intersection
+                    },
+                );
+                let petals = cones
+                    .iter()
+                    .map(|cone| {
+                        let mut petal = Vec::new();
+                        let mut common_index = 0usize;
+                        for &class in cone {
+                            while common_index < common_cone.len()
+                                && common_cone[common_index] < class
+                            {
+                                common_index += 1;
+                            }
+                            if common_index == common_cone.len()
+                                || common_cone[common_index] != class
+                            {
+                                petal.push(class);
+                            }
+                        }
+                        petal
+                    })
+                    .collect::<Vec<_>>();
+                let mut parent = (0..members.len()).collect::<Vec<_>>();
+                fn find(parent: &mut [usize], mut x: usize) -> usize {
+                    while parent[x] != x {
+                        parent[x] = parent[parent[x]];
+                        x = parent[x];
+                    }
+                    x
+                }
+                for left in 0..members.len() {
+                    for right in left + 1..members.len() {
+                        let mut i = 0usize;
+                        let mut j = 0usize;
+                        let mut overlap = false;
+                        while i < petals[left].len() && j < petals[right].len() {
+                            match petals[left][i].cmp(&petals[right][j]) {
+                                std::cmp::Ordering::Less => i += 1,
+                                std::cmp::Ordering::Greater => j += 1,
+                                std::cmp::Ordering::Equal => {
+                                    overlap = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if overlap {
+                            let a = find(&mut parent, left);
+                            let b = find(&mut parent, right);
+                            if a != b {
+                                parent[b] = a;
+                            }
+                        }
+                    }
+                }
+                let mut component_sizes = FxHashMap::<usize, usize>::default();
+                for index in 0..members.len() {
+                    let root = find(&mut parent, index);
+                    *component_sizes.entry(root).or_default() += 1;
+                }
+                let mut component_sizes = component_sizes.into_values().collect::<Vec<_>>();
+                component_sizes.sort_unstable_by(|a, b| b.cmp(a));
+                let mut cone_sizes = cones.iter().map(Vec::len).collect::<Vec<_>>();
+                cone_sizes.sort_unstable();
+                let batch_certified = dfa
+                    .support_petal_batch_certificate(quotient, &members)
+                    .is_some();
+                eprintln!(
+                    "[glrmask/dump][ti_cones] representative={} members={} cone_min={} cone_median={} cone_max={} common={} petal_overlap_components={:?} batch_certified={}",
+                    representative,
+                    members.len(),
+                    cone_sizes.first().copied().unwrap_or(0),
+                    cone_sizes.get(cone_sizes.len() / 2).copied().unwrap_or(0),
+                    cone_sizes.last().copied().unwrap_or(0),
+                    common_cone.len(),
+                    component_sizes,
+                    batch_certified,
+                );
+            }
+        }
 
         if profile_timing {
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
+                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_pair_cached_closed={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} petal_batch_groups={} petal_batch_members={} petal_batch_grouping_ms={:.3} petal_batch_certificate_ms={:.3} petal_batch_map_ms={:.3} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
                 output_pair_rejections,
+                output_pair_cached_closed,
                 output_invariant_checks,
                 first_round_rejections,
                 support_transposition_checks,
+                petal_batch_groups,
+                petal_batch_members,
+                petal_batch_grouping_ns as f64 / 1_000_000.0,
+                petal_batch_certificate_ns as f64 / 1_000_000.0,
+                petal_batch_map_ns as f64 / 1_000_000.0,
                 dfa.support_transposition_certified,
                 dfa.support_transposition_no_template,
                 dfa.support_transposition_outside_cone,
@@ -3595,6 +9368,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 first_round_ns as f64 / 1_000_000.0,
                 support_transposition_ns as f64 / 1_000_000.0,
                 dfa.support_transposition_support_setup_ns as f64 / 1_000_000.0,
+                dfa.support_quotient_build_ns as f64 / 1_000_000.0,
                 dfa.support_transposition_template_ns as f64 / 1_000_000.0,
                 dfa.support_transposition_cone_ns as f64 / 1_000_000.0,
                 dfa.support_transposition_verify_ns as f64 / 1_000_000.0,
@@ -3615,6 +9389,18 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
             );
         }
         assert_partition_invariants(&result, active_terminals);
+        if let Some(quotient) = dfa.support_quotient.as_ref() {
+            *context.support_partition_seed.borrow_mut() = Some(SupportPartitionSeed {
+                active_terminals: Arc::from(active_terminals.to_vec()),
+                class_for_state: Arc::clone(&quotient.class_for_state),
+                representative_by_class: Arc::clone(&quotient.representative_by_class),
+            });
+        }
+        *context.output_projection_seed.borrow_mut() = Some(OutputProjectionSeed {
+            active_terminals: Arc::from(active_terminals.to_vec()),
+            output_pairs: Arc::clone(&dfa.output_pairs),
+            output_pair_by_state: Arc::clone(&dfa.output_pair_by_state),
+        });
         TiRoundTransportWitnesses {
             active_before_round: active_terminals.to_vec(),
             partition: result,
@@ -4053,9 +9839,95 @@ pub(crate) fn transport_coordinate_quotient(
 
     let components_started_at = profile_timing.then(Instant::now);
     let mut source_class_mode_evaluations = 0usize;
-    for group in &mut groups {
+    let mut macro_transport_groups = 0usize;
+    // A transport mode with no quotient deviations is a pure structural
+    // relabeling that preserves the ordinary coordinate, so its component is a
+    // function of the ordinary coordinate and cannot refine the ordinary
+    // partition. Such groups are redundant: we skip building their component
+    // table and omit them from the final per-state signature. Because the
+    // absolute final-class numbering never reaches the digest (proven: the
+    // digest is invariant under class renumbering), dropping redundant groups
+    // is exact.
+    let mut group_is_redundant = vec![false; groups.len()];
+    for (group_index, group) in groups.iter_mut().enumerate() {
         let domain = &modes[group.domain_mode].scanner_state_for_original;
         let source_class_count = domain.innermost_source_class_count();
+
+        let group_quotient_deviations: usize = group
+            .modes
+            .iter()
+            .map(|&mode_index| {
+                modes[mode_index]
+                    .scanner_state_for_original
+                    .quotient_deviations()
+                    .map_or(0, |deviations| deviations.len())
+            })
+            .sum();
+        if group_quotient_deviations == 0 {
+            group_is_redundant[group_index] = true;
+            continue;
+        }
+
+        // A direct macro quotient is constant on the shared macro class of a
+        // source C class. Classify those macro classes once, then project the
+        // component id back to C instead of scanning every C class per mode.
+        if let Some(first_parts) = domain.direct_macro_quotient_parts() {
+            let shared_macro_classes = first_parts.macro_class_for_source_class;
+            let shared_macro_representatives = first_parts.representative_for_macro_class;
+            let mut mode_deviations = Vec::with_capacity(group.modes.len());
+            let mut all_direct_macro = true;
+            for &mode_index in &group.modes {
+                let Some(parts) = modes[mode_index]
+                    .scanner_state_for_original
+                    .direct_macro_quotient_parts()
+                else {
+                    all_direct_macro = false;
+                    break;
+                };
+                if parts.macro_class_for_source_class.as_ptr() != shared_macro_classes.as_ptr()
+                    || parts.representative_for_macro_class.as_ptr()
+                        != shared_macro_representatives.as_ptr()
+                {
+                    all_direct_macro = false;
+                    break;
+                }
+                mode_deviations.push(parts.source_macro_for_target_deviations);
+            }
+            if all_direct_macro {
+                assert_eq!(shared_macro_classes.len(), source_class_count);
+                let macro_coordinates = shared_macro_representatives
+                    .iter()
+                    .map(|&state| ordinary_coordinate_key(state as usize))
+                    .collect::<Vec<_>>();
+                let mut component_by_signature = FxHashMap::<Vec<u64>, u32>::default();
+                let mut component_for_macro = Vec::with_capacity(macro_coordinates.len());
+                for source_macro in 0..macro_coordinates.len() {
+                    let signature = mode_deviations
+                        .iter()
+                        .map(|deviations| {
+                            let target_macro = deviations
+                                .binary_search_by_key(&(source_macro as u32), |&(source, _)| source)
+                                .map(|index| deviations[index].1 as usize)
+                                .unwrap_or(source_macro);
+                            macro_coordinates[target_macro]
+                        })
+                        .collect::<Vec<_>>();
+                    let next_component = component_by_signature.len() as u32;
+                    let component = *component_by_signature
+                        .entry(signature)
+                        .or_insert(next_component);
+                    component_for_macro.push(component);
+                }
+                source_class_mode_evaluations += macro_coordinates.len() * group.modes.len();
+                group.component_for_source_class = shared_macro_classes
+                    .iter()
+                    .map(|&source_macro| component_for_macro[source_macro as usize])
+                    .collect();
+                macro_transport_groups += 1;
+                continue;
+            }
+        }
+
         let mut programs = Vec::<(usize, Vec<&TransportScannerStateMap>)>::new();
         let mut supports_sparse_program = true;
         for &mode_index in &group.modes {
@@ -4188,16 +10060,94 @@ pub(crate) fn transport_coordinate_quotient(
         .unwrap_or(0.0);
 
     let final_refinement_started_at = profile_timing.then(Instant::now);
+    let refining_groups: Vec<&ModeGroup> = groups
+        .iter()
+        .enumerate()
+        .filter(|&(group_index, _)| !group_is_redundant[group_index])
+        // A group whose `component_for_source_class` is constant induces a
+        // constant column (every state maps to the same component), which
+        // refines nothing. The state-order loop below already drops constant
+        // columns via `next_canon <= 1`, but only after materializing all
+        // `state_count` entries. Checking the far smaller source-class vector
+        // here skips that materialization entirely — decisive when there are
+        // many single-mode groups over a large state space (each such group
+        // otherwise costs a full `state_count` scan plus a full-column hash).
+        .filter(|&(_, group)| {
+            let components = &group.component_for_source_class;
+            match components.first() {
+                Some(&first) => components.iter().any(|&c| c != first),
+                None => false,
+            }
+        })
+        .map(|(_, group)| group)
+        .collect();
+    // Resolve each refining group's innermost class slice once. `None` means an
+    // `Explicit` innermost map where the source class equals the raw state, so
+    // the per-state signature assembly below is a plain array index instead of
+    // re-walking any `Composed` transport chain.
+    let refining_slices: Vec<(Option<&[u32]>, &[u32])> = refining_groups
+        .iter()
+        .map(|group| {
+            let domain = &modes[group.domain_mode].scanner_state_for_original;
+            (
+                domain.innermost_class_for_original(),
+                group.component_for_source_class.as_slice(),
+            )
+        })
+        .collect();
+    // Dedup refining groups by the partition they induce over the source
+    // states. Many groups differ only by component *labels* (e.g. `[0,1,0]`
+    // vs `[1,0,1]`) yet induce the same partition; others induce identical
+    // partitions outright. The final quotient is the intersection of every
+    // group partition with the ordinary key, so collapsing partition-equal
+    // groups to a single canonical column leaves the intersection — and thus
+    // the resulting partition — unchanged. (Class *numbering* here is later
+    // re-canonicalized by `reorder_internal_by_representative_key`, so only the
+    // partition matters for correctness.) Relabeling each column to
+    // first-appearance-canonical form both detects label-permuted duplicates
+    // and keeps the per-state signature narrow enough to stay inline in the
+    // `SmallVec` below, eliminating the per-state heap allocation that
+    // dominated this loop.
+    let mut canonical_columns: Vec<Vec<u32>> = Vec::new();
+    let mut seen_columns = FxHashMap::<Vec<u32>, ()>::default();
+    for &(class_slice, components) in &refining_slices {
+        let mut column = Vec::with_capacity(state_count);
+        // Components are dense in `[0, components.len())`, so a direct-indexed
+        // relabel table is used instead of a hash map: `relabel[comp]` holds the
+        // first-appearance-canonical id for that component (or `u32::MAX` until
+        // seen). This makes the per-state relabel a plain array access.
+        let mut relabel = vec![u32::MAX; components.len()];
+        let mut next_canon = 0u32;
+        for source_state in 0..state_count {
+            let source_class = match class_slice {
+                Some(slice) => slice[source_state] as usize,
+                None => source_state,
+            };
+            let comp = components[source_class] as usize;
+            let mut canon = relabel[comp];
+            if canon == u32::MAX {
+                canon = next_canon;
+                relabel[comp] = canon;
+                next_canon += 1;
+            }
+            column.push(canon);
+        }
+        if next_canon <= 1 {
+            // Constant column: refines nothing, drop it.
+            continue;
+        }
+        if !seen_columns.contains_key(&column) {
+            seen_columns.insert(column.clone(), ());
+            canonical_columns.push(column);
+        }
+    }
     let mut class_for_signature = FxHashMap::<SmallVec<[u64; 8]>, u32>::default();
     let mut class_for_state = Vec::with_capacity(state_count);
     for source_state in 0..state_count {
-        let mut signature = SmallVec::<[u64; 8]>::with_capacity(groups.len() + 1);
+        let mut signature = SmallVec::<[u64; 8]>::with_capacity(canonical_columns.len() + 1);
         signature.push(ordinary_coordinate_key(source_state));
-        for group in &groups {
-            let source_class = modes[group.domain_mode]
-                .scanner_state_for_original
-                .innermost_source_class(source_state as u32);
-            signature.push(group.component_for_source_class[source_class] as u64);
+        for column in &canonical_columns {
+            signature.push(column[source_state] as u64);
         }
         let next_class = class_for_signature.len() as u32;
         let class = *class_for_signature.entry(signature).or_insert(next_class);
@@ -4239,9 +10189,10 @@ pub(crate) fn transport_coordinate_quotient(
             .map(|group| group.modes.len())
             .collect::<Vec<_>>();
         eprintln!(
-            "[glrmask/profile][transport_coordinate_quotient] modes={} groups={} group_source_class_counts={:?} group_mode_counts={:?} source_class_mode_evaluations={} raw_state_group_lookups={} component_build_ms={:.3} final_refinement_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][transport_coordinate_quotient] modes={} groups={} macro_transport_groups={} group_source_class_counts={:?} group_mode_counts={:?} source_class_mode_evaluations={} raw_state_group_lookups={} component_build_ms={:.3} final_refinement_ms={:.3} total_ms={:.3}",
             modes.len(),
             groups.len(),
+            macro_transport_groups,
             group_source_class_counts,
             group_mode_counts,
             source_class_mode_evaluations,
@@ -4264,8 +10215,11 @@ pub(crate) fn transport_coordinate_quotient(
 /// members but only a handful of such deviations per mode, so lifting the full
 /// final-coordinate weight for every `(weight, mode)` pair is the wrong shape.
 struct PostDwaWeightLifter {
-    ordinary_coordinate_runs: Vec<(u32, u32, u32)>,
     ordinary_coordinates: Vec<u32>,
+    // Maximal `(start_tsid, end_tsid, coordinate)` runs of consecutive final
+    // TSIDs sharing one non-MAX core coordinate. Precomputed once so `base_lift`
+    // can emit one range per run instead of iterating every final TSID.
+    coordinate_runs: Vec<(u32, u32, u32)>,
     mode_deviations: Vec<Vec<(u32, u32)>>,
     base_lifts: FxHashMap<usize, Weight>,
     mode_lifts: FxHashMap<(usize, usize), Weight>,
@@ -4324,19 +10278,33 @@ impl PostDwaWeightLifter {
             .iter()
             .map(|&source| Self::core_coordinate(core_state_map, source))
             .collect();
-        let mut ordinary_coordinate_runs = Vec::<(u32, u32, u32)>::new();
-        if let Some((&first_coordinate, rest)) = ordinary_coordinates.split_first() {
-            let mut run_start = 0u32;
-            let mut coordinate = first_coordinate;
-            for (index, &next_coordinate) in rest.iter().enumerate() {
-                let final_tsid = index as u32 + 1;
-                if next_coordinate != coordinate {
-                    ordinary_coordinate_runs.push((run_start, final_tsid - 1, coordinate));
-                    run_start = final_tsid;
-                    coordinate = next_coordinate;
+        // Precompute maximal contiguous runs of equal, non-MAX coordinates so
+        // `base_lift` emits one range per run instead of iterating every final
+        // TSID. MAX coordinates break runs (they are skipped when lifting).
+        let mut coordinate_runs: Vec<(u32, u32, u32)> = Vec::new();
+        {
+            let mut idx = 0usize;
+            let n = ordinary_coordinates.len();
+            while idx < n {
+                let coordinate = ordinary_coordinates[idx];
+                if coordinate == u32::MAX {
+                    idx += 1;
+                    continue;
                 }
+                let start = idx;
+                idx += 1;
+                while idx < n && ordinary_coordinates[idx] == coordinate {
+                    idx += 1;
+                }
+                coordinate_runs.push((start as u32, (idx - 1) as u32, coordinate));
             }
-            ordinary_coordinate_runs.push((run_start, ordinary_coordinates.len() as u32 - 1, coordinate));
+        }
+        if std::env::var("GLRMASK_PROFILE_L2P_TIMING").is_ok() {
+            eprintln!(
+                "ti_post_dwa_lifter_setup final_sources={} coordinate_runs={}",
+                final_sources.len(),
+                coordinate_runs.len()
+            );
         }
         let mut mode_deviations = vec![Vec::new(); modes.len()];
         let mut sparse_mode_ready = vec![false; modes.len()];
@@ -4441,9 +10409,9 @@ impl PostDwaWeightLifter {
                 max_deviations = max_deviations.max(count);
             }
             eprintln!(
-                "[glrmask/profile][ti_post_dwa_lifter] final_tsids={} ordinary_coordinate_runs={} active_modes={} nonempty_modes={} total_deviations={} max_deviations={}",
+                "[glrmask/profile][ti_post_dwa_lifter] final_tsids={} coordinate_runs={} active_modes={} nonempty_modes={} total_deviations={} max_deviations={}",
                 final_sources.len(),
-                ordinary_coordinate_runs.len(),
+                coordinate_runs.len(),
                 active_mode_indices.len(),
                 nonempty_modes,
                 total_deviations,
@@ -4452,8 +10420,8 @@ impl PostDwaWeightLifter {
         }
 
         Self {
-            ordinary_coordinate_runs,
             ordinary_coordinates,
+            coordinate_runs,
             mode_deviations,
             base_lifts: FxHashMap::default(),
             mode_lifts: FxHashMap::default(),
@@ -4494,15 +10462,14 @@ impl PostDwaWeightLifter {
             return existing.clone();
         }
 
-        let lifted = Weight::from_tsid_ranges_shared(
-            self.ordinary_coordinate_runs
-                .iter()
-                .filter_map(|&(start, end, coordinate)| {
-                    (coordinate != u32::MAX).then(|| {
-                        (start, end, weight.shared_tokens_for_tsid(coordinate))
-                    })
-                }),
-        );
+        // `ordinary_coordinates[final_tsid]` is precomputed and identical to
+        // `core_coordinate(core_state_map, final_sources[final_tsid])`. Thousands
+        // of final TSIDs collapse onto only a few core coordinates, so iterate
+        // the precomputed contiguous coordinate runs and emit one range per run.
+        // The runs are sorted by coordinate (post-clustering relabel), so lift
+        // them with a single linear merge against the weight's ranges instead
+        // of one binary-search `get` per run.
+        let lifted = weight.lift_sorted_coordinate_runs(&self.coordinate_runs);
         self.base_lifts.insert(key, lifted.clone());
         lifted
     }
@@ -4645,11 +10612,7 @@ impl PostDwaWeightLifter {
                 .get(mode_indices)
                 .expect("prepared group coordinate plan must be retained");
             let mut union_for_token_signature = FxHashMap::<Vec<usize>, SharedTokenSet>::default();
-            let coordinate_tokens = plan
-                .coordinates
-                .iter()
-                .map(|&coordinate| Self::tokens_for_coordinate(weight, coordinate))
-                .collect::<Vec<_>>();
+            let coordinate_tokens = weight.shared_tokens_for_sorted_tsids(&plan.coordinates);
             let transformed_tokens: Vec<SharedTokenSet> = plan
                 .signatures
                 .iter()
@@ -4683,11 +10646,18 @@ impl PostDwaWeightLifter {
                 .collect();
             plan.overrides
                 .iter()
-                .filter_map(|&(final_tsid, signature)| {
-                    let base_tokens = base.shared_tokens_for_tsid(final_tsid);
+                .zip(base.shared_tokens_for_sorted_tsids(
+                    &plan
+                        .overrides
+                        .iter()
+                        .map(|&(final_tsid, _)| final_tsid)
+                        .collect::<Vec<_>>(),
+                ))
+                .filter_map(|(&(final_tsid, signature), base_tokens)| {
                     let tokens = &transformed_tokens[signature as usize];
-                    (tokens.as_ref() != base_tokens.as_ref())
-                        .then(|| (final_tsid, Arc::clone(tokens)))
+                    let differs = !Arc::ptr_eq(tokens, &base_tokens)
+                        && tokens.as_ref() != base_tokens.as_ref();
+                    differs.then(|| (final_tsid, Arc::clone(tokens)))
                 })
                 .collect::<Vec<_>>()
         };
@@ -4841,10 +10811,17 @@ pub(crate) fn expand_representative_dwa_after_minimization(
         .values()
         .map(|(_, weight)| lifter.lift_for_mode(weight, 0))
         .collect();
-    let ordinary_entry_union = Weight::union_all(ordinary_entry_weights.iter());
 
+    // `entry_union_by_group[0]` (group 0 = ordinary + any co-disjoint members)
+    // is written below but never read: the disjointness search only scans the
+    // member-derived groups (indices `1..`). We therefore avoid materializing
+    // the expensive `union_all` of every ordinary entry weight. The ordinary
+    // union being disjoint from the member union is exactly equivalent to every
+    // individual ordinary entry weight being disjoint from that member union.
     let ordinary_and_members_are_disjoint = member_entries_are_pairwise_disjoint
-        && ordinary_entry_union.is_disjoint(&all_member_entry_union);
+        && ordinary_entry_weights
+            .iter()
+            .all(|weight| weight.is_disjoint(&all_member_entry_union));
     if ordinary_and_members_are_disjoint {
         let modes_in_group: Vec<usize> = member_entry_weights
             .iter()
@@ -4854,7 +10831,8 @@ pub(crate) fn expand_representative_dwa_after_minimization(
             group_for_mode[mode_index] = Some(0);
         }
         mode_groups[0].extend(modes_in_group);
-        entry_union_by_group[0] = ordinary_entry_union.union(&all_member_entry_union);
+        // group-0 union is unused downstream; keep it cheap.
+        entry_union_by_group[0] = Weight::empty();
     } else if member_entries_are_pairwise_disjoint {
         let group_index = mode_groups.len();
         let modes_in_group: Vec<usize> = member_entry_weights
@@ -4882,10 +10860,14 @@ pub(crate) fn expand_representative_dwa_after_minimization(
             mode_groups[group_index].push(*mode_index);
             group_for_mode[*mode_index] = Some(group_index);
         }
-        entry_union_by_group[0] = ordinary_entry_union;
+        // group-0 union is unused downstream; keep it cheap.
+        entry_union_by_group[0] = Weight::empty();
     }
 
     let mut core_reachable_from = vec![vec![false; core_states.len()]; core_states.len()];
+    let grouping_pre_reach_ms = grouping_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
     for source in 0..core_states.len() {
         let mut stack = vec![source];
         while let Some(state) = stack.pop() {
@@ -4903,6 +10885,9 @@ pub(crate) fn expand_representative_dwa_after_minimization(
 
     let mut mode_indices_at_core_state =
         vec![vec![Vec::<usize>::new(); core_states.len()]; mode_groups.len()];
+    let grouping_reach_ms = grouping_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
     let mut entry_weights_at_core_state =
         vec![vec![Vec::<Weight>::new(); core_states.len()]; mode_groups.len()];
 
@@ -4982,6 +10967,17 @@ pub(crate) fn expand_representative_dwa_after_minimization(
     let grouping_ms = grouping_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
+    if profile_timing {
+        let grouping_entryw_ms = grouping_ms - grouping_reach_ms;
+        let grouping_reach_only_ms = grouping_reach_ms - grouping_pre_reach_ms;
+        eprintln!(
+            "[glrmask/profile][ti_post_dwa_grouping_split] pre_reach_ms={:.3} reach_ms={:.3} entryw_ms={:.3} total_ms={:.3}",
+            grouping_pre_reach_ms,
+            grouping_reach_only_ms,
+            grouping_entryw_ms,
+            grouping_ms,
+        );
+    }
 
     if profile_timing {
         let member_group_count = mode_groups.len().saturating_sub(1);
@@ -5959,7 +11955,10 @@ mod tests {
         let restricted = InterchangeabilityDfa::new(&tokenizer, &[true, true], &only_a);
         assert_eq!(restricted.topology.bytes, vec![b'a']);
         assert_eq!(restricted.destination_for_slot(after_a, 0), restricted.dead_state());
-        assert!(restricted.output_at(&restricted.future_finalizers, after_a).contains(1));
+        let output_id = restricted.output_pair_by_state[after_a] as usize;
+        assert!(restricted.output_pairs[output_id]
+            .future_finalizers
+            .contains(1));
     }
 
     #[test]

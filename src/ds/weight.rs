@@ -1986,18 +1986,62 @@ impl Weight {
     }
 
     /// Build a weight from ordered inclusive TSID ranges that already share
-    /// one interned token set. Adjacent equal token-set ranges are coalesced
-    /// exactly as in `from_per_tsid_shared`, without expanding each TSID point.
-    ///
-    /// Entries must be sorted and non-overlapping. Empty token sets and empty
-    /// ranges are ignored.
+    /// one interned token set. Retained as the general range-oriented name;
+    /// `from_tsid_runs_shared` is the equivalent run-oriented spelling.
     pub(crate) fn from_tsid_ranges_shared(
         entries: impl IntoIterator<Item = (u32, u32, SharedTokenSet)>,
     ) -> Self {
+        Self::from_tsid_runs_shared(entries)
+    }
+
+    /// Like `from_per_tsid_shared` but accepts pre-grouped, sorted inclusive
+    /// `(start_tsid, end_tsid)` runs that each share one Arc token set. This is
+    /// byte-identical to pushing every TSID in `start..=end` individually (the
+    /// builder merges same-Arc contiguous TSIDs anyway) but skips the per-TSID
+    /// iteration when the caller already knows the contiguous coordinate runs.
+    pub(crate) fn from_tsid_runs_shared(
+        runs: impl IntoIterator<Item = (u32, u32, SharedTokenSet)>,
+    ) -> Self {
         let mut builder = CompactRangeBuilder::new();
-        for (start, end, tokens) in entries {
-            if start <= end && !tokens.is_empty() {
-                builder.push(start, end, tokens);
+        for (start, end, tokens) in runs {
+            if tokens.is_empty() {
+                continue;
+            }
+            builder.push(start, end, tokens);
+        }
+        builder.finish()
+    }
+
+    /// Lift a set of final-TSID runs whose `coordinate` field is sorted
+    /// ascending. Byte-identical to
+    /// `from_tsid_runs_shared(runs.map(|(s, e, c)| (s, e, self.shared_tokens_for_tsid(c))))`
+    /// but replaces the per-run binary-search `get` with a single linear
+    /// merge against this weight's ascending core-TSID ranges. Requires that
+    /// `self` is neither empty nor full and that `runs` is sorted by
+    /// `coordinate` (guaranteed by the post-clustering final-TSID relabel).
+    pub(crate) fn lift_sorted_coordinate_runs(&self, runs: &[(u32, u32, u32)]) -> Self {
+        debug_assert!(!self.is_full());
+        debug_assert!(
+            runs.windows(2).all(|pair| pair[0].2 <= pair[1].2),
+            "lift_sorted_coordinate_runs requires coordinate-sorted runs"
+        );
+        let mut builder = CompactRangeBuilder::new();
+        let mut ranges = self.0.range_values().peekable();
+        for &(start, end, coordinate) in runs {
+            // Ranges are sorted ascending; coordinates are non-decreasing, so a
+            // range whose end is below the coordinate can never match a later
+            // run either and can be dropped.
+            while let Some((range, _)) = ranges.peek() {
+                if *range.end() < coordinate {
+                    ranges.next();
+                } else {
+                    break;
+                }
+            }
+            if let Some((range, tokens)) = ranges.peek() {
+                if *range.start() <= coordinate {
+                    builder.push(start, end, (*tokens).clone());
+                }
             }
         }
         builder.finish()
@@ -2020,6 +2064,50 @@ impl Weight {
             .get(tsid)
             .cloned()
             .unwrap_or_else(|| Arc::clone(&EMPTY_RANGESET))
+    }
+
+    /// Batched, sorted equivalent of [`shared_tokens_for_tsid`] for a slice of
+    /// strictly-ascending tsids. A single linear merge over the weight's ranges
+    /// replaces one binary-search point lookup per tsid, which is the dominant
+    /// cost of the post-DWA group-signature step. `u32::MAX` is the "no
+    /// coordinate" sentinel and always yields the empty token set, matching the
+    /// point helper's caller contract.
+    pub(crate) fn shared_tokens_for_sorted_tsids(&self, tsids: &[u32]) -> Vec<SharedTokenSet> {
+        debug_assert!(
+            tsids.windows(2).all(|pair| pair[0] < pair[1]),
+            "shared_tokens_for_sorted_tsids requires strictly-ascending tsids"
+        );
+        if self.is_full() {
+            let sentinel = self
+                .0
+                .range_values()
+                .next()
+                .expect("full weight must retain its sentinel token set")
+                .1
+                .clone();
+            return tsids.iter().map(|_| sentinel.clone()).collect();
+        }
+        let mut result = Vec::with_capacity(tsids.len());
+        let mut ranges = self.0.range_values().peekable();
+        for &tsid in tsids {
+            if tsid == u32::MAX {
+                result.push(Arc::clone(&EMPTY_RANGESET));
+                continue;
+            }
+            while let Some((range, _)) = ranges.peek() {
+                if *range.end() < tsid {
+                    ranges.next();
+                } else {
+                    break;
+                }
+            }
+            let tokens = match ranges.peek() {
+                Some((range, tokens)) if *range.start() <= tsid => (*tokens).clone(),
+                _ => Arc::clone(&EMPTY_RANGESET),
+            };
+            result.push(tokens);
+        }
+        result
     }
 
     /// Apply a sorted, unique set of point-TSID token-set overrides without

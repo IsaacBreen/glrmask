@@ -1406,6 +1406,18 @@ pub(crate) enum TransportScannerStateMap {
         representative_for_class: Arc<[TokenizerState]>,
         source_class_for_target_deviations: Box<[(u32, u32)]>,
     },
+    /// A quotient whose target coordinate is first coarsened by a shared
+    /// macro-state quotient. This represents a large family of C-state
+    /// transports with only the few moved macro classes, rather than one
+    /// explicit deviation per C member.
+    MacroQuotient {
+        state_count: usize,
+        class_for_original: Arc<[u32]>,
+        representative_for_source_class: Arc<[TokenizerState]>,
+        macro_class_for_source_class: Arc<[u32]>,
+        representative_for_macro_class: Arc<[TokenizerState]>,
+        source_macro_for_target_deviations: Box<[(u32, u32)]>,
+    },
     /// Temporary composition of round-local TI scanner coordinates. Keeping
     /// this lazy lets iterative TI replay share every accepted round map until
     /// the transport NWA actually queries a scanner state.
@@ -1415,12 +1427,37 @@ pub(crate) enum TransportScannerStateMap {
     },
 }
 
+pub(crate) struct DirectMacroQuotientParts<'a> {
+    pub(crate) macro_class_for_source_class: &'a [u32],
+    pub(crate) representative_for_macro_class: &'a [TokenizerState],
+    pub(crate) source_macro_for_target_deviations: &'a [(u32, u32)],
+}
+
 impl TransportScannerStateMap {
+    #[inline]
+    pub(crate) fn direct_macro_quotient_parts(&self) -> Option<DirectMacroQuotientParts<'_>> {
+        match self {
+            Self::MacroQuotient {
+                macro_class_for_source_class,
+                representative_for_macro_class,
+                source_macro_for_target_deviations,
+                ..
+            } => Some(DirectMacroQuotientParts {
+                macro_class_for_source_class,
+                representative_for_macro_class,
+                source_macro_for_target_deviations,
+            }),
+            Self::Explicit(_) | Self::Quotient { .. } | Self::Composed { .. } => None,
+        }
+    }
+
     #[inline]
     pub(crate) fn len(&self) -> usize {
         match self {
             Self::Explicit(states) => states.len(),
-            Self::Quotient { state_count, .. } => *state_count,
+            Self::Quotient { state_count, .. } | Self::MacroQuotient { state_count, .. } => {
+                *state_count
+            }
             Self::Composed { outer, inner } => {
                 debug_assert_eq!(outer.len(), inner.len());
                 outer.len()
@@ -1445,6 +1482,21 @@ impl TransportScannerStateMap {
                     .unwrap_or(target_class);
                 representative_for_class[source_class as usize]
             }
+            Self::MacroQuotient {
+                class_for_original,
+                macro_class_for_source_class,
+                representative_for_macro_class,
+                source_macro_for_target_deviations,
+                ..
+            } => {
+                let source_class = class_for_original[original_state as usize] as usize;
+                let source_macro = macro_class_for_source_class[source_class];
+                let target_macro = source_macro_for_target_deviations
+                    .binary_search_by_key(&source_macro, |&(source, _)| source)
+                    .map(|index| source_macro_for_target_deviations[index].1)
+                    .unwrap_or(source_macro);
+                representative_for_macro_class[target_macro as usize]
+            }
             Self::Composed { outer, inner } => {
                 outer.scanner_state(inner.scanner_state(original_state))
             }
@@ -1468,10 +1520,12 @@ impl TransportScannerStateMap {
     pub(crate) fn materialized(&self) -> Arc<[TokenizerState]> {
         match self {
             Self::Explicit(states) => Arc::clone(states),
-            Self::Quotient { state_count, .. } => (0..*state_count)
-                .map(|state| self.scanner_state(state as TokenizerState))
-                .collect::<Vec<_>>()
-                .into(),
+            Self::Quotient { state_count, .. } | Self::MacroQuotient { state_count, .. } => {
+                (0..*state_count)
+                    .map(|state| self.scanner_state(state as TokenizerState))
+                    .collect::<Vec<_>>()
+                    .into()
+            }
             Self::Composed { .. } => (0..self.len())
                 .map(|state| self.scanner_state(state as TokenizerState))
                 .collect::<Vec<_>>()
@@ -1488,7 +1542,7 @@ impl TransportScannerStateMap {
     fn innermost_source_map(&self) -> &Self {
         match self {
             Self::Composed { inner, .. } => inner.innermost_source_map(),
-            Self::Explicit(_) | Self::Quotient { .. } => self,
+            Self::Explicit(_) | Self::Quotient { .. } | Self::MacroQuotient { .. } => self,
         }
     }
 
@@ -1501,6 +1555,10 @@ impl TransportScannerStateMap {
         match self.innermost_source_map() {
             Self::Explicit(_) => 0,
             Self::Quotient {
+                class_for_original,
+                ..
+            }
+            | Self::MacroQuotient {
                 class_for_original,
                 ..
             } => class_for_original.as_ptr() as usize,
@@ -1516,6 +1574,10 @@ impl TransportScannerStateMap {
                 representative_for_class,
                 ..
             } => representative_for_class.len(),
+            Self::MacroQuotient {
+                representative_for_source_class,
+                ..
+            } => representative_for_source_class.len(),
             Self::Composed { .. } => unreachable!("innermost transport map cannot be composed"),
         }
     }
@@ -1527,7 +1589,31 @@ impl TransportScannerStateMap {
             Self::Quotient {
                 class_for_original,
                 ..
+            }
+            | Self::MacroQuotient {
+                class_for_original,
+                ..
             } => class_for_original[original_state as usize] as usize,
+            Self::Composed { .. } => unreachable!("innermost transport map cannot be composed"),
+        }
+    }
+
+    /// The innermost `class_for_original` slice (state -> source class), or
+    /// `None` when the innermost map is `Explicit`, where the class equals the
+    /// original state. Resolving the innermost map once and indexing this slice
+    /// avoids re-walking any `Composed` chain per state.
+    #[inline]
+    pub(crate) fn innermost_class_for_original(&self) -> Option<&[u32]> {
+        match self.innermost_source_map() {
+            Self::Explicit(_) => None,
+            Self::Quotient {
+                class_for_original,
+                ..
+            }
+            | Self::MacroQuotient {
+                class_for_original,
+                ..
+            } => Some(class_for_original),
             Self::Composed { .. } => unreachable!("innermost transport map cannot be composed"),
         }
     }
@@ -1540,6 +1626,10 @@ impl TransportScannerStateMap {
                 representative_for_class,
                 ..
             } => representative_for_class[class],
+            Self::MacroQuotient {
+                representative_for_source_class,
+                ..
+            } => representative_for_source_class[class],
             Self::Composed { .. } => unreachable!("innermost transport map cannot be composed"),
         }
     }
@@ -1555,7 +1645,9 @@ impl TransportScannerStateMap {
                 inner.append_atomic_transforms(output);
                 outer.append_atomic_transforms(output);
             }
-            Self::Explicit(_) | Self::Quotient { .. } => output.push(self),
+            Self::Explicit(_) | Self::Quotient { .. } | Self::MacroQuotient { .. } => {
+                output.push(self)
+            }
         }
     }
 
@@ -1569,7 +1661,7 @@ impl TransportScannerStateMap {
                 source_class_for_target_deviations,
                 ..
             } => Some(source_class_for_target_deviations),
-            Self::Explicit(_) | Self::Composed { .. } => None,
+            Self::Explicit(_) | Self::MacroQuotient { .. } | Self::Composed { .. } => None,
         }
     }
 
@@ -1584,7 +1676,7 @@ impl TransportScannerStateMap {
                 class_for_original.as_ptr() as usize,
                 representative_for_class.as_ptr() as usize,
             )),
-            Self::Explicit(_) | Self::Composed { .. } => None,
+            Self::Explicit(_) | Self::MacroQuotient { .. } | Self::Composed { .. } => None,
         }
     }
 
@@ -1594,7 +1686,7 @@ impl TransportScannerStateMap {
         }
         match self {
             Self::Explicit(states) => Arc::make_mut(states),
-            Self::Quotient { .. } | Self::Composed { .. } => {
+            Self::Quotient { .. } | Self::MacroQuotient { .. } | Self::Composed { .. } => {
                 unreachable!("transport map was just materialized")
             }
         }

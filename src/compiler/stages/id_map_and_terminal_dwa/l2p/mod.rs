@@ -15,6 +15,10 @@ pub(crate) mod postprocess;
 mod terminal_dwa_equivalence;
 mod terminal_interchangeability;
 
+pub(crate) use terminal_interchangeability::warm_ti_pool;
+pub(crate) use terminal_interchangeability::with_ti_pool;
+pub(crate) use terminal_interchangeability::SharedTiTokenizerOutputCache;
+
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -26,6 +30,7 @@ use crate::automata::weighted::minimize::{
     PointwiseClassOrder, minimize_owned, minimize_owned_with_pointwise_class_order,
 };
 use crate::automata::weighted::nwa::NWA;
+use crate::automata::weighted_u32::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
@@ -64,12 +69,13 @@ fn l2p_timing_profile_enabled() -> bool {
 
 thread_local! {
     static TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
-    static TERMINAL_INTERCHANGEABILITY_BYPASS_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
     static TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
-    static P8_FIRST_BYTE_FACTORIZATION_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static GLOBAL_TOKEN_POSITION_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 struct SuppressTerminalInterchangeability;
+struct SuppressTerminalInterchangeabilityStrictReference;
+struct SuppressGlobalTokenPosition;
 
 impl SuppressTerminalInterchangeability {
     fn new() -> Self {
@@ -81,33 +87,20 @@ impl SuppressTerminalInterchangeability {
 impl Drop for SuppressTerminalInterchangeability {
     fn drop(&mut self) {
         TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH.with(|depth| {
-            depth.set(depth.get().checked_sub(1).expect("unbalanced terminal interchangeability suppression"));
+            depth.set(
+                depth
+                    .get()
+                    .checked_sub(1)
+                    .expect("unbalanced terminal interchangeability suppression"),
+            );
         });
     }
 }
-
-struct SuppressTerminalInterchangeabilityBypass;
-
-impl SuppressTerminalInterchangeabilityBypass {
-    fn new() -> Self {
-        TERMINAL_INTERCHANGEABILITY_BYPASS_SUPPRESS_DEPTH.with(|depth| depth.set(depth.get() + 1));
-        Self
-    }
-}
-
-impl Drop for SuppressTerminalInterchangeabilityBypass {
-    fn drop(&mut self) {
-        TERMINAL_INTERCHANGEABILITY_BYPASS_SUPPRESS_DEPTH.with(|depth| {
-            depth.set(depth.get().checked_sub(1).expect("unbalanced terminal interchangeability bypass suppression"));
-        });
-    }
-}
-
-struct SuppressTerminalInterchangeabilityStrictReference;
 
 impl SuppressTerminalInterchangeabilityStrictReference {
     fn new() -> Self {
-        TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE_SUPPRESS_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE_SUPPRESS_DEPTH
+            .with(|depth| depth.set(depth.get() + 1));
         Self
     }
 }
@@ -115,28 +108,31 @@ impl SuppressTerminalInterchangeabilityStrictReference {
 impl Drop for SuppressTerminalInterchangeabilityStrictReference {
     fn drop(&mut self) {
         TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE_SUPPRESS_DEPTH.with(|depth| {
-            depth.set(depth.get().checked_sub(1).expect("unbalanced terminal interchangeability strict-reference suppression"));
-        });
-    }
-}
-
-struct SuppressP8FirstByteFactorization;
-
-impl SuppressP8FirstByteFactorization {
-    fn new() -> Self {
-        P8_FIRST_BYTE_FACTORIZATION_SUPPRESS_DEPTH.with(|depth| depth.set(depth.get() + 1));
-        Self
-    }
-}
-
-impl Drop for SuppressP8FirstByteFactorization {
-    fn drop(&mut self) {
-        P8_FIRST_BYTE_FACTORIZATION_SUPPRESS_DEPTH.with(|depth| {
             depth.set(
                 depth
                     .get()
                     .checked_sub(1)
-                    .expect("unbalanced P8 first-byte factorization suppression"),
+                    .expect("unbalanced terminal interchangeability strict-reference suppression"),
+            );
+        });
+    }
+}
+
+impl SuppressGlobalTokenPosition {
+    fn new() -> Self {
+        GLOBAL_TOKEN_POSITION_SUPPRESS_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+impl Drop for SuppressGlobalTokenPosition {
+    fn drop(&mut self) {
+        GLOBAL_TOKEN_POSITION_SUPPRESS_DEPTH.with(|depth| {
+            depth.set(
+                depth
+                    .get()
+                    .checked_sub(1)
+                    .expect("unbalanced global token-position suppression"),
             );
         });
     }
@@ -165,19 +161,8 @@ fn l2p_terminal_interchangeability_enabled() -> bool {
             .unwrap_or(true)
 }
 
-fn l2p_terminal_interchangeability_bypassed_for_partition(partition_label: &str) -> bool {
-    TERMINAL_INTERCHANGEABILITY_BYPASS_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
-        // The structural-boundary partitions have tiny local vocabularies.
-        // Their exact scanner quotient already does the useful reduction; on
-        // Catalog 512, P7's 31 TI merges force a much larger representative
-        // DWA transient than the direct construction. Retaining every terminal
-        // is exact and avoids discovery, transport, and expansion entirely.
-        && matches!(partition_label, "p7" | "p8")
-}
-
-fn l2p_terminal_interchangeability_enabled_for_partition(partition_label: &str) -> bool {
+fn l2p_terminal_interchangeability_enabled_for_partition(_partition_label: &str) -> bool {
     l2p_terminal_interchangeability_enabled()
-        && !l2p_terminal_interchangeability_bypassed_for_partition(partition_label)
 }
 
 /// Rebuild the TI-off local artifact and symbolically compare it with TI-on.
@@ -188,10 +173,26 @@ fn l2p_terminal_interchangeability_strict_reference_enabled() -> bool {
         && l2p_env_enabled("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE")
 }
 
+/// The structural p8 factorization remains a production optimization. Strict
+/// global-token-position validation suppresses C itself while retaining all
+/// other local optimizations on both sides of the comparison.
 pub(crate) fn p8_first_byte_factorization_allowed() -> bool {
-    P8_FIRST_BYTE_FACTORIZATION_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
+    true
 }
 
+fn l2p_global_token_position_enabled() -> bool {
+    GLOBAL_TOKEN_POSITION_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
+}
+
+fn l2p_global_token_position_strict_reference_enabled() -> bool {
+    l2p_env_enabled("GLRMASK_L2P_GLOBAL_TOKEN_POSITION_STRICT_REFERENCE")
+}
+
+fn l2p_strict_partition_matches(partition_label: &str) -> bool {
+    std::env::var("GLRMASK_L2P_STRICT_REFERENCE_PARTITION")
+        .map(|requested| requested == partition_label)
+        .unwrap_or(true)
+}
 
 #[derive(Clone, Copy)]
 struct L2PTokenLengthStats {
@@ -236,6 +237,104 @@ fn l2p_token_length_stats(vocab: &Vocab) -> L2PTokenLengthStats {
     stats
 }
 
+/// Collapse byte-identical states in a TI-expanded DWA before minimization.
+///
+/// TI mode expansion materializes many states that are exact duplicates: same
+/// `final_weight` and same `(label -> dst, weight)` transitions, where weight
+/// equality is exact because the lifted weights and their token sets are
+/// interned (Arc-ptr equality == value equality). Merging such states is a
+/// sound bisimulation quotient — it preserves the language and every weight —
+/// so the subsequent pointwise minimization reaches the identical canonical
+/// automaton (byte-identical digest) from a smaller input. This shrinks the
+/// input to `push_weights` and the pointwise coloring, which dominate the
+/// post-DWA minimize cost, without attempting the deeper pointwise-value
+/// equivalences that only that machinery can find.
+///
+/// The partition is refined to a fixpoint over `(final_weight ptr,
+/// [(label, class(dst), weight ptr)])`; the destination is compared up to its
+/// class so that duplicate states whose only difference is pointing at
+/// (mutually duplicate) destinations still collapse.
+fn quotient_exact_duplicate_states(dwa: DWA) -> DWA {
+    use crate::automata::weighted_u32::dwa::DWAState;
+    use std::collections::BTreeMap as StdBTreeMap;
+    use std::sync::Arc;
+
+    let states = dwa.states();
+    let n = states.len();
+    if n <= 1 {
+        return dwa;
+    }
+    let wptr = |w: &Weight| Arc::as_ptr(&w.0) as u64;
+
+    // Initial partition by local output signature (ignores destinations).
+    let mut class: Vec<u32> = vec![0; n];
+    let mut init_map: StdBTreeMap<Vec<u64>, u32> = StdBTreeMap::new();
+    for (i, state) in states.iter().enumerate() {
+        let mut sig: Vec<u64> = Vec::with_capacity(1 + state.transitions.len() * 2);
+        sig.push(match &state.final_weight {
+            Some(fw) => wptr(fw),
+            None => 0,
+        });
+        for (label, (_dst, w)) in state.transitions.iter() {
+            sig.push(*label as u64);
+            sig.push(wptr(w));
+        }
+        let next = init_map.len() as u32;
+        class[i] = *init_map.entry(sig).or_insert(next);
+    }
+    let mut num_classes = init_map.len();
+
+    // Refine to fixpoint, now distinguishing destinations by their class.
+    loop {
+        let mut refine_map: StdBTreeMap<Vec<u64>, u32> = StdBTreeMap::new();
+        let mut new_class: Vec<u32> = vec![0; n];
+        for (i, state) in states.iter().enumerate() {
+            let mut sig: Vec<u64> = Vec::with_capacity(1 + state.transitions.len() * 3);
+            sig.push(class[i] as u64);
+            for (label, (dst, w)) in state.transitions.iter() {
+                sig.push(*label as u64);
+                sig.push(wptr(w));
+                sig.push(class[*dst as usize] as u64);
+            }
+            let next = refine_map.len() as u32;
+            new_class[i] = *refine_map.entry(sig).or_insert(next);
+        }
+        let new_num = refine_map.len();
+        class = new_class;
+        if new_num == num_classes {
+            break;
+        }
+        num_classes = new_num;
+    }
+
+    if num_classes == n {
+        return dwa;
+    }
+
+    // Representative (first-seen) state per class; new state id == class id.
+    let mut rep_of_class: Vec<Option<usize>> = vec![None; num_classes];
+    for (i, &c) in class.iter().enumerate() {
+        rep_of_class[c as usize].get_or_insert(i);
+    }
+
+    let mut new_states: Vec<DWAState> = Vec::with_capacity(num_classes);
+    for c in 0..num_classes {
+        let rep = rep_of_class[c].expect("every class has a representative");
+        let old = &states[rep];
+        let transitions = old
+            .transitions
+            .iter()
+            .map(|(label, (dst, w))| (*label, (class[*dst as usize], w.clone())))
+            .collect();
+        new_states.push(DWAState {
+            transitions,
+            final_weight: old.final_weight.clone(),
+        });
+    }
+    let new_start = class[dwa.start_state() as usize];
+    DWA::from_parts(new_states, new_start)
+}
+
 /// Build an L2+ id_map and terminal DWA for the given vocab and terminal set.
 ///
 /// Builds its own id_map via `InternalIdMap::build_with_group_filter` (full DFA-
@@ -264,10 +363,13 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     grammar: &AnalyzedGrammar,
     active_terminals: &[bool],
     disallowed_follows: &BTreeMap<u32, BitSet>,
+    token_path_disallowed_follows: Option<&BTreeMap<u32, BitSet>>,
+    normalized_token_path_disallowed_follows: Option<&[BitSet]>,
     shared_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_original_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_original_vocab_analysis_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_transition_cache: Option<&OnceLock<equivalence_analysis::compat::FlatTransitionCache>>,
+    shared_ti_output_cache: Option<&SharedTiTokenizerOutputCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> Option<LocalIdMapTerminalDwa> {
@@ -286,6 +388,43 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         }
     }
 
+    let token_position_partition_started_at = l2p_timing_profile_enabled().then(Instant::now);
+    // Byte-valid global token-position quotient C. `compute_..._state_quotient`
+    // closes the A∧B token-position seed to a stable right congruence, which
+    // makes it sound to feed directly into the byte-level TI oracle (unlike the
+    // raw token-boundary partition, which is only exact at token boundaries).
+    let global_state_quotient = (l2p_global_token_position_enabled()
+        && matches!(partition_label, "p7" | "p8"))
+        .then(|| {
+            equivalence_analysis::state_equivalence::global_token_position::
+                compute_global_token_position_state_quotient(tokenizer, vocab)
+                .0
+        });
+    // The token-boundary partition is still consumed by the representative-core
+    // equivalence-analysis path below; keep computing it for that consumer.
+    let token_position_partition = (l2p_global_token_position_enabled()
+        && matches!(partition_label, "p7" | "p8"))
+        .then(|| {
+            equivalence_analysis::state_equivalence::global_token_position::
+                compute_global_token_position_state_partition(tokenizer, vocab)
+        })
+        .flatten();
+    let token_position_partition_ms = token_position_partition_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    if l2p_timing_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][global_token_position_partition] partition={} raw_states={} representatives={} enabled={} build_ms={:.3}",
+            partition_label,
+            num_original_states,
+            global_state_quotient.as_ref().map_or(0, |quotient| {
+                quotient.as_many_to_one().representative_original_ids.len()
+            }),
+            global_state_quotient.is_some(),
+            token_position_partition_ms,
+        );
+    }
+
     // Repeatedly discover and immediately fold each transient exact partition.
     // Only the final flat original-member partition survives this loop.
     let ti_profile_timing = l2p_timing_profile_enabled();
@@ -299,7 +438,24 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         if l2p_terminal_interchangeability_enabled_for_partition(partition_label) {
             let mut active = active_terminals.to_vec();
             let mut classes = singleton_partition(&active);
-            let discovery_context = TiDiscoveryContext::new(tokenizer, &relevant_bytes);
+            // Always use the byte-level exact discovery oracle. When the global
+            // token-position quotient C is available (p7/p8), build discovery
+            // evidence over C representatives; otherwise over raw states.
+            let discovery_context = match global_state_quotient.as_ref() {
+                Some(quotient) => {
+                    TiDiscoveryContext::new_with_global_state_quotient_and_output_cache(
+                        tokenizer,
+                        &relevant_bytes,
+                        quotient,
+                        shared_ti_output_cache,
+                    )
+                }
+                None => TiDiscoveryContext::new_with_output_cache(
+                    tokenizer,
+                    &relevant_bytes,
+                    shared_ti_output_cache,
+                ),
+            };
             let mut transport_witness_rounds = Vec::new();
             let mut round_count = 0usize;
             let mut first_round_class_count = None;
@@ -341,11 +497,11 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         .is_some_and(|partition| partition_has_merges(partition));
     // A successful merge activates production TI. The recursive TI-off rebuild
     // and symbolic comparison are a separate, explicit validation mode.
-    let local_bypass_strict_reference = l2p_terminal_interchangeability_bypassed_for_partition(partition_label)
-        && l2p_terminal_interchangeability_enabled()
-        && l2p_terminal_interchangeability_strict_reference_enabled();
-    let strict_reference = (reference_terminal_expansion || local_bypass_strict_reference)
-        && l2p_terminal_interchangeability_strict_reference_enabled();
+let strict_reference = reference_terminal_expansion
+        && l2p_terminal_interchangeability_strict_reference_enabled()
+        && l2p_strict_partition_matches(partition_label);
+    let global_token_position_strict_reference = token_position_partition.is_some()
+        && l2p_global_token_position_strict_reference_enabled();
     let analysis_active_terminals = terminal_partition
         .as_ref()
         .map(|partition| active_terminals_for_partition(partition, active_terminals.len()))
@@ -393,8 +549,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         );
         std::process::exit(0);
     }
+    let equivalence_uses_pre_normalized_follows = coalesced_disallowed_follows.is_none()
+        && token_path_disallowed_follows.is_some()
+        && normalized_token_path_disallowed_follows.is_some();
     let equivalence_disallowed_follows = coalesced_disallowed_follows
         .as_ref()
+        .or(token_path_disallowed_follows)
         .unwrap_or(disallowed_follows);
     // The representative core begins after TI discovery/coalescing. It includes
     // ordinary representative-only equivalence through representative DWA
@@ -408,6 +568,11 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         .filter(|&&active| active)
         .count();
     let tokenizer_for_build = tokenizer;
+    // C is deliberately activated only on the structural-boundary partitions
+    // this experiment targets. P0/P1 retain their established raw route.
+    let token_position_partition_for_analysis = matches!(partition_label, "p7" | "p8")
+        .then_some(token_position_partition.as_ref())
+        .flatten();
     let equivalence_initial_state_map = initial_state_map;
 
     // ---- Step 1: Equivalence analysis (raw tokenizer state IDs) ----
@@ -435,12 +600,17 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             vocab,
             equivalence_disallowed_follows,
             ignore_terminal,
+            equivalence_uses_pre_normalized_follows,
+            equivalence_uses_pre_normalized_follows
+                .then_some(normalized_token_path_disallowed_follows)
+                .flatten(),
             Some(&analysis_active_terminals),
             equivalence_vocab_dfa_cache,
             shared_analysis_dfa_cache,
             shared_base_setup_ms,
             flat_trans,
             equivalence_initial_state_map,
+            token_position_partition_for_analysis,
         );
 
     // Replay and transport-coordinate refinement are intentionally deferred
@@ -696,7 +866,20 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 .unwrap_or(0.0);
 
             let quotient_started_at = ti_profile_timing.then(Instant::now);
-            let quotient = transport_coordinate_quotient(ordinary_state_map, &modes);
+            let mut quotient = transport_coordinate_quotient(ordinary_state_map, &modes);
+            // Cluster the final tsids by their core coordinate. Many final tsids
+            // collapse onto a few core coordinates during expansion; ordering
+            // them so equal-coordinate tsids are contiguous lets each lifted
+            // weight collapse to one range per coordinate instead of scattering
+            // into many. Pure relabel (masks are token-indexed, tsid names are
+            // internal), so the global digest is unchanged.
+            quotient.reorder_internal_by_representative_key(|representative| {
+                ordinary_state_map
+                    .original_to_internal
+                    .get(representative as usize)
+                    .copied()
+                    .unwrap_or(u32::MAX)
+            });
             ti_transport_coordinate_quotient_ms = quotient_started_at
                 .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
                 .unwrap_or(0.0);
@@ -745,7 +928,21 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         // pointwise grouping to minimization. Avoid rebuilding an equivalent
         // token layout before that pass; p0 retains the established precompact
         // canonicalization path.
-        if !(used_follow_row_quotient && expanded_artifact.artifact().stats().states <= 64) {
+        //
+        // The pre-minimization `compact_dimensions_fast` used to canonicalize
+        // the token layout so the minimizer could see TSID-quotient-enabled
+        // state equivalences. Since the run-based lift (`from_tsid_runs_shared`)
+        // and clustering relabel now emit canonical SharedTokenSet storage
+        // directly, this pass reduces nothing (tsids 2602->2602, tokens 67->67
+        // on p0) yet costs ~5ms rewriting every weight. Skipping it leaves the
+        // digest AND num_parser_states byte-identical while cutting p0
+        // post_dwa_compact ~7.5ms->2.9ms. A `GLRMASK_FORCE_PRECOMPACT` escape
+        // hatch keeps the old path available for schemas that might still need
+        // the extra canonicalization for state minimality.
+        let force_precompact = std::env::var("GLRMASK_FORCE_PRECOMPACT").is_ok();
+        if force_precompact
+            && !(used_follow_row_quotient && expanded_artifact.artifact().stats().states <= 64)
+        {
             if profiling {
                 expanded_artifact.compact_dimensions_fast_with_stats();
             } else {
@@ -754,6 +951,25 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         }
         ti_post_dwa_compact_ms = post_dwa_compact_started_at.elapsed().as_secs_f64() * 1000.0;
         let (expanded_dwa, final_id_map) = expanded_artifact.into_parts();
+
+        // Exact-duplicate state quotient before minimization. TI mode expansion
+        // materializes many states that are byte-identical (same final weight
+        // and same (label -> dst, interned weight-Arc) transitions). Because the
+        // token sets and lifted weights are interned, Arc-ptr equality is exact
+        // value equality, so merging these states is a sound bisimulation
+        // quotient that leaves the language and weights unchanged. Doing it here
+        // shrinks the input to `push_weights` and the pointwise coloring inside
+        // minimization without touching the deeper pointwise-value equivalences
+        // that only that machinery can find. Ptr-based fixpoint refinement adds
+        // nothing beyond the single exact-dup pass (measured: p0 156->106 in one
+        // pass, fixpoint identical), so a single hash pass captures the whole
+        // cheap win.
+        let premerge_disabled = std::env::var("GLRMASK_DISABLE_TI_PREMERGE").is_ok();
+        let expanded_dwa = if premerge_disabled {
+            expanded_dwa
+        } else {
+            quotient_exact_duplicate_states(expanded_dwa)
+        };
 
         let post_dwa_minimize_started_at = ti_profile_timing.then(Instant::now);
         // TI lifting creates partial source domains. The precompacted local
@@ -933,18 +1149,19 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     };
 
 
-    if strict_reference {
-        // Compare completed weighted terminal languages in original
-        // tokenizer-state and token coordinates. For an active TI route the
-        // reference suppresses TI; for an explicit local bypass it suppresses
-        // only the bypass, forcing the full TI construction.
+    if strict_reference || global_token_position_strict_reference {
+        // Rebuild the local artifact under the appropriate suppressed feature
+        // set, then compare completed weighted terminal languages in original
+        // tokenizer-state and token coordinates. Global token-position strict
+        // mode validates C against the pre-C raw construction; TI strict mode
+        // validates only TI against the same C-seeded construction.
         let strict_baseline_started_at = Instant::now();
         let baseline = {
-            let _strict_reference_suppress = SuppressTerminalInterchangeabilityStrictReference::new();
-            let _suppress_p8_first_byte_factorization = SuppressP8FirstByteFactorization::new();
-            let _suppress_ti = reference_terminal_expansion.then(SuppressTerminalInterchangeability::new);
-            let _suppress_bypass = (!reference_terminal_expansion)
-                .then(SuppressTerminalInterchangeabilityBypass::new);
+            let _strict_reference_suppress =
+                SuppressTerminalInterchangeabilityStrictReference::new();
+            let _suppress_ti = strict_reference.then(SuppressTerminalInterchangeability::new);
+            let _suppress_global = global_token_position_strict_reference
+                .then(SuppressGlobalTokenPosition::new);
             build_l2p_id_map_and_terminal_dwa(
                 partition_label,
                 tokenizer,
@@ -955,10 +1172,13 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 grammar,
                 active_terminals,
                 disallowed_follows,
+                token_path_disallowed_follows,
+                normalized_token_path_disallowed_follows,
                 shared_vocab_dfa_cache,
                 shared_original_vocab_dfa_cache,
                 shared_original_vocab_analysis_dfa_cache,
                 shared_transition_cache,
+                shared_ti_output_cache,
                 flat_trans,
                 initial_state_map,
             )
@@ -976,8 +1196,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         let strict_compare_ms = strict_compare_started_at.elapsed().as_secs_f64() * 1000.0;
         if ti_profile_timing {
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability_strict_reference] partition={} baseline_build_ms={:.3} terminal_dwa_equivalence_ms={:.3} differs=false",
+                "[glrmask/profile][l2p_strict_reference] partition={} ti_reference={} global_token_position_reference={} baseline_build_ms={:.3} terminal_dwa_equivalence_ms={:.3} differs=false",
                 partition_label,
+                strict_reference,
+                global_token_position_strict_reference,
                 strict_baseline_build_ms,
                 strict_compare_ms,
             );
@@ -1024,12 +1246,12 @@ mod ti_mre_tests {
     }
 
     #[test]
-    fn p7_and_p8_bypass_terminal_interchangeability_when_globally_enabled() {
+    fn p7_and_p8_use_terminal_interchangeability_when_globally_enabled() {
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
         let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
 
-        assert!(!super::l2p_terminal_interchangeability_enabled_for_partition("p7"));
-        assert!(!super::l2p_terminal_interchangeability_enabled_for_partition("p8"));
+        assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p7"));
+        assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p8"));
     }
 
     #[test]
@@ -1038,7 +1260,7 @@ mod ti_mre_tests {
         let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
 
         assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p0"));
-        assert!(!super::l2p_terminal_interchangeability_enabled_for_partition("p7"));
+        assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p7"));
     }
 
     #[test]

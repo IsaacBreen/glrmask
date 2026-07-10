@@ -332,6 +332,13 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     let token_path_disallowed_follows = Arc::new(
         ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal),
     );
+    let normalized_token_path_disallowed_follows: Arc<[BitSet]> = Arc::from(
+        l2p::equivalence_analysis::disallowed_follows::normalize_disallowed_follows(
+            grammar.num_terminals as usize,
+            &token_path_disallowed_follows,
+        )
+        .into_boxed_slice(),
+    );
     let stage_setup_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let partition_vocab_started_at = Instant::now();
@@ -503,6 +510,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     let shared_original_vocab_analysis_dfa_cache =
         l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache::default();
     let shared_transition_cache = OnceLock::new();
+    let shared_ti_output_cache = l2p::SharedTiTokenizerOutputCache::new();
     let shared_cache_setup_ms =
         shared_cache_setup_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -522,12 +530,14 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             grammar,
             disallowed_follows,
             &token_path_disallowed_follows,
+            &normalized_token_path_disallowed_follows,
             &flat_trans,
             Some(global_max_length_state_map),
             Some(&shared_vocab_dfa_cache),
             Some(&shared_original_vocab_dfa_cache),
             Some(&shared_original_vocab_analysis_dfa_cache),
             Some(&shared_transition_cache),
+            Some(&shared_ti_output_cache),
             Some(&shared_classify_cache),
         )
         .map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));

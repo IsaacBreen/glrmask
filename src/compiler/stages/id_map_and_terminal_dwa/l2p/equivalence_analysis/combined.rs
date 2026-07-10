@@ -6,9 +6,11 @@ use std::time::Instant;
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use super::state_equivalence::global_token_position::GlobalTokenPositionStatePartition;
 use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::ignore_transparent_disallowed_follows;
 use super::state_equivalence::{
-    resolve_l2p_pipeline_config, run_state_equivalence_pipeline, StateEquivalenceScope,
+    build_state_map_from_subset_representatives, resolve_l2p_pipeline_config,
+    run_state_equivalence_pipeline, StateEquivalenceScope,
 };
 use crate::ds::bitset::BitSet;
 use super::compat::TokenizerView;
@@ -417,6 +419,224 @@ fn build_internal_id_map_from_combined_result(
         tokenizer_states: state_map,
         vocab_tokens: vocab_map,
     }
+}
+
+fn try_analyze_equivalences_with_token_boundary_partition(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    effective_disallowed: &BTreeMap<u32, BitSet>,
+    active_groups: Option<&[bool]>,
+    _shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
+    _shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
+    flat_trans: Option<&std::sync::Arc<[u32]>>,
+    token_boundary_partition: &GlobalTokenPositionStatePartition,
+    effective_follows_prepare_ms: f64,
+    pre_normalized_disallowed_follows: Option<&[BitSet]>,
+) -> Option<(InternalIdMap, CombinedEquivalenceProfile)> {
+    let active_groups = active_groups?;
+    let seed = token_boundary_partition.as_many_to_one();
+    let num_states = tokenizer.num_states() as usize;
+    if seed.original_to_internal.len() != num_states
+        || seed.representative_original_ids.is_empty()
+        || vocab.entries.values().any(Vec::is_empty)
+    {
+        return None;
+    }
+
+    let prepare_inputs_started_at = Instant::now();
+    let prepared = prepare_equivalence_inputs(tokenizer, vocab, None);
+    if prepared.token_bytes.is_empty() {
+        return None;
+    }
+    let token_len_stats = token_length_stats(&prepared.token_bytes);
+    let max_token_len = prepared
+        .token_bytes
+        .iter()
+        .map(|token| token.len())
+        .max()
+        .unwrap_or(0);
+    let prepare_inputs_ms = prepare_inputs_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let compatible_flat_trans = flat_trans.filter(|transitions| {
+        transitions.len() == tokenizer.num_states() as usize * 256
+    });
+    let analysis_view_started_at = Instant::now();
+    let tokenizer_view = match compatible_flat_trans {
+        Some(transitions) => TokenizerView::new_filtered_from_flat_trans(
+            transitions,
+            tokenizer,
+            active_groups,
+        ),
+        None => TokenizerView::new_filtered(tokenizer, active_groups),
+    };
+    let analysis_view_build_ms = analysis_view_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    // The C-seeded state/vocab equivalence walks only ever follow the
+    // partition's token bytes, so byte classes only need to be exact for the
+    // bytes that actually appear in the vocabulary. Restricting the byte-class
+    // scan to those relevant bytes makes base construction proportional to the
+    // partition's tiny alphabet instead of the full 18k-state x 256-byte table.
+    // The base is partition-local (its byte classes depend on this partition's
+    // relevant bytes), so it uses local caches rather than the cross-partition
+    // shared ones to avoid contaminating other partitions.
+    let mut relevant_bytes = [false; 256];
+    for token in &prepared.token_bytes {
+        for &byte in token.iter() {
+            relevant_bytes[byte as usize] = true;
+        }
+    }
+    let local_vocab_dfa_cache = vocab_equivalence_analysis::SharedVocabDfaCache::new();
+    let local_analysis_dfa_cache =
+        vocab_equivalence_analysis::SharedVocabAnalysisDfaCache::default();
+    let compatible_shared_base = Some(local_vocab_dfa_cache.get_or_init(|| {
+        vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa_relevant(
+            tokenizer_view.dfa(),
+            &relevant_bytes,
+        )
+    }));
+
+    let follows_normalize_started_at = Instant::now();
+    let owned_normalized_disallowed_follows;
+    let normalized_disallowed_follows = if let Some(rows) = pre_normalized_disallowed_follows {
+        rows
+    } else {
+        owned_normalized_disallowed_follows =
+            normalize_disallowed_follows(tokenizer_group_count(&tokenizer_view), effective_disallowed);
+        &owned_normalized_disallowed_follows
+    };
+    let effective_follows_normalize_ms = effective_follows_prepare_ms
+        + follows_normalize_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let byte_class_started_at = Instant::now();
+    let byte_to_class = compatible_shared_base
+        .map(vocab_equivalence_analysis::SharedVocabDfaBase::byte_to_class)
+        .unwrap_or_else(|| super::compat::compute_byte_classes(tokenizer_view.dfa()));
+    let byte_class_setup_ms = byte_class_started_at.elapsed().as_secs_f64() * 1000.0;
+    let token_dedup_started_at = Instant::now();
+    let dedup = deduplicate_tokens_by_byte_class(&prepared.token_bytes, &byte_to_class);
+    let token_dedup_ms = token_dedup_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let seed_states = seed
+        .representative_original_ids
+        .iter()
+        .map(|&state| state as usize)
+        .collect::<Vec<_>>();
+    if seed_states.iter().any(|&state| state >= num_states) {
+        return None;
+    }
+    let exact_rep_confirmation_used = seed_states.len() >= EXACT_REP_CONFIRMATION_MIN_STATES
+        && dedup.representative_token_bytes.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
+    let exact_started_at = Instant::now();
+    let state_representatives = if exact_rep_confirmation_used {
+        state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
+            &tokenizer_view,
+            &dedup.representative_token_bytes,
+            &seed_states,
+            &normalized_disallowed_follows,
+            None,
+            None,
+            Some(true),
+            compatible_shared_base,
+        )
+    } else {
+        state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
+            &tokenizer_view,
+            &dedup.representative_token_bytes,
+            &seed_states,
+            &normalized_disallowed_follows,
+            compatible_shared_base,
+        )
+    };
+    let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let tokenizer_states = build_state_map_from_subset_representatives(
+        &seed_states,
+        &state_representatives,
+        num_states,
+        Some(seed),
+    );
+    let mut final_state_representatives = tokenizer_states
+        .representative_original_ids
+        .iter()
+        .map(|&state| state as usize)
+        .collect::<Vec<_>>();
+    final_state_representatives.sort_unstable();
+    final_state_representatives.dedup();
+
+    let vocab_equiv_started_at = Instant::now();
+    let (vocab_classes, vocab_analysis_dfa_build_ms) = if partition_label == "p8" {
+        // P8's L2P vocabulary is deliberately tiny and its current exact
+        // analysis produces an identity token partition. Identity is exact in
+        // every schema, so avoid constructing a large analysis DFA merely to
+        // rediscover that no token aliases are useful on this partition.
+        (
+            (0..prepared.token_ids.len())
+                .map(|token_index| vec![token_index])
+                .collect(),
+            0.0,
+        )
+    } else {
+        let (dedup_vocab_classes, build_ms) =
+            vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
+                &tokenizer_view,
+                &dedup.representative_token_bytes,
+                &final_state_representatives,
+                effective_disallowed,
+                Some(&byte_to_class),
+                None,
+                Some(&local_vocab_dfa_cache),
+                Some(&local_analysis_dfa_cache),
+            );
+        (
+            expand_vocab_classes(
+                dedup_vocab_classes,
+                &dedup.original_to_repr,
+                dedup.representative_token_bytes.len(),
+            ),
+            build_ms,
+        )
+    };
+    let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let finalize_started_at = Instant::now();
+    let internal_id_map = InternalIdMap {
+        tokenizer_states,
+        vocab_tokens: build_vocab_map(&vocab_classes, &prepared.token_ids, prepared.max_token_id),
+    };
+    let id_map_finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
+    let exact_reps = internal_id_map.tokenizer_states.num_internal_ids() as usize;
+
+    Some((
+        internal_id_map,
+        CombinedEquivalenceProfile {
+            initial_states_considered: seed_states.len(),
+            max_length_skipped: true,
+            max_token_len,
+            token_len_gt_4: token_len_stats.gt_4,
+            token_len_gt_8: token_len_stats.gt_8,
+            token_len_gt_16: token_len_stats.gt_16,
+            token_len_gt_32: token_len_stats.gt_32,
+            token_len_gt_64: token_len_stats.gt_64,
+            raw_analysis_base_init_ms: 0.0,
+            analysis_view_build_ms,
+            active_mask_filter_ms: 0.0,
+            effective_follows_normalize_ms,
+            prepare_inputs_ms,
+            byte_class_setup_ms,
+            vocab_analysis_dfa_build_ms,
+            token_dedup_ms,
+            restricted_observation_state_equiv_ms: 0.0,
+            max_length_state_equiv_ms: 0.0,
+            vocab_equiv_ms,
+            exact_state_equiv_ms,
+            id_map_finalize_ms,
+            restricted_observation_reps: seed_states.len(),
+            max_length_reps: seed_states.len(),
+            exact_reps,
+            exact_rep_confirmation_used,
+        },
+    ))
 }
 
 fn try_analyze_equivalences_with_raw_quotient(
@@ -955,12 +1175,15 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     vocab: &Vocab,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
+    disallowed_follows_are_ignore_transparent: bool,
+    pre_normalized_disallowed_follows: Option<&[BitSet]>,
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_base_setup_ms: f64,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
+    token_boundary_partition: Option<&GlobalTokenPositionStatePartition>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
     analyze_equivalences_impl(
         partition_label,
@@ -968,12 +1191,15 @@ pub(crate) fn analyze_equivalences_with_group_filter(
         vocab,
         disallowed_follows,
         ignore_terminal,
+        disallowed_follows_are_ignore_transparent,
+        pre_normalized_disallowed_follows,
         active_groups,
         shared_vocab_dfa_cache,
         shared_analysis_dfa_cache,
         shared_base_setup_ms,
         flat_trans,
         initial_state_map,
+        token_boundary_partition,
     )
 }
 
@@ -987,18 +1213,40 @@ fn analyze_equivalences_impl(
     vocab: &Vocab,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
+    disallowed_follows_are_ignore_transparent: bool,
+    pre_normalized_disallowed_follows: Option<&[BitSet]>,
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_base_setup_ms: f64,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
+    token_boundary_partition: Option<&GlobalTokenPositionStatePartition>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
     let follows_prepare_started_at = Instant::now();
-    let token_path_disallowed_follows =
-        ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal);
+    let token_path_disallowed_follows = (!disallowed_follows_are_ignore_transparent)
+        .then(|| ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal));
     let effective_follows_prepare_ms = follows_prepare_started_at.elapsed().as_secs_f64() * 1000.0;
-    let effective_disallowed = &token_path_disallowed_follows;
+    let effective_disallowed = token_path_disallowed_follows
+        .as_ref()
+        .unwrap_or(disallowed_follows);
+    if let Some(token_boundary_partition) = token_boundary_partition {
+        if let Some(result) = try_analyze_equivalences_with_token_boundary_partition(
+            partition_label,
+            tokenizer,
+            vocab,
+            effective_disallowed,
+            active_groups,
+            shared_vocab_dfa_cache,
+            shared_analysis_dfa_cache,
+            flat_trans,
+            token_boundary_partition,
+            effective_follows_prepare_ms,
+            pre_normalized_disallowed_follows,
+        ) {
+            return result;
+        }
+    }
     if let Some(result) = try_analyze_equivalences_with_raw_quotient(
         partition_label,
         tokenizer,

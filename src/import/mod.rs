@@ -175,13 +175,15 @@ impl Constraint {
     }
 
     pub fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
-        compile_from_source(
-            schema,
-            vocab,
-            "json_schema",
-            GlrTableConstruction::LegacyRowBisim,
-            parse_json_schema_to_named,
-        )
+        crate::compiler::stages::id_map_and_terminal_dwa::l2p::with_ti_pool(|| {
+            compile_from_source(
+                schema,
+                vocab,
+                "json_schema",
+                GlrTableConstruction::LegacyRowBisim,
+                parse_json_schema_to_named,
+            )
+        })
     }
 
     /// Load a grammar from the GLRM format (see [`crate::grammar::glrm`]).

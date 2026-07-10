@@ -42,7 +42,9 @@ pub use import::__profile_json_schema_import;
 pub fn compile_grammar_def_json(grammar_def_json: &str, vocab: &Vocab) -> Result<Constraint> {
     let gdef: grammar::flat::GrammarDef = serde_json::from_str(grammar_def_json)
         .map_err(|e| GlrMaskError::GrammarParse(format!("invalid GrammarDef JSON: {e}")))?;
-    Ok(compiler::compile_owned(gdef, vocab))
+    Ok(compiler::stages::id_map_and_terminal_dwa::l2p::with_ti_pool(|| {
+        compiler::compile_owned(gdef, vocab)
+    }))
 }
 
 /// Populate compile-time artifacts that are pure functions of the vocabulary.
@@ -50,6 +52,15 @@ pub fn compile_grammar_def_json(grammar_def_json: &str, vocab: &Vocab) -> Result
 /// This intentionally does not compile any grammar/schema-dependent artifact.
 pub fn prepare_vocab_for_compile(vocab: &Vocab) {
     compiler::compile::prepare_vocab_for_compile(vocab);
+}
+
+/// Build (and, if configured, start the keepalive for) the terminal
+/// interchangeability certification thread pool ahead of first use.
+///
+/// Calling this at Python module import warms the pool so discovery does not
+/// pay the first-use worker-wake handoff (a large latency on macOS).
+pub fn warm_ti_pool() {
+    compiler::stages::id_map_and_terminal_dwa::l2p::warm_ti_pool();
 }
 
 /// Dump the imported JSON Schema grammar in GLRM format.

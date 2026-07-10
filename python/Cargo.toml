@@ -13,3 +13,4 @@ numpy = "0.24.0"
 glrmask = { path = ".." }
 glrmask-runtime = { path = "../glrmask-runtime" }
 self_cell = "1"
+mimalloc = "0.1"

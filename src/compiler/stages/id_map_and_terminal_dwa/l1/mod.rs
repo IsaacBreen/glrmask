@@ -2543,11 +2543,15 @@ fn build_l1_state_to_terminal_signatures(
     for state in 0..tokenizer.num_states() as usize {
         let signature =
             collect_active_terminal_signature(tokenizer, state as u32, active_terminals);
-        let next_signature_id = terminal_signatures.len() as u32;
-        let sig_id = *signature_to_id.entry(signature.clone()).or_insert_with(|| {
-            terminal_signatures.push(signature);
-            next_signature_id
-        });
+        let sig_id = match signature_to_id.get(&signature) {
+            Some(&id) => id,
+            None => {
+                let next_signature_id = terminal_signatures.len() as u32;
+                signature_to_id.insert(signature.clone(), next_signature_id);
+                terminal_signatures.push(signature);
+                next_signature_id
+            }
+        };
         state_to_terminal_signature[state] = sig_id;
     }
 

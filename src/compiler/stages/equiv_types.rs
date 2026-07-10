@@ -107,6 +107,41 @@ impl ManyToOneIdMap {
     pub fn iter_representative_ids(&self) -> impl Iterator<Item = u32> + '_ {
         self.representative_original_ids.iter().copied()
     }
+
+    /// Relabel internal ids into a new order given by a caller-supplied sort
+    /// key derived from each class's representative original id. This is a pure
+    /// bijective relabel: the original→class partition is unchanged, only the
+    /// integer names of the internal classes move. The sort is stable so
+    /// equal-key classes keep their prior relative order.
+    pub fn reorder_internal_by_representative_key<K: Ord>(
+        &mut self,
+        mut key: impl FnMut(u32) -> K,
+    ) {
+        let n = self.representative_original_ids.len();
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by_key(|&old_internal| key(self.representative_original_ids[old_internal]));
+        // perm[old_internal] = new_internal
+        let mut perm = vec![0u32; n];
+        for (new_internal, &old_internal) in order.iter().enumerate() {
+            perm[old_internal] = new_internal as u32;
+        }
+        for internal in self.original_to_internal.iter_mut() {
+            if (*internal as usize) < n {
+                *internal = perm[*internal as usize];
+            }
+        }
+        let mut new_internal_to_originals = vec![Vec::new(); n];
+        let mut new_representative_original_ids = vec![0u32; n];
+        for (new_internal, &old_internal) in order.iter().enumerate() {
+            new_internal_to_originals[new_internal] =
+                std::mem::take(&mut self.internal_to_originals[old_internal]);
+            new_representative_original_ids[new_internal] =
+                self.representative_original_ids[old_internal];
+        }
+        self.internal_to_originals = new_internal_to_originals;
+        self.representative_original_ids = new_representative_original_ids;
+    }
+
     pub fn internal_to_originals_vecs(&self) -> Vec<Vec<u32>> {
         self.internal_to_originals.clone()
     }
@@ -188,6 +223,7 @@ impl GlobalScannerStateQuotient {
     pub(crate) fn raw_state_count(&self) -> usize {
         self.map.original_to_internal.len()
     }
+
 }
 
 #[derive(Debug, Clone)]
