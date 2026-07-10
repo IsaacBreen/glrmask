@@ -510,7 +510,10 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     let shared_original_vocab_analysis_dfa_cache =
         l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache::default();
     let shared_transition_cache = OnceLock::new();
-    let shared_ti_output_cache = l2p::SharedTiTokenizerOutputCache::new();
+    let shared_ti_output_cache = shared_classify_cache
+        .get()
+        .and_then(l2p::SharedTiTokenizerOutputCache::new_with_classify_bytesets)
+        .unwrap_or_else(l2p::SharedTiTokenizerOutputCache::new);
     let shared_cache_setup_ms =
         shared_cache_setup_started_at.elapsed().as_secs_f64() * 1000.0;
 

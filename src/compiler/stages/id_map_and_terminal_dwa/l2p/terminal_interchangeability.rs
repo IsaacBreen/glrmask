@@ -641,6 +641,24 @@ struct TiTokenizerOutputData {
 }
 
 impl TiTokenizerOutputData {
+    fn from_classify_bytesets(
+        bytesets: &super::super::classify::SharedClassifyBytesets,
+    ) -> Option<Self> {
+        let (
+            finalizer_terminals_by_raw_state,
+            future_finalizer_terminals_by_raw_state,
+            finalizer_raw_states_by_terminal,
+            future_finalizer_raw_states_by_terminal,
+        ) = bytesets.ti_output_index()?;
+        Some(Self {
+            finalizer_terminals_by_raw_state,
+            future_finalizer_terminals_by_raw_state,
+            finalizer_raw_states_by_terminal,
+            future_finalizer_raw_states_by_terminal,
+            full_output_projection: OnceLock::new(),
+        })
+    }
+
     fn full_output_pair_hash(
         finalizers: &[TerminalID],
         future_finalizers: &[TerminalID],
@@ -850,6 +868,18 @@ pub(crate) struct SharedTiTokenizerOutputCache {
 impl SharedTiTokenizerOutputCache {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn new_with_classify_bytesets(
+        bytesets: &super::super::classify::SharedClassifyBytesets,
+    ) -> Option<Self> {
+        let data = TiTokenizerOutputData::from_classify_bytesets(bytesets)?;
+        let cache = Self::new();
+        assert!(
+            cache.data.set(Arc::new(data)).is_ok(),
+            "new TI output cache must be empty",
+        );
+        Some(cache)
     }
 
     fn get(&self, tokenizer: &Tokenizer) -> Arc<TiTokenizerOutputData> {
