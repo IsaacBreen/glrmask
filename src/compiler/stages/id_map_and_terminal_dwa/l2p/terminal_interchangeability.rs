@@ -122,6 +122,19 @@ struct OutputPair {
     future_finalizers: OutputBits,
 }
 
+#[derive(Clone, Copy, Default)]
+struct GenericOutputTrackStats {
+    group_count: u32,
+    outside_count: u32,
+    outside_hash: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct GenericOutputPairStats {
+    finalizers: GenericOutputTrackStats,
+    future_finalizers: GenericOutputTrackStats,
+}
+
 /// One exact component of the sparse characterization tuple. The output id
 /// names an immutable pair of frozen destination-output sets. Class ids are
 /// only equality labels within one round; hash-map equality still compares the
@@ -3779,7 +3792,7 @@ impl InterchangeabilityDfa {
     /// support-transposition proof. Unlike the generic exact fallback, support
     /// certification never reads historical round projections or signature
     /// indexes, so retaining every intermediate `CanonicalRound` is redundant.
-    fn support_identity_stable_partition_full(&mut self) -> (Vec<u32>, Vec<u32>) {
+    fn support_identity_stable_partition_moore(&mut self) -> (Vec<u32>, Vec<u32>) {
         self.ensure_canonical_identity_round(1);
         let mut prev_prev = self.canonical_rounds[0].classes.clone();
         let mut previous = self.canonical_rounds[1].classes.clone();
@@ -3809,6 +3822,311 @@ impl InterchangeabilityDfa {
             "support terminal interchangeability characterization did not stabilize within {} rounds",
             state_count * 2,
         );
+    }
+
+    /// Exact worklist refinement from canonical round one. The relation only
+    /// splits: when a target class splits, only predecessor classes of states
+    /// that moved can become unstable. This is the sparse counterpart of the
+    /// global Moore ladder and is especially effective when stabilization adds
+    /// only a handful of classes.
+    fn support_identity_stable_partition_worklist(&mut self) -> (Vec<u32>, Vec<u32>) {
+        self.ensure_canonical_identity_round(1);
+        let state_count = self.state_count();
+        let dead_state = self.dead_state();
+        let mut class_for_state = self.canonical_rounds[1].classes.clone();
+        let initial_class_count = self.canonical_rounds[1].representative_by_class.len();
+        let mut members_by_class = vec![Vec::<u32>::new(); initial_class_count];
+        for (state, &class) in class_for_state.iter().enumerate() {
+            members_by_class[class as usize].push(state as u32);
+        }
+        let mut queue = VecDeque::<usize>::new();
+        let mut queued = vec![false; initial_class_count];
+        for class in 0..initial_class_count {
+            if members_by_class[class].len() > 1 {
+                queue.push_back(class);
+                queued[class] = true;
+            }
+        }
+
+        while let Some(class) = queue.pop_front() {
+            queued[class] = false;
+            if members_by_class[class].len() <= 1 {
+                continue;
+            }
+            let members = members_by_class[class].clone();
+            let mut groups = Vec::<Vec<u32>>::new();
+            let mut group_hashes = Vec::<u64>::new();
+            let mut groups_by_hash = FxHashMap::<u64, SmallVec<[usize; 2]>>::default();
+            for &member in &members {
+                let state = member as usize;
+                let hash = self.canonical_identity_signature_hash(state, &class_for_state);
+                let matched = groups_by_hash.get(&hash).and_then(|candidates| {
+                    candidates.iter().copied().find(|&group_index| {
+                        self.canonical_identity_signatures_equal(
+                            state,
+                            groups[group_index][0] as usize,
+                            &class_for_state,
+                        )
+                    })
+                });
+                let group_index = matched.unwrap_or_else(|| {
+                    let group_index = groups.len();
+                    groups.push(Vec::new());
+                    group_hashes.push(hash);
+                    groups_by_hash.entry(hash).or_default().push(group_index);
+                    group_index
+                });
+                groups[group_index].push(member);
+            }
+            if groups.len() == 1 {
+                continue;
+            }
+
+            // Keep the synthetic dead state's subgroup on the old id so the
+            // implicit missing-edge target does not globally change identity.
+            let retained = groups
+                .iter()
+                .position(|group| group.binary_search(&(dead_state as u32)).is_ok())
+                .unwrap_or(0);
+            groups.swap(0, retained);
+            members_by_class[class] = std::mem::take(&mut groups[0]);
+            for &state in &members_by_class[class] {
+                class_for_state[state as usize] = class as u32;
+            }
+
+            for mut group in groups.into_iter().skip(1) {
+                let new_class = members_by_class.len();
+                queued.push(false);
+                for &state in &group {
+                    class_for_state[state as usize] = new_class as u32;
+                }
+                // Only predecessors of moved states can observe the split.
+                for &state in &group {
+                    let state = state as usize;
+                    if state >= self.reverse_predecessors.len() {
+                        continue;
+                    }
+                    for &source in &self.reverse_predecessors[state] {
+                        let source_class = class_for_state[source as usize] as usize;
+                        if members_by_class[source_class].len() > 1 && !queued[source_class] {
+                            queued[source_class] = true;
+                            queue.push_back(source_class);
+                        }
+                    }
+                }
+                group.shrink_to_fit();
+                members_by_class.push(group);
+            }
+        }
+
+        // Canonical first-state numbering keeps downstream representatives
+        // deterministic while discarding any empty historical ids.
+        let mut canonical_for_class = vec![u32::MAX; members_by_class.len()];
+        let mut representative_by_class = Vec::<u32>::new();
+        let mut canonical_classes = Vec::with_capacity(state_count);
+        for state in 0..state_count {
+            let class = class_for_state[state] as usize;
+            let canonical = if canonical_for_class[class] == u32::MAX {
+                let canonical = representative_by_class.len() as u32;
+                canonical_for_class[class] = canonical;
+                representative_by_class.push(state as u32);
+                canonical
+            } else {
+                canonical_for_class[class]
+            };
+            canonical_classes.push(canonical);
+        }
+
+        if cfg!(debug_assertions) {
+            let moore = self.support_identity_stable_partition_moore();
+            debug_assert!(same_equality_partition_u32(&canonical_classes, &moore.0));
+        }
+        (canonical_classes, representative_by_class)
+    }
+
+    /// Hopcroft-style exact refinement from canonical round one. Output labels
+    /// are already part of round-one classes, so stabilization only needs to
+    /// split source classes by destination classes. Processing every non-dead
+    /// block as an incoming-edge splitter is complete; the dead preimage is the
+    /// complement of all non-dead preimages for each byte and is therefore
+    /// redundant.
+    fn support_identity_stable_partition_full(&mut self) -> (Vec<u32>, Vec<u32>) {
+        self.ensure_canonical_identity_round(1);
+        let state_count = self.state_count();
+        let dead_state = self.dead_state();
+        let mut class_for_state = self.canonical_rounds[1].classes.clone();
+        let initial_class_count = self.canonical_rounds[1].representative_by_class.len();
+        let mut members_by_class = vec![Vec::<u32>::new(); initial_class_count];
+        for (state, &class) in class_for_state.iter().enumerate() {
+            members_by_class[class as usize].push(state as u32);
+        }
+        let dead_class = class_for_state[dead_state] as usize;
+
+        // Flat reverse-edge CSR retaining byte labels.
+        let mut reverse_counts = vec![0usize; state_count];
+        let mut edge_count = 0usize;
+        for source in 0..state_count {
+            for &(_, destination) in self.topology.edges_from(source) {
+                reverse_counts[destination as usize] += 1;
+                edge_count += 1;
+            }
+        }
+        let mut reverse_offsets = Vec::with_capacity(state_count + 1);
+        reverse_offsets.push(0usize);
+        for &count in &reverse_counts {
+            reverse_offsets.push(reverse_offsets.last().copied().unwrap() + count);
+        }
+        let mut next_offset = reverse_offsets[..state_count].to_vec();
+        let mut reverse_edges = vec![(0u8, 0u32); edge_count];
+        for source in 0..state_count {
+            for &(byte, destination) in self.topology.edges_from(source) {
+                let offset = &mut next_offset[destination as usize];
+                reverse_edges[*offset] = (byte, source as u32);
+                *offset += 1;
+            }
+        }
+
+        let mut queue = VecDeque::<usize>::new();
+        let mut queued = vec![false; initial_class_count];
+        for class in 0..initial_class_count {
+            if class != dead_class {
+                queue.push_back(class);
+                queued[class] = true;
+            }
+        }
+        let mut incoming_by_byte = (0..256)
+            .map(|_| Vec::<u32>::new())
+            .collect::<Vec<_>>();
+        let mut touched_bytes = Vec::<u8>::new();
+        let mut source_marks = vec![0u32; state_count];
+        let mut mark_epoch = 0u32;
+        let mut class_counts = vec![0usize; initial_class_count];
+        let mut touched_classes = Vec::<usize>::new();
+
+        while let Some(splitter) = queue.pop_front() {
+            queued[splitter] = false;
+            if members_by_class[splitter].is_empty() {
+                continue;
+            }
+            touched_bytes.clear();
+            for &destination in &members_by_class[splitter] {
+                let destination = destination as usize;
+                for &(byte, source) in
+                    &reverse_edges[reverse_offsets[destination]..reverse_offsets[destination + 1]]
+                {
+                    let bucket = &mut incoming_by_byte[byte as usize];
+                    if bucket.is_empty() {
+                        touched_bytes.push(byte);
+                    }
+                    bucket.push(source);
+                }
+            }
+
+            for &byte in &touched_bytes {
+                let sources = &incoming_by_byte[byte as usize];
+                mark_epoch = mark_epoch.wrapping_add(1);
+                if mark_epoch == 0 {
+                    source_marks.fill(0);
+                    mark_epoch = 1;
+                }
+                touched_classes.clear();
+                for &source in sources {
+                    let source = source as usize;
+                    if source_marks[source] == mark_epoch {
+                        continue;
+                    }
+                    source_marks[source] = mark_epoch;
+                    let class = class_for_state[source] as usize;
+                    if class_counts[class] == 0 {
+                        touched_classes.push(class);
+                    }
+                    class_counts[class] += 1;
+                }
+
+                for &class in &touched_classes {
+                    let marked_count = class_counts[class];
+                    class_counts[class] = 0;
+                    let class_len = members_by_class[class].len();
+                    if marked_count == 0 || marked_count == class_len {
+                        continue;
+                    }
+                    let old_members = std::mem::take(&mut members_by_class[class]);
+                    let mut marked = Vec::with_capacity(marked_count);
+                    let mut unmarked = Vec::with_capacity(class_len - marked_count);
+                    for state in old_members {
+                        if source_marks[state as usize] == mark_epoch {
+                            marked.push(state);
+                        } else {
+                            unmarked.push(state);
+                        }
+                    }
+
+                    let contains_dead_marked = marked.binary_search(&(dead_state as u32)).is_ok();
+                    let contains_dead_unmarked =
+                        unmarked.binary_search(&(dead_state as u32)).is_ok();
+                    let was_queued = queued[class];
+                    let (retained, moved) = if contains_dead_marked {
+                        (marked, unmarked)
+                    } else if contains_dead_unmarked {
+                        (unmarked, marked)
+                    } else if was_queued || marked.len() >= unmarked.len() {
+                        (marked, unmarked)
+                    } else {
+                        (unmarked, marked)
+                    };
+                    members_by_class[class] = retained;
+                    for &state in &members_by_class[class] {
+                        class_for_state[state as usize] = class as u32;
+                    }
+                    let new_class = members_by_class.len();
+                    for &state in &moved {
+                        class_for_state[state as usize] = new_class as u32;
+                    }
+                    members_by_class.push(moved);
+                    queued.push(false);
+                    class_counts.push(0);
+
+                    // If the old block was already pending, both halves must be
+                    // pending. Otherwise only the smaller/non-dead half is
+                    // needed by Hopcroft's splitter theorem. The retained block
+                    // was chosen large unless it contains dead.
+                    if was_queued {
+                        if new_class != dead_class {
+                            queued[new_class] = true;
+                            queue.push_back(new_class);
+                        }
+                    } else if class == dead_class {
+                        queued[new_class] = true;
+                        queue.push_back(new_class);
+                    } else {
+                        queued[new_class] = true;
+                        queue.push_back(new_class);
+                    }
+                }
+                incoming_by_byte[byte as usize].clear();
+            }
+        }
+
+        let mut canonical_for_class = vec![u32::MAX; members_by_class.len()];
+        let mut representative_by_class = Vec::<u32>::new();
+        let mut canonical_classes = Vec::with_capacity(state_count);
+        for state in 0..state_count {
+            let class = class_for_state[state] as usize;
+            let canonical = if canonical_for_class[class] == u32::MAX {
+                let canonical = representative_by_class.len() as u32;
+                canonical_for_class[class] = canonical;
+                representative_by_class.push(state as u32);
+                canonical
+            } else {
+                canonical_for_class[class]
+            };
+            canonical_classes.push(canonical);
+        }
+        if cfg!(debug_assertions) {
+            let moore = self.support_identity_stable_partition_moore();
+            debug_assert!(same_equality_partition_u32(&canonical_classes, &moore.0));
+        }
+        (canonical_classes, representative_by_class)
     }
 
     /// Recompute the current stable partition on a previous round's exact
@@ -5395,6 +5713,739 @@ impl InterchangeabilityDfa {
             }
         }
         cone
+    }
+
+    fn support_quotient_terminal_cone(
+        &self,
+        quotient: &SupportQuotient,
+        terminal: TerminalID,
+    ) -> Vec<usize> {
+        let mut cone = Vec::<usize>::new();
+        for destinations in [
+            &self.finalizer_states_by_terminal[terminal as usize],
+            &self.future_finalizer_states_by_terminal[terminal as usize],
+        ] {
+            for &destination in destinations {
+                for &source in &self.reverse_predecessors[destination as usize] {
+                    let class = quotient.class_for_state[source as usize] as usize;
+                    if !cone.contains(&class) {
+                        cone.push(class);
+                    }
+                }
+            }
+        }
+        let mut next = 0usize;
+        while next < cone.len() {
+            let class = cone[next];
+            next += 1;
+            for &predecessor in &quotient.reverse_predecessors[class] {
+                let predecessor = predecessor as usize;
+                if !cone.contains(&predecessor) {
+                    cone.push(predecessor);
+                }
+            }
+        }
+        cone.sort_unstable();
+        cone
+    }
+
+    fn normalized_group_output_code(
+        pair: &OutputPair,
+        self_terminal: TerminalID,
+        group_membership: &[bool],
+        group_size: usize,
+        out: &mut Vec<u64>,
+    ) -> bool {
+        for track in [&pair.finalizers, &pair.future_finalizers] {
+            let mut group_count = 0usize;
+            let mut self_present = false;
+            let mut outside = SmallVec::<[TerminalID; 4]>::new();
+            for &terminal in &track.0 {
+                if group_membership
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    group_count += 1;
+                    self_present |= terminal == self_terminal;
+                } else {
+                    outside.push(terminal);
+                }
+            }
+            let tag = if group_count == 0 {
+                0u64
+            } else if group_count == group_size {
+                1u64
+            } else if group_count == 1 && self_present {
+                2u64
+            } else {
+                return false;
+            };
+            out.push(tag);
+            out.push(outside.len() as u64);
+            out.extend(outside.into_iter().map(|terminal| terminal as u64));
+        }
+        true
+    }
+
+    fn support_petal_code_for_order(
+        &self,
+        quotient: &SupportQuotient,
+        petal: &[usize],
+        order: &[usize],
+        self_terminal: TerminalID,
+        group_membership: &[bool],
+        group_size: usize,
+        union_petals: &[bool],
+    ) -> Option<Vec<u64>> {
+        let mut canonical_index = FxHashMap::<usize, usize>::default();
+        for (index, &petal_index) in order.iter().enumerate() {
+            canonical_index.insert(petal[petal_index], index);
+        }
+        let mut code = Vec::<u64>::new();
+        code.push(order.len() as u64);
+        for &petal_index in order {
+            let class = petal[petal_index];
+            let state = quotient.representative_by_class[class] as usize;
+            code.push((state == self.topology.initial_state) as u64);
+            let edges = self.topology.edges_from(state);
+            code.push(edges.len() as u64);
+            for &(byte, destination) in edges {
+                let destination = destination as usize;
+                let target_class = quotient.class_for_state[destination] as usize;
+                code.push(byte as u64);
+                if let Some(&target_index) = canonical_index.get(&target_class) {
+                    code.push(0);
+                    code.push(target_index as u64);
+                } else {
+                    if union_petals[target_class] {
+                        return None;
+                    }
+                    code.push(1);
+                    code.push(target_class as u64);
+                }
+                let pair = &self.output_pairs[self.output_pair_by_state[destination] as usize];
+                if !Self::normalized_group_output_code(
+                    pair,
+                    self_terminal,
+                    group_membership,
+                    group_size,
+                    &mut code,
+                ) {
+                    return None;
+                }
+            }
+        }
+        Some(code)
+    }
+
+    fn support_petal_canonical_form(
+        &self,
+        quotient: &SupportQuotient,
+        petal: &[usize],
+        self_terminal: TerminalID,
+        group_membership: &[bool],
+        group_size: usize,
+        union_petals: &[bool],
+    ) -> Option<(Vec<u64>, Vec<usize>)> {
+        let mut index_by_class = FxHashMap::<usize, usize>::default();
+        for (index, &class) in petal.iter().enumerate() {
+            index_by_class.insert(class, index);
+        }
+        let mut colors = vec![0u32; petal.len()];
+        let mut final_signatures = Vec::<Vec<u64>>::new();
+        for _ in 0..=petal.len() {
+            let mut signatures = Vec::with_capacity(petal.len());
+            for &class in petal {
+                let state = quotient.representative_by_class[class] as usize;
+                let mut signature = Vec::<u64>::new();
+                signature.push((state == self.topology.initial_state) as u64);
+                let edges = self.topology.edges_from(state);
+                signature.push(edges.len() as u64);
+                for &(byte, destination) in edges {
+                    let destination = destination as usize;
+                    let target_class = quotient.class_for_state[destination] as usize;
+                    signature.push(byte as u64);
+                    if let Some(&target_index) = index_by_class.get(&target_class) {
+                        signature.push(0);
+                        signature.push(colors[target_index] as u64);
+                    } else {
+                        if union_petals[target_class] {
+                            return None;
+                        }
+                        signature.push(1);
+                        signature.push(target_class as u64);
+                    }
+                    let pair =
+                        &self.output_pairs[self.output_pair_by_state[destination] as usize];
+                    if !Self::normalized_group_output_code(
+                        pair,
+                        self_terminal,
+                        group_membership,
+                        group_size,
+                        &mut signature,
+                    ) {
+                        return None;
+                    }
+                }
+                signatures.push(signature);
+            }
+            let mut unique = signatures.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            let next = signatures
+                .iter()
+                .map(|signature| unique.binary_search(signature).unwrap() as u32)
+                .collect::<Vec<_>>();
+            final_signatures = signatures;
+            if next == colors {
+                break;
+            }
+            colors = next;
+        }
+        let mut seen = FxHashSet::<u32>::default();
+        if colors.iter().any(|&color| !seen.insert(color)) {
+            return None;
+        }
+        let mut canonical_order = (0..petal.len()).collect::<Vec<_>>();
+        canonical_order.sort_unstable_by_key(|&index| colors[index]);
+        let mut code = Vec::<u64>::new();
+        code.push(petal.len() as u64);
+        for &index in &canonical_order {
+            code.push(final_signatures[index].len() as u64);
+            code.extend_from_slice(&final_signatures[index]);
+        }
+        Some((
+            code,
+            canonical_order
+                .into_iter()
+                .map(|index| petal[index])
+                .collect(),
+        ))
+    }
+
+    fn generic_terminal_output_code(
+        pair: &OutputPair,
+        self_terminal: TerminalID,
+        candidate_membership: &[bool],
+        out: &mut Vec<u64>,
+    ) {
+        for track in [&pair.finalizers, &pair.future_finalizers] {
+            let mut self_present = false;
+            let mut peer_count = 0usize;
+            let mut outside = SmallVec::<[TerminalID; 4]>::new();
+            for &terminal in &track.0 {
+                if terminal == self_terminal {
+                    self_present = true;
+                } else if candidate_membership
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    peer_count += 1;
+                } else {
+                    outside.push(terminal);
+                }
+            }
+            out.push(self_present as u64);
+            out.push(peer_count as u64);
+            out.push(outside.len() as u64);
+            out.extend(outside.into_iter().map(|terminal| terminal as u64));
+        }
+    }
+
+    fn generic_output_pair_stats(
+        &self,
+        candidate_membership: &[bool],
+    ) -> Vec<GenericOutputPairStats> {
+        self.output_pairs
+            .iter()
+            .map(|pair| {
+                let track_stats = |track: &OutputBits| {
+                    let mut stats = GenericOutputTrackStats {
+                        outside_hash: 0xbb67_ae85_84ca_a73b,
+                        ..GenericOutputTrackStats::default()
+                    };
+                    for &terminal in &track.0 {
+                        if candidate_membership
+                            .get(terminal as usize)
+                            .copied()
+                            .unwrap_or(false)
+                        {
+                            stats.group_count += 1;
+                        } else {
+                            stats.outside_count += 1;
+                            stats.outside_hash = mix_structural_fingerprint(
+                                stats.outside_hash,
+                                terminal as u64 + 1,
+                            );
+                        }
+                    }
+                    stats
+                };
+                GenericOutputPairStats {
+                    finalizers: track_stats(&pair.finalizers),
+                    future_finalizers: track_stats(&pair.future_finalizers),
+                }
+            })
+            .collect()
+    }
+
+    fn generic_terminal_output_fingerprint_direct(
+        pair: &OutputPair,
+        self_terminal: TerminalID,
+        candidate_membership: &[bool],
+    ) -> u64 {
+        let mut fingerprint = 0x6a09_e667_f3bc_c909u64;
+        for (track_index, track) in [&pair.finalizers, &pair.future_finalizers]
+            .into_iter()
+            .enumerate()
+        {
+            let mut self_present = false;
+            let mut peer_count = 0usize;
+            let mut outside_count = 0usize;
+            let mut outside_hash = 0xbb67_ae85_84ca_a73bu64;
+            for &terminal in &track.0 {
+                if terminal == self_terminal {
+                    self_present = true;
+                } else if candidate_membership
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    peer_count += 1;
+                } else {
+                    outside_count += 1;
+                    outside_hash = mix_structural_fingerprint(
+                        outside_hash,
+                        terminal as u64 + 1,
+                    );
+                }
+            }
+            fingerprint = mix_structural_fingerprint(fingerprint, track_index as u64);
+            fingerprint = mix_structural_fingerprint(fingerprint, self_present as u64);
+            fingerprint = mix_structural_fingerprint(fingerprint, peer_count as u64);
+            fingerprint = mix_structural_fingerprint(fingerprint, outside_count as u64);
+            fingerprint = mix_structural_fingerprint(fingerprint, outside_hash);
+        }
+        fingerprint
+    }
+
+    fn generic_terminal_output_fingerprint(
+        pair: &OutputPair,
+        stats: GenericOutputPairStats,
+        self_terminal: TerminalID,
+    ) -> u64 {
+        let mut fingerprint = 0x6a09_e667_f3bc_c909u64;
+        for (track_index, (track, track_stats)) in [
+            (&pair.finalizers, stats.finalizers),
+            (&pair.future_finalizers, stats.future_finalizers),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let self_present = track.0.binary_search(&self_terminal).is_ok();
+            let peer_count = track_stats.group_count - u32::from(self_present);
+            fingerprint = mix_structural_fingerprint(fingerprint, track_index as u64);
+            fingerprint = mix_structural_fingerprint(fingerprint, self_present as u64);
+            fingerprint = mix_structural_fingerprint(fingerprint, peer_count as u64);
+            fingerprint =
+                mix_structural_fingerprint(fingerprint, track_stats.outside_count as u64);
+            fingerprint = mix_structural_fingerprint(fingerprint, track_stats.outside_hash);
+        }
+        fingerprint
+    }
+
+    fn support_terminal_cone_generic_form(
+        &self,
+        quotient: &SupportQuotient,
+        cone: &[usize],
+        terminal: TerminalID,
+        candidate_membership: &[bool],
+        pair_stats: Option<&[GenericOutputPairStats]>,
+    ) -> (Vec<u64>, Option<Vec<usize>>) {
+        #[derive(Clone, Copy)]
+        struct GenericEdge {
+            byte: u8,
+            internal_target: Option<usize>,
+            external_target: usize,
+            output: u64,
+        }
+
+        let mut index_by_class = SmallVec::<[(usize, usize); 8]>::new();
+        for (index, &class) in cone.iter().enumerate() {
+            index_by_class.push((class, index));
+        }
+        let mut rows = Vec::<SmallVec<[GenericEdge; 8]>>::with_capacity(cone.len());
+        let mut root_flags = Vec::<bool>::with_capacity(cone.len());
+        for &class in cone {
+            let state = quotient.representative_by_class[class] as usize;
+            root_flags.push(state == self.topology.initial_state);
+            let mut row = SmallVec::<[GenericEdge; 8]>::new();
+            for &(byte, destination) in self.topology.edges_from(state) {
+                let destination = destination as usize;
+                let target_class = quotient.class_for_state[destination] as usize;
+                let internal_target = index_by_class
+                    .iter()
+                    .find(|(seen_class, _)| *seen_class == target_class)
+                    .map(|(_, index)| *index);
+                let pair = &self.output_pairs[self.output_pair_by_state[destination] as usize];
+                row.push(GenericEdge {
+                    byte,
+                    internal_target,
+                    external_target: target_class,
+                    output: match pair_stats {
+                        Some(pair_stats) => Self::generic_terminal_output_fingerprint(
+                            pair,
+                            pair_stats[self.output_pair_by_state[destination] as usize],
+                            terminal,
+                        ),
+                        None => Self::generic_terminal_output_fingerprint_direct(
+                            pair,
+                            terminal,
+                            candidate_membership,
+                        ),
+                    },
+                });
+            }
+            rows.push(row);
+        }
+
+        let mut colors = vec![0u64; cone.len()];
+        let mut next = vec![0u64; cone.len()];
+        // Fixed-depth refinement is an isomorphism invariant. Hash collisions
+        // only coarsen candidate groups; the exact petal certificate below is
+        // the sole accepting proof.
+        for round in 0..2usize {
+            for index in 0..cone.len() {
+                let mut fingerprint = mix_structural_fingerprint(
+                    0x510e_527f_ade6_82d1,
+                    round as u64,
+                );
+                fingerprint = mix_structural_fingerprint(
+                    fingerprint,
+                    root_flags[index] as u64,
+                );
+                for edge in &rows[index] {
+                    fingerprint =
+                        mix_structural_fingerprint(fingerprint, edge.byte as u64 + 1);
+                    if let Some(target_index) = edge.internal_target {
+                        fingerprint = mix_structural_fingerprint(fingerprint, 0);
+                        fingerprint =
+                            mix_structural_fingerprint(fingerprint, colors[target_index]);
+                    } else {
+                        fingerprint = mix_structural_fingerprint(fingerprint, 1);
+                        fingerprint = mix_structural_fingerprint(
+                            fingerprint,
+                            edge.external_target as u64 + 1,
+                        );
+                    }
+                    fingerprint = mix_structural_fingerprint(fingerprint, edge.output);
+                }
+                next[index] = fingerprint;
+            }
+            std::mem::swap(&mut colors, &mut next);
+        }
+        let mut order = (0..colors.len()).collect::<Vec<_>>();
+        order.sort_unstable_by_key(|&index| colors[index]);
+        let unique = order
+            .windows(2)
+            .all(|pair| colors[pair[0]] != colors[pair[1]]);
+        let mut sorted_colors = colors;
+        sorted_colors.sort_unstable();
+        let mut code = Vec::with_capacity(sorted_colors.len() + 1);
+        code.push(cone.len() as u64);
+        code.extend(sorted_colors);
+        let canonical_order = unique.then(|| {
+            order
+                .into_iter()
+                .map(|index| cone[index])
+                .collect::<Vec<_>>()
+        });
+        (code, canonical_order)
+    }
+
+    /// Fast exact batch certificate. The fixed-depth cone colors only propose
+    /// one class order per terminal. Hash collisions or insufficient color
+    /// refinement are harmless: every resulting sparse permutation is checked
+    /// by `support_deviations_are_valid` before acceptance.
+    fn support_petal_batch_certificate_from_orders(
+        &self,
+        quotient: &SupportQuotient,
+        members: &[TerminalID],
+        cones: &[&[usize]],
+        proposed_orders: &[&[usize]],
+    ) -> Option<Vec<Vec<usize>>> {
+        if members.len() < 2
+            || members.len() != cones.len()
+            || members.len() != proposed_orders.len()
+        {
+            return None;
+        }
+        let common = cones.iter().skip(1).fold(cones[0].to_vec(), |common, cone| {
+            let mut intersection = Vec::new();
+            let mut i = 0usize;
+            let mut j = 0usize;
+            while i < common.len() && j < cone.len() {
+                match common[i].cmp(&cone[j]) {
+                    std::cmp::Ordering::Less => i += 1,
+                    std::cmp::Ordering::Greater => j += 1,
+                    std::cmp::Ordering::Equal => {
+                        intersection.push(common[i]);
+                        i += 1;
+                        j += 1;
+                    }
+                }
+            }
+            intersection
+        });
+        let class_count = quotient.representative_by_class.len();
+        let mut owner = vec![usize::MAX; class_count];
+        let mut canonical_orders = Vec::with_capacity(members.len());
+        for (terminal_index, (cone, proposed_order)) in
+            cones.iter().zip(proposed_orders).enumerate()
+        {
+            if proposed_order.len() != cone.len() {
+                return None;
+            }
+            let mut petal_order = Vec::new();
+            for &class in *proposed_order {
+                if cone.binary_search(&class).is_err() {
+                    return None;
+                }
+                if common.binary_search(&class).is_ok() {
+                    continue;
+                }
+                if owner[class] != usize::MAX {
+                    return None;
+                }
+                owner[class] = terminal_index;
+                petal_order.push(class);
+            }
+            canonical_orders.push(petal_order);
+        }
+        if canonical_orders
+            .iter()
+            .skip(1)
+            .any(|order| order.len() != canonical_orders[0].len())
+        {
+            return None;
+        }
+
+        let union_petals = owner
+            .iter()
+            .map(|&owner| owner != usize::MAX)
+            .collect::<Vec<_>>();
+        let mut group_membership = vec![false; self.finalizer_states_by_terminal.len()];
+        for &terminal in members {
+            group_membership[terminal as usize] = true;
+        }
+        for &class in &common {
+            let state = quotient.representative_by_class[class] as usize;
+            for &(_, destination) in self.topology.edges_from(state) {
+                let destination = destination as usize;
+                let target_class = quotient.class_for_state[destination] as usize;
+                if union_petals[target_class] {
+                    return None;
+                }
+                let pair = &self.output_pairs[self.output_pair_by_state[destination] as usize];
+                let mut ignored = Vec::new();
+                if !Self::normalized_group_output_code(
+                    pair,
+                    u32::MAX,
+                    &group_membership,
+                    members.len(),
+                    &mut ignored,
+                ) {
+                    return None;
+                }
+            }
+        }
+        Some(canonical_orders)
+    }
+
+    /// Sufficient whole-class certificate: all mutable behavior is contained in
+    /// pairwise-disjoint reverse-closed petals with one common canonical form;
+    /// the complement is fixed and invariant under every permutation of the
+    /// terminal group. Then the canonical petal bijections extend by identity
+    /// to an action of the full symmetric group.
+    fn support_petal_batch_certificate(
+        &self,
+        quotient: &SupportQuotient,
+        members: &[TerminalID],
+    ) -> Option<Vec<Vec<usize>>> {
+        let owned_cones = members
+            .iter()
+            .map(|&terminal| self.support_quotient_terminal_cone(quotient, terminal))
+            .collect::<Vec<_>>();
+        let cones = owned_cones.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        self.support_petal_batch_certificate_with_cones(quotient, members, &cones)
+    }
+
+    fn support_petal_batch_certificate_with_cones(
+        &self,
+        quotient: &SupportQuotient,
+        members: &[TerminalID],
+        cones: &[&[usize]],
+    ) -> Option<Vec<Vec<usize>>> {
+        if members.len() < 2 || members.len() != cones.len() {
+            return None;
+        }
+        let common = cones.iter().skip(1).fold(cones[0].to_vec(), |common, cone| {
+            let mut intersection = Vec::new();
+            let mut i = 0usize;
+            let mut j = 0usize;
+            while i < common.len() && j < cone.len() {
+                match common[i].cmp(&cone[j]) {
+                    std::cmp::Ordering::Less => i += 1,
+                    std::cmp::Ordering::Greater => j += 1,
+                    std::cmp::Ordering::Equal => {
+                        intersection.push(common[i]);
+                        i += 1;
+                        j += 1;
+                    }
+                }
+            }
+            intersection
+        });
+        let petals = cones
+            .iter()
+            .map(|cone| {
+                cone.iter()
+                    .copied()
+                    .filter(|class| common.binary_search(class).is_err())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let class_count = quotient.representative_by_class.len();
+        let mut owner = vec![usize::MAX; class_count];
+        for (terminal_index, petal) in petals.iter().enumerate() {
+            for &class in petal {
+                if owner[class] != usize::MAX {
+                    return None;
+                }
+                owner[class] = terminal_index;
+            }
+        }
+        let union_petals = owner
+            .iter()
+            .map(|&owner| owner != usize::MAX)
+            .collect::<Vec<_>>();
+        let terminal_count = self.finalizer_states_by_terminal.len();
+        let mut group_membership = vec![false; terminal_count];
+        for &terminal in members {
+            group_membership[terminal as usize] = true;
+        }
+
+        // Every C_t is reverse-closed, hence their union is reverse-closed:
+        // no class outside the union can enter a moved petal or observe a
+        // group-terminal output. Only the intersection K remains inside every
+        // cone while fixed by the petal action, so only K needs an invariance
+        // check.
+        for &class in &common {
+            let state = quotient.representative_by_class[class] as usize;
+            for &(_, destination) in self.topology.edges_from(state) {
+                let destination = destination as usize;
+                let target_class = quotient.class_for_state[destination] as usize;
+                if union_petals[target_class] {
+                    return None;
+                }
+                let pair = &self.output_pairs[self.output_pair_by_state[destination] as usize];
+                let mut ignored = Vec::new();
+                // Use a sentinel outside the group: only empty/all-group tracks
+                // are accepted in the fixed common core.
+                if !Self::normalized_group_output_code(
+                    pair,
+                    u32::MAX,
+                    &group_membership,
+                    members.len(),
+                    &mut ignored,
+                ) {
+                    return None;
+                }
+            }
+        }
+
+        let mut canonical_code: Option<Vec<u64>> = None;
+        let mut canonical_orders = Vec::with_capacity(members.len());
+        for (&terminal, petal) in members.iter().zip(&petals) {
+            let (code, order) = self.support_petal_canonical_form(
+                quotient,
+                petal,
+                terminal,
+                &group_membership,
+                members.len(),
+                &union_petals,
+            )?;
+            if canonical_code.as_ref().is_some_and(|expected| *expected != code) {
+                return None;
+            }
+            canonical_code.get_or_insert(code);
+            canonical_orders.push(order);
+        }
+        Some(canonical_orders)
+    }
+
+    fn support_petal_batch_maps(
+        &self,
+        quotient: &SupportQuotient,
+        members: &[TerminalID],
+        canonical_orders: &[Vec<usize>],
+    ) -> Option<Vec<InterchangeMap>> {
+        if members.len() != canonical_orders.len() || members.len() < 2 {
+            return None;
+        }
+        let representative_order = &canonical_orders[0];
+        let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
+        let mut maps = Vec::with_capacity(members.len() - 1);
+        for member_order in &canonical_orders[1..] {
+            if member_order.len() != representative_order.len() {
+                return None;
+            }
+            let mut deviations = Vec::<(u32, u32)>::with_capacity(member_order.len() * 2);
+            for (&representative_class, &member_class) in
+                representative_order.iter().zip(member_order)
+            {
+                if representative_class == member_class {
+                    continue;
+                }
+                if representative_class == root_class || member_class == root_class {
+                    return None;
+                }
+                deviations.push((representative_class as u32, member_class as u32));
+                deviations.push((member_class as u32, representative_class as u32));
+            }
+            deviations.sort_unstable_by_key(|&(source, _)| source);
+            if deviations.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                return None;
+            }
+            let member_index = maps.len() + 1;
+            let cone_classes = self.support_quotient_affected_cone_small(
+                quotient,
+                members[0],
+                members[member_index],
+            );
+            if !self.support_deviations_are_valid(
+                quotient,
+                members[0],
+                members[member_index],
+                &cone_classes,
+                &deviations,
+            ) {
+                return None;
+            }
+            maps.push(InterchangeMap {
+                scanner_state_map: TransportScannerStateMap::Quotient {
+                    state_count: quotient.scanner_state_count,
+                    class_for_original: Arc::clone(&quotient.scanner_class_for_original),
+                    representative_for_class: Arc::clone(
+                        &quotient.scanner_representative_for_class,
+                    ),
+                    source_class_for_target_deviations: deviations.into_boxed_slice(),
+                },
+            });
+        }
+        Some(maps)
     }
 
     fn canonical_quotient_affected_cone_small(
@@ -7002,6 +8053,9 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
             .iter()
             .map(|group| group.len() * group.len().saturating_sub(1) / 2)
             .sum::<usize>();
+        let diagnostic_candidate_groups = std::env::var_os("GLRMASK_DUMP_TI_CONE_COMPONENTS")
+            .is_some()
+            .then(|| candidate_groups.clone());
         let output_hypergraph_filter_ms = output_hypergraph_filter_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
@@ -7056,6 +8110,152 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
         let mut support_transposition_ns = 0u64;
         let mut exact_map_ns = 0u64;
         let mut accepted_map_storage_ns = 0u64;
+
+        if let Some(groups) = diagnostic_candidate_groups.as_ref() {
+            dfa.ensure_support_quotient();
+            let quotient = dfa
+                .support_quotient
+                .as_ref()
+                .expect("support quotient initialized for candidate batch diagnostics");
+            let mut certified_groups = 0usize;
+            let mut certified_members = 0usize;
+            let mut failed_sizes = Vec::new();
+            for group in groups {
+                if dfa.support_petal_batch_certificate(quotient, group).is_some() {
+                    certified_groups += 1;
+                    certified_members += group.len();
+                } else {
+                    failed_sizes.push(group.len());
+                }
+            }
+            failed_sizes.sort_unstable_by(|a, b| b.cmp(a));
+            eprintln!(
+                "[glrmask/dump][ti_candidate_batches] groups={} members={} certified_groups={} certified_members={} failed_sizes={:?}",
+                groups.len(),
+                groups.iter().map(Vec::len).sum::<usize>(),
+                certified_groups,
+                certified_members,
+                failed_sizes,
+            );
+        }
+
+        let petal_batch_enabled = std::env::var("GLRMASK_TI_PETAL_BATCH")
+            .ok()
+            .map(|value| {
+                let value = value.trim();
+                value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
+            })
+            .unwrap_or(false);
+        let mut petal_batch_groups = 0usize;
+        let mut petal_batch_members = 0usize;
+        let mut petal_batch_grouping_ns = 0u64;
+        let mut petal_batch_certificate_ns = 0u64;
+        let mut petal_batch_map_ns = 0u64;
+        let candidate_groups = if petal_batch_enabled
+            && dfa.topology.raw_representative_by_state.is_none()
+        {
+            dfa.ensure_support_quotient();
+            let quotient = dfa
+                .support_quotient
+                .as_ref()
+                .expect("support quotient initialized for petal batching");
+            let mut residual_groups = Vec::<Vec<TerminalID>>::new();
+            let mut cone_by_terminal = vec![None::<Vec<usize>>; active_terminals.len()];
+            let mut order_by_terminal = vec![None::<Vec<usize>>; active_terminals.len()];
+            for candidate_group in candidate_groups {
+                let grouping_started_at = Instant::now();
+                let mut membership = vec![false; active_terminals.len()];
+                for &terminal in &candidate_group {
+                    membership[terminal as usize] = true;
+                }
+                let pair_stats = (candidate_group.len() >= 64)
+                    .then(|| dfa.generic_output_pair_stats(&membership));
+                let mut by_code = BTreeMap::<Vec<u64>, Vec<TerminalID>>::new();
+                for &terminal in &candidate_group {
+                    let cone = dfa.support_quotient_terminal_cone(quotient, terminal);
+                    let (code, order) = dfa.support_terminal_cone_generic_form(
+                        quotient,
+                        &cone,
+                        terminal,
+                        &membership,
+                        pair_stats.as_deref(),
+                    );
+                    cone_by_terminal[terminal as usize] = Some(cone);
+                    order_by_terminal[terminal as usize] = order;
+                    by_code.entry(code).or_default().push(terminal);
+                }
+                petal_batch_grouping_ns += grouping_started_at.elapsed().as_nanos() as u64;
+                for group in by_code.into_values().filter(|group| group.len() >= 2) {
+                    let certificate_started_at = Instant::now();
+                    let group_cones = group
+                        .iter()
+                        .map(|&terminal| {
+                            cone_by_terminal[terminal as usize]
+                                .as_deref()
+                                .expect("petal batch terminal cone cached during grouping")
+                        })
+                        .collect::<Vec<_>>();
+                    let group_orders = group
+                        .iter()
+                        .map(|&terminal| {
+                            order_by_terminal[terminal as usize]
+                                .as_deref()
+                                .ok_or(())
+                        })
+                        .collect::<Result<Vec<_>, _>>();
+                    let Some(canonical_orders) = group_orders.ok().and_then(|group_orders| {
+                        dfa.support_petal_batch_certificate_from_orders(
+                            quotient,
+                            &group,
+                            &group_cones,
+                            &group_orders,
+                        )
+                    }) else {
+                        petal_batch_certificate_ns +=
+                            certificate_started_at.elapsed().as_nanos() as u64;
+                        residual_groups.push(group);
+                        continue;
+                    };
+                    petal_batch_certificate_ns +=
+                        certificate_started_at.elapsed().as_nanos() as u64;
+                    let map_started_at = Instant::now();
+                    let Some(maps) = dfa.support_petal_batch_maps(
+                        quotient,
+                        &group,
+                        &canonical_orders,
+                    ) else {
+                        petal_batch_map_ns += map_started_at.elapsed().as_nanos() as u64;
+                        residual_groups.push(group);
+                        continue;
+                    };
+                    petal_batch_map_ns += map_started_at.elapsed().as_nanos() as u64;
+                    let representative = group[0];
+                    petal_batch_groups += 1;
+                    petal_batch_members += group.len() - 1;
+                    support_transposition_checks += group.len() - 1;
+                    accepted_representative_members += group.len() - 1;
+                    for (&terminal, map) in group[1..].iter().zip(maps) {
+                        result
+                            .get_mut(&representative)
+                            .expect("TI batch representative must retain its singleton partition entry")
+                            .insert(terminal);
+                        let removed = result.remove(&terminal);
+                        debug_assert!(
+                            removed.is_some(),
+                            "TI batch member must retain its singleton partition entry"
+                        );
+                        let replaced = accepted_maps.insert(
+                            (representative, terminal),
+                            Arc::new(map.scanner_state_map()),
+                        );
+                        debug_assert!(replaced.is_none(), "TI batch must accept each pair once");
+                    }
+                }
+            }
+            residual_groups
+        } else {
+            candidate_groups
+        };
 
         // Accepted terminal swaps are automorphisms. Therefore (a b) and
         // (b c) imply (a c) by conjugation, so interchangeability is an
@@ -7337,14 +8537,197 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
         }
         }
 
+        if std::env::var_os("GLRMASK_DUMP_TI_CONE_COMPONENTS").is_some() {
+            dfa.ensure_support_quotient();
+            let quotient = dfa
+                .support_quotient
+                .as_ref()
+                .expect("support quotient initialized for cone diagnostics");
+            if let Some(candidate_groups) = diagnostic_candidate_groups.as_ref() {
+                let mut final_class_by_terminal = vec![u32::MAX; active_terminals.len()];
+                for (&representative, members) in &result {
+                    for &member in members {
+                        final_class_by_terminal[member as usize] = representative;
+                    }
+                }
+                let mut predicted_groups = 0usize;
+                let mut predicted_members = 0usize;
+                let mut certified_groups = 0usize;
+                let mut certified_members = 0usize;
+                let mut impure_groups = 0usize;
+                let mut exact_final_groups = 0usize;
+                for candidate_group in candidate_groups {
+                    let mut membership = vec![false; active_terminals.len()];
+                    for &terminal in candidate_group {
+                        membership[terminal as usize] = true;
+                    }
+                    let pair_stats = (candidate_group.len() >= 64)
+                        .then(|| dfa.generic_output_pair_stats(&membership));
+                    let mut by_code = BTreeMap::<Vec<u64>, Vec<TerminalID>>::new();
+                    for &terminal in candidate_group {
+                        let cone = dfa.support_quotient_terminal_cone(quotient, terminal);
+                        let (code, _) = dfa.support_terminal_cone_generic_form(
+                            quotient,
+                            &cone,
+                            terminal,
+                            &membership,
+                            pair_stats.as_deref(),
+                        );
+                        by_code.entry(code).or_default().push(terminal);
+                    }
+                    for predicted in by_code.into_values().filter(|group| group.len() >= 2) {
+                        predicted_groups += 1;
+                        predicted_members += predicted.len();
+                        let first_class = final_class_by_terminal[predicted[0] as usize];
+                        let pure = predicted.iter().all(|&terminal| {
+                            final_class_by_terminal[terminal as usize] == first_class
+                        });
+                        impure_groups += usize::from(!pure);
+                        if pure {
+                            let final_size = result
+                                .get(&first_class)
+                                .map_or(0, BTreeSet::len);
+                            exact_final_groups += usize::from(final_size == predicted.len());
+                        }
+                        if dfa
+                            .support_petal_batch_certificate(quotient, &predicted)
+                            .is_some()
+                        {
+                            certified_groups += 1;
+                            certified_members += predicted.len();
+                        }
+                    }
+                }
+                eprintln!(
+                    "[glrmask/dump][ti_generic_cone_groups] predicted_groups={} predicted_members={} certified_groups={} certified_members={} impure_groups={} exact_final_groups={}",
+                    predicted_groups,
+                    predicted_members,
+                    certified_groups,
+                    certified_members,
+                    impure_groups,
+                    exact_final_groups,
+                );
+            }
+            for (&representative, members) in &result {
+                if members.len() < 2 {
+                    continue;
+                }
+                let members = members.iter().copied().collect::<Vec<_>>();
+                let cones = members
+                    .iter()
+                    .map(|&terminal| dfa.support_quotient_terminal_cone(quotient, terminal))
+                    .collect::<Vec<_>>();
+                let common_cone = cones.iter().skip(1).fold(
+                    cones.first().cloned().unwrap_or_default(),
+                    |common, cone| {
+                        let mut intersection = Vec::new();
+                        let mut i = 0usize;
+                        let mut j = 0usize;
+                        while i < common.len() && j < cone.len() {
+                            match common[i].cmp(&cone[j]) {
+                                std::cmp::Ordering::Less => i += 1,
+                                std::cmp::Ordering::Greater => j += 1,
+                                std::cmp::Ordering::Equal => {
+                                    intersection.push(common[i]);
+                                    i += 1;
+                                    j += 1;
+                                }
+                            }
+                        }
+                        intersection
+                    },
+                );
+                let petals = cones
+                    .iter()
+                    .map(|cone| {
+                        let mut petal = Vec::new();
+                        let mut common_index = 0usize;
+                        for &class in cone {
+                            while common_index < common_cone.len()
+                                && common_cone[common_index] < class
+                            {
+                                common_index += 1;
+                            }
+                            if common_index == common_cone.len()
+                                || common_cone[common_index] != class
+                            {
+                                petal.push(class);
+                            }
+                        }
+                        petal
+                    })
+                    .collect::<Vec<_>>();
+                let mut parent = (0..members.len()).collect::<Vec<_>>();
+                fn find(parent: &mut [usize], mut x: usize) -> usize {
+                    while parent[x] != x {
+                        parent[x] = parent[parent[x]];
+                        x = parent[x];
+                    }
+                    x
+                }
+                for left in 0..members.len() {
+                    for right in left + 1..members.len() {
+                        let mut i = 0usize;
+                        let mut j = 0usize;
+                        let mut overlap = false;
+                        while i < petals[left].len() && j < petals[right].len() {
+                            match petals[left][i].cmp(&petals[right][j]) {
+                                std::cmp::Ordering::Less => i += 1,
+                                std::cmp::Ordering::Greater => j += 1,
+                                std::cmp::Ordering::Equal => {
+                                    overlap = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if overlap {
+                            let a = find(&mut parent, left);
+                            let b = find(&mut parent, right);
+                            if a != b {
+                                parent[b] = a;
+                            }
+                        }
+                    }
+                }
+                let mut component_sizes = FxHashMap::<usize, usize>::default();
+                for index in 0..members.len() {
+                    let root = find(&mut parent, index);
+                    *component_sizes.entry(root).or_default() += 1;
+                }
+                let mut component_sizes = component_sizes.into_values().collect::<Vec<_>>();
+                component_sizes.sort_unstable_by(|a, b| b.cmp(a));
+                let mut cone_sizes = cones.iter().map(Vec::len).collect::<Vec<_>>();
+                cone_sizes.sort_unstable();
+                let batch_certified = dfa
+                    .support_petal_batch_certificate(quotient, &members)
+                    .is_some();
+                eprintln!(
+                    "[glrmask/dump][ti_cones] representative={} members={} cone_min={} cone_median={} cone_max={} common={} petal_overlap_components={:?} batch_certified={}",
+                    representative,
+                    members.len(),
+                    cone_sizes.first().copied().unwrap_or(0),
+                    cone_sizes.get(cone_sizes.len() / 2).copied().unwrap_or(0),
+                    cone_sizes.last().copied().unwrap_or(0),
+                    common_cone.len(),
+                    component_sizes,
+                    batch_certified,
+                );
+            }
+        }
+
         if profile_timing {
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_pair_cached_closed={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
+                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_pair_cached_closed={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} petal_batch_groups={} petal_batch_members={} petal_batch_grouping_ms={:.3} petal_batch_certificate_ms={:.3} petal_batch_map_ms={:.3} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
                 output_pair_rejections,
                 output_pair_cached_closed,
                 output_invariant_checks,
                 first_round_rejections,
                 support_transposition_checks,
+                petal_batch_groups,
+                petal_batch_members,
+                petal_batch_grouping_ns as f64 / 1_000_000.0,
+                petal_batch_certificate_ns as f64 / 1_000_000.0,
+                petal_batch_map_ns as f64 / 1_000_000.0,
                 dfa.support_transposition_certified,
                 dfa.support_transposition_no_template,
                 dfa.support_transposition_outside_cone,
