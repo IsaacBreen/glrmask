@@ -14,12 +14,13 @@
 //! sides.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque, hash_map::Entry};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
 
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::SmallVec;
 use super::nwa_builder::{TerminalNwaTransportMode, TransportScannerStateMap};
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -637,9 +638,65 @@ struct TiTokenizerOutputData {
     future_finalizer_terminals_by_raw_state: Arc<[Box<[TerminalID]>]>,
     finalizer_raw_states_by_terminal: Arc<[Vec<u32>]>,
     future_finalizer_raw_states_by_terminal: Arc<[Vec<u32>]>,
+    full_output_projection: OnceLock<(Arc<[OutputPair]>, Arc<[u32]>)>,
 }
 
 impl TiTokenizerOutputData {
+    fn full_output_pair_hash(
+        finalizers: &[TerminalID],
+        future_finalizers: &[TerminalID],
+    ) -> u64 {
+        let mut hasher = FxHasher::default();
+        finalizers.hash(&mut hasher);
+        future_finalizers.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn full_output_projection(&self) -> (Arc<[OutputPair]>, Arc<[u32]>) {
+        let (pairs, by_state) = self.full_output_projection.get_or_init(|| {
+            let empty = OutputPair {
+                finalizers: OutputBits::new(0),
+                future_finalizers: OutputBits::new(0),
+            };
+            let mut pairs = vec![empty];
+            let mut buckets = FxHashMap::<u64, SmallVec<[u32; 1]>>::default();
+            buckets
+                .entry(Self::full_output_pair_hash(&[], &[]))
+                .or_default()
+                .push(0);
+            let mut by_state = Vec::with_capacity(self.finalizer_terminals_by_raw_state.len());
+            for (finalizers, future_finalizers) in self
+                .finalizer_terminals_by_raw_state
+                .iter()
+                .zip(self.future_finalizer_terminals_by_raw_state.iter())
+            {
+                let hash = Self::full_output_pair_hash(finalizers, future_finalizers);
+                let existing = buckets.get(&hash).and_then(|candidates| {
+                    candidates.iter().copied().find(|&id| {
+                        let pair = &pairs[id as usize];
+                        pair.finalizers.0.as_slice() == finalizers.as_ref()
+                            && pair.future_finalizers.0.as_slice()
+                                == future_finalizers.as_ref()
+                    })
+                });
+                let id = existing.unwrap_or_else(|| {
+                    let id = pairs.len() as u32;
+                    pairs.push(OutputPair {
+                        finalizers: OutputBits(finalizers.iter().copied().collect()),
+                        future_finalizers: OutputBits(
+                            future_finalizers.iter().copied().collect(),
+                        ),
+                    });
+                    buckets.entry(hash).or_default().push(id);
+                    id
+                });
+                by_state.push(id);
+            }
+            (Arc::from(pairs), Arc::from(by_state))
+        });
+        (Arc::clone(pairs), Arc::clone(by_state))
+    }
+
     fn new(tokenizer: &Tokenizer) -> Self {
         let state_count = tokenizer.num_states() as usize;
         let terminal_count = tokenizer.num_terminals() as usize;
@@ -750,6 +807,7 @@ impl TiTokenizerOutputData {
                     finalizer_raw_states_by_terminal: finalizer_raw_states_by_terminal.into(),
                     future_finalizer_raw_states_by_terminal:
                         future_finalizer_raw_states_by_terminal.into(),
+                    full_output_projection: OnceLock::new(),
                 };
             }
         }
@@ -779,6 +837,7 @@ impl TiTokenizerOutputData {
             future_finalizer_terminals_by_raw_state: future_finalizer_terminals_by_raw_state.into(),
             finalizer_raw_states_by_terminal: finalizer_raw_states_by_terminal.into(),
             future_finalizer_raw_states_by_terminal: future_finalizer_raw_states_by_terminal.into(),
+            full_output_projection: OnceLock::new(),
         }
     }
 }
@@ -812,6 +871,7 @@ struct TiRawDiscoveryData {
     future_finalizer_states_by_terminal: Arc<[Vec<u32>]>,
     reverse_predecessors: Arc<[Vec<u32>]>,
     observed_destinations: Arc<[bool]>,
+    full_output_projection_seed: OutputProjectionSeed,
 }
 
 impl TiRawDiscoveryData {
@@ -864,6 +924,19 @@ impl TiRawDiscoveryData {
         };
 
         let reverse_predecessors = topology.reverse_predecessors();
+        let (full_output_pairs, full_output_pair_by_raw_state) =
+            outputs.full_output_projection();
+        let mut full_output_pair_by_state = Vec::with_capacity(topology.state_count());
+        for state in 0..topology.real_state_count {
+            let raw_state = topology.raw_state_for_state(state) as usize;
+            full_output_pair_by_state.push(full_output_pair_by_raw_state[raw_state]);
+        }
+        full_output_pair_by_state.push(0);
+        let full_output_projection_seed = OutputProjectionSeed {
+            active_terminals: Arc::from(vec![true; tokenizer.num_terminals() as usize]),
+            output_pairs: full_output_pairs,
+            output_pair_by_state: Arc::from(full_output_pair_by_state),
+        };
 
         Self {
             finalizer_terminals_by_state,
@@ -872,6 +945,7 @@ impl TiRawDiscoveryData {
             future_finalizer_states_by_terminal,
             reverse_predecessors,
             observed_destinations: topology.observed_destinations(),
+            full_output_projection_seed,
         }
     }
 }
@@ -3666,6 +3740,8 @@ impl InterchangeabilityDfa {
         output_projection_seed: Option<OutputProjectionSeed>,
     ) -> Self {
         let state_count = topology.state_count();
+        let output_projection_seed =
+            output_projection_seed.or_else(|| Some(raw.full_output_projection_seed.clone()));
         let empty_pair = OutputPair {
             finalizers: OutputBits::new(0),
             future_finalizers: OutputBits::new(0),
@@ -4007,9 +4083,35 @@ impl InterchangeabilityDfa {
                 continue;
             }
             let members = std::mem::take(&mut members_by_class[class]);
+            let representative = if members.binary_search(&(dead_state as u32)).is_ok() {
+                dead_state as u32
+            } else {
+                members[0]
+            };
+            let mut retained = Vec::<u32>::with_capacity(members.len());
+            let mut deviants = Vec::<u32>::new();
+            for &member in &members {
+                if self.canonical_identity_signatures_equal(
+                    representative as usize,
+                    member as usize,
+                    &class_for_state,
+                ) {
+                    retained.push(member);
+                } else {
+                    deviants.push(member);
+                }
+            }
+            if deviants.is_empty() {
+                members_by_class[class] = retained;
+                continue;
+            }
+
+            // Most unstable classes differ from their representative by only
+            // a tiny exceptional set. Group just those deviants instead of
+            // rehashing every representative-equivalent member.
             let mut groups = Vec::<Vec<u32>>::new();
             let mut groups_by_hash = FxHashMap::<u64, SmallVec<[usize; 2]>>::default();
-            for &member in &members {
+            for &member in &deviants {
                 let state = member as usize;
                 let hash = self.canonical_identity_signature_hash(state, &class_for_state);
                 let matched = groups_by_hash.get(&hash).and_then(|candidates| {
@@ -4029,22 +4131,13 @@ impl InterchangeabilityDfa {
                 });
                 groups[group_index].push(member);
             }
-            if groups.len() == 1 {
-                members_by_class[class] = groups.pop().unwrap();
-                continue;
-            }
 
-            let retained = groups
-                .iter()
-                .position(|group| group.binary_search(&(dead_state as u32)).is_ok())
-                .unwrap_or(0);
-            groups.swap(0, retained);
-            members_by_class[class] = std::mem::take(&mut groups[0]);
+            members_by_class[class] = retained;
             for &state in &members_by_class[class] {
                 class_for_state[state as usize] = class as u32;
             }
 
-            for group in groups.into_iter().skip(1) {
+            for group in groups {
                 let new_class = members_by_class.len();
                 queued.push(false);
                 for &state in &group {
