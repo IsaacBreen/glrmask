@@ -765,6 +765,7 @@ pub(crate) fn compute_state_map_raw(
     transitions: &[u32],
     active_groups: &[bool],
     relevant_bytes: &[bool; 256],
+    precomputed_observations: Option<(&[u32], &[u32])>,
 ) -> Option<RawRestrictedObservationResult> {
     let num_states = tokenizer.num_states() as usize;
     if transitions.len() != num_states * 256 || num_states == 0 {
@@ -772,7 +773,13 @@ pub(crate) fn compute_state_map_raw(
     }
     let active_bytes = active_byte_representatives(Some(relevant_bytes), None);
     let labels_started_at = Instant::now();
-    let observations = raw_target_label_ids(tokenizer, active_groups);
+    let observations = match precomputed_observations {
+        Some((ids, representatives)) if ids.len() == num_states => RawObservationIds {
+            ids: ids.to_vec(),
+            representatives: representatives.to_vec(),
+        },
+        _ => raw_target_label_ids(tokenizer, active_groups),
+    };
     let target_labels = &observations.ids;
     let label_ms = labels_started_at.elapsed().as_secs_f64() * 1000.0;
     let refine_started_at = Instant::now();

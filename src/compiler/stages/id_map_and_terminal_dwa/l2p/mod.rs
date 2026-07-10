@@ -434,6 +434,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         ti_transport_witness_rounds,
         ti_round_count,
         ti_additional_merged_members,
+        ti_raw_observations,
     ) =
         if l2p_terminal_interchangeability_enabled_for_partition(partition_label) {
             let mut active = active_terminals.to_vec();
@@ -480,14 +481,17 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let additional_merged_members = first_round_class_count
                 .unwrap_or(classes.len())
                 .saturating_sub(classes.len());
+            let raw_observations = discovery_context
+                .final_raw_observation_ids(tokenizer.num_states() as usize);
             (
                 Some(classes),
                 Some(transport_witness_rounds),
                 round_count,
                 additional_merged_members,
+                raw_observations,
             )
         } else {
-            (None, None, 0, 0)
+            (None, None, 0, 0, None)
         };
     let ti_discovery_ms = ti_discovery_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
@@ -611,6 +615,14 @@ let strict_reference = reference_terminal_expansion
             flat_trans,
             equivalence_initial_state_map,
             token_position_partition_for_analysis,
+            std::env::var_os("GLRMASK_TI_DISABLE_RAW_OBSERVATION_REUSE")
+                .is_none()
+                .then(|| {
+                    ti_raw_observations.as_ref().map(|(ids, representatives)| {
+                        (ids.as_slice(), representatives.as_slice())
+                    })
+                })
+                .flatten(),
         );
 
     // Replay and transport-coordinate refinement are intentionally deferred

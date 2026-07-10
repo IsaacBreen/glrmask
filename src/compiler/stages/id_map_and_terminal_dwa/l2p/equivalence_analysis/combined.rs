@@ -649,6 +649,7 @@ fn try_analyze_equivalences_with_raw_quotient(
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
     effective_follows_prepare_ms: f64,
+    precomputed_raw_observations: Option<(&[u32], &[u32])>,
 ) -> Option<(InternalIdMap, CombinedEquivalenceProfile)> {
     let active_groups = active_groups?;
     let flat_trans = flat_trans?;
@@ -870,6 +871,7 @@ fn try_analyze_equivalences_with_raw_quotient(
         flat_trans,
         active_groups,
         &raw_relevant_bytes,
+        precomputed_raw_observations,
     )?;
     let restricted_observation_state_equiv_ms =
         restricted_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1184,6 +1186,7 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
     token_boundary_partition: Option<&GlobalTokenPositionStatePartition>,
+    precomputed_raw_observations: Option<(&[u32], &[u32])>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
     analyze_equivalences_impl(
         partition_label,
@@ -1200,6 +1203,7 @@ pub(crate) fn analyze_equivalences_with_group_filter(
         flat_trans,
         initial_state_map,
         token_boundary_partition,
+        precomputed_raw_observations,
     )
 }
 
@@ -1222,6 +1226,7 @@ fn analyze_equivalences_impl(
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
     token_boundary_partition: Option<&GlobalTokenPositionStatePartition>,
+    precomputed_raw_observations: Option<(&[u32], &[u32])>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
     let follows_prepare_started_at = Instant::now();
     let token_path_disallowed_follows = (!disallowed_follows_are_ignore_transparent)
@@ -1257,6 +1262,7 @@ fn analyze_equivalences_impl(
         flat_trans,
         initial_state_map,
         effective_follows_prepare_ms,
+        precomputed_raw_observations,
     ) {
         return result;
     }

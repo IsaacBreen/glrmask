@@ -1070,6 +1070,38 @@ impl TiDiscoveryContext {
             first_round_memo: std::cell::RefCell::new(FxHashMap::default()),
         }
     }
+
+    /// Exact finalizer/future observation IDs from the most recent discovery
+    /// round, restricted and densified over real raw scanner states.
+    pub(crate) fn final_raw_observation_ids(
+        &self,
+        raw_state_count: usize,
+    ) -> Option<(Vec<u32>, Vec<u32>)> {
+        if self.topology.raw_representative_by_state.is_some() {
+            return None;
+        }
+        let seed = self.output_projection_seed.borrow();
+        let by_state = &seed.as_ref()?.output_pair_by_state;
+        if by_state.len() < raw_state_count {
+            return None;
+        }
+        let mut dense_by_pair = FxHashMap::<u32, u32>::default();
+        let mut ids = Vec::with_capacity(raw_state_count);
+        let mut representatives = Vec::<u32>::new();
+        for (state, &pair) in by_state[..raw_state_count].iter().enumerate() {
+            let id = if let Some(&id) = dense_by_pair.get(&pair) {
+                id
+            } else {
+                let id = dense_by_pair.len() as u32;
+                dense_by_pair.insert(pair, id);
+                representatives.push(state as u32);
+                id
+            };
+            ids.push(id);
+        }
+        Some((ids, representatives))
+    }
+
 }
 
 /// Partition candidate terminals by a necessary-and-sufficient condition for
