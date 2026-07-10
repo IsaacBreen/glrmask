@@ -115,6 +115,7 @@ pub(crate) struct Lowerer<'a> {
     pub(crate) fixed_object_nfa_templates: HashMap<FixedObjectTemplateKey, ExprNFA>,
     definition_rules: BTreeMap<String, String>,
     definition_by_pointer: BTreeMap<String, &'a Schema>,
+    pub(crate) object_variant_ref_stack: BTreeSet<String>,
     used_rule_names: BTreeSet<String>,
     next_rule_id: usize,
 }
@@ -167,6 +168,7 @@ impl<'a> Lowerer<'a> {
             fixed_object_nfa_templates: HashMap::new(),
             definition_rules: BTreeMap::new(),
             definition_by_pointer,
+            object_variant_ref_stack: BTreeSet::new(),
             used_rule_names: BTreeSet::new(),
             next_rule_id: 0,
         };
@@ -200,6 +202,7 @@ impl<'a> Lowerer<'a> {
             fixed_object_nfa_templates: HashMap::new(),
             definition_rules: BTreeMap::new(),
             definition_by_pointer: self.definition_by_pointer.clone(),
+            object_variant_ref_stack: BTreeSet::new(),
             used_rule_names: BTreeSet::new(),
             next_rule_id,
         };

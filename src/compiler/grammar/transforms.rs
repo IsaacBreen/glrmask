@@ -5,7 +5,10 @@ use rustc_hash::FxHashSet;
 
 use crate::automata::regex::Expr;
 use crate::automata::lexer::regex::parse_regex;
-use crate::compiler::glr::analysis::{eliminate_right_recursion, merge_identical_nonterminals, normalize_grammar};
+use crate::compiler::glr::analysis::{
+    eliminate_right_recursion, has_indirect_left_recursion, merge_identical_nonterminals,
+    normalize_grammar,
+};
 use crate::grammar::flat::{GrammarDef, NonterminalID, Terminal};
 use crate::grammar::flat::{Rule, Symbol, TerminalID};
 
@@ -962,9 +965,16 @@ fn prepare_grammar_transforms_impl(
         id
     };
     eliminate_right_recursion(&mut normalized.rules, &mut fresh_nt);
+    // Inlining and identical-nonterminal merging can recreate indirect left
+    // recursion after the initial normalization pass. Most grammars do not,
+    // so pay for the full fixed-point normalization only when the cheap
+    // left-reachability check finds such a cycle.
+    if has_indirect_left_recursion(&normalized.rules) {
+        normalize_grammar(&mut normalized.rules, normalized.start);
+    }
     if let Some(started_at) = post_merge_rr_started_at {
         emit_grammar_transform_profile(
-            "eliminate_right_recursion",
+            "post_merge_normalize",
             elapsed_ms(started_at),
             post_merge_rr_rules_before,
             normalized.rules.len(),

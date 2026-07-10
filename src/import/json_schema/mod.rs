@@ -218,7 +218,27 @@ pub(crate) fn lower_exact_subtractions_enabled() -> bool {
 pub(crate) const GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS_ENV: &str =
     "GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS";
 
+#[cfg(test)]
+std::thread_local! {
+    static SPLIT_LITERAL_TERMINALS_TEST_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn swap_split_literal_terminals_test_override(
+    value: Option<bool>,
+) -> Option<bool> {
+    SPLIT_LITERAL_TERMINALS_TEST_OVERRIDE.with(|override_value| override_value.replace(value))
+}
+
 pub(crate) fn split_literal_terminals_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(value) =
+        SPLIT_LITERAL_TERMINALS_TEST_OVERRIDE.with(std::cell::Cell::get)
+    {
+        return value;
+    }
+
     // Process-fixed knob (the toggle test exercises it via child processes, like
     // `unanchored_pattern_split_mode`). Cache it so the per-string-terminal call
     // sites in object/string/lower do not re-read the environment.

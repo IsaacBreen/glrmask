@@ -300,11 +300,6 @@ impl<'a> Lowerer<'a> {
         if branches.len() < 2 {
             return Ok(None);
         }
-        if branches.iter().any(Self::schema_contains_any_ref)
-            && self.has_recursive_ref_branch(branches)?
-        {
-            return Ok(None);
-        }
         if self.has_duplicate_recursive_ref_branches(branches)? {
             return Ok(None);
         }
@@ -591,11 +586,6 @@ impl<'a> Lowerer<'a> {
         branches: &[Schema],
     ) -> ImportResult<Option<GrammarExpr>> {
         if branches.len() < 2 {
-            return Ok(None);
-        }
-        if branches.iter().any(Self::schema_contains_any_ref)
-            && self.has_recursive_ref_branch(branches)?
-        {
             return Ok(None);
         }
         if self.has_duplicate_recursive_ref_branches(branches)? {
@@ -1462,8 +1452,15 @@ impl<'a> Lowerer<'a> {
             if ref_depth >= 4 {
                 return Ok(None);
             }
+            let normalized = normalize_local_ref(pointer)?;
             let target = self.resolve_ref_target(pointer)?.clone();
-            return self.collect_closed_any_of_object_variant_inner(&target, ref_depth + 1, profile);
+            if !self.object_variant_ref_stack.insert(normalized.clone()) {
+                return Ok(None);
+            }
+            let result =
+                self.collect_closed_any_of_object_variant_inner(&target, ref_depth + 1, profile);
+            self.object_variant_ref_stack.remove(&normalized);
+            return result;
         }
 
         let SchemaKind::Assertions(assertions) = &branch.kind else {
@@ -1605,8 +1602,14 @@ impl<'a> Lowerer<'a> {
             if ref_depth >= 4 {
                 return Ok(None);
             }
-            let target = self.resolve_ref_target(pointer)?;
-            return self.collect_open_any_of_object_variant_inner(target, ref_depth + 1);
+            let normalized = normalize_local_ref(pointer)?;
+            let target = self.resolve_ref_target(pointer)?.clone();
+            if !self.object_variant_ref_stack.insert(normalized.clone()) {
+                return Ok(None);
+            }
+            let result = self.collect_open_any_of_object_variant_inner(&target, ref_depth + 1);
+            self.object_variant_ref_stack.remove(&normalized);
+            return result;
         }
 
         let SchemaKind::Assertions(assertions) = &branch.kind else {

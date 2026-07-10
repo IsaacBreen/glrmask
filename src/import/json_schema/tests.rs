@@ -2,9 +2,11 @@ use serde_json::json;
 use std::{env, ffi::OsString, process::Command, sync::Mutex};
 
 use super::ast::StringSchema;
+use super::preflight::{swap_allow_large_test_override, swap_max_nodes_test_override};
 use super::{
     GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS_ENV, lower_exact_subtractions_enabled,
     schema_to_named_grammar, split_literal_terminals_enabled,
+    swap_split_literal_terminals_test_override,
 };
 use super::string::{property_name_matches_pattern, string_value_satisfies_schema, GLRMASK_LLGUIDANCE_COMPAT_ENV};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -18,6 +20,60 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 struct EnvVarGuard {
     key: &'static str,
     original: Option<OsString>,
+}
+
+struct SplitLiteralTerminalsOverrideGuard {
+    original: Option<bool>,
+}
+
+struct MaxNodesOverrideGuard {
+    original: Option<String>,
+}
+
+impl MaxNodesOverrideGuard {
+    fn set(value: &str) -> Self {
+        Self {
+            original: swap_max_nodes_test_override(Some(value.to_string())),
+        }
+    }
+}
+
+impl Drop for MaxNodesOverrideGuard {
+    fn drop(&mut self) {
+        swap_max_nodes_test_override(self.original.take());
+    }
+}
+
+struct AllowLargeOverrideGuard {
+    original: Option<bool>,
+}
+
+impl AllowLargeOverrideGuard {
+    fn set(value: bool) -> Self {
+        Self {
+            original: swap_allow_large_test_override(Some(value)),
+        }
+    }
+}
+
+impl Drop for AllowLargeOverrideGuard {
+    fn drop(&mut self) {
+        swap_allow_large_test_override(self.original);
+    }
+}
+
+impl SplitLiteralTerminalsOverrideGuard {
+    fn enabled() -> Self {
+        Self {
+            original: swap_split_literal_terminals_test_override(Some(true)),
+        }
+    }
+}
+
+impl Drop for SplitLiteralTerminalsOverrideGuard {
+    fn drop(&mut self) {
+        swap_split_literal_terminals_test_override(self.original);
+    }
 }
 
 fn object_constrained_allof_with_nested_oneof_schema() -> serde_json::Value {
@@ -194,13 +250,22 @@ fn start_expr(grammar: &NamedGrammar) -> &GrammarExpr {
 }
 
 fn assert_glrm_has_split_literal_key(glrm: &str, key: &str) {
-    assert!(glrm.contains("-- JSON_QUOTE -->"), "{glrm}");
-    assert!(glrm.contains(&format!("-- \"{key}\" -->")), "{glrm}");
-    assert!(glrm.contains("-- JSON_KEY_SUFFIX -->"), "{glrm}");
+    assert!(
+        glrm.lines().any(|line| {
+            line.contains(&format!("JSON_QUOTE \"{key}\" JSON_KEY_SUFFIX"))
+        }),
+        "{glrm}"
+    );
     assert!(
         !glrm.contains(&format!("\\\"{key}\\\": ")),
         "literal key {key:?} was fused back into one terminal:\n{glrm}"
     );
+}
+
+macro_rules! enable_split_literal_terminals_for_test {
+    () => {
+        let _split_literal_terminals = SplitLiteralTerminalsOverrideGuard::enabled();
+    };
 }
 
 const SPLIT_LITERAL_TERMINALS_TEST_CHILD_ENV: &str =
@@ -305,9 +370,8 @@ fn exact_subtraction_lowering_env_var_defaults_false_and_accepts_truthy_values()
 
 #[test]
 fn schema_size_preflight_allows_below_budget_schema() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-    let _allow_large = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_ALLOW_LARGE");
-    let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", "64");
+    let _allow_large = AllowLargeOverrideGuard::set(false);
+    let _max_nodes = MaxNodesOverrideGuard::set("64");
 
     let schema = json!({
         "type": "object",
@@ -323,9 +387,8 @@ fn schema_size_preflight_allows_below_budget_schema() {
 
 #[test]
 fn schema_size_preflight_rejects_over_budget_schema() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-    let _allow_large = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_ALLOW_LARGE");
-    let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", "20");
+    let _allow_large = AllowLargeOverrideGuard::set(false);
+    let _max_nodes = MaxNodesOverrideGuard::set("20");
 
     let mut properties = serde_json::Map::new();
     for index in 0..16 {
@@ -346,8 +409,7 @@ fn schema_size_preflight_rejects_over_budget_schema() {
 
 #[test]
 fn schema_size_preflight_raised_max_nodes_allows_schema() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-    let _allow_large = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_ALLOW_LARGE");
+    let _allow_large = AllowLargeOverrideGuard::set(false);
 
     let mut properties = serde_json::Map::new();
     for index in 0..16 {
@@ -360,21 +422,20 @@ fn schema_size_preflight_raised_max_nodes_allows_schema() {
     });
 
     {
-        let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", "20");
+        let _max_nodes = MaxNodesOverrideGuard::set("20");
         let err =
             schema_to_named_grammar(&schema).expect_err("schema should exceed the lower budget");
         assert!(err.to_string().contains("limit=20"), "{err}");
     }
 
-    let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", "128");
+    let _max_nodes = MaxNodesOverrideGuard::set("128");
     schema_to_named_grammar(&schema).expect("raised node limit should allow schema");
 }
 
 #[test]
 fn schema_size_preflight_falsey_allow_large_does_not_bypass_budget() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-    let _allow_large = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_ALLOW_LARGE", "0");
-    let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", "1");
+    let _allow_large = AllowLargeOverrideGuard::set(false);
+    let _max_nodes = MaxNodesOverrideGuard::set("1");
 
     let schema = json!({
         "type": "object",
@@ -392,9 +453,8 @@ fn schema_size_preflight_falsey_allow_large_does_not_bypass_budget() {
 
 #[test]
 fn schema_size_preflight_allow_large_override_bypasses_budget() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-    let _allow_large = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_ALLOW_LARGE", "1");
-    let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", "1");
+    let _allow_large = AllowLargeOverrideGuard::set(true);
+    let _max_nodes = MaxNodesOverrideGuard::set("1");
 
     let schema = json!({
         "type": "object",
@@ -408,11 +468,10 @@ fn schema_size_preflight_allow_large_override_bypasses_budget() {
 
 #[test]
 fn schema_size_preflight_invalid_max_nodes_reports_env_var() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-    let _allow_large = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_ALLOW_LARGE");
+    let _allow_large = AllowLargeOverrideGuard::set(false);
 
     for value in ["not-a-number", "0"] {
-        let _max_nodes = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_MAX_NODES", value);
+        let _max_nodes = MaxNodesOverrideGuard::set(value);
         let schema = json!({"type": "string"});
 
         let err = schema_to_named_grammar(&schema)
@@ -1965,6 +2024,7 @@ fn large_optional_open_object_uses_fused_prefix_chain_rules() {
 
 #[test]
 fn object_property_array_opener_keeps_literal_key_boundaries() {
+    enable_split_literal_terminals_for_test!();
     let schema = json!({
         "type": "object",
         "properties": {
@@ -1987,12 +2047,18 @@ fn object_property_array_opener_keeps_literal_key_boundaries() {
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
     assert_glrm_has_split_literal_key(&glrm, "items");
-    assert!(glrm.contains("-- \"[\" -->"), "{glrm}");
+    assert!(
+        glrm.lines().any(|line| {
+            line.contains("JSON_QUOTE \"items\" JSON_KEY_SUFFIX \"[\"")
+        }),
+        "{glrm}"
+    );
     lower(&grammar).unwrap();
 }
 
 #[test]
 fn object_property_string_value_keeps_literal_key_boundaries() {
+    enable_split_literal_terminals_for_test!();
     let schema = json!({
         "type": "object",
         "properties": {
@@ -2011,6 +2077,7 @@ fn object_property_string_value_keeps_literal_key_boundaries() {
 
 #[test]
 fn object_property_nullable_string_value_keeps_literal_key_boundaries() {
+    enable_split_literal_terminals_for_test!();
     let schema = json!({
         "type": "object",
         "properties": {
@@ -2026,12 +2093,19 @@ fn object_property_nullable_string_value_keeps_literal_key_boundaries() {
         rule.is_terminal && rule.name.starts_with("json_property_string_value")
     }), "{:?}", grammar.rules);
     assert_glrm_has_split_literal_key(&glrm, "name");
-    assert!(glrm.contains("-- \"null\" -->"), "{glrm}");
+    assert!(
+        glrm.lines().any(|line| {
+            line.contains("JSON_QUOTE \"name\" JSON_KEY_SUFFIX")
+                && line.contains("\"null\"")
+        }),
+        "{glrm}"
+    );
     lower(&grammar).unwrap();
 }
 
 #[test]
 fn nullable_uuid_property_keeps_literal_key_boundaries() {
+    enable_split_literal_terminals_for_test!();
     let schema = json!({
         "type": "object",
         "properties": {
@@ -2058,6 +2132,7 @@ fn nullable_uuid_property_keeps_literal_key_boundaries() {
 
 #[test]
 fn patterned_property_keeps_literal_key_boundaries_and_length_bounds() {
+    enable_split_literal_terminals_for_test!();
     let schema = json!({
         "type": "object",
         "properties": {
@@ -2087,6 +2162,7 @@ fn patterned_property_keeps_literal_key_boundaries_and_length_bounds() {
 
 #[test]
 fn costly_bounded_pattern_property_keeps_literal_key_boundaries() {
+    enable_split_literal_terminals_for_test!();
     let schema = json!({
         "type": "object",
         "properties": {
@@ -2119,6 +2195,7 @@ fn costly_bounded_pattern_property_keeps_literal_key_boundaries() {
 
 #[test]
 fn patterned_property_reuses_split_key_components_after_an_object_separator() {
+    enable_split_literal_terminals_for_test!();
     let schema = json!({
         "type": "object",
         "properties": {
@@ -2148,6 +2225,7 @@ fn patterned_property_reuses_split_key_components_after_an_object_separator() {
 
 #[test]
 fn mixed_string_integer_pattern_property_keeps_literal_key_boundaries() {
+    enable_split_literal_terminals_for_test!();
     let schema = json!({
         "type": "object",
         "properties": {
@@ -2179,6 +2257,7 @@ fn mixed_string_integer_pattern_property_keeps_literal_key_boundaries() {
 fn llguidance_compat_escaped_pattern_property_keeps_literal_key_boundaries() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let _split_literal_terminals = SplitLiteralTerminalsOverrideGuard::enabled();
     let schema = json!({
         "type": "object",
         "properties": {
@@ -2204,6 +2283,7 @@ fn llguidance_compat_escaped_pattern_property_keeps_literal_key_boundaries() {
 
 #[test]
 fn object_property_null_value_keeps_literal_key_boundaries() {
+    enable_split_literal_terminals_for_test!();
     let schema = json!({
         "type": "object",
         "properties": {
@@ -2216,7 +2296,12 @@ fn object_property_null_value_keeps_literal_key_boundaries() {
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
     assert_glrm_has_split_literal_key(&glrm, "name");
-    assert!(glrm.contains("-- \"null\" -->"), "{glrm}");
+    assert!(
+        glrm.lines().any(|line| {
+            line.contains("JSON_QUOTE \"name\" JSON_KEY_SUFFIX \"null\"")
+        }),
+        "{glrm}"
+    );
     lower(&grammar).unwrap();
 }
 
@@ -5281,6 +5366,7 @@ fn dependent_schemas_still_errors() {
 
 #[test]
 fn enum_and_const_lower_to_exact_json_literals() {
+    enable_split_literal_terminals_for_test!();
     let schema = json!({"enum": [null, true, "ready", 7]});
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
@@ -5292,6 +5378,7 @@ fn enum_and_const_lower_to_exact_json_literals() {
 
 #[test]
 fn string_const_keeps_both_quotes_separate_from_literal_body() {
+    enable_split_literal_terminals_for_test!();
     let schema = json!({"const": "ready"});
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let expr = start_expr(&grammar);
@@ -7568,8 +7655,7 @@ fn shadow_owner_skips_residual_with_unsafe_additional_constraints() {
 
 #[test]
 fn shadow_owner_allows_unsupported_optional_owner_fields() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-    let _allow_large = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_ALLOW_LARGE", "1");
+    let _allow_large = AllowLargeOverrideGuard::set(true);
 
     let schema = json!({
         "anyOf": [
@@ -7602,7 +7688,7 @@ fn shadow_owner_allows_unsupported_optional_owner_fields() {
 }
 
 #[test]
-fn shadow_owner_ref_branch_context_uses_factored_open_object_body() {
+fn shadow_owner_ref_branch_context_uses_shared_open_object_body() {
     let schema = json!({
         "definitions": {
             "Translation": {
@@ -7637,12 +7723,13 @@ fn shadow_owner_ref_branch_context_uses_factored_open_object_body() {
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
     assert!(
-        glrm.contains("schema_ref_") && glrm.contains("json_closed_object_body"),
+        glrm.contains("schema_ref_") && glrm.contains("json_anyof_object_body"),
         "{glrm}"
     );
     assert!(
         glrm.lines().any(|line| {
-            line.contains(" ::= schema_ref_") && line.contains("| \"{\" json_closed_object_body")
+            line.starts_with("nt schema_ref_")
+                && line.contains(" ::= \"{\" json_anyof_object_body")
         }),
         "{glrm}"
     );

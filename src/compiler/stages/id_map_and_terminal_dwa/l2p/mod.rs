@@ -190,6 +190,9 @@ fn l2p_terminal_interchangeability_strict_reference_enabled() -> bool {
 
 pub(crate) fn p8_first_byte_factorization_allowed() -> bool {
     P8_FIRST_BYTE_FACTORIZATION_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
+        // Forced-all-L2P is a diagnostic route that does not preserve the
+        // normal classifier invariants of the structural-boundary partition.
+        && !l2p_env_enabled("GLRMASK_FORCE_ALL_L2P")
 }
 
 
@@ -1115,6 +1118,30 @@ nt S ::= QUOTE IDENT;
         );
         Constraint::from_glrm_grammar(grammar, &vocab)
             .expect("P8 local TI bypass must match the forced full-TI artifact");
+    }
+
+    #[test]
+    fn forced_all_l2p_enum_skips_p8_first_byte_factorization() {
+        let vocab = Vocab::new(
+            vec![
+                (0, b"\"red\"".to_vec()),
+                (1, b"\"blue\"".to_vec()),
+                (2, b"\"green\"".to_vec()),
+            ],
+            None,
+        );
+
+        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+        let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+        let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+        let _strict = EnvVarGuard::set(
+            "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
+            "1",
+        );
+
+        Constraint::from_json_schema(r#"{"enum":["red","blue"]}"#, &vocab)
+            .expect("forced-all-L2P enum must match the strict TI reference");
     }
 
     #[test]
