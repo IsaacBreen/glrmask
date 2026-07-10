@@ -524,6 +524,7 @@ mod tests {
             )],
             start: "start".into(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
 
         simplify_named_grammar(&mut grammar);
@@ -546,6 +547,7 @@ mod tests {
             ],
             start: "start".into(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
 
         let stats = simplify_named_grammar(&mut grammar);
@@ -567,6 +569,7 @@ mod tests {
             ],
             start: "start".into(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
 
         simplify_named_grammar(&mut grammar);
@@ -583,6 +586,7 @@ mod tests {
             ],
             start: "start".into(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
 
         let stats = simplify_named_grammar(&mut grammar);
@@ -604,6 +608,7 @@ mod tests {
             )],
             start: "start".into(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
 
         simplify_named_grammar(&mut grammar);

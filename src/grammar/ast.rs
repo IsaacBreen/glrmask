@@ -153,9 +153,49 @@ pub struct NamedGrammar {
     /// Name of the terminal rule whose body should be used as the ignore pattern.
     /// Set by Lark's `%ignore` directive.
     pub ignore: Option<String>,
+    /// Optional terminal-name → lexer-partition name assignments.
+    ///
+    /// Terminals in the same named partition are jointly determinized.
+    /// Different partitions are combined by epsilon transitions, preventing
+    /// cross-partition DFA blow-ups. Unassigned terminals follow the active
+    /// tokenizer partition policy.
+    pub lexer_partitions: BTreeMap<String, String>,
 }
 
 impl NamedGrammar {
+    /// Assign terminal rules to one jointly-determinized lexer partition.
+    pub fn set_lexer_partition<I, S>(&mut self, partition: impl Into<String>, terminals: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let partition = partition.into();
+        for terminal in terminals {
+            self.lexer_partitions.insert(terminal.into(), partition.clone());
+        }
+    }
+
+    /// Builder-style variant of [`Self::set_lexer_partition`].
+    pub fn with_lexer_partition<I, S>(
+        mut self,
+        partition: impl Into<String>,
+        terminals: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.set_lexer_partition(partition, terminals);
+        self
+    }
+
+    /// Put one terminal in its own lexer partition.
+    pub fn isolate_terminal(&mut self, terminal: impl Into<String>) {
+        let terminal = terminal.into();
+        self.lexer_partitions
+            .insert(terminal.clone(), format!("__isolated_{terminal}"));
+    }
+
     /// Returns the set of rule names marked as terminals.
     pub fn terminal_names_set(&self) -> HashSet<String> {
         self.rules
@@ -231,7 +271,18 @@ impl NamedGrammar {
             .cloned()
             .collect();
 
-        NamedGrammar { rules, start: self.start.clone(), ignore: self.ignore.clone() }
+        let lexer_partitions = self
+            .lexer_partitions
+            .iter()
+            .filter(|(terminal, _)| reachable.contains(*terminal))
+            .map(|(terminal, partition)| (terminal.clone(), partition.clone()))
+            .collect();
+        NamedGrammar {
+            rules,
+            start: self.start.clone(),
+            ignore: self.ignore.clone(),
+            lexer_partitions,
+        }
     }
 
     /// Dump the grammar in a Lark-like human-readable format.
@@ -2818,6 +2869,19 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
             .iter()
             .find_map(|(&id, name)| (name == ignore_name).then_some(id))
     });
+    let mut lexer_partitions = BTreeMap::new();
+    for (terminal_name, partition) in &grammar.lexer_partitions {
+        let terminal_id = lowerer
+            .terminal_names
+            .iter()
+            .find_map(|(&id, name)| (name == terminal_name).then_some(id))
+            .ok_or_else(|| {
+                GlrMaskError::GrammarParse(format!(
+                    "lexer group references unknown or non-emitting terminal '{terminal_name}'",
+                ))
+            })?;
+        lexer_partitions.insert(terminal_id, partition.clone());
+    }
 
     let dedup_started_at = detail_profile.then(std::time::Instant::now);
     dedup_rules_preserving_first_occurrence(&mut lowerer.rules);
@@ -2864,6 +2928,7 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         nonterminal_names,
         terminal_names: lowerer.terminal_names,
         ignore_terminal,
+        lexer_partitions,
     })
 }
 
@@ -3002,6 +3067,7 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
 
         lower(&grammar).unwrap();
@@ -3029,6 +3095,7 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
 
         lower(&grammar).unwrap();
@@ -3043,6 +3110,7 @@ mod tests {
             )],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
 
         let gdef = lower(&grammar).unwrap();
@@ -3077,6 +3145,7 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
 
         let gdef = lower(&grammar).unwrap();

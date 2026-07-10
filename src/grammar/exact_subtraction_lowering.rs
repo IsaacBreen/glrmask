@@ -810,6 +810,7 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
 
         let stats = lower_exact_subtractions(&mut grammar).unwrap();
@@ -863,6 +864,7 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
 
         lower_exact_subtractions(&mut grammar).unwrap();
@@ -886,6 +888,7 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
 
         let stats = lower_exact_subtractions(&mut grammar).unwrap();
@@ -920,6 +923,7 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
 
         let stats = lower_exact_subtractions(&mut grammar).unwrap();
@@ -951,6 +955,7 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
 
         let stats = lower_exact_subtractions(&mut grammar).unwrap();

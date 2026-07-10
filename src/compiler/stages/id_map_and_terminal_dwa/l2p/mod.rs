@@ -296,7 +296,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         ti_round_count,
         ti_additional_merged_members,
     ) =
-        if l2p_terminal_interchangeability_enabled_for_partition(partition_label) {
+        if !tokenizer.has_epsilon_transitions()
+            && l2p_terminal_interchangeability_enabled_for_partition(partition_label)
+        {
             let mut active = active_terminals.to_vec();
             let mut classes = singleton_partition(&active);
             let discovery_context = TiDiscoveryContext::new(tokenizer, &relevant_bytes);

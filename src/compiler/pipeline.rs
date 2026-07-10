@@ -8,6 +8,8 @@ use once_cell::sync::Lazy;
 use crate::Vocab;
 use crate::automata::lexer::compile::{
     build_regex,
+    build_regex_partitioned,
+    build_regex_partitioned_with_profile_labels,
     build_regex_with_profile_labels,
     factor_regex_expr,
 };
@@ -380,7 +382,44 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
             );
         }
     }
-    build_tokenizer_from_exprs(&exprs, Some(&terminal_labels))
+    let partition_ids = lexer_partition_ids(grammar);
+    build_tokenizer_from_exprs_partitioned(
+        &exprs,
+        Some(&terminal_labels),
+        &partition_ids,
+    )
+}
+
+fn lexer_partition_ids(grammar: &GrammarDef) -> Vec<u32> {
+    // Stress mode is deliberately the temporary default for this branch. Once
+    // merged, changing the fallback to monolithic makes it opt-in without
+    // changing the grammar or NamedGrammar API.
+    let separate_unspecified = std::env::var("GLRMASK_LEXER_PARTITION_MODE")
+        .map(|value| !value.trim().eq_ignore_ascii_case("monolithic"))
+        .unwrap_or(true);
+    let mut ids_by_key = BTreeMap::<String, u32>::new();
+    let mut next_id = 0u32;
+    (0..grammar.terminals.len())
+        .map(|terminal| {
+            let terminal = terminal as u32;
+            let key = grammar
+                .lexer_partitions
+                .get(&terminal)
+                .map(|partition| format!("named:{partition}"))
+                .unwrap_or_else(|| {
+                    if separate_unspecified {
+                        format!("terminal:{terminal}")
+                    } else {
+                        "default".to_string()
+                    }
+                });
+            *ids_by_key.entry(key).or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                id
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn build_tokenizer_from_exprs(
@@ -411,6 +450,38 @@ pub(crate) fn build_tokenizer_from_exprs(
         );
     }
 
+    regex.into_tokenizer(
+        exprs.len() as u32,
+        Some(std::sync::Arc::from(exprs.to_vec())),
+    )
+}
+
+pub(crate) fn build_tokenizer_from_exprs_partitioned(
+    exprs: &[Expr],
+    profile_labels: Option<&[String]>,
+    partition_ids: &[u32],
+) -> Tokenizer {
+    let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
+    let started_at = Instant::now();
+    let regex = if let Some(labels) = profile_labels {
+        build_regex_partitioned_with_profile_labels(exprs, labels, partition_ids)
+    } else {
+        build_regex_partitioned(exprs, partition_ids)
+    };
+    if profile_detail {
+        eprintln!(
+            "[glrmask/profile][tokenizer] partitioned_build_done terminals={} partitions={} elapsed_ms={:.3} final_states={} final_transitions={}",
+            exprs.len(),
+            partition_ids
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            elapsed_ms(started_at),
+            regex.num_states(),
+            regex.num_transitions(),
+        );
+    }
     regex.into_tokenizer(
         exprs.len() as u32,
         Some(std::sync::Arc::from(exprs.to_vec())),

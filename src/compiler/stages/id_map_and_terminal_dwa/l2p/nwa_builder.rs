@@ -824,8 +824,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let mut pending_by_offset = BTreeMap::<usize, NodesByTokenizerState>::new();
         pending_by_offset.insert(0, initial_nodes.clone());
 
-        // Reusable buffers for DFA execution (avoids per-call allocation)
-        let mut match_map_buf = FxHashMap::<TerminalID, (usize, u32)>::default();
         let mut matches_buf: Vec<TokenizerMatch> = Vec::new();
 
         while let Some((offset, nodes_at_offset)) = pending_by_offset.pop_first() {
@@ -837,37 +835,22 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             }
 
             for (tokenizer_state, source_nodes) in nodes_at_offset {
-                // Inline DFA scanning with flat transition table for O(1) per-byte stepping
-                match_map_buf.clear();
-                let mut scan_state = tokenizer_state;
-                let mut scan_alive = true;
-                for (index, &byte) in segment_bytes[offset..].iter().enumerate() {
-                    if let Some(next) = self.fast_step(scan_state, byte) {
-                        scan_state = next;
-                        // Record longest match per terminal
-                        for terminal in self.tokenizer.matched_terminals_iter(scan_state) {
-                            // Skip non-active terminals when filtering
-                            if let Some(ref active) = self.active_terminals {
-                                if !active.get(terminal as usize).copied().unwrap_or(false) {
-                                    continue;
-                                }
-                            }
-                            match_map_buf.insert(terminal, (index + 1, scan_state));
-                        }
-                    } else {
-                        scan_alive = false;
-                        break;
-                    }
-                }
-                let end_state = if scan_alive { Some(scan_state) } else { None };
-
-                // Collect matches into reusable buffer
+                let execution = self.tokenizer.execute_from_state(
+                    &segment_bytes[offset..],
+                    tokenizer_state,
+                );
                 matches_buf.clear();
-                for (&id, &(width, end_st)) in match_map_buf.iter() {
-                    matches_buf.push(TokenizerMatch { id, width, end_state: end_st });
-                }
+                matches_buf.extend(execution.matches.into_iter().filter(|matched| {
+                    self.active_terminals.as_ref().map_or(true, |active| {
+                        active
+                            .get(matched.id as usize)
+                            .copied()
+                            .unwrap_or(false)
+                    })
+                }));
+                let end_states = execution.end_state;
 
-                if let Some(end_state) = end_state {
+                for &end_state in &end_states {
                     if child_node.has_token() {
                         self.add_future_leaf_token_from_sources(
                             &source_nodes,
@@ -883,7 +866,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     let next_offset = offset + matched.width;
 
                     if next_offset == segment_bytes.len() && child_node.has_token() &&
-                        !end_state.is_some_and(|s| self.possible_future_terminals_for_state(s).contains(&matched.id)) // This one's optional. Might make it a little faster but functionally no difference.
+                        !end_states.iter().copied().any(|s| self.possible_future_terminals_for_state(s).contains(&matched.id)) // This one's optional. Might make it a little faster but functionally no difference.
                     {
                         self.profile.match_transition_additions += source_nodes.len() as u64;
                         self.add_leaf_token_from_sources(
@@ -906,7 +889,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         child_node,
                         leaf_token_id,
                         matched.id,
-                        end_state,
+                        Some(matched.end_state),
                         next_offset == segment_bytes.len(),
                     ) else {
                         continue;
@@ -1053,7 +1036,7 @@ mod tests {
 
     use super::*;
     use crate::automata::lexer::ast::Expr;
-    use crate::automata::lexer::compile::build_regex;
+    use crate::automata::lexer::compile::build_regex_monolithic as build_regex;
     use crate::automata::weighted::determinize::determinize;
     use crate::automata::weighted::minimize::minimize_owned;
     use crate::compiler::stages::equiv_types::ManyToOneIdMap;

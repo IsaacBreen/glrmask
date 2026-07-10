@@ -1737,9 +1737,10 @@ fn compute_constraint_possible_matches_with_artifacts(
     let trie_build_states: Vec<u32> = (0..tokenizer.num_states()).collect();
 
     let root_terminal_union = root_terminal_union_count(tokenizer, &trie_build_states);
-    let use_sparse_root_collect = sparse_root_collect_enabled()
-        && trie_build_states.len() <= sparse_root_state_limit()
-        && root_terminal_union <= sparse_root_terminal_limit();
+    let use_sparse_root_collect = tokenizer.has_epsilon_transitions()
+        || (sparse_root_collect_enabled()
+            && trie_build_states.len() <= sparse_root_state_limit()
+            && root_terminal_union <= sparse_root_terminal_limit());
 
     let trie_class_result = if use_sparse_root_collect {
         if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
@@ -1810,7 +1811,7 @@ pub(crate) fn compute_constraint_possible_matches_for_vocab(
     vocab: &Vocab,
     _config: ConstraintPossibleMatchesConfig,
 ) -> ConstraintPossibleMatchesComputation {
-    if pm_vocab_equiv_enabled() {
+    if pm_vocab_equiv_enabled() && !tokenizer.has_epsilon_transitions() {
         let (full_artifacts, full_profile) = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
         let runtime_dynamic_vocab = runtime_dynamic_vocab_artifacts(&full_artifacts);
         emit_ordered_vocab_cache_profile(full_profile);

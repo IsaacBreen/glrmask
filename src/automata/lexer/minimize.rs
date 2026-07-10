@@ -480,6 +480,14 @@ impl DFA {
     /// Minimize this DFA using Hopcroft's algorithm.
     /// Returns a new, minimized DFA.  State 0 remains the start state.
     pub(super) fn minimize(&self) -> DFA {
+        // Hopcroft below assumes one deterministic byte target and no epsilon
+        // edges. Epsilon-NFAs are already assembled from independently
+        // minimized DFA components, so preserving them is both correct and
+        // avoids reintroducing the cross-terminal subset blow-up this mode is
+        // intended to prevent.
+        if self.has_epsilon_transitions() {
+            return self.clone();
+        }
         self.minimize_impl(true).0
     }
 
@@ -487,6 +495,9 @@ impl DFA {
     /// minimized states.  `mapping[old_state] = new_state`.
     /// Unreachable original states map to `u32::MAX`.
     pub(super) fn minimize_with_state_mapping(&self) -> (DFA, Vec<u32>) {
+        if self.has_epsilon_transitions() {
+            return (self.clone(), (0..self.states().len() as u32).collect());
+        }
         self.minimize_impl(true)
     }
 
@@ -604,6 +615,14 @@ impl DFA {
                     .map(|(byte, &next)| (byte, state_mapping[next as usize]))
                     .collect();
                 new_state.transitions = CharTransitions::from_sorted_entries(entries);
+                new_state.epsilon_transitions = new_state
+                    .epsilon_transitions
+                    .iter()
+                    .filter_map(|&next| {
+                        let mapped = state_mapping[next as usize];
+                        (mapped != u32::MAX).then_some(mapped)
+                    })
+                    .collect();
                 new_states.push(new_state);
             }
         }
@@ -617,6 +636,11 @@ impl DFA {
         let n = self.states().len();
         let num_groups = self.num_groups();
         if n == 0 {
+            return;
+        }
+
+        if self.has_epsilon_transitions() {
+            self.recompute_possible_futures_with_epsilon();
             return;
         }
 
@@ -715,6 +739,55 @@ impl DFA {
         }
     }
 
+    fn recompute_possible_futures_with_epsilon(&mut self) {
+        let n = self.states().len();
+        let num_groups = self.num_groups();
+        let mut successors: Vec<Vec<u32>> = Vec::with_capacity(n);
+        let mut immediate: Vec<BitSet> = Vec::with_capacity(n);
+
+        for state in 0..n as u32 {
+            let source_closure = self.epsilon_closure(&[state]);
+            let mut targets = Vec::new();
+            let mut finals = BitSet::new(num_groups);
+            for source in source_closure {
+                for (_, &target) in self.states()[source as usize].transitions.iter() {
+                    for closed_target in self.epsilon_closure(&[target]) {
+                        if !targets.contains(&closed_target) {
+                            targets.push(closed_target);
+                        }
+                        finals.union_with(&self.states()[closed_target as usize].finalizers);
+                    }
+                }
+            }
+            targets.sort_unstable();
+            targets.dedup();
+            successors.push(targets);
+            immediate.push(finals);
+        }
+
+        let mut futures = immediate.clone();
+        loop {
+            let mut changed = false;
+            for state in 0..n {
+                let mut next = immediate[state].clone();
+                for &target in &successors[state] {
+                    next.union_with(&futures[target as usize]);
+                }
+                if next != futures[state] {
+                    futures[state] = next;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        for (state, future) in futures.into_iter().enumerate() {
+            self.set_possible_future_group_ids(state as u32, future);
+        }
+    }
+
     /// Rebuild DFA from partition blocks.
     /// Ensures state 0 in the new DFA corresponds to the block
     /// containing old state 0.
@@ -763,6 +836,11 @@ impl DFA {
                 .map(|(byte, &old_next)| (byte, state_mapping[old_next as usize]))
                 .collect();
             new_state.transitions = CharTransitions::from_sorted_entries(entries);
+            new_state.epsilon_transitions = old_state
+                .epsilon_transitions
+                .iter()
+                .map(|&old_next| state_mapping[old_next as usize])
+                .collect();
         }
 
         result.recompute_possible_futures();

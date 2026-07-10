@@ -102,6 +102,7 @@ fn factor_named_grammar_slow(
         rules,
         start: grammar.start,
         ignore: grammar.ignore,
+        lexer_partitions: grammar.lexer_partitions,
     }
 }
 
@@ -518,6 +519,7 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
 
         assert!(factoring_is_provably_noop(&grammar));
@@ -541,6 +543,7 @@ mod tests {
             )],
             start: "_private".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
         assert!(!factoring_is_provably_noop(&factorable));
 
@@ -551,6 +554,7 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
         assert!(!factoring_is_provably_noop(&duplicate_names));
     }

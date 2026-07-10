@@ -6,7 +6,7 @@ pub(crate) mod tokenizer_scan;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
-use crate::automata::lexer::tokenizer::{TokenizerExecResult, TokenizerMatch};
+use crate::automata::lexer::tokenizer::{TokenizerExecResult, TokenizerMatch, TokenizerStateSet};
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
     ParserGSS,
@@ -290,8 +290,8 @@ impl InitialCommitScan {
             let actionable_terminals = ActionableTerminals::from_gss(constraint, parser_gss);
             let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
 
-            if let Some(end_state) = exec_result.end_state {
-                remapped_tokenizer_states.insert(tokenizer_state, end_state);
+            if !exec_result.end_state.is_empty() {
+                remapped_tokenizer_states.insert(tokenizer_state, exec_result.end_state.clone());
             }
 
             for matched in &exec_result.matches {
@@ -408,7 +408,7 @@ fn collect_unique_actionable_matches(
 fn prune_initial_states(
     state: &mut BTreeMap<u32, ParserGSS>,
     accepted_terminals: &FxHashMap<u32, FxHashSet<u32>>,
-    remapped_tokenizer_states: &FxHashMap<u32, u32>,
+    remapped_tokenizer_states: &FxHashMap<u32, TokenizerStateSet>,
 ) {
     if accepted_terminals.is_empty()
         && state
@@ -434,12 +434,14 @@ fn prune_initial_states(
                 }
 
                 let mut remapped = BTreeMap::new();
-                for (old_state, new_state) in remapped_tokenizer_states {
+                for (old_state, new_states) in remapped_tokenizer_states {
                     if let Some(disallowed) = terminals_disallowed.get(old_state) {
-                        remapped
-                            .entry(*new_state)
-                            .or_insert_with(BTreeSet::new)
-                            .extend(disallowed.iter().copied());
+                        for &new_state in new_states {
+                            remapped
+                                .entry(new_state)
+                                .or_insert_with(BTreeSet::new)
+                                .extend(disallowed.iter().copied());
+                        }
                     }
                 }
                 Some(TerminalsDisallowed(std::sync::Arc::new(remapped)))
@@ -465,7 +467,7 @@ fn prune_single_initial_state_for_exec(
         }
     }
 
-    if accepted_terminals.is_empty() && exec_result.end_state.is_none() {
+    if accepted_terminals.is_empty() && exec_result.end_state.is_empty() {
         return gss;
     }
 
@@ -490,7 +492,7 @@ fn prune_single_initial_state_for_exec(
         }
 
         let mut remapped = BTreeMap::new();
-        if let Some(end_state) = exec_result.end_state {
+        for &end_state in &exec_result.end_state {
             if let Some(disallowed) = terminals_disallowed.get(&tokenizer_state) {
                 remapped
                     .entry(end_state)
@@ -601,19 +603,30 @@ fn apply_future_terminal_disallow(
         return gss;
     }
 
-    let Some(end_state) = exec_result.end_state else {
+    if exec_result.end_state.is_empty() {
         return gss;
-    };
-    if !constraint
-        .tokenizer
-        .possible_future_terminals(end_state)
-        .contains(terminal as usize)
-    {
+    }
+    let relevant: TokenizerStateSet = exec_result
+        .end_state
+        .iter()
+        .copied()
+        .filter(|&end_state| {
+            constraint
+                .tokenizer
+                .possible_future_terminals(end_state)
+                .contains(terminal as usize)
+        })
+        .collect();
+    if relevant.is_empty() {
         return gss;
     }
 
     gss.apply(|terminals_disallowed: &TerminalsDisallowed| {
-        terminals_disallowed.with_insert(end_state, terminal)
+        let mut updated = terminals_disallowed.clone();
+        for &end_state in &relevant {
+            updated = updated.with_insert(end_state, terminal);
+        }
+        updated
     })
 }
 
@@ -901,7 +914,7 @@ fn commit_bytes_fast_path(
     }
     let terminal = sole_terminal?;
 
-    let no_end_state = exec_result.end_state.is_none();
+    let no_end_state = exec_result.end_state.is_empty();
     let accs_empty = gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
     let all_accs_empty = no_end_state && accs_empty;
 
@@ -939,7 +952,7 @@ fn commit_bytes_fast_path(
                 }
             }
             let mut remapped = BTreeMap::new();
-            if let Some(end_state) = exec_result.end_state {
+            for &end_state in &exec_result.end_state {
                 if let Some(d) = td.get(&tokenizer_state) {
                     remapped
                         .entry(end_state)
@@ -958,10 +971,12 @@ fn commit_bytes_fast_path(
         pruned
     };
 
-    let end_state_to_keep = exec_result
+    let end_states_to_keep: TokenizerStateSet = exec_result
         .end_state
-        .filter(|&end_state| end_state_may_advance(constraint, &pruned_gss, end_state));
-    let end_state_gss = end_state_to_keep.map(|_| pruned_gss.clone());
+        .iter()
+        .copied()
+        .filter(|&end_state| end_state_may_advance(constraint, &pruned_gss, end_state))
+        .collect();
 
     // The terminal and tokenizer end-state continuations are independent.
     // Preserve either branch if it produces viable parser state.
@@ -978,7 +993,7 @@ fn commit_bytes_fast_path(
     {
         advanced
     } else {
-        advance_parser_stacks_owned(constraint, pruned_gss, terminal)
+        advance_parser_stacks_owned(constraint, pruned_gss.clone(), terminal)
     };
     let mut produced_state = false;
     if !advanced.is_empty() {
@@ -993,13 +1008,15 @@ fn commit_bytes_fast_path(
         }
     }
 
-    if let (Some(end_state), Some(end_gss)) = (end_state_to_keep, end_state_gss) {
-        let fused = end_gss.fuse(Some(1));
+    if !end_states_to_keep.is_empty() {
+        let fused = pruned_gss.fuse(Some(1));
         if !fused.is_empty() {
-            state
-                .entry(end_state)
-                .and_modify(|existing| *existing = existing.merge(&fused))
-                .or_insert(fused);
+            for &end_state in &end_states_to_keep {
+                state
+                    .entry(end_state)
+                    .and_modify(|existing| *existing = existing.merge(&fused))
+                    .or_insert_with(|| fused.clone());
+            }
             produced_state = true;
         }
     }
@@ -1098,9 +1115,9 @@ fn commit_bytes_full_width_fast_path(
             }
         }
 
-        if let Some(end_state) = exec_result.end_state {
+        for &end_state in &exec_result.end_state {
             if end_state_may_advance(constraint, &pruned_gss, end_state) {
-                merge_parser_state(&mut output, end_state, pruned_gss);
+                merge_parser_state(&mut output, end_state, pruned_gss.clone());
             }
         }
     }
@@ -1277,9 +1294,9 @@ fn commit_bytes_small_queue_fast_path(
                   }
             }
 
-            if let Some(end_state) = exec_result.end_state {
+            for &end_state in &exec_result.end_state {
                 if end_state_may_advance(constraint, &gss_at_offset, end_state) {
-                    merge_parser_state(&mut pending_state, end_state, gss_at_offset);
+                    merge_parser_state(&mut pending_state, end_state, gss_at_offset.clone());
                 }
             }
         }
@@ -1662,7 +1679,7 @@ fn commit_bytes_direct_linear_fast_path(
                 )));
             }
             let exec_result = TokenizerExecResult {
-                end_state: step.end_state,
+                end_state: step.end_state.into_iter().collect(),
                 matches: Vec::new(),
             };
             let future_start = profile.as_ref().map(|_| std::time::Instant::now());
@@ -1790,7 +1807,7 @@ fn commit_bytes_fast_path_profiled(
         return None;
     };
 
-    let no_end_state = exec_result.end_state.is_none();
+    let no_end_state = exec_result.end_state.is_empty();
     let all_accs_empty = no_end_state
         && gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
 
@@ -1895,7 +1912,7 @@ fn commit_bytes_fast_path_profiled(
                 }
             }
             let mut remapped = BTreeMap::new();
-            if let Some(end_state) = exec_result.end_state {
+            for &end_state in &exec_result.end_state {
                 if let Some(d) = td.get(&tokenizer_state) {
                     remapped
                         .entry(end_state)
@@ -1915,11 +1932,13 @@ fn commit_bytes_fast_path_profiled(
     profile.prune_ns = profile.fast_path_prune_ns;
 
     let end_state_check_start = Instant::now();
-    let end_state_to_keep = exec_result
+    let end_states_to_keep: TokenizerStateSet = exec_result
         .end_state
-        .filter(|&end_state| end_state_may_advance(constraint, &pruned_gss, end_state));
+        .iter()
+        .copied()
+        .filter(|&end_state| end_state_may_advance(constraint, &pruned_gss, end_state))
+        .collect();
     profile.fast_path_end_state_check_ns = end_state_check_start.elapsed().as_nanos() as u64;
-    let end_state_gss = end_state_to_keep.map(|_| pruned_gss.clone());
 
     let advance_start = Instant::now();
     let advanced = advance_parser_stacks_owned(constraint, pruned_gss.clone(), terminal);
@@ -1970,18 +1989,20 @@ fn commit_bytes_fast_path_profiled(
         profile.advance_ns = profile.fast_path_advance_ns;
     }
 
-    if let (Some(end_state), Some(end_gss)) = (end_state_to_keep, end_state_gss) {
+    if !end_states_to_keep.is_empty() {
         let fuse_start = Instant::now();
-        let fused = end_gss.fuse(Some(1));
+        let fused = pruned_gss.fuse(Some(1));
         let fuse_elapsed = fuse_start.elapsed().as_nanos() as u64;
         profile.fast_path_fuse_ns += fuse_elapsed;
         profile.fuse_ns += fuse_elapsed;
         if !fused.is_empty() {
             let update_start = Instant::now();
-            state
-                .entry(end_state)
-                .and_modify(|existing| *existing = existing.merge(&fused))
-                .or_insert(fused);
+            for &end_state in &end_states_to_keep {
+                state
+                    .entry(end_state)
+                    .and_modify(|existing| *existing = existing.merge(&fused))
+                    .or_insert_with(|| fused.clone());
+            }
             profile.fast_path_state_update_ns += update_start.elapsed().as_nanos() as u64;
             produced_state = true;
         }
@@ -2074,7 +2095,7 @@ fn commit_bytes_impl_profiled(
             }
 
             let linear_eligibility_start = Instant::now();
-            let linear_fast_path_eligible = !exec_result.end_state.is_some_and(|end_state| {
+            let linear_fast_path_eligible = !exec_result.end_state.iter().copied().any(|end_state| {
                     state
                         .values()
                         .next()
@@ -2267,7 +2288,7 @@ fn commit_bytes_impl_profiled(
                                     profile.queue_enqueue_ns += enqueue_start.elapsed().as_nanos() as u64;
                                 }
 
-                                if let Some(end_state) = exec_result.end_state {
+                                for &end_state in &exec_result.end_state {
                                     let may_start = Instant::now();
                                     let may_advance =
                                         end_state_may_advance(constraint, &gss_at_offset, end_state);
@@ -2283,7 +2304,7 @@ fn commit_bytes_impl_profiled(
                                         bytes.len(),
                                         bytes.len(),
                                         end_state,
-                                        gss_at_offset,
+                                        gss_at_offset.clone(),
                                     );
                                     profile.queue_enqueue_ns += enqueue_start.elapsed().as_nanos() as u64;
                                 }
@@ -2459,7 +2480,7 @@ fn commit_bytes_impl_profiled(
                 profile.queue_enqueue_ns += enqueue_start.elapsed().as_nanos() as u64;
             }
 
-            if let Some(end_state) = exec_result.end_state {
+            for &end_state in &exec_result.end_state {
                 let may_start = Instant::now();
                 let may_advance = end_state_may_advance(constraint, &gss_at_offset, end_state);
                 profile.may_advance_ns += may_start.elapsed().as_nanos() as u64;
@@ -2474,7 +2495,7 @@ fn commit_bytes_impl_profiled(
                     bytes.len(),
                     bytes.len(),
                     end_state,
-                    gss_at_offset,
+                    gss_at_offset.clone(),
                 );
                 profile.queue_enqueue_ns += enqueue_start.elapsed().as_nanos() as u64;
             }
@@ -2565,7 +2586,14 @@ fn commit_bytes_linear_fast_path(
             };
         };
 
-        if let Some(end_state) = exec_result.end_state
+        if exec_result.end_state.len() > 1 {
+            return if offset > 0 {
+                LinearFastPathResult::Continue { gss, offset }
+            } else {
+                LinearFastPathResult::Restart
+            };
+        }
+        if let Some(end_state) = exec_result.end_state.first().copied()
             && let Some(stack) = carried_stack.as_ref()
         {
             let keep_carried = stack.top().copied().is_some_and(|top_state| {
@@ -2584,7 +2612,7 @@ fn commit_bytes_linear_fast_path(
             }
         }
 
-        if let Some(end_state) = exec_result.end_state {
+        if let Some(end_state) = exec_result.end_state.first().copied() {
             if end_state_may_advance(constraint, &gss, end_state) {
                 return if offset > 0 {
                     LinearFastPathResult::Continue { gss, offset }
@@ -2600,7 +2628,7 @@ fn commit_bytes_linear_fast_path(
                 && let Some(stack) = carried_stack.as_mut()
                 && let Some(top_state) = stack.top().copied()
                 && let Some(Action::Shift(target, is_replace)) = constraint.table.action(top_state, terminal)
-                && exec_result.end_state.is_none_or(|end_state| {
+                && exec_result.end_state.iter().copied().all(|end_state| {
                     end_state != constraint.tokenizer.initial_state()
                         && !constraint.table.advance_row_intersects(
                             top_state,
@@ -2767,7 +2795,17 @@ fn commit_bytes_linear_fast_path_profiled(
         };
 
         let end_state_start = Instant::now();
-        if let Some(end_state) = exec_result.end_state {
+        if exec_result.end_state.len() > 1 {
+            profile.linear_fast_path_end_state_check_ns +=
+                end_state_start.elapsed().as_nanos() as u64;
+            profile.linear_fast_path_total_ns = total_start.elapsed().as_nanos() as u64;
+            return if offset > 0 {
+                LinearFastPathResult::Continue { gss, offset }
+            } else {
+                LinearFastPathResult::Restart
+            };
+        }
+        if let Some(end_state) = exec_result.end_state.first().copied() {
             if end_state_may_advance(constraint, &gss, end_state) {
                 profile.linear_fast_path_end_state_check_ns +=
                     end_state_start.elapsed().as_nanos() as u64;
@@ -2973,7 +3011,9 @@ fn commit_bytes_impl(
 
         if !exec_result
             .end_state
-            .is_some_and(|end_state| {
+            .iter()
+            .copied()
+            .any(|end_state| {
                 state
                     .values()
                     .next()
@@ -3091,7 +3131,7 @@ fn commit_bytes_impl(
                                 );
                             }
 
-                            if let Some(end_state) = exec_result.end_state {
+                            for &end_state in &exec_result.end_state {
                                 if !end_state_may_advance(constraint, &gss_at_offset, end_state) {
                                     continue;
                                 }
@@ -3102,7 +3142,7 @@ fn commit_bytes_impl(
                                     bytes.len(),
                                     bytes.len(),
                                     end_state,
-                                    gss_at_offset,
+                                    gss_at_offset.clone(),
                                 );
                             }
                         }
@@ -3126,8 +3166,9 @@ fn commit_bytes_impl(
         let parser_gss = state.values().next().unwrap();
         let actionable_terminals = ActionableTerminals::from_gss(constraint, parser_gss);
 
-        if let Some(end_state) = exec_result.end_state {
-            bufs.remapped_tokenizer_states.insert(tokenizer_state, end_state);
+        if !exec_result.end_state.is_empty() {
+            bufs.remapped_tokenizer_states
+                .insert(tokenizer_state, exec_result.end_state.clone());
         }
 
         for matched in &exec_result.matches {
@@ -3155,8 +3196,9 @@ fn commit_bytes_impl(
             let actionable_terminals = ActionableTerminals::from_gss(constraint, parser_gss);
             let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
 
-            if let Some(end_state) = exec_result.end_state {
-                bufs.remapped_tokenizer_states.insert(tokenizer_state, end_state);
+            if !exec_result.end_state.is_empty() {
+                bufs.remapped_tokenizer_states
+                    .insert(tokenizer_state, exec_result.end_state.clone());
             }
 
             for matched in &exec_result.matches {
@@ -3262,7 +3304,7 @@ fn commit_bytes_impl(
                 );
             }
 
-            if let Some(end_state) = exec_result.end_state {
+            for &end_state in &exec_result.end_state {
                 if !end_state_may_advance(constraint, &gss_at_offset, end_state) {
                     continue;
                 }
@@ -3273,7 +3315,7 @@ fn commit_bytes_impl(
                     bytes.len(),
                     bytes.len(),
                     end_state,
-                    gss_at_offset,
+                    gss_at_offset.clone(),
                 );
             }
         }

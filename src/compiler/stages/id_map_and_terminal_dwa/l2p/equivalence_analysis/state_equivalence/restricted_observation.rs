@@ -871,7 +871,7 @@ mod tests {
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::automata::lexer::Lexer;
-    use crate::automata::lexer::compile::build_regex;
+    use crate::automata::lexer::compile::build_regex_monolithic as build_regex;
 
     fn tokenizer(expressions: Vec<Expr>) -> Tokenizer {
         let terminal_count = expressions.len() as u32;

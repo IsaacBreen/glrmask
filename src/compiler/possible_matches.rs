@@ -5,8 +5,9 @@ use std::rc::Rc;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
-use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::lexer::tokenizer::{Tokenizer, TokenizerStateSet};
 use crate::grammar::flat::TerminalID;
 use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
@@ -35,7 +36,7 @@ fn merge_possible_match_maps(into: &mut PossibleMatchMap, other: &PossibleMatchM
 pub(crate) struct PossibleMatchesComputer<'a> {
     tokenizer: &'a Tokenizer,
     canonical_state: Option<&'a [u32]>,
-    cache: FxHashMap<(usize, u32), Rc<PossibleMatchMap>>,
+    cache: FxHashMap<(usize, TokenizerStateSet), Rc<PossibleMatchMap>>,
     reachable_cache: FxHashMap<usize, Rc<RangeSetBlaze<u32>>>,
     self_loop_bytes: FxHashMap<u32, U8Set>,
     flat_transitions: Vec<Option<Box<[u32; 256]>>>,
@@ -98,7 +99,23 @@ impl<'a> PossibleMatchesComputer<'a> {
         node: &VocabPrefixTreeNode,
         tokenizer_state: u32,
     ) -> Rc<PossibleMatchMap> {
-        let cache_key = (node as *const VocabPrefixTreeNode as usize, tokenizer_state);
+        let states = self
+            .tokenizer
+            .execute_from_state_end_only(&[], tokenizer_state);
+        self.possible_matches_for_node_states(node, states)
+    }
+
+    fn possible_matches_for_node_states(
+        &mut self,
+        node: &VocabPrefixTreeNode,
+        mut tokenizer_states: TokenizerStateSet,
+    ) -> Rc<PossibleMatchMap> {
+        tokenizer_states.sort_unstable();
+        tokenizer_states.dedup();
+        let cache_key = (
+            node as *const VocabPrefixTreeNode as usize,
+            tokenizer_states.clone(),
+        );
         if let Some(cached) = self.cache.get(&cache_key) {
             return Rc::clone(cached);
         }
@@ -110,37 +127,54 @@ impl<'a> PossibleMatchesComputer<'a> {
         // continuations.
         if node.has_token() {
             let token_id = node.token_id() as u32;
-            for terminal in self.tokenizer.matched_terminals_iter(tokenizer_state) {
-                result.entry(terminal).or_default().insert(token_id);
+            for &tokenizer_state in &tokenizer_states {
+                for terminal in self.tokenizer.matched_terminals_iter(tokenizer_state) {
+                    result.entry(terminal).or_default().insert(token_id);
+                }
             }
         }
 
         for (segment_bytes, child) in node.iter_children() {
-            let mut current_state = tokenizer_state;
-            let mut segment_blocked = false;
+            let mut current_states = tokenizer_states.clone();
             let reachable = self.reachable_for_node(child);
 
             for &byte in segment_bytes {
-                let Some(next_state) = self.fast_step(current_state, byte) else {
-                    segment_blocked = true;
-                    break;
+                current_states = if current_states.len() == 1
+                    && !self.tokenizer.has_epsilon_transitions()
+                {
+                    match self.fast_step(current_states[0], byte) {
+                        Some(next) => SmallVec::from_buf([next]),
+                        None => TokenizerStateSet::new(),
+                    }
+                } else {
+                    self.tokenizer.step_all(&current_states, byte)
                 };
-                current_state = next_state;
-                for terminal in self.tokenizer.matched_terminals_iter(current_state) {
-                    let existing = result.entry(terminal).or_default();
-                    merge_token_ids(existing, reachable.as_ref());
+                if current_states.is_empty() {
+                    break;
+                }
+                for &current_state in &current_states {
+                    for terminal in self.tokenizer.matched_terminals_iter(current_state) {
+                        let existing = result.entry(terminal).or_default();
+                        merge_token_ids(existing, reachable.as_ref());
+                    }
                 }
             }
 
-            if !segment_blocked && !self.tokenizer.is_end(current_state) {
-                let descend_state = self
-                    .canonical_state
-                    .and_then(|map| map.get(current_state as usize).copied())
-                    .unwrap_or(current_state);
-                if self.can_skip_self_loop_subtree(child, descend_state) {
+            current_states.retain(|state| !self.tokenizer.is_end(*state));
+            if !current_states.is_empty() {
+                if let Some(map) = self.canonical_state {
+                    for state in &mut current_states {
+                        *state = map.get(*state as usize).copied().unwrap_or(*state);
+                    }
+                    current_states.sort_unstable();
+                    current_states.dedup();
+                }
+                if current_states.len() == 1
+                    && self.can_skip_self_loop_subtree(child, current_states[0])
+                {
                     continue;
                 }
-                let child_matches = self.possible_matches_for_node(child, descend_state);
+                let child_matches = self.possible_matches_for_node_states(child, current_states);
                 merge_possible_match_maps(&mut result, child_matches.as_ref());
             }
         }

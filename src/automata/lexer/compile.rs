@@ -1586,18 +1586,139 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
 }
 
 pub fn build_regex(exprs: &[Expr]) -> Regex {
-    let dfa = compile_with_plan(build_exclusion_compile_plan(exprs));
+    let partitions = (0..exprs.len() as u32).collect::<Vec<_>>();
+    build_regex_partitioned(exprs, &partitions)
+}
 
-    Regex { dfa }
+/// Compile all expressions into one traditional deterministic lexer. This is
+/// retained for DFA-specific analyses and their unit tests. Normal tokenizer
+/// construction deliberately uses the epsilon-partitioned stress path above.
+pub(crate) fn build_regex_monolithic(exprs: &[Expr]) -> Regex {
+    Regex {
+        dfa: compile_with_plan(build_exclusion_compile_plan(exprs)),
+    }
 }
 
 pub fn build_regex_with_profile_labels(exprs: &[Expr], visible_labels: &[String]) -> Regex {
-    let dfa = compile_with_plan(build_exclusion_compile_plan_with_labels(
-        exprs,
-        Some(visible_labels),
-    ));
+    let partitions = (0..exprs.len() as u32).collect::<Vec<_>>();
+    build_regex_partitioned_with_profile_labels(exprs, visible_labels, &partitions)
+}
 
-    Regex { dfa }
+/// Compile terminals in caller-selected deterministic partitions, then join
+/// those partitions with epsilon edges from one global start state. Terminals
+/// sharing a partition may be jointly determinized; terminals in different
+/// partitions can never cause a cross-partition subset/product blow-up.
+pub(crate) fn build_regex_partitioned(exprs: &[Expr], partitions: &[u32]) -> Regex {
+    Regex {
+        dfa: compile_terminal_partitions(exprs, None, partitions),
+    }
+}
+
+pub(crate) fn build_regex_partitioned_with_profile_labels(
+    exprs: &[Expr],
+    visible_labels: &[String],
+    partitions: &[u32],
+) -> Regex {
+    Regex {
+        dfa: compile_terminal_partitions(exprs, Some(visible_labels), partitions),
+    }
+}
+
+fn compile_terminal_partitions(
+    exprs: &[Expr],
+    visible_labels: Option<&[String]>,
+    partitions: &[u32],
+) -> DFA {
+    assert_eq!(exprs.len(), partitions.len(), "one lexer partition id is required per terminal");
+    if let Some(labels) = visible_labels {
+        assert_eq!(exprs.len(), labels.len(), "one profile label is required per terminal");
+    }
+    if exprs.is_empty() {
+        return compile_with_plan(build_exclusion_compile_plan(exprs));
+    }
+
+    let mut grouped = BTreeMap::<u32, Vec<usize>>::new();
+    for (terminal, &partition) in partitions.iter().enumerate() {
+        grouped.entry(partition).or_default().push(terminal);
+    }
+    if grouped.len() == 1 {
+        return compile_with_plan(build_exclusion_compile_plan_with_labels(exprs, visible_labels));
+    }
+
+    let groups = grouped.into_values().collect::<Vec<_>>();
+    let components: Vec<(Vec<usize>, DFA)> = groups
+        .into_par_iter()
+        .map(|terminal_ids| {
+            let local_exprs = terminal_ids
+                .iter()
+                .map(|&terminal| exprs[terminal].clone())
+                .collect::<Vec<_>>();
+            let local_labels = visible_labels.map(|labels| {
+                terminal_ids
+                    .iter()
+                    .map(|&terminal| labels[terminal].clone())
+                    .collect::<Vec<_>>()
+            });
+            let component = compile_with_plan(build_exclusion_compile_plan_with_labels(
+                &local_exprs,
+                local_labels.as_deref(),
+            ));
+            (terminal_ids, component)
+        })
+        .collect();
+
+    let total_states = 1usize
+        + components
+            .iter()
+            .map(|(_, component)| component.num_states())
+            .sum::<usize>();
+    let mut combined = DFA::new(total_states);
+    combined.ensure_group_capacity(exprs.len());
+
+    let mut offset = 1u32;
+    for (terminal_ids, component) in &components {
+        debug_assert_eq!(component.num_groups(), terminal_ids.len());
+        combined.add_epsilon_transition(0, offset);
+
+        for (local_group, &terminal_id) in terminal_ids.iter().enumerate() {
+            combined.set_group_u8set(
+                terminal_id as u32,
+                *component.group_id_to_u8set(local_group as u32),
+            );
+        }
+
+        for (state_index, state) in component.states().iter().enumerate() {
+            let mapped_state = offset + state_index as u32;
+            let transitions = state
+                .transitions
+                .iter()
+                .map(|(byte, &target)| (byte, offset + target))
+                .collect();
+            combined.set_transitions_from_sorted_entries(mapped_state, transitions);
+            for &target in &state.epsilon_transitions {
+                combined.add_epsilon_transition(mapped_state, offset + target);
+            }
+
+            let mut finalizers = BitSet::new(exprs.len());
+            let mut futures = BitSet::new(exprs.len());
+            for (local_group, &terminal_id) in terminal_ids.iter().enumerate() {
+                if state.finalizers.contains(local_group) {
+                    finalizers.set(terminal_id);
+                }
+                if component
+                    .possible_future_group_ids(state_index as u32)
+                    .contains(local_group)
+                {
+                    futures.set(terminal_id);
+                }
+            }
+            combined.overwrite_state_metadata(mapped_state, finalizers, futures);
+        }
+        offset += component.num_states() as u32;
+    }
+
+    combined.recompute_possible_futures();
+    combined
 }
 
 fn product_state_metadata(
@@ -2955,6 +3076,74 @@ mod tests {
         ]);
         assert!(terminal_matches(expr.clone(), b"b"));
         assert!(!terminal_matches(expr, b"ab"));
+    }
+
+    #[test]
+    fn separate_terminal_partitions_preserve_multiple_live_end_states() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                min: 1,
+                max: None,
+            },
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+
+        assert!(tokenizer.has_epsilon_transitions());
+        let result = tokenizer.execute_from_state(b"a", tokenizer.initial_state());
+        assert_eq!(result.end_state.len(), 2, "both terminal components must remain live");
+        assert_eq!(
+            result.matches.iter().map(|matched| matched.id).collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([0, 1]),
+        );
+
+        let continued = tokenizer.execute_from_state(b"a", result.end_state[1]);
+        assert!(continued.matches.iter().any(|matched| matched.id == 1));
+    }
+
+    #[test]
+    fn explicit_partition_ids_control_joint_determinization() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"z".to_vec()),
+        ];
+        let regex = super::build_regex_partitioned(&expressions, &[7, 7, 9]);
+        assert_eq!(
+            regex.dfa.states()[0].epsilon_transitions.len(),
+            2,
+            "two declared partitions must produce two epsilon branches",
+        );
+        let tokenizer = regex.into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let result = tokenizer.execute_from_state(b"a", tokenizer.initial_state());
+        assert!(result.matches.iter().any(|matched| matched.id == 0));
+        assert!(!result.end_state.is_empty());
+    }
+
+    #[test]
+    fn epsilon_partitioned_tokenizer_round_trips_through_serde() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ab".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let encoded = bincode::serialize(&tokenizer).unwrap();
+        let decoded: Tokenizer = bincode::deserialize(&encoded).unwrap();
+        assert!(decoded.has_epsilon_transitions());
+        assert_eq!(
+            tokenizer.execute_from_state(b"a", tokenizer.initial_state()),
+            decoded.execute_from_state(b"a", decoded.initial_state()),
+        );
     }
 
 }

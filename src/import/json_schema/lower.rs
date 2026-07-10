@@ -278,6 +278,7 @@ impl<'a> Lowerer<'a> {
             rules: self.rules,
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
         simplify_named_grammar_expressions(&mut grammar);
         if let Some(simplify_started_at) = simplify_started_at {

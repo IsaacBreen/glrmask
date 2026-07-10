@@ -12,6 +12,7 @@
 //!
 //! start <nt-name>;
 //! [ignore <TM-NAME>;]
+//! [lexer group <partition-name> ::= <TM-NAME>, ...;]
 //!
 //! // Nonterminal rules
 //! nt rule_name ::= <expr>;
@@ -48,7 +49,7 @@ use crate::automata::unweighted_u32::dfa::Label;
 use crate::automata::unweighted_u32::nfa::NFA;
 use crate::grammar::ast::{GrammarExpr, Quantifier, NamedGrammar, NamedRule};
 use crate::grammar::expr_nfa::ExprNFA;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 // ============================================================
 // Dumper
@@ -60,6 +61,21 @@ pub fn to_glrm(grammar: &NamedGrammar) -> String {
     out.push_str(&format!("start {};\n", grammar.start));
     if let Some(ref ign) = grammar.ignore {
         out.push_str(&format!("ignore {};\n", ign));
+    }
+    let mut lexer_groups = BTreeMap::<&str, Vec<&str>>::new();
+    for (terminal, partition) in &grammar.lexer_partitions {
+        lexer_groups
+            .entry(partition.as_str())
+            .or_default()
+            .push(terminal.as_str());
+    }
+    for (partition, mut terminals) in lexer_groups {
+        terminals.sort_unstable();
+        out.push_str(&format!(
+            "lexer group {} ::= {};\n",
+            partition,
+            terminals.join(", "),
+        ));
     }
     out.push('\n');
 
@@ -662,6 +678,7 @@ impl GlrmParser {
         let mut start: Option<String> = None;
         let mut ignore: Option<String> = None;
         let mut rules: Vec<NamedRule> = Vec::new();
+        let mut lexer_partitions = BTreeMap::<String, String>::new();
 
         loop {
             match self.peek().clone() {
@@ -678,6 +695,37 @@ impl GlrmParser {
                         let name = self.expect_ident()?;
                         self.consume(&Tok::Semi)?;
                         ignore = Some(name);
+                    }
+                    "lexer" => {
+                        self.advance();
+                        match self.advance().clone() {
+                            Tok::Ident(ref keyword) if keyword == "group" => {}
+                            other => {
+                                return Err(err(&format!(
+                                    "expected 'group' after 'lexer', got {:?}",
+                                    other,
+                                )));
+                            }
+                        }
+                        let partition = self.expect_ident()?;
+                        self.consume(&Tok::DeclEq)?;
+                        loop {
+                            let terminal = self.expect_ident()?;
+                            if lexer_partitions
+                                .insert(terminal.clone(), partition.clone())
+                                .is_some()
+                            {
+                                return Err(err(&format!(
+                                    "terminal '{terminal}' is assigned to more than one lexer group",
+                                )));
+                            }
+                            if matches!(self.peek(), Tok::Comma) {
+                                self.advance();
+                                continue;
+                            }
+                            break;
+                        }
+                        self.consume(&Tok::Semi)?;
                     }
                     "nt" => {
                         self.advance();
@@ -707,7 +755,12 @@ impl GlrmParser {
         }
 
         let start = start.ok_or_else(|| err("grammar has no 'start' declaration"))?;
-        Ok(NamedGrammar { rules, start, ignore })
+        Ok(NamedGrammar {
+            rules,
+            start,
+            ignore,
+            lexer_partitions,
+        })
     }
 
     fn parse_rule(&mut self, is_terminal: bool, is_internal: bool) -> Result<NamedRule, GlrMaskError> {
@@ -1422,9 +1475,83 @@ accept 1;
             }],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
         };
 
         let err = lower(&grammar).unwrap_err().to_string();
         assert!(err.contains("complete expression of a nonterminal rule"), "{err}");
+    }
+
+    #[test]
+    fn lexer_groups_round_trip_and_control_tokenizer_partitions() {
+        let grammar = from_glrm(
+            r#"
+start s;
+lexer group words ::= A, B;
+t A ::= "a";
+t B ::= "ab";
+t C ::= "z";
+nt s ::= A | B | C;
+"#,
+        )
+        .unwrap();
+        assert_eq!(grammar.lexer_partitions.get("A").map(String::as_str), Some("words"));
+        assert_eq!(grammar.lexer_partitions.get("B").map(String::as_str), Some("words"));
+        assert!(!grammar.lexer_partitions.contains_key("C"));
+
+        let dumped = to_glrm(&grammar);
+        assert!(dumped.contains("lexer group words ::= A, B;"), "{dumped}");
+        let reparsed = from_glrm(&dumped).unwrap();
+        assert_eq!(reparsed.lexer_partitions, grammar.lexer_partitions);
+
+        let lowered = lower(&grammar).unwrap();
+        assert_eq!(lowered.lexer_partitions.len(), 2);
+        let tokenizer = crate::compiler::pipeline::build_tokenizer(&lowered);
+        assert!(tokenizer.has_epsilon_transitions());
+        assert_eq!(
+            tokenizer.initial_epsilon_branch_count(),
+            2,
+            "A/B should share one component while unspecified C is isolated in stress mode",
+        );
+    }
+
+    #[test]
+    fn named_grammar_isolate_terminal_is_lowered_to_a_partition() {
+        let mut grammar = from_glrm(
+            r#"
+start s;
+t A ::= "a";
+t B ::= "b";
+nt s ::= A B;
+"#,
+        )
+        .unwrap();
+        grammar.isolate_terminal("B");
+        let lowered = lower(&grammar).unwrap();
+        assert_eq!(lowered.lexer_partitions.len(), 1);
+        let b_id = lowered
+            .terminal_names
+            .iter()
+            .find_map(|(&id, name)| (name == "B").then_some(id))
+            .unwrap();
+        assert_eq!(
+            lowered.lexer_partitions.get(&b_id).map(String::as_str),
+            Some("__isolated_B"),
+        );
+    }
+
+    #[test]
+    fn lexer_group_rejects_unknown_terminal_at_lowering() {
+        let grammar = from_glrm(
+            r#"
+start s;
+lexer group bad ::= MISSING;
+t A ::= "a";
+nt s ::= A;
+"#,
+        )
+        .unwrap();
+        let error = lower(&grammar).unwrap_err().to_string();
+        assert!(error.contains("unknown or non-emitting terminal 'MISSING'"), "{error}");
     }
 }

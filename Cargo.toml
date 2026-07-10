@@ -17,7 +17,7 @@ default = []
 [dependencies]
 rustc-hash = "1"
 ahash = "0.8"
-smallvec = "1"
+smallvec = { version = "1", features = ["serde"] }
 im = "15"
 range-set-blaze = "0.3.0"
 hashbrown = "0.15"

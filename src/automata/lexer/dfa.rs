@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 use crate::ds::char_transitions::CharTransitions;
 use crate::ds::bitset::BitSet;
@@ -70,6 +71,10 @@ fn intersection_missing_group_indices(
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(super) struct DFAState {
     pub(super) transitions: CharTransitions<u32>,
+    /// Epsilon transitions are the only source of lexer nondeterminism. Byte
+    /// transitions remain deterministic within an individual physical state.
+    #[serde(default)]
+    pub(super) epsilon_transitions: Vec<u32>,
     pub(super) finalizers: BitSet,
     possible_future_group_ids: BitSet,
 }
@@ -103,6 +108,7 @@ impl DFA {
         let groups = self.group_id_to_u8set.len();
         self.states.push(DFAState {
             transitions: CharTransitions::default(),
+            epsilon_transitions: Vec::new(),
             finalizers: BitSet::new(groups),
             possible_future_group_ids: BitSet::new(groups),
         });
@@ -122,6 +128,80 @@ impl DFA {
         if let Some(state) = self.states.get_mut(from as usize) {
             state.transitions.insert(byte, to);
         }
+    }
+
+    pub(super) fn add_epsilon_transition(&mut self, from: u32, to: u32) {
+        if let Some(state) = self.states.get_mut(from as usize) {
+            if !state.epsilon_transitions.contains(&to) {
+                state.epsilon_transitions.push(to);
+            }
+        }
+    }
+
+    pub(super) fn has_epsilon_transitions(&self) -> bool {
+        self.states
+            .iter()
+            .any(|state| !state.epsilon_transitions.is_empty())
+    }
+
+    pub(super) fn epsilon_closure(&self, roots: &[u32]) -> SmallVec<[u32; 1]> {
+        if roots.len() == 1 {
+            let root = roots[0];
+            if self
+                .states
+                .get(root as usize)
+                .is_some_and(|state| state.epsilon_transitions.is_empty())
+            {
+                return SmallVec::from_buf([root]);
+            }
+        }
+        let mut closure = SmallVec::<[u32; 1]>::new();
+        let mut seen = vec![false; self.states.len()];
+        let mut stack = Vec::with_capacity(roots.len());
+        for &root in roots {
+            if (root as usize) < self.states.len() && !seen[root as usize] {
+                seen[root as usize] = true;
+                stack.push(root);
+            }
+        }
+        while let Some(state) = stack.pop() {
+            closure.push(state);
+            for &target in &self.states[state as usize].epsilon_transitions {
+                if !seen[target as usize] {
+                    seen[target as usize] = true;
+                    stack.push(target);
+                }
+            }
+        }
+        closure.sort_unstable();
+        closure
+    }
+
+    pub(super) fn step_all(&self, states: &[u32], byte: u8) -> SmallVec<[u32; 1]> {
+        if states.len() == 1 {
+            let state = states[0];
+            if self.states[state as usize].epsilon_transitions.is_empty() {
+                let Some(target) = self.step(state, byte) else {
+                    return SmallVec::new();
+                };
+                if self.states[target as usize].epsilon_transitions.is_empty() {
+                    return SmallVec::from_buf([target]);
+                }
+            }
+        }
+        let closure = self.epsilon_closure(states);
+        let mut targets = SmallVec::<[u32; 1]>::new();
+        for state in closure {
+            if let Some(target) = self.step(state, byte) {
+                targets.push(target);
+            }
+        }
+        if targets.is_empty() {
+            return targets;
+        }
+        targets.sort_unstable();
+        targets.dedup();
+        self.epsilon_closure(&targets)
     }
 
     pub(super) fn set_transitions_from_sorted_entries(
@@ -239,6 +319,12 @@ impl DFA {
                     changed = true;
                 }
             }
+            for target in &mut state.epsilon_transitions {
+                if *target == old_target {
+                    *target = new_target;
+                    changed = true;
+                }
+            }
         }
         changed
     }
@@ -296,6 +382,8 @@ impl DFA {
                 .map(|(byte, &target)| (byte, target))
                 .collect();
             projected.set_transitions_from_sorted_entries(state_index as u32, transitions);
+            projected.states_mut()[state_index].epsilon_transitions =
+                state.epsilon_transitions.clone();
 
             let finalizers = project_bitset(&state.finalizers, num_groups);
             let future = project_bitset(&state.possible_future_group_ids, num_groups);
@@ -320,5 +408,32 @@ impl DFA {
             state.possible_future_group_ids =
                 resized_bitset(&state.possible_future_group_ids, num_groups);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DFA;
+    use crate::ds::bitset::BitSet;
+
+    #[test]
+    fn epsilon_closure_handles_fanout_chains_and_cycles() {
+        let mut automaton = DFA::new(5);
+        automaton.ensure_group_capacity(1);
+        automaton.add_epsilon_transition(0, 1);
+        automaton.add_epsilon_transition(0, 2);
+        automaton.add_epsilon_transition(1, 3);
+        automaton.add_epsilon_transition(2, 3);
+        automaton.add_epsilon_transition(3, 1);
+        automaton.add_transition(3, b'x', 4);
+
+        let mut finalizers = BitSet::new(1);
+        finalizers.set(0);
+        automaton.overwrite_state_metadata(4, finalizers, BitSet::new(1));
+        automaton.recompute_possible_futures();
+
+        assert_eq!(automaton.epsilon_closure(&[0]).as_slice(), &[0, 1, 2, 3]);
+        assert_eq!(automaton.step_all(&[0], b'x').as_slice(), &[4]);
+        assert!(automaton.possible_future_group_ids(0).contains(0));
     }
 }
