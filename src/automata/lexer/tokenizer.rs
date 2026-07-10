@@ -172,6 +172,47 @@ impl Tokenizer {
             .map_or(0, |state| state.epsilon_transitions.len())
     }
 
+    /// Return the deterministic scanner roots behind the special epsilon
+    /// dispatch state produced by `build_regex_partitioned`.
+    ///
+    /// This is deliberately narrower than "has epsilon transitions".  The
+    /// compiler can retain its scalar-state fast paths when the only live
+    /// nondeterminism is a zero-byte fan-out from the global reset state into
+    /// independently deterministic components.  Nullable-start isolation may
+    /// leave an unreachable cloned dispatch state elsewhere in the DFA, so the
+    /// predicate is based on the live reset shape rather than a whole-DFA scan.
+    pub(crate) fn deterministic_dispatch_roots(&self) -> Option<&[u32]> {
+        let start = self.dfa.states().get(self.start_state() as usize)?;
+        if start.epsilon_transitions.len() < 2 || !start.transitions.is_empty() {
+            return None;
+        }
+        if start.epsilon_transitions.iter().any(|&root| {
+            self.dfa
+                .states()
+                .get(root as usize)
+                .is_none_or(|state| !state.epsilon_transitions.is_empty())
+        }) {
+            return None;
+        }
+        Some(&start.epsilon_transitions)
+    }
+
+    #[inline]
+    pub(crate) fn has_deterministic_dispatch(&self) -> bool {
+        self.deterministic_dispatch_roots().is_some()
+    }
+
+    /// Scanner states to use after a terminal boundary.  A conventional DFA
+    /// has one reset state.  A partitioned lexer has one deterministic reset
+    /// state per component; keeping them separate avoids materializing their
+    /// product while preserving cross-component terminal sequences inside one
+    /// vocabulary token.
+    pub(crate) fn deterministic_reset_states(&self) -> TokenizerStateSet {
+        self.deterministic_dispatch_roots()
+            .map(TokenizerStateSet::from_slice)
+            .unwrap_or_else(|| TokenizerStateSet::from_buf([self.initial_state_id()]))
+    }
+
     fn transitions_from(&self, state: u32) -> impl Iterator<Item = (u8, u32)> + '_ {
         self.dfa
             .states()

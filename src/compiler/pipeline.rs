@@ -621,7 +621,7 @@ fn compile_prepared_with_profile_and_table_construction(
         // routed wholly through the general L2P builder, so pre-classification
         // would be both unnecessary and capable of seeding an invalid scalar
         // transition cache.
-        if !tokenizer.has_epsilon_transitions() {
+        if !tokenizer.has_epsilon_transitions() || tokenizer.has_deterministic_dispatch() {
             let _terminal_path_lengths = classify_terminal_path_lengths(
                 &tokenizer,
                 vocab,

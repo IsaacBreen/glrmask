@@ -538,7 +538,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
 
             // ---- Step 6: Trie-walk NWA build ----
             let trie_build_started_at = Instant::now();
-            let roots = seed_root_nodes(&mut nwa, start_state, &simplified_id_map);
+            let roots = seed_root_nodes(tokenizer, &mut nwa, start_state, &simplified_id_map);
             seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
             let _build_profile = build_nwa_via_trie_walk(
                 tokenizer_for_build,

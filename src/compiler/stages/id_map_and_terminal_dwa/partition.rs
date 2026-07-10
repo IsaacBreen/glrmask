@@ -71,7 +71,8 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     let num_terminals = grammar.num_terminals as u32;
     // Classify terminals into L1 (single-byte paths) vs L2+ by default.
     // Set GLRMASK_FORCE_ALL_L2P=1 to skip L1 and route everything through L2P.
-    let force_all_l2p = tokenizer.has_epsilon_transitions()
+    let force_all_l2p = (tokenizer.has_epsilon_transitions()
+        && !tokenizer.has_deterministic_dispatch())
         || std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
 
     let pre_classify_setup_ms =
@@ -118,7 +119,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     }
 
     let use_l2p_vocab_split = has_l2p
-        && !tokenizer.has_epsilon_transitions()
+        && (!tokenizer.has_epsilon_transitions() || tokenizer.has_deterministic_dispatch())
         && split_l2p_vocab_enabled();
     let l2p_vocab_split = use_l2p_vocab_split.then(|| {
         split_vocab_for_active_l2p_terminals(

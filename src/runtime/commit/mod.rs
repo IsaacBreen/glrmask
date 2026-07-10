@@ -892,9 +892,6 @@ fn commit_bytes_fast_path(
     tokenizer_state: u32,
     exec_result: &TokenizerExecResult,
 ) -> Option<Result<(), String>> {
-    if constraint.tokenizer.has_epsilon_transitions() {
-        return None;
-    }
     let gss = state.values().next().unwrap();
     let ignore_terminal = constraint.ignore_terminal;
 
@@ -919,6 +916,14 @@ fn commit_bytes_fast_path(
 
     let no_end_state = exec_result.end_state.is_empty();
     let accs_empty = gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
+    // The stale-exclusion bug that originally required the epsilon guard only
+    // exists when exclusions must be transported from one NFA configuration
+    // to another.  With empty accumulators this routine is already fully
+    // state-set aware: it advances the sole full-width terminal and preserves
+    // every viable lexer continuation independently.
+    if constraint.tokenizer.has_epsilon_transitions() && !accs_empty {
+        return None;
+    }
     let all_accs_empty = no_end_state && accs_empty;
 
     // Ultra-fast path: single Interface, empty accs, no end_state, pure shift.
@@ -1037,7 +1042,9 @@ fn commit_bytes_full_width_fast_path(
     state: &mut BTreeMap<u32, ParserGSS>,
     bytes: &[u8],
 ) -> Option<Result<(), String>> {
-    if constraint.tokenizer.has_epsilon_transitions() {
+    if constraint.tokenizer.has_epsilon_transitions()
+        && state_has_nonempty_accumulators(state)
+    {
         return None;
     }
     if state.len() > 2 {
@@ -1789,6 +1796,12 @@ fn commit_bytes_fast_path_profiled(
     let total_start = Instant::now();
     let gss = state.values().next().unwrap();
     let ignore_terminal = constraint.ignore_terminal;
+    if constraint.tokenizer.has_epsilon_transitions()
+        && !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
+    {
+        profile.failed_fast_path_probe_ns += total_start.elapsed().as_nanos() as u64;
+        return None;
+    }
 
     let scan_start = Instant::now();
     let mut sole_terminal: Option<u32> = None;
@@ -2048,6 +2061,30 @@ fn commit_bytes_impl_profiled(
     }
 
     let ignore_terminal = constraint.ignore_terminal;
+
+    if allow_fast_paths
+        && constraint.tokenizer.has_epsilon_transitions()
+        && state.len() == 1
+    {
+        let (&tokenizer_state, _) = state.iter().next().unwrap();
+        let exec_start = Instant::now();
+        let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
+        let exec_elapsed = exec_start.elapsed().as_nanos() as u64;
+        profile.initial_exec_ns = exec_elapsed;
+        profile.exec_ns = exec_elapsed;
+        profile.fast_path_tokenizer_exec_ns = exec_elapsed;
+        if let Some(result) = commit_bytes_fast_path_profiled(
+            constraint,
+            state,
+            bytes,
+            tokenizer_state,
+            &exec_result,
+            advances.as_deref_mut(),
+            &mut profile,
+        ) {
+            return result.map(|()| profile);
+        }
+    }
 
     if allow_fast_paths && !constraint.tokenizer.has_epsilon_transitions() && state.len() == 1 {
         let (&tokenizer_state, parser_gss) = state.iter().next().unwrap();
@@ -2954,7 +2991,7 @@ fn commit_bytes_impl(
 
     let ignore_terminal = constraint.ignore_terminal;
 
-    if !constraint.tokenizer.has_epsilon_transitions() && state.len() == 1 {
+    if state.len() == 1 {
         let (&tokenizer_state, _) = state.iter().next().unwrap();
         let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
         if let Some(result) = commit_bytes_fast_path(
@@ -3007,7 +3044,7 @@ fn commit_bytes_impl(
         return result;
     }
 
-    if !constraint.tokenizer.has_epsilon_transitions() && state.len() == 1 {
+    if state.len() == 1 {
         let (&tokenizer_state, _) = state.iter().next().unwrap();
         let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
 
@@ -3524,5 +3561,29 @@ mod tests {
             }
             frontier = next;
         }
+    }
+
+    #[test]
+    fn epsilon_full_width_terminal_with_empty_accumulators_uses_fast_path() {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                lexer group left ::= A;
+                lexer group right ::= B;
+                t A ::= "a";
+                t B ::= "b";
+                nt start ::= A | B;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        assert!(constraint.tokenizer.has_deterministic_dispatch());
+
+        let mut state = constraint.start();
+        let profile = state.commit_token_profiled(0).unwrap();
+        assert!(profile.fast_path_total_ns > 0, "profile={profile:?}");
+        assert_eq!(profile.n_queue_entries, 0, "profile={profile:?}");
+        assert_eq!(profile.n_advances, 1, "profile={profile:?}");
     }
 }

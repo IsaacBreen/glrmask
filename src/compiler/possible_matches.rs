@@ -87,7 +87,9 @@ impl<'a> PossibleMatchesComputer<'a> {
         node: &VocabPrefixTreeNode,
         tokenizer_state: u32,
     ) -> bool {
-        if self.tokenizer.has_epsilon_transitions() {
+        if self.tokenizer.has_epsilon_transitions()
+            && !self.tokenizer.has_deterministic_dispatch()
+        {
             return false;
         }
         let self_loop_bytes = self
@@ -143,7 +145,8 @@ impl<'a> PossibleMatchesComputer<'a> {
 
             for &byte in segment_bytes {
                 current_states = if current_states.len() == 1
-                    && !self.tokenizer.has_epsilon_transitions()
+                    && (!self.tokenizer.has_epsilon_transitions()
+                        || self.tokenizer.has_deterministic_dispatch())
                 {
                     match self.fast_step(current_states[0], byte) {
                         Some(next) => SmallVec::from_buf([next]),
