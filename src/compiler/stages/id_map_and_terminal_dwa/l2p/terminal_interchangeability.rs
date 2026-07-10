@@ -6372,7 +6372,7 @@ impl InterchangeabilityDfa {
         terminal: TerminalID,
         candidate_membership: &[bool],
         pair_stats: Option<&[GenericOutputPairStats]>,
-    ) -> (Vec<u64>, Option<Vec<usize>>) {
+    ) -> (SmallVec<[u64; 8]>, Option<SmallVec<[usize; 8]>>) {
         #[derive(Clone, Copy)]
         struct GenericEdge {
             byte: u8,
@@ -6385,8 +6385,10 @@ impl InterchangeabilityDfa {
         for (index, &class) in cone.iter().enumerate() {
             index_by_class.push((class, index));
         }
-        let mut rows = Vec::<SmallVec<[GenericEdge; 8]>>::with_capacity(cone.len());
-        let mut root_flags = Vec::<bool>::with_capacity(cone.len());
+        let mut rows = SmallVec::<[SmallVec<[GenericEdge; 8]>; 8]>::new();
+        let mut root_flags = SmallVec::<[bool; 8]>::new();
+        rows.reserve(cone.len());
+        root_flags.reserve(cone.len());
         for &class in cone {
             let state = quotient.representative_by_class[class] as usize;
             root_flags.push(state == self.topology.initial_state);
@@ -6420,8 +6422,10 @@ impl InterchangeabilityDfa {
             rows.push(row);
         }
 
-        let mut colors = vec![0u64; cone.len()];
-        let mut next = vec![0u64; cone.len()];
+        let mut colors = SmallVec::<[u64; 8]>::new();
+        let mut next = SmallVec::<[u64; 8]>::new();
+        colors.resize(cone.len(), 0);
+        next.resize(cone.len(), 0);
         // Fixed-depth refinement is an isomorphism invariant. Hash collisions
         // only coarsen candidate groups; the exact petal certificate below is
         // the sole accepting proof.
@@ -6455,23 +6459,164 @@ impl InterchangeabilityDfa {
             }
             std::mem::swap(&mut colors, &mut next);
         }
-        let mut order = (0..colors.len()).collect::<Vec<_>>();
+        let mut order = (0..colors.len()).collect::<SmallVec<[usize; 8]>>();
         order.sort_unstable_by_key(|&index| colors[index]);
         let unique = order
             .windows(2)
             .all(|pair| colors[pair[0]] != colors[pair[1]]);
-        let mut sorted_colors = colors;
+        let mut sorted_colors = colors.clone();
         sorted_colors.sort_unstable();
-        let mut code = Vec::with_capacity(sorted_colors.len() + 1);
+        let mut code = SmallVec::<[u64; 8]>::new();
+        code.reserve(sorted_colors.len() + 1);
         code.push(cone.len() as u64);
         code.extend(sorted_colors);
         let canonical_order = unique.then(|| {
             order
                 .into_iter()
                 .map(|index| cone[index])
-                .collect::<Vec<_>>()
+                .collect::<SmallVec<[usize; 8]>>()
         });
         (code, canonical_order)
+    }
+
+    fn normalized_group_track_equal(
+        left: &OutputBits,
+        left_self: TerminalID,
+        right: &OutputBits,
+        right_self: TerminalID,
+        group_membership: &[bool],
+        group_size: usize,
+    ) -> bool {
+        let classify = |track: &OutputBits, self_terminal: TerminalID| {
+            let mut group_count = 0usize;
+            let mut self_present = false;
+            for &terminal in &track.0 {
+                if group_membership
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    group_count += 1;
+                    self_present |= terminal == self_terminal;
+                }
+            }
+            if group_count == 0 {
+                Some(0u8)
+            } else if group_count == group_size {
+                Some(1u8)
+            } else if group_count == 1 && self_present {
+                Some(2u8)
+            } else {
+                None
+            }
+        };
+        if classify(left, left_self) != classify(right, right_self) {
+            return false;
+        }
+        left.0
+            .iter()
+            .copied()
+            .filter(|&terminal| {
+                !group_membership
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+            })
+            .eq(right.0.iter().copied().filter(|&terminal| {
+                !group_membership
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+            }))
+    }
+
+    fn normalized_group_output_equal(
+        left: &OutputPair,
+        left_self: TerminalID,
+        right: &OutputPair,
+        right_self: TerminalID,
+        group_membership: &[bool],
+        group_size: usize,
+    ) -> bool {
+        Self::normalized_group_track_equal(
+            &left.finalizers,
+            left_self,
+            &right.finalizers,
+            right_self,
+            group_membership,
+            group_size,
+        ) && Self::normalized_group_track_equal(
+            &left.future_finalizers,
+            left_self,
+            &right.future_finalizers,
+            right_self,
+            group_membership,
+            group_size,
+        )
+    }
+
+    fn singleton_petal_rows_match(
+        &self,
+        quotient: &SupportQuotient,
+        left_class: usize,
+        left_terminal: TerminalID,
+        right_class: usize,
+        right_terminal: TerminalID,
+        union_petals: &[bool],
+        group_membership: &[bool],
+        group_size: usize,
+    ) -> bool {
+        let left_state = quotient.representative_by_class[left_class] as usize;
+        let right_state = quotient.representative_by_class[right_class] as usize;
+        if (left_state == self.topology.initial_state)
+            != (right_state == self.topology.initial_state)
+        {
+            return false;
+        }
+        let left_edges = self.topology.edges_from(left_state);
+        let right_edges = self.topology.edges_from(right_state);
+        if left_edges.len() != right_edges.len() {
+            return false;
+        }
+        for (&(left_byte, left_destination), &(right_byte, right_destination)) in
+            left_edges.iter().zip(right_edges)
+        {
+            if left_byte != right_byte {
+                return false;
+            }
+            let left_destination = left_destination as usize;
+            let right_destination = right_destination as usize;
+            let left_target = quotient.class_for_state[left_destination] as usize;
+            let right_target = quotient.class_for_state[right_destination] as usize;
+            let left_internal = left_target == left_class;
+            let right_internal = right_target == right_class;
+            if left_internal != right_internal {
+                return false;
+            }
+            if !left_internal {
+                if union_petals[left_target]
+                    || union_petals[right_target]
+                    || left_target != right_target
+                {
+                    return false;
+                }
+            }
+            let left_output =
+                &self.output_pairs[self.output_pair_by_state[left_destination] as usize];
+            let right_output =
+                &self.output_pairs[self.output_pair_by_state[right_destination] as usize];
+            if !Self::normalized_group_output_equal(
+                left_output,
+                left_terminal,
+                right_output,
+                right_terminal,
+                group_membership,
+                group_size,
+            ) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Fast exact batch certificate. The fixed-depth cone colors only propose
@@ -6569,6 +6714,30 @@ impl InterchangeabilityDfa {
                     return None;
                 }
             }
+        }
+
+        // The overwhelmingly common case is one moved quotient class per
+        // terminal. Compare those rows directly, normalizing SELF and the one
+        // internal petal target. This is the same exact certificate as the
+        // canonical code below without allocating one Vec<u64> per member.
+        if canonical_orders.iter().all(|order| order.len() == 1) {
+            let representative_class = canonical_orders[0][0];
+            let representative_terminal = members[0];
+            for (&terminal, order) in members[1..].iter().zip(&canonical_orders[1..]) {
+                if !self.singleton_petal_rows_match(
+                    quotient,
+                    representative_class,
+                    representative_terminal,
+                    order[0],
+                    terminal,
+                    &union_petals,
+                    &group_membership,
+                    members.len(),
+                ) {
+                    return None;
+                }
+            }
+            return Some(canonical_orders);
         }
 
         // The color order is only a proposal. Compare the complete labelled
@@ -8489,7 +8658,8 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 .expect("support quotient initialized for petal batching");
             let mut residual_groups = Vec::<Vec<TerminalID>>::new();
             let mut cone_by_terminal = vec![None::<Vec<usize>>; active_terminals.len()];
-            let mut order_by_terminal = vec![None::<Vec<usize>>; active_terminals.len()];
+            let mut order_by_terminal =
+                vec![None::<SmallVec<[usize; 8]>>; active_terminals.len()];
             let parallel_petal_min_terminals = std::env::var(
                 "GLRMASK_TI_PARALLEL_PETAL_MIN_TERMINALS",
             )
@@ -8504,7 +8674,8 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 }
                 let pair_stats = (candidate_group.len() >= 64)
                     .then(|| dfa.generic_output_pair_stats(&membership));
-                let mut by_code = BTreeMap::<Vec<u64>, Vec<TerminalID>>::new();
+                let mut by_code =
+                    BTreeMap::<SmallVec<[u64; 8]>, Vec<TerminalID>>::new();
                 let classify_terminal = |terminal: TerminalID| {
                     let cone = dfa.support_quotient_terminal_cone(quotient, terminal);
                     let (code, order) = dfa.support_terminal_cone_generic_form(
@@ -8927,7 +9098,8 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                     }
                     let pair_stats = (candidate_group.len() >= 64)
                         .then(|| dfa.generic_output_pair_stats(&membership));
-                    let mut by_code = BTreeMap::<Vec<u64>, Vec<TerminalID>>::new();
+                    let mut by_code =
+                        BTreeMap::<SmallVec<[u64; 8]>, Vec<TerminalID>>::new();
                     for &terminal in candidate_group {
                         let cone = dfa.support_quotient_terminal_cone(quotient, terminal);
                         let (code, _) = dfa.support_terminal_cone_generic_form(
