@@ -185,6 +185,18 @@ struct SupportQuotient {
     scanner_representative_for_class: Arc<[u32]>,
 }
 
+/// Exact stable support partition retained across iterative TI rounds. Removing
+/// active terminals only projects labels away, so the next round's stable
+/// partition can only coarsen this one. The active mask guards against using the
+/// seed outside that monotone discovery sequence.
+#[derive(Clone)]
+struct SupportPartitionSeed {
+    active_terminals: Arc<[bool]>,
+    class_for_state: Arc<[u32]>,
+    representative_by_class: Arc<[u32]>,
+}
+
+
 /// Per-swap output-label relabelling. The immutable base ids represent the
 /// original frozen output pairs; ids allocated after `base_count` are local to
 /// this swap and compare equal only to the same full mapped pair.
@@ -651,6 +663,10 @@ pub(crate) struct TiDiscoveryContext {
     raw: Arc<TiRawDiscoveryData>,
     root_output_signatures: Vec<RootOutputSignature>,
     root_observed_states: usize,
+    /// Stable support partition from the latest round that needed one. Later
+    /// rounds only remove active terminals, so they may solve exactly on this
+    /// quotient rather than over every discovery-domain state again.
+    support_partition_seed: std::cell::RefCell<Option<SupportPartitionSeed>>,
     /// Cross-round memo of the first-round necessary-condition filter.
     /// `canonical_round_one_still_possible(a, b)` depends only on the fixed DFA
     /// topology, canonical Moore rounds, and per-terminal finalizer states -
@@ -687,6 +703,7 @@ impl TiDiscoveryContext {
             raw,
             root_output_signatures,
             root_observed_states,
+            support_partition_seed: std::cell::RefCell::new(None),
             first_round_memo: std::cell::RefCell::new(FxHashMap::default()),
         }
     }
@@ -712,6 +729,7 @@ impl TiDiscoveryContext {
             raw,
             root_output_signatures,
             root_observed_states,
+            support_partition_seed: std::cell::RefCell::new(None),
             first_round_memo: std::cell::RefCell::new(FxHashMap::default()),
         }
     }
@@ -3134,6 +3152,7 @@ struct InterchangeabilityDfa {
     canonical_round_one_left_sources: Vec<u32>,
     canonical_round_one_changed_scratch: SmallVec<[(u32, u32); 16]>,
     canonical_round_one_added_scratch: SmallVec<[u32; 16]>,
+    support_partition_seed: Option<SupportPartitionSeed>,
     support_quotient: Option<SupportQuotient>,
     canonical_quotient: Option<CanonicalQuotient>,
     /// Per raw terminal, the canonical quotient classes whose representative
@@ -3321,14 +3340,28 @@ impl InterchangeabilityDfa {
         topology: Arc<RestrictedTopology>,
     ) -> Self {
         let raw = Arc::new(TiRawDiscoveryData::new(tokenizer, &topology));
-        Self::from_raw_discovery_data(observed_terminals, topology, raw)
+        Self::from_raw_discovery_data(observed_terminals, topology, raw, None)
     }
 
     fn from_context(observed_terminals: &[bool], context: &TiDiscoveryContext) -> Self {
+        let support_partition_seed = context
+            .support_partition_seed
+            .borrow()
+            .as_ref()
+            .filter(|seed| {
+                seed.class_for_state.len() == context.topology.state_count()
+                    && observed_terminals.len() == seed.active_terminals.len()
+                    && observed_terminals
+                        .iter()
+                        .zip(seed.active_terminals.iter())
+                        .all(|(&current, &seed_active)| !current || seed_active)
+            })
+            .cloned();
         Self::from_raw_discovery_data(
             observed_terminals,
             Arc::clone(&context.topology),
             Arc::clone(&context.raw),
+            support_partition_seed,
         )
     }
 
@@ -3336,6 +3369,7 @@ impl InterchangeabilityDfa {
         observed_terminals: &[bool],
         topology: Arc<RestrictedTopology>,
         raw: Arc<TiRawDiscoveryData>,
+        support_partition_seed: Option<SupportPartitionSeed>,
     ) -> Self {
         let state_count = topology.state_count();
         let terminal_bits = |terminals: &[TerminalID]| {
@@ -3487,6 +3521,7 @@ impl InterchangeabilityDfa {
             canonical_round_one_left_sources: Vec::new(),
             canonical_round_one_changed_scratch: SmallVec::new(),
             canonical_round_one_added_scratch: SmallVec::new(),
+            support_partition_seed,
             support_quotient: None,
             canonical_quotient: None,
             terminal_quotient_output_supports: None,
@@ -3527,7 +3562,7 @@ impl InterchangeabilityDfa {
     /// support-transposition proof. Unlike the generic exact fallback, support
     /// certification never reads historical round projections or signature
     /// indexes, so retaining every intermediate `CanonicalRound` is redundant.
-    fn support_identity_stable_partition(&mut self) -> (Vec<u32>, Vec<u32>) {
+    fn support_identity_stable_partition_full(&mut self) -> (Vec<u32>, Vec<u32>) {
         self.ensure_canonical_identity_round(1);
         let mut prev_prev = self.canonical_rounds[0].classes.clone();
         let mut previous = self.canonical_rounds[1].classes.clone();
@@ -3557,6 +3592,83 @@ impl InterchangeabilityDfa {
             "support terminal interchangeability characterization did not stabilize within {} rounds",
             state_count * 2,
         );
+    }
+
+    /// Recompute the current stable partition on a previous round's exact
+    /// quotient. For every old class and byte, old equivalence guarantees a
+    /// unique old target class and old destination output; projection to the
+    /// current active mask preserves that uniformity. Solving the same fixed
+    /// point over old classes is therefore exactly equivalent to solving over
+    /// all states, then lifting the resulting coarsening back.
+    fn support_identity_stable_partition_from_seed(
+        &self,
+        seed: &SupportPartitionSeed,
+    ) -> (Vec<u32>, Vec<u32>) {
+        let old_class_count = seed.representative_by_class.len();
+        let dead_old_class = seed.class_for_state[self.dead_state()] as usize;
+        let mut previous = vec![0u32; old_class_count];
+        for _ in 1..=old_class_count.saturating_mul(2).max(1) {
+            let default_class = previous[dead_old_class];
+            let mut classes_by_signature =
+                FxHashMap::<CanonicalSignature, u32>::default();
+            let mut next = Vec::with_capacity(old_class_count);
+            let mut representative_old_class = Vec::<u32>::new();
+            for old_class in 0..old_class_count {
+                let state = seed.representative_by_class[old_class] as usize;
+                let mut components = SmallVec::<[CanonicalComponent; 8]>::new();
+                for &(byte, destination) in self.topology.edges_from(state) {
+                    let destination = destination as usize;
+                    let target_old_class = seed.class_for_state[destination] as usize;
+                    let previous_class = previous[target_old_class];
+                    let output = self.output_pair_by_state[destination];
+                    if previous_class == default_class && output == 0 {
+                        continue;
+                    }
+                    components.push(CanonicalComponent {
+                        byte,
+                        previous_class,
+                        output,
+                    });
+                }
+                let signature = CanonicalSignature(components);
+                let next_id = classes_by_signature.len() as u32;
+                let class = *classes_by_signature.entry(signature).or_insert_with(|| {
+                    representative_old_class.push(old_class as u32);
+                    next_id
+                });
+                next.push(class);
+            }
+            if same_equality_partition_u32(&previous, &next) {
+                let class_for_state = seed
+                    .class_for_state
+                    .iter()
+                    .map(|&old_class| next[old_class as usize])
+                    .collect::<Vec<_>>();
+                let representative_by_class = representative_old_class
+                    .into_iter()
+                    .map(|old_class| seed.representative_by_class[old_class as usize])
+                    .collect::<Vec<_>>();
+                return (class_for_state, representative_by_class);
+            }
+            previous = next;
+        }
+        panic!(
+            "seeded support terminal interchangeability characterization did not stabilize within {} rounds",
+            old_class_count.saturating_mul(2).max(1),
+        );
+    }
+
+    fn support_identity_stable_partition(&mut self) -> (Vec<u32>, Vec<u32>) {
+        if let Some(seed) = self.support_partition_seed.clone() {
+            let reduced = self.support_identity_stable_partition_from_seed(&seed);
+            if cfg!(debug_assertions) {
+                let full = self.support_identity_stable_partition_full();
+                debug_assert!(same_equality_partition_u32(&reduced.0, &full.0));
+            }
+            reduced
+        } else {
+            self.support_identity_stable_partition_full()
+        }
     }
 
     fn ensure_support_quotient(&mut self) {
@@ -6714,6 +6826,13 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
             );
         }
         assert_partition_invariants(&result, active_terminals);
+        if let Some(quotient) = dfa.support_quotient.as_ref() {
+            *context.support_partition_seed.borrow_mut() = Some(SupportPartitionSeed {
+                active_terminals: Arc::from(active_terminals.to_vec()),
+                class_for_state: Arc::clone(&quotient.class_for_state),
+                representative_by_class: Arc::clone(&quotient.representative_by_class),
+            });
+        }
         TiRoundTransportWitnesses {
             active_before_round: active_terminals.to_vec(),
             partition: result,
