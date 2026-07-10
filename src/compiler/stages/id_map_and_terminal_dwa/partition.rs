@@ -61,6 +61,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     shared_original_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_original_vocab_analysis_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_transition_cache: Option<&std::sync::OnceLock<super::l2p::equivalence_analysis::compat::FlatTransitionCache>>,
+    shared_ti_output_cache: Option<&super::l2p::SharedTiTokenizerOutputCache>,
     shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
@@ -201,6 +202,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                         shared_original_vocab_dfa_cache,
                         shared_original_vocab_analysis_dfa_cache,
                         shared_transition_cache,
+                        shared_ti_output_cache,
                         // All L2P work keeps raw lexer-state coordinates; equivalence
                         // analysis verifies flat-table compatibility before using it.
                         Some(flat_trans),
@@ -267,6 +269,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                 shared_original_vocab_dfa_cache,
                                 shared_original_vocab_analysis_dfa_cache,
                                 shared_transition_cache,
+                                shared_ti_output_cache,
                                         // All L2P work keeps raw lexer-state coordinates; equivalence
                                 // analysis verifies flat-table compatibility before using it.
                                 Some(flat_trans),

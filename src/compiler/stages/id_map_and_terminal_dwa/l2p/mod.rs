@@ -17,6 +17,7 @@ mod terminal_interchangeability;
 
 pub(crate) use terminal_interchangeability::warm_ti_pool;
 pub(crate) use terminal_interchangeability::with_ti_pool;
+pub(crate) use terminal_interchangeability::SharedTiTokenizerOutputCache;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -333,6 +334,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     shared_original_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_original_vocab_analysis_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_transition_cache: Option<&OnceLock<equivalence_analysis::compat::FlatTransitionCache>>,
+    shared_ti_output_cache: Option<&SharedTiTokenizerOutputCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> Option<LocalIdMapTerminalDwa> {
@@ -405,12 +407,19 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             // token-position quotient C is available (p7/p8), build discovery
             // evidence over C representatives; otherwise over raw states.
             let discovery_context = match global_state_quotient.as_ref() {
-                Some(quotient) => TiDiscoveryContext::new_with_global_state_quotient(
+                Some(quotient) => {
+                    TiDiscoveryContext::new_with_global_state_quotient_and_output_cache(
+                        tokenizer,
+                        &relevant_bytes,
+                        quotient,
+                        shared_ti_output_cache,
+                    )
+                }
+                None => TiDiscoveryContext::new_with_output_cache(
                     tokenizer,
                     &relevant_bytes,
-                    quotient,
+                    shared_ti_output_cache,
                 ),
-                None => TiDiscoveryContext::new(tokenizer, &relevant_bytes),
             };
             let mut transport_witness_rounds = Vec::new();
             let mut round_count = 0usize;
@@ -1136,6 +1145,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 shared_original_vocab_dfa_cache,
                 shared_original_vocab_analysis_dfa_cache,
                 shared_transition_cache,
+                shared_ti_output_cache,
                 flat_trans,
                 initial_state_map,
             )

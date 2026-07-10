@@ -597,12 +597,75 @@ struct RootOutputSignature {
     future_finalizer_states: Box<[u32]>,
 }
 
+/// Tokenizer output columns independent of vocabulary partition and enabled
+/// bytes. Every L2P partition uses the same frozen lexer metadata, so build
+/// these raw-state indexes once and share them across partition contexts.
+struct TiTokenizerOutputData {
+    finalizer_terminals_by_raw_state: Arc<[Box<[TerminalID]>]>,
+    future_finalizer_terminals_by_raw_state: Arc<[Box<[TerminalID]>]>,
+    finalizer_raw_states_by_terminal: Arc<[Vec<u32>]>,
+    future_finalizer_raw_states_by_terminal: Arc<[Vec<u32>]>,
+}
+
+impl TiTokenizerOutputData {
+    fn new(tokenizer: &Tokenizer) -> Self {
+        let state_count = tokenizer.num_states() as usize;
+        let terminal_count = tokenizer.num_terminals() as usize;
+        let mut finalizer_terminals_by_raw_state = Vec::with_capacity(state_count);
+        let mut future_finalizer_terminals_by_raw_state = Vec::with_capacity(state_count);
+        let mut finalizer_raw_states_by_terminal = vec![Vec::<u32>::new(); terminal_count];
+        let mut future_finalizer_raw_states_by_terminal = vec![Vec::<u32>::new(); terminal_count];
+        for raw_state in 0..state_count as u32 {
+            let finalizers = tokenizer
+                .matched_terminals_iter(raw_state)
+                .collect::<Vec<_>>();
+            for &terminal in &finalizers {
+                finalizer_raw_states_by_terminal[terminal as usize].push(raw_state);
+            }
+            finalizer_terminals_by_raw_state.push(finalizers.into_boxed_slice());
+
+            let future_finalizers = tokenizer
+                .possible_future_terminals_iter(raw_state)
+                .collect::<Vec<_>>();
+            for &terminal in &future_finalizers {
+                future_finalizer_raw_states_by_terminal[terminal as usize].push(raw_state);
+            }
+            future_finalizer_terminals_by_raw_state.push(future_finalizers.into_boxed_slice());
+        }
+        Self {
+            finalizer_terminals_by_raw_state: finalizer_terminals_by_raw_state.into(),
+            future_finalizer_terminals_by_raw_state: future_finalizer_terminals_by_raw_state.into(),
+            finalizer_raw_states_by_terminal: finalizer_raw_states_by_terminal.into(),
+            future_finalizer_raw_states_by_terminal: future_finalizer_raw_states_by_terminal.into(),
+        }
+    }
+}
+
+/// Thread-safe compile-local cache shared by all vocabulary partitions.
+#[derive(Default)]
+pub(crate) struct SharedTiTokenizerOutputCache {
+    data: OnceLock<Arc<TiTokenizerOutputData>>,
+}
+
+impl SharedTiTokenizerOutputCache {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn get(&self, tokenizer: &Tokenizer) -> Arc<TiTokenizerOutputData> {
+        Arc::clone(
+            self.data
+                .get_or_init(|| Arc::new(TiTokenizerOutputData::new(tokenizer))),
+        )
+    }
+}
+
 /// Immutable raw lexer evidence that is independent of a historical TI round's
 /// active-terminal mask.  The projected `OutputBits` remain round-local, but
 /// their source columns and the reverse restricted topology are reusable.
 struct TiRawDiscoveryData {
-    finalizer_terminals_by_state: Vec<Box<[TerminalID]>>,
-    future_finalizer_terminals_by_state: Vec<Box<[TerminalID]>>,
+    finalizer_terminals_by_state: Arc<[Box<[TerminalID]>]>,
+    future_finalizer_terminals_by_state: Arc<[Box<[TerminalID]>]>,
     finalizer_states_by_terminal: Arc<[Vec<u32>]>,
     future_finalizer_states_by_terminal: Arc<[Vec<u32>]>,
     reverse_predecessors: Arc<[Vec<u32>]>,
@@ -610,32 +673,53 @@ struct TiRawDiscoveryData {
 }
 
 impl TiRawDiscoveryData {
-    fn new(tokenizer: &Tokenizer, topology: &RestrictedTopology) -> Self {
-        let terminal_count = tokenizer.num_terminals() as usize;
-        let mut finalizer_terminals_by_state = Vec::with_capacity(topology.real_state_count);
-        let mut future_finalizer_terminals_by_state =
-            Vec::with_capacity(topology.real_state_count);
-        let mut finalizer_states_by_terminal = vec![Vec::<u32>::new(); terminal_count];
-        let mut future_finalizer_states_by_terminal = vec![Vec::<u32>::new(); terminal_count];
+    fn new(
+        tokenizer: &Tokenizer,
+        topology: &RestrictedTopology,
+        shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+    ) -> Self {
+        let outputs = shared_output_cache
+            .map(|cache| cache.get(tokenizer))
+            .unwrap_or_else(|| Arc::new(TiTokenizerOutputData::new(tokenizer)));
 
-        for state in 0..topology.real_state_count {
-            let raw_state = topology.raw_state_for_state(state);
-            let finalizers = tokenizer
-                .matched_terminals_iter(raw_state)
-                .collect::<Vec<_>>();
-            for &terminal in &finalizers {
-                finalizer_states_by_terminal[terminal as usize].push(state as u32);
+        let (
+            finalizer_terminals_by_state,
+            future_finalizer_terminals_by_state,
+            finalizer_states_by_terminal,
+            future_finalizer_states_by_terminal,
+        ) = if topology.raw_representative_by_state.is_none() {
+            (
+                Arc::clone(&outputs.finalizer_terminals_by_raw_state),
+                Arc::clone(&outputs.future_finalizer_terminals_by_raw_state),
+                Arc::clone(&outputs.finalizer_raw_states_by_terminal),
+                Arc::clone(&outputs.future_finalizer_raw_states_by_terminal),
+            )
+        } else {
+            let terminal_count = tokenizer.num_terminals() as usize;
+            let mut finalizers_by_state = Vec::with_capacity(topology.real_state_count);
+            let mut future_by_state = Vec::with_capacity(topology.real_state_count);
+            let mut finalizer_states = vec![Vec::<u32>::new(); terminal_count];
+            let mut future_states = vec![Vec::<u32>::new(); terminal_count];
+            for state in 0..topology.real_state_count {
+                let raw_state = topology.raw_state_for_state(state) as usize;
+                let finalizers = outputs.finalizer_terminals_by_raw_state[raw_state].clone();
+                for &terminal in finalizers.iter() {
+                    finalizer_states[terminal as usize].push(state as u32);
+                }
+                finalizers_by_state.push(finalizers);
+                let future = outputs.future_finalizer_terminals_by_raw_state[raw_state].clone();
+                for &terminal in future.iter() {
+                    future_states[terminal as usize].push(state as u32);
+                }
+                future_by_state.push(future);
             }
-            finalizer_terminals_by_state.push(finalizers.into_boxed_slice());
-
-            let future_finalizers = tokenizer
-                .possible_future_terminals_iter(raw_state)
-                .collect::<Vec<_>>();
-            for &terminal in &future_finalizers {
-                future_finalizer_states_by_terminal[terminal as usize].push(state as u32);
-            }
-            future_finalizer_terminals_by_state.push(future_finalizers.into_boxed_slice());
-        }
+            (
+                Arc::from(finalizers_by_state),
+                Arc::from(future_by_state),
+                Arc::from(finalizer_states),
+                Arc::from(future_states),
+            )
+        };
 
         let mut reverse_predecessors = vec![Vec::<u32>::new(); topology.real_state_count];
         for source in 0..topology.real_state_count {
@@ -647,13 +731,14 @@ impl TiRawDiscoveryData {
         Self {
             finalizer_terminals_by_state,
             future_finalizer_terminals_by_state,
-            finalizer_states_by_terminal: finalizer_states_by_terminal.into(),
-            future_finalizer_states_by_terminal: future_finalizer_states_by_terminal.into(),
+            finalizer_states_by_terminal,
+            future_finalizer_states_by_terminal,
             reverse_predecessors: reverse_predecessors.into(),
             observed_destinations: topology.observed_destinations().into(),
         }
     }
 }
+
 
 /// Static per-L2P-partition TI data.  The restricted raw lexer topology and
 /// root observation depend only on vocabulary bytes, not on the historical
@@ -680,11 +765,23 @@ pub(crate) struct TiDiscoveryContext {
 
 impl TiDiscoveryContext {
     pub(crate) fn new(tokenizer: &Tokenizer, relevant_bytes: &[bool; 256]) -> Self {
+        Self::new_with_output_cache(tokenizer, relevant_bytes, None)
+    }
+
+    pub(crate) fn new_with_output_cache(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+    ) -> Self {
         let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
         let t0 = Instant::now();
         let topology = Arc::new(RestrictedTopology::new(tokenizer, relevant_bytes));
         let t1 = Instant::now();
-        let raw = Arc::new(TiRawDiscoveryData::new(tokenizer, &topology));
+        let raw = Arc::new(TiRawDiscoveryData::new(
+            tokenizer,
+            &topology,
+            shared_output_cache,
+        ));
         let t2 = Instant::now();
         let (root_output_signatures, root_observed_states) =
             root_output_signatures(tokenizer, &topology);
@@ -716,12 +813,30 @@ impl TiDiscoveryContext {
         relevant_bytes: &[bool; 256],
         global_state_quotient: &GlobalScannerStateQuotient,
     ) -> Self {
+        Self::new_with_global_state_quotient_and_output_cache(
+            tokenizer,
+            relevant_bytes,
+            global_state_quotient,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_global_state_quotient_and_output_cache(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        global_state_quotient: &GlobalScannerStateQuotient,
+        shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+    ) -> Self {
         let topology = Arc::new(RestrictedTopology::new_with_global_state_quotient(
             tokenizer,
             relevant_bytes,
             global_state_quotient,
         ));
-        let raw = Arc::new(TiRawDiscoveryData::new(tokenizer, &topology));
+        let raw = Arc::new(TiRawDiscoveryData::new(
+            tokenizer,
+            &topology,
+            shared_output_cache,
+        ));
         let (root_output_signatures, root_observed_states) =
             root_output_signatures(tokenizer, &topology);
         Self {
@@ -3339,7 +3454,7 @@ impl InterchangeabilityDfa {
         observed_terminals: &[bool],
         topology: Arc<RestrictedTopology>,
     ) -> Self {
-        let raw = Arc::new(TiRawDiscoveryData::new(tokenizer, &topology));
+        let raw = Arc::new(TiRawDiscoveryData::new(tokenizer, &topology, None));
         Self::from_raw_discovery_data(observed_terminals, topology, raw, None)
     }
 
