@@ -196,6 +196,17 @@ struct SupportPartitionSeed {
     representative_by_class: Arc<[u32]>,
 }
 
+/// Exact round-local active output alphabet retained for projection into the
+/// next monotone active mask. Output-pair projection commutes with removing
+/// inactive terminal labels, so remapping distinct pairs is enough; raw states
+/// only replay their previous compact pair id.
+#[derive(Clone)]
+struct OutputProjectionSeed {
+    active_terminals: Arc<[bool]>,
+    output_pairs: Arc<[OutputPair]>,
+    output_pair_by_state: Arc<[u32]>,
+}
+
 
 /// Per-swap output-label relabelling. The immutable base ids represent the
 /// original frozen output pairs; ids allocated after `base_count` are local to
@@ -752,6 +763,7 @@ pub(crate) struct TiDiscoveryContext {
     /// rounds only remove active terminals, so they may solve exactly on this
     /// quotient rather than over every discovery-domain state again.
     support_partition_seed: std::cell::RefCell<Option<SupportPartitionSeed>>,
+    output_projection_seed: std::cell::RefCell<Option<OutputProjectionSeed>>,
     /// Positive observed-output closure proofs retained across a monotone
     /// shrinking active mask. Projection commutes with a terminal transposition,
     /// so the image of a swap-closed output alphabet remains swap-closed.
@@ -806,6 +818,7 @@ impl TiDiscoveryContext {
             root_output_signatures,
             root_observed_states,
             support_partition_seed: std::cell::RefCell::new(None),
+            output_projection_seed: std::cell::RefCell::new(None),
             output_pair_closed_memo: std::cell::RefCell::new(FxHashSet::default()),
             output_pair_closed_active: std::cell::RefCell::new(None),
             first_round_memo: std::cell::RefCell::new(FxHashMap::default()),
@@ -852,6 +865,7 @@ impl TiDiscoveryContext {
             root_output_signatures,
             root_observed_states,
             support_partition_seed: std::cell::RefCell::new(None),
+            output_projection_seed: std::cell::RefCell::new(None),
             output_pair_closed_memo: std::cell::RefCell::new(FxHashSet::default()),
             output_pair_closed_active: std::cell::RefCell::new(None),
             first_round_memo: std::cell::RefCell::new(FxHashMap::default()),
@@ -3258,9 +3272,9 @@ struct InterchangeabilityDfa {
     /// Canonical, collision-free characterization cache used by the hot path.
     /// It describes the same raw restricted topology as `identity_rounds` and
     /// never merges or rewrites tokenizer states.
-    output_pairs: Vec<OutputPair>,
+    output_pairs: Arc<[OutputPair]>,
     output_pair_lookup: FxHashMap<OutputPair, u32>,
-    output_pair_by_state: Vec<u32>,
+    output_pair_by_state: Arc<[u32]>,
     /// Reverse enabled-byte edges, used only by the exact first-round
     /// rejection prefilter. Each changed frozen output can affect only these
     /// source rows in the characterization tuple.
@@ -3464,21 +3478,33 @@ impl InterchangeabilityDfa {
         topology: Arc<RestrictedTopology>,
     ) -> Self {
         let raw = Arc::new(TiRawDiscoveryData::new(tokenizer, &topology, None));
-        Self::from_raw_discovery_data(observed_terminals, topology, raw, None)
+        Self::from_raw_discovery_data(observed_terminals, topology, raw, None, None)
     }
 
     fn from_context(observed_terminals: &[bool], context: &TiDiscoveryContext) -> Self {
+        let is_monotone_seed = |seed_active: &[bool]| {
+            observed_terminals.len() == seed_active.len()
+                && observed_terminals
+                    .iter()
+                    .zip(seed_active)
+                    .all(|(&current, &old)| !current || old)
+        };
         let support_partition_seed = context
             .support_partition_seed
             .borrow()
             .as_ref()
             .filter(|seed| {
                 seed.class_for_state.len() == context.topology.state_count()
-                    && observed_terminals.len() == seed.active_terminals.len()
-                    && observed_terminals
-                        .iter()
-                        .zip(seed.active_terminals.iter())
-                        .all(|(&current, &seed_active)| !current || seed_active)
+                    && is_monotone_seed(&seed.active_terminals)
+            })
+            .cloned();
+        let output_projection_seed = context
+            .output_projection_seed
+            .borrow()
+            .as_ref()
+            .filter(|seed| {
+                seed.output_pair_by_state.len() == context.topology.state_count()
+                    && is_monotone_seed(&seed.active_terminals)
             })
             .cloned();
         Self::from_raw_discovery_data(
@@ -3486,6 +3512,7 @@ impl InterchangeabilityDfa {
             Arc::clone(&context.topology),
             Arc::clone(&context.raw),
             support_partition_seed,
+            output_projection_seed,
         )
     }
 
@@ -3494,52 +3521,116 @@ impl InterchangeabilityDfa {
         topology: Arc<RestrictedTopology>,
         raw: Arc<TiRawDiscoveryData>,
         support_partition_seed: Option<SupportPartitionSeed>,
+        output_projection_seed: Option<OutputProjectionSeed>,
     ) -> Self {
         let state_count = topology.state_count();
-        let terminal_bits = |terminals: &[TerminalID]| {
-            OutputBits::from_active(terminals, observed_terminals)
-        };
-        let finalizers = raw
-            .finalizer_terminals_by_state
-            .iter()
-            .map(|terminals| terminal_bits(terminals))
-            .collect::<Vec<_>>();
-        // These are the tokenizer's original, frozen future-finalizer sets.
-        let future_finalizers = raw
-            .future_finalizer_terminals_by_state
-            .iter()
-            .map(|terminals| terminal_bits(terminals))
-            .collect::<Vec<_>>();
-        // Intern the complete round-local output alphabet once. The observed
-        // enabled-destination alphabet below is a subset of these canonical ids;
-        // deriving it by id avoids a second OutputPair hash-interning pass.
         let empty_output = OutputBits::new(0);
         let empty_pair = OutputPair {
             finalizers: empty_output.clone(),
             future_finalizers: empty_output.clone(),
         };
-        let mut output_pairs = vec![empty_pair.clone()];
-        let mut output_pair_lookup = FxHashMap::<OutputPair, u32>::default();
-        output_pair_lookup.insert(empty_pair, 0);
-        let mut output_pair_by_state = Vec::with_capacity(state_count);
-        for state in 0..topology.real_state_count {
-            let pair = OutputPair {
-                finalizers: finalizers[state].clone(),
-                future_finalizers: future_finalizers[state].clone(),
-            };
-            let id = match output_pair_lookup.entry(pair) {
-                Entry::Occupied(entry) => *entry.get(),
-                Entry::Vacant(entry) => {
-                    let id = output_pairs.len() as u32;
-                    output_pairs.push(entry.key().clone());
-                    entry.insert(id);
-                    id
+        let (
+            finalizers,
+            future_finalizers,
+            output_pairs,
+            output_pair_lookup,
+            output_pair_by_state,
+        ): (
+            Vec<OutputBits>,
+            Vec<OutputBits>,
+            Arc<[OutputPair]>,
+            FxHashMap<OutputPair, u32>,
+            Arc<[u32]>,
+        ) = if let Some(seed) = output_projection_seed {
+                let mut output_pairs = vec![empty_pair.clone()];
+                let mut output_pair_lookup = FxHashMap::<OutputPair, u32>::default();
+                output_pair_lookup.insert(empty_pair.clone(), 0);
+                let mut projected_id = Vec::with_capacity(seed.output_pairs.len());
+                for pair in seed.output_pairs.iter() {
+                    let projected = OutputPair {
+                        finalizers: OutputBits::from_active(
+                            &pair.finalizers.0,
+                            observed_terminals,
+                        ),
+                        future_finalizers: OutputBits::from_active(
+                            &pair.future_finalizers.0,
+                            observed_terminals,
+                        ),
+                    };
+                    let id = match output_pair_lookup.entry(projected) {
+                        Entry::Occupied(entry) => *entry.get(),
+                        Entry::Vacant(entry) => {
+                            let id = output_pairs.len() as u32;
+                            output_pairs.push(entry.key().clone());
+                            entry.insert(id);
+                            id
+                        }
+                    };
+                    projected_id.push(id);
                 }
+                let output_pair_by_state = seed
+                    .output_pair_by_state
+                    .iter()
+                    .map(|&old_id| projected_id[old_id as usize])
+                    .collect::<Vec<_>>();
+                let finalizers = output_pair_by_state[..topology.real_state_count]
+                    .iter()
+                    .map(|&id| output_pairs[id as usize].finalizers.clone())
+                    .collect::<Vec<_>>();
+                let future_finalizers = output_pair_by_state[..topology.real_state_count]
+                    .iter()
+                    .map(|&id| output_pairs[id as usize].future_finalizers.clone())
+                    .collect::<Vec<_>>();
+                (
+                    finalizers,
+                    future_finalizers,
+                    Arc::from(output_pairs),
+                    output_pair_lookup,
+                    Arc::from(output_pair_by_state),
+                )
+            } else {
+                let terminal_bits = |terminals: &[TerminalID]| {
+                    OutputBits::from_active(terminals, observed_terminals)
+                };
+                let finalizers = raw
+                    .finalizer_terminals_by_state
+                    .iter()
+                    .map(|terminals| terminal_bits(terminals))
+                    .collect::<Vec<_>>();
+                let future_finalizers = raw
+                    .future_finalizer_terminals_by_state
+                    .iter()
+                    .map(|terminals| terminal_bits(terminals))
+                    .collect::<Vec<_>>();
+                let mut output_pairs = vec![empty_pair.clone()];
+                let mut output_pair_lookup = FxHashMap::<OutputPair, u32>::default();
+                output_pair_lookup.insert(empty_pair.clone(), 0);
+                let mut output_pair_by_state = Vec::with_capacity(state_count);
+                for state in 0..topology.real_state_count {
+                    let pair = OutputPair {
+                        finalizers: finalizers[state].clone(),
+                        future_finalizers: future_finalizers[state].clone(),
+                    };
+                    let id = match output_pair_lookup.entry(pair) {
+                        Entry::Occupied(entry) => *entry.get(),
+                        Entry::Vacant(entry) => {
+                            let id = output_pairs.len() as u32;
+                            output_pairs.push(entry.key().clone());
+                            entry.insert(id);
+                            id
+                        }
+                    };
+                    output_pair_by_state.push(id);
+                }
+                output_pair_by_state.push(0);
+                (
+                    finalizers,
+                    future_finalizers,
+                    Arc::from(output_pairs),
+                    output_pair_lookup,
+                    Arc::from(output_pair_by_state),
+                )
             };
-            output_pair_by_state.push(id);
-        }
-        // The synthetic dead destination has the all-empty frozen output.
-        output_pair_by_state.push(0);
 
         let observed_destinations = &raw.observed_destinations;
         let mut observed_output_pair_is_observed = vec![false; output_pairs.len()];
@@ -7228,6 +7319,11 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 representative_by_class: Arc::clone(&quotient.representative_by_class),
             });
         }
+        *context.output_projection_seed.borrow_mut() = Some(OutputProjectionSeed {
+            active_terminals: Arc::from(active_terminals.to_vec()),
+            output_pairs: Arc::clone(&dfa.output_pairs),
+            output_pair_by_state: Arc::clone(&dfa.output_pair_by_state),
+        });
         TiRoundTransportWitnesses {
             active_before_round: active_terminals.to_vec(),
             partition: result,
