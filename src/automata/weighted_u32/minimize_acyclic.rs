@@ -2762,6 +2762,48 @@ fn memberwise_group_compatible(
 /// if two class representatives are deemed compatible, ALL pairs across the
 /// two classes are compatible (since transitions/weights are identical within
 /// a class, only the needed-set overlap domain varies).
+fn build_and_color_pairwise_greedy(
+    dwa: &DWA,
+    candidates: &[usize],
+    needed: &[Weight],
+    old_to_new: &[u32],
+    productive_transitions: &[Vec<ProductiveTransition>],
+) -> Vec<usize> {
+    // A merge group is valid when every pair of members agrees on the
+    // intersection of its live domains and has no conflicting label target.
+    // Checking the full clique directly is exact: pairwise agreement of these
+    // partial deterministic behaviors implies one well-defined union behavior
+    // for the whole group. For small height buckets this avoids constructing
+    // the much larger pointwise profile representation merely to discover that
+    // almost every successful merge is domain-disjoint.
+    let mut groups = Vec::<SmallVec<[usize; 16]>>::new();
+    let mut coloring = Vec::with_capacity(candidates.len());
+    for &candidate in candidates {
+        let group = groups
+            .iter()
+            .position(|members| {
+                members.iter().all(|&member| {
+                    are_compatible(
+                        candidate,
+                        member,
+                        dwa,
+                        needed,
+                        old_to_new,
+                        productive_transitions,
+                        false,
+                    )
+                })
+            })
+            .unwrap_or_else(|| {
+                groups.push(SmallVec::new());
+                groups.len() - 1
+            });
+        groups[group].push(candidate);
+        coloring.push(group);
+    }
+    coloring
+}
+
 fn build_and_color_hybrid(
     dwa: &DWA,
     candidates: &[usize],
@@ -2771,6 +2813,17 @@ fn build_and_color_hybrid(
     pointwise_class_order: PointwiseClassOrder,
 ) -> Vec<usize> {
     let profile_enabled = weighted_dwa_minimize_profile_enabled();
+    if candidates.len() <= 64
+        && std::env::var_os("GLRMASK_WEIGHTED_MINIMIZE_DISABLE_PAIRWISE_SMALL").is_none()
+    {
+        return build_and_color_pairwise_greedy(
+            dwa,
+            candidates,
+            needed,
+            old_to_new,
+            productive_transitions,
+        );
+    }
     let total_started_at = Instant::now();
 
     // Step 1: Partition refinement to get fine-grained classes.
