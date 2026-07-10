@@ -40,7 +40,10 @@ use crate::compiler::stages::mapped_artifact::{
     WeightRefs,
     count_interned_ranges_for_weights,
 };
-use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
+use crate::compiler::stages::parser_dwa::{
+    build_parser_dwa_from_terminal_dwa_with_precomputed_templates,
+    try_build_immediate_parser_dwa,
+};
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals_profiled;
 use crate::compiler::stages::templates::compile_dfa::{
@@ -649,14 +652,22 @@ fn build_parser_dwa_for_terminal_family(
 ) -> Option<MappedArtifact<DWA>> {
     let family = family?;
     let internal_ids = family.id_map().clone();
-    let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
-        table,
-        grammar,
-        family.artifact(),
-        templates,
-        vocab,
-        &internal_ids,
-    );
+    let (parser_dwa, immediate_fast_path) =
+        if let Some(parser_dwa) = try_build_immediate_parser_dwa(family.artifact(), grammar, table) {
+            (parser_dwa, true)
+        } else {
+            (
+                build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+                    table,
+                    grammar,
+                    family.artifact(),
+                    templates,
+                    vocab,
+                    &internal_ids,
+                ),
+                false,
+            )
+        };
     if family_name == "l1"
         && family.artifact().num_states() == 2
         && table.admission_policy
@@ -680,12 +691,13 @@ fn build_parser_dwa_for_terminal_family(
         let terminal_stats = family.artifact().stats();
         let parser_stats = parser_dwa.stats();
         eprintln!(
-            "[glrmask/profile][parser_dwa_family] family={} terminal_states={} terminal_transitions={} parser_states={} parser_transitions={}",
+            "[glrmask/profile][parser_dwa_family] family={} terminal_states={} terminal_transitions={} parser_states={} parser_transitions={} immediate_fast_path={}",
             family_name,
             terminal_stats.states,
             terminal_stats.transitions,
             parser_stats.states,
             parser_stats.transitions,
+            immediate_fast_path,
         );
     }
     Some(MappedArtifact::new(parser_dwa, internal_ids))
@@ -723,7 +735,7 @@ fn build_and_merge_parser_dwa_families(
         },
     );
     let parser_dwas: Vec<MappedArtifact<DWA>> = l1_parser.into_iter().chain(l2p_parser).collect();
-    crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_dwas(
+    crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas(
         parser_dwas,
         tokenizer.num_states() as usize,
         vocab.max_token_id(),

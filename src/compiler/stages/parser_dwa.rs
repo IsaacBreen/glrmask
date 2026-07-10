@@ -508,17 +508,106 @@ fn immediate_acceptance_certificates(
         }
     }
 
+    let mut cache = FxHashMap::<Vec<TerminalID>, Weight>::default();
     table
         .action
         .iter()
         .map(|row| {
-            Weight::union_all(row.iter().filter_map(|(terminal, action)| {
-                top_row_action_is_unconditionally_applicable(action)
-                    .then(|| complete_by_terminal.get(&terminal))
-                    .flatten()
-            }))
+            let terminals: Vec<TerminalID> = row
+                .iter()
+                .filter_map(|(terminal, action)| {
+                    (top_row_action_is_unconditionally_applicable(action)
+                        && complete_by_terminal.contains_key(&terminal))
+                    .then_some(terminal)
+                })
+                .collect();
+            if terminals.is_empty() {
+                return Weight::empty();
+            }
+            if let Some(weight) = cache.get(&terminals) {
+                return weight.clone();
+            }
+            let weight = Weight::union_all(
+                terminals
+                    .iter()
+                    .filter_map(|terminal| complete_by_terminal.get(terminal)),
+            );
+            cache.insert(terminals, weight.clone());
+            weight
         })
         .collect()
+}
+
+fn terminal_automaton_is_immediate_completion(
+    terminal_automaton: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    table: &GLRTable,
+) -> bool {
+    if table.admission_policy != AdmissionPolicy::RowPresenceExact {
+        return false;
+    }
+    let TerminalAutomaton::Dwa(dwa) = terminal_automaton else {
+        return false;
+    };
+    let Some(start) = dwa.states().get(dwa.start_state() as usize) else {
+        return false;
+    };
+
+    if start
+        .final_weight
+        .as_ref()
+        .is_some_and(|weight| !weight.is_empty())
+    {
+        return false;
+    }
+
+    let mut saw_edge = false;
+    for (&label, (target, edge_weight)) in &start.transitions {
+        if edge_weight.is_empty() {
+            continue;
+        }
+        if label < 0 || label as u32 >= grammar.num_terminals {
+            return false;
+        }
+        let Some(target_state) = dwa.states().get(*target as usize) else {
+            return false;
+        };
+        if target_state
+            .transitions
+            .values()
+            .any(|(_, weight)| !weight.is_empty())
+        {
+            return false;
+        }
+        let Some(target_final) = target_state.final_weight.as_ref() else {
+            return false;
+        };
+        if !edge_weight.is_subset(target_final) {
+            return false;
+        }
+        saw_edge = true;
+    }
+    saw_edge
+}
+
+pub(crate) fn try_build_immediate_parser_dwa(
+    terminal_automaton: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    table: &GLRTable,
+) -> Option<DWA> {
+    if !terminal_automaton_is_immediate_completion(terminal_automaton, grammar, table) {
+        return None;
+    }
+    let certificates = immediate_acceptance_certificates(terminal_automaton, grammar, table);
+    let mut parser_dwa = DWA::new(0, 0);
+    let final_state = parser_dwa.add_state();
+    parser_dwa.set_final_weight(final_state, Weight::all());
+    for (parser_top, weight) in certificates.into_iter().enumerate() {
+        if !weight.is_empty() {
+            parser_dwa.add_transition(0, parser_top as i32, final_state, weight);
+        }
+    }
+    Some(parser_dwa)
 }
 
 fn collapse_immediate_acceptance_certificates(
