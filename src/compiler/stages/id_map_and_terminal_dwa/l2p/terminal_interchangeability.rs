@@ -206,8 +206,7 @@ struct SupportQuotient {
 #[derive(Clone)]
 struct SupportPartitionSeed {
     active_terminals: Arc<[bool]>,
-    class_for_state: Arc<[u32]>,
-    representative_by_class: Arc<[u32]>,
+    quotient: Arc<SupportQuotient>,
 }
 
 /// Exact round-local active output alphabet retained for projection into the
@@ -642,6 +641,24 @@ struct TiTokenizerOutputData {
 }
 
 impl TiTokenizerOutputData {
+    fn from_classify_bytesets(
+        bytesets: &super::super::classify::SharedClassifyBytesets,
+    ) -> Option<Self> {
+        let (
+            finalizer_terminals_by_raw_state,
+            future_finalizer_terminals_by_raw_state,
+            finalizer_raw_states_by_terminal,
+            future_finalizer_raw_states_by_terminal,
+        ) = bytesets.ti_output_index()?;
+        Some(Self {
+            finalizer_terminals_by_raw_state,
+            future_finalizer_terminals_by_raw_state,
+            finalizer_raw_states_by_terminal,
+            future_finalizer_raw_states_by_terminal,
+            full_output_projection: OnceLock::new(),
+        })
+    }
+
     fn full_output_pair_hash(
         finalizers: &[TerminalID],
         future_finalizers: &[TerminalID],
@@ -851,6 +868,18 @@ pub(crate) struct SharedTiTokenizerOutputCache {
 impl SharedTiTokenizerOutputCache {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn new_with_classify_bytesets(
+        bytesets: &super::super::classify::SharedClassifyBytesets,
+    ) -> Option<Self> {
+        let data = TiTokenizerOutputData::from_classify_bytesets(bytesets)?;
+        let cache = Self::new();
+        assert!(
+            cache.data.set(Arc::new(data)).is_ok(),
+            "new TI output cache must be empty",
+        );
+        Some(cache)
     }
 
     fn get(&self, tokenizer: &Tokenizer) -> Arc<TiTokenizerOutputData> {
@@ -1071,6 +1100,38 @@ impl TiDiscoveryContext {
             first_round_memo: std::cell::RefCell::new(FxHashMap::default()),
         }
     }
+
+    /// Exact finalizer/future observation IDs from the most recent discovery
+    /// round, restricted and densified over real raw scanner states.
+    pub(crate) fn final_raw_observation_ids(
+        &self,
+        raw_state_count: usize,
+    ) -> Option<(Vec<u32>, Vec<u32>)> {
+        if self.topology.raw_representative_by_state.is_some() {
+            return None;
+        }
+        let seed = self.output_projection_seed.borrow();
+        let by_state = &seed.as_ref()?.output_pair_by_state;
+        if by_state.len() < raw_state_count {
+            return None;
+        }
+        let mut dense_by_pair = FxHashMap::<u32, u32>::default();
+        let mut ids = Vec::with_capacity(raw_state_count);
+        let mut representatives = Vec::<u32>::new();
+        for (state, &pair) in by_state[..raw_state_count].iter().enumerate() {
+            let id = if let Some(&id) = dense_by_pair.get(&pair) {
+                id
+            } else {
+                let id = dense_by_pair.len() as u32;
+                dense_by_pair.insert(pair, id);
+                representatives.push(state as u32);
+                id
+            };
+            ids.push(id);
+        }
+        Some((ids, representatives))
+    }
+
 }
 
 /// Partition candidate terminals by a necessary-and-sufficient condition for
@@ -3488,7 +3549,7 @@ struct InterchangeabilityDfa {
     canonical_round_one_changed_scratch: SmallVec<[(u32, u32); 16]>,
     canonical_round_one_added_scratch: SmallVec<[u32; 16]>,
     support_partition_seed: Option<SupportPartitionSeed>,
-    support_quotient: Option<SupportQuotient>,
+    support_quotient: Option<Arc<SupportQuotient>>,
     canonical_quotient: Option<CanonicalQuotient>,
     /// Per raw terminal, the canonical quotient classes whose representative
     /// frozen output mentions that terminal.  This is build-local discovery
@@ -3710,7 +3771,7 @@ impl InterchangeabilityDfa {
             .borrow()
             .as_ref()
             .filter(|seed| {
-                seed.class_for_state.len() == context.topology.state_count()
+                seed.quotient.class_for_state.len() == context.topology.state_count()
                     && is_monotone_seed(&seed.active_terminals)
             })
             .cloned();
@@ -3938,6 +3999,21 @@ impl InterchangeabilityDfa {
                 * (1 + blake3::OUT_LEN + 2 * (size_of::<u32>() + 4 * size_of::<TerminalID>()));
         let seed = CharacterizationHash::seed();
         let observed_output_pair_count = observed_output_pairs.len();
+        // A support quotient built for a larger active output alphabet remains
+        // an exact (possibly finer) congruence after projecting terminals away.
+        // Reusing it can only make the sufficient support certificate more
+        // conservative; any missed certificate still falls through to the
+        // ordinary exact checker.
+        let support_quotient = std::env::var_os(
+            "GLRMASK_TI_DISABLE_FINE_SUPPORT_QUOTIENT_REUSE",
+        )
+            .is_none()
+            .then(|| {
+                support_partition_seed
+                    .as_ref()
+                    .map(|seed| Arc::clone(&seed.quotient))
+            })
+            .flatten();
         Self {
             topology,
             observed_output_pairs,
@@ -3970,7 +4046,7 @@ impl InterchangeabilityDfa {
             canonical_round_one_changed_scratch: SmallVec::new(),
             canonical_round_one_added_scratch: SmallVec::new(),
             support_partition_seed,
-            support_quotient: None,
+            support_quotient,
             canonical_quotient: None,
             terminal_quotient_output_supports: None,
             parallel_terminal_supports: OnceLock::new(),
@@ -4493,8 +4569,8 @@ impl InterchangeabilityDfa {
         &self,
         seed: &SupportPartitionSeed,
     ) -> (Vec<u32>, Vec<u32>) {
-        let old_class_count = seed.representative_by_class.len();
-        let dead_old_class = seed.class_for_state[self.dead_state()] as usize;
+        let old_class_count = seed.quotient.representative_by_class.len();
+        let dead_old_class = seed.quotient.class_for_state[self.dead_state()] as usize;
         let mut previous = vec![0u32; old_class_count];
         for _ in 1..=old_class_count.saturating_mul(2).max(1) {
             let default_class = previous[dead_old_class];
@@ -4503,11 +4579,11 @@ impl InterchangeabilityDfa {
             let mut next = Vec::with_capacity(old_class_count);
             let mut representative_old_class = Vec::<u32>::new();
             for old_class in 0..old_class_count {
-                let state = seed.representative_by_class[old_class] as usize;
+                let state = seed.quotient.representative_by_class[old_class] as usize;
                 let mut components = SmallVec::<[CanonicalComponent; 8]>::new();
                 for &(byte, destination) in self.topology.edges_from(state) {
                     let destination = destination as usize;
-                    let target_old_class = seed.class_for_state[destination] as usize;
+                    let target_old_class = seed.quotient.class_for_state[destination] as usize;
                     let previous_class = previous[target_old_class];
                     let output = self.output_pair_by_state[destination];
                     if previous_class == default_class && output == 0 {
@@ -4529,13 +4605,14 @@ impl InterchangeabilityDfa {
             }
             if same_equality_partition_u32(&previous, &next) {
                 let class_for_state = seed
+                    .quotient
                     .class_for_state
                     .iter()
                     .map(|&old_class| next[old_class as usize])
                     .collect::<Vec<_>>();
                 let representative_by_class = representative_old_class
                     .into_iter()
-                    .map(|old_class| seed.representative_by_class[old_class as usize])
+                    .map(|old_class| seed.quotient.representative_by_class[old_class as usize])
                     .collect::<Vec<_>>();
                 return (class_for_state, representative_by_class);
             }
@@ -4593,14 +4670,14 @@ impl InterchangeabilityDfa {
                 Arc::clone(&class_for_state),
                 Arc::clone(&representative_by_class),
             );
-        self.support_quotient = Some(SupportQuotient {
+        self.support_quotient = Some(Arc::new(SupportQuotient {
             class_for_state,
             representative_by_class,
             reverse_predecessors,
             scanner_state_count,
             scanner_class_for_original,
             scanner_representative_for_class,
-        });
+        }));
         if let Some(started_at) = quotient_build_started_at {
             self.support_quotient_build_ns += started_at.elapsed().as_nanos() as u64;
         }
@@ -6069,8 +6146,8 @@ impl InterchangeabilityDfa {
         &self,
         quotient: &SupportQuotient,
         terminal: TerminalID,
-    ) -> Vec<usize> {
-        let mut cone = Vec::<usize>::new();
+    ) -> SmallVec<[usize; 8]> {
+        let mut cone = SmallVec::<[usize; 8]>::new();
         for destinations in [
             &self.finalizer_states_by_terminal[terminal as usize],
             &self.future_finalizer_states_by_terminal[terminal as usize],
@@ -6466,6 +6543,56 @@ impl InterchangeabilityDfa {
         candidate_membership: &[bool],
         pair_stats: Option<&[GenericOutputPairStats]>,
     ) -> (SmallVec<[u64; 8]>, Option<SmallVec<[usize; 8]>>) {
+        // A one-class cone has a forced canonical order. Evaluate the same two
+        // fingerprint rounds directly, without allocating an index, row table,
+        // color vectors, or sorting a singleton. The exact batch certificate
+        // remains the sole accepting proof.
+        if std::env::var_os("GLRMASK_TI_DISABLE_SINGLETON_CONE_FAST").is_none()
+            && let [class] = cone
+        {
+            let state = quotient.representative_by_class[*class] as usize;
+            let root = state == self.topology.initial_state;
+            let mut color = 0u64;
+            for round in 0..2usize {
+                let mut fingerprint =
+                    mix_structural_fingerprint(0x510e_527f_ade6_82d1, round as u64);
+                fingerprint = mix_structural_fingerprint(fingerprint, root as u64);
+                for &(byte, destination) in self.topology.edges_from(state) {
+                    let destination = destination as usize;
+                    let target_class = quotient.class_for_state[destination] as usize;
+                    fingerprint = mix_structural_fingerprint(fingerprint, byte as u64 + 1);
+                    if target_class == *class {
+                        fingerprint = mix_structural_fingerprint(fingerprint, 0);
+                        fingerprint = mix_structural_fingerprint(fingerprint, color);
+                    } else {
+                        fingerprint = mix_structural_fingerprint(fingerprint, 1);
+                        fingerprint =
+                            mix_structural_fingerprint(fingerprint, target_class as u64 + 1);
+                    }
+                    let output_id = self.output_pair_by_state[destination] as usize;
+                    let pair = &self.output_pairs[output_id];
+                    let output = match pair_stats {
+                        Some(pair_stats) => Self::generic_terminal_output_fingerprint(
+                            pair,
+                            pair_stats[output_id],
+                            terminal,
+                        ),
+                        None => Self::generic_terminal_output_fingerprint_direct(
+                            pair,
+                            terminal,
+                            candidate_membership,
+                        ),
+                    };
+                    fingerprint = mix_structural_fingerprint(fingerprint, output);
+                }
+                color = fingerprint;
+            }
+            return (
+                SmallVec::from_slice(&[1, color]),
+                Some(SmallVec::from_slice(&[*class])),
+            );
+        }
+
         #[derive(Clone, Copy)]
         struct GenericEdge {
             byte: u8,
@@ -6876,7 +7003,10 @@ impl InterchangeabilityDfa {
             .iter()
             .map(|&terminal| self.support_quotient_terminal_cone(quotient, terminal))
             .collect::<Vec<_>>();
-        let cones = owned_cones.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let cones = owned_cones
+            .iter()
+            .map(|cone| cone.as_slice())
+            .collect::<Vec<_>>();
         self.support_petal_batch_certificate_with_cones(quotient, members, &cones)
     }
 
@@ -8750,7 +8880,8 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 .as_ref()
                 .expect("support quotient initialized for petal batching");
             let mut residual_groups = Vec::<Vec<TerminalID>>::new();
-            let mut cone_by_terminal = vec![None::<Vec<usize>>; active_terminals.len()];
+            let mut cone_by_terminal =
+                vec![None::<SmallVec<[usize; 8]>>; active_terminals.len()];
             let mut order_by_terminal =
                 vec![None::<SmallVec<[usize; 8]>>; active_terminals.len()];
             let parallel_petal_min_terminals = std::env::var(
@@ -9263,7 +9394,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                                 }
                             }
                         }
-                        intersection
+                        intersection.into()
                     },
                 );
                 let petals = cones
@@ -9325,7 +9456,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 }
                 let mut component_sizes = component_sizes.into_values().collect::<Vec<_>>();
                 component_sizes.sort_unstable_by(|a, b| b.cmp(a));
-                let mut cone_sizes = cones.iter().map(Vec::len).collect::<Vec<_>>();
+                let mut cone_sizes = cones.iter().map(|cone| cone.len()).collect::<Vec<_>>();
                 cone_sizes.sort_unstable();
                 let batch_certified = dfa
                     .support_petal_batch_certificate(quotient, &members)
@@ -9392,8 +9523,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
         if let Some(quotient) = dfa.support_quotient.as_ref() {
             *context.support_partition_seed.borrow_mut() = Some(SupportPartitionSeed {
                 active_terminals: Arc::from(active_terminals.to_vec()),
-                class_for_state: Arc::clone(&quotient.class_for_state),
-                representative_by_class: Arc::clone(&quotient.representative_by_class),
+                quotient: Arc::clone(quotient),
             });
         }
         *context.output_projection_seed.borrow_mut() = Some(OutputProjectionSeed {
@@ -9798,14 +9928,19 @@ pub(crate) fn transport_coordinate_quotient(
 
     #[derive(Eq, Hash, PartialEq)]
     struct SparseModeSignature {
-        defaults: SmallVec<[u64; 4]>,
-        deviations: SmallVec<[(u32, u64); 4]>,
+        /// Sparse feature overrides from the ordinary coordinate. Real mode
+        /// ids occupy `[0, modes.len())`; tail-default features use ids above
+        /// that range. Absence means the ordinary coordinate already present
+        /// in the final state signature.
+        deviations: SmallVec<[(u32, u64); 8]>,
     }
 
     struct TailGroup<'a> {
         tail: Vec<&'a TransportScannerStateMap>,
         modes: Vec<(usize, &'a TransportScannerStateMap)>,
-        default_for_source_class: Vec<u64>,
+        /// Sorted sparse overrides from the ordinary coordinate, keyed by the
+        /// current group's source class.
+        default_deviations: Vec<(u32, u64)>,
     }
 
     // The ordinary mode is represented directly by the first coordinate below.
@@ -9840,6 +9975,10 @@ pub(crate) fn transport_coordinate_quotient(
     let components_started_at = profile_timing.then(Instant::now);
     let mut source_class_mode_evaluations = 0usize;
     let mut macro_transport_groups = 0usize;
+    let mut sparse_tail_groups = 0usize;
+    let mut sparse_tail_atoms = 0usize;
+    let mut sparse_tail_default_cells = 0usize;
+    let mut sparse_tail_default_changes = 0usize;
     // A transport mode with no quotient deviations is a pure structural
     // relabeling that preserves the ordinary coordinate, so its component is a
     // function of the ordinary coordinate and cannot refine the ordinary
@@ -9988,7 +10127,7 @@ pub(crate) fn transport_coordinate_quotient(
                     tail_groups.push(TailGroup {
                         tail,
                         modes: Vec::new(),
-                        default_for_source_class: Vec::new(),
+                        default_deviations: Vec::new(),
                     });
                     entry.insert(index);
                     index
@@ -9997,38 +10136,110 @@ pub(crate) fn transport_coordinate_quotient(
             tail_groups[tail_group_index].modes.push((mode_index, inner));
         }
 
+        sparse_tail_groups += tail_groups.len();
+        sparse_tail_atoms += tail_groups.iter().map(|group| group.tail.len()).sum::<usize>();
+        let ordinary_for_source_class = (0..source_class_count)
+            .map(|source_class| {
+                ordinary_coordinate_key(
+                    domain.innermost_source_representative(source_class) as usize,
+                )
+            })
+            .collect::<Vec<_>>();
         let mut deviations_by_source_class =
-            vec![SmallVec::<[(u32, u64); 4]>::new(); source_class_count];
-        for tail_group in &mut tail_groups {
-            tail_group.default_for_source_class = Vec::with_capacity(source_class_count);
-            for source_class in 0..source_class_count {
-                let mut target_state = domain.innermost_source_representative(source_class);
-                for transform in &tail_group.tail {
-                    target_state = transform.scanner_state(target_state);
+            vec![SmallVec::<[(u32, u64); 8]>::new(); source_class_count];
+        let mut current_classes_by_tail_domain =
+            FxHashMap::<usize, Vec<Vec<u32>>>::default();
+
+        for (tail_group_index, tail_group) in tail_groups.iter_mut().enumerate() {
+            let tail_feature = modes.len() as u32 + tail_group_index as u32;
+            if tail_group.tail.is_empty() {
+                // Identity tail: every default is already represented by the
+                // ordinary coordinate in the final quotient signature.
+            } else if tail_group.tail.len() == 1
+                && tail_group.tail[0].quotient_deviations().is_some()
+            {
+                let transform = tail_group.tail[0];
+                let tail_domain_key = transform.innermost_source_domain_key();
+                let classes_by_tail_class = current_classes_by_tail_domain
+                    .entry(tail_domain_key)
+                    .or_insert_with(|| {
+                        let mut inverse =
+                            vec![Vec::<u32>::new(); transform.innermost_source_class_count()];
+                        for source_class in 0..source_class_count {
+                            let raw_state =
+                                domain.innermost_source_representative(source_class);
+                            let tail_class =
+                                transform.innermost_source_class(raw_state);
+                            inverse[tail_class].push(source_class as u32);
+                        }
+                        inverse
+                    });
+                for &(input_class, output_class) in transform
+                    .quotient_deviations()
+                    .expect("one-atom quotient tail was checked above")
+                {
+                    let coordinate = ordinary_coordinate_key(
+                        transform.innermost_source_representative(output_class as usize)
+                            as usize,
+                    );
+                    for &source_class in &classes_by_tail_class[input_class as usize] {
+                        let source_class = source_class as usize;
+                        sparse_tail_default_cells += 1;
+                        source_class_mode_evaluations += 1;
+                        if coordinate != ordinary_for_source_class[source_class] {
+                            sparse_tail_default_changes += 1;
+                            tail_group
+                                .default_deviations
+                                .push((source_class as u32, coordinate));
+                            deviations_by_source_class[source_class]
+                                .push((tail_feature, coordinate));
+                        }
+                    }
                 }
-                tail_group
-                    .default_for_source_class
-                    .push(ordinary_coordinate_key(target_state as usize));
-                source_class_mode_evaluations += 1 + tail_group.tail.len();
+                tail_group.default_deviations.sort_unstable_by_key(|&(class, _)| class);
+            } else {
+                // General exact fallback. This is absent in the current p0/p1
+                // workload, but retains arbitrary composed-tail semantics.
+                for source_class in 0..source_class_count {
+                    let mut target_state =
+                        domain.innermost_source_representative(source_class);
+                    for transform in &tail_group.tail {
+                        target_state = transform.scanner_state(target_state);
+                    }
+                    let coordinate = ordinary_coordinate_key(target_state as usize);
+                    sparse_tail_default_cells += 1;
+                    source_class_mode_evaluations += 1 + tail_group.tail.len();
+                    if coordinate != ordinary_for_source_class[source_class] {
+                        sparse_tail_default_changes += 1;
+                        tail_group
+                            .default_deviations
+                            .push((source_class as u32, coordinate));
+                        deviations_by_source_class[source_class]
+                            .push((tail_feature, coordinate));
+                    }
+                }
             }
+
+            let default_for = |source_class: usize| {
+                tail_group
+                    .default_deviations
+                    .binary_search_by_key(&(source_class as u32), |&(class, _)| class)
+                    .map(|index| tail_group.default_deviations[index].1)
+                    .unwrap_or(ordinary_for_source_class[source_class])
+            };
             for &(mode_index, inner) in &tail_group.modes {
-                let deviations = inner
+                let inner_deviations = inner
                     .quotient_deviations()
                     .expect("sparse transport program was checked above");
-                for &(input_class, output_class) in deviations {
+                for &(input_class, output_class) in inner_deviations {
                     let input_class = input_class as usize;
                     let output_class = output_class as usize;
                     assert!(
                         input_class < source_class_count && output_class < source_class_count,
                         "TI transport deviation must stay within its source quotient",
                     );
-                    // The tail default table already contains the exact
-                    // coordinate reached from every source-class representative.
-                    // A sparse inner deviation merely selects a different
-                    // source class, so re-running the same tail here is
-                    // redundant.
-                    let coordinate = tail_group.default_for_source_class[output_class];
-                    if coordinate != tail_group.default_for_source_class[input_class] {
+                    let coordinate = default_for(output_class);
+                    if coordinate != default_for(input_class) {
                         deviations_by_source_class[input_class]
                             .push((mode_index as u32, coordinate));
                     }
@@ -10040,14 +10251,8 @@ pub(crate) fn transport_coordinate_quotient(
         group.component_for_source_class = Vec::with_capacity(source_class_count);
         for source_class in 0..source_class_count {
             let mut deviations = std::mem::take(&mut deviations_by_source_class[source_class]);
-            deviations.sort_unstable_by_key(|&(mode, _)| mode);
-            let signature = SparseModeSignature {
-                defaults: tail_groups
-                    .iter()
-                    .map(|tail_group| tail_group.default_for_source_class[source_class])
-                    .collect(),
-                deviations,
-            };
+            deviations.sort_unstable_by_key(|&(feature, _)| feature);
+            let signature = SparseModeSignature { deviations };
             let next_component = component_by_signature.len() as u32;
             let component = *component_by_signature
                 .entry(signature)
@@ -10095,59 +10300,22 @@ pub(crate) fn transport_coordinate_quotient(
             )
         })
         .collect();
-    // Dedup refining groups by the partition they induce over the source
-    // states. Many groups differ only by component *labels* (e.g. `[0,1,0]`
-    // vs `[1,0,1]`) yet induce the same partition; others induce identical
-    // partitions outright. The final quotient is the intersection of every
-    // group partition with the ordinary key, so collapsing partition-equal
-    // groups to a single canonical column leaves the intersection — and thus
-    // the resulting partition — unchanged. (Class *numbering* here is later
-    // re-canonicalized by `reorder_internal_by_representative_key`, so only the
-    // partition matters for correctness.) Relabeling each column to
-    // first-appearance-canonical form both detects label-permuted duplicates
-    // and keeps the per-state signature narrow enough to stay inline in the
-    // `SmallVec` below, eliminating the per-state heap allocation that
-    // dominated this loop.
-    let mut canonical_columns: Vec<Vec<u32>> = Vec::new();
-    let mut seen_columns = FxHashMap::<Vec<u32>, ()>::default();
-    for &(class_slice, components) in &refining_slices {
-        let mut column = Vec::with_capacity(state_count);
-        // Components are dense in `[0, components.len())`, so a direct-indexed
-        // relabel table is used instead of a hash map: `relabel[comp]` holds the
-        // first-appearance-canonical id for that component (or `u32::MAX` until
-        // seen). This makes the per-state relabel a plain array access.
-        let mut relabel = vec![u32::MAX; components.len()];
-        let mut next_canon = 0u32;
-        for source_state in 0..state_count {
+    // Component ids are exact equality labels within each group. Their numeric
+    // names do not matter: including the raw labels directly in the joint
+    // signature yields the same partition intersection. This avoids building,
+    // relabelling, hashing, and then rereading one full raw-state column per
+    // group.
+    let mut class_for_signature = FxHashMap::<SmallVec<[u64; 8]>, u32>::default();
+    let mut class_for_state = Vec::with_capacity(state_count);
+    for source_state in 0..state_count {
+        let mut signature = SmallVec::<[u64; 8]>::with_capacity(refining_slices.len() + 1);
+        signature.push(ordinary_coordinate_key(source_state));
+        for &(class_slice, components) in &refining_slices {
             let source_class = match class_slice {
                 Some(slice) => slice[source_state] as usize,
                 None => source_state,
             };
-            let comp = components[source_class] as usize;
-            let mut canon = relabel[comp];
-            if canon == u32::MAX {
-                canon = next_canon;
-                relabel[comp] = canon;
-                next_canon += 1;
-            }
-            column.push(canon);
-        }
-        if next_canon <= 1 {
-            // Constant column: refines nothing, drop it.
-            continue;
-        }
-        if !seen_columns.contains_key(&column) {
-            seen_columns.insert(column.clone(), ());
-            canonical_columns.push(column);
-        }
-    }
-    let mut class_for_signature = FxHashMap::<SmallVec<[u64; 8]>, u32>::default();
-    let mut class_for_state = Vec::with_capacity(state_count);
-    for source_state in 0..state_count {
-        let mut signature = SmallVec::<[u64; 8]>::with_capacity(canonical_columns.len() + 1);
-        signature.push(ordinary_coordinate_key(source_state));
-        for column in &canonical_columns {
-            signature.push(column[source_state] as u64);
+            signature.push(components[source_class] as u64);
         }
         let next_class = class_for_signature.len() as u32;
         let class = *class_for_signature.entry(signature).or_insert(next_class);
@@ -10189,10 +10357,14 @@ pub(crate) fn transport_coordinate_quotient(
             .map(|group| group.modes.len())
             .collect::<Vec<_>>();
         eprintln!(
-            "[glrmask/profile][transport_coordinate_quotient] modes={} groups={} macro_transport_groups={} group_source_class_counts={:?} group_mode_counts={:?} source_class_mode_evaluations={} raw_state_group_lookups={} component_build_ms={:.3} final_refinement_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][transport_coordinate_quotient] modes={} groups={} macro_transport_groups={} sparse_tail_groups={} sparse_tail_atoms={} sparse_tail_default_cells={} sparse_tail_default_changes={} group_source_class_counts={:?} group_mode_counts={:?} source_class_mode_evaluations={} raw_state_group_lookups={} component_build_ms={:.3} final_refinement_ms={:.3} total_ms={:.3}",
             modes.len(),
             groups.len(),
             macro_transport_groups,
+            sparse_tail_groups,
+            sparse_tail_atoms,
+            sparse_tail_default_cells,
+            sparse_tail_default_changes,
             group_source_class_counts,
             group_mode_counts,
             source_class_mode_evaluations,

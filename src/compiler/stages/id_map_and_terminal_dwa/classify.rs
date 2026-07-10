@@ -24,12 +24,34 @@ pub struct SharedClassifyBytesets {
     transitions_by_byte: Vec<u32>,
     sparse_transitions_by_byte: Vec<Vec<(u32, u32)>>,
     reverse_transitions_by_byte: Vec<ReverseByteTransitions>,
-    matched_states_by_terminal: Vec<Vec<u32>>,
+    matched_terminals_by_state: Arc<[Box<[u32]>]>,
+    future_terminals_by_state: Arc<[Box<[u32]>]>,
+    matched_states_by_terminal: Arc<[Vec<u32>]>,
+    future_states_by_terminal: Arc<[Vec<u32>]>,
     has_matched_terminal_by_state: Vec<u8>,
     future_by_state_words: Vec<u64>,
     representative_future_terminal_by_state: Vec<u32>,
     words_per_terminal_set: usize,
     active_route_setup_cache: Mutex<HashMap<(BitSet, usize), Arc<ActiveL2pRouteSetup>>>,
+}
+
+impl SharedClassifyBytesets {
+    pub(crate) fn ti_output_index(
+        &self,
+    ) -> Option<(Arc<[Box<[u32]>]>, Arc<[Box<[u32]>]>, Arc<[Vec<u32>]>, Arc<[Vec<u32>]>)> {
+        let state_count = self.future_by_state_words.len() / self.words_per_terminal_set.max(1);
+        (self.matched_terminals_by_state.len() == state_count
+            && self.future_terminals_by_state.len() == state_count
+            && self.future_states_by_terminal.len() == self.matched_states_by_terminal.len())
+            .then(|| {
+                (
+                    Arc::clone(&self.matched_terminals_by_state),
+                    Arc::clone(&self.future_terminals_by_state),
+                    Arc::clone(&self.matched_states_by_terminal),
+                    Arc::clone(&self.future_states_by_terminal),
+                )
+            })
+    }
 }
 
 struct ActiveL2pRouteSetup {
@@ -287,23 +309,46 @@ impl SharedClassifyBytesets {
         let num_states = tokenizer.num_states() as usize;
         let mut transitions_by_byte = vec![u32::MAX; 256 * num_states];
         let mut sparse_transitions_by_byte = vec![Vec::<(u32, u32)>::new(); 256];
+        let build_ti_output_index =
+            std::env::var_os("GLRMASK_DISABLE_CLASSIFY_TI_OUTPUT_INDEX").is_none();
+        let mut matched_terminals_by_state =
+            Vec::with_capacity(if build_ti_output_index { num_states } else { 0 });
+        let mut future_terminals_by_state =
+            Vec::with_capacity(if build_ti_output_index { num_states } else { 0 });
         let mut matched_states_by_terminal = vec![Vec::<u32>::new(); nt];
+        let mut future_states_by_terminal = vec![Vec::<u32>::new(); nt];
         let mut has_matched_terminal_by_state = vec![0u8; num_states];
         let mut future_by_state_words = vec![0u64; num_states * words_per_terminal_set];
         let mut representative_future_terminal_by_state = vec![u32::MAX; num_states];
         let mut transition_count = 0usize;
 
         for state in 0..tokenizer.num_states() {
-            for terminal in tokenizer.matched_terminals_iter(state) {
-                if (terminal as usize) < nt {
-                    matched_states_by_terminal[terminal as usize].push(state);
-                    has_matched_terminal_by_state[state as usize] = 1;
-                }
+            let matched = tokenizer
+                .matched_terminals_iter(state)
+                .filter(|terminal| (*terminal as usize) < nt)
+                .collect::<Vec<_>>();
+            for &terminal in &matched {
+                matched_states_by_terminal[terminal as usize].push(state);
+                has_matched_terminal_by_state[state as usize] = 1;
             }
+            if build_ti_output_index {
+                matched_terminals_by_state.push(matched.into_boxed_slice());
+            }
+
             let future_words = tokenizer.possible_future_terminals(state).words();
             future_by_state_words[state as usize * words_per_terminal_set
                 ..(state as usize + 1) * words_per_terminal_set]
                 .copy_from_slice(future_words);
+            if build_ti_output_index {
+                let future = tokenizer
+                    .possible_future_terminals_iter(state)
+                    .filter(|terminal| (*terminal as usize) < nt)
+                    .collect::<Vec<_>>();
+                for &terminal in &future {
+                    future_states_by_terminal[terminal as usize].push(state);
+                }
+                future_terminals_by_state.push(future.into_boxed_slice());
+            }
             if let Some((word_index, &word)) = future_words
                 .iter()
                 .take(words_per_terminal_set)
@@ -400,7 +445,10 @@ impl SharedClassifyBytesets {
             transitions_by_byte,
             sparse_transitions_by_byte,
             reverse_transitions_by_byte,
-            matched_states_by_terminal,
+            matched_terminals_by_state: matched_terminals_by_state.into(),
+            future_terminals_by_state: future_terminals_by_state.into(),
+            matched_states_by_terminal: matched_states_by_terminal.into(),
+            future_states_by_terminal: future_states_by_terminal.into(),
             has_matched_terminal_by_state,
             future_by_state_words,
             representative_future_terminal_by_state,
@@ -2071,7 +2119,10 @@ mod tests {
             transitions_by_byte: Vec::new(),
             sparse_transitions_by_byte: Vec::new(),
             reverse_transitions_by_byte: Vec::new(),
-            matched_states_by_terminal: Vec::new(),
+            matched_terminals_by_state: Arc::from(Vec::<Box<[u32]>>::new()),
+            future_terminals_by_state: Arc::from(Vec::<Box<[u32]>>::new()),
+            matched_states_by_terminal: Arc::from(Vec::<Vec<u32>>::new()),
+            future_states_by_terminal: Arc::from(Vec::<Vec<u32>>::new()),
             has_matched_terminal_by_state: Vec::new(),
             future_by_state_words: Vec::new(),
             representative_future_terminal_by_state: Vec::new(),

@@ -431,6 +431,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         ti_transport_witness_rounds,
         ti_round_count,
         ti_additional_merged_members,
+        ti_raw_observations,
     ) =
         if l2p_terminal_interchangeability_enabled_for_partition(partition_label) {
             let mut active = active_terminals.to_vec();
@@ -477,14 +478,17 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let additional_merged_members = first_round_class_count
                 .unwrap_or(classes.len())
                 .saturating_sub(classes.len());
+            let raw_observations = discovery_context
+                .final_raw_observation_ids(tokenizer.num_states() as usize);
             (
                 Some(classes),
                 Some(transport_witness_rounds),
                 round_count,
                 additional_merged_members,
+                raw_observations,
             )
         } else {
-            (None, None, 0, 0)
+            (None, None, 0, 0, None)
         };
     let ti_discovery_ms = ti_discovery_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
@@ -608,6 +612,14 @@ let strict_reference = reference_terminal_expansion
             flat_trans,
             equivalence_initial_state_map,
             token_position_partition_for_analysis,
+            std::env::var_os("GLRMASK_TI_DISABLE_RAW_OBSERVATION_REUSE")
+                .is_none()
+                .then(|| {
+                    ti_raw_observations.as_ref().map(|(ids, representatives)| {
+                        (ids.as_slice(), representatives.as_slice())
+                    })
+                })
+                .flatten(),
         );
 
     // Replay and transport-coordinate refinement are intentionally deferred
@@ -902,10 +914,20 @@ let strict_reference = reference_terminal_expansion
             ignore_terminal,
         );
         let used_follow_row_quotient = raw_follow_restoration.used_follow_row_quotient;
-        let mut expanded_dwa = raw_follow_restoration.dwa;
+        let expanded_dwa = raw_follow_restoration.dwa;
         ti_raw_follow_restore_ms = raw_follow_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
+
+        // Exact duplicate states remain equivalent under any subsequent
+        // source-domain restriction. Quotient them before forward normalization
+        // so both normalization and weighted minimization see the smaller graph.
+        let premerge_disabled = std::env::var("GLRMASK_DISABLE_TI_PREMERGE").is_ok();
+        let mut expanded_dwa = if premerge_disabled {
+            expanded_dwa
+        } else {
+            quotient_exact_duplicate_states(expanded_dwa)
+        };
 
         let forward_domain_started_at = ti_profile_timing.then(Instant::now);
         restrict_weights_to_forward_domains_in_place(&mut expanded_dwa);
@@ -948,25 +970,6 @@ let strict_reference = reference_terminal_expansion
         }
         ti_post_dwa_compact_ms = post_dwa_compact_started_at.elapsed().as_secs_f64() * 1000.0;
         let (expanded_dwa, final_id_map) = expanded_artifact.into_parts();
-
-        // Exact-duplicate state quotient before minimization. TI mode expansion
-        // materializes many states that are byte-identical (same final weight
-        // and same (label -> dst, interned weight-Arc) transitions). Because the
-        // token sets and lifted weights are interned, Arc-ptr equality is exact
-        // value equality, so merging these states is a sound bisimulation
-        // quotient that leaves the language and weights unchanged. Doing it here
-        // shrinks the input to `push_weights` and the pointwise coloring inside
-        // minimization without touching the deeper pointwise-value equivalences
-        // that only that machinery can find. Ptr-based fixpoint refinement adds
-        // nothing beyond the single exact-dup pass (measured: p0 156->106 in one
-        // pass, fixpoint identical), so a single hash pass captures the whole
-        // cheap win.
-        let premerge_disabled = std::env::var("GLRMASK_DISABLE_TI_PREMERGE").is_ok();
-        let expanded_dwa = if premerge_disabled {
-            expanded_dwa
-        } else {
-            quotient_exact_duplicate_states(expanded_dwa)
-        };
 
         let post_dwa_minimize_started_at = ti_profile_timing.then(Instant::now);
         // TI lifting creates partial source domains. The precompacted local

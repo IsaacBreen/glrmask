@@ -2762,6 +2762,48 @@ fn memberwise_group_compatible(
 /// if two class representatives are deemed compatible, ALL pairs across the
 /// two classes are compatible (since transitions/weights are identical within
 /// a class, only the needed-set overlap domain varies).
+fn build_and_color_pairwise_greedy(
+    dwa: &DWA,
+    candidates: &[usize],
+    needed: &[Weight],
+    old_to_new: &[u32],
+    productive_transitions: &[Vec<ProductiveTransition>],
+) -> Vec<usize> {
+    // A merge group is valid when every pair of members agrees on the
+    // intersection of its live domains and has no conflicting label target.
+    // Checking the full clique directly is exact: pairwise agreement of these
+    // partial deterministic behaviors implies one well-defined union behavior
+    // for the whole group. For small height buckets this avoids constructing
+    // the much larger pointwise profile representation merely to discover that
+    // almost every successful merge is domain-disjoint.
+    let mut groups = Vec::<SmallVec<[usize; 16]>>::new();
+    let mut coloring = Vec::with_capacity(candidates.len());
+    for &candidate in candidates {
+        let group = groups
+            .iter()
+            .position(|members| {
+                members.iter().all(|&member| {
+                    are_compatible(
+                        candidate,
+                        member,
+                        dwa,
+                        needed,
+                        old_to_new,
+                        productive_transitions,
+                        false,
+                    )
+                })
+            })
+            .unwrap_or_else(|| {
+                groups.push(SmallVec::new());
+                groups.len() - 1
+            });
+        groups[group].push(candidate);
+        coloring.push(group);
+    }
+    coloring
+}
+
 fn build_and_color_hybrid(
     dwa: &DWA,
     candidates: &[usize],
@@ -2771,6 +2813,17 @@ fn build_and_color_hybrid(
     pointwise_class_order: PointwiseClassOrder,
 ) -> Vec<usize> {
     let profile_enabled = weighted_dwa_minimize_profile_enabled();
+    if candidates.len() <= 64
+        && std::env::var_os("GLRMASK_WEIGHTED_MINIMIZE_DISABLE_PAIRWISE_SMALL").is_none()
+    {
+        return build_and_color_pairwise_greedy(
+            dwa,
+            candidates,
+            needed,
+            old_to_new,
+            productive_transitions,
+        );
+    }
     let total_started_at = Instant::now();
 
     // Step 1: Partition refinement to get fine-grained classes.
@@ -3594,6 +3647,26 @@ fn merge_state_into_builder(
     }
 }
 
+fn merge_productive_state_into_builder(
+    old_id: usize,
+    color: usize,
+    dwa: &DWA,
+    productive_transitions: &[Vec<ProductiveTransition>],
+    old_to_new: &[u32],
+    builders: &mut [MergedStateBuilder],
+) {
+    let builder = &mut builders[color];
+    let old_state = &dwa.states()[old_id];
+    if let Some(final_weight) = &old_state.final_weight {
+        builder.add_final_weight(final_weight);
+    }
+    for transition in &productive_transitions[old_id] {
+        let target = mapped_target(old_to_new, transition.target)
+            .expect("productive transition target must be colored first");
+        builder.add_transition(transition.label, target, transition.weight.clone());
+    }
+}
+
 fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedStateBuilder>) -> DWA {
     let profile_enabled = weighted_dwa_minimize_profile_enabled();
     let mut final_pending_weight_count = 0usize;
@@ -3665,6 +3738,193 @@ fn canonical_dead_dwa() -> DWA {
     DWA::new(0, 0)
 }
 
+/// Exact small-input path that never materializes a transient pushed DWA.
+///
+/// The ordinary pipeline computes each productive transition, writes it back
+/// into the state's BTreeMap, scans those maps again to build productive
+/// profiles, and finally clones the same weights into reconstruction builders.
+/// For small height buckets we already use exact pairwise coloring, so the
+/// pushed maps are not needed for partition refinement. Keep the productive
+/// transitions in one compact side vector and reconstruct directly from it.
+fn try_minimize_small_pairwise_direct(dwa: &DWA) -> Option<DWA> {
+    const MAX_INPUT_STATES: usize = 128;
+    const MAX_HEIGHT_BUCKET: usize = 64;
+
+    let n = dwa.states().len();
+    if n == 0 || n > MAX_INPUT_STATES {
+        return None;
+    }
+    let started_at = Instant::now();
+    let topo = compute_topo_order(dwa)?;
+
+    let mut incoming_transition_counts = vec![0usize; n];
+    for state in dwa.states() {
+        for (target, _) in state.transitions.values() {
+            if (*target as usize) < n {
+                incoming_transition_counts[*target as usize] += 1;
+            }
+        }
+    }
+
+    let mut needed = vec![Weight::empty(); n];
+    let mut productive_transitions = vec![Vec::<ProductiveTransition>::new(); n];
+    let mut intersection_cache = FxHashMap::<(usize, usize), Weight>::default();
+    let mut intersection_indexes = FxHashMap::<usize, WeightIntersectionIndex>::default();
+    for &source in topo.iter().rev() {
+        let state = &dwa.states()[source];
+        let mut reachable_parts = Vec::<Weight>::with_capacity(state.transitions.len() + 1);
+        let mut reachable_is_full = false;
+        if let Some(final_weight) = &state.final_weight {
+            if final_weight.is_full() {
+                reachable_is_full = true;
+            } else if !final_weight.is_empty() {
+                reachable_parts.push(final_weight.clone());
+            }
+        }
+
+        let mut productive = Vec::with_capacity(state.transitions.len());
+        for (&label, (target, weight)) in &state.transitions {
+            let target_index = *target as usize;
+            if target_index >= n || needed[target_index].is_empty() {
+                continue;
+            }
+            let pushed_weight = if needed[target_index].is_full() {
+                weight.clone()
+            } else {
+                let index = (incoming_transition_counts[target_index] >= 8).then(|| {
+                    let key = needed[target_index].ptr_key();
+                    intersection_indexes
+                        .entry(key)
+                        .or_insert_with(|| needed[target_index].intersection_index())
+                });
+                memoized_intersection(
+                    &mut intersection_cache,
+                    weight,
+                    &needed[target_index],
+                    index.as_deref(),
+                )
+            };
+            if pushed_weight.is_empty() {
+                continue;
+            }
+            if !reachable_is_full {
+                if pushed_weight.is_full() {
+                    reachable_is_full = true;
+                    reachable_parts.clear();
+                } else {
+                    reachable_parts.push(pushed_weight.clone());
+                }
+            }
+            productive.push(ProductiveTransition {
+                label,
+                target: *target,
+                weight: pushed_weight,
+            });
+        }
+        productive_transitions[source] = productive;
+        needed[source] = if reachable_is_full {
+            Weight::all()
+        } else {
+            Weight::union_all(reachable_parts.iter())
+        };
+    }
+
+    let start_state = dwa.start_state() as usize;
+    if start_state >= n || needed[start_state].is_empty() {
+        return Some(canonical_dead_dwa());
+    }
+
+    let mut heights = vec![0usize; n];
+    for &source in topo.iter().rev() {
+        heights[source] = productive_transitions[source]
+            .iter()
+            .map(|transition| heights[transition.target as usize] + 1)
+            .max()
+            .unwrap_or(0);
+    }
+    let max_height = heights.iter().copied().max().unwrap_or(0);
+
+    let mut reachable_from_start = vec![false; n];
+    let mut stack = vec![start_state];
+    while let Some(source) = stack.pop() {
+        if reachable_from_start[source] {
+            continue;
+        }
+        reachable_from_start[source] = true;
+        stack.extend(
+            productive_transitions[source]
+                .iter()
+                .map(|transition| transition.target as usize),
+        );
+    }
+
+    let mut states_by_height = vec![Vec::<usize>::new(); max_height + 1];
+    for state in 0..n {
+        if reachable_from_start[state] && !needed[state].is_empty() {
+            states_by_height[heights[state]].push(state);
+        }
+    }
+    if states_by_height
+        .iter()
+        .any(|bucket| bucket.len() > MAX_HEIGHT_BUCKET)
+    {
+        return None;
+    }
+
+    let mut old_to_new = vec![UNMAPPED; n];
+    let mut new_states = Vec::<MergedStateBuilder>::new();
+    for (height, candidates) in states_by_height.iter().enumerate() {
+        if candidates.is_empty() {
+            continue;
+        }
+        let coloring = if height == 0
+            && candidates
+                .iter()
+                .all(|&state| productive_transitions[state].is_empty())
+        {
+            vec![0usize; candidates.len()]
+        } else {
+            build_and_color_pairwise_greedy(
+                dwa,
+                candidates,
+                &needed,
+                &old_to_new,
+                &productive_transitions,
+            )
+        };
+        let base_new_id = new_states.len() as u32;
+        let num_colors = coloring.iter().copied().max().map_or(0, |color| color + 1);
+        for (index, &color) in coloring.iter().enumerate() {
+            old_to_new[candidates[index]] = base_new_id + color as u32;
+        }
+        new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
+        let builders = &mut new_states[base_new_id as usize..];
+        for (index, &color) in coloring.iter().enumerate() {
+            merge_productive_state_into_builder(
+                candidates[index],
+                color,
+                dwa,
+                &productive_transitions,
+                &old_to_new,
+                builders,
+            );
+        }
+    }
+
+    let minimized = reconstruct_dwa(start_state, &old_to_new, new_states);
+    if weighted_dwa_minimize_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][weighted_dwa_minimize_small_direct] input_states={} input_transitions={} output_states={} output_transitions={} total_ms={:.3}",
+            dwa.num_states(),
+            dwa.num_transitions(),
+            minimized.num_states(),
+            minimized.num_transitions(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some(minimized)
+}
+
 // Public API.
 
 /// Minimize an acyclic DWA using weight pushing + graph-coloring.
@@ -3684,6 +3944,11 @@ pub fn minimize_acyclic_owned_with_pointwise_class_order(
 ) -> DWA {
     if pushed.states().is_empty() {
         return pushed;
+    }
+    if std::env::var_os("GLRMASK_WEIGHTED_MINIMIZE_DISABLE_SMALL_DIRECT").is_none()
+        && let Some(minimized) = try_minimize_small_pairwise_direct(&pushed)
+    {
+        return minimized;
     }
 
     let profile_enabled = weighted_dwa_minimize_profile_enabled();
