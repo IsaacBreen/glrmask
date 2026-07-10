@@ -3376,6 +3376,8 @@ enum MemberVerdict {
 struct MemberResult {
     verdict: MemberVerdict,
     memo_update: Option<((TerminalID, TerminalID), bool)>,
+    closed_update: Option<(TerminalID, TerminalID)>,
+    used_cached_closed: bool,
 }
 
 /// Dedicated rayon thread pool for the per-pair TI certification loop. Built
@@ -4311,6 +4313,27 @@ impl InterchangeabilityDfa {
     ) -> Option<Vec<(u32, u32)>> {
         self.ensure_terminal_quotient_output_support(left);
         self.ensure_terminal_quotient_output_support(right);
+        let supports = self
+            .terminal_quotient_output_supports
+            .as_ref()
+            .expect("terminal quotient output supports initialized");
+        let left_support = supports[left as usize].as_ref()?;
+        let right_support = supports[right as usize].as_ref()?;
+        self.support_transposition_search_deviations_with_supports(
+            left,
+            right,
+            left_support,
+            right_support,
+        )
+    }
+
+    fn support_transposition_search_deviations_with_supports(
+        &self,
+        left: TerminalID,
+        right: TerminalID,
+        left_support: &[(u32, u8)],
+        right_support: &[(u32, u8)],
+    ) -> Option<Vec<(u32, u32)>> {
         let quotient = self
             .support_quotient
             .as_ref()
@@ -4319,12 +4342,6 @@ impl InterchangeabilityDfa {
         if cone_classes.len() > 12 {
             return None;
         }
-        let supports = self
-            .terminal_quotient_output_supports
-            .as_ref()
-            .expect("terminal quotient output supports initialized");
-        let left_support = supports[left as usize].as_ref()?;
-        let right_support = supports[right as usize].as_ref()?;
         let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
         let dead_class = quotient.class_for_state[self.dead_state()] as usize;
         let mut outputs = SparseSwappedOutputIds::new(
@@ -6327,7 +6344,23 @@ impl InterchangeabilityDfa {
         left: TerminalID,
         right: TerminalID,
     ) -> Option<InterchangeMap> {
-        let deviations = self.support_transposition_deviations_scratch(left, right)?;
+        if let Some(deviations) = self.support_transposition_deviations_scratch(left, right) {
+            if let Some(map) = self.support_transposition_interchange_map_from_deviations_scratch(
+                left,
+                right,
+                deviations,
+            ) {
+                return Some(map);
+            }
+        }
+        let left_support = self.terminal_support_parallel(left);
+        let right_support = self.terminal_support_parallel(right);
+        let deviations = self.support_transposition_search_deviations_with_supports(
+            left,
+            right,
+            left_support,
+            right_support,
+        )?;
         self.support_transposition_interchange_map_from_deviations_scratch(left, right, deviations)
     }
 
@@ -6495,27 +6528,38 @@ impl InterchangeabilityDfa {
         left_sources: &[u32],
         terminal: TerminalID,
         memo_snapshot: &FxHashMap<(TerminalID, TerminalID), bool>,
+        closed_snapshot: &FxHashSet<(TerminalID, TerminalID)>,
     ) -> MemberResult {
-        let outpair_ok =
-            self.observed_output_pair_set_is_swap_closed_scratch(scratch, representative, terminal);
-        if !outpair_ok {
-            return MemberResult {
-                verdict: MemberVerdict::RejectOutputPair,
-                memo_update: None,
-            };
-        }
-        let frozen_preserved = self.swap_preserves_all_frozen_outputs(representative, terminal);
-        if frozen_preserved {
-            return MemberResult {
-                verdict: MemberVerdict::AcceptIdentity(self.canonical_identity_map_prebuilt()),
-                memo_update: None,
-            };
-        }
         let memo_key = if representative <= terminal {
             (representative, terminal)
         } else {
             (terminal, representative)
         };
+        let used_cached_closed = closed_snapshot.contains(&memo_key);
+        let outpair_ok = used_cached_closed
+            || self.observed_output_pair_set_is_swap_closed_scratch(
+                scratch,
+                representative,
+                terminal,
+            );
+        if !outpair_ok {
+            return MemberResult {
+                verdict: MemberVerdict::RejectOutputPair,
+                memo_update: None,
+                closed_update: None,
+                used_cached_closed,
+            };
+        }
+        let closed_update = (!used_cached_closed).then_some(memo_key);
+        let frozen_preserved = self.swap_preserves_all_frozen_outputs(representative, terminal);
+        if frozen_preserved {
+            return MemberResult {
+                verdict: MemberVerdict::AcceptIdentity(self.canonical_identity_map_prebuilt()),
+                memo_update: None,
+                closed_update,
+                used_cached_closed,
+            };
+        }
         let mut memo_update = None;
         let first_round_possible = match memo_snapshot.get(&memo_key).copied() {
             Some(value) => value,
@@ -6534,6 +6578,8 @@ impl InterchangeabilityDfa {
             return MemberResult {
                 verdict: MemberVerdict::RejectFirstRound,
                 memo_update,
+                closed_update,
+                used_cached_closed,
             };
         }
         let support = self.support_transposition_interchange_map_scratch(representative, terminal);
@@ -6544,6 +6590,8 @@ impl InterchangeabilityDfa {
         MemberResult {
             verdict,
             memo_update,
+            closed_update,
+            used_cached_closed,
         }
     }
 
@@ -7029,7 +7077,9 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
             // snapshot it once here (immutable, read by all parallel workers) and
             // merge every new entry back in a single sweep after the round.
             let memo_snapshot = context.first_round_memo.borrow().clone();
+            let closed_snapshot = context.output_pair_closed_memo.borrow().clone();
             let mut memo_additions: Vec<((TerminalID, TerminalID), bool)> = Vec::new();
+            let mut closed_additions: Vec<(TerminalID, TerminalID)> = Vec::new();
             let mut rep_sources = Vec::<u32>::new();
             // Per-item certification work is only microseconds, so rayon's
             // fork/join and pool-wake latency dwarfs it for small pivots. Only
@@ -7059,6 +7109,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                         let dfa_ref = &dfa;
                         let rep_sources_ref = &rep_sources;
                         let memo_snapshot_ref = &memo_snapshot;
+                        let closed_snapshot_ref = &closed_snapshot;
                         // NOTE: no per-pivot `pool.install` here. The whole pivot
                         // loop runs inside a single `pool.install` below, so these
                         // nested `par_iter`s reuse the already-hot pool instead of
@@ -7074,6 +7125,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                                         rep_sources_ref,
                                         terminal,
                                         memo_snapshot_ref,
+                                        closed_snapshot_ref,
                                     )
                                 },
                             )
@@ -7089,6 +7141,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                                     &rep_sources,
                                     terminal,
                                     &memo_snapshot,
+                                    &closed_snapshot,
                                 )
                             })
                             .collect()
@@ -7096,6 +7149,12 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                     for member_result in &results {
                         if let Some(update) = member_result.memo_update {
                             memo_additions.push(update);
+                        }
+                        if let Some(update) = member_result.closed_update {
+                            closed_additions.push(update);
+                        }
+                        if member_result.used_cached_closed {
+                            output_pair_cached_closed += 1;
                         }
                     }
                     let members: Vec<TerminalID> = unresolved[1..].to_vec();
@@ -7151,6 +7210,12 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 for (key, value) in memo_additions {
                     memo.insert(key, value);
                 }
+            }
+            if !closed_additions.is_empty() {
+                context
+                    .output_pair_closed_memo
+                    .borrow_mut()
+                    .extend(closed_additions);
             }
         } else {
         // Sequential discovery owns this partition-local context for the whole
