@@ -729,6 +729,37 @@ pub(crate) fn merge_local_id_maps_and_terminal_dwas(
     }
 }
 
+/// Union mapped deterministic weighted automata in a common ID space.
+///
+/// The merge machinery is independent of how the input DWAs were produced;
+/// parser DWAs use the same TSID/token-labelled weights as terminal DWAs.  This
+/// wrapper keeps parser construction from depending on the terminal-specific
+/// transport struct while reusing the exact remap/union/determinize path.
+pub(crate) fn merge_mapped_dwas(
+    inputs: Vec<MappedArtifact<DWA>>,
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> MappedArtifact<DWA> {
+    assert!(!inputs.is_empty(), "merge_mapped_dwas called with empty inputs");
+    let locals = inputs
+        .into_iter()
+        .map(|input| {
+            let (dwa, id_map) = input.into_parts();
+            LocalIdMapTerminalDwa {
+                id_map,
+                dwa,
+                profile: TerminalDwaPhaseProfile::default(),
+            }
+        })
+        .collect();
+    let merged = merge_local_id_maps_and_terminal_dwas(
+        locals,
+        num_tokenizer_states,
+        max_token_id,
+    );
+    MappedArtifact::new(merged.dwa, merged.id_map)
+}
+
 /// Build the ordinary global NWA union and determinize it. This is used only
 /// as an opt-in semantic oracle for the specialized disjoint-domain merge.
 fn generic_global_union_determinization(

@@ -1,7 +1,8 @@
 //! Shared types used across the terminal DWA build pipeline.
 
 use crate::automata::weighted::dwa::DWA;
-use crate::compiler::stages::equiv_types::InternalIdMap;
+use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
+use crate::compiler::stages::equiv_types::{InternalIdMap, MappedArtifact};
 use crate::grammar::flat::TerminalID;
 
 /// Color identifier (index into graph-coloring partition).
@@ -70,6 +71,30 @@ pub(crate) struct PartitionTerminalDwas {
 impl PartitionTerminalDwas {
     pub(crate) fn is_empty(&self) -> bool {
         self.l1.is_none() && self.l2p.is_none() && self.l2p_single_l1.is_none()
+    }
+}
+
+/// Globally merged terminal-DWA families.  L1 includes both ordinary L1
+/// terminals and the cheap L1 construction over the vocabulary subset split
+/// away from L2P.  Keeping the families separate lets parser construction run
+/// independently before the parser DWAs are unioned.
+#[derive(Debug)]
+pub(crate) struct TerminalDwaFamilies {
+    pub(crate) l1: Option<MappedArtifact<TerminalAutomaton>>,
+    pub(crate) l2p: Option<MappedArtifact<TerminalAutomaton>>,
+}
+
+impl TerminalDwaFamilies {
+    pub(crate) fn len(&self) -> usize {
+        usize::from(self.l1.is_some()) + usize::from(self.l2p.is_some())
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.l1.is_none() && self.l2p.is_none()
+    }
+
+    pub(crate) fn into_vec(self) -> Vec<MappedArtifact<TerminalAutomaton>> {
+        self.l1.into_iter().chain(self.l2p).collect()
     }
 }
 
