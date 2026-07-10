@@ -327,6 +327,12 @@ pub(crate) struct CommitTemplateDfas {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Constraint {
     pub(crate) parser_dwa: DWA,
+    /// Exact depth-one parser acceptance kept separate from the deeper parser
+    /// DWA. Keys are encoded parser-state labels; values are already the
+    /// transition/final-weight intersection for accepting after that one
+    /// stack symbol.
+    #[serde(default)]
+    pub(crate) parser_top_accept: BTreeMap<i32, Weight>,
     pub(crate) table: GLRTable,
     #[serde(default)]
     pub(crate) terminal_display_names: Vec<String>,

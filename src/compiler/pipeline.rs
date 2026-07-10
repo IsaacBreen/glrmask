@@ -454,6 +454,21 @@ fn finalize_constraint(mut constraint: Constraint) -> Constraint {
     constraint
 }
 
+#[derive(Clone, Debug, Default)]
+struct ParserTopAccept(BTreeMap<i32, Weight>);
+
+impl WeightRefs for ParserTopAccept {
+    fn weight_refs(&self) -> Vec<&Weight> {
+        self.0.values().collect()
+    }
+
+    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
+        self.0.values_mut().collect()
+    }
+}
+
+type MappedParserDwa = MappedArtifact<(DWA, ParserTopAccept)>;
+
 fn build_templates_for_compile(
     table: &GLRTable,
     analyzed_grammar: &AnalyzedGrammar,
@@ -639,7 +654,7 @@ struct CompileDagResult {
     terminal_dwa_finished_ms: f64,
     templates_started_ms: f64,
     templates_finished_ms: f64,
-    prebuilt_parser_dwa: Option<(MappedArtifact<DWA>, f64, f64, f64)>,
+    prebuilt_parser_dwa: Option<(MappedParserDwa, f64, f64, f64)>,
 }
 
 fn build_parser_dwa_for_terminal_family(
@@ -710,7 +725,7 @@ fn build_and_merge_parser_dwa_families(
     templates: Templates,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-) -> MappedArtifact<DWA> {
+) -> MappedParserDwa {
     let l1_templates = templates.clone();
     let (l1_parser, l2p_parser) = rayon::join(
         || {
@@ -735,11 +750,13 @@ fn build_and_merge_parser_dwa_families(
         },
     );
     let parser_dwas: Vec<MappedArtifact<DWA>> = l1_parser.into_iter().chain(l2p_parser).collect();
-    crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas(
+    let (mapped_dwa, top_accept) = crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas_with_top_accept(
         parser_dwas,
         tokenizer.num_states() as usize,
         vocab.max_token_id(),
-    )
+    );
+    let (dwa, id_map) = mapped_dwa.into_parts();
+    MappedArtifact::new((dwa, ParserTopAccept(top_accept)), id_map)
 }
 
 #[derive(Clone, Copy)]
@@ -1594,7 +1611,8 @@ fn compile_prepared_with_profile_and_table_construction(
         possible_matches =
             MappedArtifact::new(possible_matches_artifact, internal_ids.clone());
 
-        let parser_dwa_interned_ranges = parser_dwa.artifact().stats().interned_ranges;
+        let parser_dwa_interned_ranges =
+            count_interned_ranges_for_weights(parser_dwa.artifact().weight_refs()).total_ranges();
         let (possible_matches_interned_ranges, parser_pm_joint_interned_ranges) = {
             let (parser_dwa_artifact, _) = parser_dwa.parts_mut();
             let (possible_matches_artifact, _) = possible_matches.parts_mut();
@@ -1603,7 +1621,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 joint_interned_range_count_for_artifacts(parser_dwa_artifact, possible_matches_artifact),
             )
         };
-        let parser_dwa = parser_dwa.into_artifact();
+        let (parser_dwa, ParserTopAccept(parser_top_accept)) = parser_dwa.into_artifact();
 
         let internal_token_bytes_started_at = Instant::now();
         let internal_token_bytes = cpm::build_internal_token_bytes_from_groups(
@@ -1634,6 +1652,7 @@ fn compile_prepared_with_profile_and_table_construction(
         let token_bytes = std::sync::Arc::clone(&vocab.entries);
         let constraint = finalize_constraint(Constraint {
             parser_dwa,
+            parser_top_accept,
             table,
             terminal_display_names: analyzed_grammar.terminal_display_names.clone(),
             tokenizer,

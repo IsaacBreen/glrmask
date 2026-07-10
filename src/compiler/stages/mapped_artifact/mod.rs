@@ -3,10 +3,11 @@
 mod compaction;
 mod reconcile;
 
+use std::collections::BTreeMap;
+
 use crate::automata::weighted_u32::dwa::DWA;
 use crate::automata::weighted_u32::nwa::NWA;
 use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
-use crate::compiler::constraint_possible_matches::RuntimePossibleMatchesByTerminal;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::ds::weight::Weight;
 
@@ -99,7 +100,7 @@ impl WeightRefs for TerminalAutomaton {
     }
 }
 
-impl WeightRefs for RuntimePossibleMatchesByTerminal {
+impl<K: Ord> WeightRefs for BTreeMap<K, Weight> {
     fn weight_refs(&self) -> Vec<&Weight> {
         self.values().collect()
     }
@@ -375,6 +376,32 @@ impl<T: WeightRefs> MappedArtifact<T> {
             right_id_map,
         );
         left_id_map.clone()
+    }
+
+    /// Reconcile into the exact common refinement even when one map already
+    /// refines the other. Input order controls the composite class ordering;
+    /// callers use this when preserving the first artifact's locality matters
+    /// more than avoiding a remap of the second artifact.
+    pub(crate) fn pair_forced_common<U>(
+        mut self,
+        mut other: MappedArtifact<U>,
+    ) -> MappedArtifact<(T, U)>
+    where
+        U: WeightRefs,
+    {
+        let common_id_map = {
+            let (left_artifact, left_id_map) = self.parts_mut();
+            let (right_artifact, right_id_map) = other.parts_mut();
+            let mut left_weights = left_artifact.weight_refs_mut();
+            let mut right_weights = right_artifact.weight_refs_mut();
+            reconcile::reconcile_weight_id_maps_into_forced_common(
+                &mut left_weights,
+                left_id_map,
+                &mut right_weights,
+                right_id_map,
+            )
+        };
+        MappedArtifact::new((self.into_artifact(), other.into_artifact()), common_id_map)
     }
 
 }

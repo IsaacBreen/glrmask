@@ -1224,6 +1224,29 @@ fn save_load_roundtrip_preserves_behavior() {
 }
 
 #[test]
+fn runtime_payload_v1_roundtrip_preserves_behavior_without_overlay() {
+    let constraint = ebnf(&["a", "b"], r#"start ::= "a" "b""#);
+    let bytes = constraint.save_runtime_payload_v1();
+    let loaded = Constraint::load_runtime_payload_v1(&bytes).unwrap();
+    assert_accepts_tokens(&loaded, &[0, 1]);
+}
+
+#[test]
+fn runtime_payload_v2_roundtrip_preserves_split_parser_overlay() {
+    let constraint = lark(
+        &["!", "aaa"],
+        r#"
+            start: "!" | WORD
+            WORD: /[a-z]+/
+        "#,
+    );
+    let bytes = constraint.save_runtime_payload_v2();
+    let loaded = Constraint::load_runtime_payload_v2(&bytes).unwrap();
+    assert_accepts_tokens(&loaded, &[0]);
+    assert_accepts_tokens(&loaded, &[1]);
+}
+
+#[test]
 fn plan_style_mask_buffer_matches_mask() {
     let constraint = ebnf(&["a", "b"], r#"start ::= "a" "b""#);
     let mut state = constraint.start();

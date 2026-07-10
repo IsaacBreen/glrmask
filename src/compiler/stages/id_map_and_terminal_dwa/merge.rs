@@ -4,7 +4,7 @@
 //! and disjoint vocabs (e.g., different character-type partitions) uniformly
 //! via composite-key refinement.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -965,8 +965,33 @@ pub(crate) fn merge_mapped_parser_dwas(
         let left = iter.next().unwrap();
         let right = iter.next().unwrap();
         let reconcile_started_at = Instant::now();
-        let reconciled = MappedArtifact::from((left, right));
-        let ((left_dwa, right_dwa), common_id_map) = reconciled.into_parts();
+        let left_is_immediate = immediate_dwa_accepting_edges(left.artifact()).is_some();
+        let right_is_immediate = immediate_dwa_accepting_edges(right.artifact()).is_some();
+        let (left_dwa, right_dwa, common_id_map, reconcile_mode) = if left_is_immediate {
+            // Put the large non-immediate family first so descendants of each
+            // of its classes remain contiguous in the common refinement.
+            let reconciled = right.pair_forced_common(left);
+            let ((primary_dwa, immediate_dwa), common_id_map) = reconciled.into_parts();
+            (
+                immediate_dwa,
+                primary_dwa,
+                common_id_map,
+                "common_refinement_primary_first",
+            )
+        } else if right_is_immediate {
+            let reconciled = left.pair_forced_common(right);
+            let ((primary_dwa, immediate_dwa), common_id_map) = reconciled.into_parts();
+            (
+                immediate_dwa,
+                primary_dwa,
+                common_id_map,
+                "common_refinement_primary_first",
+            )
+        } else {
+            let reconciled = MappedArtifact::from((left, right));
+            let ((left_dwa, right_dwa), common_id_map) = reconciled.into_parts();
+            (left_dwa, right_dwa, common_id_map, "common_refinement")
+        };
         let reconcile_ms = reconcile_started_at.elapsed().as_secs_f64() * 1000.0;
         let graft_started_at = Instant::now();
         if let Some(dwa) = try_graft_immediate_parser_dwa(&left_dwa, right_dwa.clone())
@@ -975,7 +1000,8 @@ pub(crate) fn merge_mapped_parser_dwas(
             let graft_ms = graft_started_at.elapsed().as_secs_f64() * 1000.0;
             if compile_profile_enabled() {
                 eprintln!(
-                    "[glrmask/profile][parser_dwa_merge] inputs=2 mode=immediate_graft reconcile_ms={:.3} graft_ms={:.3} states={} transitions={} total_ms={:.3}",
+                    "[glrmask/profile][parser_dwa_merge] inputs=2 mode=immediate_graft reconcile_mode={} reconcile_ms={:.3} graft_ms={:.3} states={} transitions={} total_ms={:.3}",
+                    reconcile_mode,
                     reconcile_ms,
                     graft_ms,
                     dwa.num_states(),
@@ -1050,6 +1076,80 @@ pub(crate) fn merge_mapped_parser_dwas(
         .map(|local| MappedArtifact::new(local.dwa, local.id_map))
         .collect();
     merge_mapped_dwas(inputs, num_tokenizer_states, max_token_id)
+}
+
+/// Keep an immediate parser family as a top-state acceptance overlay instead
+/// of materializing its union with the deeper parser DWA.
+///
+/// The returned DWA is the non-immediate family in the exact common ID space;
+/// `top_accept[label]` is unioned after consuming the first stack symbol. This
+/// is semantically the same union that `try_graft_immediate_parser_dwa` builds,
+/// but avoids destination decoration and the subsequent quotient.
+pub(crate) fn merge_mapped_parser_dwas_with_top_accept(
+    inputs: Vec<MappedArtifact<DWA>>,
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> (MappedArtifact<DWA>, BTreeMap<i32, Weight>) {
+    assert!(
+        !inputs.is_empty(),
+        "merge_mapped_parser_dwas_with_top_accept called with empty inputs"
+    );
+    if inputs.len() == 1 {
+        return (inputs.into_iter().next().unwrap(), BTreeMap::new());
+    }
+
+    if inputs.len() == 2 {
+        let total_started_at = Instant::now();
+        let mut iter = inputs.into_iter();
+        let left = iter.next().unwrap();
+        let right = iter.next().unwrap();
+        let left_is_immediate = immediate_dwa_accepting_edges(left.artifact()).is_some();
+        let right_is_immediate = immediate_dwa_accepting_edges(right.artifact()).is_some();
+
+        if left_is_immediate || right_is_immediate {
+            let (primary, immediate) = if left_is_immediate {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            let (immediate_dwa, immediate_id_map) = immediate.into_parts();
+            let top_accept: BTreeMap<i32, Weight> =
+                immediate_dwa_accepting_edges(&immediate_dwa)
+                    .expect("immediate parser shape was checked above")
+                    .into_iter()
+                    .collect();
+            let reconciled = primary
+                .pair_forced_common(MappedArtifact::new(top_accept, immediate_id_map));
+            let ((primary_dwa, top_accept), common_id_map) = reconciled.into_parts();
+            if compile_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][parser_dwa_merge] inputs=2 mode=top_accept_overlay overlay_labels={} states={} transitions={} total_ms={:.3}",
+                    top_accept.len(),
+                    primary_dwa.num_states(),
+                    primary_dwa.num_transitions(),
+                    total_started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            return (
+                MappedArtifact::new(primary_dwa, common_id_map),
+                top_accept,
+            );
+        }
+
+        return (
+            merge_mapped_parser_dwas(
+                vec![left, right],
+                num_tokenizer_states,
+                max_token_id,
+            ),
+            BTreeMap::new(),
+        );
+    }
+
+    (
+        merge_mapped_parser_dwas(inputs, num_tokenizer_states, max_token_id),
+        BTreeMap::new(),
+    )
 }
 
 /// Build the ordinary global NWA union and determinize it. This is used only
@@ -1441,6 +1541,14 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
         return input;
     }
 
+    if let Some(merged) = try_merge_immediate_terminal_dwas(
+        &inputs,
+        num_tokenizer_states,
+        max_token_id,
+    ) {
+        return merged;
+    }
+
     let total_started_at = Instant::now();
 
     let build_unified_global_id_map_started_at = Instant::now();
@@ -1645,6 +1753,92 @@ pub(crate) fn merge_id_maps_and_terminal_dwas(
             ..TerminalDwaPhaseProfile::default()
         },
     }
+}
+
+/// Merge a family of depth-one terminal DWAs directly.
+///
+/// The generic global merge converts the inputs to an NWA, determinizes a
+/// large set of one-edge alternatives, then minimizes the result back to two
+/// states. For an immediate family the exact union is simply the union of the
+/// remapped acceptance weights on each start label.
+fn try_merge_immediate_terminal_dwas(
+    inputs: &[LocalIdMapTerminalDwa],
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> Option<LocalIdMapTerminalDwa> {
+    if inputs.len() < 2
+        || inputs
+            .iter()
+            .any(|input| immediate_dwa_accepting_edges(&input.dwa).is_none())
+    {
+        return None;
+    }
+
+    let total_started_at = Instant::now();
+    let id_map_started_at = Instant::now();
+    let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
+    let (global_id_map, direct_local_to_global_token_maps) =
+        build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
+    let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let remap_started_at = Instant::now();
+    let mut weights_by_label = BTreeMap::<i32, Vec<Weight>>::new();
+    for (input_index, input) in inputs.iter().enumerate() {
+        let mut dwa = input.dwa.clone();
+        let tsid_map = build_local_to_global_tsid_map(&input.id_map, &global_id_map);
+        let token_map = direct_local_to_global_token_maps
+            .as_ref()
+            .and_then(|maps| maps.get(input_index))
+            .map(|direct_map| build_direct_local_to_global_token_map(direct_map))
+            .unwrap_or_else(|| build_local_to_global_token_map(&input.id_map, &global_id_map));
+        remap_dwa_with_maps(
+            &mut dwa,
+            &tsid_map,
+            &token_map,
+            global_id_map.num_tsids() as usize,
+        );
+        for (label, weight) in immediate_dwa_accepting_edges(&dwa)? {
+            weights_by_label.entry(label).or_default().push(weight);
+        }
+    }
+    let remap_ms = remap_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let union_started_at = Instant::now();
+    let mut dwa = DWA::new(global_id_map.num_tsids(), global_id_map.max_internal_token_id());
+    let final_state = dwa.add_state();
+    dwa.set_final_weight(final_state, Weight::all());
+    for (label, weights) in weights_by_label {
+        let weight = Weight::union_all(weights.iter());
+        if !weight.is_empty() {
+            dwa.add_transition(dwa.start_state(), label, final_state, weight);
+        }
+    }
+    let union_ms = union_started_at.elapsed().as_secs_f64() * 1000.0;
+    let total_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][immediate_terminal_dwa_merge] inputs={} id_map_ms={:.3} remap_ms={:.3} union_ms={:.3} states={} transitions={} tsids={} tokens={} total_ms={:.3}",
+            inputs.len(),
+            id_map_ms,
+            remap_ms,
+            union_ms,
+            dwa.num_states(),
+            dwa.num_transitions(),
+            global_id_map.num_tsids(),
+            global_id_map.num_internal_tokens(),
+            total_ms,
+        );
+    }
+
+    Some(LocalIdMapTerminalDwa {
+        id_map: global_id_map,
+        dwa,
+        profile: TerminalDwaPhaseProfile {
+            global_merge_ms: total_ms,
+            ..TerminalDwaPhaseProfile::default()
+        },
+    })
 }
 
 /// Fast exact global map construction for an already-proven disjoint token
@@ -2644,16 +2838,27 @@ mod tests {
         other.set_final_weight(end, Weight::all());
 
         let generic = generic_union(&[immediate.clone(), other.clone()]);
-        let grafted = try_graft_immediate_parser_dwa(&immediate, other)
+        let grafted = try_graft_immediate_parser_dwa(&immediate, other.clone())
             .expect("depth-one parser DWA should graft");
         let quotient = exact_quotient_acyclic_dwa(grafted);
+        let overlay: BTreeMap<i32, Weight> = immediate_dwa_accepting_edges(&immediate)
+            .expect("depth-one parser DWA should form an overlay")
+            .into_iter()
+            .collect();
 
         for word in all_words(&[7, 8], 3) {
+            let overlay_result = match word.as_slice() {
+                [label] => other
+                    .eval_word(&word)
+                    .union(overlay.get(label).unwrap_or(&Weight::empty())),
+                _ => other.eval_word(&word),
+            };
             assert_eq!(
                 quotient.eval_word(&word),
                 generic.eval_word(&word),
                 "word={word:?}"
             );
+            assert_eq!(overlay_result, generic.eval_word(&word), "overlay word={word:?}");
         }
         assert_eq!(quotient.eval_word(&[7]), token_range_weight(0, 1));
         assert_eq!(quotient.eval_word(&[7, 8]), token_range_weight(1, 2));
