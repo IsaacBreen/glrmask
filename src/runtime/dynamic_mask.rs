@@ -84,17 +84,16 @@ fn advance_exclusions(
             return None;
         }
 
-        let Some(end_state) = execution.end_state else {
-            continue;
-        };
-        let accessible = constraint.tokenizer.tokens_accessible_from_state(end_state);
-        let next_blocked = advanced.entry(end_state).or_default();
-        next_blocked.extend(
-            blocked
-                .iter()
-                .copied()
-                .filter(|terminal| accessible.contains(*terminal as usize)),
-        );
+        for &end_state in &execution.end_state {
+            let accessible = constraint.tokenizer.tokens_accessible_from_state(end_state);
+            let next_blocked = advanced.entry(end_state).or_default();
+            next_blocked.extend(
+                blocked
+                    .iter()
+                    .copied()
+                    .filter(|terminal| accessible.contains(*terminal as usize)),
+            );
+        }
     }
     Some(Arc::new(advanced))
 }
@@ -208,12 +207,10 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
 
                     let next_position = position + matched.width;
                     if next_position == segment.len() {
-                        let exclusions = execution.end_state.map_or_else(
-                            || segment_exclusions.clone(),
-                            |end_state| {
-                                with_excluded_terminal(&segment_exclusions, end_state, matched.id)
-                            },
-                        );
+                        let mut exclusions = segment_exclusions.clone();
+                        for &end_state in &execution.end_state {
+                            exclusions = with_excluded_terminal(&exclusions, end_state, matched.id);
+                        }
                         traversal.push(TraverseWork {
                             node: edge.child,
                             tokenizer_state: initial_tsid,
@@ -225,11 +222,11 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                     }
                 }
 
-                if let Some(end_state) = execution.end_state {
+                for &end_state in &execution.end_state {
                     traversal.push(TraverseWork {
                         node: edge.child,
                         tokenizer_state: end_state,
-                        gss,
+                        gss: gss.clone(),
                         exclusions: segment_exclusions.clone(),
                     });
                 }

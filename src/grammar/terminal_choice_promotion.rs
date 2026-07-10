@@ -488,6 +488,9 @@ mod tests {
             ],
             start: "start".into(),
             ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         let stats = promote_choice_terminals_exact(&mut grammar, false);
@@ -517,7 +520,14 @@ mod tests {
             .map(|(name, left, right)| nt(name, GrammarExpr::Choice(vec![lit(left), lit(right)])))
             .collect::<Vec<_>>();
         rules.push(nt("start", GrammarExpr::Ref("A".into())));
-        let mut grammar = NamedGrammar { rules, start: "start".into(), ignore: None };
+        let mut grammar = NamedGrammar {
+            rules,
+            start: "start".into(),
+            ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
+        };
 
         let stats = promote_choice_terminals_exact(&mut grammar, false);
 
@@ -534,6 +544,9 @@ mod tests {
             ],
             start: "start".into(),
             ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         let before = grammar.rules[0].expr.clone();
@@ -553,6 +566,9 @@ mod tests {
             rules: vec![nt("start", expr)],
             start: "start".into(),
             ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         let stats = promote_choice_terminals_exact(&mut grammar, false);

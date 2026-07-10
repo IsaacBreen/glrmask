@@ -64,6 +64,12 @@ impl NodesByTokenizerState {
         self.entries.get(&state).and_then(|nodes| nodes.first().copied())
     }
 
+    fn first_any(&self) -> Option<NwaState> {
+        self.entries
+            .values()
+            .find_map(|nodes| nodes.first().copied())
+    }
+
     fn push_one(&mut self, state: TokenizerState, node: NwaState) {
         self.entries.entry(state).or_default().push(node);
     }
@@ -479,6 +485,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         node: &VocabPrefixTreeNode,
         tokenizer_state: TokenizerState,
     ) -> bool {
+        if self.tokenizer.has_epsilon_transitions()
+            && !self.tokenizer.has_deterministic_dispatch()
+        {
+            return false;
+        }
         let self_loop_bytes = self
             .self_loop_bytes
             .entry(tokenizer_state)
@@ -677,6 +688,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         roots_by_tokenizer_state: &NodesByTokenizerState,
         id_map: &InternalIdMap,
     ) {
+        assert!(
+            !self.tokenizer.has_epsilon_transitions()
+                || self.tokenizer.has_deterministic_dispatch(),
+            "L1 flat-state construction requires scalar deterministic scan roots",
+        );
         // Pre-populate flat transition tables for ALL tokenizer states.
         let num_states = self.tokenizer.num_states() as usize;
         for state_idx in 0..num_states {
@@ -691,14 +707,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let mut future_groups: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
         let phase1_start = std::time::Instant::now();
         for &(internal_token_id, ref bytes) in internal_vocab {
-            for (_tsid_idx, representative_state) in
-                id_map.tokenizer_states.iter_representative_ids().enumerate()
-            {
-                let source_nodes =
-                    match roots_by_tokenizer_state.entries.get(&representative_state) {
-                        Some(nodes) => nodes.as_slice(),
-                        None => continue,
-                    };
+            for (representative_state, source_nodes) in roots_by_tokenizer_state.iter() {
                 if source_nodes.is_empty() {
                     continue;
                 }
@@ -824,8 +833,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let mut pending_by_offset = BTreeMap::<usize, NodesByTokenizerState>::new();
         pending_by_offset.insert(0, initial_nodes.clone());
 
-        // Reusable buffers for DFA execution (avoids per-call allocation)
-        let mut match_map_buf = FxHashMap::<TerminalID, (usize, u32)>::default();
         let mut matches_buf: Vec<TokenizerMatch> = Vec::new();
 
         while let Some((offset, nodes_at_offset)) = pending_by_offset.pop_first() {
@@ -837,37 +844,22 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             }
 
             for (tokenizer_state, source_nodes) in nodes_at_offset {
-                // Inline DFA scanning with flat transition table for O(1) per-byte stepping
-                match_map_buf.clear();
-                let mut scan_state = tokenizer_state;
-                let mut scan_alive = true;
-                for (index, &byte) in segment_bytes[offset..].iter().enumerate() {
-                    if let Some(next) = self.fast_step(scan_state, byte) {
-                        scan_state = next;
-                        // Record longest match per terminal
-                        for terminal in self.tokenizer.matched_terminals_iter(scan_state) {
-                            // Skip non-active terminals when filtering
-                            if let Some(ref active) = self.active_terminals {
-                                if !active.get(terminal as usize).copied().unwrap_or(false) {
-                                    continue;
-                                }
-                            }
-                            match_map_buf.insert(terminal, (index + 1, scan_state));
-                        }
-                    } else {
-                        scan_alive = false;
-                        break;
-                    }
-                }
-                let end_state = if scan_alive { Some(scan_state) } else { None };
-
-                // Collect matches into reusable buffer
+                let execution = self.tokenizer.execute_from_state(
+                    &segment_bytes[offset..],
+                    tokenizer_state,
+                );
                 matches_buf.clear();
-                for (&id, &(width, end_st)) in match_map_buf.iter() {
-                    matches_buf.push(TokenizerMatch { id, width, end_state: end_st });
-                }
+                matches_buf.extend(execution.matches.into_iter().filter(|matched| {
+                    self.active_terminals.as_ref().map_or(true, |active| {
+                        active
+                            .get(matched.id as usize)
+                            .copied()
+                            .unwrap_or(false)
+                    })
+                }));
+                let end_states = execution.end_state;
 
-                if let Some(end_state) = end_state {
+                for &end_state in &end_states {
                     if child_node.has_token() {
                         self.add_future_leaf_token_from_sources(
                             &source_nodes,
@@ -882,8 +874,14 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 for matched in &matches_buf {
                     let next_offset = offset + matched.width;
 
-                    if next_offset == segment_bytes.len() && child_node.has_token() &&
-                        !end_state.is_some_and(|s| self.possible_future_terminals_for_state(s).contains(&matched.id)) // This one's optional. Might make it a little faster but functionally no difference.
+                    if next_offset == segment_bytes.len()
+                        && child_node.has_token()
+                        && ((self.tokenizer.has_epsilon_transitions()
+                            && !self.tokenizer.has_deterministic_dispatch())
+                            || !end_states.iter().copied().any(|s| {
+                                self.possible_future_terminals_for_state(s)
+                                    .contains(&matched.id)
+                            }))
                     {
                         self.profile.match_transition_additions += source_nodes.len() as u64;
                         self.add_leaf_token_from_sources(
@@ -906,7 +904,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         child_node,
                         leaf_token_id,
                         matched.id,
-                        end_state,
+                        Some(matched.end_state),
                         next_offset == segment_bytes.len(),
                     ) else {
                         continue;
@@ -918,9 +916,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     let continuation_nodes = pending_by_offset
                         .entry(next_offset)
                         .or_insert_with(NodesByTokenizerState::new);
+                    let reset_states = self.tokenizer.deterministic_reset_states();
                     let destination = ensure_continuation_state(
                         continuation_nodes,
-                        self.tokenizer.initial_state_id(),
+                        &reset_states,
                         self.nwa,
                     );
 
@@ -950,15 +949,17 @@ fn subtract_possible_matches(
 
 fn ensure_continuation_state(
     pending: &mut NodesByTokenizerState,
-    tokenizer_state: TokenizerState,
+    tokenizer_states: &[TokenizerState],
     nwa: &mut NWA,
 ) -> NwaState {
-    if let Some(existing) = pending.first(tokenizer_state) {
+    if let Some(existing) = pending.first_any() {
         return existing;
     }
 
     let state = nwa.add_state();
-    pending.push_one(tokenizer_state, state);
+    for &tokenizer_state in tokenizer_states {
+        pending.push_one(tokenizer_state, state);
+    }
     state
 }
 
@@ -977,6 +978,7 @@ pub(crate) fn internal_vocab_entries(vocab: &Vocab, id_map: &InternalIdMap) -> V
 }
 
 pub(crate) fn seed_root_nodes(
+    tokenizer: &Tokenizer,
     nwa: &mut NWA,
     start_state: u32,
     id_map: &InternalIdMap,
@@ -991,6 +993,15 @@ pub(crate) fn seed_root_nodes(
         let root = nwa.add_state();
         let start_weight = all_token_weight(internal_tsid as u32, id_map.max_internal_token_id());
         nwa.add_epsilon(start_state, root, start_weight);
+        if id_map.tokenizer_states.internal_to_originals[internal_tsid]
+            .contains(&tokenizer.initial_state_id())
+            && let Some(dispatch_roots) = tokenizer.deterministic_dispatch_roots()
+        {
+            for &dispatch_root in dispatch_roots {
+                roots_by_tokenizer_state.merge(dispatch_root, &[root]);
+            }
+            continue;
+        }
         roots_by_tokenizer_state.merge(representative_state, &[root]);
     }
 
@@ -1053,7 +1064,7 @@ mod tests {
 
     use super::*;
     use crate::automata::lexer::ast::Expr;
-    use crate::automata::lexer::compile::build_regex;
+    use crate::automata::lexer::compile::build_regex_monolithic as build_regex;
     use crate::automata::weighted::determinize::determinize;
     use crate::automata::weighted::minimize::minimize_owned;
     use crate::compiler::stages::equiv_types::ManyToOneIdMap;
@@ -1239,7 +1250,7 @@ mod tests {
         nwa.set_final_weight(leaf, Weight::all());
         let start = nwa.add_state();
         nwa.start_states_mut().push(start);
-        let roots = seed_root_nodes(&mut nwa, start, id_map);
+        let roots = seed_root_nodes(tokenizer, &mut nwa, start, id_map);
         build_nwa_via_trie_walk(
             tokenizer,
             &TerminalColoring::identity(tokenizer.num_terminals() as usize),
@@ -2344,6 +2355,10 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
     modes: &[TerminalNwaTransportMode],
 ) -> TerminalDwaBuildProfile {
     assert!(!modes.is_empty());
+    assert!(
+        !tokenizer.has_epsilon_transitions(),
+        "TI transport construction requires a deterministic tokenizer",
+    );
     let mut roots = NodesByTransportContext::default();
     let mut initial_source_states = Vec::<bool>::new();
     let mut transport = TransportModePlanner::new(modes, visible_output_raw_labels);

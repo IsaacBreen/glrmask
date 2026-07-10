@@ -806,9 +806,12 @@ fn build_l1_id_map<'a>(
             .unwrap_or(0);
         let (vocab_tokens, vocab_order, token_identity_map_ms) =
             build_l1_identity_vocab_map(vocab);
-        let tokenizer_states = initial_state_map
+        let mut tokenizer_states = initial_state_map
             .expect("checked by should_use_fast_projected_l1_id_map")
             .clone();
+        if tokenizer.has_deterministic_dispatch() {
+            tokenizer_states.isolate_original(tokenizer.initial_state_id());
+        }
         let state_to_rep = state_to_representative_vector(&tokenizer_states, num_dfa_states);
         let exact_reps = tokenizer_states.num_internal_ids() as usize;
 
@@ -947,13 +950,6 @@ fn build_l1_id_map<'a>(
     // signature for every token. Sampling tokens here is not a proof and has
     // caused order-sensitive mask/commit mismatches.
 
-    // Build state_to_rep: original_state → representative_state (for trie traversal)
-    let mut state_to_rep = vec![0u32; num_dfa_states];
-    for (state_id, &internal) in state_original_to_internal.iter().enumerate() {
-        if internal != u32::MAX {
-            state_to_rep[state_id] = state_representatives[internal as usize];
-        }
-    }
     let state_equiv_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let token_map_started_at = Instant::now();
@@ -961,15 +957,25 @@ fn build_l1_id_map<'a>(
     let token_ids_sorted = order.token_ids_sorted.to_vec();
     let token_identity_map_ms =
         token_sort_ms + token_map_started_at.elapsed().as_secs_f64() * 1000.0;
-    let exact_reps = state_representatives.len();
+    let mut tokenizer_states = ManyToOneIdMap::from_original_to_internal_with_representatives(
+        state_original_to_internal,
+        state_representatives.len() as u32,
+        state_representatives,
+    );
+    if tokenizer.has_deterministic_dispatch() {
+        tokenizer_states.isolate_original(tokenizer.initial_state_id());
+    }
+    let state_to_rep = state_to_representative_vector(&tokenizer_states, num_dfa_states);
+    let exact_reps = tokenizer_states.num_internal_ids() as usize;
+    let exact_profile_reuse = if tokenizer.has_deterministic_dispatch() {
+        None
+    } else {
+        exact_profile_reuse
+    };
 
     (
         InternalIdMap {
-            tokenizer_states: ManyToOneIdMap::from_original_to_internal_with_representatives(
-                state_original_to_internal,
-                exact_reps as u32,
-                state_representatives,
-            ),
+            tokenizer_states,
             vocab_tokens: ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
                 token_original_to_internal,
                 token_ids_sorted,
@@ -2696,6 +2702,18 @@ fn build_l1_terminal_dwa(
         .iter_representative_ids()
         .enumerate()
     {
+        if id_map.tokenizer_states.internal_to_originals[internal_tsid]
+            .contains(&tokenizer.initial_state_id())
+            && let Some(dispatch_roots) = tokenizer.deterministic_dispatch_roots()
+        {
+            for &dispatch_root in dispatch_roots {
+                states_to_initial_tsids
+                    .entry(dispatch_root)
+                    .or_default()
+                    .push(internal_tsid as u32);
+            }
+            continue;
+        }
         states_to_initial_tsids
             .entry(representative_state)
             .or_default()

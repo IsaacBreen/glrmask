@@ -2,13 +2,13 @@ use crate::automata::lexer::Lexer;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
-use crate::automata::lexer::tokenizer::TokenizerExecResult;
+use crate::automata::lexer::tokenizer::{TokenizerExecResult, TokenizerStateSet};
 
 use super::super::artifact::Constraint;
 
 pub(super) struct InitialCommitScan {
 	pub exec_results: FxHashMap<u32, TokenizerExecResult>,
-	pub remapped_tokenizer_states: FxHashMap<u32, u32>,
+	pub remapped_tokenizer_states: FxHashMap<u32, TokenizerStateSet>,
 	pub accepted_terminals: FxHashMap<u32, FxHashSet<u32>>,
 }
 
@@ -17,6 +17,9 @@ pub(super) fn execute_tokenizer_from_state_small(
 	bytes: &[u8],
 	start_state: u32,
 ) -> TokenizerExecResult {
+	if constraint.tokenizer.has_epsilon_transitions() {
+		return constraint.tokenizer.execute_from_state(bytes, start_state);
+	}
 	let mut tokenizer_state = start_state;
 	let mut matches = SmallVec::<[(u32, usize, u32); 8]>::new();
 
@@ -27,7 +30,7 @@ pub(super) fn execute_tokenizer_from_state_small(
 			.map_or(u32::MAX, |transitions| transitions[byte as usize]);
 		if next_state == u32::MAX {
 			return TokenizerExecResult {
-				end_state: None,
+				end_state: TokenizerStateSet::new(),
 				matches: matches
 					.into_iter()
 					.map(|(id, width, end_state)| crate::automata::lexer::tokenizer::TokenizerMatch {
@@ -54,7 +57,7 @@ pub(super) fn execute_tokenizer_from_state_small(
 	}
 
 	TokenizerExecResult {
-		end_state: Some(tokenizer_state),
+		end_state: SmallVec::from_buf([tokenizer_state]),
 		matches: matches
 			.into_iter()
 			.map(|(id, width, end_state)| crate::automata::lexer::tokenizer::TokenizerMatch {

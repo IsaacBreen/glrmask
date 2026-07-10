@@ -810,6 +810,9 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         let stats = lower_exact_subtractions(&mut grammar).unwrap();
@@ -863,6 +866,9 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         lower_exact_subtractions(&mut grammar).unwrap();
@@ -886,6 +892,9 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         let stats = lower_exact_subtractions(&mut grammar).unwrap();
@@ -920,6 +929,9 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         let stats = lower_exact_subtractions(&mut grammar).unwrap();
@@ -951,6 +963,9 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         let stats = lower_exact_subtractions(&mut grammar).unwrap();

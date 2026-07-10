@@ -628,6 +628,9 @@ mod ambiguity_tests {
             rules,
             start: "start".into(),
             ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         }
     }
 
@@ -718,6 +721,9 @@ mod ambiguity_tests {
             ],
             start: "start".into(),
             ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         }
     }
 

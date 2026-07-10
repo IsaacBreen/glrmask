@@ -12,7 +12,7 @@ use super::string::{property_name_matches_pattern, string_value_satisfies_schema
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguityKind};
 use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar, Quantifier};
-use crate::grammar::glrm::to_glrm;
+use crate::grammar::glrm::{from_glrm, to_glrm};
 use crate::Vocab;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -251,9 +251,8 @@ fn start_expr(grammar: &NamedGrammar) -> &GrammarExpr {
 
 fn assert_glrm_has_split_literal_key(glrm: &str, key: &str) {
     assert!(
-        glrm.lines().any(|line| {
-            line.contains(&format!("JSON_QUOTE \"{key}\" JSON_KEY_SUFFIX"))
-        }),
+        glrm.lines()
+            .any(|line| line.contains(&format!("JSON_QUOTE \"{key}\" JSON_KEY_SUFFIX"))),
         "{glrm}"
     );
     assert!(
@@ -5424,8 +5423,78 @@ fn large_string_enum_at_root_uses_raw_regex() {
     let schema = json!({"type": "string", "enum": values});
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(matches!(start_expr(&grammar), GrammarExpr::RawRegex(_)));
+    let GrammarExpr::Ref(rule_name) = start_expr(&grammar) else {
+        panic!("expected named literal-enum terminal: {:?}", start_expr(&grammar));
+    };
+    let enum_rule = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.name == *rule_name)
+        .expect("literal-enum terminal rule");
+    assert!(matches!(enum_rule.expr, GrammarExpr::RawRegex(_)));
+    assert_eq!(
+        grammar.lexer_partitions.get(rule_name).map(String::as_str),
+        Some(super::lower::JSON_LITERAL_LEXER_PARTITION),
+    );
     lower(&grammar).unwrap();
+}
+
+#[test]
+fn json_schema_assigns_literals_bounded_repetitions_and_patterns_to_separate_lexer_groups() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "mode": {"type": "string", "enum": ["red", "green", "blue"]},
+            "code": {"type": "string", "pattern": "^[A-Z]+$", "maxLength": 8},
+            "digest": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+            "free": {"type": "string", "pattern": "^[a-z]+$"}
+        },
+        "required": ["mode", "code", "digest", "free"],
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert_eq!(
+        grammar.default_lexer_partition.as_deref(),
+        Some(super::lower::JSON_PATTERN_LEXER_PARTITION),
+    );
+    assert!(grammar
+        .lexer_literal_partitions
+        .values()
+        .any(|partition| partition == super::lower::JSON_LITERAL_LEXER_PARTITION));
+    assert!(
+        grammar
+            .lexer_partitions
+            .values()
+            .any(|partition| partition == super::lower::JSON_BOUNDED_LEXER_PARTITION),
+        "partitions={:?}\n{}",
+        grammar.lexer_partitions,
+        to_glrm(&grammar),
+    );
+
+    let lowered = lower(&grammar).unwrap();
+    assert_eq!(lowered.lexer_partitions.len(), lowered.terminals.len());
+    let partitions = lowered
+        .lexer_partitions
+        .values()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(partitions.contains(super::lower::JSON_LITERAL_LEXER_PARTITION));
+    assert!(partitions.contains(super::lower::JSON_BOUNDED_LEXER_PARTITION));
+    assert!(partitions.contains(super::lower::JSON_PATTERN_LEXER_PARTITION));
+    let tokenizer = crate::compiler::pipeline::build_tokenizer(&lowered);
+    assert_eq!(
+        tokenizer.initial_epsilon_branch_count(),
+        3,
+        "JSON terminals should be jointly determinized by category, not isolated one-by-one",
+    );
+
+    let dumped = to_glrm(&grammar);
+    assert!(dumped.contains("@literals"), "{dumped}");
+    let reparsed = from_glrm(&dumped).unwrap();
+    let reparsed_lowered = lower(&reparsed).unwrap();
+    let reparsed_tokenizer = crate::compiler::pipeline::build_tokenizer(&reparsed_lowered);
+    assert_eq!(reparsed_tokenizer.initial_epsilon_branch_count(), 3);
 }
 
 #[test]

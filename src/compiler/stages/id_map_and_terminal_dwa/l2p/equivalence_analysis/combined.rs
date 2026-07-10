@@ -185,6 +185,43 @@ fn build_identity_vocab_map(token_ids: &[u32], max_token_id: u32) -> ManyToOneId
     }
 }
 
+/// Conservative vocabulary quotient for epsilon tokenizers: only byte-for-byte
+/// aliases are merged. They necessarily have identical lexer behaviour, and
+/// merging them is required because the vocabulary prefix tree has one leaf
+/// per byte string. The final mask mapping expands the class back to every
+/// original token id.
+fn build_exact_byte_vocab_map(
+    token_ids: &[u32],
+    token_bytes: &[&[u8]],
+    max_token_id: u32,
+) -> ManyToOneIdMap {
+    debug_assert_eq!(token_ids.len(), token_bytes.len());
+    let mut classes = BTreeMap::<Vec<u8>, Vec<u32>>::new();
+    for (&token_id, &bytes) in token_ids.iter().zip(token_bytes) {
+        classes.entry(bytes.to_vec()).or_default().push(token_id);
+    }
+
+    let mut ordered = classes.into_values().collect::<Vec<_>>();
+    for class in &mut ordered {
+        class.sort_unstable();
+    }
+    ordered.sort_unstable_by_key(|class| class[0]);
+
+    let mut original_to_internal = vec![u32::MAX; max_token_id as usize + 1];
+    let mut representatives = Vec::with_capacity(ordered.len());
+    for (internal, class) in ordered.iter().enumerate() {
+        representatives.push(class[0]);
+        for &original in class {
+            original_to_internal[original as usize] = internal as u32;
+        }
+    }
+    ManyToOneIdMap {
+        original_to_internal,
+        internal_to_originals: ordered,
+        representative_original_ids: representatives,
+    }
+}
+
 struct PreparedEquivalenceInputs<'a> {
     max_token_id: u32,
     token_ids: Vec<u32>,
@@ -1230,6 +1267,68 @@ fn analyze_equivalences_impl(
     token_boundary_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
+    // Every equivalence implementation below assumes that a lexer
+    // configuration is one deterministic physical state. With epsilon edges,
+    // token behaviour is a set-of-states computation and merging either raw
+    // states or vocabulary entries using those DFA-only signatures is
+    // unsound. Keep exact identity coordinates until a set-aware quotient is
+    // implemented. This only declines compression.
+    if tokenizer.has_epsilon_transitions() {
+        let prepare_started_at = Instant::now();
+        let prepared = prepare_equivalence_inputs(tokenizer, vocab, initial_state_map);
+        let token_len_stats = token_length_stats(&prepared.token_bytes);
+        let max_token_len = prepared
+            .token_bytes
+            .iter()
+            .map(|token| token.len())
+            .max()
+            .unwrap_or(0);
+        let state_ids = (0..tokenizer.num_states()).collect::<Vec<_>>();
+        let tokenizer_states =
+            ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+                state_ids.clone(),
+                state_ids,
+            );
+        let id_map = InternalIdMap {
+            tokenizer_states,
+            vocab_tokens: build_exact_byte_vocab_map(
+                &prepared.token_ids,
+                &prepared.token_bytes,
+                prepared.max_token_id,
+            ),
+        };
+        return (
+            id_map,
+            CombinedEquivalenceProfile {
+                initial_states_considered: prepared.initial_states.len(),
+                max_length_skipped: true,
+                max_token_len,
+                token_len_gt_4: token_len_stats.gt_4,
+                token_len_gt_8: token_len_stats.gt_8,
+                token_len_gt_16: token_len_stats.gt_16,
+                token_len_gt_32: token_len_stats.gt_32,
+                token_len_gt_64: token_len_stats.gt_64,
+                raw_analysis_base_init_ms: 0.0,
+                analysis_view_build_ms: 0.0,
+                active_mask_filter_ms: 0.0,
+                effective_follows_normalize_ms: 0.0,
+                prepare_inputs_ms: prepare_started_at.elapsed().as_secs_f64() * 1000.0,
+                byte_class_setup_ms: 0.0,
+                vocab_analysis_dfa_build_ms: 0.0,
+                token_dedup_ms: 0.0,
+                restricted_observation_state_equiv_ms: 0.0,
+                max_length_state_equiv_ms: 0.0,
+                vocab_equiv_ms: 0.0,
+                exact_state_equiv_ms: 0.0,
+                id_map_finalize_ms: 0.0,
+                restricted_observation_reps: tokenizer.num_states() as usize,
+                max_length_reps: tokenizer.num_states() as usize,
+                exact_reps: tokenizer.num_states() as usize,
+                exact_rep_confirmation_used: false,
+            },
+        );
+    }
+
     let follows_prepare_started_at = Instant::now();
     let token_path_disallowed_follows = (!disallowed_follows_are_ignore_transparent)
         .then(|| ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal));

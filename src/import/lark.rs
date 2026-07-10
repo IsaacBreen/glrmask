@@ -778,6 +778,9 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
         rules,
         start: output_start,
         ignore: grammar.ignore,
+        lexer_partitions: grammar.lexer_partitions,
+        lexer_literal_partitions: Default::default(),
+        default_lexer_partition: None,
     })
 }
 
@@ -944,7 +947,14 @@ impl Parser {
         mark_lark_terminal_rules(&mut rules);
         let ignore = synthesize_lark_ignore_rule(&mut rules, ignore_exprs);
 
-        Ok(NamedGrammar { rules, start, ignore })
+        Ok(NamedGrammar {
+            rules,
+            start,
+            ignore,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
+        })
     }
 
     fn parse_alternatives(&mut self) -> Result<GrammarExpr, GlrMaskError> {

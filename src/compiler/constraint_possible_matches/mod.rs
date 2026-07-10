@@ -722,7 +722,16 @@ fn compute_pm_vocab_equivalence_map(
         matched_terminal_masks.push(mask);
     }
 
+    // For a deterministic-component dispatch, the synthetic reset state's PM
+    // behavior is the union of the component-root behaviors.  Equality at all
+    // physical component states therefore implies equality at the dispatch
+    // state, so including it as a dead scalar row would be both unnecessary
+    // and incorrect.
+    let dispatch_start = tokenizer
+        .has_deterministic_dispatch()
+        .then(|| tokenizer.start_state());
     let root_outcomes = (0..tokenizer.num_states())
+        .filter(|state| Some(*state) != dispatch_start)
         .map(|state| PmTokenOutcome {
             terminals: 0,
             end_state: state,
@@ -754,11 +763,15 @@ fn compute_pm_vocab_equivalence_map_fast(
                     .matched_terminals_iter(state_idx as u32)
                     .map(|terminal| terminal as usize)
                     .collect(),
-                // PM token equivalence only cares which terminals can be
-                // reached while consuming the token bytes. Terminal-DWA
-                // future-group metadata is deliberately not part of this PM
-                // owned equivalence relation.
-                possible_future_group_ids: Vec::new(),
+                // The equivalence signature is based on terminals actually
+                // reached while consuming a token, but the fast walker also
+                // uses future groups to identify genuinely dead states.  An
+                // empty vector here marks every non-final state dead and can
+                // collapse the entire vocabulary into one bogus class.
+                possible_future_group_ids: tokenizer
+                    .possible_future_terminals_iter(state_idx as u32)
+                    .map(|terminal| terminal as usize)
+                    .collect(),
             }
         })
         .collect::<Vec<_>>();
@@ -774,7 +787,12 @@ fn compute_pm_vocab_equivalence_map_fast(
         .iter()
         .map(|bytes| bytes.as_slice())
         .collect::<Vec<_>>();
-    let initial_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
+    let dispatch_start = tokenizer
+        .has_deterministic_dispatch()
+        .then(|| tokenizer.start_state() as usize);
+    let initial_states = (0..tokenizer.num_states() as usize)
+        .filter(|state| Some(*state) != dispatch_start)
+        .collect::<Vec<_>>();
     let disallowed_follows = BTreeMap::<u32, BitSet>::new();
     let classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
         &tokenizer_view,
@@ -1698,6 +1716,37 @@ fn collect_sparse_root_possible_matches(
     }
 }
 
+fn attach_structured_dispatch_possible_matches(
+    tokenizer: &Tokenizer,
+    root: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
+    result: &mut TrieClassBuildResult,
+) {
+    if !tokenizer.has_deterministic_dispatch() {
+        return;
+    }
+
+    let start = tokenizer.start_state();
+    let dispatch = collect_sparse_root_possible_matches(tokenizer, root, &[start], None);
+    let dispatch_class = dispatch
+        .state_classes
+        .get(start as usize)
+        .copied()
+        .filter(|&class| class != u32::MAX)
+        .expect("structured lexer dispatch PM row must be collected");
+    let dispatch_map = dispatch.class_maps[dispatch_class as usize].as_ref();
+    let class = result
+        .class_maps
+        .iter()
+        .position(|existing| existing.as_ref() == dispatch_map)
+        .map(|class| class as u32)
+        .unwrap_or_else(|| {
+            let class = result.class_maps.len() as u32;
+            result.class_maps.push(Arc::new(dispatch_map.clone()));
+            class
+        });
+    result.state_classes[start as usize] = class;
+}
+
 pub(crate) fn compute_constraint_possible_matches(
     tokenizer: &Tokenizer,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
@@ -1734,14 +1783,19 @@ fn compute_constraint_possible_matches_with_artifacts(
     let ordered_vocab = artifacts.ordered_vocab;
     let trie = artifacts.trie;
 
-    let trie_build_states: Vec<u32> = (0..tokenizer.num_states()).collect();
+    let structured_dispatch = tokenizer.has_deterministic_dispatch();
+    let dispatch_start = structured_dispatch.then(|| tokenizer.start_state());
+    let trie_build_states: Vec<u32> = (0..tokenizer.num_states())
+        .filter(|state| Some(*state) != dispatch_start)
+        .collect();
 
     let root_terminal_union = root_terminal_union_count(tokenizer, &trie_build_states);
-    let use_sparse_root_collect = sparse_root_collect_enabled()
-        && trie_build_states.len() <= sparse_root_state_limit()
-        && root_terminal_union <= sparse_root_terminal_limit();
+    let use_sparse_root_collect = (tokenizer.has_epsilon_transitions() && !structured_dispatch)
+        || (sparse_root_collect_enabled()
+            && trie_build_states.len() <= sparse_root_state_limit()
+            && root_terminal_union <= sparse_root_terminal_limit());
 
-    let trie_class_result = if use_sparse_root_collect {
+    let mut trie_class_result = if use_sparse_root_collect {
         if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         {
@@ -1768,6 +1822,7 @@ fn compute_constraint_possible_matches_with_artifacts(
         )
         .0
     };
+    attach_structured_dispatch_possible_matches(tokenizer, &trie.root, &mut trie_class_result);
 
     let possible_matches_collect_ms = elapsed_ms(pm_started_at);
 
@@ -1810,7 +1865,9 @@ pub(crate) fn compute_constraint_possible_matches_for_vocab(
     vocab: &Vocab,
     _config: ConstraintPossibleMatchesConfig,
 ) -> ConstraintPossibleMatchesComputation {
-    if pm_vocab_equiv_enabled() {
+    if pm_vocab_equiv_enabled()
+        && (!tokenizer.has_epsilon_transitions() || tokenizer.has_deterministic_dispatch())
+    {
         let (full_artifacts, full_profile) = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
         let runtime_dynamic_vocab = runtime_dynamic_vocab_artifacts(&full_artifacts);
         emit_ordered_vocab_cache_profile(full_profile);
@@ -1860,4 +1917,93 @@ pub(crate) fn compute_constraint_possible_matches_for_vocab(
 
 pub(crate) fn prepare_vocab_for_possible_matches(vocab: &Vocab) {
     let _ = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automata::lexer::ast::Expr;
+    use crate::compiler::pipeline::build_tokenizer_from_exprs_partitioned;
+    use std::collections::BTreeSet;
+
+    fn directly_matched_terminals(
+        tokenizer: &Tokenizer,
+        start_state: u32,
+        bytes: &[u8],
+    ) -> BTreeSet<u32> {
+        let mut states = tokenizer.execute_from_state_end_only(&[], start_state);
+        let mut terminals = BTreeSet::new();
+        for &byte in bytes {
+            states = tokenizer.step_all(&states, byte);
+            for &state in &states {
+                terminals.extend(tokenizer.matched_terminals_iter(state));
+            }
+            if states.is_empty() {
+                break;
+            }
+        }
+        terminals
+    }
+
+    #[test]
+    fn structured_dispatch_possible_matches_match_direct_state_set_execution() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"b".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b" ".to_vec())),
+                min: 1,
+                max: None,
+            },
+        ];
+        let tokenizer = build_tokenizer_from_exprs_partitioned(
+            &expressions,
+            None,
+            &[0, 1, 2, 2],
+        );
+        assert!(tokenizer.has_deterministic_dispatch());
+
+        let entries = vec![
+            (0, b"a".to_vec()),
+            (1, b"ab".to_vec()),
+            (2, b"b".to_vec()),
+            (3, b" a".to_vec()),
+            (4, b"a ".to_vec()),
+            (5, b"x".to_vec()),
+            (6, b"ab".to_vec()),
+        ];
+        let vocab = Vocab::new(entries.clone(), None);
+        let computation = compute_constraint_possible_matches_for_vocab(
+            &tokenizer,
+            &vocab,
+            ConstraintPossibleMatchesConfig,
+        );
+        let mapped = &computation.mapped_possible_matches;
+
+        for state in 0..tokenizer.num_states() {
+            let internal_state = mapped.id_map().tokenizer_states.original_to_internal[state as usize];
+            assert_ne!(internal_state, u32::MAX, "state={state}");
+            for (token_id, bytes) in &entries {
+                let internal_token = mapped.id_map().vocab_tokens.original_to_internal[*token_id as usize];
+                assert_ne!(internal_token, u32::MAX, "token={token_id}");
+                let expected = directly_matched_terminals(&tokenizer, state, bytes);
+                for terminal in 0..tokenizer.num_terminals() {
+                    let actual = mapped
+                        .artifact()
+                        .get(&terminal)
+                        .is_some_and(|weight| {
+                            weight
+                                .tokens_for_tsid(internal_state)
+                                .contains(internal_token)
+                        });
+                    assert_eq!(
+                        actual,
+                        expected.contains(&terminal),
+                        "state={state} token={token_id} bytes={bytes:?} terminal={terminal}",
+                    );
+                }
+            }
+        }
+    }
 }

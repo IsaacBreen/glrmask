@@ -433,7 +433,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         ti_additional_merged_members,
         ti_raw_observations,
     ) =
-        if l2p_terminal_interchangeability_enabled_for_partition(partition_label) {
+        if !tokenizer.has_epsilon_transitions()
+            && l2p_terminal_interchangeability_enabled_for_partition(partition_label)
+        {
             let mut active = active_terminals.to_vec();
             let mut classes = singleton_partition(&active);
             // Always use the byte-level exact discovery oracle. When the global
@@ -715,7 +717,7 @@ let strict_reference = reference_terminal_expansion
 
             // ---- Step 6: Trie-walk NWA build ----
             let trie_build_started_at = Instant::now();
-            let roots = seed_root_nodes(&mut nwa, start_state, &simplified_id_map);
+            let roots = seed_root_nodes(tokenizer, &mut nwa, start_state, &simplified_id_map);
             seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
             let _build_profile = build_nwa_via_trie_walk(
                 tokenizer_for_build,

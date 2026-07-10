@@ -1,4 +1,5 @@
 use crate::automata::lexer::Lexer;
+use crate::automata::lexer::tokenizer::TokenizerStateSet;
 use std::sync::Mutex;
 use std::collections::BTreeMap;
 
@@ -31,7 +32,7 @@ pub(crate) struct CommitBuffers {
     pub seen_matches: FxHashSet<(usize, u32)>,
     pub terminal_result_cache: FxHashMap<u32, ParserGSS>,
     pub exec_results: FxHashMap<u32, crate::automata::lexer::tokenizer::TokenizerExecResult>,
-    pub remapped_tokenizer_states: FxHashMap<u32, u32>,
+    pub remapped_tokenizer_states: FxHashMap<u32, TokenizerStateSet>,
     pub accepted_terminals: FxHashMap<u32, FxHashSet<u32>>,
     pub processing_queue: Vec<FxHashMap<u32, ParserGSS>>,
 }

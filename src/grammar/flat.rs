@@ -15,6 +15,9 @@ pub struct GrammarDef {
     pub terminal_names: BTreeMap<TerminalID, String>,
     #[serde(default)]
     pub ignore_terminal: Option<TerminalID>,
+    /// Explicit terminal-id → named lexer partition assignments.
+    #[serde(default)]
+    pub lexer_partitions: BTreeMap<TerminalID, String>,
 }
 
 pub type NonterminalID = u32;

@@ -1263,6 +1263,294 @@ fn runtime_payload_v2_roundtrip_preserves_split_parser_overlay() {
 }
 
 #[test]
+fn isolated_and_monolithic_lexer_partitions_are_end_to_end_equivalent() {
+    let vocab = vocab(&[
+        "a", "aa", "b", "c", "ab", "ac", " b", " c", " ", "  ", "ba", "ca",
+        "aa b", "aa c",
+    ]);
+    let isolated_grammar = r#"
+        start start;
+        ignore WS;
+        lexer group ws ::= WS;
+        lexer group a ::= A;
+        lexer group b ::= B;
+        lexer group c ::= C;
+        t WS ::= " "+;
+        t A ::= "a"+;
+        t B ::= "b";
+        t C ::= "c";
+        nt start ::= A B | A C | B A | C A;
+    "#;
+    let monolithic_grammar = r#"
+        start start;
+        ignore WS;
+        lexer group all ::= WS, A, B, C;
+        t WS ::= " "+;
+        t A ::= "a"+;
+        t B ::= "b";
+        t C ::= "c";
+        nt start ::= A B | A C | B A | C A;
+    "#;
+    let isolated = Constraint::from_glrm_grammar(isolated_grammar, &vocab).unwrap();
+    let monolithic = Constraint::from_glrm_grammar(monolithic_grammar, &vocab).unwrap();
+
+    let mut frontier = vec![(isolated.start(), monolithic.start(), Vec::<u32>::new())];
+    for depth in 0..=4 {
+        let mut next = Vec::new();
+        for (isolated_state, monolithic_state, path) in frontier {
+            assert_eq!(
+                isolated_state.mask(),
+                monolithic_state.mask(),
+                "mask differed after token path {path:?}",
+            );
+            assert_eq!(
+                isolated_state.is_finished(),
+                monolithic_state.is_finished(),
+                "completion differed after token path {path:?}",
+            );
+            if depth == 4 {
+                continue;
+            }
+            for token in allowed(&isolated_state.mask()) {
+                let token = token as u32;
+                let mut next_isolated = isolated_state.clone();
+                let mut next_monolithic = monolithic_state.clone();
+                let isolated_result = next_isolated.commit_token(token);
+                let monolithic_result = next_monolithic.commit_token(token);
+                assert_eq!(
+                    isolated_result.is_ok(),
+                    monolithic_result.is_ok(),
+                    "commit result differed for token {token} after path {path:?}",
+                );
+                if isolated_result.is_ok() {
+                    let mut next_path = path.clone();
+                    next_path.push(token);
+                    next.push((next_isolated, next_monolithic, next_path));
+                }
+            }
+        }
+        frontier = next;
+    }
+
+    let loaded = Constraint::load(&isolated.save()).unwrap();
+    assert_eq!(loaded.start().mask(), isolated.start().mask());
+}
+
+fn assert_partitioned_runtime_matches_dynamic(
+    grammar: &str,
+    vocab: &Vocab,
+    max_depth: usize,
+) {
+    let partitioned = Constraint::from_glrm_grammar(grammar, vocab).unwrap();
+
+    let mut frontier = vec![(partitioned.start(), Vec::<u32>::new())];
+    for depth in 0..=max_depth {
+        let mut next = Vec::new();
+        for (partitioned_state, path) in frontier {
+            let mut partitioned_dynamic = vec![0; partitioned.mask_len()];
+            partitioned_state.fill_mask_dynamic(&mut partitioned_dynamic);
+            assert_eq!(
+                partitioned_state.mask(),
+                partitioned_dynamic,
+                "partitioned parser-DWA mask differed from direct dynamic traversal after token path {path:?}\ngrammar:\n{grammar}",
+            );
+            if depth == max_depth {
+                continue;
+            }
+
+            let mask = partitioned_state.mask();
+            for &token in vocab.entries.keys() {
+                let word = token as usize / 32;
+                let bit = token % 32;
+                let expected_allowed = mask
+                    .get(word)
+                    .is_some_and(|mask_word| mask_word & (1u32 << bit) != 0);
+                let mut next_partitioned = partitioned_state.clone();
+                let partitioned_result = next_partitioned.commit_token(token);
+                assert_eq!(
+                    partitioned_result.is_ok(),
+                    expected_allowed,
+                    "commit result disagreed with mask for token {token} after path {path:?}\ngrammar:\n{grammar}",
+                );
+                if expected_allowed {
+                    let mut next_path = path.clone();
+                    next_path.push(token);
+                    next.push((next_partitioned, next_path));
+                }
+            }
+        }
+        frontier = next;
+    }
+
+    let loaded = Constraint::load(&partitioned.save()).unwrap();
+    assert_eq!(loaded.start().mask(), partitioned.start().mask());
+}
+
+#[test]
+fn partitioned_runtime_matches_dynamic_across_lexer_shapes() {
+    let vocab = vocab(&[
+        "a", "b", "c", "aa", "bb", "cc", "ab", "ac", "ba", "bc", "abc",
+        "aab", "abb", "acc", " ", "  ", " a", "a ", " a ", "ab c",
+    ]);
+    let cases: &[&str] = &[
+            r#"
+                start start;
+                ignore WS;
+                lexer group ws ::= WS;
+                lexer group a ::= A;
+                lexer group b ::= B;
+                lexer group c ::= C;
+                t WS ::= " "+;
+                t A ::= "a"+;
+                t B ::= "b";
+                t C ::= "c";
+                nt item ::= A | B | C;
+                nt start ::= item item? item?;
+            "#,
+            r#"
+                start start;
+                lexer group a ::= A;
+                lexer group b ::= B;
+                lexer group c ::= C;
+                t A ::= "a"*;
+                t B ::= "ab" | "b";
+                t C ::= "c"+;
+                nt item ::= A | B | C;
+                nt start ::= item item?;
+            "#,
+            r#"
+                start start;
+                lexer group a ::= A;
+                lexer group b ::= B;
+                lexer group c ::= C;
+                t A ::= "a" | "ab";
+                t B ::= "ab" | "b" | "ba";
+                t C ::= "abc" | "bc" | "c";
+                nt item ::= A | B | C;
+                nt start ::= item item? item?;
+            "#,
+            r#"
+                start start;
+                lexer group a ::= A;
+                lexer group b ::= B;
+                lexer group c ::= C;
+                t A ::= [abc] - "b";
+                t B ::= [ab] & [bc];
+                t C ::= "b" | "bc";
+                nt item ::= A | B | C;
+                nt start ::= item item? item?;
+            "#,
+            r#"
+                start start;
+                ignore WS;
+                lexer group ws ::= WS;
+                lexer group a ::= A;
+                lexer group b ::= B;
+                lexer group c ::= C;
+                t WS ::= " "*;
+                t A ::= /a(?:b|c)*/;
+                t B ::= /b+/;
+                t C ::= /c+/;
+                nt item ::= A | B | C;
+                nt start ::= item item?;
+            "#,
+    ];
+
+    for &grammar in cases {
+        assert_partitioned_runtime_matches_dynamic(grammar, &vocab, 3);
+    }
+}
+
+#[test]
+fn partitioned_repeat_continuation_survives_ignore_prefixed_token() {
+    let vocab = vocab(&[
+        "a", "b", "c", "aa", "bb", "cc", "ab", "ac", "ba", "bc", "abc",
+        "aab", "abb", "acc", " ", "  ", " a", "a ", " a ", "ab c",
+    ]);
+    let grammar = r#"
+        start start;
+        ignore WS;
+        lexer group ws ::= WS;
+        lexer group a ::= A;
+        lexer group b ::= B;
+        lexer group c ::= C;
+        t WS ::= " "+;
+        t A ::= "a"+;
+        t B ::= "b";
+        t C ::= "c";
+        nt item ::= A | B | C;
+        nt start ::= item item? item?;
+    "#;
+    let monolithic_grammar = r#"
+        start start;
+        ignore WS;
+        lexer group all ::= WS, A, B, C;
+        t WS ::= " "+;
+        t A ::= "a"+;
+        t B ::= "b";
+        t C ::= "c";
+        nt item ::= A | B | C;
+        nt start ::= item item? item?;
+    "#;
+    let partitioned = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+    let monolithic = Constraint::from_glrm_grammar(monolithic_grammar, &vocab).unwrap();
+    let mut partitioned_state = partitioned.start();
+    let mut monolithic_state = monolithic.start();
+
+    for token in [0, 6, 16] {
+        partitioned_state.commit_token(token).unwrap();
+        monolithic_state.commit_token(token).unwrap();
+    }
+
+    assert_eq!(partitioned_state.mask(), monolithic_state.mask());
+    assert_allowed(&partitioned_state, &[0, 3, 14, 15, 17]);
+    let mut dynamic = vec![0; partitioned.mask_len()];
+    partitioned_state.fill_mask_dynamic(&mut dynamic);
+    assert_eq!(partitioned_state.mask(), dynamic);
+}
+
+#[test]
+fn nullable_terminal_root_loop_is_preserved_by_isolated_partitions() {
+    let vocab = vocab(&["a", "aa", "b", "ab", "aab"]);
+    let isolated = Constraint::from_glrm_grammar(
+        r#"
+            start start;
+            lexer group a ::= A;
+            lexer group b ::= B;
+            t A ::= "a"*;
+            t B ::= "b";
+            nt start ::= A B;
+        "#,
+        &vocab,
+    )
+    .unwrap();
+    let monolithic = Constraint::from_glrm_grammar(
+        r#"
+            start start;
+            lexer group all ::= A, B;
+            t A ::= "a"*;
+            t B ::= "b";
+            nt start ::= A B;
+        "#,
+        &vocab,
+    )
+    .unwrap();
+
+    assert_eq!(isolated.start().mask(), monolithic.start().mask());
+    for token_path in [&[2][..], &[3], &[4], &[0, 2], &[1, 2]] {
+        let mut isolated_state = isolated.start();
+        let mut monolithic_state = monolithic.start();
+        for &token in token_path {
+            isolated_state.commit_token(token).unwrap();
+            monolithic_state.commit_token(token).unwrap();
+            assert_eq!(isolated_state.mask(), monolithic_state.mask());
+            assert_eq!(isolated_state.is_finished(), monolithic_state.is_finished());
+        }
+        assert!(isolated_state.is_finished(), "path {token_path:?} did not finish");
+    }
+}
+
+#[test]
 fn plan_style_mask_buffer_matches_mask() {
     let constraint = ebnf(&["a", "b"], r#"start ::= "a" "b""#);
     let mut state = constraint.start();
@@ -1330,19 +1618,18 @@ fn json_schema_kubernetes_container_ports_prefix_has_single_stack_path() {
     state.commit_bytes(K8S_ORDERED_PORTS_PREFIX).unwrap();
 
     let stacks = state.debug_parser_stacks();
-    assert_eq!(state.parser_path_count(1_000_000), 1, "{stacks:?}");
-    assert_eq!(stacks.len(), 1, "{stacks:?}");
-    assert_eq!(stack_count(&state), 1, "{stacks:?}");
-
-    let stack_values = stacks[0]
-        .1
+    let mut stack_values = stacks
         .iter()
+        .flat_map(|(_, parser_stacks)| parser_stacks.iter())
         .map(|(stack, _)| stack.clone())
         .collect::<Vec<_>>();
+    stack_values.sort_unstable();
+    stack_values.dedup();
     assert_eq!(stack_values.len(), 1, "{stacks:?}");
 
     // The old regression shape kept two equivalent stack suffixes here.
-    // Current lowering removes that split entirely; keep the stronger invariant.
+    // Partitioned lexers may retain several lexer residuals, but they must all
+    // carry the same parser stack rather than reintroducing parser ambiguity.
 }
 
 #[test]

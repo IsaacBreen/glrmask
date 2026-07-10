@@ -166,6 +166,40 @@ impl ManyToOneIdMap {
         self.representative_original_ids.push(representative);
         self
     }
+
+    /// Split one original ID out into its own class while preserving all
+    /// existing class IDs.  This is used for structured epsilon lexers: the
+    /// global dispatch state has no scalar byte transitions and must never be
+    /// equated with an ordinary dead-looking DFA state, because its actual
+    /// behavior is the union of the deterministic component roots.
+    pub fn isolate_original(&mut self, original: u32) {
+        let Some(class) = self
+            .original_to_internal
+            .get(original as usize)
+            .copied()
+            .filter(|&class| class != u32::MAX)
+        else {
+            return;
+        };
+        let Some(originals) = self.internal_to_originals.get_mut(class as usize) else {
+            return;
+        };
+        if originals.len() <= 1 {
+            return;
+        }
+        let Some(index) = originals.iter().position(|&candidate| candidate == original) else {
+            return;
+        };
+        originals.swap_remove(index);
+        if self.representative_original_ids[class as usize] == original {
+            self.representative_original_ids[class as usize] = originals[0];
+        }
+
+        let new_class = self.internal_to_originals.len() as u32;
+        self.original_to_internal[original as usize] = new_class;
+        self.internal_to_originals.push(vec![original]);
+        self.representative_original_ids.push(original);
+    }
 }
 
 /// A total quotient of the complete raw scanner-state domain.

@@ -8,13 +8,17 @@ use once_cell::sync::Lazy;
 use crate::Vocab;
 use crate::automata::lexer::compile::{
     build_regex,
+    build_regex_partitioned,
+    build_regex_partitioned_with_profile_labels,
     build_regex_with_profile_labels,
     factor_regex_expr,
 };
 use crate::automata::lexer::regex::parse_regex;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::regex::Expr;
+use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
+use crate::automata::weighted::nwa::NWA;
 use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_possible_matches as cpm;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -395,7 +399,44 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
             );
         }
     }
-    build_tokenizer_from_exprs(&exprs, Some(&terminal_labels))
+    let partition_ids = lexer_partition_ids(grammar);
+    build_tokenizer_from_exprs_partitioned(
+        &exprs,
+        Some(&terminal_labels),
+        &partition_ids,
+    )
+}
+
+fn lexer_partition_ids(grammar: &GrammarDef) -> Vec<u32> {
+    // Named lexer groups opt into partitioning. Unspecified terminals remain
+    // monolithic by default so existing grammars keep their historical lexer
+    // shape; the environment override remains useful for stress testing.
+    let separate_unspecified = std::env::var("GLRMASK_LEXER_PARTITION_MODE")
+        .map(|value| !value.trim().eq_ignore_ascii_case("monolithic"))
+        .unwrap_or(false);
+    let mut ids_by_key = BTreeMap::<String, u32>::new();
+    let mut next_id = 0u32;
+    (0..grammar.terminals.len())
+        .map(|terminal| {
+            let terminal = terminal as u32;
+            let key = grammar
+                .lexer_partitions
+                .get(&terminal)
+                .map(|partition| format!("named:{partition}"))
+                .unwrap_or_else(|| {
+                    if separate_unspecified {
+                        format!("terminal:{terminal}")
+                    } else {
+                        "default".to_string()
+                    }
+                });
+            *ids_by_key.entry(key).or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                id
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn build_tokenizer_from_exprs(
@@ -426,6 +467,38 @@ pub(crate) fn build_tokenizer_from_exprs(
         );
     }
 
+    regex.into_tokenizer(
+        exprs.len() as u32,
+        Some(std::sync::Arc::from(exprs.to_vec())),
+    )
+}
+
+pub(crate) fn build_tokenizer_from_exprs_partitioned(
+    exprs: &[Expr],
+    profile_labels: Option<&[String]>,
+    partition_ids: &[u32],
+) -> Tokenizer {
+    let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
+    let started_at = Instant::now();
+    let regex = if let Some(labels) = profile_labels {
+        build_regex_partitioned_with_profile_labels(exprs, labels, partition_ids)
+    } else {
+        build_regex_partitioned(exprs, partition_ids)
+    };
+    if profile_detail {
+        eprintln!(
+            "[glrmask/profile][tokenizer] partitioned_build_done terminals={} partitions={} elapsed_ms={:.3} final_states={} final_transitions={}",
+            exprs.len(),
+            partition_ids
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            elapsed_ms(started_at),
+            regex.num_states(),
+            regex.num_transitions(),
+        );
+    }
     regex.into_tokenizer(
         exprs.len() as u32,
         Some(std::sync::Arc::from(exprs.to_vec())),
@@ -594,6 +667,7 @@ struct TerminalDagJoinState {
 struct TerminalDagResult {
     tokenizer: TokenizerDagLane,
     analysis: AnalysisDagLane,
+    ignore_terminal: Option<u32>,
     terminal_coloring_ms: f64,
     terminal_dwas: TerminalDwaFamilies,
     terminal_phase_profile: TerminalDwaPhaseProfile,
@@ -664,6 +738,7 @@ fn build_parser_dwa_for_terminal_family(
     grammar: &AnalyzedGrammar,
     templates: Templates,
     vocab: &Vocab,
+    collapse_immediate_acceptance: bool,
 ) -> Option<MappedArtifact<DWA>> {
     let family = family?;
     let internal_ids = family.id_map().clone();
@@ -679,6 +754,7 @@ fn build_parser_dwa_for_terminal_family(
                     templates,
                     vocab,
                     &internal_ids,
+                    collapse_immediate_acceptance,
                 ),
                 false,
             )
@@ -718,14 +794,70 @@ fn build_parser_dwa_for_terminal_family(
     Some(MappedArtifact::new(parser_dwa, internal_ids))
 }
 
+fn combine_terminal_dwa_families(
+    terminal_dwas: &TerminalDwaFamilies,
+) -> MappedArtifact<TerminalAutomaton> {
+    let inputs = [terminal_dwas.l1.as_ref(), terminal_dwas.l2p.as_ref()]
+        .into_iter()
+        .flatten()
+        .map(|family| MappedArtifact::new(family.artifact().clone(), family.id_map().clone()))
+        .collect::<Vec<_>>();
+    assert!(!inputs.is_empty(), "terminal DWA families must not be empty");
+    if inputs.len() == 1 {
+        return inputs.into_iter().next().unwrap();
+    }
+
+    let reconciled = MappedArtifact::reconcile_vec(inputs);
+    let (automata, id_map) = reconciled.into_parts();
+    let mut union = NWA::new(
+        id_map.num_tsids(),
+        id_map.max_internal_token_id(),
+    );
+    let mut body = union.body();
+    for automaton in automata {
+        let branch = match automaton {
+            TerminalAutomaton::Dwa(dwa) => dwa.to_nwa(),
+            TerminalAutomaton::TokenDeterministicNwa(nwa) => nwa,
+        };
+        body = union.union_in_place(&branch, &body);
+    }
+    union.set_start_states(body.start_states);
+    let dwa = determinize(&union).expect("combined terminal-family NWA must determinize");
+    MappedArtifact::new(TerminalAutomaton::Dwa(dwa), id_map)
+}
+
 fn build_and_merge_parser_dwa_families(
     terminal_dwas: &TerminalDwaFamilies,
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
+    ignore_terminal: Option<u32>,
     templates: Templates,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
 ) -> MappedParserDwa {
+    // Epsilon tokenizers retain several live lexer residuals across token
+    // boundaries. Building parser DWAs independently by L1/L2P family loses
+    // cross-family residual continuations; ignore terminals are one instance
+    // of the same problem because they are identity parser actions. Combine the
+    // terminal automata first and build one parser DWA, matching the established
+    // pre-family construction.
+    if tokenizer.has_epsilon_transitions() || ignore_terminal.is_some() {
+        let combined = combine_terminal_dwa_families(terminal_dwas);
+        let parser = build_parser_dwa_for_terminal_family(
+            "combined_epsilon_or_ignore",
+            Some(&combined),
+            table,
+            grammar,
+            templates,
+            vocab,
+            false,
+        )
+        .expect("combined epsilon/ignore terminal family must produce a parser DWA");
+        let (dwa, id_map) = parser.into_parts();
+        return MappedArtifact::new((dwa, ParserTopAccept::default()), id_map);
+    }
+
+    let collapse_immediate_acceptance = !tokenizer.has_epsilon_transitions();
     let l1_templates = templates.clone();
     let (l1_parser, l2p_parser) = rayon::join(
         || {
@@ -736,6 +868,7 @@ fn build_and_merge_parser_dwa_families(
                 grammar,
                 l1_templates,
                 vocab,
+                collapse_immediate_acceptance,
             )
         },
         || {
@@ -746,15 +879,17 @@ fn build_and_merge_parser_dwa_families(
                 grammar,
                 templates,
                 vocab,
+                collapse_immediate_acceptance,
             )
         },
     );
     let parser_dwas: Vec<MappedArtifact<DWA>> = l1_parser.into_iter().chain(l2p_parser).collect();
-    let (mapped_dwa, top_accept) = crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas_with_top_accept(
-        parser_dwas,
-        tokenizer.num_states() as usize,
-        vocab.max_token_id(),
-    );
+    let (mapped_dwa, top_accept) =
+        crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas_with_top_accept(
+            parser_dwas,
+            tokenizer.num_states() as usize,
+            vocab.max_token_id(),
+        );
     let (dwa, id_map) = mapped_dwa.into_parts();
     MappedArtifact::new((dwa, ParserTopAccept(top_accept)), id_map)
 }
@@ -853,6 +988,7 @@ fn launch_parser_dag_if_ready<'scope>(
         let TerminalDagResult {
             tokenizer,
             analysis,
+            ignore_terminal,
             terminal_coloring_ms,
             terminal_dwas,
             terminal_phase_profile,
@@ -886,6 +1022,7 @@ fn launch_parser_dag_if_ready<'scope>(
                 &terminal_dwas,
                 &table,
                 &analysis.analyzed_grammar,
+                ignore_terminal,
                 templates,
                 &tokenizer.tokenizer,
                 vocab,
@@ -1003,6 +1140,7 @@ fn launch_terminal_dag_if_ready<'scope>(
             .terminal = Some(TerminalDagResult {
                 tokenizer,
                 analysis,
+                ignore_terminal: prepared_grammar.ignore_terminal,
                 terminal_coloring_ms,
                 terminal_dwas,
                 terminal_phase_profile,
@@ -1063,13 +1201,20 @@ fn launch_classify_dag_if_ready<'scope>(
         let shared_classify_cache = SharedClassifyCache::new();
         let classify_started_ms = elapsed_ms(compile_started_at.clone());
         let classify_started_at = Instant::now();
-        let _terminal_path_lengths = classify_terminal_path_lengths(
-            &tokenizer.tokenizer,
-            vocab,
-            &token_path_disallowed_follows,
-            analysis.analyzed_grammar.num_terminals,
-            Some(&shared_classify_cache),
-        );
+        // Generic epsilon NFAs cannot use scalar classifier caches. The
+        // partitioned lexer is a structured deterministic dispatch, so its
+        // component-aware classifier remains valid.
+        if !tokenizer.tokenizer.has_epsilon_transitions()
+            || tokenizer.tokenizer.has_deterministic_dispatch()
+        {
+            let _terminal_path_lengths = classify_terminal_path_lengths(
+                &tokenizer.tokenizer,
+                vocab,
+                &token_path_disallowed_follows,
+                analysis.analyzed_grammar.num_terminals,
+                Some(&shared_classify_cache),
+            );
+        }
         let classify_ms = elapsed_ms(classify_started_at);
         let classify_finished_ms = elapsed_ms(compile_started_at.clone());
 
@@ -1507,6 +1652,7 @@ fn compile_prepared_with_profile_and_table_construction(
                         &terminal_dwas,
                         &table,
                         &analyzed_grammar,
+                        prepared_grammar.ignore_terminal,
                         retained_templates,
                         &tokenizer,
                         vocab,
@@ -1523,6 +1669,7 @@ fn compile_prepared_with_profile_and_table_construction(
                         &precompact_families,
                         &table,
                         &analyzed_grammar,
+                        prepared_grammar.ignore_terminal,
                         retained_templates,
                         &tokenizer,
                         vocab,
@@ -1554,6 +1701,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     &terminal_dwas,
                     &table,
                     &analyzed_grammar,
+                    prepared_grammar.ignore_terminal,
                     retained_templates,
                     &tokenizer,
                     vocab,

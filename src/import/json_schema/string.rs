@@ -36,7 +36,11 @@ impl<'a> Lowerer<'a> {
             || has_recognized_format
             || ((schema.min_length != 0 || schema.max_length.is_some()) && should_terminalize_length)
         {
-            let name = self.fresh_rule_name("json_string_constrained");
+            let name = self.fresh_rule_name(if schema.max_length.is_some() {
+                "json_string_constrained_bounded"
+            } else {
+                "json_string_constrained"
+            });
             if schema.min_length == 0
                 && schema.max_length.is_none()
                 && let Some(pattern) = &schema.pattern
@@ -932,7 +936,11 @@ impl<'a> Lowerer<'a> {
             literal_prefix.extend_from_slice(b": ");
             let value = self.lower_string_property_value_expr(schema)?;
             let expr = prepend_literal_prefix_to_expr(literal_prefix, value);
-            let name = self.fresh_rule_name("json_property_string_value");
+            let name = self.fresh_rule_name(if schema.max_length.is_some() {
+                "json_property_string_value_bounded"
+            } else {
+                "json_property_string_value"
+            });
             self.add_terminal_rule(&name, expr);
             return Ok(r(&name));
         }

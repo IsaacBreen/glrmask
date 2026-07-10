@@ -2426,6 +2426,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     templates: Templates,
     _vocab: &Vocab,
     _id_map: &InternalIdMap,
+    collapse_immediate_acceptance: bool,
 ) -> DWA {
     let num_parser_states = table.num_states;
     let total_started_at = Instant::now();
@@ -2461,12 +2462,16 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let mut parser_dwa_pre_minimize = determinized.dwa;
 
     let guaranteed_read_started_at = Instant::now();
-    let immediate_read_rewrites = collapse_immediate_acceptance_certificates(
-        &mut parser_dwa_pre_minimize,
-        terminal_dwa,
-        grammar,
-        table,
-    );
+    let immediate_read_rewrites = if collapse_immediate_acceptance {
+        collapse_immediate_acceptance_certificates(
+            &mut parser_dwa_pre_minimize,
+            terminal_dwa,
+            grammar,
+            table,
+        )
+    } else {
+        0
+    };
     let guaranteed_read_rewrites = immediate_read_rewrites;
     let guaranteed_read_ms = elapsed_ms(guaranteed_read_started_at);
 
@@ -2496,7 +2501,9 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
         &possible_by_state,
         num_parser_states,
     );
-    parser_dwa_pre_minimize = collapse_final_leaf_targets(parser_dwa_pre_minimize);
+    if collapse_immediate_acceptance {
+        parser_dwa_pre_minimize = collapse_final_leaf_targets(parser_dwa_pre_minimize);
+    }
     let fallback_determinize_ms = elapsed_ms(fallback_determinize_started_at);
 
     let pre_minimize_state_count = parser_dwa_pre_minimize.states().len();

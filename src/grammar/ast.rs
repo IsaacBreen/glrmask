@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -153,9 +153,157 @@ pub struct NamedGrammar {
     /// Name of the terminal rule whose body should be used as the ignore pattern.
     /// Set by Lark's `%ignore` directive.
     pub ignore: Option<String>,
+    /// Optional terminal-name → lexer-partition name assignments.
+    ///
+    /// Terminals in the same named partition are jointly determinized.
+    /// Different partitions are combined by epsilon transitions, preventing
+    /// cross-partition DFA blow-ups. Unassigned terminals follow the active
+    /// tokenizer partition policy.
+    pub lexer_partitions: BTreeMap<String, String>,
+    /// Exact anonymous literal bytes → lexer-partition name assignments.
+    ///
+    /// This applies to inline literals such as `"{"` used directly in
+    /// nonterminal productions, not to named terminal rules whose bodies happen
+    /// to be literal. Those continue to use `lexer_partitions`.
+    pub lexer_literal_partitions: BTreeMap<Vec<u8>, String>,
+    /// Optional catch-all partition for every emitted terminal not assigned by
+    /// either an explicit named-terminal or anonymous-literal assignment.
+    pub default_lexer_partition: Option<String>,
 }
 
 impl NamedGrammar {
+    /// Exact byte strings that are emitted by anonymous inline literal atoms in
+    /// nonterminal rules. Literals nested inside a terminal expression such as
+    /// an intersection remain part of that one terminal and are not returned.
+    pub fn emitted_anonymous_literals(&self) -> BTreeSet<Vec<u8>> {
+        fn collect(expr: &GrammarExpr, literals: &mut BTreeSet<Vec<u8>>) {
+            match expr {
+                GrammarExpr::Literal(bytes) => {
+                    if !bytes.is_empty() {
+                        literals.insert(bytes.clone());
+                    }
+                }
+                GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+                    collect(inner, literals);
+                }
+                GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+                    for part in parts {
+                        collect(part, literals);
+                    }
+                }
+                GrammarExpr::SeparatedSequence {
+                    items, separator, ..
+                } => {
+                    collect(separator, literals);
+                    for (item, _) in items {
+                        collect(item, literals);
+                    }
+                }
+                GrammarExpr::ExprNFA(expr_nfa) => {
+                    for symbol in &expr_nfa.symbols {
+                        collect(symbol, literals);
+                    }
+                }
+                GrammarExpr::Exclude { .. }
+                | GrammarExpr::Intersect { .. }
+                | GrammarExpr::Ref(_)
+                | GrammarExpr::Epsilon
+                | GrammarExpr::CharClass { .. }
+                | GrammarExpr::RawRegex(_)
+                | GrammarExpr::LexerDfa(_)
+                | GrammarExpr::AnyByte => {}
+            }
+        }
+
+        let mut literals = BTreeSet::new();
+        for rule in &self.rules {
+            if !rule.is_terminal {
+                collect(&rule.expr, &mut literals);
+            }
+        }
+        literals
+    }
+
+    /// Assign terminal rules to one jointly-determinized lexer partition.
+    pub fn set_lexer_partition<I, S>(&mut self, partition: impl Into<String>, terminals: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let partition = partition.into();
+        for terminal in terminals {
+            self.lexer_partitions.insert(terminal.into(), partition.clone());
+        }
+    }
+
+    /// Builder-style variant of [`Self::set_lexer_partition`].
+    pub fn with_lexer_partition<I, S>(
+        mut self,
+        partition: impl Into<String>,
+        terminals: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.set_lexer_partition(partition, terminals);
+        self
+    }
+
+    /// Put one terminal in its own lexer partition.
+    pub fn isolate_terminal(&mut self, terminal: impl Into<String>) {
+        let terminal = terminal.into();
+        let base = format!("__isolated_{terminal}");
+        let mut partition = base.clone();
+        let mut suffix = 2usize;
+        while self
+            .lexer_partitions
+            .iter()
+            .any(|(other_terminal, existing)| {
+                other_terminal != &terminal && existing == &partition
+            })
+        {
+            partition = format!("{base}_{suffix}");
+            suffix += 1;
+        }
+        self.lexer_partitions.insert(terminal, partition);
+    }
+
+    /// Assign anonymous inline literals to one jointly-determinized partition.
+    pub fn set_literal_lexer_partition<I, B>(
+        &mut self,
+        partition: impl Into<String>,
+        literals: I,
+    ) where
+        I: IntoIterator<Item = B>,
+        B: AsRef<[u8]>,
+    {
+        let partition = partition.into();
+        for literal in literals {
+            self.lexer_literal_partitions
+                .insert(literal.as_ref().to_vec(), partition.clone());
+        }
+    }
+
+    /// Builder-style variant of [`Self::set_literal_lexer_partition`].
+    pub fn with_literal_lexer_partition<I, B>(
+        mut self,
+        partition: impl Into<String>,
+        literals: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = B>,
+        B: AsRef<[u8]>,
+    {
+        self.set_literal_lexer_partition(partition, literals);
+        self
+    }
+
+    /// Assign every otherwise-unassigned emitted terminal to `partition`.
+    pub fn set_default_lexer_partition(&mut self, partition: impl Into<String>) {
+        self.default_lexer_partition = Some(partition.into());
+    }
+
     /// Returns the set of rule names marked as terminals.
     pub fn terminal_names_set(&self) -> HashSet<String> {
         self.rules
@@ -231,7 +379,20 @@ impl NamedGrammar {
             .cloned()
             .collect();
 
-        NamedGrammar { rules, start: self.start.clone(), ignore: self.ignore.clone() }
+        let lexer_partitions = self
+            .lexer_partitions
+            .iter()
+            .filter(|(terminal, _)| reachable.contains(*terminal))
+            .map(|(terminal, partition)| (terminal.clone(), partition.clone()))
+            .collect();
+        NamedGrammar {
+            rules,
+            start: self.start.clone(),
+            ignore: self.ignore.clone(),
+            lexer_partitions,
+            lexer_literal_partitions: self.lexer_literal_partitions.clone(),
+            default_lexer_partition: self.default_lexer_partition.clone(),
+        }
     }
 
     /// Dump the grammar in a Lark-like human-readable format.
@@ -444,6 +605,7 @@ struct Lowerer<'a> {
     next_nonterminal_id: NonterminalID,
     generated_nonterminal_counter: u32,
     terminal_names: BTreeMap<TerminalID, String>,
+    terminal_ids_by_name: FxHashMap<String, TerminalID>,
     internal_terminal_names: FxHashSet<String>,
     named_rule_exprs: FxHashMap<String, &'a GrammarExpr>,
     named_rule_is_terminal: FxHashMap<String, bool>,
@@ -557,6 +719,7 @@ impl<'a> Lowerer<'a> {
             next_nonterminal_id: 0,
             generated_nonterminal_counter: 0,
             terminal_names: BTreeMap::new(),
+            terminal_ids_by_name: FxHashMap::default(),
             internal_terminal_names: FxHashSet::default(),
             named_rule_exprs: FxHashMap::default(),
             named_rule_is_terminal: FxHashMap::default(),
@@ -1046,11 +1209,13 @@ impl<'a> Lowerer<'a> {
     fn terminal_id(&mut self, name: &str, pattern: &str, utf8: bool) -> TerminalID {
         let pattern_key = format!("{pattern}:{utf8}");
         if let Some(&id) = self.terminal_map.get(&pattern_key) {
+            self.terminal_ids_by_name.insert(name.to_string(), id);
             return id;
         }
         let id = self.terminals.len() as TerminalID;
         self.terminal_map.insert(pattern_key, id);
         self.terminal_names.insert(id, name.to_string());
+        self.terminal_ids_by_name.insert(name.to_string(), id);
         let name_bytes = name.as_bytes();
         let literal_pattern: String = name_bytes.iter().map(|&byte| regex_escape_byte(byte)).collect();
         if literal_pattern == pattern && !utf8 {
@@ -2123,6 +2288,7 @@ impl<'a> Lowerer<'a> {
                 if let Some(Terminal::Expr { expr: existing, .. }) = self.terminals.get(id as usize)
                     && *existing == expr
                 {
+                    self.terminal_ids_by_name.insert(name.to_string(), id);
                     return id;
                 }
             }
@@ -2130,6 +2296,7 @@ impl<'a> Lowerer<'a> {
 
         let id = self.terminals.len() as TerminalID;
         self.terminal_names.insert(id, name.to_string());
+        self.terminal_ids_by_name.insert(name.to_string(), id);
         self.terminals.push(Terminal::Expr { id, expr });
         self.terminal_expr_hash_index.entry(hash).or_default().push(id);
         id
@@ -2813,11 +2980,51 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         .collect();
 
     let ignore_terminal = grammar.ignore.as_ref().and_then(|ignore_name| {
-        lowerer
-            .terminal_names
-            .iter()
-            .find_map(|(&id, name)| (name == ignore_name).then_some(id))
+        lowerer.terminal_ids_by_name.get(ignore_name).copied()
     });
+    let mut lexer_partitions = BTreeMap::new();
+    for (terminal_name, partition) in &grammar.lexer_partitions {
+        let terminal_id = lowerer.terminal_ids_by_name.get(terminal_name).copied();
+        let Some(terminal_id) = terminal_id else {
+            return Err(GlrMaskError::GrammarParse(format!(
+                "lexer group references unknown or non-emitting terminal '{terminal_name}'",
+            )));
+        };
+        if let Some(previous) = lexer_partitions.insert(terminal_id, partition.clone())
+            && previous != *partition
+        {
+            return Err(GlrMaskError::GrammarParse(format!(
+                "terminal '{terminal_name}' is assigned to both lexer groups '{previous}' and '{partition}'",
+            )));
+        }
+    }
+    for (literal, partition) in &grammar.lexer_literal_partitions {
+        let matching = lowerer
+            .terminals
+            .iter()
+            .filter_map(|terminal| match terminal {
+                Terminal::Literal { id, bytes } if bytes == literal => Some(*id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for terminal_id in matching {
+            if let Some(previous) = lexer_partitions.insert(terminal_id, partition.clone())
+                && previous != *partition
+            {
+                return Err(GlrMaskError::GrammarParse(format!(
+                    "anonymous literal {:?} is assigned to both lexer groups '{previous}' and '{partition}'",
+                    String::from_utf8_lossy(literal),
+                )));
+            }
+        }
+    }
+    if let Some(default_partition) = &grammar.default_lexer_partition {
+        for terminal_id in 0..lowerer.terminals.len() as TerminalID {
+            lexer_partitions
+                .entry(terminal_id)
+                .or_insert_with(|| default_partition.clone());
+        }
+    }
 
     let dedup_started_at = detail_profile.then(std::time::Instant::now);
     dedup_rules_preserving_first_occurrence(&mut lowerer.rules);
@@ -2864,6 +3071,7 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         nonterminal_names,
         terminal_names: lowerer.terminal_names,
         ignore_terminal,
+        lexer_partitions,
     })
 }
 
@@ -3002,6 +3210,9 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         lower(&grammar).unwrap();
@@ -3029,6 +3240,9 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         lower(&grammar).unwrap();
@@ -3043,6 +3257,9 @@ mod tests {
             )],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         let gdef = lower(&grammar).unwrap();
@@ -3077,6 +3294,9 @@ mod tests {
             ],
             start: "start".to_string(),
             ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
         };
 
         let gdef = lower(&grammar).unwrap();

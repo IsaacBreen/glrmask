@@ -9,6 +9,10 @@ use crate::grammar::flat::TerminalID;
 use crate::runtime::artifact::{empty_dense_words, PossibleMatchesByTerminal};
 use crate::runtime::Constraint;
 
+const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
+const CONSTRAINT_VERSION: u16 = 1;
+const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
+
 /// Deliberate, execution-only persisted state for a compiled constraint.
 ///
 /// This excludes every derived lookup table, dense mask, and cache. Loading it
@@ -153,6 +157,10 @@ impl Constraint {
             self.parser_top_accept.is_empty(),
             "runtime payload V1 cannot represent parser_top_accept; use save_runtime_payload_v2"
         );
+        assert!(
+            !self.tokenizer.has_epsilon_transitions(),
+            "runtime payload V1 cannot represent an epsilon tokenizer; use save_runtime_payload_v2"
+        );
         bincode::serialize(&RuntimePayloadV1::from(self))
             .expect("Runtime payload serialization should succeed")
     }
@@ -162,6 +170,11 @@ impl Constraint {
         let payload: RuntimePayloadV1 = bincode::deserialize(bytes)
             .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
         let mut constraint = payload.into_constraint();
+        if constraint.tokenizer.has_epsilon_transitions() {
+            return Err(crate::GlrMaskError::Serialization(
+                "runtime payload V1 contains epsilon lexer transitions".to_owned(),
+            ));
+        }
         constraint.rebuild_runtime_caches();
         Ok(constraint)
     }
@@ -183,11 +196,51 @@ impl Constraint {
     }
 
     pub fn save(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("Constraint serialization should succeed")
+        let payload = bincode::serialize(self).expect("Constraint serialization should succeed");
+        let mut bytes = Vec::with_capacity(CONSTRAINT_HEADER_LEN + payload.len());
+        bytes.extend_from_slice(&CONSTRAINT_MAGIC);
+        bytes.extend_from_slice(&CONSTRAINT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        bytes
     }
 
     pub fn load(bytes: &[u8]) -> crate::Result<Self> {
-        let mut constraint: Self = bincode::deserialize(bytes)
+        let payload = if bytes.starts_with(&CONSTRAINT_MAGIC) {
+            if bytes.len() < CONSTRAINT_HEADER_LEN {
+                return Err(crate::GlrMaskError::Serialization(
+                    "truncated constraint artifact header".to_owned(),
+                ));
+            }
+            let version = u16::from_le_bytes([bytes[8], bytes[9]]);
+            if version != CONSTRAINT_VERSION {
+                return Err(crate::GlrMaskError::Serialization(format!(
+                    "unsupported constraint artifact version {version}",
+                )));
+            }
+            let payload_len = usize::try_from(u64::from_le_bytes(
+                bytes[10..18]
+                    .try_into()
+                    .expect("constraint artifact header has fixed width"),
+            ))
+            .map_err(|_| {
+                crate::GlrMaskError::Serialization(
+                    "constraint artifact payload length does not fit this platform".to_owned(),
+                )
+            })?;
+            if bytes.len() != CONSTRAINT_HEADER_LEN.saturating_add(payload_len) {
+                return Err(crate::GlrMaskError::Serialization(
+                    "invalid constraint artifact payload length".to_owned(),
+                ));
+            }
+            &bytes[CONSTRAINT_HEADER_LEN..]
+        } else {
+            // Historical `Constraint::save` returned raw bincode. Keep one-way
+            // compatibility while the envelope prevents old readers from
+            // silently accepting epsilon-enabled artifacts.
+            bytes
+        };
+        let mut constraint: Self = bincode::deserialize(payload)
             .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
         constraint.rebuild_runtime_caches();
         Ok(constraint)
@@ -199,6 +252,23 @@ mod tests {
     use range_set_blaze::RangeSetBlaze;
 
     use super::*;
+    use crate::Vocab;
+
+    fn tiny_constraint() -> Constraint {
+        Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                t B ::= "b";
+                nt start ::= A B;
+            "#,
+            &Vocab::new(
+                vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"ab".to_vec())],
+                None,
+            ),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn runtime_payload_v2_preserves_top_accept_and_v1_rejects_it() {
@@ -225,5 +295,50 @@ mod tests {
         let bytes = constraint.save_runtime_payload_v2();
         let loaded = Constraint::load_runtime_payload_v2(&bytes).unwrap();
         assert_eq!(loaded.parser_top_accept, constraint.parser_top_accept);
+    }
+
+    #[test]
+    fn constraint_envelope_roundtrip_and_legacy_raw_load() {
+        let constraint = tiny_constraint();
+        let saved = constraint.save();
+        assert!(saved.starts_with(&CONSTRAINT_MAGIC));
+        assert!(bincode::deserialize::<Constraint>(&saved).is_err());
+        let loaded = Constraint::load(&saved).unwrap();
+        assert_eq!(loaded.start().mask(), constraint.start().mask());
+
+        let legacy_constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                nt start ::= A;
+            "#,
+            &Vocab::new(vec![(0, b"a".to_vec())], None),
+        )
+        .unwrap();
+        let legacy = bincode::serialize(&legacy_constraint).unwrap();
+        assert!(!legacy.starts_with(&CONSTRAINT_MAGIC));
+        let loaded_legacy = Constraint::load(&legacy).unwrap();
+        assert_eq!(
+            loaded_legacy.start().mask(),
+            legacy_constraint.start().mask(),
+        );
+    }
+
+    #[test]
+    fn constraint_envelope_rejects_version_and_length_mismatches() {
+        let constraint = tiny_constraint();
+        let mut wrong_version = constraint.save();
+        wrong_version[8..10].copy_from_slice(&(CONSTRAINT_VERSION + 1).to_le_bytes());
+        assert!(Constraint::load(&wrong_version)
+            .unwrap_err()
+            .to_string()
+            .contains("version"));
+
+        let mut wrong_length = constraint.save();
+        wrong_length[10..18].copy_from_slice(&0u64.to_le_bytes());
+        assert!(Constraint::load(&wrong_length)
+            .unwrap_err()
+            .to_string()
+            .contains("payload length"));
     }
 }

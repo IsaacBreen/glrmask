@@ -25,6 +25,10 @@ use self::config::JsonSchemaConfig;
 use self::load::{load_document_with_features, scan_document_features};
 use self::lower::lower_document;
 
+pub(crate) fn assign_default_lexer_partitions(grammar: &mut NamedGrammar) {
+    lower::assign_default_lexer_partitions(grammar);
+}
+
 /// Convert a JSON Schema value into the project's named grammar AST.
 ///
 /// The implementation intentionally has two phases:

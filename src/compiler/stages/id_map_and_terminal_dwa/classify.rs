@@ -292,8 +292,6 @@ impl SharedClassifyBytesets {
     /// Scan the DFA to compute per-terminal byte sets.
     pub fn build(tokenizer: &Tokenizer, num_terminals: u32) -> Self {
         let nt = num_terminals as usize;
-        let initial = tokenizer.start_state();
-
         // The old implementation expanded target terminal bitsets once per
         // transition. On a large tokenizer this is catastrophic: many
         // transitions reach states whose possible-future bitsets contain most
@@ -409,18 +407,23 @@ impl SharedClassifyBytesets {
             }
         }
 
-        // first_bytes: only from initial state (single state, no parallelism needed).
+        // first_bytes: from the deterministic reset roots.  For an ordinary
+        // DFA this is the single initial state.  For the partitioned lexer it
+        // is the small set of component roots behind the epsilon dispatch.
         let mut first_bytes = vec![U8Set::empty(); nt];
-        for (byte, target) in tokenizer.transitions_from(initial) {
-            for terminal in tokenizer.matched_terminal_bitset(target).iter() {
-                if terminal < nt {
-                    first_bytes[terminal].insert(byte);
+        let reset_states = tokenizer.deterministic_reset_states();
+        for reset_state in reset_states {
+            for (byte, target) in tokenizer.transitions_from(reset_state) {
+                for terminal in tokenizer.matched_terminal_bitset(target).iter() {
+                    if terminal < nt {
+                        first_bytes[terminal].insert(byte);
+                    }
                 }
-            }
-            for terminal in tokenizer.possible_future_terminals(target).iter() {
-                let t = terminal as usize;
-                if t < nt {
-                    first_bytes[t].insert(byte);
+                for terminal in tokenizer.possible_future_terminals(target).iter() {
+                    let t = terminal;
+                    if t < nt {
+                        first_bytes[t].insert(byte);
+                    }
                 }
             }
         }
@@ -655,6 +658,13 @@ pub(crate) fn classify_terminal_path_lengths(
     shared_classify_cache: Option<&SharedClassifyCache>,
 ) -> Vec<TerminalPathLength> {
     let nt = num_terminals as usize;
+    // Every accelerated classification below assumes one deterministic lexer
+    // state after each byte. Routing every terminal through L2P is conservative
+    // and exact for epsilon tokenizers, and protects future callers that do not
+    // know about the pipeline-level guard.
+    if tokenizer.has_epsilon_transitions() && !tokenizer.has_deterministic_dispatch() {
+        return vec![TerminalPathLength::TwoPlus; nt];
+    }
 
     // 1. Vocab byte bitset: all bytes appearing in any vocab token.
     let vocab_bytes = vocab_byte_set(vocab);
@@ -1602,6 +1612,20 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
     shared_classify_cache: Option<&SharedClassifyCache>,
 ) -> L2pVocabBoundarySplit {
     let split_started_at = std::time::Instant::now();
+    // The split is only an optimization. For epsilon tokenizers, conservatively
+    // send every vocabulary entry through the general boundary-capable builder.
+    if tokenizer.has_epsilon_transitions() && !tokenizer.has_deterministic_dispatch() {
+        let boundary_token_ids = vocab.entries.keys().copied().collect::<Vec<_>>();
+        let boundary_tokens = boundary_token_ids.len();
+        return L2pVocabBoundarySplit {
+            boundary_token_ids,
+            single_token_ids: Vec::new(),
+            adjacent_tokens: boundary_tokens,
+            boundary_tokens,
+            single_tokens: 0,
+            irrelevant_tokens: 0,
+        };
+    }
     let owned_bytesets: Option<SharedClassifyBytesets>;
     let bytesets = if let Some(cache) = shared_classify_cache {
         cache.get_or_init(|| SharedClassifyBytesets::build(tokenizer, num_terminals))
@@ -1647,12 +1671,17 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
         .active_start_states
         .len()
         .saturating_mul(adjacent_candidate_count);
-    let use_exact_boundary_filter = match exact_l2p_boundary_filter_mode() {
-        ExactL2pBoundaryFilterMode::Force(enabled) => enabled,
-        ExactL2pBoundaryFilterMode::Auto => {
-            estimated_exact_work <= exact_l2p_boundary_filter_work_limit()
-        }
-    };
+    // The exact scalar-state filter does not yet model a reset into several
+    // deterministic component roots.  Its cheap byte-adjacency prefilter is
+    // still sound, so retain the useful single/irrelevant split but route every
+    // adjacent candidate through the boundary-capable builder.
+    let use_exact_boundary_filter = !tokenizer.has_deterministic_dispatch()
+        && match exact_l2p_boundary_filter_mode() {
+            ExactL2pBoundaryFilterMode::Force(enabled) => enabled,
+            ExactL2pBoundaryFilterMode::Auto => {
+                estimated_exact_work <= exact_l2p_boundary_filter_work_limit()
+            }
+        };
 
     if std::env::var_os("GLRMASK_PROFILE_EXACT_L2P_BOUNDARY_FILTER").is_some() {
         eprintln!(
@@ -2078,7 +2107,6 @@ mod tests {
 
     fn reference_bytesets(tokenizer: &Tokenizer, num_terminals: u32) -> SharedClassifyBytesets {
         let nt = num_terminals as usize;
-        let initial = tokenizer.start_state();
         let mut reachable_bytes = vec![U8Set::empty(); nt];
         let mut last_bytes = vec![U8Set::empty(); nt];
 
@@ -2099,15 +2127,17 @@ mod tests {
         }
 
         let mut first_bytes = vec![U8Set::empty(); nt];
-        for (byte, target) in tokenizer.transitions_from(initial) {
-            for terminal in tokenizer.matched_terminal_bitset(target).iter() {
-                if terminal < nt {
-                    first_bytes[terminal].insert(byte);
+        for reset_state in tokenizer.deterministic_reset_states() {
+            for (byte, target) in tokenizer.transitions_from(reset_state) {
+                for terminal in tokenizer.matched_terminal_bitset(target).iter() {
+                    if terminal < nt {
+                        first_bytes[terminal].insert(byte);
+                    }
                 }
-            }
-            for terminal in tokenizer.possible_future_terminals(target).iter() {
-                if terminal < nt {
-                    first_bytes[terminal].insert(byte);
+                for terminal in tokenizer.possible_future_terminals(target).iter() {
+                    if terminal < nt {
+                        first_bytes[terminal].insert(byte);
+                    }
                 }
             }
         }

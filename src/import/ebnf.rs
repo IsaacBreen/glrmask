@@ -308,7 +308,14 @@ impl Parser {
             .first()
             .map(|r| r.name.clone())
             .ok_or_else(|| GlrMaskError::GrammarParse("empty grammar".into()))?;
-        Ok(NamedGrammar { rules, start, ignore: None })
+        Ok(NamedGrammar {
+            rules,
+            start,
+            ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
+        })
     }
 
     fn parse_alternatives(&mut self) -> Result<GrammarExpr, GlrMaskError> {
@@ -385,4 +392,3 @@ pub fn parse_ebnf_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let mut parser = Parser::new(tokens);
     parser.parse_grammar()
 }
-
