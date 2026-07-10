@@ -3879,15 +3879,308 @@ impl InterchangeabilityDfa {
         CanonicalSignature(components.into())
     }
 
+    fn support_mask_for_class(support: &[(u32, u8)], class: usize) -> u8 {
+        support
+            .binary_search_by_key(&(class as u32), |&(seen, _)| seen)
+            .ok()
+            .map_or(0, |index| support[index].1)
+    }
+
+    /// Necessary row condition for a quotient-class image under a terminal
+    /// swap, ignoring only the recursive destination-class permutation. This
+    /// sharply constrains the tiny exact cone search without accepting a map.
+    fn support_output_rows_match_after_swap(
+        &self,
+        source_state: usize,
+        target_state: usize,
+        outputs: &mut SparseSwappedOutputIds<'_>,
+    ) -> bool {
+        let source_edges = self.topology.edges_from(source_state);
+        let target_edges = self.topology.edges_from(target_state);
+        let mut source_index = 0usize;
+        let mut target_index = 0usize;
+        while source_index < source_edges.len() || target_index < target_edges.len() {
+            let (source_destination, target_destination) = match (
+                source_edges.get(source_index),
+                target_edges.get(target_index),
+            ) {
+                (Some(&(source_byte, source_destination)), Some(&(target_byte, target_destination)))
+                    if source_byte == target_byte =>
+                {
+                    source_index += 1;
+                    target_index += 1;
+                    (source_destination as usize, target_destination as usize)
+                }
+                (Some(&(source_byte, source_destination)), Some(&(target_byte, _)))
+                    if source_byte < target_byte =>
+                {
+                    source_index += 1;
+                    (source_destination as usize, self.dead_state())
+                }
+                (Some(_), Some(&(_, target_destination))) => {
+                    target_index += 1;
+                    (self.dead_state(), target_destination as usize)
+                }
+                (Some(&(_, source_destination)), None) => {
+                    source_index += 1;
+                    (source_destination as usize, self.dead_state())
+                }
+                (None, Some(&(_, target_destination))) => {
+                    target_index += 1;
+                    (self.dead_state(), target_destination as usize)
+                }
+                (None, None) => unreachable!("sparse edge union loop is nonempty"),
+            };
+            if outputs.id(self.output_pair_by_state[source_destination])
+                != self.output_pair_by_state[target_destination]
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Full exact quotient automorphism check for a proposed sparse class
+    /// permutation. The affected cone is reverse-closed, so every class outside
+    /// it is identity and cannot transition into a moved class.
+    fn support_deviations_are_valid(
+        &self,
+        quotient: &SupportQuotient,
+        left: TerminalID,
+        right: TerminalID,
+        cone_classes: &[usize],
+        deviations: &[(u32, u32)],
+    ) -> bool {
+        let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
+        if Self::mapped_support_class(deviations, root_class) != root_class as u32 {
+            return false;
+        }
+        let mut outputs = SparseSwappedOutputIds::new(
+            &self.output_pairs,
+            &self.output_pair_lookup,
+            left as usize,
+            right as usize,
+        );
+        for &class in cone_classes {
+            let target = Self::mapped_support_class(deviations, class);
+            let source_state = quotient.representative_by_class[class] as usize;
+            let target_state = quotient.representative_by_class[target as usize] as usize;
+            let source_edges = self.topology.edges_from(source_state);
+            let target_edges = self.topology.edges_from(target_state);
+            let mut source_index = 0usize;
+            let mut target_index = 0usize;
+            while source_index < source_edges.len() || target_index < target_edges.len() {
+                let (source_destination, target_destination) = match (
+                    source_edges.get(source_index),
+                    target_edges.get(target_index),
+                ) {
+                    (Some(&(source_byte, source_destination)), Some(&(target_byte, target_destination)))
+                        if source_byte == target_byte =>
+                    {
+                        source_index += 1;
+                        target_index += 1;
+                        (source_destination as usize, target_destination as usize)
+                    }
+                    (Some(&(source_byte, source_destination)), Some(&(target_byte, _)))
+                        if source_byte < target_byte =>
+                    {
+                        source_index += 1;
+                        (source_destination as usize, self.dead_state())
+                    }
+                    (Some(_), Some(&(_, target_destination))) => {
+                        target_index += 1;
+                        (self.dead_state(), target_destination as usize)
+                    }
+                    (Some(&(_, source_destination)), None) => {
+                        source_index += 1;
+                        (source_destination as usize, self.dead_state())
+                    }
+                    (None, Some(&(_, target_destination))) => {
+                        target_index += 1;
+                        (self.dead_state(), target_destination as usize)
+                    }
+                    (None, None) => unreachable!("sparse edge union loop is nonempty"),
+                };
+                let expected_destination = Self::mapped_support_class(
+                    deviations,
+                    quotient.class_for_state[source_destination] as usize,
+                );
+                if quotient.class_for_state[target_destination] != expected_destination
+                    || outputs.id(self.output_pair_by_state[source_destination])
+                        != self.output_pair_by_state[target_destination]
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn search_support_cone_permutation(
+        &self,
+        quotient: &SupportQuotient,
+        left: TerminalID,
+        right: TerminalID,
+        cone_classes: &[usize],
+        candidates: &[SmallVec<[usize; 8]>],
+        order: &[usize],
+        depth: usize,
+        assignment: &mut [usize],
+        used_targets: &mut [bool],
+        search_nodes: &mut usize,
+    ) -> Option<Vec<(u32, u32)>> {
+        const MAX_SEARCH_NODES: usize = 50_000;
+        if *search_nodes >= MAX_SEARCH_NODES {
+            return None;
+        }
+        if depth == order.len() {
+            let mut deviations = cone_classes
+                .iter()
+                .enumerate()
+                .filter_map(|(source_index, &source_class)| {
+                    let target_class = cone_classes[assignment[source_index]];
+                    (source_class != target_class)
+                        .then_some((source_class as u32, target_class as u32))
+                })
+                .collect::<Vec<_>>();
+            deviations.sort_unstable_by_key(|&(source, _)| source);
+            return self
+                .support_deviations_are_valid(
+                    quotient,
+                    left,
+                    right,
+                    cone_classes,
+                    &deviations,
+                )
+                .then_some(deviations);
+        }
+        let source_index = order[depth];
+        for &target_index in &candidates[source_index] {
+            if used_targets[target_index] {
+                continue;
+            }
+            *search_nodes += 1;
+            assignment[source_index] = target_index;
+            used_targets[target_index] = true;
+            if let Some(found) = self.search_support_cone_permutation(
+                quotient,
+                left,
+                right,
+                cone_classes,
+                candidates,
+                order,
+                depth + 1,
+                assignment,
+                used_targets,
+                search_nodes,
+            ) {
+                return Some(found);
+            }
+            used_targets[target_index] = false;
+            assignment[source_index] = usize::MAX;
+            if *search_nodes >= MAX_SEARCH_NODES {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Exact small-cone fallback for support templates whose numeric-order
+    /// pairing is wrong. Candidate images must swap the two terminal support
+    /// masks and match the complete destination-output row; backtracking then
+    /// verifies the full recursive quotient automorphism before acceptance.
+    fn support_transposition_search_deviations(
+        &mut self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<Vec<(u32, u32)>> {
+        self.ensure_terminal_quotient_output_support(left);
+        self.ensure_terminal_quotient_output_support(right);
+        let quotient = self
+            .support_quotient
+            .as_ref()
+            .expect("support quotient initialized");
+        let cone_classes = self.support_quotient_affected_cone_small(quotient, left, right);
+        if cone_classes.len() > 12 {
+            return None;
+        }
+        let supports = self
+            .terminal_quotient_output_supports
+            .as_ref()
+            .expect("terminal quotient output supports initialized");
+        let left_support = supports[left as usize].as_ref()?;
+        let right_support = supports[right as usize].as_ref()?;
+        let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
+        let dead_class = quotient.class_for_state[self.dead_state()] as usize;
+        let mut outputs = SparseSwappedOutputIds::new(
+            &self.output_pairs,
+            &self.output_pair_lookup,
+            left as usize,
+            right as usize,
+        );
+        let mut candidates = vec![SmallVec::<[usize; 8]>::new(); cone_classes.len()];
+        for (source_index, &source_class) in cone_classes.iter().enumerate() {
+            let source_left = Self::support_mask_for_class(left_support, source_class);
+            let source_right = Self::support_mask_for_class(right_support, source_class);
+            let source_state = quotient.representative_by_class[source_class] as usize;
+            for (target_index, &target_class) in cone_classes.iter().enumerate() {
+                if (source_class == root_class && target_class != root_class)
+                    || (source_class == dead_class && target_class != dead_class)
+                {
+                    continue;
+                }
+                let target_left = Self::support_mask_for_class(left_support, target_class);
+                let target_right = Self::support_mask_for_class(right_support, target_class);
+                if target_left != source_right || target_right != source_left {
+                    continue;
+                }
+                let target_state = quotient.representative_by_class[target_class] as usize;
+                if self.support_output_rows_match_after_swap(
+                    source_state,
+                    target_state,
+                    &mut outputs,
+                ) {
+                    candidates[source_index].push(target_index);
+                }
+            }
+            if candidates[source_index].is_empty() {
+                return None;
+            }
+        }
+        let mut order = (0..cone_classes.len()).collect::<Vec<_>>();
+        order.sort_unstable_by_key(|&source_index| candidates[source_index].len());
+        let mut assignment = vec![usize::MAX; cone_classes.len()];
+        let mut used_targets = vec![false; cone_classes.len()];
+        let mut search_nodes = 0usize;
+        self.search_support_cone_permutation(
+            quotient,
+            left,
+            right,
+            &cone_classes,
+            &candidates,
+            &order,
+            0,
+            &mut assignment,
+            &mut used_targets,
+            &mut search_nodes,
+        )
+    }
+
     fn support_transposition_interchange_map(
         &mut self,
         left: TerminalID,
         right: TerminalID,
     ) -> Option<InterchangeMap> {
-        let Some(deviations) = self.support_transposition_deviations(left, right) else {
+        if let Some(deviations) = self.support_transposition_deviations(left, right) {
+            if let Some(map) =
+                self.support_transposition_interchange_map_from_deviations(left, right, deviations)
+            {
+                return Some(map);
+            }
+        } else {
             self.support_transposition_no_template += 1;
-            return None;
-        };
+        }
+        let deviations = self.support_transposition_search_deviations(left, right)?;
         self.support_transposition_interchange_map_from_deviations(left, right, deviations)
     }
 
@@ -3920,68 +4213,18 @@ impl InterchangeabilityDfa {
             return None;
         }
         let verify_started_at = profile_timing.then(Instant::now);
-        let mut outputs = SparseSwappedOutputIds::new(
-            &self.output_pairs,
-            &self.output_pair_lookup,
-            left as usize,
-            right as usize,
-        );
-        for &class in &cone_classes {
-            let target = Self::mapped_support_class(&deviations, class);
-            let source_state = quotient.representative_by_class[class] as usize;
-            let target_state = quotient.representative_by_class[target as usize] as usize;
-            let source_edges = self.topology.edges_from(source_state);
-            let target_edges = self.topology.edges_from(target_state);
-            let mut source_index = 0usize;
-            let mut target_index = 0usize;
-            while source_index < source_edges.len() || target_index < target_edges.len() {
-                let (byte, source_destination, target_destination) = match (
-                    source_edges.get(source_index),
-                    target_edges.get(target_index),
-                ) {
-                    (Some(&(source_byte, source_destination)), Some(&(target_byte, target_destination)))
-                        if source_byte == target_byte =>
-                    {
-                        source_index += 1;
-                        target_index += 1;
-                        (source_byte, source_destination as usize, target_destination as usize)
-                    }
-                    (Some(&(source_byte, source_destination)), Some(&(target_byte, _)))
-                        if source_byte < target_byte =>
-                    {
-                        source_index += 1;
-                        (source_byte, source_destination as usize, self.dead_state())
-                    }
-                    (Some(_), Some(&(target_byte, target_destination))) => {
-                        target_index += 1;
-                        (target_byte, self.dead_state(), target_destination as usize)
-                    }
-                    (Some(&(source_byte, source_destination)), None) => {
-                        source_index += 1;
-                        (source_byte, source_destination as usize, self.dead_state())
-                    }
-                    (None, Some(&(target_byte, target_destination))) => {
-                        target_index += 1;
-                        (target_byte, self.dead_state(), target_destination as usize)
-                    }
-                    (None, None) => unreachable!("sparse edge union loop is nonempty"),
-                };
-                let expected_destination = Self::mapped_support_class(
-                    &deviations,
-                    quotient.class_for_state[source_destination] as usize,
-                );
-                if quotient.class_for_state[target_destination] != expected_destination
-                    || outputs.id(self.output_pair_by_state[source_destination])
-                        != self.output_pair_by_state[target_destination]
-                {
-                    self.support_transposition_signature_rejected += 1;
-                    if let Some(started_at) = verify_started_at {
-                        self.support_transposition_verify_ns +=
-                            started_at.elapsed().as_nanos() as u64;
-                    }
-                    return None;
-                }
+        if !self.support_deviations_are_valid(
+            quotient,
+            left,
+            right,
+            &cone_classes,
+            &deviations,
+        ) {
+            self.support_transposition_signature_rejected += 1;
+            if let Some(started_at) = verify_started_at {
+                self.support_transposition_verify_ns += started_at.elapsed().as_nanos() as u64;
             }
+            return None;
         }
         if let Some(started_at) = verify_started_at {
             self.support_transposition_verify_ns += started_at.elapsed().as_nanos() as u64;
