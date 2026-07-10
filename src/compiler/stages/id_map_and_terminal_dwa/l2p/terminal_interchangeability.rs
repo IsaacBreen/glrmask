@@ -9798,14 +9798,19 @@ pub(crate) fn transport_coordinate_quotient(
 
     #[derive(Eq, Hash, PartialEq)]
     struct SparseModeSignature {
-        defaults: SmallVec<[u64; 4]>,
-        deviations: SmallVec<[(u32, u64); 4]>,
+        /// Sparse feature overrides from the ordinary coordinate. Real mode
+        /// ids occupy `[0, modes.len())`; tail-default features use ids above
+        /// that range. Absence means the ordinary coordinate already present
+        /// in the final state signature.
+        deviations: SmallVec<[(u32, u64); 8]>,
     }
 
     struct TailGroup<'a> {
         tail: Vec<&'a TransportScannerStateMap>,
         modes: Vec<(usize, &'a TransportScannerStateMap)>,
-        default_for_source_class: Vec<u64>,
+        /// Sorted sparse overrides from the ordinary coordinate, keyed by the
+        /// current group's source class.
+        default_deviations: Vec<(u32, u64)>,
     }
 
     // The ordinary mode is represented directly by the first coordinate below.
@@ -9840,6 +9845,10 @@ pub(crate) fn transport_coordinate_quotient(
     let components_started_at = profile_timing.then(Instant::now);
     let mut source_class_mode_evaluations = 0usize;
     let mut macro_transport_groups = 0usize;
+    let mut sparse_tail_groups = 0usize;
+    let mut sparse_tail_atoms = 0usize;
+    let mut sparse_tail_default_cells = 0usize;
+    let mut sparse_tail_default_changes = 0usize;
     // A transport mode with no quotient deviations is a pure structural
     // relabeling that preserves the ordinary coordinate, so its component is a
     // function of the ordinary coordinate and cannot refine the ordinary
@@ -9988,7 +9997,7 @@ pub(crate) fn transport_coordinate_quotient(
                     tail_groups.push(TailGroup {
                         tail,
                         modes: Vec::new(),
-                        default_for_source_class: Vec::new(),
+                        default_deviations: Vec::new(),
                     });
                     entry.insert(index);
                     index
@@ -9997,38 +10006,110 @@ pub(crate) fn transport_coordinate_quotient(
             tail_groups[tail_group_index].modes.push((mode_index, inner));
         }
 
+        sparse_tail_groups += tail_groups.len();
+        sparse_tail_atoms += tail_groups.iter().map(|group| group.tail.len()).sum::<usize>();
+        let ordinary_for_source_class = (0..source_class_count)
+            .map(|source_class| {
+                ordinary_coordinate_key(
+                    domain.innermost_source_representative(source_class) as usize,
+                )
+            })
+            .collect::<Vec<_>>();
         let mut deviations_by_source_class =
-            vec![SmallVec::<[(u32, u64); 4]>::new(); source_class_count];
-        for tail_group in &mut tail_groups {
-            tail_group.default_for_source_class = Vec::with_capacity(source_class_count);
-            for source_class in 0..source_class_count {
-                let mut target_state = domain.innermost_source_representative(source_class);
-                for transform in &tail_group.tail {
-                    target_state = transform.scanner_state(target_state);
+            vec![SmallVec::<[(u32, u64); 8]>::new(); source_class_count];
+        let mut current_classes_by_tail_domain =
+            FxHashMap::<usize, Vec<Vec<u32>>>::default();
+
+        for (tail_group_index, tail_group) in tail_groups.iter_mut().enumerate() {
+            let tail_feature = modes.len() as u32 + tail_group_index as u32;
+            if tail_group.tail.is_empty() {
+                // Identity tail: every default is already represented by the
+                // ordinary coordinate in the final quotient signature.
+            } else if tail_group.tail.len() == 1
+                && tail_group.tail[0].quotient_deviations().is_some()
+            {
+                let transform = tail_group.tail[0];
+                let tail_domain_key = transform.innermost_source_domain_key();
+                let classes_by_tail_class = current_classes_by_tail_domain
+                    .entry(tail_domain_key)
+                    .or_insert_with(|| {
+                        let mut inverse =
+                            vec![Vec::<u32>::new(); transform.innermost_source_class_count()];
+                        for source_class in 0..source_class_count {
+                            let raw_state =
+                                domain.innermost_source_representative(source_class);
+                            let tail_class =
+                                transform.innermost_source_class(raw_state);
+                            inverse[tail_class].push(source_class as u32);
+                        }
+                        inverse
+                    });
+                for &(input_class, output_class) in transform
+                    .quotient_deviations()
+                    .expect("one-atom quotient tail was checked above")
+                {
+                    let coordinate = ordinary_coordinate_key(
+                        transform.innermost_source_representative(output_class as usize)
+                            as usize,
+                    );
+                    for &source_class in &classes_by_tail_class[input_class as usize] {
+                        let source_class = source_class as usize;
+                        sparse_tail_default_cells += 1;
+                        source_class_mode_evaluations += 1;
+                        if coordinate != ordinary_for_source_class[source_class] {
+                            sparse_tail_default_changes += 1;
+                            tail_group
+                                .default_deviations
+                                .push((source_class as u32, coordinate));
+                            deviations_by_source_class[source_class]
+                                .push((tail_feature, coordinate));
+                        }
+                    }
                 }
-                tail_group
-                    .default_for_source_class
-                    .push(ordinary_coordinate_key(target_state as usize));
-                source_class_mode_evaluations += 1 + tail_group.tail.len();
+                tail_group.default_deviations.sort_unstable_by_key(|&(class, _)| class);
+            } else {
+                // General exact fallback. This is absent in the current p0/p1
+                // workload, but retains arbitrary composed-tail semantics.
+                for source_class in 0..source_class_count {
+                    let mut target_state =
+                        domain.innermost_source_representative(source_class);
+                    for transform in &tail_group.tail {
+                        target_state = transform.scanner_state(target_state);
+                    }
+                    let coordinate = ordinary_coordinate_key(target_state as usize);
+                    sparse_tail_default_cells += 1;
+                    source_class_mode_evaluations += 1 + tail_group.tail.len();
+                    if coordinate != ordinary_for_source_class[source_class] {
+                        sparse_tail_default_changes += 1;
+                        tail_group
+                            .default_deviations
+                            .push((source_class as u32, coordinate));
+                        deviations_by_source_class[source_class]
+                            .push((tail_feature, coordinate));
+                    }
+                }
             }
+
+            let default_for = |source_class: usize| {
+                tail_group
+                    .default_deviations
+                    .binary_search_by_key(&(source_class as u32), |&(class, _)| class)
+                    .map(|index| tail_group.default_deviations[index].1)
+                    .unwrap_or(ordinary_for_source_class[source_class])
+            };
             for &(mode_index, inner) in &tail_group.modes {
-                let deviations = inner
+                let inner_deviations = inner
                     .quotient_deviations()
                     .expect("sparse transport program was checked above");
-                for &(input_class, output_class) in deviations {
+                for &(input_class, output_class) in inner_deviations {
                     let input_class = input_class as usize;
                     let output_class = output_class as usize;
                     assert!(
                         input_class < source_class_count && output_class < source_class_count,
                         "TI transport deviation must stay within its source quotient",
                     );
-                    // The tail default table already contains the exact
-                    // coordinate reached from every source-class representative.
-                    // A sparse inner deviation merely selects a different
-                    // source class, so re-running the same tail here is
-                    // redundant.
-                    let coordinate = tail_group.default_for_source_class[output_class];
-                    if coordinate != tail_group.default_for_source_class[input_class] {
+                    let coordinate = default_for(output_class);
+                    if coordinate != default_for(input_class) {
                         deviations_by_source_class[input_class]
                             .push((mode_index as u32, coordinate));
                     }
@@ -10040,14 +10121,8 @@ pub(crate) fn transport_coordinate_quotient(
         group.component_for_source_class = Vec::with_capacity(source_class_count);
         for source_class in 0..source_class_count {
             let mut deviations = std::mem::take(&mut deviations_by_source_class[source_class]);
-            deviations.sort_unstable_by_key(|&(mode, _)| mode);
-            let signature = SparseModeSignature {
-                defaults: tail_groups
-                    .iter()
-                    .map(|tail_group| tail_group.default_for_source_class[source_class])
-                    .collect(),
-                deviations,
-            };
+            deviations.sort_unstable_by_key(|&(feature, _)| feature);
+            let signature = SparseModeSignature { deviations };
             let next_component = component_by_signature.len() as u32;
             let component = *component_by_signature
                 .entry(signature)
@@ -10189,10 +10264,14 @@ pub(crate) fn transport_coordinate_quotient(
             .map(|group| group.modes.len())
             .collect::<Vec<_>>();
         eprintln!(
-            "[glrmask/profile][transport_coordinate_quotient] modes={} groups={} macro_transport_groups={} group_source_class_counts={:?} group_mode_counts={:?} source_class_mode_evaluations={} raw_state_group_lookups={} component_build_ms={:.3} final_refinement_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][transport_coordinate_quotient] modes={} groups={} macro_transport_groups={} sparse_tail_groups={} sparse_tail_atoms={} sparse_tail_default_cells={} sparse_tail_default_changes={} group_source_class_counts={:?} group_mode_counts={:?} source_class_mode_evaluations={} raw_state_group_lookups={} component_build_ms={:.3} final_refinement_ms={:.3} total_ms={:.3}",
             modes.len(),
             groups.len(),
             macro_transport_groups,
+            sparse_tail_groups,
+            sparse_tail_atoms,
+            sparse_tail_default_cells,
+            sparse_tail_default_changes,
             group_source_class_counts,
             group_mode_counts,
             source_class_mode_evaluations,
