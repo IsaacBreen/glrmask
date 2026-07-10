@@ -642,7 +642,7 @@ struct CompileDagResult {
 fn build_parser_dwa_for_terminal_family(
     family_name: &str,
     family: Option<&MappedArtifact<TerminalAutomaton>>,
-    num_parser_states: u32,
+    table: &GLRTable,
     grammar: &AnalyzedGrammar,
     templates: Templates,
     vocab: &Vocab,
@@ -650,13 +650,32 @@ fn build_parser_dwa_for_terminal_family(
     let family = family?;
     let internal_ids = family.id_map().clone();
     let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
-        num_parser_states,
+        table,
         grammar,
         family.artifact(),
         templates,
         vocab,
         &internal_ids,
     );
+    if family_name == "l1"
+        && family.artifact().num_states() == 2
+        && table.admission_policy
+            == crate::compiler::glr::table::AdmissionPolicy::RowPresenceExact
+        && parser_dwa.num_transitions() > 0
+    {
+        debug_assert_eq!(parser_dwa.states().len(), 2, "L1 parser DWA must be depth one");
+        let start = parser_dwa.start_state() as usize;
+        let final_state = 1usize.wrapping_sub(start);
+        debug_assert!(parser_dwa.states()[start]
+            .transitions
+            .values()
+            .all(|(target, weight)| *target as usize == final_state && !weight.is_empty()));
+        debug_assert!(parser_dwa.states()[final_state].transitions.is_empty());
+        debug_assert!(parser_dwa.states()[final_state]
+            .final_weight
+            .as_ref()
+            .is_some_and(|weight| !weight.is_empty()));
+    }
     if compile_profile_enabled() {
         let terminal_stats = family.artifact().stats();
         let parser_stats = parser_dwa.stats();
@@ -674,7 +693,7 @@ fn build_parser_dwa_for_terminal_family(
 
 fn build_and_merge_parser_dwa_families(
     terminal_dwas: &TerminalDwaFamilies,
-    num_parser_states: u32,
+    table: &GLRTable,
     grammar: &AnalyzedGrammar,
     templates: Templates,
     tokenizer: &Tokenizer,
@@ -686,7 +705,7 @@ fn build_and_merge_parser_dwa_families(
             build_parser_dwa_for_terminal_family(
                 "l1",
                 terminal_dwas.l1.as_ref(),
-                num_parser_states,
+                table,
                 grammar,
                 l1_templates,
                 vocab,
@@ -696,7 +715,7 @@ fn build_and_merge_parser_dwa_families(
             build_parser_dwa_for_terminal_family(
                 "l2p",
                 terminal_dwas.l2p.as_ref(),
-                num_parser_states,
+                table,
                 grammar,
                 templates,
                 vocab,
@@ -836,7 +855,7 @@ fn launch_parser_dag_if_ready<'scope>(
             let parser_dwa_started_ms = elapsed_ms(compile_started_at.clone());
             let parser_dwa = build_and_merge_parser_dwa_families(
                 &terminal_dwas,
-                table.num_states,
+                &table,
                 &analysis.analyzed_grammar,
                 templates,
                 &tokenizer.tokenizer,
@@ -1457,7 +1476,7 @@ fn compile_prepared_with_profile_and_table_construction(
                         MappedArtifact::new(possible_matches_artifact, compacted_ids);
                     build_and_merge_parser_dwa_families(
                         &terminal_dwas,
-                        table.num_states,
+                        &table,
                         &analyzed_grammar,
                         retained_templates,
                         &tokenizer,
@@ -1473,7 +1492,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     );
                     let mut parser_dwa = build_and_merge_parser_dwa_families(
                         &precompact_families,
-                        table.num_states,
+                        &table,
                         &analyzed_grammar,
                         retained_templates,
                         &tokenizer,
@@ -1504,7 +1523,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     MappedArtifact::new(possible_matches_artifact, reconciled_ids);
                 build_and_merge_parser_dwa_families(
                     &terminal_dwas,
-                    table.num_states,
+                    &table,
                     &analyzed_grammar,
                     retained_templates,
                     &tokenizer,

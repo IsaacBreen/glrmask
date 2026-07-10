@@ -12,6 +12,7 @@ use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
+use crate::compiler::glr::table::{Action, AdmissionPolicy, GLRTable};
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::compile_profile_enabled;
@@ -466,6 +467,194 @@ fn parser_state_label(label: i32, num_parser_states: u32) -> Option<u32> {
     } else {
         None
     }
+}
+
+fn top_row_action_is_unconditionally_applicable(_action: &Action) -> bool {
+    // These actions originate from a precise LR(1)/IELR lookahead row. Guarded
+    // stack shifts are a lowered representation of that row's already-valid
+    // action, not a weaker admission predicate. Their guards select the exact
+    // stack effect; they do not make the terminal cease to be admissible from
+    // the row's top state.
+    true
+}
+
+fn immediate_acceptance_certificates(
+    terminal_automaton: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    table: &GLRTable,
+) -> Vec<Weight> {
+    if table.admission_policy != AdmissionPolicy::RowPresenceExact {
+        return vec![Weight::empty(); table.num_states as usize];
+    }
+    let mut complete_by_terminal = BTreeMap::<TerminalID, Weight>::new();
+    for start_state in terminal_automaton.start_states() {
+        for (target, bundle) in
+            group_terminal_edges_by_target(terminal_automaton, grammar, start_state)
+        {
+            let Some(target_final) = terminal_state_final_weight(terminal_automaton, target as usize)
+            else {
+                continue;
+            };
+            for (terminal, edge_weight) in bundle {
+                let complete = edge_weight.intersection(&target_final);
+                if complete.is_empty() {
+                    continue;
+                }
+                complete_by_terminal
+                    .entry(terminal)
+                    .and_modify(|existing| *existing = existing.union(&complete))
+                    .or_insert(complete);
+            }
+        }
+    }
+
+    table
+        .action
+        .iter()
+        .map(|row| {
+            Weight::union_all(row.iter().filter_map(|(terminal, action)| {
+                top_row_action_is_unconditionally_applicable(action)
+                    .then(|| complete_by_terminal.get(&terminal))
+                    .flatten()
+            }))
+        })
+        .collect()
+}
+
+fn collapse_immediate_acceptance_certificates(
+    parser_dwa: &mut DWA,
+    terminal_automaton: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    table: &GLRTable,
+) -> usize {
+    if parser_dwa.states().is_empty() {
+        return 0;
+    }
+    let certificates = immediate_acceptance_certificates(terminal_automaton, grammar, table);
+    let start_state = parser_dwa.start_state();
+    let mut rewrites = Vec::<(i32, Weight)>::new();
+    for (&label, (_target, edge_weight)) in
+        &parser_dwa.states()[start_state as usize].transitions
+    {
+        let Some(parser_top) = parser_state_label(label, table.num_states) else {
+            continue;
+        };
+        if edge_weight.is_subset(&certificates[parser_top as usize]) {
+            rewrites.push((label, edge_weight.clone()));
+        }
+    }
+    if rewrites.is_empty() {
+        return 0;
+    }
+
+    let sink = parser_dwa.add_state();
+    parser_dwa.set_final_weight(sink, Weight::union_all(rewrites.iter().map(|(_, w)| w)));
+    for (label, _) in &rewrites {
+        let (target, _) = parser_dwa.states_mut()[start_state as usize]
+            .transitions
+            .get_mut(label)
+            .expect("certified start transition disappeared");
+        *target = sink;
+    }
+    rewrites.len()
+}
+
+fn trim_unreachable_dwa(dwa: DWA) -> DWA {
+    if dwa.states().is_empty() {
+        return dwa;
+    }
+    let old_states = dwa.states().to_vec();
+    let old_start = dwa.start_state() as usize;
+    let mut reachable = vec![false; old_states.len()];
+    let mut queue = VecDeque::from([old_start]);
+    reachable[old_start] = true;
+    while let Some(state_id) = queue.pop_front() {
+        for (target, weight) in old_states[state_id].transitions.values() {
+            let target = *target as usize;
+            if weight.is_empty() || target >= old_states.len() || reachable[target] {
+                continue;
+            }
+            reachable[target] = true;
+            queue.push_back(target);
+        }
+    }
+
+    let mut remap = vec![u32::MAX; old_states.len()];
+    let mut new_states = Vec::with_capacity(reachable.iter().filter(|&&live| live).count());
+    for (old_id, state) in old_states.iter().enumerate() {
+        if reachable[old_id] {
+            remap[old_id] = new_states.len() as u32;
+            new_states.push(state.clone());
+        }
+    }
+    for state in &mut new_states {
+        state.transitions.retain(|_, (target, weight)| {
+            if weight.is_empty() || (*target as usize) >= remap.len() {
+                return false;
+            }
+            let mapped = remap[*target as usize];
+            if mapped == u32::MAX {
+                return false;
+            }
+            *target = mapped;
+            true
+        });
+    }
+    DWA::from_parts(new_states, remap[old_start])
+}
+
+/// Push final weights from transition-free leaf states into their incoming
+/// edges, then share one `final = all` sink. Runtime evaluation already
+/// intersects the accumulated path weight with the destination final weight,
+/// so this is an exact weighted normalization rather than a language change.
+fn collapse_final_leaf_targets(mut dwa: DWA) -> DWA {
+    if dwa.states().is_empty() {
+        return dwa;
+    }
+    let leaf_finals: Vec<Option<Weight>> = dwa
+        .states()
+        .iter()
+        .map(|state| {
+            (state.transitions.is_empty())
+                .then(|| state.final_weight.clone())
+                .flatten()
+                .filter(|weight| !weight.is_empty())
+        })
+        .collect();
+    if leaf_finals.iter().all(Option::is_none) {
+        return dwa;
+    }
+
+    let sink = dwa.add_state();
+    dwa.set_final_weight(sink, Weight::all());
+    let mut changed = false;
+    for state_id in 0..sink as usize {
+        let mut remove = Vec::new();
+        for (&label, (target, edge_weight)) in &mut dwa.states_mut()[state_id].transitions {
+            let Some(final_weight) = leaf_finals
+                .get(*target as usize)
+                .and_then(Option::as_ref)
+            else {
+                continue;
+            };
+            let pushed = edge_weight.intersection(final_weight);
+            if pushed.is_empty() {
+                remove.push(label);
+            } else {
+                *target = sink;
+                *edge_weight = pushed;
+            }
+            changed = true;
+        }
+        for label in remove {
+            dwa.states_mut()[state_id].transitions.remove(&label);
+        }
+    }
+    if !changed {
+        dwa.states_mut().pop();
+        return dwa;
+    }
+    trim_unreachable_dwa(dwa)
 }
 
 enum PossibleOutgoingIds {
@@ -2142,13 +2331,14 @@ fn build_parser_nwa_from_terminal_dwa(
 }
 
 pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
-    num_parser_states: u32,
+    table: &GLRTable,
     grammar: &AnalyzedGrammar,
     terminal_dwa: &TerminalAutomaton,
     templates: Templates,
     _vocab: &Vocab,
     _id_map: &InternalIdMap,
 ) -> DWA {
+    let num_parser_states = table.num_states;
     let total_started_at = Instant::now();
     let minimize_skipped = false;
     let profiling_enabled = compile_profile_enabled();
@@ -2181,6 +2371,16 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let support_determinize_ms = elapsed_ms(support_determinize_started_at);
     let mut parser_dwa_pre_minimize = determinized.dwa;
 
+    let guaranteed_read_started_at = Instant::now();
+    let immediate_read_rewrites = collapse_immediate_acceptance_certificates(
+        &mut parser_dwa_pre_minimize,
+        terminal_dwa,
+        grammar,
+        table,
+    );
+    let guaranteed_read_rewrites = immediate_read_rewrites;
+    let guaranteed_read_ms = elapsed_ms(guaranteed_read_started_at);
+
     let possible_outgoing_started_at = Instant::now();
     let possible_by_state = build_possible_outgoing_ids_by_state(
         &parser_nwa,
@@ -2207,6 +2407,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
         &possible_by_state,
         num_parser_states,
     );
+    parser_dwa_pre_minimize = collapse_final_leaf_targets(parser_dwa_pre_minimize);
     let fallback_determinize_ms = elapsed_ms(fallback_determinize_started_at);
 
     let pre_minimize_state_count = parser_dwa_pre_minimize.states().len();
@@ -2239,7 +2440,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 
     if profiling_enabled {
         eprintln!(
-            "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} parser_nwa_states={} parser_nwa_start_states={} pre_minimize_states={} pre_minimize_transitions={} post_minimize_states={} post_minimize_transitions={} minimize_skipped={} state_prep_ms={:.3} compose_state_ms={:.3} parser_nwa_build_ms={:.3} resolve_negative_ms={:.3} support_determinize_ms={:.3} possible_outgoing_ms={:.3} default_opt_ms={:.3} subtract_final_ms={:.3} fallback_determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} parser_nwa_states={} parser_nwa_start_states={} pre_minimize_states={} pre_minimize_transitions={} post_minimize_states={} post_minimize_transitions={} minimize_skipped={} state_prep_ms={:.3} compose_state_ms={:.3} parser_nwa_build_ms={:.3} resolve_negative_ms={:.3} support_determinize_ms={:.3} guaranteed_read_rewrites={} guaranteed_read_ms={:.3} possible_outgoing_ms={:.3} default_opt_ms={:.3} subtract_final_ms={:.3} fallback_determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
             terminal_dwa.num_states(),
             terminal_dwa_transition_count,
             terminal_dwa_interned_ranges,
@@ -2255,6 +2456,8 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
             parser_nwa_profile.parser_nwa_build_ms,
             resolve_negative_ms,
             support_determinize_ms,
+            guaranteed_read_rewrites,
+            guaranteed_read_ms,
             possible_outgoing_ms,
             default_opt_ms,
             subtract_final_ms,
@@ -2265,4 +2468,61 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     }
 
     minimized
+}
+
+#[cfg(test)]
+mod tests {
+    use range_set_blaze::RangeSetBlaze;
+
+    use super::collapse_final_leaf_targets;
+    use crate::automata::weighted::dwa::DWA;
+    use crate::ds::weight::Weight;
+
+    fn weight(tokens: std::ops::RangeInclusive<u32>) -> Weight {
+        Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter([tokens]))
+    }
+
+    #[test]
+    fn final_leaf_weights_are_pushed_into_shared_sink_edges() {
+        let mut dwa = DWA::new(1, 5);
+        let left = dwa.add_state();
+        let right = dwa.add_state();
+        dwa.add_transition(0, 10, left, weight(0..=5));
+        dwa.add_transition(0, 11, right, weight(0..=5));
+        dwa.set_final_weight(left, weight(0..=2));
+        dwa.set_final_weight(right, weight(3..=4));
+
+        let collapsed = collapse_final_leaf_targets(dwa);
+
+        assert_eq!(collapsed.states().len(), 2);
+        assert_eq!(collapsed.eval_word(&[10]), weight(0..=2));
+        assert_eq!(collapsed.eval_word(&[11]), weight(3..=4));
+        let targets: Vec<u32> = collapsed.states()[collapsed.start_state() as usize]
+            .transitions
+            .values()
+            .map(|(target, _)| *target)
+            .collect();
+        assert_eq!(targets.len(), 2);
+        assert!(targets.iter().all(|target| *target == targets[0]));
+        assert!(collapsed.states()[targets[0] as usize]
+            .final_weight
+            .as_ref()
+            .is_some_and(Weight::is_full));
+    }
+
+    #[test]
+    fn nonleaf_continuations_are_not_shortened() {
+        let mut dwa = DWA::new(1, 5);
+        let middle = dwa.add_state();
+        let leaf = dwa.add_state();
+        dwa.add_transition(0, 10, middle, weight(0..=5));
+        dwa.add_transition(middle, 11, leaf, weight(0..=5));
+        dwa.set_final_weight(leaf, weight(1..=3));
+
+        let collapsed = collapse_final_leaf_targets(dwa);
+
+        assert_eq!(collapsed.states().len(), 3);
+        assert!(collapsed.eval_word(&[10]).is_empty());
+        assert_eq!(collapsed.eval_word(&[10, 11]), weight(1..=3));
+    }
 }
