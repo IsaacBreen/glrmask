@@ -3523,20 +3523,51 @@ impl InterchangeabilityDfa {
         self.topology.dead_state()
     }
 
+    /// Compute only the final canonical identity partition needed by the
+    /// support-transposition proof. Unlike the generic exact fallback, support
+    /// certification never reads historical round projections or signature
+    /// indexes, so retaining every intermediate `CanonicalRound` is redundant.
+    fn support_identity_stable_partition(&mut self) -> (Vec<u32>, Vec<u32>) {
+        self.ensure_canonical_identity_round(1);
+        let mut prev_prev = self.canonical_rounds[0].classes.clone();
+        let mut previous = self.canonical_rounds[1].classes.clone();
+        let mut cached_hashes = self.canonical_identity_cached_hashes.clone();
+        let state_count = self.state_count();
+        for _ in 2..=state_count * 2 {
+            let next = self.canonical_identity_round_incremental(
+                &previous,
+                Some(&prev_prev),
+                &mut cached_hashes,
+                false,
+            );
+            if same_equality_partition_u32(&previous, &next.classes) {
+                if cfg!(debug_assertions) {
+                    let stable_round = self.ensure_canonical_identity_stable_round();
+                    debug_assert!(same_equality_partition_u32(
+                        &next.classes,
+                        &self.canonical_rounds[stable_round].classes,
+                    ));
+                }
+                return (next.classes, next.representative_by_class);
+            }
+            prev_prev = previous;
+            previous = next.classes;
+        }
+        panic!(
+            "support terminal interchangeability characterization did not stabilize within {} rounds",
+            state_count * 2,
+        );
+    }
+
     fn ensure_support_quotient(&mut self) {
         if self.support_quotient.is_some() {
             return;
         }
         let quotient_build_started_at =
             std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some().then(Instant::now);
-        let stable_round = self.ensure_canonical_identity_stable_round();
-        let class_for_state = self.canonical_rounds[stable_round].classes.clone();
-        let class_count = self.canonical_rounds[stable_round]
-            .representative_by_class
-            .len();
-        let representative_by_class = self.canonical_rounds[stable_round]
-            .representative_by_class
-            .clone();
+        let (class_for_state, representative_by_class) =
+            self.support_identity_stable_partition();
+        let class_count = representative_by_class.len();
         let mut reverse_predecessors = vec![Vec::<u32>::new(); class_count];
         for (class, &representative) in representative_by_class.iter().enumerate() {
             let state = representative as usize;
@@ -4150,6 +4181,7 @@ impl InterchangeabilityDfa {
         previous: &[u32],
         prev_prev: Option<&[u32]>,
         cached_hashes: &mut Vec<u64>,
+        retain_signature_index: bool,
     ) -> CanonicalRound {
         let state_count = self.state_count();
         let dead = self.dead_state();
@@ -4194,7 +4226,11 @@ impl InterchangeabilityDfa {
             return CanonicalRound {
                 classes,
                 representative_by_class,
-                classes_by_signature_hash,
+                classes_by_signature_hash: if retain_signature_index {
+                    classes_by_signature_hash
+                } else {
+                    FxHashMap::default()
+                },
             };
         }
 
@@ -4284,10 +4320,12 @@ impl InterchangeabilityDfa {
                 let class = representative_by_class.len() as u32;
                 final_of_group[group] = class;
                 representative_by_class.push(state as u32);
-                classes_by_signature_hash
-                    .entry(cached_hashes[state])
-                    .or_default()
-                    .push(class);
+                if retain_signature_index {
+                    classes_by_signature_hash
+                        .entry(cached_hashes[state])
+                        .or_default()
+                        .push(class);
+                }
                 class
             } else {
                 final_of_group[group]
@@ -4316,6 +4354,7 @@ impl InterchangeabilityDfa {
                 &previous,
                 prev_prev.as_deref(),
                 &mut cached_hashes,
+                true,
             );
             self.canonical_identity_cached_hashes = cached_hashes;
             if cfg!(debug_assertions) {
