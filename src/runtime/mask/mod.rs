@@ -784,10 +784,12 @@ impl<'a> ConstraintState<'a> {
             let internal_tsid = self
                 .constraint
                 .internal_tsid_for_state(original_tokenizer_state);
+            let actionable_states = stack.first().copied().into_iter().collect::<SmallVec<[u32; 1]>>();
             let Some(mut acc) = self.terminals_disallowed_to_dense_acc(
                 &terminals_disallowed,
                 original_tokenizer_state,
                 internal_tsid,
+                &actionable_states,
             ) else {
                 continue;
             };
@@ -913,6 +915,7 @@ impl<'a> ConstraintState<'a> {
         terminals_disallowed: &TerminalsDisallowed,
         original_tokenizer_state: u32,
         internal_tsid: u32,
+        actionable_states: &[u32],
     ) -> Option<DenseMaskAcc> {
         let base = &self.constraint.seed_universe_dense;
         if base.is_empty() {
@@ -928,8 +931,6 @@ impl<'a> ConstraintState<'a> {
             return DenseMaskAcc::from_dense_arc(internal_tsid, Arc::clone(base));
         }
 
-        let mut dense = base.to_vec();
-
         // TerminalsDisallowed remains keyed by ORIGINAL tokenizer state because
         // it describes tokenizer futures accumulated by the GLR parser.
         //
@@ -937,12 +938,58 @@ impl<'a> ConstraintState<'a> {
         // internal TSID/token spaces. `seed_terminal_dense` bridges back to
         // original tokenizer states by expanding each internal TSID through
         // `internal_tsid_to_states` during precomputation.
+        //
+        // A token can match more than one terminal from the same tokenizer
+        // state. Mirror commit pruning exactly: remove it only when it has at
+        // least one actionable matching terminal and every actionable match is
+        // disallowed. Subtracting PM[d] terminal-by-terminal is unsound because
+        // an allowed overlapping terminal may witness the same token.
+        let terminal_is_actionable = |terminal_id| {
+            actionable_states.iter().any(|&parser_state| {
+                self.constraint
+                    .table
+                    .advance_row_allows(parser_state, terminal_id)
+            })
+        };
+
+        let mut blocked_only = vec![0u64; base.len()];
         for &terminal_id in disallowed_in_state {
+            if Some(terminal_id) == self.constraint.ignore_terminal
+                || !terminal_is_actionable(terminal_id)
+            {
+                continue;
+            }
             if let Some(mask) = terminal_masks.get(&(original_tokenizer_state, terminal_id)) {
-                for (allowed_word, mask_word) in dense.iter_mut().zip(mask.iter()) {
-                    *allowed_word &= !mask_word;
+                for (blocked_word, mask_word) in blocked_only.iter_mut().zip(mask.iter()) {
+                    *blocked_word |= mask_word;
                 }
             }
+        }
+
+        if blocked_only.iter().all(|&word| word == 0) {
+            return DenseMaskAcc::from_dense_arc(internal_tsid, Arc::clone(base));
+        }
+
+        for &terminal_id in self.constraint.possible_matches.keys() {
+            if Some(terminal_id) == self.constraint.ignore_terminal
+                || disallowed_in_state.contains(&terminal_id)
+                || !terminal_is_actionable(terminal_id)
+            {
+                continue;
+            }
+            if let Some(mask) = terminal_masks.get(&(original_tokenizer_state, terminal_id)) {
+                for (blocked_word, mask_word) in blocked_only.iter_mut().zip(mask.iter()) {
+                    *blocked_word &= !mask_word;
+                }
+                if blocked_only.iter().all(|&word| word == 0) {
+                    return DenseMaskAcc::from_dense_arc(internal_tsid, Arc::clone(base));
+                }
+            }
+        }
+
+        let mut dense = base.to_vec();
+        for (allowed_word, blocked_word) in dense.iter_mut().zip(blocked_only) {
+            *allowed_word &= !blocked_word;
         }
 
         DenseMaskAcc::from_dense(internal_tsid, dense)
@@ -1085,14 +1132,41 @@ impl<'a> ConstraintState<'a> {
             } else {
                 None
             };
-            let (decomposed, root_accs) =
-                gss.apply_transform_and_decompose(|terminals_disallowed| {
+            // Exclusion pruning depends on which parser top makes an overlapping
+            // terminal actionable. Transforming accumulators before decomposing
+            // the parser frontier loses that correlation: the union of all top
+            // states can let a terminal from one parser path rescue a blocked
+            // token on another. Decompose by top first, then transform every
+            // accumulator in that top-local sub-GSS with exactly that top state.
+            let mut decomposed = Vec::new();
+            gss.for_each_decomposed(|parser_state, popped| {
+                let dense = popped.apply_and_prune(|terminals_disallowed| {
                     self.terminals_disallowed_to_dense_acc(
                         terminals_disallowed,
                         original_tokenizer_state,
                         internal_tsid,
+                        std::slice::from_ref(&parser_state),
                     )
                 });
+                if !dense.is_empty() {
+                    decomposed.push((parser_state, dense));
+                }
+            });
+
+            // Empty parser-stack paths have no actionable parser top. Preserve
+            // their root accumulators separately for the parser-DWA start final
+            // weight, matching apply_transform_and_decompose's old root handling.
+            let mut root_accs = Vec::new();
+            gss.isolate(None).for_each_acc(|terminals_disallowed| {
+                if let Some(acc) = self.terminals_disallowed_to_dense_acc(
+                    terminals_disallowed,
+                    original_tokenizer_state,
+                    internal_tsid,
+                    &[],
+                ) {
+                    root_accs.push(acc);
+                }
+            });
             if let (Some(profile), Some(start)) = (profile.as_mut(), seed_decompose_start) {
                 profile.seed_decompose_ns += elapsed_ns(start);
             }
