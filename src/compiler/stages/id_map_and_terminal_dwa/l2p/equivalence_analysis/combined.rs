@@ -1226,6 +1226,7 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     initial_state_map: Option<&ManyToOneIdMap>,
     token_boundary_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
+    allow_structured_epsilon_equivalence: bool,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
     analyze_equivalences_impl(
         partition_label,
@@ -1243,6 +1244,7 @@ pub(crate) fn analyze_equivalences_with_group_filter(
         initial_state_map,
         token_boundary_partition,
         precomputed_raw_observations,
+        allow_structured_epsilon_equivalence,
     )
 }
 
@@ -1266,13 +1268,15 @@ fn analyze_equivalences_impl(
     initial_state_map: Option<&ManyToOneIdMap>,
     token_boundary_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
+    allow_structured_epsilon_equivalence: bool,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
-    // Every equivalence implementation below assumes that a lexer
-    // configuration is one deterministic physical state. With epsilon edges,
-    // token behaviour is a set-of-states computation and merging either raw
-    // states or vocabulary entries using those DFA-only signatures is
-    // unsound. Keep exact identity coordinates until a set-aware quotient is
-    // implemented. This only declines compression.
+    // Arbitrary epsilon lexers require set-of-states token execution, so the
+    // scalar finite-token equivalence passes below are not applicable. A
+    // deterministic-dispatch lexer is narrower: every physical component state
+    // has deterministic byte transitions, and the synthetic dispatch root stays
+    // distinct. For p0 we may therefore use the exact frozen-output,
+    // relevant-byte right congruence over physical states. We deliberately do
+    // not run the coarser scalar finite-token refinement in this branch.
     if tokenizer.has_epsilon_transitions() {
         let prepare_started_at = Instant::now();
         let prepared = prepare_equivalence_inputs(tokenizer, vocab, initial_state_map);
@@ -1283,12 +1287,46 @@ fn analyze_equivalences_impl(
             .map(|token| token.len())
             .max()
             .unwrap_or(0);
-        let state_ids = (0..tokenizer.num_states()).collect::<Vec<_>>();
-        let tokenizer_states =
-            ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-                state_ids.clone(),
-                state_ids,
-            );
+        let mut relevant_bytes = [false; 256];
+        for token in &prepared.token_bytes {
+            for &byte in *token {
+                relevant_bytes[byte as usize] = true;
+            }
+        }
+        let structured_equivalence = allow_structured_epsilon_equivalence
+            && partition_label == "p0"
+            && tokenizer.has_deterministic_dispatch()
+            && flat_trans.is_some();
+        let all_groups;
+        let active_groups = match active_groups {
+            Some(active_groups) => active_groups,
+            None => {
+                all_groups = vec![true; tokenizer.num_terminals() as usize];
+                &all_groups
+            }
+        };
+        let raw_restricted = structured_equivalence
+            .then(|| {
+                super::state_equivalence::restricted_observation::compute_state_map_raw(
+                    tokenizer,
+                    flat_trans.expect("structured epsilon equivalence requires flat transitions"),
+                    active_groups,
+                    &relevant_bytes,
+                    precomputed_raw_observations,
+                )
+            })
+            .flatten();
+        let tokenizer_states = raw_restricted
+            .as_ref()
+            .map(|result| result.state_map.clone())
+            .unwrap_or_else(|| {
+                let state_ids = (0..tokenizer.num_states()).collect::<Vec<_>>();
+                ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+                    state_ids.clone(),
+                    state_ids,
+                )
+            });
+        let tokenizer_state_reps = tokenizer_states.num_internal_ids() as usize;
         let id_map = InternalIdMap {
             tokenizer_states,
             vocab_tokens: build_exact_byte_vocab_map(
@@ -1316,14 +1354,17 @@ fn analyze_equivalences_impl(
                 byte_class_setup_ms: 0.0,
                 vocab_analysis_dfa_build_ms: 0.0,
                 token_dedup_ms: 0.0,
-                restricted_observation_state_equiv_ms: 0.0,
+                restricted_observation_state_equiv_ms: raw_restricted
+                    .as_ref()
+                    .map(|result| result.label_ms + result.refine_ms + result.certificate_ms)
+                    .unwrap_or(0.0),
                 max_length_state_equiv_ms: 0.0,
                 vocab_equiv_ms: 0.0,
                 exact_state_equiv_ms: 0.0,
                 id_map_finalize_ms: 0.0,
-                restricted_observation_reps: tokenizer.num_states() as usize,
-                max_length_reps: tokenizer.num_states() as usize,
-                exact_reps: tokenizer.num_states() as usize,
+                restricted_observation_reps: tokenizer_state_reps,
+                max_length_reps: tokenizer_state_reps,
+                exact_reps: tokenizer_state_reps,
                 exact_rep_confirmation_used: false,
             },
         );

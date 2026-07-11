@@ -668,19 +668,41 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
     let (l1_family, l2p_family) = rayon::join(
         || {
             (!l1_pairs.is_empty()).then(|| {
-                merge::merge_id_maps_and_terminal_dwas(
+                let family = merge::merge_id_maps_and_terminal_dwas(
                     l1_pairs,
                     num_tokenizer_states,
                     max_token_id,
+                );
+                let profile = family.profile;
+                (
+                    MappedArtifact::new(TerminalAutomaton::Dwa(family.dwa), family.id_map),
+                    profile,
                 )
             })
         },
         || {
             (!l2p_pairs.is_empty()).then(|| {
-                merge::merge_id_maps_and_terminal_dwas(
+                if let Some((nwa, id_map, profile)) =
+                    merge::try_merge_id_maps_and_token_deterministic_nwa(
+                        &l2p_pairs,
+                        num_tokenizer_states,
+                        max_token_id,
+                    )
+                {
+                    return (
+                        MappedArtifact::new(TerminalAutomaton::TokenDeterministicNwa(nwa), id_map),
+                        profile,
+                    );
+                }
+                let family = merge::merge_id_maps_and_terminal_dwas(
                     l2p_pairs,
                     num_tokenizer_states,
                     max_token_id,
+                );
+                let profile = family.profile;
+                (
+                    MappedArtifact::new(TerminalAutomaton::Dwa(family.dwa), family.id_map),
+                    profile,
                 )
             })
         },
@@ -689,16 +711,12 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
     let dominant_family_profile = [l1_family.as_ref(), l2p_family.as_ref()]
         .into_iter()
         .flatten()
-        .map(|family| family.profile)
+        .map(|(_, profile)| *profile)
         .max_by(|left, right| left.global_merge_ms.total_cmp(&right.global_merge_ms))
         .unwrap_or_default();
     let terminal_families = TerminalDwaFamilies {
-        l1: l1_family.map(|family| {
-            MappedArtifact::new(TerminalAutomaton::Dwa(family.dwa), family.id_map)
-        }),
-        l2p: l2p_family.map(|family| {
-            MappedArtifact::new(TerminalAutomaton::Dwa(family.dwa), family.id_map)
-        }),
+        l1: l1_family.map(|(family, _)| family),
+        l2p: l2p_family.map(|(family, _)| family),
     };
     debug_assert!(!terminal_families.is_empty());
     let merge_ms = family_merge_wall_ms;

@@ -1102,6 +1102,73 @@ fn exact_l2p_boundary_filter_work_limit() -> usize {
     })
 }
 
+fn suffix_has_allowed_l2p_follow_from_reset(
+    tokenizer: &Tokenizer,
+    suffix: &[u8],
+    allowed_after: &BitSet,
+) -> bool {
+    if allowed_after.is_empty() {
+        return false;
+    }
+
+    // A partitioned lexer resets to an epsilon fan-out over deterministic
+    // component roots.  Treat that reset configuration as a state set instead
+    // of pretending the epsilon-only dispatch state is an ordinary scalar DFA
+    // state.  The scalar fast path remains for conventional tokenizers.
+    if tokenizer.has_deterministic_dispatch() {
+        let mut states = tokenizer.deterministic_reset_states();
+        for &byte in suffix {
+            if states.iter().all(|&state| {
+                tokenizer
+                    .possible_future_terminals(state)
+                    .is_disjoint(allowed_after)
+            }) {
+                return false;
+            }
+            states = tokenizer.step_all(&states, byte);
+            if states.is_empty() {
+                return false;
+            }
+            if states.iter().any(|&state| {
+                tokenizer
+                    .matched_terminals_iter(state)
+                    .any(|terminal| allowed_after.contains(terminal as usize))
+            }) {
+                return true;
+            }
+        }
+        return states.iter().any(|&state| {
+            !tokenizer
+                .possible_future_terminals(state)
+                .is_disjoint(allowed_after)
+        });
+    }
+
+    let mut state = tokenizer.initial_state_id();
+    for &byte in suffix {
+        if tokenizer
+            .possible_future_terminals(state)
+            .is_disjoint(allowed_after)
+        {
+            return false;
+        }
+        let Some(next) = tokenizer.step(state, byte) else {
+            return false;
+        };
+        state = next;
+        if tokenizer
+            .matched_terminals_iter(state)
+            .any(|terminal| allowed_after.contains(terminal as usize))
+        {
+            return true;
+        }
+    }
+
+    !tokenizer
+        .possible_future_terminals(state)
+        .is_disjoint(allowed_after)
+}
+
 fn suffix_has_allowed_l2p_follow(
     tokenizer: &Tokenizer,
     terminal_1: usize,
@@ -1112,32 +1179,7 @@ fn suffix_has_allowed_l2p_follow(
     let allowed_after = disallowed_follows
         .get(&(terminal_1 as u32))
         .map_or_else(|| active_bitset.clone(), |blocked| active_bitset.difference(blocked));
-    if allowed_after.is_empty() {
-        return false;
-    }
-
-    let mut state = tokenizer.initial_state_id();
-    for &byte in suffix {
-        if tokenizer
-            .possible_future_terminals(state)
-            .is_disjoint(&allowed_after)
-        {
-            return false;
-        }
-        let Some(next) = tokenizer.step(state, byte) else {
-            return false;
-        };
-        state = next;
-        for terminal in tokenizer.matched_terminals_iter(state) {
-            if allowed_after.contains(terminal as usize) {
-                return true;
-            }
-        }
-    }
-
-    !tokenizer
-        .possible_future_terminals(state)
-        .is_disjoint(&allowed_after)
+    suffix_has_allowed_l2p_follow_from_reset(tokenizer, suffix, &allowed_after)
 }
 
 fn token_has_exact_active_l2p_boundary(
@@ -1550,33 +1592,43 @@ fn tokens_have_exact_active_l2p_boundary(
                     prefix_allowed_checks += 1;
                     suffixes_evaluated += 1;
                     let suffix_start = split_after + 1;
-                    let mut state = tokenizer.initial_state_id();
-                    let mut consumed_suffix = true;
-                    for &byte in &bytes[suffix_start..] {
-                        if tokenizer.possible_future_terminals(state).is_disjoint(allowed) {
-                            consumed_suffix = false;
-                            break;
-                        }
-                        let next = flat_trans[state as usize * 256 + byte as usize];
-                        if next == u32::MAX {
-                            consumed_suffix = false;
-                            break;
-                        }
-                        state = next;
-                        for terminal in tokenizer.matched_terminals_iter(state) {
-                            if allowed.contains(terminal as usize) {
-                                suffixes_with_terminals += 1;
-                                return true;
+                    let suffix_has_allowed_terminal = if tokenizer.has_deterministic_dispatch() {
+                        suffix_has_allowed_l2p_follow_from_reset(
+                            tokenizer,
+                            &bytes[suffix_start..],
+                            allowed,
+                        )
+                    } else {
+                        let mut state = tokenizer.initial_state_id();
+                        let mut consumed_suffix = true;
+                        let mut matched = false;
+                        for &byte in &bytes[suffix_start..] {
+                            if tokenizer.possible_future_terminals(state).is_disjoint(allowed) {
+                                consumed_suffix = false;
+                                break;
+                            }
+                            let next = flat_trans[state as usize * 256 + byte as usize];
+                            if next == u32::MAX {
+                                consumed_suffix = false;
+                                break;
+                            }
+                            state = next;
+                            if tokenizer
+                                .matched_terminals_iter(state)
+                                .any(|terminal| allowed.contains(terminal as usize))
+                            {
+                                matched = true;
+                                break;
                             }
                         }
-                    }
-                    if consumed_suffix {
-                        let suffix_has_allowed_terminal =
-                            !tokenizer.possible_future_terminals(state).is_disjoint(allowed);
-                        suffixes_with_terminals += usize::from(suffix_has_allowed_terminal);
-                        return suffix_has_allowed_terminal;
-                    }
-                    false
+                        matched
+                            || consumed_suffix
+                                && !tokenizer
+                                    .possible_future_terminals(state)
+                                    .is_disjoint(allowed)
+                    };
+                    suffixes_with_terminals += usize::from(suffix_has_allowed_terminal);
+                    suffix_has_allowed_terminal
                 })
         })
         .collect();
@@ -1671,12 +1723,10 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
         .active_start_states
         .len()
         .saturating_mul(adjacent_candidate_count);
-    // The exact scalar-state filter does not yet model a reset into several
-    // deterministic component roots.  Its cheap byte-adjacency prefilter is
-    // still sound, so retain the useful single/irrelevant split but route every
-    // adjacent candidate through the boundary-capable builder.
-    let use_exact_boundary_filter = !tokenizer.has_deterministic_dispatch()
-        && match exact_l2p_boundary_filter_mode() {
+    // The exact filter follows both prefix and suffix state sets for a
+    // deterministic-dispatch tokenizer, so the same validation-gated path is
+    // sound for ordinary and partitioned lexer representations.
+    let use_exact_boundary_filter = match exact_l2p_boundary_filter_mode() {
             ExactL2pBoundaryFilterMode::Force(enabled) => enabled,
             ExactL2pBoundaryFilterMode::Auto => {
                 estimated_exact_work <= exact_l2p_boundary_filter_work_limit()
@@ -1705,22 +1755,28 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
         let active_matched_by_state = (adjacent_entries.len()
             > (tokenizer.num_states() as usize).div_ceil(16))
         .then(|| build_active_matched_by_state(bytesets, &active_bitset));
-        let viable_indices = adjacent_entries
-            .iter()
-            .enumerate()
-            .filter_map(|(index, (_, bytes))| {
-                token_has_active_terminal_suffix(
-                    tokenizer,
-                    bytesets,
-                    flat_trans,
-                    bytes,
-                    active_words,
-                    active_matched_by_state.as_deref(),
-                    &route_setup.active_suffix_start_by_byte,
-                )
-                .then_some(index)
-            })
-            .collect::<Vec<_>>();
+        let viable_indices = if tokenizer.has_deterministic_dispatch() {
+            // The scalar suffix prefilter cannot represent the reset fan-out.
+            // Let the exact state-set batch classify every byte-adjacent token.
+            (0..adjacent_entries.len()).collect::<Vec<_>>()
+        } else {
+            adjacent_entries
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (_, bytes))| {
+                    token_has_active_terminal_suffix(
+                        tokenizer,
+                        bytesets,
+                        flat_trans,
+                        bytes,
+                        active_words,
+                        active_matched_by_state.as_deref(),
+                        &route_setup.active_suffix_start_by_byte,
+                    )
+                    .then_some(index)
+                })
+                .collect::<Vec<_>>()
+        };
         exact_prefilter_ms = prefilter_started_at.elapsed().as_secs_f64() * 1000.0;
         exact_viable_tokens = viable_indices.len();
         let tokens = viable_indices
@@ -2093,12 +2149,13 @@ mod tests {
     };
     use super::{
         classify_vocab_char_type, parse_exact_l2p_boundary_filter_mode,
-        ExactL2pBoundaryFilterMode, SharedClassifyBytesets,
+        suffix_has_allowed_l2p_follow_from_reset, ExactL2pBoundaryFilterMode,
+        SharedClassifyBytesets,
         TokenL2pRouteHint, state_future_intersects_words,
         token_has_active_l2p_boundary_words, token_l2p_route_hint,
     };
     use crate::automata::lexer::ast::Expr;
-    use crate::automata::lexer::compile::build_regex;
+    use crate::automata::lexer::compile::{build_regex, build_regex_partitioned};
     use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::automata::lexer::Lexer;
     use crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table;
@@ -2171,6 +2228,32 @@ mod tests {
         assert!(matches!(parse_exact_l2p_boundary_filter_mode("0"), ExactL2pBoundaryFilterMode::Force(false)));
         assert!(matches!(parse_exact_l2p_boundary_filter_mode("false"), ExactL2pBoundaryFilterMode::Force(false)));
         assert!(matches!(parse_exact_l2p_boundary_filter_mode("off"), ExactL2pBoundaryFilterMode::Force(false)));
+    }
+
+    #[test]
+    fn deterministic_dispatch_suffix_uses_all_reset_roots() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"b".to_vec()),
+        ];
+        let tokenizer = build_regex_partitioned(&expressions, &[0, 1]).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        assert!(tokenizer.has_deterministic_dispatch());
+
+        let mut allowed = BitSet::new(2);
+        allowed.set(1);
+        assert!(suffix_has_allowed_l2p_follow_from_reset(
+            &tokenizer,
+            b"b",
+            &allowed,
+        ));
+        assert!(!suffix_has_allowed_l2p_follow_from_reset(
+            &tokenizer,
+            b"a",
+            &allowed,
+        ));
     }
 
     #[test]
