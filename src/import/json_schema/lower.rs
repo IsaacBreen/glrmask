@@ -54,6 +54,17 @@ pub(crate) enum JsonTerminalPartitionClass {
     Pattern,
 }
 
+impl JsonTerminalPartitionClass {
+    pub(crate) fn merge(self, other: Self) -> Self {
+        use JsonTerminalPartitionClass::{Literal, Other, Pattern};
+        match (self, other) {
+            (Pattern, _) | (_, Pattern) => Pattern,
+            (Literal, _) | (_, Literal) => Literal,
+            (Other, Other) => Other,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct FixedObjectShapeProfile {
     pub(crate) calls: usize,
@@ -255,15 +266,10 @@ impl<'a> Lowerer<'a> {
             self.rules.push(rule);
         }
         for (terminal, class) in terminal_partition_classes {
-            if let Some(previous) = self
-                .terminal_partition_classes
-                .insert(terminal.clone(), class)
-                && previous != class
-            {
-                return Err(SchemaImportError::new(format!(
-                    "isolated JSON Schema lowering assigned terminal {terminal:?} both {previous:?} and {class:?} lexer provenance",
-                )));
-            }
+            self.terminal_partition_classes
+                .entry(terminal)
+                .and_modify(|existing| *existing = existing.merge(class))
+                .or_insert(class);
         }
         Ok(())
     }
@@ -1087,15 +1093,12 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn add_terminal_rule(&mut self, name: &str, expr: GrammarExpr) {
         self.used_rule_names.insert(name.to_string());
-        if let Some(previous) = self
-            .terminal_partition_classes
-            .insert(name.to_string(), self.terminal_partition_class)
-        {
-            assert_eq!(
-                previous, self.terminal_partition_class,
-                "JSON terminal {name:?} was emitted with conflicting lexer provenance"
-            );
-        }
+        self.terminal_partition_classes
+            .entry(name.to_string())
+            .and_modify(|existing| {
+                *existing = existing.merge(self.terminal_partition_class)
+            })
+            .or_insert(self.terminal_partition_class);
         self.rules.push(NamedRule {
             name: name.to_string(),
             expr,

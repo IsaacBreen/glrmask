@@ -453,7 +453,6 @@ fn lexer_partition_ids(grammar: &GrammarDef) -> Vec<u32> {
     lexer_partition_ids_with_options(grammar, singleton_all_terminals)
 }
 
-#[cfg(test)]
 pub(crate) fn build_tokenizer_with_partition_options(
     grammar: &GrammarDef,
     singleton_all_terminals: bool,
@@ -570,8 +569,7 @@ pub(crate) fn build_tokenizer_from_exprs_partitioned(
     build_tokenizer_from_exprs_partitioned_impl(exprs, profile_labels, partition_ids, None)
 }
 
-#[cfg(test)]
-fn build_tokenizer_from_exprs_partitioned_with_adaptive(
+pub(crate) fn build_tokenizer_from_exprs_partitioned_with_adaptive(
     exprs: &[Expr],
     profile_labels: Option<&[String]>,
     partition_ids: &[u32],
@@ -1319,6 +1317,7 @@ fn compile_prepared_with_profile(
         prepared_grammar,
         vocab,
         GlrTableConstruction::ExperimentalCoreMerged,
+        None,
     )
 }
 
@@ -1326,6 +1325,7 @@ fn compile_prepared_with_profile_and_table_construction(
     prepared_grammar: GrammarDef,
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
+    lexer_adaptive_override: Option<bool>,
 ) -> (Constraint, CompilePhaseProfile) {
     let interner_cleanup = crate::ds::weight::defer_weight_interner_cleanup();
     let result = run_with_compile_thread_pool(|| {
@@ -1348,10 +1348,20 @@ fn compile_prepared_with_profile_and_table_construction(
             let prepared_grammar_ref = &prepared_grammar;
             let analysis_started_for_tokenizer = analysis_started_at.clone();
             let compile_started_for_tokenizer = compile_started_at.clone();
+            let lexer_adaptive_override = lexer_adaptive_override;
 
             scope.spawn(move |scope| {
                 let tok_started = Instant::now();
-                let mut tokenizer = build_tokenizer(prepared_grammar_ref);
+                let mut tokenizer = lexer_adaptive_override.map_or_else(
+                    || build_tokenizer(prepared_grammar_ref),
+                    |adaptive| {
+                        build_tokenizer_with_partition_options(
+                            prepared_grammar_ref,
+                            false,
+                            adaptive,
+                        )
+                    },
+                );
                 let tokenizer_construct_ms = elapsed_ms(tok_started);
                 let isolate_started = Instant::now();
                 tokenizer.isolate_start_state_and_drain_nullable_terminals();
@@ -2008,6 +2018,23 @@ pub(crate) fn compile_prepared_with_table_construction(
         prepared_grammar,
         vocab,
         default_table_construction,
+        None,
+    )
+    .0
+}
+
+#[cfg(test)]
+pub(crate) fn compile_owned_with_lexer_adaptive(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    adaptive: bool,
+) -> Constraint {
+    let prepared_grammar = prepare_grammar_transforms_only(grammar);
+    compile_prepared_with_profile_and_table_construction(
+        prepared_grammar,
+        vocab,
+        GlrTableConstruction::ExperimentalCoreMerged,
+        Some(adaptive),
     )
     .0
 }
@@ -2037,6 +2064,7 @@ pub(crate) fn compile_owned_profiled_with_table_construction(
         prepared_grammar,
         vocab,
         default_table_construction,
+        None,
     );
     profile.prepare_ms = prepare_ms;
     profile.total_ms = elapsed_ms(total_started_at);

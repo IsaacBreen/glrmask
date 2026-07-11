@@ -16,6 +16,7 @@ use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguityKind};
 use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar, Quantifier};
 use crate::grammar::factoring::factor_named_grammar;
 use crate::grammar::glrm::{from_glrm, to_glrm};
+use crate::dump_json_schema_grammar_glrm;
 use crate::Vocab;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -368,6 +369,86 @@ fn exact_subtraction_lowering_env_var_defaults_false_and_accepts_truthy_values()
         let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS", value);
         assert!(lower_exact_subtractions_enabled(), "value {value:?} should enable exact-sub lowering");
     }
+}
+
+#[test]
+fn exact_subtraction_json_schema_dump_uses_helpers_when_enabled() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lower = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS");
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "first": {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"},
+                    "b": {"type": "string"}
+                },
+                "additionalProperties": {"type": "string"}
+            },
+            "second": {
+                "type": "object",
+                "properties": {
+                    "b": {"type": "string"}
+                },
+                "patternProperties": {
+                    "^x_": {"type": "number"}
+                },
+                "additionalProperties": {"type": "string"}
+            }
+        },
+        "additionalProperties": false
+    });
+
+    let glrm = dump_json_schema_grammar_glrm(&schema.to_string()).unwrap();
+    assert!(
+        glrm.contains("JSON_STRING JSON_KEY_SEPARATOR")
+            || glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"),
+        "{glrm}"
+    );
+    assert!(glrm.contains("\"a\"") || glrm.contains("\"b\""), "{glrm}");
+}
+
+#[test]
+fn exact_subtraction_json_schema_dump_keeps_direct_subtraction_when_disabled() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lower = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS", "0");
+    let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "first": {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"},
+                    "b": {"type": "string"}
+                },
+                "additionalProperties": {"type": "string"}
+            },
+            "second": {
+                "type": "object",
+                "properties": {
+                    "b": {"type": "string"}
+                },
+                "patternProperties": {
+                    "^x_": {"type": "number"}
+                },
+                "additionalProperties": {"type": "string"}
+            }
+        },
+        "additionalProperties": false
+    });
+
+    let glrm = dump_json_schema_grammar_glrm(&schema.to_string()).unwrap();
+    assert!(
+        glrm.contains("JSON_STRING JSON_KEY_SEPARATOR")
+            || glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"),
+        "{glrm}"
+    );
+    assert!(glrm.contains("\"a\"") || glrm.contains("\"b\""), "{glrm}");
+    assert!(!glrm.contains("__exact_sub_AP_SHARED_LITERAL_KEY_SET_result"), "{glrm}");
 }
 
 #[test]

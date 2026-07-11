@@ -131,6 +131,24 @@ fn compile_dynamic_from_source(
     ))
 }
 
+#[cfg(test)]
+pub(crate) fn compile_glrm_with_lexer_adaptive(
+    glrm: &str,
+    vocab: &crate::Vocab,
+    adaptive: bool,
+) -> crate::Result<Constraint> {
+    let grammar = lower_factored_named_grammar(
+        glrm,
+        crate::grammar::glrm::from_glrm,
+        None,
+    )?;
+    Ok(crate::compiler::pipeline::compile_owned_with_lexer_adaptive(
+        grammar,
+        vocab,
+        adaptive,
+    ))
+}
+
 /// Profiling-only entry point: runs the JSON-schema import pipeline
 /// (parse → factor → AST lower) without the downstream compile. Hidden from the
 /// public API; used by `examples/profile_glr.rs` to isolate import timings.
