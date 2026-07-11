@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, path::{Path, PathBuf}};
 
 use criterion::{black_box, BenchmarkId, Criterion};
-use glrmask::{clear_weight_interners, clear_weight_op_caches, Constraint, Vocab};
+use glrmask::{Constraint, Vocab};
 
 pub struct BenchCase {
     pub id: &'static str,
@@ -80,8 +80,8 @@ fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
 }
 
 pub fn clear_compile_caches() {
-    clear_weight_interners();
-    clear_weight_op_caches();
+    Constraint::__clear_weight_interners();
+    Constraint::__clear_weight_op_caches();
 }
 
 pub fn build_schema(case: &BenchCase, vocab: &Vocab) {

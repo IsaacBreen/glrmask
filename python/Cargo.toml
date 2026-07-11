@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.24.2", features = ["extension-module"] }
 numpy = "0.24.0"
-glrmask = { path = ".." }
+glrmask = { path = "..", features = ["python-bindings"] }
 glrmask-runtime = { path = "../glrmask-runtime" }
 self_cell = "1"
 mimalloc = "0.1"

@@ -77,7 +77,7 @@ fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmas
     Ok(glrmask::Vocab::new(entries, None))
 }
 
-fn constraint_result<T>(result: glrmask::Result<T>) -> PyResult<T> {
+fn constraint_result<T, E: std::fmt::Display>(result: Result<T, E>) -> PyResult<T> {
     result.map_err(|e| PyValueError::new_err(format!("{e}")))
 }
 
@@ -85,7 +85,7 @@ fn set_gss_summary_fields(
     dict: &Bound<'_, PyDict>,
     prefix: &str,
     path_count: usize,
-    summary: &glrmask::GssProfileSummary,
+    summary: &glrmask::__private::GssProfileSummary,
 ) -> PyResult<()> {
     dict.set_item(format!("{prefix}_path_count"), path_count)?;
     dict.set_item(format!("{prefix}_top_values_count"), summary.top_values_count)?;
@@ -115,7 +115,7 @@ fn set_gss_summary_fields(
 
 fn mask_profile_to_dict<'py>(
     py: Python<'py>,
-    profile: glrmask::MaskProfile,
+    profile: glrmask::__private::MaskProfile,
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("total_ns", profile.total_ns)?;
@@ -296,7 +296,7 @@ fn string_result<T>(result: Result<T, String>) -> PyResult<T> {
 
 fn advance_trace_to_dict<'py>(
     py: Python<'py>,
-    trace: &glrmask::AdvanceTrace,
+    trace: &glrmask::__private::AdvanceTrace,
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
 
@@ -325,7 +325,7 @@ fn advance_trace_to_dict<'py>(
 
 fn advance_trace_step_to_dict<'py>(
     py: Python<'py>,
-    step: &glrmask::AdvanceTraceStep,
+    step: &glrmask::__private::AdvanceTraceStep,
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("source_state", step.source_state)?;
@@ -398,8 +398,8 @@ pub struct PyConstraint {
 }
 
 impl PyConstraint {
-    fn from_constraint_result(
-        constraint: glrmask::Result<glrmask::Constraint>,
+    fn from_constraint_result<E: std::fmt::Display>(
+        constraint: Result<glrmask::Constraint, E>,
         vocab: &PyVocab,
     ) -> PyResult<Self> {
         let constraint = constraint_result(constraint)?;
@@ -882,7 +882,7 @@ impl PyConstraintState {
 
 #[pymodule]
 fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    glrmask::warm_ti_pool();
+    glrmask::Constraint::__warm_ti_pool();
     m.add_class::<PyVocab>()?;
     m.add_class::<PyConstraint>()?;
     m.add_class::<PyConstraintState>()?;
@@ -896,22 +896,22 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[pyfunction]
 fn clear_stale_weights() {
-    glrmask::clear_stale_weights();
+    glrmask::Constraint::__clear_stale_weights();
 }
 
 #[pyfunction]
 fn clear_weight_op_caches() {
-    glrmask::clear_weight_op_caches();
+    glrmask::Constraint::__clear_weight_op_caches();
 }
 
 #[pyfunction]
 fn prepare_vocab_for_compile(vocab: &PyVocab) {
-    glrmask::prepare_vocab_for_compile(&vocab.inner);
+    vocab.inner.__prepare_for_compile();
 }
 
 #[pyfunction]
 fn compile_grammar_def_json(grammar_def_json: &str, vocab: &PyVocab) -> PyResult<PyConstraint> {
-    let constraint = glrmask::compile_grammar_def_json(grammar_def_json, &vocab.inner)
+    let constraint = glrmask::Constraint::__compile_grammar_def_json(grammar_def_json, &vocab.inner)
         .map_err(|e| PyValueError::new_err(format!("{e}")))?;
     let max_token = vocab.inner.max_token_id();
     Ok(PyConstraint {
@@ -922,6 +922,6 @@ fn compile_grammar_def_json(grammar_def_json: &str, vocab: &PyVocab) -> PyResult
 
 #[pyfunction]
 fn dump_json_schema_grammar_glrm(schema_json: &str) -> PyResult<String> {
-    glrmask::dump_json_schema_grammar_glrm(schema_json)
+    glrmask::Constraint::__dump_json_schema_grammar_glrm(schema_json)
         .map_err(|e| PyValueError::new_err(format!("{e}")))
 }

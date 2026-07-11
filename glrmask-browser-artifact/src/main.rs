@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-use glrmask::{compile_grammar_def_json, Vocab};
+use glrmask::{Constraint, Vocab};
 use glrmask_runtime::RuntimeArtifact;
 use serde_json::{json, Value};
 
@@ -94,7 +94,7 @@ fn run() -> Result<(), String> {
 
     let vocab = load_gpt_style_vocab(Path::new(&tokenizer))?;
     eprintln!("loaded {} TinyStories BPE tokens", vocab.len());
-    let constraint = compile_grammar_def_json(&story_json_grammar(), &vocab)
+    let constraint = Constraint::__compile_grammar_def_json(&story_json_grammar(), &vocab)
         .map_err(|error| error.to_string())?;
     let artifact = RuntimeArtifact::from_runtime_payload_v2(constraint.save_runtime_payload_v2());
     let output = Path::new(&output);

@@ -13,6 +13,7 @@ exclude = [".benchmarks/**", ".cache/**", "glrmask-runtime/**", "python/**", "py
 
 [features]
 default = []
+python-bindings = []
 
 [dependencies]
 rustc-hash = "1"
