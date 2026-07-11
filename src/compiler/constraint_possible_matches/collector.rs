@@ -450,7 +450,13 @@ fn mix_signature_word(hash: u64, word: u32) -> u64 {
 }
 
 struct SignatureEntry { state_pos: usize, class_id: u32 }
-struct ChildBuildData { outcomes: Vec<SegmentOutcome>, child_class_ids: Vec<u32>, reachable: Box<[TokenRange]>, result: NodeClasses }
+struct ChildBuildData {
+    outcomes: Vec<SegmentOutcome>,
+    child_class_ids: Vec<u32>,
+    nondefault_rows: Vec<(u32, u32, u32)>,
+    reachable: Box<[TokenRange]>,
+    result: NodeClasses,
+}
 struct ChildPendingData<'a> { child: &'a VocabPrefixTreeNode, outcomes: Vec<SegmentOutcome>, descend_positions: Vec<u32>, child_active_states: Vec<u32>, reachable: Box<[TokenRange]> }
 
 fn build_node(
@@ -562,7 +568,17 @@ fn build_node(
                 local_timings.parallel_child_class_project_ms += elapsed_ms(child_class_project_started_at);
                 (result, child_class_ids)
             };
-            (ChildBuildData { outcomes: pending.outcomes, child_class_ids, reachable: pending.reachable, result }, local_timings)
+            let nondefault_rows = pending
+                .outcomes
+                .iter()
+                .zip(child_class_ids.iter())
+                .enumerate()
+                .filter_map(|(state_pos, (outcome, &child_class_id))| {
+                    (outcome.terminals_id != empty_terminals_id || child_class_id != u32::MAX)
+                        .then_some((state_pos as u32, outcome.terminals_id, child_class_id))
+                })
+                .collect();
+            (ChildBuildData { outcomes: pending.outcomes, child_class_ids, nondefault_rows, reachable: pending.reachable, result }, local_timings)
         }).collect();
         for (data, local_timings) in built { timings.add_assign(local_timings); child_data.push(data); }
     } else {
@@ -580,7 +596,17 @@ fn build_node(
                 timings.serial_child_class_project_ms += elapsed_ms(child_class_project_started_at);
                 (result, child_class_ids)
             };
-            child_data.push(ChildBuildData { outcomes: pending.outcomes, child_class_ids, reachable: pending.reachable, result });
+            let nondefault_rows = pending
+                .outcomes
+                .iter()
+                .zip(child_class_ids.iter())
+                .enumerate()
+                .filter_map(|(state_pos, (outcome, &child_class_id))| {
+                    (outcome.terminals_id != empty_terminals_id || child_class_id != u32::MAX)
+                        .then_some((state_pos as u32, outcome.terminals_id, child_class_id))
+                })
+                .collect();
+            child_data.push(ChildBuildData { outcomes: pending.outcomes, child_class_ids, nondefault_rows, reachable: pending.reachable, result });
         }
     }
 
@@ -616,31 +642,103 @@ fn build_node(
             }
         }
         _ => {
-            let mut buckets: FxHashMap<u64, Vec<SignatureEntry>> = FxHashMap::default();
-            let mut next_class_id = 0u32;
-            for (state_pos, &state) in active_states.iter().enumerate() {
-                let node_terms = if node.has_token() { node_terminal_ids[state as usize] } else { empty_terminals_id };
-                let mut hash = mix_signature_word(0, node_terms);
-                for child in &child_data { hash = mix_signature_word(hash, child.outcomes[state_pos].terminals_id); hash = mix_signature_word(hash, child.child_class_ids[state_pos]); }
-                let bucket = buckets.entry(hash).or_default();
-                let mut found = false;
-                for entry in bucket.iter() {
-                    timings.signature_bucket_probes += 1;
-                    let rep_pos = entry.state_pos;
-                    let rep_state = active_states[rep_pos];
-                    let rep_node_terms = if node.has_token() { node_terminal_ids[rep_state as usize] } else { empty_terminals_id };
-                    if rep_node_terms != node_terms { continue; }
-                    if child_data.iter().all(|child| child.outcomes[rep_pos].terminals_id == child.outcomes[state_pos].terminals_id && child.child_class_ids[rep_pos] == child.child_class_ids[state_pos]) {
-                        classes[state_pos] = entry.class_id;
-                        found = true;
-                        break;
+            let dense_pairs = active_states.len() * child_data.len();
+            let sparse_pairs = child_data
+                .iter()
+                .map(|child| child.nondefault_rows.len())
+                .sum::<usize>();
+            if dense_pairs >= 4096 && sparse_pairs.saturating_mul(4) < dense_pairs {
+                let mut offsets = vec![0usize; active_states.len() + 1];
+                for child in &child_data {
+                    for &(state_pos, _, _) in &child.nondefault_rows {
+                        offsets[state_pos as usize + 1] += 1;
                     }
                 }
-                if !found {
-                    let class_id = next_class_id; next_class_id += 1;
-                    classes[state_pos] = class_id;
-                    representative_states.push(state); representative_state_positions.push(state_pos);
-                    bucket.push(SignatureEntry { state_pos, class_id });
+                for state_pos in 0..active_states.len() {
+                    offsets[state_pos + 1] += offsets[state_pos];
+                }
+                let mut cursors = offsets[..active_states.len()].to_vec();
+                let mut sparse_entries = vec![(0u32, 0u32, 0u32); sparse_pairs];
+                for (child_index, child) in child_data.iter().enumerate() {
+                    for &(state_pos, terminals_id, child_class_id) in &child.nondefault_rows {
+                        let state_pos = state_pos as usize;
+                        let slot = cursors[state_pos];
+                        sparse_entries[slot] =
+                            (child_index as u32, terminals_id, child_class_id);
+                        cursors[state_pos] += 1;
+                    }
+                }
+
+                let mut buckets: FxHashMap<u64, Vec<SignatureEntry>> = FxHashMap::default();
+                let mut next_class_id = 0u32;
+                for (state_pos, &state) in active_states.iter().enumerate() {
+                    let node_terms = if node.has_token() {
+                        node_terminal_ids[state as usize]
+                    } else {
+                        empty_terminals_id
+                    };
+                    let row = &sparse_entries[offsets[state_pos]..offsets[state_pos + 1]];
+                    let mut hash = mix_signature_word(0, node_terms);
+                    for &(child_index, terminals_id, child_class_id) in row {
+                        hash = mix_signature_word(hash, child_index);
+                        hash = mix_signature_word(hash, terminals_id);
+                        hash = mix_signature_word(hash, child_class_id);
+                    }
+                    let bucket = buckets.entry(hash).or_default();
+                    let mut found = false;
+                    for entry in bucket.iter() {
+                        timings.signature_bucket_probes += 1;
+                        let rep_pos = entry.state_pos;
+                        let rep_state = active_states[rep_pos];
+                        let rep_node_terms = if node.has_token() {
+                            node_terminal_ids[rep_state as usize]
+                        } else {
+                            empty_terminals_id
+                        };
+                        if rep_node_terms == node_terms
+                            && &sparse_entries[offsets[rep_pos]..offsets[rep_pos + 1]] == row
+                        {
+                            classes[state_pos] = entry.class_id;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        let class_id = next_class_id;
+                        next_class_id += 1;
+                        classes[state_pos] = class_id;
+                        representative_states.push(state);
+                        representative_state_positions.push(state_pos);
+                        bucket.push(SignatureEntry { state_pos, class_id });
+                    }
+                }
+            } else {
+                let mut buckets: FxHashMap<u64, Vec<SignatureEntry>> = FxHashMap::default();
+                let mut next_class_id = 0u32;
+                for (state_pos, &state) in active_states.iter().enumerate() {
+                    let node_terms = if node.has_token() { node_terminal_ids[state as usize] } else { empty_terminals_id };
+                    let mut hash = mix_signature_word(0, node_terms);
+                    for child in &child_data { hash = mix_signature_word(hash, child.outcomes[state_pos].terminals_id); hash = mix_signature_word(hash, child.child_class_ids[state_pos]); }
+                    let bucket = buckets.entry(hash).or_default();
+                    let mut found = false;
+                    for entry in bucket.iter() {
+                        timings.signature_bucket_probes += 1;
+                        let rep_pos = entry.state_pos;
+                        let rep_state = active_states[rep_pos];
+                        let rep_node_terms = if node.has_token() { node_terminal_ids[rep_state as usize] } else { empty_terminals_id };
+                        if rep_node_terms != node_terms { continue; }
+                        if child_data.iter().all(|child| child.outcomes[rep_pos].terminals_id == child.outcomes[state_pos].terminals_id && child.child_class_ids[rep_pos] == child.child_class_ids[state_pos]) {
+                            classes[state_pos] = entry.class_id;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        let class_id = next_class_id; next_class_id += 1;
+                        classes[state_pos] = class_id;
+                        representative_states.push(state); representative_state_positions.push(state_pos);
+                        bucket.push(SignatureEntry { state_pos, class_id });
+                    }
                 }
             }
         }
