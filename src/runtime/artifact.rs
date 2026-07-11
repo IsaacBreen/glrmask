@@ -490,6 +490,49 @@ impl DynamicMaskVocab {
         groups
     }
 
+    fn collect_dfa_continuation_groups(
+        &self,
+        tokenizer: &Tokenizer,
+        node_id: u32,
+        state: u32,
+        by_end_states: &mut BTreeMap<Vec<u32>, Vec<u32>>,
+    ) {
+        let node = self.trie.node(node_id);
+        if let Some(token_id) = node.token_id {
+            let end_states = if tokenizer.is_end(state) {
+                Vec::new()
+            } else {
+                vec![state]
+            };
+            by_end_states.entry(end_states).or_default().push(token_id);
+        }
+
+        for edge in self.trie.children(node_id) {
+            let mut next_state = state;
+            let mut blocked = false;
+            for &byte in self.trie.edge_bytes(edge) {
+                next_state = tokenizer.get_transition(next_state, byte);
+                if next_state == u32::MAX {
+                    blocked = true;
+                    break;
+                }
+            }
+            if blocked {
+                by_end_states
+                    .entry(Vec::new())
+                    .or_default()
+                    .extend_from_slice(self.trie.subtree_tokens(edge.child));
+            } else {
+                self.collect_dfa_continuation_groups(
+                    tokenizer,
+                    edge.child,
+                    next_state,
+                    by_end_states,
+                );
+            }
+        }
+    }
+
     fn build_continuation_partition(
         &self,
         tokenizer: &Tokenizer,
@@ -497,37 +540,47 @@ impl DynamicMaskVocab {
         mask_words: usize,
         entries: &[(u32, Box<[u8]>)],
     ) -> Option<DynamicContinuationPartition> {
-        let mut by_end_states = BTreeMap::<Vec<u32>, Vec<usize>>::new();
-        for (entry_index, (_, bytes)) in entries.iter().enumerate() {
-            let mut end_states = tokenizer
-                .execute_from_state_end_only(bytes, source_state)
-                .into_iter()
-                .filter(|&state| !tokenizer.is_end(state))
-                .collect::<Vec<_>>();
-            end_states.sort_unstable();
-            end_states.dedup();
-            by_end_states
-                .entry(end_states)
-                .or_default()
-                .push(entry_index);
+        let mut by_end_states = BTreeMap::<Vec<u32>, Vec<u32>>::new();
+        if tokenizer.has_epsilon_transitions() {
+            for (canonical_token_id, bytes) in entries {
+                let mut end_states = tokenizer
+                    .execute_from_state_end_only(bytes, source_state)
+                    .into_iter()
+                    .filter(|&state| !tokenizer.is_end(state))
+                    .collect::<Vec<_>>();
+                end_states.sort_unstable();
+                end_states.dedup();
+                by_end_states
+                    .entry(end_states)
+                    .or_default()
+                    .push(*canonical_token_id);
+            }
+        } else {
+            self.collect_dfa_continuation_groups(
+                tokenizer,
+                0,
+                source_state,
+                &mut by_end_states,
+            );
         }
 
         if by_end_states.len() > 64 {
             return None;
         }
 
-        let max_token_id = entries
+        let max_token_id = self
+            .trie
+            .subtree_tokens(0)
             .iter()
-            .map(|(token_id, _)| *token_id as usize)
+            .map(|token_id| *token_id as usize)
             .max()
             .unwrap_or(0);
         let mut token_groups = vec![u16::MAX; max_token_id.saturating_add(1)];
         let mut groups = Vec::with_capacity(by_end_states.len());
-        for (group_id, (end_states, entry_indices)) in by_end_states.into_iter().enumerate() {
+        for (group_id, (end_states, canonical_token_ids)) in by_end_states.into_iter().enumerate() {
             let mut mask = vec![0u32; mask_words];
             let mut token_count = 0usize;
-            for entry_index in entry_indices {
-                let canonical_token_id = entries[entry_index].0;
+            for canonical_token_id in canonical_token_ids {
                 token_count += self.set_alias_bits(canonical_token_id, &mut mask);
                 token_groups[canonical_token_id as usize] = group_id as u16;
             }
