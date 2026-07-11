@@ -1,4 +1,5 @@
 use glrmask::{Constraint, ConstraintState, Vocab};
+use glrmask::__private::ConstraintStateExt as _;
 
 const FIXED_N5_ORDERED_SUFFIX_GLRM: &str = r#"
 start start;

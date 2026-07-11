@@ -1,4 +1,5 @@
 use glrmask::{Constraint, Vocab};
+use glrmask::__private::ConstraintStateExt as _;
 
 fn byte_vocab() -> Vocab {
     Vocab::new((0u8..=127).map(|byte| (byte as u32, vec![byte])).collect(), None)

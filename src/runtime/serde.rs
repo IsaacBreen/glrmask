@@ -152,7 +152,7 @@ impl Constraint {
     /// V1 cannot represent the depth-one parser acceptance overlay introduced
     /// by split parser-family compilation. Use [`Self::save_runtime_payload_v2`]
     /// when that overlay is present.
-    pub fn save_runtime_payload_v1(&self) -> Vec<u8> {
+    pub(crate) fn save_runtime_payload_v1(&self) -> Vec<u8> {
         assert!(
             self.parser_top_accept.is_empty(),
             "runtime payload V1 cannot represent parser_top_accept; use save_runtime_payload_v2"
@@ -166,7 +166,7 @@ impl Constraint {
     }
 
     /// Load the intentional v1 execution payload and rebuild all derived caches.
-    pub fn load_runtime_payload_v1(bytes: &[u8]) -> crate::Result<Self> {
+    pub(crate) fn load_runtime_payload_v1(bytes: &[u8]) -> crate::Result<Self> {
         let payload: RuntimePayloadV1 = bincode::deserialize(bytes)
             .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
         let mut constraint = payload.into_constraint();
@@ -181,13 +181,13 @@ impl Constraint {
 
     /// Serialize the intentional v2 execution payload, including the
     /// depth-one parser acceptance overlay.
-    pub fn save_runtime_payload_v2(&self) -> Vec<u8> {
+    pub(crate) fn save_runtime_payload_v2(&self) -> Vec<u8> {
         bincode::serialize(&RuntimePayloadV2::from(self))
             .expect("Runtime payload V2 serialization should succeed")
     }
 
     /// Load an intentional v2 execution payload and rebuild derived caches.
-    pub fn load_runtime_payload_v2(bytes: &[u8]) -> crate::Result<Self> {
+    pub(crate) fn load_runtime_payload_v2(bytes: &[u8]) -> crate::Result<Self> {
         let payload: RuntimePayloadV2 = bincode::deserialize(bytes)
             .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
         let mut constraint = payload.into_constraint();

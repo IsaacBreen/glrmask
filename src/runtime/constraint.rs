@@ -343,19 +343,19 @@ impl Constraint {
         trie
     }
 
-    pub fn table_ambiguous_actions(&self) -> Vec<TableAmbiguity> {
+    pub(crate) fn table_ambiguous_actions(&self) -> Vec<TableAmbiguity> {
         self.table.ambiguous_actions()
     }
 
-    pub fn table_has_ambiguity(&self) -> bool {
+    pub(crate) fn table_has_ambiguity(&self) -> bool {
         self.table.has_ambiguity()
     }
 
-    pub fn terminal_display_names(&self) -> &[String] {
+    pub(crate) fn terminal_display_names(&self) -> &[String] {
         &self.terminal_display_names
     }
 
-    pub fn terminal_display_name(&self, terminal_id: TerminalID) -> Option<&str> {
+    pub(crate) fn terminal_display_name(&self, terminal_id: TerminalID) -> Option<&str> {
         self.terminal_display_names
             .get(terminal_id as usize)
             .map(String::as_str)
@@ -1818,23 +1818,23 @@ impl Constraint {
             .unwrap_or(0)
     }
 
-    pub fn mask_game_internal_to_original(&self) -> &[Vec<u32>] {
+    pub(crate) fn mask_game_internal_to_original(&self) -> &[Vec<u32>] {
         &self.internal_token_to_tokens
     }
 
-    pub fn mask_game_original_to_internal(&self) -> &[u32] {
+    pub(crate) fn mask_game_original_to_internal(&self) -> &[u32] {
         &self.original_token_to_internal
     }
 
-    pub fn num_parser_states(&self) -> u32 {
+    pub(crate) fn num_parser_states(&self) -> u32 {
         self.table.num_states
     }
 
-    pub fn num_tokenizer_states(&self) -> usize {
+    pub(crate) fn num_tokenizer_states(&self) -> usize {
         self.tokenizer.num_states() as usize
     }
 
-    pub fn num_forced_minimized_tokenizer_states(&self) -> usize {
+    pub(crate) fn num_forced_minimized_tokenizer_states(&self) -> usize {
         self.tokenizer.num_forced_minimized_states()
     }
 

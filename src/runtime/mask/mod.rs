@@ -1747,13 +1747,13 @@ impl<'a> ConstraintState<'a> {
         self.fill_mask_uncached(buf);
     }
 
-    pub fn fill_mask_timed_ns(&self, buf: &mut [u32]) -> u64 {
+    pub(crate) fn fill_mask_timed_ns(&self, buf: &mut [u32]) -> u64 {
         let start = Instant::now();
         self.fill_mask(buf);
         start.elapsed().as_nanos() as u64
     }
 
-    pub fn fill_mask_profiled(&self, buf: &mut [u32]) -> MaskProfile {
+    pub(crate) fn fill_mask_profiled(&self, buf: &mut [u32]) -> MaskProfile {
         let total_start = Instant::now();
         if self.try_fill_mask_from_cache(buf) {
             return MaskProfile {
@@ -1770,7 +1770,7 @@ impl<'a> ConstraintState<'a> {
             })
     }
 
-    pub fn mask_game_fill_mask_and_internal_ids(&self, buf: &mut [u32]) -> Vec<u32> {
+    pub(crate) fn mask_game_fill_mask_and_internal_ids(&self, buf: &mut [u32]) -> Vec<u32> {
         if self.try_fill_mask_from_cache(buf) {
             let cache = self.mask_cache.lock().unwrap();
             if cache

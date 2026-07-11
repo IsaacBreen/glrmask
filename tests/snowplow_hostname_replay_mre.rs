@@ -1,4 +1,5 @@
 use glrmask::Constraint;
+use glrmask::__private::ConstraintStateExt as _;
 
 include!("snowplow_hostname_fixture.rsinc");
 

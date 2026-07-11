@@ -8,6 +8,7 @@ use std::{
 };
 
 use glrmask::{Constraint, ConstraintState, Vocab};
+use glrmask::__private::{ConstraintExt as _, ConstraintStateExt as _};
 
 static URI_ENV_LOCK: Mutex<()> = Mutex::new(());
 static TI_ENV_LOCK: RwLock<()> = RwLock::new(());
@@ -24,7 +25,7 @@ impl EnvVarGuard {
             env::remove_var(key);
         }
         if key == "GLRMASK_LLGUIDANCE_COMPAT" {
-            glrmask::Constraint::__set_test_compat_mode(false);
+            glrmask::Constraint::set_test_compat_mode(false);
         }
         Self { key, original }
     }
@@ -36,7 +37,7 @@ impl EnvVarGuard {
         }
         if key == "GLRMASK_LLGUIDANCE_COMPAT" {
             let enabled = value != "0" && !value.is_empty();
-            glrmask::Constraint::__set_test_compat_mode(enabled);
+            glrmask::Constraint::set_test_compat_mode(enabled);
         }
         Self { key, original }
     }
@@ -56,7 +57,7 @@ impl Drop for EnvVarGuard {
             },
         };
         if self.key == "GLRMASK_LLGUIDANCE_COMPAT" {
-            glrmask::Constraint::__set_test_compat_mode(original_enabled);
+            glrmask::Constraint::set_test_compat_mode(original_enabled);
         }
     }
 }

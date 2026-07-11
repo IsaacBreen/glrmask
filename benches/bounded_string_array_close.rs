@@ -10,6 +10,7 @@ use criterion::{
     criterion_main,
 };
 use glrmask::Constraint;
+use glrmask::__private::{ConstraintExt as _, ConstraintStateExt as _};
 use std::time::Duration;
 
 const ARRAY_CLOSE_BYTES: &[u8] = b"\"]";

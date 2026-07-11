@@ -1,6 +1,7 @@
 use std::{env, ffi::OsString, sync::{Mutex, MutexGuard}};
 
 use glrmask::{Constraint, Vocab};
+use glrmask::__private::{ConstraintExt as _, ConstraintStateExt as _};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -17,7 +18,7 @@ impl EnvVarGuard {
         }
         if key == "GLRMASK_LLGUIDANCE_COMPAT" {
             let enabled = value != "0" && !value.is_empty();
-            glrmask::Constraint::__set_test_compat_mode(enabled);
+            glrmask::Constraint::set_test_compat_mode(enabled);
         }
         Self { key, original }
     }
@@ -37,7 +38,7 @@ impl Drop for EnvVarGuard {
             },
         };
         if self.key == "GLRMASK_LLGUIDANCE_COMPAT" {
-            glrmask::Constraint::__set_test_compat_mode(original_enabled);
+            glrmask::Constraint::set_test_compat_mode(original_enabled);
         }
     }
 }

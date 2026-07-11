@@ -1,4 +1,5 @@
 use glrmask::{Constraint, Vocab};
+use glrmask::__private::ConstraintExt as _;
 use serde_json::json;
 
 fn bytes_vocab() -> Vocab {

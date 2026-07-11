@@ -1,4 +1,5 @@
 use glrmask::{Constraint, ConstraintState, Vocab};
+use glrmask::__private::ConstraintStateExt as _;
 use serde_json::{json, Map, Value};
 
 fn make_byte_vocab() -> Vocab {

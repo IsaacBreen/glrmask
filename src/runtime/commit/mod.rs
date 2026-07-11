@@ -3407,7 +3407,7 @@ impl<'a> ConstraintState<'a> {
         result
     }
 
-    pub fn commit_token_timed_ns(&mut self, token_id: u32) -> Result<u64, String> {
+    pub(crate) fn commit_token_timed_ns(&mut self, token_id: u32) -> Result<u64, String> {
         use std::time::Instant;
 
         let constraint = self.constraint;
@@ -3422,7 +3422,7 @@ impl<'a> ConstraintState<'a> {
         result.map(|()| total_ns)
     }
 
-    pub fn commit_token_profiled(&mut self, token_id: u32) -> Result<CommitProfile, String> {
+    pub(crate) fn commit_token_profiled(&mut self, token_id: u32) -> Result<CommitProfile, String> {
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id)
             .ok_or_else(|| format!("commit_token: token_id {token_id} not in vocabulary"))?;
@@ -3440,7 +3440,7 @@ impl<'a> ConstraintState<'a> {
         result
     }
 
-    pub fn commit_token_per_advance(
+    pub(crate) fn commit_token_per_advance(
         &mut self,
         token_id: u32,
     ) -> Result<(Vec<PerAdvanceEntry>, Vec<(u32, Vec<Vec<u32>>)>, CommitProfile), String> {

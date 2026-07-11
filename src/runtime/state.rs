@@ -120,21 +120,21 @@ impl<'a> ConstraintState<'a> {
         self.is_complete()
     }
 
-    pub fn parser_root_count(&self) -> usize {
+    pub(crate) fn parser_root_count(&self) -> usize {
         self.state.values().map(|gss| gss.peek_values().len()).sum()
     }
 
-    pub fn parser_path_count(&self, limit: usize) -> usize {
+    pub(crate) fn parser_path_count(&self, limit: usize) -> usize {
         self.state.values().map(|gss| gss.path_count_at_most(limit)).sum::<usize>().min(limit)
     }
 
-    pub fn has_parser_ambiguity(&self) -> bool {
+    pub(crate) fn has_parser_ambiguity(&self) -> bool {
         self.parser_path_count(2) > 1
     }
 
     /// Return all flattened parser stacks for debugging.
     /// Each entry is (tokenizer_state, Vec<(stack_of_parser_states, disallowed_terminals)>).
-    pub fn debug_parser_stacks(&self) -> Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)> {
+    pub(crate) fn debug_parser_stacks(&self) -> Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)> {
         self.state.iter().map(|(&ts, gss)| {
             let stacks = gss.to_stacks();
             let formatted: Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)> = stacks.into_iter().map(|(stack, acc)| {

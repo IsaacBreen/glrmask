@@ -1,4 +1,5 @@
 use glrmask::{Constraint, Vocab};
+use glrmask::__private::ConstraintStateExt as _;
 
 const DISPUTED_TOKEN_ID: u32 = 3605;
 const DISPUTED_TOKEN_BYTES: &[u8] = b" \"/";

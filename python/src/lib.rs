@@ -24,6 +24,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use self_cell::self_cell;
 use std::sync::Arc;
+use glrmask::__private::{ConstraintExt as _, ConstraintStateExt as _, VocabExt as _};
 
 // ---------------------------------------------------------------------------
 // OwnedState — `self_cell`-generated safe owner/dependent pair.
@@ -882,7 +883,7 @@ impl PyConstraintState {
 
 #[pymodule]
 fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    glrmask::Constraint::__warm_ti_pool();
+    glrmask::Constraint::warm_ti_pool();
     m.add_class::<PyVocab>()?;
     m.add_class::<PyConstraint>()?;
     m.add_class::<PyConstraintState>()?;
@@ -896,22 +897,22 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[pyfunction]
 fn clear_stale_weights() {
-    glrmask::Constraint::__clear_stale_weights();
+    glrmask::Constraint::clear_stale_weights();
 }
 
 #[pyfunction]
 fn clear_weight_op_caches() {
-    glrmask::Constraint::__clear_weight_op_caches();
+    glrmask::Constraint::clear_weight_op_caches();
 }
 
 #[pyfunction]
 fn prepare_vocab_for_compile(vocab: &PyVocab) {
-    vocab.inner.__prepare_for_compile();
+    vocab.inner.prepare_for_compile();
 }
 
 #[pyfunction]
 fn compile_grammar_def_json(grammar_def_json: &str, vocab: &PyVocab) -> PyResult<PyConstraint> {
-    let constraint = glrmask::Constraint::__compile_grammar_def_json(grammar_def_json, &vocab.inner)
+    let constraint = glrmask::Constraint::compile_grammar_def_json(grammar_def_json, &vocab.inner)
         .map_err(|e| PyValueError::new_err(format!("{e}")))?;
     let max_token = vocab.inner.max_token_id();
     Ok(PyConstraint {
@@ -922,6 +923,6 @@ fn compile_grammar_def_json(grammar_def_json: &str, vocab: &PyVocab) -> PyResult
 
 #[pyfunction]
 fn dump_json_schema_grammar_glrm(schema_json: &str) -> PyResult<String> {
-    glrmask::Constraint::__dump_json_schema_grammar_glrm(schema_json)
+    glrmask::Constraint::dump_json_schema_grammar_glrm(schema_json)
         .map_err(|e| PyValueError::new_err(format!("{e}")))
 }

@@ -12,7 +12,7 @@ pub(crate) use artifact::{CommitTemplateDfas, DynamicMaskVocab};
 #[allow(unused_imports)]
 pub use crate::compiler::glr::parser::{AdvanceTrace, AdvanceTraceStep};
 #[allow(unused_imports)]
-pub use commit::profile::GssProfileSummary;
+pub use commit::profile::{CommitProfile, GssProfileSummary, PerAdvanceEntry};
 pub use constraint::Constraint;
 #[allow(unused_imports)]
 pub use mask::profile::MaskProfile;
