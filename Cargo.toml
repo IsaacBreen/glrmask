@@ -40,73 +40,60 @@ thiserror = "1"
 [dev-dependencies]
 criterion = "0.5"
 pretty_assertions = "1"
+# Enable the unstable bridge only while building this package's tests,
+# examples, and benchmarks. Normal dependency builds keep the narrow API.
+glrmask_internal_dev = { package = "glrmask", path = ".", features = ["internal-api"] }
 
 [[bench]]
 name = "cfa_sweep_schema_build_single_threaded"
 harness = false
-required-features = ["internal-api"]
 
 [[bench]]
 name = "cfa_sweep_schema_build_multithreaded"
 harness = false
-required-features = ["internal-api"]
 
 [[bench]]
 name = "bounded_string_array_close"
 harness = false
-required-features = ["internal-api"]
 
 [[example]]
 name = "profile_glr"
-required-features = ["internal-api"]
 
 [[test]]
 name = "integration"
-required-features = ["internal-api"]
 
 [[test]]
 name = "mre"
-required-features = ["internal-api"]
 
 [[test]]
 name = "o4836_unicode_escape_key"
-required-features = ["internal-api"]
 
 [[test]]
 name = "json_schema_unicode_escape_characterization"
-required-features = ["internal-api"]
 
 [[test]]
 name = "o35155_tokenizer_scaling"
-required-features = ["internal-api"]
 
 [[test]]
 name = "o25804_mask_commit_mismatch"
-required-features = ["internal-api"]
 
 [[test]]
 name = "ordered_anyof_ambiguity"
-required-features = ["internal-api"]
 
 [[test]]
 name = "snowplow_hostname_replay_mre"
-required-features = ["internal-api"]
 
 [[test]]
 name = "direct_glrm_ordered_suffix_fixed_n5"
-required-features = ["internal-api"]
 
 [[test]]
 name = "direct_glrm_ordered_suffix_ambiguity"
-required-features = ["internal-api"]
 
 [[test]]
 name = "o13029_unit_inlining_false_negative"
-required-features = ["internal-api"]
 
 [[test]]
 name = "o15627_schema_gss_split_mre"
-required-features = ["internal-api"]
 
 [workspace]
 members = [

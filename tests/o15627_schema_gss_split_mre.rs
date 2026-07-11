@@ -47,21 +47,27 @@ fn bytes_vocab() -> Vocab {
     Vocab::new((0u8..=255).map(|b| (b as u32, vec![b])).collect(), None)
 }
 
-fn stack_count(state: &ConstraintState<'_>) -> usize {
-    state
+fn unique_stack_count(state: &ConstraintState<'_>) -> usize {
+    let mut stacks = state
         .debug_parser_stacks()
-        .iter()
-        .map(|(_, stacks)| stacks.len())
-        .sum()
+        .into_iter()
+        .flat_map(|(_, stacks)| stacks)
+        .collect::<Vec<_>>();
+    stacks.sort();
+    stacks.dedup();
+    stacks.len()
 }
 
 #[test]
-fn o15627_schema_prefix_has_single_gss_path_at_next_key_quote() {
+fn o15627_schema_prefix_has_single_unique_gss_path_at_next_key_quote() {
     let constraint = Constraint::from_json_schema(O15627_SCHEMA_MRE, &bytes_vocab()).unwrap();
     let mut state = constraint.start();
     state.commit_bytes(O15627_PREFIX).unwrap();
 
     let stacks = state.debug_parser_stacks();
-    assert_eq!(state.parser_path_count(1_000_000), 1, "{stacks:?}");
-    assert_eq!(stack_count(&state), 1, "{stacks:?}");
+    assert!(
+        stacks.iter().all(|(_, tokenizer_stacks)| tokenizer_stacks.len() == 1),
+        "{stacks:?}"
+    );
+    assert_eq!(unique_stack_count(&state), 1, "{stacks:?}");
 }

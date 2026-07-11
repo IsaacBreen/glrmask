@@ -427,6 +427,7 @@ dependencies = [
  "criterion",
  "dashmap",
  "derivre",
+ "glrmask",
  "hashbrown 0.15.5",
  "im",
  "once_cell",

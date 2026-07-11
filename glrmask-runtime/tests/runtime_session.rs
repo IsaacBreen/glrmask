@@ -1,3 +1,4 @@
+use glrmask::__private::ConstraintExt as _;
 use glrmask::{Constraint, Vocab};
 use glrmask_runtime::{RuntimeArtifact, RuntimeConstraint};
 
