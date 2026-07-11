@@ -16,9 +16,7 @@ use crate::automata::lexer::compile::{
 use crate::automata::lexer::regex::parse_regex;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::regex::Expr;
-use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
-use crate::automata::weighted::nwa::NWA;
 use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_possible_matches as cpm;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -794,69 +792,15 @@ fn build_parser_dwa_for_terminal_family(
     Some(MappedArtifact::new(parser_dwa, internal_ids))
 }
 
-fn combine_terminal_dwa_families(
-    terminal_dwas: &TerminalDwaFamilies,
-) -> MappedArtifact<TerminalAutomaton> {
-    let inputs = [terminal_dwas.l1.as_ref(), terminal_dwas.l2p.as_ref()]
-        .into_iter()
-        .flatten()
-        .map(|family| MappedArtifact::new(family.artifact().clone(), family.id_map().clone()))
-        .collect::<Vec<_>>();
-    assert!(!inputs.is_empty(), "terminal DWA families must not be empty");
-    if inputs.len() == 1 {
-        return inputs.into_iter().next().unwrap();
-    }
-
-    let reconciled = MappedArtifact::reconcile_vec(inputs);
-    let (automata, id_map) = reconciled.into_parts();
-    let mut union = NWA::new(
-        id_map.num_tsids(),
-        id_map.max_internal_token_id(),
-    );
-    let mut body = union.body();
-    for automaton in automata {
-        let branch = match automaton {
-            TerminalAutomaton::Dwa(dwa) => dwa.to_nwa(),
-            TerminalAutomaton::TokenDeterministicNwa(nwa) => nwa,
-        };
-        body = union.union_in_place(&branch, &body);
-    }
-    union.set_start_states(body.start_states);
-    let dwa = determinize(&union).expect("combined terminal-family NWA must determinize");
-    MappedArtifact::new(TerminalAutomaton::Dwa(dwa), id_map)
-}
-
 fn build_and_merge_parser_dwa_families(
     terminal_dwas: &TerminalDwaFamilies,
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
-    ignore_terminal: Option<u32>,
+    _ignore_terminal: Option<u32>,
     templates: Templates,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
 ) -> MappedParserDwa {
-    // Epsilon tokenizers retain several live lexer residuals across token
-    // boundaries. Building parser DWAs independently by L1/L2P family loses
-    // cross-family residual continuations; ignore terminals are one instance
-    // of the same problem because they are identity parser actions. Combine the
-    // terminal automata first and build one parser DWA, matching the established
-    // pre-family construction.
-    if tokenizer.has_epsilon_transitions() || ignore_terminal.is_some() {
-        let combined = combine_terminal_dwa_families(terminal_dwas);
-        let parser = build_parser_dwa_for_terminal_family(
-            "combined_epsilon_or_ignore",
-            Some(&combined),
-            table,
-            grammar,
-            templates,
-            vocab,
-            false,
-        )
-        .expect("combined epsilon/ignore terminal family must produce a parser DWA");
-        let (dwa, id_map) = parser.into_parts();
-        return MappedArtifact::new((dwa, ParserTopAccept::default()), id_map);
-    }
-
     let collapse_immediate_acceptance = !tokenizer.has_epsilon_transitions();
     let l1_templates = templates.clone();
     let (l1_parser, l2p_parser) = rayon::join(
@@ -884,14 +828,14 @@ fn build_and_merge_parser_dwa_families(
         },
     );
     let parser_dwas: Vec<MappedArtifact<DWA>> = l1_parser.into_iter().chain(l2p_parser).collect();
-    let (mapped_dwa, top_accept) =
-        crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas_with_top_accept(
+    let mapped_dwa =
+        crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas(
             parser_dwas,
             tokenizer.num_states() as usize,
             vocab.max_token_id(),
         );
     let (dwa, id_map) = mapped_dwa.into_parts();
-    MappedArtifact::new((dwa, ParserTopAccept(top_accept)), id_map)
+    MappedArtifact::new((dwa, ParserTopAccept::default()), id_map)
 }
 
 #[derive(Clone, Copy)]

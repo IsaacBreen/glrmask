@@ -199,6 +199,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                         // analysis verifies flat-table compatibility before using it.
                         Some(flat_trans),
                         initial_state_map,
+                        true,
                     );
                     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
                     return ((result, 0.0), (None, 0.0), elapsed_ms);
@@ -248,6 +249,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                 // analysis verifies flat-table compatibility before using it.
                                 Some(flat_trans),
                                 initial_state_map,
+                                true,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         }

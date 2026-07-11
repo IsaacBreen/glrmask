@@ -531,6 +531,17 @@ fn pm_vocab_equiv_enabled() -> bool {
         .unwrap_or(true)
 }
 
+#[inline]
+fn pm_vocab_equiv_supported(tokenizer: &Tokenizer) -> bool {
+    // This pre-pass is an optional compression of the canonical exact trie
+    // collector.  Its signatures assume one scalar scanner state after every
+    // byte.  An epsilon or deterministic-dispatch tokenizer carries a state
+    // set, so applying the flat-DFA analysis there is both expensive and outside
+    // the algorithm's proven domain.  The direct collector below is the exact
+    // implementation for those tokenizers.
+    !tokenizer.has_epsilon_transitions()
+}
+
 #[derive(Clone, Copy)]
 struct PmTokenOutcome {
     terminals: u128,
@@ -1865,9 +1876,7 @@ pub(crate) fn compute_constraint_possible_matches_for_vocab(
     vocab: &Vocab,
     _config: ConstraintPossibleMatchesConfig,
 ) -> ConstraintPossibleMatchesComputation {
-    if pm_vocab_equiv_enabled()
-        && (!tokenizer.has_epsilon_transitions() || tokenizer.has_deterministic_dispatch())
-    {
+    if pm_vocab_equiv_enabled() && pm_vocab_equiv_supported(tokenizer) {
         let (full_artifacts, full_profile) = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
         let runtime_dynamic_vocab = runtime_dynamic_vocab_artifacts(&full_artifacts);
         emit_ordered_vocab_cache_profile(full_profile);
@@ -1963,6 +1972,7 @@ mod tests {
             &[0, 1, 2, 2],
         );
         assert!(tokenizer.has_deterministic_dispatch());
+        assert!(!pm_vocab_equiv_supported(&tokenizer));
 
         let entries = vec![
             (0, b"a".to_vec()),
