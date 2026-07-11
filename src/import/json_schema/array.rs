@@ -87,7 +87,12 @@ impl<'a> Lowerer<'a> {
         max_items: Option<usize>,
     ) -> bool {
         let Some(item_complexity) = repeat_complexity else {
-            return true;
+            // Unknown-cost bounded repetition must not silently become one
+            // enormous terminal.  Small bounded arrays retain the compact
+            // whole-array path; unbounded arrays retain their loop-shaped
+            // terminal, which does not unroll a finite count.
+            return max_items
+                .is_none_or(|max| max <= self.config.repeat_chunk_size.max(2));
         };
         let repetitions = max_items.unwrap_or(1).max(1);
         item_complexity.saturating_mul(repetitions)
