@@ -9,7 +9,9 @@ use crate::Vocab;
 use crate::automata::lexer::compile::{
     build_regex,
     build_regex_partitioned,
+    build_regex_partitioned_with_adaptive,
     build_regex_partitioned_with_profile_labels,
+    build_regex_partitioned_with_profile_labels_and_adaptive,
     build_regex_with_profile_labels,
     factor_regex_expr,
 };
@@ -399,36 +401,44 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
         }
     }
     let partition_ids = lexer_partition_ids(grammar);
-    build_tokenizer_from_exprs_partitioned(
-        &exprs,
-        Some(&terminal_labels),
-        &partition_ids,
-    )
+    build_tokenizer_from_exprs_partitioned(&exprs, Some(&terminal_labels), &partition_ids)
 }
 
-fn lexer_partition_ids(grammar: &GrammarDef) -> Vec<u32> {
+fn env_flag(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            other => panic!(
+                "invalid {name}={other:?}; expected one of 1/0, true/false, yes/no, or on/off"
+            ),
+        },
+        Err(_) => default,
+    }
+}
+
+fn lexer_partition_ids_with_options(
+    grammar: &GrammarDef,
+    singleton_all_terminals: bool,
+) -> Vec<u32> {
     // Named lexer groups opt into partitioning. Unspecified terminals remain
     // monolithic by default so existing grammars keep their historical lexer
-    // shape; the environment override remains useful for stress testing.
-    let separate_unspecified = std::env::var("GLRMASK_LEXER_PARTITION_MODE")
-        .map(|value| !value.trim().eq_ignore_ascii_case("monolithic"))
-        .unwrap_or(false);
+    // shape. The global singleton override deliberately takes precedence over
+    // named groups because it is an exact stress mode.
     let mut ids_by_key = BTreeMap::<String, u32>::new();
     let mut next_id = 0u32;
     (0..grammar.terminals.len())
         .map(|terminal| {
             let terminal = terminal as u32;
-            let key = grammar
-                .lexer_partitions
-                .get(&terminal)
-                .map(|partition| format!("named:{partition}"))
-                .unwrap_or_else(|| {
-                    if separate_unspecified {
-                        format!("terminal:{terminal}")
-                    } else {
-                        "default".to_string()
-                    }
-                });
+            let key = if singleton_all_terminals {
+                format!("terminal:{terminal}")
+            } else {
+                grammar
+                    .lexer_partitions
+                    .get(&terminal)
+                    .map(|partition| format!("named:{partition}"))
+                    .unwrap_or_else(|| "default".to_string())
+            };
             *ids_by_key.entry(key).or_insert_with(|| {
                 let id = next_id;
                 next_id += 1;
@@ -436,6 +446,85 @@ fn lexer_partition_ids(grammar: &GrammarDef) -> Vec<u32> {
             })
         })
         .collect()
+}
+
+fn lexer_partition_ids(grammar: &GrammarDef) -> Vec<u32> {
+    let singleton_all_terminals = env_flag("GLRMASK_LEXER_SINGLETONS", false);
+    lexer_partition_ids_with_options(grammar, singleton_all_terminals)
+}
+
+pub(crate) fn build_tokenizer_with_partition_options(
+    grammar: &GrammarDef,
+    singleton_all_terminals: bool,
+    adaptive: bool,
+) -> Tokenizer {
+    let exprs = grammar
+        .terminals
+        .iter()
+        .map(terminal_expr)
+        .map(factor_regex_expr)
+        .collect::<Vec<_>>();
+    let labels = grammar
+        .terminals
+        .iter()
+        .enumerate()
+        .map(|(index, _)| grammar.terminal_display_name(index as u32))
+        .collect::<Vec<_>>();
+    let partition_ids = lexer_partition_ids_with_options(grammar, singleton_all_terminals);
+    build_tokenizer_from_exprs_partitioned_with_adaptive(
+        &exprs,
+        Some(&labels),
+        &partition_ids,
+        adaptive,
+    )
+}
+
+#[cfg(test)]
+mod lexer_partition_plan_tests {
+    use std::collections::BTreeSet;
+
+    use super::lexer_partition_ids_with_options;
+    use crate::grammar::flat::{GrammarDef, Terminal};
+
+    fn grammar_with_terminals(count: u32) -> GrammarDef {
+        GrammarDef {
+            terminals: (0..count)
+                .map(|id| Terminal::Literal {
+                    id,
+                    bytes: vec![b'a' + id as u8],
+                })
+                .collect(),
+            ..GrammarDef::default()
+        }
+    }
+
+    #[test]
+    fn unspecified_terminals_are_monolithic_by_default() {
+        let grammar = grammar_with_terminals(3);
+        assert_eq!(lexer_partition_ids_with_options(&grammar, false), vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn global_singleton_override_isolates_named_and_unnamed_terminals() {
+        let mut grammar = grammar_with_terminals(3);
+        grammar.lexer_partitions.insert(0, "words".to_string());
+        grammar.lexer_partitions.insert(1, "words".to_string());
+
+        let ids = lexer_partition_ids_with_options(&grammar, true);
+        assert_eq!(ids.iter().copied().collect::<BTreeSet<_>>().len(), 3);
+    }
+
+    #[test]
+    fn named_partition_membership_is_preserved_by_partition_planning() {
+        let mut grammar = grammar_with_terminals(3);
+        grammar.lexer_partitions.insert(0, "words".to_string());
+        grammar.lexer_partitions.insert(1, "words".to_string());
+        grammar.lexer_partitions.insert(2, "numbers".to_string());
+
+        let ids = lexer_partition_ids_with_options(&grammar, false);
+        assert_eq!(ids[0], ids[1]);
+        assert_ne!(ids[0], ids[2]);
+    }
 }
 
 pub(crate) fn build_tokenizer_from_exprs(
@@ -477,9 +566,43 @@ pub(crate) fn build_tokenizer_from_exprs_partitioned(
     profile_labels: Option<&[String]>,
     partition_ids: &[u32],
 ) -> Tokenizer {
+    build_tokenizer_from_exprs_partitioned_impl(exprs, profile_labels, partition_ids, None)
+}
+
+pub(crate) fn build_tokenizer_from_exprs_partitioned_with_adaptive(
+    exprs: &[Expr],
+    profile_labels: Option<&[String]>,
+    partition_ids: &[u32],
+    adaptive: bool,
+) -> Tokenizer {
+    build_tokenizer_from_exprs_partitioned_impl(
+        exprs,
+        profile_labels,
+        partition_ids,
+        Some(adaptive),
+    )
+}
+
+fn build_tokenizer_from_exprs_partitioned_impl(
+    exprs: &[Expr],
+    profile_labels: Option<&[String]>,
+    partition_ids: &[u32],
+    adaptive_override: Option<bool>,
+) -> Tokenizer {
     let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
     let started_at = Instant::now();
-    let regex = if let Some(labels) = profile_labels {
+    let regex = if let Some(adaptive) = adaptive_override {
+        if let Some(labels) = profile_labels {
+            build_regex_partitioned_with_profile_labels_and_adaptive(
+                exprs,
+                labels,
+                partition_ids,
+                adaptive,
+            )
+        } else {
+            build_regex_partitioned_with_adaptive(exprs, partition_ids, adaptive)
+        }
+    } else if let Some(labels) = profile_labels {
         build_regex_partitioned_with_profile_labels(exprs, labels, partition_ids)
     } else {
         build_regex_partitioned(exprs, partition_ids)
@@ -1194,6 +1317,7 @@ fn compile_prepared_with_profile(
         prepared_grammar,
         vocab,
         GlrTableConstruction::ExperimentalCoreMerged,
+        None,
     )
 }
 
@@ -1201,6 +1325,7 @@ fn compile_prepared_with_profile_and_table_construction(
     prepared_grammar: GrammarDef,
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
+    lexer_adaptive_override: Option<bool>,
 ) -> (Constraint, CompilePhaseProfile) {
     let interner_cleanup = crate::ds::weight::defer_weight_interner_cleanup();
     let result = run_with_compile_thread_pool(|| {
@@ -1223,10 +1348,20 @@ fn compile_prepared_with_profile_and_table_construction(
             let prepared_grammar_ref = &prepared_grammar;
             let analysis_started_for_tokenizer = analysis_started_at.clone();
             let compile_started_for_tokenizer = compile_started_at.clone();
+            let lexer_adaptive_override = lexer_adaptive_override;
 
             scope.spawn(move |scope| {
                 let tok_started = Instant::now();
-                let mut tokenizer = build_tokenizer(prepared_grammar_ref);
+                let mut tokenizer = lexer_adaptive_override.map_or_else(
+                    || build_tokenizer(prepared_grammar_ref),
+                    |adaptive| {
+                        build_tokenizer_with_partition_options(
+                            prepared_grammar_ref,
+                            false,
+                            adaptive,
+                        )
+                    },
+                );
                 let tokenizer_construct_ms = elapsed_ms(tok_started);
                 let isolate_started = Instant::now();
                 tokenizer.isolate_start_state_and_drain_nullable_terminals();
@@ -1883,6 +2018,23 @@ pub(crate) fn compile_prepared_with_table_construction(
         prepared_grammar,
         vocab,
         default_table_construction,
+        None,
+    )
+    .0
+}
+
+#[cfg(test)]
+pub(crate) fn compile_owned_with_lexer_adaptive(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    adaptive: bool,
+) -> Constraint {
+    let prepared_grammar = prepare_grammar_transforms_only(grammar);
+    compile_prepared_with_profile_and_table_construction(
+        prepared_grammar,
+        vocab,
+        GlrTableConstruction::ExperimentalCoreMerged,
+        Some(adaptive),
     )
     .0
 }
@@ -1912,6 +2064,7 @@ pub(crate) fn compile_owned_profiled_with_table_construction(
         prepared_grammar,
         vocab,
         default_table_construction,
+        None,
     );
     profile.prepare_ms = prepare_ms;
     profile.total_ms = elapsed_ms(total_started_at);

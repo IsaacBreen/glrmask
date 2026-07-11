@@ -3717,7 +3717,7 @@ mod tests {
             ],
             None,
         );
-        let constraint = Constraint::from_glrm_grammar(
+        let grammar = crate::grammar::glrm::from_glrm(
             r#"
                 start start;
                 ignore WS;
@@ -3732,9 +3732,14 @@ mod tests {
                 nt item ::= A | B | C;
                 nt start ::= item item? item?;
             "#,
-            &vocab,
         )
         .unwrap();
+        let grammar = crate::grammar::ast::lower(&grammar).unwrap();
+        let constraint = crate::compiler::pipeline::compile_owned_with_lexer_adaptive(
+            grammar,
+            &vocab,
+            false,
+        );
         assert!(constraint.tokenizer.has_epsilon_transitions());
 
         let mut frontier = vec![(
@@ -3828,7 +3833,7 @@ mod tests {
     #[test]
     fn epsilon_full_width_terminal_with_empty_accumulators_uses_fast_path() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
-        let constraint = Constraint::from_glrm_grammar(
+        let grammar = crate::grammar::glrm::from_glrm(
             r#"
                 start start;
                 lexer group left ::= A;
@@ -3837,9 +3842,14 @@ mod tests {
                 t B ::= "b";
                 nt start ::= A | B;
             "#,
-            &vocab,
         )
         .unwrap();
+        let grammar = crate::grammar::ast::lower(&grammar).unwrap();
+        let constraint = crate::compiler::pipeline::compile_owned_with_lexer_adaptive(
+            grammar,
+            &vocab,
+            false,
+        );
         assert!(constraint.tokenizer.has_deterministic_dispatch());
 
         let mut state = constraint.start();

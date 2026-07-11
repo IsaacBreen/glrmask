@@ -2155,7 +2155,10 @@ mod tests {
         token_has_active_l2p_boundary_words, token_l2p_route_hint,
     };
     use crate::automata::lexer::ast::Expr;
-    use crate::automata::lexer::compile::{build_regex, build_regex_partitioned};
+    use crate::automata::lexer::compile::{
+        build_regex,
+        build_regex_partitioned_with_adaptive,
+    };
     use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::automata::lexer::Lexer;
     use crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table;
@@ -2236,10 +2239,11 @@ mod tests {
             Expr::U8Seq(b"a".to_vec()),
             Expr::U8Seq(b"b".to_vec()),
         ];
-        let tokenizer = build_regex_partitioned(&expressions, &[0, 1]).into_tokenizer(
-            expressions.len() as u32,
-            Some(Arc::from(expressions.into_boxed_slice())),
-        );
+        let tokenizer = build_regex_partitioned_with_adaptive(&expressions, &[0, 1], false)
+            .into_tokenizer(
+                expressions.len() as u32,
+                Some(Arc::from(expressions.into_boxed_slice())),
+            );
         assert!(tokenizer.has_deterministic_dispatch());
 
         let mut allowed = BitSet::new(2);
