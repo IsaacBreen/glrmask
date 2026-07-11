@@ -1393,20 +1393,47 @@ mod tests {
     use super::FinalMaskMapping;
 
     #[test]
-    fn dense_or_preserves_bits_from_previous_paths() {
-        let mapping = FinalMaskMapping::new(
-            &[vec![0], vec![1], vec![2], vec![3]],
-            1,
-        );
-        let dense = [0b0111u64];
+    fn dense_or_matches_set_union_exhaustively_on_small_mappings() {
+        let mappings = [
+            vec![vec![0], vec![1], vec![2], vec![3]],
+            vec![vec![0, 4], vec![1], vec![2, 5], vec![3]],
+            vec![vec![0, 2], vec![1, 4], vec![3, 5]],
+        ];
 
-        let mut reference = [1u32 << 3];
-        mapping.or_dense_to_buf(&dense, &mut reference, false);
-        assert_eq!(reference, [0b1111]);
+        for internal_to_original in mappings {
+            let mapping = FinalMaskMapping::new(&internal_to_original, 1);
+            let internal_count = internal_to_original.len();
+            for selected in 0u64..(1u64 << internal_count) {
+                let dense = [selected];
+                let selected_image = internal_to_original
+                    .iter()
+                    .enumerate()
+                    .filter(|(internal, _)| selected & (1u64 << internal) != 0)
+                    .flat_map(|(_, originals)| originals.iter().copied())
+                    .fold(0u32, |mask, original| mask | (1u32 << original));
 
-        let mut fast = [1u32 << 3];
-        mapping.or_dense_to_buf_fast(&dense, &mut fast, false);
-        assert_eq!(fast, [0b1111]);
+                for initial in 0u32..=0xff {
+                    let expected = initial | selected_image;
+                    let buf_zeroed = initial == 0;
+
+                    let mut profiled = [initial];
+                    mapping.or_dense_to_buf(&dense, &mut profiled, buf_zeroed);
+                    assert_eq!(
+                        profiled,
+                        [expected],
+                        "profiled OR mismatch: mapping={internal_to_original:?} selected={selected:#b} initial={initial:#010b}"
+                    );
+
+                    let mut fast = [initial];
+                    mapping.or_dense_to_buf_fast(&dense, &mut fast, buf_zeroed);
+                    assert_eq!(
+                        fast,
+                        [expected],
+                        "fast OR mismatch: mapping={internal_to_original:?} selected={selected:#b} initial={initial:#010b}"
+                    );
+                }
+            }
+        }
     }
 }
 

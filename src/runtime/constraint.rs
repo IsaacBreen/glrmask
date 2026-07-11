@@ -2646,7 +2646,7 @@ mod dense_internal_token_mask_tests {
     }
 
     #[test]
-    fn dense_or_preserves_bits_from_previous_paths_without_final_mapping() {
+    fn dense_or_matches_set_union_exhaustively_without_final_mapping() {
         let vocab = Vocab::new(
             vec![
                 (0, b"a".to_vec()),
@@ -2668,25 +2668,46 @@ mod dense_internal_token_mask_tests {
         )
         .unwrap();
         constraint.final_mask_mapping = Default::default();
-
-        let missing_internal = constraint.original_token_to_internal[3] as usize;
         let n_internal = constraint.internal_token_to_tokens.len();
-        let mut dense = vec![!0u64; n_internal.div_ceil(64)];
-        if let Some(last) = dense.last_mut() {
-            let valid_bits = n_internal % 64;
-            if valid_bits != 0 {
-                *last &= (1u64 << valid_bits) - 1;
+        assert!(n_internal <= 16, "small exhaustive test requires a tiny internal vocab");
+
+        for selected in 0u64..(1u64 << n_internal) {
+            let mut dense = vec![0u64; n_internal.div_ceil(64)];
+            let mut selected_image = 0u32;
+            for (internal, originals) in constraint.internal_token_to_tokens.iter().enumerate() {
+                if selected & (1u64 << internal) == 0 {
+                    continue;
+                }
+                dense[internal / 64] |= 1u64 << (internal % 64);
+                for &original in originals {
+                    selected_image |= 1u32 << original;
+                }
+            }
+
+            for initial in 0u32..=0x0f {
+                let expected = initial | selected_image;
+                let buf_zeroed = initial == 0;
+
+                let mut profiled = vec![0u32; constraint.mask_len()];
+                profiled[0] = initial;
+                constraint.or_internal_dense_to_buf(&dense, &mut profiled, buf_zeroed);
+                assert_eq!(
+                    profiled[0],
+                    expected,
+                    "profiled OR mismatch: selected={selected:#b} initial={initial:#06b} internal_to_original={:?}",
+                    constraint.internal_token_to_tokens,
+                );
+
+                let mut fast = vec![0u32; constraint.mask_len()];
+                fast[0] = initial;
+                constraint.or_internal_dense_to_buf_fast(&dense, &mut fast, buf_zeroed);
+                assert_eq!(
+                    fast[0],
+                    expected,
+                    "fast OR mismatch: selected={selected:#b} initial={initial:#06b} internal_to_original={:?}",
+                    constraint.internal_token_to_tokens,
+                );
             }
         }
-        dense[missing_internal / 64] &= !(1u64 << (missing_internal % 64));
-
-        let mut buf = vec![0u32; constraint.mask_len()];
-        buf[3 / 32] |= 1u32 << (3 % 32);
-        constraint.or_internal_dense_to_buf(&dense, &mut buf, false);
-        assert_ne!(
-            buf[3 / 32] & (1u32 << (3 % 32)),
-            0,
-            "OR conversion must not clear a token admitted by an earlier parser path"
-        );
     }
 }
