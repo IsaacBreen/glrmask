@@ -16,6 +16,7 @@ use crate::ds::weight::Weight;
 #[derive(Debug, Clone)]
 pub enum TerminalAutomaton {
     Dwa(DWA),
+    /// An epsilon-free NWA that is deterministic over `(label, token)`.
     TokenDeterministicNwa(NWA),
 }
 

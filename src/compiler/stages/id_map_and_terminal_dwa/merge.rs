@@ -20,6 +20,7 @@ use crate::automata::weighted::minimize_token_deterministic_nwa::{
     minimize_token_deterministic_nwa_owned, quotient_disjoint_source_nwa_owned,
 };
 use crate::automata::weighted::nwa::NWA;
+use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::mapped_artifact::MappedArtifact;
 use crate::ds::weight::Weight;
@@ -892,6 +893,7 @@ fn try_graft_immediate_parser_dwa(immediate: &DWA, mut other: DWA) -> Option<DWA
         let existing = original_start
             .transitions
             .get(&label)
+            .or_else(|| original_start.transitions.get(&DEFAULT_LABEL))
             .cloned();
         if let Some((target, edge_weight)) = existing {
             let key = (target, edge_weight.ptr_key(), add_weight.ptr_key());
@@ -964,73 +966,52 @@ pub(crate) fn merge_mapped_parser_dwas(
         let mut iter = inputs.into_iter();
         let left = iter.next().unwrap();
         let right = iter.next().unwrap();
-        let reconcile_started_at = Instant::now();
         let left_is_immediate = immediate_dwa_accepting_edges(left.artifact()).is_some();
         let right_is_immediate = immediate_dwa_accepting_edges(right.artifact()).is_some();
-        let (left_dwa, right_dwa, common_id_map, reconcile_mode) = if left_is_immediate {
-            // Put the large non-immediate family first so descendants of each
-            // of its classes remain contiguous in the common refinement.
-            let reconciled = right.pair_forced_common(left);
-            let ((primary_dwa, immediate_dwa), common_id_map) = reconciled.into_parts();
-            (
-                immediate_dwa,
-                primary_dwa,
-                common_id_map,
-                "common_refinement_primary_first",
-            )
-        } else if right_is_immediate {
-            let reconciled = left.pair_forced_common(right);
-            let ((primary_dwa, immediate_dwa), common_id_map) = reconciled.into_parts();
-            (
-                immediate_dwa,
-                primary_dwa,
-                common_id_map,
-                "common_refinement_primary_first",
-            )
+
+        // Reconcile with the deeper family first so refinements of each L2P
+        // class remain contiguous. Then form the exact deterministic union.
+        // Do not run the generic weighted minimizer here: parser DWAs interpret
+        // DEFAULT_LABEL as fallback, while that minimizer treats labels as an
+        // ordinary alphabet and can change the parser language.
+        let reconcile_started_at = Instant::now();
+        let reconciled = if left_is_immediate && !right_is_immediate {
+            let paired = right.pair_forced_common(left);
+            let ((right, left), id_map) = paired.into_parts();
+            MappedArtifact::new(vec![left, right], id_map)
+        } else if right_is_immediate && !left_is_immediate {
+            let paired = left.pair_forced_common(right);
+            let ((left, right), id_map) = paired.into_parts();
+            MappedArtifact::new(vec![left, right], id_map)
         } else {
-            let reconciled = MappedArtifact::from((left, right));
-            let ((left_dwa, right_dwa), common_id_map) = reconciled.into_parts();
-            (left_dwa, right_dwa, common_id_map, "common_refinement")
+            MappedArtifact::reconcile_vec(vec![left, right])
         };
         let reconcile_ms = reconcile_started_at.elapsed().as_secs_f64() * 1000.0;
-        let graft_started_at = Instant::now();
-        if let Some(dwa) = try_graft_immediate_parser_dwa(&left_dwa, right_dwa.clone())
-            .or_else(|| try_graft_immediate_parser_dwa(&right_dwa, left_dwa.clone()))
-        {
-            let graft_ms = graft_started_at.elapsed().as_secs_f64() * 1000.0;
-            if compile_profile_enabled() {
-                eprintln!(
-                    "[glrmask/profile][parser_dwa_merge] inputs=2 mode=immediate_graft reconcile_mode={} reconcile_ms={:.3} graft_ms={:.3} states={} transitions={} total_ms={:.3}",
-                    reconcile_mode,
-                    reconcile_ms,
-                    graft_ms,
-                    dwa.num_states(),
-                    dwa.num_transitions(),
-                    total_started_at.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
-            let quotient_started_at = Instant::now();
-            let before_states = dwa.num_states();
-            let before_transitions = dwa.num_transitions();
-            let dwa = exact_quotient_acyclic_dwa(dwa);
-            if compile_profile_enabled() {
-                eprintln!(
-                    "[glrmask/profile][parser_dwa_exact_quotient] states={}->{} transitions={}->{} total_ms={:.3}",
-                    before_states,
-                    dwa.num_states(),
-                    before_transitions,
-                    dwa.num_transitions(),
-                    quotient_started_at.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
-            return MappedArtifact::new(dwa, common_id_map);
-        }
+        let (dwas, common_id_map) = reconciled.into_parts();
 
-        let inputs = vec![
-            MappedArtifact::new(left_dwa, common_id_map.clone()),
-            MappedArtifact::new(right_dwa, common_id_map),
-        ];
-        return merge_mapped_dwas(inputs, num_tokenizer_states, max_token_id);
+        let union_started_at = Instant::now();
+        let mut union = NWA::new(
+            common_id_map.num_tsids(),
+            common_id_map.max_internal_token_id(),
+        );
+        let mut body = union.body();
+        for dwa in dwas {
+            body = union.union_in_place(&dwa.to_nwa(), &body);
+        }
+        union.set_start_states(body.start_states);
+        let dwa = determinize(&union).expect("parser-family NWA union must determinize");
+        let union_ms = union_started_at.elapsed().as_secs_f64() * 1000.0;
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][parser_dwa_merge] inputs=2 mode=exact_raw_union reconcile_ms={:.3} union_ms={:.3} states={} transitions={} total_ms={:.3}",
+                reconcile_ms,
+                union_ms,
+                dwa.num_states(),
+                dwa.num_transitions(),
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return MappedArtifact::new(dwa, common_id_map);
     }
 
     let locals: Vec<LocalIdMapTerminalDwa> = inputs
@@ -1519,6 +1500,7 @@ pub(crate) fn try_merge_id_maps_and_token_deterministic_nwa(
         },
     ))
 }
+
 
 /// Merge already-compacted partition outputs into one global DWA.
 ///
