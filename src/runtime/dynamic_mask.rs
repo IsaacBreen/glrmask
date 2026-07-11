@@ -1343,17 +1343,23 @@ nt start ::= item item? item?;
                         if grouped && a == b {
                             continue;
                         }
-                        let grammar = format!(
-                            "start start;\n{ignore}{grouping}{}{}nt item ::= A | B;\nnt start ::= item item? item?;\n",
-                            rule("A", a),
-                            rule("B", b),
-                        );
-                        let constraint =
-                            Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
-                        let context = format!(
-                            "finite grouped={grouped} ignored={ignored} A={a:#06b} B={b:#06b}\ngrammar:\n{grammar}"
-                        );
-                        assert_dynamic_parity_on_reachable_states(&constraint, 3, &context);
+                        for start_rule in [
+                            "nt item ::= A | B;\nnt start ::= item item? item?;",
+                            "nt start ::= A A | B B;",
+                            "nt start ::= A B | B A;",
+                        ] {
+                            let grammar = format!(
+                                "start start;\n{ignore}{grouping}{}{}{start_rule}\n",
+                                rule("A", a),
+                                rule("B", b),
+                            );
+                            let constraint =
+                                Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+                            let context = format!(
+                                "finite grouped={grouped} ignored={ignored} A={a:#06b} B={b:#06b}\ngrammar:\n{grammar}"
+                            );
+                            assert_dynamic_parity_on_reachable_states(&constraint, 3, &context);
+                        }
                     }
                 }
 
