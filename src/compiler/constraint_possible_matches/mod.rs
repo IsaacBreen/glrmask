@@ -1932,7 +1932,7 @@ pub(crate) fn prepare_vocab_for_possible_matches(vocab: &Vocab) {
 mod tests {
     use super::*;
     use crate::automata::lexer::ast::Expr;
-    use crate::compiler::pipeline::build_tokenizer_from_exprs_partitioned;
+    use crate::compiler::pipeline::build_tokenizer_from_exprs_partitioned_with_adaptive;
     use std::collections::BTreeSet;
 
     fn directly_matched_terminals(
@@ -1966,10 +1966,11 @@ mod tests {
                 max: None,
             },
         ];
-        let tokenizer = build_tokenizer_from_exprs_partitioned(
+        let tokenizer = build_tokenizer_from_exprs_partitioned_with_adaptive(
             &expressions,
             None,
             &[0, 1, 2, 2],
+            false,
         );
         assert!(tokenizer.has_deterministic_dispatch());
         assert!(!pm_vocab_equiv_supported(&tokenizer));

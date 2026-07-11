@@ -1,5 +1,5 @@
 use crate::automata::lexer::Lexer;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::automata::lexer::tokenizer::{TokenizerExecResult, TokenizerStateSet};
@@ -8,8 +8,6 @@ use super::super::artifact::Constraint;
 
 pub(super) struct InitialCommitScan {
 	pub exec_results: FxHashMap<u32, TokenizerExecResult>,
-	pub remapped_tokenizer_states: FxHashMap<u32, TokenizerStateSet>,
-	pub accepted_terminals: FxHashMap<u32, FxHashSet<u32>>,
 }
 
 pub(super) fn execute_tokenizer_from_state_small(

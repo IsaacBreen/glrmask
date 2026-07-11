@@ -281,44 +281,14 @@ impl InitialCommitScan {
         state: &BTreeMap<u32, ParserGSS>,
         bytes: &[u8],
     ) -> Self {
-        let ignore_terminal = constraint.ignore_terminal;
         let mut exec_results = FxHashMap::default();
-        let mut remapped_tokenizer_states = FxHashMap::default();
-        let mut accepted_terminals = FxHashMap::<u32, FxHashSet<u32>>::default();
 
-        for (&tokenizer_state, parser_gss) in state {
-            let actionable_terminals = ActionableTerminals::from_gss(constraint, parser_gss);
+        for &tokenizer_state in state.keys() {
             let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
-
-            if !exec_result.end_state.is_empty() {
-                remapped_tokenizer_states.insert(tokenizer_state, exec_result.end_state.clone());
-            }
-
-            for matched in &exec_result.matches {
-                if is_ignored_terminal(ignore_terminal, matched.id)
-                    || !is_actionable_terminal(
-                        actionable_terminals.as_ref(),
-                        constraint,
-                        matched.id,
-                    )
-                {
-                    continue;
-                }
-
-                accepted_terminals
-                    .entry(tokenizer_state)
-                    .or_default()
-                    .insert(matched.id);
-            }
-
             exec_results.insert(tokenizer_state, exec_result);
         }
 
-        Self {
-            exec_results,
-            remapped_tokenizer_states,
-            accepted_terminals,
-        }
+        Self { exec_results }
     }
 
     fn take_exec_result(&mut self, tokenizer_state: u32) -> Option<TokenizerExecResult> {
@@ -403,51 +373,6 @@ fn collect_unique_actionable_matches(
         });
     }
     normalized
-}
-
-fn prune_initial_states(
-    state: &mut BTreeMap<u32, ParserGSS>,
-    accepted_terminals: &FxHashMap<u32, FxHashSet<u32>>,
-    remapped_tokenizer_states: &FxHashMap<u32, TokenizerStateSet>,
-) {
-    if accepted_terminals.is_empty()
-        && state
-            .values()
-            .all(|parser_state| parser_state.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()))
-    {
-        return;
-    }
-
-    for parser_state in state.values_mut() {
-        *parser_state = parser_state.apply_and_prune_no_promote(
-            |terminals_disallowed: &TerminalsDisallowed| {
-                for (tokenizer_state, matched_terminals) in accepted_terminals {
-                    if let Some(disallowed) = terminals_disallowed.get(tokenizer_state) {
-                        if !matched_terminals.is_empty()
-                            && matched_terminals
-                                .iter()
-                                .all(|terminal| disallowed.contains(terminal))
-                        {
-                            return None;
-                        }
-                    }
-                }
-
-                let mut remapped = BTreeMap::new();
-                for (old_state, new_states) in remapped_tokenizer_states {
-                    if let Some(disallowed) = terminals_disallowed.get(old_state) {
-                        for &new_state in new_states {
-                            remapped
-                                .entry(new_state)
-                                .or_insert_with(BTreeSet::new)
-                                .extend(disallowed.iter().copied());
-                        }
-                    }
-                }
-                Some(TerminalsDisallowed(std::sync::Arc::new(remapped)))
-            },
-        );
-    }
 }
 
 fn prune_single_initial_state_for_exec(
@@ -1170,7 +1095,6 @@ fn commit_bytes_small_queue_fast_path(
     if bytes.len() > 8 || state.len() > 2 {
         return None;
     }
-
       let mut processing_queue: Vec<SmallVec<[(u32, ParserGSS); 4]>> =
           (0..=bytes.len()).map(|_| SmallVec::new()).collect();
     for (&tokenizer_state, gss) in state.iter() {
@@ -1187,16 +1111,6 @@ fn commit_bytes_small_queue_fast_path(
 
           let states_to_process = std::mem::take(&mut processing_queue[offset]);
           let initial_tokenizer_state = constraint.tokenizer.initial_state();
-          let mut initial_gss_at_offset: Option<ParserGSS> = None;
-          for (tokenizer_state, gss) in &states_to_process {
-              if *tokenizer_state != initial_tokenizer_state {
-                  continue;
-              }
-              initial_gss_at_offset = Some(match initial_gss_at_offset.take() {
-                  Some(existing) => existing.merge(gss),
-                  None => gss.clone(),
-              });
-          }
           for (tokenizer_state, mut gss_at_offset) in states_to_process {
               let exec_result =
                   execute_tokenizer_from_state_small(constraint, &bytes[offset..], tokenizer_state);
@@ -1248,14 +1162,7 @@ fn commit_bytes_small_queue_fast_path(
                       continue;
                   }
 
-                  let advanced = if tokenizer_state != initial_tokenizer_state
-                      && let Some(existing_initial_gss) = initial_gss_at_offset.as_ref()
-                      && existing_initial_gss.all_accs_satisfy(|td: &TerminalsDisallowed| {
-                          td.get(&tokenizer_state)
-                              .is_some_and(|disallowed| disallowed.contains(&matched.terminal_id))
-                      }) {
-                      existing_initial_gss.clone()
-                  } else if !template_advance_enabled()
+                  let advanced = if !template_advance_enabled()
                       && let Some(top_state) = gss_at_offset.single_exclusive_top_value()
                       && let Some(action) = constraint.table.action(top_state, matched.terminal_id)
                       && let Some(advanced) = apply_single_top_action_fast(
@@ -2394,15 +2301,6 @@ fn commit_bytes_impl_profiled(
     let mut initial_scan = InitialCommitScan::collect(constraint, state, bytes);
     profile.scan_ns = scan_start.elapsed().as_nanos() as u64;
 
-    let prune_start = Instant::now();
-    prune_initial_states(
-        state,
-        &initial_scan.accepted_terminals,
-        &initial_scan.remapped_tokenizer_states,
-    );
-    state.retain(|_, parser_state| !parser_state.is_empty());
-    profile.prune_ns = prune_start.elapsed().as_nanos() as u64;
-
     let queue_start = Instant::now();
     let mut pending_state = ParserStatesByTokenizer::default();
     let mut processing_queue: Vec<ParserStatesByTokenizer> =
@@ -2417,12 +2315,8 @@ fn commit_bytes_impl_profiled(
         }
 
         let states_to_process = std::mem::take(&mut processing_queue[offset]);
-        for (tokenizer_state, gss_at_offset) in states_to_process {
+        for (tokenizer_state, mut gss_at_offset) in states_to_process {
             profile.n_queue_entries += 1;
-
-            let actionable_start = Instant::now();
-            let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss_at_offset);
-            profile.actionable_ns += actionable_start.elapsed().as_nanos() as u64;
 
             let exec_start = Instant::now();
             let exec_result = if offset == 0 {
@@ -2435,6 +2329,27 @@ fn commit_bytes_impl_profiled(
             let queue_exec_elapsed = exec_start.elapsed().as_nanos() as u64;
             profile.queue_exec_ns += queue_exec_elapsed;
             profile.exec_ns += queue_exec_elapsed;
+
+            if offset == 0
+                && !gss_at_offset
+                    .all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
+            {
+                let prune_start = Instant::now();
+                gss_at_offset = prune_single_initial_state_for_exec(
+                    constraint,
+                    gss_at_offset,
+                    tokenizer_state,
+                    &exec_result,
+                );
+                profile.prune_ns += prune_start.elapsed().as_nanos() as u64;
+                if gss_at_offset.is_empty() {
+                    continue;
+                }
+            }
+
+            let actionable_start = Instant::now();
+            let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss_at_offset);
+            profile.actionable_ns += actionable_start.elapsed().as_nanos() as u64;
 
             let match_start = Instant::now();
             let normalized_matches = collect_unique_actionable_matches(
@@ -2576,6 +2491,16 @@ fn final_stacks(state: &BTreeMap<u32, ParserGSS>) -> Vec<(u32, Vec<Vec<u32>>)> {
     state.iter().map(|(&tokenizer_state, gss)| {
         (tokenizer_state, parser_stacks_only(gss))
     }).collect()
+}
+
+fn clear_state_on_commit_error<T>(
+    state: &mut BTreeMap<u32, ParserGSS>,
+    result: Result<T, String>,
+) -> Result<T, String> {
+    if result.is_err() {
+        state.clear();
+    }
+    result
 }
 
 fn commit_bytes_linear_fast_path(
@@ -2991,7 +2916,7 @@ fn commit_bytes_impl(
 
     let ignore_terminal = constraint.ignore_terminal;
 
-    if state.len() == 1 {
+    if !constraint.tokenizer.has_epsilon_transitions() && state.len() == 1 {
         let (&tokenizer_state, _) = state.iter().next().unwrap();
         let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
         if let Some(result) = commit_bytes_fast_path(
@@ -3044,7 +2969,7 @@ fn commit_bytes_impl(
         return result;
     }
 
-    if state.len() == 1 {
+    if !constraint.tokenizer.has_epsilon_transitions() && state.len() == 1 {
         let (&tokenizer_state, _) = state.iter().next().unwrap();
         let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
 
@@ -3209,72 +3134,15 @@ fn commit_bytes_impl(
 
         // Fast path failed — build scan data from already-computed exec_result
         bufs.clear_all();
-        let parser_gss = state.values().next().unwrap();
-        let actionable_terminals = ActionableTerminals::from_gss(constraint, parser_gss);
-
-        if !exec_result.end_state.is_empty() {
-            bufs.remapped_tokenizer_states
-                .insert(tokenizer_state, exec_result.end_state.clone());
-        }
-
-        for matched in &exec_result.matches {
-            if is_ignored_terminal(ignore_terminal, matched.id)
-                || !is_actionable_terminal(
-                    actionable_terminals.as_ref(),
-                    constraint,
-                    matched.id,
-                )
-            {
-                continue;
-            }
-
-            bufs.accepted_terminals
-                .entry(tokenizer_state)
-                .or_default()
-                .insert(matched.id);
-        }
-
         bufs.exec_results.insert(tokenizer_state, exec_result);
     } else {
         bufs.clear_all();
 
-        for (&tokenizer_state, parser_gss) in state.iter() {
-            let actionable_terminals = ActionableTerminals::from_gss(constraint, parser_gss);
+        for &tokenizer_state in state.keys() {
             let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
-
-            if !exec_result.end_state.is_empty() {
-                bufs.remapped_tokenizer_states
-                    .insert(tokenizer_state, exec_result.end_state.clone());
-            }
-
-            for matched in &exec_result.matches {
-                if is_ignored_terminal(ignore_terminal, matched.id)
-                    || !is_actionable_terminal(
-                        actionable_terminals.as_ref(),
-                        constraint,
-                        matched.id,
-                    )
-                {
-                    continue;
-                }
-
-                bufs.accepted_terminals
-                    .entry(tokenizer_state)
-                    .or_default()
-                    .insert(matched.id);
-            }
-
             bufs.exec_results.insert(tokenizer_state, exec_result);
         }
     }
-
-    prune_initial_states(
-        state,
-        &bufs.accepted_terminals,
-        &bufs.remapped_tokenizer_states,
-    );
-
-    state.retain(|_, parser_state| !parser_state.is_empty());
 
     let needed_queue_len = bytes.len() + 1;
     let mut processing_queue = std::mem::take(&mut bufs.processing_queue);
@@ -3294,8 +3162,7 @@ fn commit_bytes_impl(
         }
 
         let states_to_process = std::mem::take(&mut processing_queue[offset]);
-        for (tokenizer_state, gss_at_offset) in states_to_process {
-            let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss_at_offset);
+        for (tokenizer_state, mut gss_at_offset) in states_to_process {
             let exec_result = if offset == 0 {
                 bufs.exec_results.remove(&tokenizer_state).unwrap_or_else(|| {
                     execute_tokenizer_from_state_small(constraint, &bytes[offset..], tokenizer_state)
@@ -3303,6 +3170,23 @@ fn commit_bytes_impl(
             } else {
                 execute_tokenizer_from_state_small(constraint, &bytes[offset..], tokenizer_state)
             };
+
+            if offset == 0
+                && !gss_at_offset
+                    .all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
+            {
+                gss_at_offset = prune_single_initial_state_for_exec(
+                    constraint,
+                    gss_at_offset,
+                    tokenizer_state,
+                    &exec_result,
+                );
+                if gss_at_offset.is_empty() {
+                    continue;
+                }
+            }
+
+            let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss_at_offset);
 
             bufs.terminal_result_cache.clear();
 
@@ -3402,6 +3286,7 @@ impl<'a> ConstraintState<'a> {
             })?;
         let was_in_mask = snapshot_mask_membership(self, token_id);
         let result = commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
+        let result = clear_state_on_commit_error(&mut self.state, result);
         self.generation += 1;
         assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
         result
@@ -3416,6 +3301,7 @@ impl<'a> ConstraintState<'a> {
         let was_in_mask = snapshot_mask_membership(self, token_id);
         let start = Instant::now();
         let result = commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
+        let result = clear_state_on_commit_error(&mut self.state, result);
         let total_ns = start.elapsed().as_nanos() as u64;
         self.generation += 1;
         assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
@@ -3435,6 +3321,7 @@ impl<'a> ConstraintState<'a> {
             None,
             true,
         );
+        let result = clear_state_on_commit_error(&mut self.state, result);
         self.generation += 1;
         assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
         result
@@ -3456,7 +3343,8 @@ impl<'a> ConstraintState<'a> {
             &mut self.buffers,
             Some(&mut advances),
             profile_allow_fast_paths(),
-        )
+        );
+        let result = clear_state_on_commit_error(&mut self.state, result)
         .map(|profile| (advances, final_stacks(&self.state), profile));
         self.generation += 1;
         assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
@@ -3465,6 +3353,7 @@ impl<'a> ConstraintState<'a> {
 
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
         let result = commit_bytes_impl(self.constraint, &mut self.state, bytes, &mut self.buffers);
+        let result = clear_state_on_commit_error(&mut self.state, result);
         self.generation += 1;
         result
     }
@@ -3480,7 +3369,312 @@ impl<'a> ConstraintState<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::pipeline::compile_owned_with_lexer_adaptive;
+    use crate::grammar::{ast::lower, glrm::from_glrm};
     use crate::{Constraint, Vocab};
+
+    type CanonicalCommitState =
+        Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)>;
+
+    fn canonical_commit_state(
+        state: &BTreeMap<u32, ParserGSS>,
+    ) -> CanonicalCommitState {
+        state
+            .iter()
+            .map(|(&tokenizer_state, gss)| {
+                let mut stacks = gss
+                    .to_stacks()
+                    .into_iter()
+                    .map(|(stack, terminals_disallowed)| {
+                        let disallowed = terminals_disallowed
+                            .iter()
+                            .map(|(&state, terminals)| {
+                                (state, terminals.iter().copied().collect::<Vec<_>>())
+                            })
+                            .collect::<Vec<_>>();
+                        (stack, disallowed)
+                    })
+                    .collect::<Vec<_>>();
+                stacks.sort();
+                (tokenizer_state, stacks)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rejected_public_commits_enter_fail_state() {
+        let vocab = Vocab::new(
+            vec![(0, b"a".to_vec()), (1, b"b".to_vec())],
+            None,
+        );
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                nt start ::= A;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+
+        let assert_failed = |state: &ConstraintState<'_>| {
+            assert!(state.state.is_empty());
+            assert!(state.mask().iter().all(|&word| word == 0));
+        };
+
+        let mut state = constraint.start();
+        assert!(state.commit_token(1).is_err());
+        assert_failed(&state);
+
+        let mut state = constraint.start();
+        assert!(state.commit_token_timed_ns(1).is_err());
+        assert_failed(&state);
+
+        let mut state = constraint.start();
+        assert!(state.commit_token_profiled(1).is_err());
+        assert_failed(&state);
+
+        let mut state = constraint.start();
+        assert!(state.commit_token_per_advance(1).is_err());
+        assert_failed(&state);
+
+        let mut state = constraint.start();
+        assert!(state.commit_bytes(b"b").is_err());
+        assert_failed(&state);
+    }
+
+    fn assert_fast_and_general_queue_match<'a>(
+        constraint: &'a Constraint,
+        fast_state: &ConstraintState<'a>,
+        token_id: u32,
+        bytes: &[u8],
+        context: &str,
+    ) -> Option<ConstraintState<'a>> {
+        let mut fast = fast_state.clone();
+        let mut profiled = fast_state.clone();
+        let mut general = fast_state.clone();
+
+        let fast_result = commit_bytes_impl(
+            constraint,
+            &mut fast.state,
+            bytes,
+            &mut fast.buffers,
+        );
+        let profiled_result = commit_bytes_impl_profiled(
+            constraint,
+            &mut profiled.state,
+            bytes,
+            &mut profiled.buffers,
+            None,
+            true,
+        );
+        let general_result = commit_bytes_impl_profiled(
+            constraint,
+            &mut general.state,
+            bytes,
+            &mut general.buffers,
+            None,
+            false,
+        );
+
+        assert_eq!(
+            fast_result.is_ok(),
+            general_result.is_ok(),
+            "commit result mismatch: {context} token_id={token_id} bytes={bytes:?}\nfast={:?}\ngeneral={:?}",
+            fast.state,
+            general.state,
+        );
+        assert_eq!(
+            profiled_result.is_ok(),
+            general_result.is_ok(),
+            "profiled commit result mismatch: {context} token_id={token_id} bytes={bytes:?}\nprofiled={:?}\ngeneral={:?}",
+            profiled.state,
+            general.state,
+        );
+        if fast_result.is_err() {
+            return None;
+        }
+        assert_eq!(
+            canonical_commit_state(&fast.state),
+            canonical_commit_state(&general.state),
+            "successful commit state mismatch: {context} token_id={token_id} bytes={bytes:?}\nfast_stacks={:#?}\ngeneral_stacks={:#?}",
+            fast.state
+                .iter()
+                .map(|(&ts, gss)| (ts, gss.to_stacks()))
+                .collect::<Vec<_>>(),
+            general
+                .state
+                .iter()
+                .map(|(&ts, gss)| (ts, gss.to_stacks()))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            canonical_commit_state(&profiled.state),
+            canonical_commit_state(&general.state),
+            "successful profiled commit state mismatch: {context} token_id={token_id} bytes={bytes:?}\nprofiled_stacks={:#?}\ngeneral_stacks={:#?}",
+            profiled
+                .state
+                .iter()
+                .map(|(&ts, gss)| (ts, gss.to_stacks()))
+                .collect::<Vec<_>>(),
+            general
+                .state
+                .iter()
+                .map(|(&ts, gss)| (ts, gss.to_stacks()))
+                .collect::<Vec<_>>(),
+        );
+
+        Some(fast)
+    }
+
+    #[test]
+    fn monolithic_commit_fast_paths_match_general_queue_on_small_language_space() {
+        const WORDS: [&str; 4] = ["a", "b", "ab", "ba"];
+        let vocab = Vocab::new(
+            WORDS
+                .iter()
+                .enumerate()
+                .map(|(id, word)| (id as u32, word.as_bytes().to_vec()))
+                .collect(),
+            None,
+        );
+        let languages = (1u32..1u32 << WORDS.len())
+            .filter(|mask| mask.count_ones() <= 2)
+            .collect::<Vec<_>>();
+
+        let rule = |name: &str, mask: u32| {
+            let rhs = WORDS
+                .iter()
+                .enumerate()
+                .filter_map(|(index, word)| {
+                    (mask & (1 << index) != 0).then(|| format!("\"{word}\""))
+                })
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!("t {name} ::= {rhs};\n")
+        };
+
+        for &a in &languages {
+            for &b in &languages {
+                let grammar = format!(
+                    "start start;\n{}{}nt item ::= A | B;\nnt start ::= item item? item?;\n",
+                    rule("A", a),
+                    rule("B", b),
+                );
+                let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+                let mut frontier = vec![(constraint.start(), Vec::<u32>::new())];
+
+                for depth in 0..3 {
+                    let mut next = Vec::new();
+                    for (state, path) in frontier {
+                        let mask = state.mask();
+                        for (&token_id, bytes) in vocab.entries.iter() {
+                            let context = format!(
+                                "A_mask={a:#06b} B_mask={b:#06b} depth={depth} path={path:?}\ngrammar:\n{grammar}"
+                            );
+                            let next_state = assert_fast_and_general_queue_match(
+                                &constraint,
+                                &state,
+                                token_id,
+                                bytes,
+                                &context,
+                            );
+                            let token_in_mask = mask
+                                .get(token_id as usize / 32)
+                                .is_some_and(|word| {
+                                    word & (1u32 << (token_id % 32)) != 0
+                                });
+                            assert_eq!(
+                                token_in_mask,
+                                next_state.is_some(),
+                                "mask/commit mismatch: {context} token_id={token_id} bytes={bytes:?}"
+                            );
+                            if let Some(next_state) = next_state {
+                                let mut next_path = path.clone();
+                                next_path.push(token_id);
+                                next.push((next_state, next_path));
+                            }
+                        }
+                    }
+                    frontier = next;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn residual_bc_fast_path_matches_general_queue() {
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+                (2, b"c".to_vec()),
+                (3, b"ab".to_vec()),
+                (4, b"ba".to_vec()),
+                (5, b"bc".to_vec()),
+                (6, b"abc".to_vec()),
+            ],
+            None,
+        );
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a" | "ab";
+                t B ::= "bc";
+                nt item ::= A | B;
+                nt start ::= item item? item?;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+
+        let mut fast = constraint.start();
+        let mut slow = constraint.start();
+        let fast_result = commit_bytes_impl(
+            &constraint,
+            &mut fast.state,
+            vocab.entries.get(&0).unwrap(),
+            &mut fast.buffers,
+        );
+        fast.generation += 1;
+        assert!(fast_result.is_ok());
+        let slow_result = commit_bytes_impl_profiled(
+            &constraint,
+            &mut slow.state,
+            vocab.entries.get(&0).unwrap(),
+            &mut slow.buffers,
+            None,
+            false,
+        );
+        slow.generation += 1;
+        assert!(slow_result.is_ok());
+        assert_eq!(fast.state, slow.state, "state mismatch after token a");
+
+        let mut next_fast = fast.clone();
+        let mut next_slow = slow.clone();
+        let fast_result = commit_bytes_impl(
+            &constraint,
+            &mut next_fast.state,
+            vocab.entries.get(&5).unwrap(),
+            &mut next_fast.buffers,
+        );
+        let slow_result = commit_bytes_impl_profiled(
+            &constraint,
+            &mut next_slow.state,
+            vocab.entries.get(&5).unwrap(),
+            &mut next_slow.buffers,
+            None,
+            false,
+        );
+        assert_eq!(
+            fast_result.is_ok(),
+            slow_result.is_ok(),
+            "fast={:?}\nslow={:?}",
+            next_fast.state,
+            next_slow.state,
+        );
+        assert_eq!(next_fast.state, next_slow.state);
+    }
 
     #[test]
     fn epsilon_commit_fast_paths_match_no_fast_path_reference() {
@@ -3500,7 +3694,7 @@ mod tests {
             ],
             None,
         );
-        let constraint = Constraint::from_glrm_grammar(
+        let named = from_glrm(
             r#"
                 start start;
                 ignore WS;
@@ -3515,51 +3709,93 @@ mod tests {
                 nt item ::= A | B | C;
                 nt start ::= item item? item?;
             "#,
-            &vocab,
         )
         .unwrap();
+        let grammar = lower(&named).unwrap();
+        let constraint = compile_owned_with_lexer_adaptive(grammar, &vocab, false);
         assert!(constraint.tokenizer.has_epsilon_transitions());
 
-        let mut frontier = vec![(constraint.start(), constraint.start(), Vec::<u32>::new())];
-        for depth in 0..=3 {
+        let mut frontier = vec![(
+            constraint.start(),
+            constraint.start(),
+            constraint.start(),
+            Vec::<u32>::new(),
+        )];
+        for depth in 0..=4 {
             let mut next = Vec::new();
-            for (fast, slow, path) in frontier {
+            for (fast, profiled, general, path) in frontier {
                 assert_eq!(
                     fast.mask(),
-                    slow.mask(),
-                    "mask mismatch after path {path:?}",
+                    general.mask(),
+                    "epsilon mask mismatch after path {path:?}\nfast={:#?}\ngeneral={:#?}",
+                    canonical_commit_state(&fast.state),
+                    canonical_commit_state(&general.state),
+                );
+                assert_eq!(
+                    profiled.mask(),
+                    general.mask(),
+                    "epsilon profiled-mask mismatch after path {path:?}\nprofiled={:#?}\ngeneral={:#?}",
+                    canonical_commit_state(&profiled.state),
+                    canonical_commit_state(&general.state),
                 );
                 assert_eq!(
                     fast.is_finished(),
-                    slow.is_finished(),
-                    "completion mismatch after path {path:?}",
+                    general.is_finished(),
+                    "epsilon completion mismatch after path {path:?}",
                 );
-                if depth == 3 {
+                assert_eq!(
+                    profiled.is_finished(),
+                    general.is_finished(),
+                    "epsilon profiled completion mismatch after path {path:?}",
+                );
+                if depth == 4 {
                     continue;
                 }
 
                 for (&token_id, bytes) in vocab.entries.iter() {
                     let mut next_fast = fast.clone();
-                    let mut next_slow = slow.clone();
-                    let fast_result = next_fast.commit_token(token_id);
-                    let slow_result = commit_bytes_impl_profiled(
+                    let mut next_profiled = profiled.clone();
+                    let mut next_general = general.clone();
+                    let fast_result = commit_bytes_impl(
                         &constraint,
-                        &mut next_slow.state,
+                        &mut next_fast.state,
                         bytes,
-                        &mut next_slow.buffers,
+                        &mut next_fast.buffers,
+                    );
+                    let profiled_result = commit_bytes_impl_profiled(
+                        &constraint,
+                        &mut next_profiled.state,
+                        bytes,
+                        &mut next_profiled.buffers,
+                        None,
+                        true,
+                    );
+                    let general_result = commit_bytes_impl_profiled(
+                        &constraint,
+                        &mut next_general.state,
+                        bytes,
+                        &mut next_general.buffers,
                         None,
                         false,
                     );
-                    next_slow.generation += 1;
                     assert_eq!(
                         fast_result.is_ok(),
-                        slow_result.is_ok(),
-                        "commit result mismatch for token {token_id} after path {path:?}",
+                        general_result.is_ok(),
+                        "epsilon commit result mismatch after path {path:?} token_id={token_id} bytes={bytes:?}\nfast={:#?}\ngeneral={:#?}",
+                        canonical_commit_state(&next_fast.state),
+                        canonical_commit_state(&next_general.state),
+                    );
+                    assert_eq!(
+                        profiled_result.is_ok(),
+                        general_result.is_ok(),
+                        "epsilon profiled commit result mismatch after path {path:?} token_id={token_id} bytes={bytes:?}\nprofiled={:#?}\ngeneral={:#?}",
+                        canonical_commit_state(&next_profiled.state),
+                        canonical_commit_state(&next_general.state),
                     );
                     if fast_result.is_ok() {
                         let mut next_path = path.clone();
                         next_path.push(token_id);
-                        next.push((next_fast, next_slow, next_path));
+                        next.push((next_fast, next_profiled, next_general, next_path));
                     }
                 }
             }

@@ -1624,7 +1624,11 @@ nt s ::= A | B | C;
 
         let lowered = lower(&grammar).unwrap();
         assert_eq!(lowered.lexer_partitions.len(), 2);
-        let tokenizer = crate::compiler::pipeline::build_tokenizer(&lowered);
+        let tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
+            &lowered,
+            false,
+            false,
+        );
         assert!(tokenizer.has_epsilon_transitions());
         assert_eq!(
             tokenizer.initial_epsilon_branch_count(),

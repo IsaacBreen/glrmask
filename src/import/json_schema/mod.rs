@@ -50,6 +50,18 @@ fn is_pattern_partition(partition: &str) -> bool {
         || partition.starts_with("json_pattern_")
 }
 
+fn partition_class(partition: Option<&str>) -> lower::JsonTerminalPartitionClass {
+    match partition {
+        Some(lower::JSON_LITERAL_LEXER_PARTITION) => {
+            lower::JsonTerminalPartitionClass::Literal
+        }
+        Some(partition) if is_pattern_partition(partition) => {
+            lower::JsonTerminalPartitionClass::Pattern
+        }
+        _ => lower::JsonTerminalPartitionClass::Other,
+    }
+}
+
 fn finalize_lexer_partitions_with_options(
     grammar: &mut NamedGrammar,
     pattern_singletons: bool,
@@ -57,6 +69,31 @@ fn finalize_lexer_partitions_with_options(
     let previous_partitions = std::mem::take(&mut grammar.lexer_partitions);
     let resolved_terminals = resolved_named_terminal_exprs(grammar)?;
     let mut pattern_partitions = HashMap::new();
+    let mut class_by_terminal_expr = HashMap::new();
+
+    // Named terminal rules are deduplicated to `TerminalID` by resolved lexer
+    // expression, not by rule name. Combine provenance on that exact identity
+    // before assigning physical partitions, otherwise two names for the same
+    // terminal language can assign one eventual TerminalID to two groups.
+    // Pattern provenance dominates because singleton isolation is specifically
+    // intended to protect pattern languages from cross-language interference;
+    // literal provenance dominates the ordinary catch-all class.
+    for rule in grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.is_terminal && !rule.is_internal)
+    {
+        let terminal_expr = resolved_terminals
+            .get(&rule.name)
+            .expect("resolved emitting JSON terminal expression");
+        let class = partition_class(previous_partitions.get(&rule.name).map(String::as_str));
+        class_by_terminal_expr
+            .entry(terminal_expr.clone())
+            .and_modify(|existing: &mut lower::JsonTerminalPartitionClass| {
+                *existing = existing.merge(class);
+            })
+            .or_insert(class);
+    }
 
     grammar.default_lexer_partition = None;
     for rule in grammar
@@ -64,23 +101,26 @@ fn finalize_lexer_partitions_with_options(
         .iter()
         .filter(|rule| rule.is_terminal && !rule.is_internal)
     {
-        let previous = previous_partitions.get(&rule.name).map(String::as_str);
-        let partition = if previous == Some(lower::JSON_LITERAL_LEXER_PARTITION) {
-            lower::JSON_LITERAL_LEXER_PARTITION.to_string()
-        } else if previous.is_some_and(is_pattern_partition) {
-            if pattern_singletons {
-                let terminal_expr = resolved_terminals
-                    .get(&rule.name)
-                    .expect("resolved emitting JSON terminal expression");
+        let terminal_expr = resolved_terminals
+            .get(&rule.name)
+            .expect("resolved emitting JSON terminal expression");
+        let class = class_by_terminal_expr[terminal_expr];
+        let partition = match class {
+            lower::JsonTerminalPartitionClass::Literal => {
+                lower::JSON_LITERAL_LEXER_PARTITION.to_string()
+            }
+            lower::JsonTerminalPartitionClass::Pattern if pattern_singletons => {
                 pattern_partitions
                     .entry(terminal_expr.clone())
                     .or_insert_with(|| format!("json_pattern_{}", rule.name))
                     .clone()
-            } else {
+            }
+            lower::JsonTerminalPartitionClass::Pattern => {
                 lower::JSON_PATTERN_LEXER_PARTITION.to_string()
             }
-        } else {
-            lower::JSON_OTHER_LEXER_PARTITION.to_string()
+            lower::JsonTerminalPartitionClass::Other => {
+                lower::JSON_OTHER_LEXER_PARTITION.to_string()
+            }
         };
         grammar.lexer_partitions.insert(rule.name.clone(), partition);
     }

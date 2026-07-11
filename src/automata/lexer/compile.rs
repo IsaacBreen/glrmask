@@ -2711,7 +2711,6 @@ mod tests {
     use super::{
         build_regex,
         build_regex_monolithic,
-        build_regex_partitioned,
         build_regex_partitioned_with_adaptive,
         try_product_union_dfas,
     };
@@ -3732,7 +3731,8 @@ mod tests {
                 max: None,
             },
         ];
-        let tokenizer = build_regex_partitioned(&expressions, &[0, 1]).into_tokenizer(
+        let tokenizer = build_regex_partitioned_with_adaptive(&expressions, &[0, 1], false)
+            .into_tokenizer(
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
         );
