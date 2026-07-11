@@ -47,6 +47,7 @@ pub(crate) struct ConstraintPossibleMatchesConfig;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ConstraintPossibleMatchesProfile {
+    pub(crate) vocab_equiv_ms: f64,
     pub(crate) possible_matches_collect_ms: f64,
     pub(crate) possible_match_vocab_ms: f64,
 }
@@ -528,7 +529,7 @@ fn pm_vocab_equiv_enabled() -> bool {
             let trimmed = value.trim();
             trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 #[inline]
@@ -2105,7 +2106,11 @@ fn compute_constraint_possible_matches_with_artifacts(
     ConstraintPossibleMatchesComputation {
         mapped_possible_matches: MappedArtifact::new(possible_matches, possible_matches_id_map),
         runtime_dynamic_vocab,
-        profile: ConstraintPossibleMatchesProfile { possible_matches_collect_ms, possible_match_vocab_ms },
+        profile: ConstraintPossibleMatchesProfile {
+            vocab_equiv_ms: 0.0,
+            possible_matches_collect_ms,
+            possible_match_vocab_ms,
+        },
     }
 }
 
@@ -2150,6 +2155,7 @@ pub(crate) fn compute_constraint_possible_matches_for_vocab(
         }
         let compact_token_bytes =
             build_internal_token_bytes_from_groups(vocab, &pm_vocab_map.internal_to_originals);
+        let vocab_equiv_ms = elapsed_ms(vocab_equiv_started_at);
         let mut computation = compute_constraint_possible_matches_with_artifacts(
             tokenizer,
             vocab.entries.len(),
@@ -2157,6 +2163,7 @@ pub(crate) fn compute_constraint_possible_matches_for_vocab(
             Some(&pm_vocab_map),
         );
         computation.runtime_dynamic_vocab = runtime_dynamic_vocab;
+        computation.profile.vocab_equiv_ms = vocab_equiv_ms;
         return computation;
     }
 
