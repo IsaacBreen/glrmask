@@ -954,14 +954,14 @@ fn build_and_merge_parser_dwa_families(
         },
     );
     let parser_dwas: Vec<MappedArtifact<DWA>> = l1_parser.into_iter().chain(l2p_parser).collect();
-    let mapped_dwa =
-        crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas(
+    let (mapped_dwa, top_accept) =
+        crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas_with_top_accept(
             parser_dwas,
             tokenizer.num_states() as usize,
             vocab.max_token_id(),
         );
     let (dwa, id_map) = mapped_dwa.into_parts();
-    MappedArtifact::new((dwa, ParserTopAccept::default()), id_map)
+    MappedArtifact::new((dwa, ParserTopAccept(top_accept)), id_map)
 }
 
 #[derive(Clone, Copy)]
