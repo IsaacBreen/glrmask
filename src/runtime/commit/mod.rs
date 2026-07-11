@@ -392,10 +392,6 @@ fn prune_single_initial_state_for_exec(
         }
     }
 
-    if accepted_terminals.is_empty() && exec_result.end_state.is_empty() {
-        return gss;
-    }
-
     if accepted_terminals.is_empty()
         && gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
     {
@@ -3395,6 +3391,7 @@ impl<'a> ConstraintState<'a> {
 mod tests {
     use super::*;
     use crate::{Constraint, Vocab};
+    use std::collections::BTreeSet;
 
     type CanonicalCommitState =
         Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)>;
@@ -3422,6 +3419,237 @@ mod tests {
                 (tokenizer_state, stacks)
             })
             .collect()
+    }
+
+    fn canonical_gss(gss: &ParserGSS) -> Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)> {
+        canonical_commit_state(&BTreeMap::from([(0, gss.clone())]))
+            .pop()
+            .unwrap()
+            .1
+    }
+
+    fn top_local_prune_reference(
+        constraint: &Constraint,
+        gss: &ParserGSS,
+        tokenizer_state: u32,
+        exec_result: &TokenizerExecResult,
+    ) -> ParserGSS {
+        let prune_partition = |partition: ParserGSS, top: Option<u32>| {
+            let accepted_terminals: SmallVec<[u32; 4]> = exec_result
+                .matches
+                .iter()
+                .filter(|matched| {
+                    !is_ignored_terminal(constraint.ignore_terminal, matched.id)
+                        && top.is_some_and(|parser_state| {
+                            constraint
+                                .table
+                                .advance_row_allows(parser_state, matched.id)
+                        })
+                })
+                .map(|matched| matched.id)
+                .collect();
+
+            partition.apply_and_prune_no_promote(
+                |terminals_disallowed: &TerminalsDisallowed| {
+                    if terminals_disallowed.is_empty() {
+                        return Some(TerminalsDisallowed::new());
+                    }
+                    if let Some(disallowed) = terminals_disallowed.get(&tokenizer_state)
+                        && !accepted_terminals.is_empty()
+                        && accepted_terminals
+                            .iter()
+                            .all(|terminal| disallowed.contains(terminal))
+                    {
+                        return None;
+                    }
+
+                    let mut remapped = BTreeMap::new();
+                    for &end_state in &exec_result.end_state {
+                        if let Some(disallowed) = terminals_disallowed.get(&tokenizer_state) {
+                            remapped
+                                .entry(end_state)
+                                .or_insert_with(BTreeSet::new)
+                                .extend(disallowed.iter().copied());
+                        }
+                    }
+                    Some(TerminalsDisallowed(std::sync::Arc::new(remapped)))
+                },
+            )
+        };
+
+        let mut partitions = Vec::new();
+        let root = gss.isolate(None);
+        if !root.is_empty() {
+            let root = prune_partition(root, None);
+            if !root.is_empty() {
+                partitions.push(root);
+            }
+        }
+        for parser_state in gss.peek_values() {
+            let partition = prune_partition(gss.isolate(Some(parser_state)), Some(parser_state));
+            if !partition.is_empty() {
+                partitions.push(partition);
+            }
+        }
+
+        let mut iter = partitions.into_iter();
+        let Some(mut merged) = iter.next() else {
+            return ParserGSS::empty();
+        };
+        for partition in iter {
+            merged = merged.merge(&partition);
+        }
+        merged
+    }
+
+    #[test]
+    fn initial_prune_drops_exclusions_from_inactive_dead_residuals() {
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+                (2, b"ab".to_vec()),
+            ],
+            None,
+        );
+        let grammar = r#"
+start start;
+t A ::= "a";
+t B ::= "a" | "ab";
+nt item ::= A | B;
+nt start ::= item item? item?;
+"#;
+        let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let mut state = constraint.start();
+        state.commit_token(0).unwrap();
+
+        let tokenizer_state = constraint.tokenizer.initial_state();
+        let gss = state
+            .state
+            .get(&tokenizer_state)
+            .expect("ambiguous a must retain a reset lexer branch");
+        assert!(
+            !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()),
+            "MRE requires a stale residual exclusion on the reset branch"
+        );
+
+        let exec_result =
+            execute_tokenizer_from_state_small(&constraint, b"b", tokenizer_state);
+        assert!(exec_result.matches.is_empty());
+        assert!(exec_result.end_state.is_empty());
+
+        let pruned = prune_single_initial_state_for_exec(
+            &constraint,
+            gss.clone(),
+            tokenizer_state,
+            &exec_result,
+        );
+        assert!(
+            pruned.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()),
+            "dead exclusions keyed to another tokenizer state must not survive reset-branch pruning"
+        );
+    }
+
+    #[test]
+    fn initial_prune_matches_top_local_reference_on_generated_small_languages() {
+        const WORDS: [&str; 4] = ["a", "b", "ab", "ba"];
+        let vocab = Vocab::new(
+            [
+                "a", "b", "ab", "ba", " ", " a", "a ", " b", "b ", " a ", " b ",
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(id, word)| (id as u32, word.as_bytes().to_vec()))
+            .collect(),
+            None,
+        );
+        let languages = (1u32..1u32 << WORDS.len())
+            .filter(|mask| mask.count_ones() <= 2)
+            .collect::<Vec<_>>();
+        let rule = |name: &str, mask: u32| {
+            let rhs = WORDS
+                .iter()
+                .enumerate()
+                .filter_map(|(index, word)| {
+                    (mask & (1 << index) != 0).then(|| format!("\"{word}\""))
+                })
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!("t {name} ::= {rhs};\n")
+        };
+
+        for &a in &languages {
+            for &b in &languages {
+                for start_rule in [
+                    "nt item ::= A | B;\nnt start ::= item item? item?;",
+                    "nt start ::= A A | B B;",
+                    "nt start ::= A B | B A;",
+                ] {
+                    let grammar = format!(
+                        "start start;\nignore WS;\nt WS ::= \" \"+;\n{}{}{start_rule}\n",
+                        rule("A", a),
+                        rule("B", b),
+                    );
+                    let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+                    let mut frontier = vec![(constraint.start(), Vec::<u32>::new())];
+                    let mut seen = BTreeSet::new();
+
+                    for depth in 0..=4 {
+                        let mut next = Vec::new();
+                        for (state, path) in frontier {
+                            let state_key = canonical_commit_state(&state.state);
+                            if !seen.insert(state_key) {
+                                continue;
+                            }
+                            for (&token_id, bytes) in constraint.token_bytes.iter() {
+                                for (&tokenizer_state, gss) in &state.state {
+                                    if gss
+                                        .all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
+                                    {
+                                        continue;
+                                    }
+                                    let exec_result = execute_tokenizer_from_state_small(
+                                        &constraint,
+                                        bytes,
+                                        tokenizer_state,
+                                    );
+                                    let actual = prune_single_initial_state_for_exec(
+                                        &constraint,
+                                        gss.clone(),
+                                        tokenizer_state,
+                                        &exec_result,
+                                    );
+                                    let expected = top_local_prune_reference(
+                                        &constraint,
+                                        gss,
+                                        tokenizer_state,
+                                        &exec_result,
+                                    );
+                                    assert_eq!(
+                                        canonical_gss(&actual),
+                                        canonical_gss(&expected),
+                                        "initial prune crossed parser-top correlations: A={a:#06b} B={b:#06b} depth={depth} path={path:?} token={token_id} bytes={bytes:?} tokenizer_state={tokenizer_state}\ngrammar:\n{grammar}\nsource={:#?}\nactual={:#?}\nexpected={:#?}",
+                                        canonical_gss(gss),
+                                        canonical_gss(&actual),
+                                        canonical_gss(&expected),
+                                    );
+                                }
+
+                                if depth < 4 {
+                                    let mut advanced = state.clone();
+                                    if advanced.commit_bytes(bytes).is_ok() {
+                                        let mut next_path = path.clone();
+                                        next_path.push(token_id);
+                                        next.push((advanced, next_path));
+                                    }
+                                }
+                            }
+                        }
+                        frontier = next;
+                    }
+                }
+            }
+        }
     }
 
     #[test]
