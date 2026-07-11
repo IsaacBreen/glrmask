@@ -579,22 +579,31 @@ impl DynamicMaskVocab {
             .map(|&(state, _)| state)
             .collect::<FxHashSet<_>>();
         let mut entry_sources = Vec::<(u32, usize)>::new();
+        let deterministic = !tokenizer.has_epsilon_transitions();
         for source_state in 0..tokenizer.num_states() {
             if broad_targets.contains(&source_state) {
                 continue;
             }
-            let mut covered = U8Set::empty();
-            for byte in 0..=u8::MAX {
-                let execution = tokenizer.execute_from_state_end_only(&[byte], source_state);
-                if execution
-                    .iter()
-                    .any(|end_state| broad_targets.contains(end_state))
-                {
-                    covered.insert(byte);
+            let covered_len = if deterministic {
+                tokenizer
+                    .transitions_from(source_state)
+                    .filter(|(_, target)| broad_targets.contains(target))
+                    .count()
+            } else {
+                let mut covered = U8Set::empty();
+                for byte in 0..=u8::MAX {
+                    let execution = tokenizer.execute_from_state_end_only(&[byte], source_state);
+                    if execution
+                        .iter()
+                        .any(|end_state| broad_targets.contains(end_state))
+                    {
+                        covered.insert(byte);
+                    }
                 }
-            }
-            if covered.len() >= 32 {
-                entry_sources.push((source_state, covered.len()));
+                covered.len()
+            };
+            if covered_len >= 32 {
+                entry_sources.push((source_state, covered_len));
             }
         }
         entry_sources.sort_unstable_by_key(|&(state, width)| (state, std::cmp::Reverse(width)));
