@@ -58,6 +58,7 @@ use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::{GrammarDef, Terminal};
 use crate::runtime::{Constraint, DynamicMaskVocab};
+use crate::DynamicConstraint;
 
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
@@ -1875,6 +1876,42 @@ pub(crate) fn compile_owned(grammar: GrammarDef, vocab: &Vocab) -> Constraint {
         vocab,
         GlrTableConstruction::ExperimentalCoreMerged,
     )
+}
+
+pub(crate) fn compile_dynamic_owned_with_table_construction(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+) -> DynamicConstraint {
+    let prepared_grammar = prepare_grammar_transforms_only(grammar);
+    run_with_compile_thread_pool(|| {
+        let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
+        if let Err(message) = analyzed_grammar.check_table_build_normal_form() {
+            panic!("[glrmask] grammar precondition violations:\n{}", message);
+        }
+
+        let (tokenizer, table) = rayon::join(
+            || {
+                let mut tokenizer = build_tokenizer(&prepared_grammar);
+                tokenizer.isolate_start_state_and_drain_nullable_terminals();
+                tokenizer
+            },
+            || {
+                GLRTable::build_with_default_construction(
+                    &analyzed_grammar,
+                    default_table_construction,
+                )
+            },
+        );
+
+        DynamicConstraint::from_parts(
+            table,
+            analyzed_grammar.terminal_display_names.clone(),
+            tokenizer,
+            prepared_grammar.ignore_terminal,
+            vocab,
+        )
+    })
 }
 
 pub(crate) fn compile_owned_with_table_construction(

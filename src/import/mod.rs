@@ -10,6 +10,7 @@ use crate::compiler::compile::{
     compile_profile_enabled,
     emit_compile_profile_summary,
 };
+use crate::compiler::pipeline::compile_dynamic_owned_with_table_construction;
 use crate::grammar::exact_subtraction_lowering::lower_exact_subtractions;
 use crate::grammar::factoring::factor_named_grammar;
 use crate::grammar::flat::GrammarDef;
@@ -17,6 +18,7 @@ use crate::grammar::named_simplify::simplify_named_grammar;
 use crate::grammar::terminal_choice_promotion::promote_choice_terminals_exact;
 use crate::compiler::glr::table::GlrTableConstruction;
 use crate::runtime::Constraint;
+use crate::DynamicConstraint;
 
 type GrammarParser = fn(&str) -> crate::Result<GrammarDef>;
 type NamedGrammarParser = fn(&str) -> crate::Result<ast::NamedGrammar>;
@@ -128,6 +130,21 @@ fn compile_from_source(
     Ok(constraint)
 }
 
+fn compile_dynamic_from_source(
+    source: &str,
+    vocab: &crate::Vocab,
+    source_kind: &str,
+    default_table_construction: GlrTableConstruction,
+    parse: NamedGrammarParser,
+) -> crate::Result<DynamicConstraint> {
+    let grammar = lower_factored_named_grammar(source, source_kind, parse)?;
+    Ok(compile_dynamic_owned_with_table_construction(
+        grammar,
+        vocab,
+        default_table_construction,
+    ))
+}
+
 /// Profiling-only entry point: runs the JSON-schema import pipeline
 /// (parse → factor → AST lower) without the downstream compile. Hidden from the
 /// public API; used by `examples/profile_glr.rs` to isolate import timings.
@@ -190,6 +207,48 @@ impl Constraint {
     /// Load a grammar from the GLRM text format.
     pub fn from_glrm_grammar(glrm: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         compile_from_source(
+            glrm,
+            vocab,
+            "glrm",
+            GlrTableConstruction::ExperimentalCoreMerged,
+            crate::grammar::glrm::from_glrm,
+        )
+    }
+}
+
+impl DynamicConstraint {
+    pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        compile_dynamic_from_source(
+            ebnf,
+            vocab,
+            "ebnf",
+            GlrTableConstruction::ExperimentalCoreMerged,
+            ebnf::parse_ebnf_to_named,
+        )
+    }
+
+    pub fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        compile_dynamic_from_source(
+            lark,
+            vocab,
+            "lark",
+            GlrTableConstruction::ExperimentalCoreMerged,
+            lark::parse_lark_to_named,
+        )
+    }
+
+    pub fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        compile_dynamic_from_source(
+            schema,
+            vocab,
+            "json_schema",
+            GlrTableConstruction::LegacyRowBisim,
+            parse_json_schema_to_named,
+        )
+    }
+
+    pub fn from_glrm_grammar(glrm: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        compile_dynamic_from_source(
             glrm,
             vocab,
             "glrm",

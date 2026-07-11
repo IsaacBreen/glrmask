@@ -9,8 +9,11 @@ mod error;
 pub(crate) mod grammar;
 pub(crate) mod import;
 pub(crate) mod runtime;
+#[path = "runtime/dynamic_constraint.rs"]
+mod dynamic_constraint;
 mod vocab;
 
+pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
 pub use runtime::{Constraint, ConstraintState};
 pub use vocab::Vocab;
 

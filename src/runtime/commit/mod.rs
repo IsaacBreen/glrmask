@@ -3407,6 +3407,30 @@ impl<'a> ConstraintState<'a> {
         result
     }
 
+    pub(crate) fn commit_token_dynamic(&mut self, token_id: u32) -> Result<(), String> {
+        let constraint = self.constraint;
+        let bytes = token_bytes_for_id(constraint, token_id)
+            .ok_or_else(|| format!("commit_token: token_id {token_id} not in vocabulary"))?;
+        let was_in_mask = if commit_mask_assert_enabled() {
+            let mut mask = vec![0u32; constraint.mask_len()];
+            self.fill_mask_dynamic(&mut mask);
+            Some(token_in_mask(&mask, token_id))
+        } else {
+            None
+        };
+        let result = commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
+        self.generation += 1;
+        assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
+        result
+    }
+
+    pub(crate) fn commit_tokens_dynamic(&mut self, tokens: &[u32]) -> Result<(), String> {
+        for &token in tokens {
+            self.commit_token_dynamic(token)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn commit_token_timed_ns(&mut self, token_id: u32) -> Result<u64, String> {
         use std::time::Instant;
 

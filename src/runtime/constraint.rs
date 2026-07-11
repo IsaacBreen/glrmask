@@ -251,6 +251,16 @@ impl Constraint {
         DynamicMaskVocab::from_packed(Arc::new(trie), Arc::new(token_aliases))
     }
 
+    pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
+        self.table.rebuild_guarded_shift_index();
+        if !self.dynamic_mask_vocab.is_initialized() {
+            self.dynamic_mask_vocab = self.build_dynamic_mask_vocab();
+        }
+        self.dynamic_mask_vocab
+            .prebuild_continuation_partitions(&self.tokenizer, self.mask_len());
+        self.tokenizer_fast_transitions = self.compute_tokenizer_fast_transitions();
+    }
+
     #[inline]
     fn dynamic_mask_lcp_len(left: &[u8], right: &[u8], from: usize) -> usize {
         let max_len = left.len().min(right.len());
@@ -1820,6 +1830,17 @@ impl Constraint {
         state
     }
 
+    pub(crate) fn start_dynamic(&self) -> ConstraintState<'_> {
+        ConstraintState {
+            constraint: self,
+            state: self.initial_state_map(),
+            buffers: Default::default(),
+            generation: 0,
+            mask_cache: Mutex::new(None),
+            mask_scratch: Mutex::new(Default::default()),
+        }
+    }
+
     pub fn mask_len(&self) -> usize {
         self.token_bytes
             .keys()
@@ -2586,7 +2607,7 @@ impl Constraint {
 impl<'a> ConstraintState<'a> {
     /// Fill a mask directly from the lexer and parser stack, without using the
     /// parser DWA.
-    pub fn fill_mask_dynamic(&self, buf: &mut [u32]) {
+    pub(crate) fn fill_mask_dynamic(&self, buf: &mut [u32]) {
         super::dynamic_mask::fill_mask_dynamic(self, buf);
     }
 

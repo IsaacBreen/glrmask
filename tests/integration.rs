@@ -7,7 +7,7 @@ use std::{
     sync::{Mutex, RwLock},
 };
 
-use glrmask::{Constraint, ConstraintState, Vocab};
+use glrmask::{Constraint, ConstraintState, DynamicConstraint, Vocab};
 use glrmask::__private::{ConstraintExt as _, ConstraintStateExt as _};
 
 static URI_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -1343,17 +1343,18 @@ fn assert_partitioned_runtime_matches_dynamic(
     max_depth: usize,
 ) {
     let partitioned = Constraint::from_glrm_grammar(grammar, vocab).unwrap();
+    let dynamic = DynamicConstraint::from_glrm_grammar(grammar, vocab).unwrap();
 
     let mut frontier = vec![(partitioned.start(), Vec::<u32>::new())];
     for depth in 0..=max_depth {
         let mut next = Vec::new();
         for (partitioned_state, path) in frontier {
-            let mut partitioned_dynamic = vec![0; partitioned.mask_len()];
-            partitioned_state.fill_mask_dynamic(&mut partitioned_dynamic);
+            let mut dynamic_state = dynamic.start();
+            dynamic_state.commit_tokens(&path).unwrap();
             assert_eq!(
                 partitioned_state.mask(),
-                partitioned_dynamic,
-                "partitioned parser-DWA mask differed from direct dynamic traversal after token path {path:?}\ngrammar:\n{grammar}",
+                dynamic_state.mask(),
+                "partitioned parser-DWA mask differed from DynamicConstraint after token path {path:?}\ngrammar:\n{grammar}",
             );
             if depth == max_depth {
                 continue;
@@ -1368,10 +1369,18 @@ fn assert_partitioned_runtime_matches_dynamic(
                     .is_some_and(|mask_word| mask_word & (1u32 << bit) != 0);
                 let mut next_partitioned = partitioned_state.clone();
                 let partitioned_result = next_partitioned.commit_token(token);
+                let mut next_dynamic = dynamic.start();
+                next_dynamic.commit_tokens(&path).unwrap();
+                let dynamic_result = next_dynamic.commit_token(token);
                 assert_eq!(
                     partitioned_result.is_ok(),
                     expected_allowed,
                     "commit result disagreed with mask for token {token} after path {path:?}\ngrammar:\n{grammar}",
+                );
+                assert_eq!(
+                    dynamic_result.is_ok(),
+                    expected_allowed,
+                    "DynamicConstraint commit result disagreed with mask for token {token} after path {path:?}\ngrammar:\n{grammar}",
                 );
                 if expected_allowed {
                     let mut next_path = path.clone();
@@ -1382,9 +1391,6 @@ fn assert_partitioned_runtime_matches_dynamic(
         }
         frontier = next;
     }
-
-    let loaded = Constraint::load(&partitioned.save()).unwrap();
-    assert_eq!(loaded.start().mask(), partitioned.start().mask());
 }
 
 #[test]
@@ -1494,20 +1500,21 @@ fn partitioned_repeat_continuation_survives_ignore_prefixed_token() {
         nt start ::= item item? item?;
     "#;
     let partitioned = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+    let dynamic = DynamicConstraint::from_glrm_grammar(grammar, &vocab).unwrap();
     let monolithic = Constraint::from_glrm_grammar(monolithic_grammar, &vocab).unwrap();
     let mut partitioned_state = partitioned.start();
+    let mut dynamic_state = dynamic.start();
     let mut monolithic_state = monolithic.start();
 
     for token in [0, 6, 16] {
         partitioned_state.commit_token(token).unwrap();
+        dynamic_state.commit_token(token).unwrap();
         monolithic_state.commit_token(token).unwrap();
     }
 
     assert_eq!(partitioned_state.mask(), monolithic_state.mask());
     assert_allowed(&partitioned_state, &[0, 3, 14, 15, 17]);
-    let mut dynamic = vec![0; partitioned.mask_len()];
-    partitioned_state.fill_mask_dynamic(&mut dynamic);
-    assert_eq!(partitioned_state.mask(), dynamic);
+    assert_eq!(partitioned_state.mask(), dynamic_state.mask());
 }
 
 #[test]

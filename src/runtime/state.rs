@@ -148,31 +148,57 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub fn force(&self) -> Vec<u32> {
+        self.force_impl(false)
+    }
+
+    pub(crate) fn force_dynamic(&self) -> Vec<u32> {
+        self.force_impl(true)
+    }
+
+    fn force_impl(&self, dynamic: bool) -> Vec<u32> {
         if self.is_complete() {
             return Vec::new();
         }
 
-        self.force_by_bytes()
-            .unwrap_or_else(|| self.single_token_force())
+        self.force_by_bytes(dynamic)
+            .unwrap_or_else(|| self.single_token_force(dynamic))
     }
 
-    fn force_by_bytes(&self) -> Option<Vec<u32>> {
-        let forced_bytes = self.compute_forced_byte_prefix();
+    fn mask_for_force(&self, dynamic: bool) -> Vec<u32> {
+        if dynamic {
+            let mut mask = vec![0u32; self.constraint.mask_len()];
+            self.fill_mask_dynamic(&mut mask);
+            mask
+        } else {
+            self.mask()
+        }
+    }
+
+    fn force_by_bytes(&self, dynamic: bool) -> Option<Vec<u32>> {
+        let forced_bytes = self.compute_forced_byte_prefix(dynamic);
         let tokens = self.tokenize_forced_with_stop(&forced_bytes);
         (!tokens.is_empty()).then_some(tokens)
     }
 
-    fn single_token_force(&self) -> Vec<u32> {
+    fn single_token_force(&self, dynamic: bool) -> Vec<u32> {
         let mut forced = Vec::new();
         let mut cursor = self.clone();
 
         loop {
-            let mask = cursor.mask();
+            let mask = cursor.mask_for_force(dynamic);
             let Some(token) = single_allowed_token(&mask) else {
                 break;
             };
             forced.push(token);
-            cursor.commit_token(token).expect("forced token should be in vocabulary");
+            if dynamic {
+                cursor
+                    .commit_token_dynamic(token)
+                    .expect("forced token should be in vocabulary");
+            } else {
+                cursor
+                    .commit_token(token)
+                    .expect("forced token should be in vocabulary");
+            }
             if cursor.state.is_empty() || cursor.is_complete() {
                 break;
             }
@@ -181,7 +207,7 @@ impl<'a> ConstraintState<'a> {
         forced
     }
 
-    fn compute_forced_byte_prefix(&self) -> Vec<u8> {
+    fn compute_forced_byte_prefix(&self, dynamic: bool) -> Vec<u8> {
         let eos = self.constraint.eos_token_id;
         let mut bytes = Vec::new();
         let mut cursor = self.clone();
@@ -192,7 +218,7 @@ impl<'a> ConstraintState<'a> {
                 break;
             }
 
-            let mask = cursor.mask();
+            let mask = cursor.mask_for_force(dynamic);
             if let Some(eos_id) = eos {
                 if is_token_set(&mask, eos_id) {
                     break;

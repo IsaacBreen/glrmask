@@ -31,6 +31,7 @@ use glrmask::__private::{ConstraintExt as _, ConstraintStateExt as _, VocabExt a
 // ---------------------------------------------------------------------------
 
 type ConstraintState<'a> = glrmask::ConstraintState<'a>;
+type DynamicConstraintState<'a> = glrmask::DynamicConstraintState<'a>;
 
 self_cell!(
     struct OwnedState {
@@ -43,6 +44,20 @@ self_cell!(
 impl OwnedState {
     fn from_arc(arc: Arc<glrmask::Constraint>) -> Self {
         OwnedState::new(arc, |arc_ref| arc_ref.start())
+    }
+}
+
+self_cell!(
+    struct OwnedDynamicState {
+        owner: Arc<glrmask::DynamicConstraint>,
+        #[not_covariant]
+        dependent: DynamicConstraintState,
+    }
+);
+
+impl OwnedDynamicState {
+    fn from_arc(arc: Arc<glrmask::DynamicConstraint>) -> Self {
+        OwnedDynamicState::new(arc, |arc_ref| arc_ref.start())
     }
 }
 
@@ -80,6 +95,46 @@ fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmas
 
 fn constraint_result<T, E: std::fmt::Display>(result: Result<T, E>) -> PyResult<T> {
     result.map_err(|e| PyValueError::new_err(format!("{e}")))
+}
+
+fn words_to_bool_array<'py>(
+    py: Python<'py>,
+    words: &[u32],
+    max_token: u32,
+) -> Bound<'py, PyArray1<bool>> {
+    let n = (max_token + 1) as usize;
+    let n_full_words = n / 32;
+    let remainder = n % 32;
+    let mut bools = vec![false; n];
+    for (wi, &word) in words[..n_full_words.min(words.len())].iter().enumerate() {
+        let base = wi * 32;
+        let mut w = word;
+        for bit in &mut bools[base..base + 32] {
+            *bit = w & 1 != 0;
+            w >>= 1;
+        }
+    }
+    if remainder > 0 && n_full_words < words.len() {
+        let base = n_full_words * 32;
+        let mut w = words[n_full_words];
+        for bit in &mut bools[base..] {
+            *bit = w & 1 != 0;
+            w >>= 1;
+        }
+    }
+    PyArray1::from_vec(py, bools)
+}
+
+fn bitmask_u32_view<'a, 'py>(
+    bitmask: &'a mut PyReadwriteArray1<'py, i32>,
+) -> PyResult<&'a mut [u32]> {
+    let slice = bitmask
+        .as_slice_mut()
+        .map_err(|e| PyValueError::new_err(format!("Array must be contiguous: {e:?}")))?;
+    // Safety: i32 and u32 have identical size, alignment, and bit representation.
+    Ok(unsafe {
+        std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
+    })
 }
 
 fn set_gss_summary_fields(
@@ -504,6 +559,135 @@ impl PyConstraint {
 }
 
 // ---------------------------------------------------------------------------
+// PyDynamicConstraint
+// ---------------------------------------------------------------------------
+
+#[pyclass(name = "DynamicConstraint")]
+#[derive(Clone)]
+pub struct PyDynamicConstraint {
+    inner: Arc<glrmask::DynamicConstraint>,
+    max_token: u32,
+}
+
+impl PyDynamicConstraint {
+    fn from_constraint_result<E: std::fmt::Display>(
+        constraint: Result<glrmask::DynamicConstraint, E>,
+        vocab: &PyVocab,
+    ) -> PyResult<Self> {
+        let constraint = constraint_result(constraint)?;
+        Ok(Self {
+            inner: Arc::new(constraint),
+            max_token: vocab.inner.max_token_id(),
+        })
+    }
+}
+
+#[pymethods]
+impl PyDynamicConstraint {
+    #[staticmethod]
+    fn from_json_schema(schema: &str, vocab: &PyVocab) -> PyResult<Self> {
+        Self::from_constraint_result(
+            glrmask::DynamicConstraint::from_json_schema(schema, &vocab.inner),
+            vocab,
+        )
+    }
+
+    #[staticmethod]
+    fn from_lark(lark_source: &str, vocab: &PyVocab) -> PyResult<Self> {
+        Self::from_constraint_result(
+            glrmask::DynamicConstraint::from_lark(lark_source, &vocab.inner),
+            vocab,
+        )
+    }
+
+    #[staticmethod]
+    fn from_glrm_grammar(glrm_source: &str, vocab: &PyVocab) -> PyResult<Self> {
+        Self::from_constraint_result(
+            glrmask::DynamicConstraint::from_glrm_grammar(glrm_source, &vocab.inner),
+            vocab,
+        )
+    }
+
+    #[staticmethod]
+    fn from_ebnf(ebnf_source: &str, vocab: &PyVocab) -> PyResult<Self> {
+        Self::from_constraint_result(
+            glrmask::DynamicConstraint::from_ebnf(ebnf_source, &vocab.inner),
+            vocab,
+        )
+    }
+
+    #[staticmethod]
+    fn load(data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
+        Self::from_constraint_result(glrmask::DynamicConstraint::load(data), vocab)
+    }
+
+    fn save(&self) -> Vec<u8> {
+        self.inner.save()
+    }
+
+    fn mask_len(&self) -> usize {
+        self.inner.mask_len()
+    }
+
+    fn start(&self) -> PyDynamicConstraintState {
+        PyDynamicConstraintState {
+            inner: OwnedDynamicState::from_arc(self.inner.clone()),
+            max_token: self.max_token,
+        }
+    }
+}
+
+#[pyclass(name = "DynamicConstraintState")]
+pub struct PyDynamicConstraintState {
+    inner: OwnedDynamicState,
+    max_token: u32,
+}
+
+#[pymethods]
+impl PyDynamicConstraintState {
+    fn commit_bytes(&mut self, data: &[u8]) -> PyResult<()> {
+        self.inner
+            .with_dependent_mut(|_owner, state| string_result(state.commit_bytes(data)))
+    }
+
+    fn commit_token(&mut self, token_id: u32) -> PyResult<()> {
+        self.inner
+            .with_dependent_mut(|_owner, state| string_result(state.commit_token(token_id)))
+    }
+
+    fn commit_tokens(&mut self, token_ids: Vec<u32>) -> PyResult<()> {
+        self.inner
+            .with_dependent_mut(|_owner, state| string_result(state.commit_tokens(&token_ids)))
+    }
+
+    fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
+        let buf = bitmask_u32_view(&mut bitmask)?;
+        self.inner
+            .with_dependent(|_owner, state| state.fill_mask(buf));
+        Ok(())
+    }
+
+    fn force(&self) -> Vec<u32> {
+        self.inner.with_dependent(|_owner, state| state.force())
+    }
+
+    fn is_complete(&self) -> bool {
+        self.inner
+            .with_dependent(|_owner, state| state.is_complete())
+    }
+
+    fn is_finished(&self) -> bool {
+        self.inner
+            .with_dependent(|_owner, state| state.is_finished())
+    }
+
+    fn mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
+        let words = self.inner.with_dependent(|_owner, state| state.mask());
+        Ok(words_to_bool_array(py, &words, self.max_token))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PyConstraintState
 // ---------------------------------------------------------------------------
 
@@ -518,28 +702,7 @@ pub struct PyConstraintState {
 impl PyConstraintState {
     fn mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
         let words = self.inner.with_dependent(|_owner, state| state.mask());
-        let n = (self.max_token + 1) as usize;
-        let n_full_words = n / 32;
-        let remainder = n % 32;
-        let mut bools = vec![false; n];
-        // Expand full 32-bit words in bulk — avoids per-element division/modulo.
-        for (wi, &word) in words[..n_full_words].iter().enumerate() {
-            let base = wi * 32;
-            let mut w = word;
-            for b in bools[base..base + 32].iter_mut() {
-                *b = w & 1 != 0;
-                w >>= 1;
-            }
-        }
-        if remainder > 0 && n_full_words < words.len() {
-            let base = n_full_words * 32;
-            let mut w = words[n_full_words];
-            for b in bools[base..].iter_mut() {
-                *b = w & 1 != 0;
-                w >>= 1;
-            }
-        }
-        Ok(PyArray1::from_vec(py, bools))
+        Ok(words_to_bool_array(py, &words, self.max_token))
     }
 
     fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
@@ -552,19 +715,6 @@ impl PyConstraintState {
             std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
         };
         self.inner.with_dependent(|_owner, state| state.fill_mask(buf));
-        Ok(())
-    }
-
-    fn fill_mask_dynamic(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
-        let slice = bitmask.as_slice_mut().map_err(|e| {
-            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
-        })?;
-        // Safety: i32 and u32 have identical size, alignment, and bit representation.
-        let buf: &mut [u32] = unsafe {
-            std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
-        };
-        self.inner
-            .with_dependent(|_owner, state| state.fill_mask_dynamic(buf));
         Ok(())
     }
 
@@ -1020,10 +1170,19 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVocab>()?;
     m.add_class::<PyConstraint>()?;
     m.add_class::<PyConstraintState>()?;
+    m.add_class::<PyDynamicConstraint>()?;
+    m.add_class::<PyDynamicConstraintState>()?;
     add_internal_module(m)?;
     m.setattr(
         "__all__",
-        ["Vocab", "Constraint", "ConstraintState", "_internal"],
+        [
+            "Vocab",
+            "Constraint",
+            "ConstraintState",
+            "DynamicConstraint",
+            "DynamicConstraintState",
+            "_internal",
+        ],
     )?;
     Ok(())
 }
