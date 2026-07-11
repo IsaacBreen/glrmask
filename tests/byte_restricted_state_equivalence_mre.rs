@@ -21,7 +21,7 @@ fn byte_restricted_state_equivalence_must_admit_a_cross_partition_partial_token(
     unsafe {
         std::env::set_var("GLRMASK_FORCE_ALL_L2P", "1");
         std::env::set_var("GLRMASK_SPLIT_L2P_VOCAB", "0");
-        std::env::set_var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "0");
+        std::env::set_var("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "1");
     }
 
     // Exactly one grammar terminal, and exactly the two necessary tokens.

@@ -74,6 +74,114 @@ struct TokenPositionSeedKey {
     first_destinations: Box<[u32]>,
 }
 
+struct NfaTokenPositionView<'a> {
+    tokenizer: &'a Tokenizer,
+    config_ids: FxHashMap<Vec<u32>, u32>,
+    configs: Vec<Box<[u32]>>,
+    raw_start_configs: Vec<u32>,
+    transitions: FxHashMap<(u32, u8), u32>,
+}
+
+impl<'a> NfaTokenPositionView<'a> {
+    fn new(tokenizer: &'a Tokenizer) -> Self {
+        let mut view = Self {
+            tokenizer,
+            config_ids: FxHashMap::default(),
+            configs: Vec::new(),
+            raw_start_configs: Vec::with_capacity(tokenizer.num_states() as usize),
+            transitions: FxHashMap::default(),
+        };
+        for raw_state in 0..tokenizer.num_states() {
+            let closure = tokenizer
+                .execute_from_state_end_only(&[], raw_state)
+                .to_vec();
+            let config = view.intern_config(closure);
+            view.raw_start_configs.push(config);
+        }
+        view
+    }
+
+    fn intern_config(&mut self, states: Vec<u32>) -> u32 {
+        if let Some(&config) = self.config_ids.get(&states) {
+            return config;
+        }
+        let config = self.configs.len() as u32;
+        self.config_ids.insert(states.clone(), config);
+        self.configs.push(states.into_boxed_slice());
+        config
+    }
+
+    #[inline]
+    fn raw_start_config(&self, raw_state: usize) -> u32 {
+        self.raw_start_configs[raw_state]
+    }
+
+    fn step(&mut self, config: u32, byte: u8) -> u32 {
+        if let Some(&target) = self.transitions.get(&(config, byte)) {
+            return target;
+        }
+        let source = self.configs[config as usize].to_vec();
+        let targets = self.tokenizer.step_all(&source, byte);
+        let target = if targets.is_empty() {
+            u32::MAX
+        } else {
+            self.intern_config(targets.to_vec())
+        };
+        self.transitions.insert((config, byte), target);
+        target
+    }
+
+    #[inline]
+    fn states(&self, config: u32) -> &[u32] {
+        &self.configs[config as usize]
+    }
+
+    fn has_finalizer(&self, config: u32) -> bool {
+        self.states(config)
+            .iter()
+            .any(|&state| !self.tokenizer.matched_terminal_bitset(state).is_empty())
+    }
+
+    fn outgoing_bytes(&self, config: u32, bytes: &mut Vec<u8>) {
+        let mut seen = [false; 256];
+        bytes.clear();
+        for &state in self.states(config) {
+            for (byte, _) in self.tokenizer.transitions_from(state) {
+                if !seen[byte as usize] {
+                    seen[byte as usize] = true;
+                    bytes.push(byte);
+                }
+            }
+        }
+    }
+}
+
+fn first_destination_rows(tokenizer: &Tokenizer, first_bytes: &[u8]) -> Vec<Box<[u32]>> {
+    if !tokenizer.has_epsilon_transitions() {
+        return (0..tokenizer.num_states())
+            .map(|state| {
+                first_bytes
+                    .iter()
+                    .map(|&byte| tokenizer.get_transition(state, byte))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice()
+            })
+            .collect();
+    }
+
+    let mut view = NfaTokenPositionView::new(tokenizer);
+    (0..tokenizer.num_states() as usize)
+        .map(|state| {
+            let source = view.raw_start_config(state);
+            first_bytes
+                .iter()
+                .map(|&byte| view.step(source, byte))
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        })
+        .collect()
+}
+
 fn token_position_byte_sets(vocab: &Vocab) -> ([bool; 256], [bool; 256], [bool; 256]) {
     let mut first = [false; 256];
     let mut remaining = [false; 256];
@@ -107,6 +215,31 @@ fn second_states(
     first_bytes: &[u8],
 ) -> Vec<bool> {
     let state_count = tokenizer.num_states() as usize;
+    if tokenizer.has_epsilon_transitions() {
+        let mut view = NfaTokenPositionView::new(tokenizer);
+        let mut states = vec![false; state_count];
+        let mut reset_needed = false;
+        for source in 0..state_count {
+            let source_config = view.raw_start_config(source);
+            for &byte in first_bytes {
+                let destination = view.step(source_config, byte);
+                if destination == u32::MAX {
+                    continue;
+                }
+                reset_needed |= view.has_finalizer(destination);
+                for &state in view.states(destination) {
+                    states[state as usize] = true;
+                }
+            }
+        }
+        if reset_needed {
+            let reset = view.raw_start_config(tokenizer.initial_state_id() as usize);
+            for &state in view.states(reset) {
+                states[state as usize] = true;
+            }
+        }
+        return states;
+    }
     let mut states = vec![false; state_count];
     for source in 0..state_count {
         for &byte in first_bytes {
@@ -132,6 +265,49 @@ fn third_plus_states(
     second_bytes: &[u8],
 ) -> Vec<bool> {
     let state_count = tokenizer.num_states() as usize;
+    if tokenizer.has_epsilon_transitions() {
+        let mut view = NfaTokenPositionView::new(tokenizer);
+        let mut reached = vec![false; state_count];
+        let mut worklist = VecDeque::new();
+
+        for (state, &is_second_state) in second_states.iter().enumerate() {
+            if !is_second_state {
+                continue;
+            }
+            let source = view.raw_start_config(state);
+            for &byte in second_bytes {
+                let destination = view.step(source, byte);
+                if destination == u32::MAX {
+                    continue;
+                }
+                for &target in view.states(destination) {
+                    if !reached[target as usize] {
+                        reached[target as usize] = true;
+                        worklist.push_back(target);
+                    }
+                }
+            }
+        }
+
+        let mut bytes = Vec::<u8>::new();
+        while let Some(state) = worklist.pop_front() {
+            let source = view.raw_start_config(state as usize);
+            view.outgoing_bytes(source, &mut bytes);
+            for byte in bytes.clone() {
+                let destination = view.step(source, byte);
+                if destination == u32::MAX {
+                    continue;
+                }
+                for &target in view.states(destination) {
+                    if !reached[target as usize] {
+                        reached[target as usize] = true;
+                        worklist.push_back(target);
+                    }
+                }
+            }
+        }
+        return reached;
+    }
     let mut reached = vec![false; state_count];
     let mut worklist = VecDeque::new();
 
@@ -169,6 +345,7 @@ fn seed_partition(
     third_plus: &[bool],
 ) -> (Vec<u32>, usize) {
     let state_count = tokenizer.num_states() as usize;
+    let first_destinations = first_destination_rows(tokenizer, first_bytes);
     // Group states by their exact A∧B seed key (first-byte destinations and a
     // position->=3 singleton marker) via a 128-bit fingerprint. Position->=3
     // states fold their own index into the hash so they remain singletons. A
@@ -183,8 +360,8 @@ fn seed_partition(
     for state in 0..state_count {
         let mut hash_a = 0x9e37_79b9_7f4a_7c15u64;
         let mut hash_b = 0xd1b5_4a32_d192_ed03u64;
-        for &byte in first_bytes {
-            let destination = tokenizer.get_transition(state as u32, byte) as u64;
+        for &destination in first_destinations[state].iter() {
+            let destination = destination as u64;
             hash_a = hash_a
                 .wrapping_mul(0x517c_c1b7_2722_0a95)
                 .wrapping_add(destination.wrapping_add(1));
@@ -217,6 +394,7 @@ fn token_position_partition(
     third_plus: &[bool],
 ) -> ManyToOneIdMap {
     let state_count = tokenizer.num_states() as usize;
+    let first_destinations = first_destination_rows(tokenizer, first_bytes);
     let mut key_to_class = FxHashMap::<TokenPositionSeedKey, u32>::default();
     let mut original_to_internal = vec![u32::MAX; state_count];
     let mut internal_to_originals = Vec::<Vec<u32>>::new();
@@ -225,11 +403,7 @@ fn token_position_partition(
     for state in 0..state_count {
         let key = TokenPositionSeedKey {
             third_plus_singleton: third_plus[state].then_some(state as u32).unwrap_or(u32::MAX),
-            first_destinations: first_bytes
-                .iter()
-                .map(|&byte| tokenizer.get_transition(state as u32, byte))
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+            first_destinations: first_destinations[state].clone(),
         };
         let next = internal_to_originals.len() as u32;
         let class = *key_to_class.entry(key).or_insert_with(|| {
@@ -253,6 +427,7 @@ fn first_destination_partition_class_count(
     first_bytes: &[u8],
     third_plus: Option<&[bool]>,
 ) -> usize {
+    let first_destinations = first_destination_rows(tokenizer, first_bytes);
     let mut classes = FxHashMap::<TokenPositionSeedKey, u32>::default();
     for state in 0..tokenizer.num_states() as usize {
         let key = TokenPositionSeedKey {
@@ -260,11 +435,7 @@ fn first_destination_partition_class_count(
                 .is_some_and(|states| states[state])
                 .then_some(state as u32)
                 .unwrap_or(u32::MAX),
-            first_destinations: first_bytes
-                .iter()
-                .map(|&byte| tokenizer.get_transition(state as u32, byte))
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+            first_destinations: first_destinations[state].clone(),
         };
         let next = classes.len() as u32;
         classes.entry(key).or_insert(next);
@@ -277,17 +448,14 @@ fn first_destination_partition(
     first_bytes: &[u8],
 ) -> ManyToOneIdMap {
     let state_count = tokenizer.num_states() as usize;
+    let first_destinations = first_destination_rows(tokenizer, first_bytes);
     let mut key_to_class = FxHashMap::<Box<[u32]>, u32>::default();
     let mut original_to_internal = vec![u32::MAX; state_count];
     let mut internal_to_originals = Vec::<Vec<u32>>::new();
     let mut representative_original_ids = Vec::<u32>::new();
 
     for state in 0..state_count {
-        let destinations = first_bytes
-            .iter()
-            .map(|&byte| tokenizer.get_transition(state as u32, byte))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+        let destinations = first_destinations[state].clone();
         let next = internal_to_originals.len() as u32;
         let class = *key_to_class.entry(destinations).or_insert_with(|| {
             internal_to_originals.push(Vec::new());
@@ -440,6 +608,7 @@ mod tests {
     use super::*;
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::compile::build_regex;
+    use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
 
     fn tokenizer(expressions: Vec<Expr>) -> Tokenizer {
         let terminal_count = expressions.len() as u32;
@@ -486,5 +655,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn epsilon_token_boundary_classes_share_exact_state_set_trajectories() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let vocab = vocab(&[(0, b"a"), (1, b"b"), (2, b"aa"), (3, b"ba")]);
+        let partition = compute_global_token_boundary_state_partition(&tokenizer, &vocab)
+            .expect("all fixture tokens are nonempty");
+        let map = partition.as_many_to_one();
+
+        for members in &map.internal_to_originals {
+            let representative = *members.first().expect("total quotient class");
+            for &state in members {
+                for token in vocab.entries.values() {
+                    let mut left = tokenizer.execute_from_state_end_only(&[], state);
+                    let mut right = tokenizer.execute_from_state_end_only(&[], representative);
+                    for &byte in token {
+                        left = tokenizer.step_all(&left, byte);
+                        right = tokenizer.step_all(&right, byte);
+                        assert_eq!(
+                            left, right,
+                            "epsilon boundary states diverged on token {token:?}",
+                        );
+                    }
+                }
+            }
+        }
+
+        let (quotient, _) = compute_global_token_position_state_quotient(&tokenizer, &vocab);
+        assert_eq!(quotient.raw_state_count(), tokenizer.num_states() as usize);
     }
 }

@@ -12,6 +12,7 @@ use super::state_equivalence::{
     build_state_map_from_subset_representatives, resolve_l2p_pipeline_config,
     run_state_equivalence_pipeline, StateEquivalenceScope,
 };
+use super::state_equivalence::nfa::build_bounded_analysis_view;
 use crate::ds::bitset::BitSet;
 use super::compat::TokenizerView;
 use super::disallowed_follows::normalize_disallowed_follows;
@@ -1226,7 +1227,6 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     initial_state_map: Option<&ManyToOneIdMap>,
     token_boundary_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
-    allow_structured_epsilon_equivalence: bool,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
     analyze_equivalences_impl(
         partition_label,
@@ -1244,7 +1244,6 @@ pub(crate) fn analyze_equivalences_with_group_filter(
         initial_state_map,
         token_boundary_partition,
         precomputed_raw_observations,
-        allow_structured_epsilon_equivalence,
     )
 }
 
@@ -1268,78 +1267,190 @@ fn analyze_equivalences_impl(
     initial_state_map: Option<&ManyToOneIdMap>,
     token_boundary_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
-    allow_structured_epsilon_equivalence: bool,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
-    // Arbitrary epsilon lexers require set-of-states token execution, so the
-    // scalar finite-token equivalence passes below are not applicable. A
-    // deterministic-dispatch lexer is narrower: every physical component state
-    // has deterministic byte transitions, and the synthetic dispatch root stays
-    // distinct. For p0 we may therefore use the exact frozen-output,
-    // relevant-byte right congruence over physical states. We deliberately do
-    // not run the coarser scalar finite-token refinement in this branch.
     if tokenizer.has_epsilon_transitions() {
+        let follows_prepare_started_at = Instant::now();
+        let token_path_disallowed_follows = (!disallowed_follows_are_ignore_transparent)
+            .then(|| ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal));
+        let effective_follows_prepare_ms =
+            follows_prepare_started_at.elapsed().as_secs_f64() * 1000.0;
+        let effective_disallowed = token_path_disallowed_follows
+            .as_ref()
+            .unwrap_or(disallowed_follows);
+
         let prepare_started_at = Instant::now();
         let prepared = prepare_equivalence_inputs(tokenizer, vocab, initial_state_map);
         let token_len_stats = token_length_stats(&prepared.token_bytes);
-        let max_token_len = prepared
-            .token_bytes
+        let prepare_inputs_ms = prepare_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        let token_dedup_started_at = Instant::now();
+        let identity_byte_class: [u8; 256] = std::array::from_fn(|byte| byte as u8);
+        let dedup = deduplicate_tokens_by_byte_class(&prepared.token_bytes, &identity_byte_class);
+        let token_dedup_ms = token_dedup_started_at.elapsed().as_secs_f64() * 1000.0;
+        let max_token_len = dedup
+            .representative_token_bytes
             .iter()
             .map(|token| token.len())
             .max()
             .unwrap_or(0);
         let mut relevant_bytes = [false; 256];
-        for token in &prepared.token_bytes {
+        for token in &dedup.representative_token_bytes {
             for &byte in *token {
                 relevant_bytes[byte as usize] = true;
             }
         }
-        let structured_equivalence = allow_structured_epsilon_equivalence
-            && partition_label == "p0"
-            && tokenizer.has_deterministic_dispatch()
-            && flat_trans.is_some();
-        let all_groups;
-        let active_groups = match active_groups {
-            Some(active_groups) => active_groups,
-            None => {
-                all_groups = vec![true; tokenizer.num_terminals() as usize];
-                &all_groups
-            }
+        let direct_token_bytes = dedup
+            .representative_token_bytes
+            .iter()
+            .map(|token| token.len())
+            .sum();
+        let active_byte_count = relevant_bytes.iter().filter(|&&active| active).count();
+        let projected_by_global = prepared.initial_states.len() < tokenizer.num_states() as usize;
+        let max_length_skipped = should_skip_max_length_for_partition(
+            partition_label,
+            prepared.initial_states.len(),
+            projected_by_global,
+            direct_token_bytes,
+            max_token_len,
+            active_byte_count,
+        );
+        let pipeline_config = resolve_l2p_pipeline_config(!max_length_skipped);
+        let (tokenizer_states, pipeline_profile) = run_state_equivalence_pipeline(
+            tokenizer,
+            vocab,
+            initial_state_map,
+            active_groups,
+            StateEquivalenceScope::L2p,
+            &pipeline_config,
+            None,
+            None,
+        );
+
+        let raw_pre_representatives = tokenizer_states
+            .representative_original_ids
+            .iter()
+            .map(|&state| state as usize)
+            .collect::<Vec<_>>();
+        let analysis_view_started_at = Instant::now();
+        let bounded = build_bounded_analysis_view(
+            tokenizer,
+            &raw_pre_representatives,
+            &dedup.representative_token_bytes,
+            active_groups,
+        );
+        let analysis_view_build_ms =
+            analysis_view_started_at.elapsed().as_secs_f64() * 1000.0;
+        let analysis_view = &bounded.tokenizer_view;
+
+        let byte_class_started_at = Instant::now();
+        let byte_to_class = super::compat::compute_byte_classes(analysis_view.dfa());
+        let byte_class_setup_ms = byte_class_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        let follows_normalize_started_at = Instant::now();
+        let normalized_disallowed_follows =
+            normalize_disallowed_follows(tokenizer_group_count(analysis_view), effective_disallowed);
+        let effective_follows_normalize_ms = effective_follows_prepare_ms
+            + follows_normalize_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        let preclass_view_states = raw_pre_representatives
+            .iter()
+            .map(|&raw| bounded.view_state_for_raw_start(raw))
+            .collect::<Vec<_>>();
+        let mut query_view_states = preclass_view_states.clone();
+        query_view_states.sort_unstable();
+        query_view_states.dedup();
+        let exact_rep_confirmation_used = query_view_states.len() >= EXACT_REP_CONFIRMATION_MIN_STATES
+            && dedup.representative_token_bytes.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
+        let exact_started_at = Instant::now();
+        let query_representatives = if exact_rep_confirmation_used {
+            state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
+                analysis_view,
+                &dedup.representative_token_bytes,
+                &query_view_states,
+                &normalized_disallowed_follows,
+                None,
+                None,
+                Some(true),
+                None,
+            )
+        } else {
+            state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
+                analysis_view,
+                &dedup.representative_token_bytes,
+                &query_view_states,
+                &normalized_disallowed_follows,
+                None,
+            )
         };
-        let raw_restricted = structured_equivalence
-            .then(|| {
-                super::state_equivalence::restricted_observation::compute_state_map_raw(
-                    tokenizer,
-                    flat_trans.expect("structured epsilon equivalence requires flat transitions"),
-                    active_groups,
-                    &relevant_bytes,
-                    precomputed_raw_observations,
-                )
-            })
-            .flatten();
-        let tokenizer_states = raw_restricted
-            .as_ref()
-            .map(|result| result.state_map.clone())
-            .unwrap_or_else(|| {
-                let state_ids = (0..tokenizer.num_states()).collect::<Vec<_>>();
-                ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-                    state_ids.clone(),
-                    state_ids,
-                )
+        let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        let view_to_exact_view = query_view_states
+            .iter()
+            .copied()
+            .zip(query_representatives.iter().copied())
+            .collect::<BTreeMap<_, _>>();
+        let first_preclass_for_view = preclass_view_states
+            .iter()
+            .copied()
+            .enumerate()
+            .fold(BTreeMap::<usize, usize>::new(), |mut map, (preclass, view_state)| {
+                map.entry(view_state).or_insert(preclass);
+                map
             });
-        let tokenizer_state_reps = tokenizer_states.num_internal_ids() as usize;
+        let final_preclass_representatives = preclass_view_states
+            .iter()
+            .map(|view_state| {
+                let exact_view = view_to_exact_view[view_state];
+                first_preclass_for_view[&exact_view]
+            })
+            .collect::<Vec<_>>();
+        let tokenizer_states =
+            compose_raw_quotient_state_map(&tokenizer_states, &final_preclass_representatives);
+
+        let mut final_view_states = tokenizer_states
+            .representative_original_ids
+            .iter()
+            .map(|&raw| bounded.view_state_for_raw_start(raw as usize))
+            .collect::<Vec<_>>();
+        final_view_states.sort_unstable();
+        final_view_states.dedup();
+
+        let vocab_equiv_started_at = Instant::now();
+        let (dedup_vocab_classes, vocab_analysis_dfa_build_ms) =
+            vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
+                analysis_view,
+                &dedup.representative_token_bytes,
+                &final_view_states,
+                effective_disallowed,
+                Some(&byte_to_class),
+                None,
+                None,
+                None,
+            );
+        let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        let id_map_finalize_started_at = Instant::now();
+        let vocab_classes = expand_vocab_classes(
+            dedup_vocab_classes,
+            &dedup.original_to_repr,
+            dedup.representative_token_bytes.len(),
+        );
+        let vocab_tokens = build_vocab_map(
+            &vocab_classes,
+            &prepared.token_ids,
+            prepared.max_token_id,
+        );
         let id_map = InternalIdMap {
             tokenizer_states,
-            vocab_tokens: build_exact_byte_vocab_map(
-                &prepared.token_ids,
-                &prepared.token_bytes,
-                prepared.max_token_id,
-            ),
+            vocab_tokens,
         };
+        let id_map_finalize_ms = id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
+        let exact_reps = id_map.tokenizer_states.num_internal_ids() as usize;
         return (
             id_map,
             CombinedEquivalenceProfile {
                 initial_states_considered: prepared.initial_states.len(),
-                max_length_skipped: true,
+                max_length_skipped: pipeline_profile.max_length_skipped,
                 max_token_len,
                 token_len_gt_4: token_len_stats.gt_4,
                 token_len_gt_8: token_len_stats.gt_8,
@@ -1347,25 +1458,23 @@ fn analyze_equivalences_impl(
                 token_len_gt_32: token_len_stats.gt_32,
                 token_len_gt_64: token_len_stats.gt_64,
                 raw_analysis_base_init_ms: 0.0,
-                analysis_view_build_ms: 0.0,
+                analysis_view_build_ms,
                 active_mask_filter_ms: 0.0,
-                effective_follows_normalize_ms: 0.0,
-                prepare_inputs_ms: prepare_started_at.elapsed().as_secs_f64() * 1000.0,
-                byte_class_setup_ms: 0.0,
-                vocab_analysis_dfa_build_ms: 0.0,
-                token_dedup_ms: 0.0,
-                restricted_observation_state_equiv_ms: raw_restricted
-                    .as_ref()
-                    .map(|result| result.label_ms + result.refine_ms + result.certificate_ms)
-                    .unwrap_or(0.0),
-                max_length_state_equiv_ms: 0.0,
-                vocab_equiv_ms: 0.0,
-                exact_state_equiv_ms: 0.0,
-                id_map_finalize_ms: 0.0,
-                restricted_observation_reps: tokenizer_state_reps,
-                max_length_reps: tokenizer_state_reps,
-                exact_reps: tokenizer_state_reps,
-                exact_rep_confirmation_used: false,
+                effective_follows_normalize_ms,
+                prepare_inputs_ms,
+                byte_class_setup_ms,
+                vocab_analysis_dfa_build_ms,
+                token_dedup_ms,
+                restricted_observation_state_equiv_ms: pipeline_profile
+                    .restricted_observation_state_equiv_ms,
+                max_length_state_equiv_ms: pipeline_profile.max_length_state_equiv_ms,
+                vocab_equiv_ms,
+                exact_state_equiv_ms,
+                id_map_finalize_ms,
+                restricted_observation_reps: pipeline_profile.restricted_observation_reps,
+                max_length_reps: pipeline_profile.max_length_reps,
+                exact_reps,
+                exact_rep_confirmation_used,
             },
         );
     }

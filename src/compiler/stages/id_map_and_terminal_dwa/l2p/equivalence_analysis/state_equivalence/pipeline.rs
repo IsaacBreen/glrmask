@@ -155,6 +155,7 @@ pub(crate) fn run_state_equivalence_pipeline(
 
     for kind in &config.passes {
         if matches!(kind, StateEquivalencePassKind::MaxLength)
+            && !tokenizer.has_epsilon_transitions()
             && matches!(scope, StateEquivalenceScope::L2p)
             && kbounded_tokenizer_view.is_some_and(|view| {
                 view.is_relevant_byte_congruent(&current_state_map, statistic.relevant_bytes())
@@ -185,15 +186,28 @@ pub(crate) fn run_state_equivalence_pipeline(
                     "restricted-observation state equivalence is L2P-only",
                 );
                 let started_at = Instant::now();
-                let tokenizer_view = kbounded_tokenizer_view
-                    .expect("L2P restricted observation requires the shared analysis view");
-                current_state_map = restricted_observation::compute_state_map(
-                    tokenizer_view,
-                    statistic.relevant_bytes(),
-                    Some(&current_state_map),
-                    kbounded_byte_to_class,
-                    config.passes.iter().any(|kind| matches!(kind, StateEquivalencePassKind::MaxLength)),
-                );
+                current_state_map = if tokenizer.has_epsilon_transitions() {
+                    super::nfa::compute_state_map(
+                        tokenizer,
+                        statistic.relevant_bytes(),
+                        active_groups,
+                        Some(&current_state_map),
+                        super::nfa::RefinementDepth::Stable,
+                    )
+                } else {
+                    let tokenizer_view = kbounded_tokenizer_view
+                        .expect("L2P restricted observation requires the shared analysis view");
+                    restricted_observation::compute_state_map(
+                        tokenizer_view,
+                        statistic.relevant_bytes(),
+                        Some(&current_state_map),
+                        kbounded_byte_to_class,
+                        config
+                            .passes
+                            .iter()
+                            .any(|kind| matches!(kind, StateEquivalencePassKind::MaxLength)),
+                    )
+                };
                 record_restricted_observation_profile(
                     &mut profile,
                     started_at.elapsed().as_secs_f64() * 1000.0,

@@ -632,32 +632,50 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         return None;
     }
 
+    let generic_epsilon_nfa =
+        tokenizer.has_epsilon_transitions() && !tokenizer.has_deterministic_dispatch();
+
     let total_started_at = Instant::now();
     let id_map_started_at = Instant::now();
-    let (mut id_map, vocab_order, _state_to_rep, id_map_profile, exact_profile_reuse) = build_l1_id_map(
-        partition_label,
-        tokenizer,
-        vocab,
-        active_terminals,
-        flat_trans,
-        transitions_by_byte,
-        initial_state_map,
-    );
+    let (mut id_map, vocab_order, _state_to_rep, id_map_profile, exact_profile_reuse) =
+        if generic_epsilon_nfa {
+            build_l1_generic_nfa_id_map(tokenizer, vocab, initial_state_map)
+        } else {
+            build_l1_id_map(
+                partition_label,
+                tokenizer,
+                vocab,
+                active_terminals,
+                flat_trans,
+                transitions_by_byte,
+                initial_state_map,
+            )
+        };
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let num_terminals = grammar.num_terminals as u32;
     let dwa_started_at = Instant::now();
-    let (dwa, terminal_profile) = build_l1_terminal_dwa(
-        tokenizer,
-        vocab_order.as_ref(),
-        &mut id_map,
-        num_terminals,
-        active_terminals,
-        flat_trans.as_ref(),
-        exact_profile_reuse
-            .as_ref()
-            .filter(|_| l1_exact_profile_reuse_enabled()),
-    )?;
+    let (dwa, terminal_profile) = if generic_epsilon_nfa {
+        build_l1_generic_nfa_terminal_dwa(
+            tokenizer,
+            vocab_order.as_ref(),
+            &mut id_map,
+            num_terminals,
+            active_terminals,
+        )?
+    } else {
+        build_l1_terminal_dwa(
+            tokenizer,
+            vocab_order.as_ref(),
+            &mut id_map,
+            num_terminals,
+            active_terminals,
+            flat_trans.as_ref(),
+            exact_profile_reuse
+                .as_ref()
+                .filter(|_| l1_exact_profile_reuse_enabled()),
+        )?
+    };
     let dwa_stats_before_compact = dwa.stats();
     let terminal_build_ms = dwa_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -764,6 +782,166 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
             ..TerminalDwaPhaseProfile::default()
         },
     })
+}
+
+fn build_l1_generic_nfa_id_map<'a>(
+    tokenizer: &Tokenizer,
+    vocab: &'a Vocab,
+    initial_state_map: Option<&ManyToOneIdMap>,
+) -> (
+    InternalIdMap,
+    Arc<L1IdentityVocabOrder>,
+    Vec<u32>,
+    L1IdMapProfile,
+    Option<L1ExactProfileReuse>,
+) {
+    let num_states = tokenizer.num_states() as usize;
+    let token_bytes = vocab
+        .entries
+        .values()
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    let token_len_stats = token_length_stats(&token_bytes);
+    let max_token_len = token_bytes.iter().map(|bytes| bytes.len()).max().unwrap_or(0);
+    let (vocab_tokens, vocab_order, token_identity_map_ms) = build_l1_identity_vocab_map(vocab);
+
+    // Raw TSIDs are the token-boundary coordinate.  Do not quotient them
+    // through powerset scanner configurations before the exact L1 profile is
+    // known: different raw branches may share a scanner configuration while
+    // carrying different parser/GSS histories.  A previously proved global
+    // state quotient is safe to reuse; otherwise start from identity.
+    let mut tokenizer_states = initial_state_map.cloned().unwrap_or_else(|| {
+        let ids = (0..tokenizer.num_states()).collect::<Vec<_>>();
+        ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+            ids.clone(),
+            ids,
+        )
+    });
+    tokenizer_states.isolate_original(tokenizer.initial_state_id());
+    let state_to_rep = state_to_representative_vector(&tokenizer_states, num_states);
+    let exact_reps = tokenizer_states.num_internal_ids() as usize;
+
+    (
+        InternalIdMap {
+            tokenizer_states,
+            vocab_tokens,
+        },
+        vocab_order,
+        state_to_rep,
+        L1IdMapProfile {
+            initial_states_considered: exact_reps,
+            max_length_skipped: true,
+            max_token_len,
+            token_len_gt_4: token_len_stats.gt_4,
+            token_len_gt_8: token_len_stats.gt_8,
+            token_len_gt_16: token_len_stats.gt_16,
+            token_len_gt_32: token_len_stats.gt_32,
+            token_len_gt_64: token_len_stats.gt_64,
+            state_equiv_ms: 0.0,
+            max_length_state_equiv_ms: 0.0,
+            exact_state_equiv_ms: 0.0,
+            max_length_reps: exact_reps,
+            exact_reps,
+            token_identity_map_ms,
+        },
+        None,
+    )
+}
+
+fn build_l1_generic_nfa_terminal_dwa(
+    tokenizer: &Tokenizer,
+    vocab_order: &L1IdentityVocabOrder,
+    id_map: &mut InternalIdMap,
+    num_terminals: u32,
+    active_terminals: &[bool],
+) -> Option<(DWA, L1TerminalBuildProfile)> {
+    let traversal_started_at = Instant::now();
+    let tsids_before_merge = id_map.num_tsids() as usize;
+    let mut deferred_by_terminal =
+        (0..num_terminals).map(|_| Vec::<(u32, Arc<RangeSetBlaze<u32>>)>::new()).collect::<Vec<_>>();
+
+    for (internal_tsid, raw_state) in id_map
+        .tokenizer_states
+        .iter_representative_ids()
+        .enumerate()
+    {
+        let mut token_ids_by_terminal = FxHashMap::<u32, Vec<u32>>::default();
+        for (internal_token_id, (_, bytes)) in
+            vocab_order.token_entries_sorted.iter().enumerate()
+        {
+            let end_states = tokenizer.execute_from_state_end_only(bytes, raw_state);
+            if end_states.is_empty() {
+                continue;
+            }
+            let mut matched = Vec::<u32>::new();
+            for &state in &end_states {
+                matched.extend(tokenizer.matched_terminals_iter(state));
+            }
+            matched.sort_unstable();
+            matched.dedup();
+            for terminal in matched {
+                if active_terminals
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    token_ids_by_terminal
+                        .entry(terminal)
+                        .or_default()
+                        .push(internal_token_id as u32);
+                }
+            }
+        }
+
+        for (terminal, token_ids) in token_ids_by_terminal {
+            let token_set = shared_rangeset(token_ids.into_iter().collect());
+            if !token_set.is_empty() {
+                deferred_by_terminal[terminal as usize]
+                    .push((internal_tsid as u32, token_set));
+            }
+        }
+    }
+    let traversal_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let merge_started_at = Instant::now();
+    let merge_report = merge_deferred_equivalent_tsids(id_map, &mut deferred_by_terminal);
+    let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let dwa_started_at = Instant::now();
+    let mut dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+    let end_state = dwa.add_state();
+    dwa.set_final_weight(end_state, Weight::all());
+    let mut transition_count = 0usize;
+    for (terminal, entries) in deferred_by_terminal.into_iter().enumerate() {
+        if entries.is_empty() {
+            continue;
+        }
+        let weight = Weight::from_per_tsid_shared(entries);
+        if weight.is_empty() {
+            continue;
+        }
+        dwa.add_transition(dwa.start_state(), terminal as i32, end_state, weight);
+        transition_count += 1;
+    }
+    if transition_count == 0 {
+        return None;
+    }
+    let dwa_ms = dwa_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    Some((
+        dwa,
+        L1TerminalBuildProfile {
+            internal_vocab_ms: 0.0,
+            vocab_tree_build_ms: 0.0,
+            state_seed_ms: 0.0,
+            token_set_intern_ms: 0.0,
+            tsid_profile_merge_ms: merge_ms,
+            tsid_profile_merge_before: tsids_before_merge,
+            tsid_profile_merge_after: merge_report.tsids_after,
+            vocab_tree_traversal_ms: traversal_ms,
+            direct_terminal_dwa_ms: traversal_ms + merge_ms + dwa_ms,
+        },
+    ))
 }
 
 fn build_l1_id_map<'a>(
@@ -4035,6 +4213,61 @@ struct L1TerminalBuildProfile {
     tsid_profile_merge_after: usize,
     vocab_tree_traversal_ms: f64,
     direct_terminal_dwa_ms: f64,
+}
+
+#[cfg(test)]
+mod generic_nfa_tests {
+    use super::*;
+    use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
+
+    #[test]
+    fn generic_epsilon_l1_weights_match_exact_state_set_execution() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+                (2, b"aa".to_vec()),
+            ],
+            None,
+        );
+        let active = [true, true];
+        let (mut id_map, order, _, _, _) =
+            build_l1_generic_nfa_id_map(&tokenizer, &vocab, None);
+        let (dwa, _) = build_l1_generic_nfa_terminal_dwa(
+            &tokenizer,
+            order.as_ref(),
+            &mut id_map,
+            2,
+            &active,
+        )
+        .expect("generic epsilon L1 fixture must produce a terminal DWA");
+
+        for raw_state in 0..tokenizer.num_states() {
+            let tsid = id_map.tokenizer_states.original_to_internal[raw_state as usize];
+            assert_ne!(tsid, u32::MAX, "raw_state={raw_state}");
+            for (&token_id, bytes) in vocab.entries.iter() {
+                let internal_token = id_map.vocab_tokens.original_to_internal[token_id as usize];
+                assert_ne!(internal_token, u32::MAX, "token={token_id}");
+                let end_states = tokenizer.execute_from_state_end_only(bytes, raw_state);
+                for terminal in 0..2u32 {
+                    let expected = end_states.iter().any(|&state| {
+                        tokenizer
+                            .matched_terminals_iter(state)
+                            .any(|matched| matched == terminal)
+                    });
+                    let actual = dwa
+                        .eval_word(&[terminal as i32])
+                        .tokens_for_tsid(tsid)
+                        .contains(internal_token);
+                    assert_eq!(
+                        actual, expected,
+                        "raw_state={raw_state} token={token_id} bytes={bytes:?} terminal={terminal}",
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -71,9 +71,8 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     let num_terminals = grammar.num_terminals as u32;
     // Classify terminals into L1 (single-byte paths) vs L2+ by default.
     // Set GLRMASK_FORCE_ALL_L2P=1 to skip L1 and route everything through L2P.
-    let force_all_l2p = (tokenizer.has_epsilon_transitions()
-        && !tokenizer.has_deterministic_dispatch())
-        || std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
+    let force_all_l2p =
+        std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
 
     let pre_classify_setup_ms =
         pre_classify_setup_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -118,9 +117,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         }
     }
 
-    let use_l2p_vocab_split = has_l2p
-        && (!tokenizer.has_epsilon_transitions() || tokenizer.has_deterministic_dispatch())
-        && split_l2p_vocab_enabled();
+    let use_l2p_vocab_split = has_l2p && split_l2p_vocab_enabled();
     let l2p_vocab_split = use_l2p_vocab_split.then(|| {
         split_vocab_for_active_l2p_terminals(
             tokenizer,
@@ -199,7 +196,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                         // analysis verifies flat-table compatibility before using it.
                         Some(flat_trans),
                         initial_state_map,
-                        true,
                     );
                     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
                     return ((result, 0.0), (None, 0.0), elapsed_ms);
@@ -249,7 +245,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                 // analysis verifies flat-table compatibility before using it.
                                 Some(flat_trans),
                                 initial_state_map,
-                                true,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         }

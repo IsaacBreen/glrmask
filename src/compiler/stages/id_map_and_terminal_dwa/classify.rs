@@ -322,7 +322,8 @@ impl SharedClassifyBytesets {
 
         for state in 0..tokenizer.num_states() {
             let matched = tokenizer
-                .matched_terminals_iter(state)
+                .matched_terminals(state)
+                .into_iter()
                 .filter(|terminal| (*terminal as usize) < nt)
                 .collect::<Vec<_>>();
             for &terminal in &matched {
@@ -361,19 +362,20 @@ impl SharedClassifyBytesets {
                 transitions_by_byte[byte as usize * num_states + state as usize] = target;
                 sparse_transitions_by_byte[byte as usize].push((state, target));
                 let bucket_offset = byte as usize * words_per_terminal_set;
-                let matched_words = tokenizer.matched_terminal_bitset(target).words();
-                let future_words = tokenizer.possible_future_terminals(target).words();
+                let target_closure = tokenizer.execute_from_state_end_only(&[], target);
+                for &closure_state in &target_closure {
+                    let matched_words = tokenizer.matched_terminal_bitset(closure_state).words();
+                    let future_words = tokenizer.possible_future_terminals(closure_state).words();
 
-                debug_assert!(matched_words.len() >= words_per_terminal_set);
-                debug_assert!(future_words.len() >= words_per_terminal_set);
-                for word_index in 0..words_per_terminal_set {
-                    let matched_word = matched_words[word_index];
-                    let future_word = future_words[word_index];
-                    // Future terminals are strict and omit finalizers, so the
-                    // reachable set is exactly their union. Fuse the two
-                    // reachable-bucket writes into one pass.
-                    reachable_by_byte[bucket_offset + word_index] |= matched_word | future_word;
-                    last_by_byte[bucket_offset + word_index] |= matched_word;
+                    debug_assert!(matched_words.len() >= words_per_terminal_set);
+                    debug_assert!(future_words.len() >= words_per_terminal_set);
+                    for word_index in 0..words_per_terminal_set {
+                        let matched_word = matched_words[word_index];
+                        let future_word = future_words[word_index];
+                        reachable_by_byte[bucket_offset + word_index] |=
+                            matched_word | future_word;
+                        last_by_byte[bucket_offset + word_index] |= matched_word;
+                    }
                 }
             }
         }
@@ -407,13 +409,13 @@ impl SharedClassifyBytesets {
             }
         }
 
-        // first_bytes: from the deterministic reset roots.  For an ordinary
-        // DFA this is the single initial state.  For the partitioned lexer it
-        // is the small set of component roots behind the epsilon dispatch.
+        // first_bytes: one exact byte step from the epsilon-closed reset
+        // configuration. The ordinary DFA case naturally has one state.
         let mut first_bytes = vec![U8Set::empty(); nt];
-        let reset_states = tokenizer.deterministic_reset_states();
-        for reset_state in reset_states {
-            for (byte, target) in tokenizer.transitions_from(reset_state) {
+        let reset_states = tokenizer.execute_from_state_end_only(&[], tokenizer.initial_state_id());
+        for byte in 0u8..=u8::MAX {
+            let targets = tokenizer.step_all(&reset_states, byte);
+            for target in targets {
                 for terminal in tokenizer.matched_terminal_bitset(target).iter() {
                     if terminal < nt {
                         first_bytes[terminal].insert(byte);
@@ -658,14 +660,6 @@ pub(crate) fn classify_terminal_path_lengths(
     shared_classify_cache: Option<&SharedClassifyCache>,
 ) -> Vec<TerminalPathLength> {
     let nt = num_terminals as usize;
-    // Every accelerated classification below assumes one deterministic lexer
-    // state after each byte. Routing every terminal through L2P is conservative
-    // and exact for epsilon tokenizers, and protects future callers that do not
-    // know about the pipeline-level guard.
-    if tokenizer.has_epsilon_transitions() && !tokenizer.has_deterministic_dispatch() {
-        return vec![TerminalPathLength::TwoPlus; nt];
-    }
-
     // 1. Vocab byte bitset: all bytes appearing in any vocab token.
     let vocab_bytes = vocab_byte_set(vocab);
 
@@ -1111,62 +1105,34 @@ fn suffix_has_allowed_l2p_follow_from_reset(
         return false;
     }
 
-    // A partitioned lexer resets to an epsilon fan-out over deterministic
-    // component roots.  Treat that reset configuration as a state set instead
-    // of pretending the epsilon-only dispatch state is an ordinary scalar DFA
-    // state.  The scalar fast path remains for conventional tokenizers.
-    if tokenizer.has_deterministic_dispatch() {
-        let mut states = tokenizer.deterministic_reset_states();
-        for &byte in suffix {
-            if states.iter().all(|&state| {
-                tokenizer
-                    .possible_future_terminals(state)
-                    .is_disjoint(allowed_after)
-            }) {
-                return false;
-            }
-            states = tokenizer.step_all(&states, byte);
-            if states.is_empty() {
-                return false;
-            }
-            if states.iter().any(|&state| {
-                tokenizer
-                    .matched_terminals_iter(state)
-                    .any(|terminal| allowed_after.contains(terminal as usize))
-            }) {
-                return true;
-            }
-        }
-        return states.iter().any(|&state| {
-            !tokenizer
+    let mut states =
+        tokenizer.execute_from_state_end_only(&[], tokenizer.initial_state_id());
+    for &byte in suffix {
+        if states.iter().all(|&state| {
+            tokenizer
                 .possible_future_terminals(state)
                 .is_disjoint(allowed_after)
-        });
-    }
-
-    let mut state = tokenizer.initial_state_id();
-    for &byte in suffix {
-        if tokenizer
-            .possible_future_terminals(state)
-            .is_disjoint(allowed_after)
-        {
+        }) {
             return false;
         }
-        let Some(next) = tokenizer.step(state, byte) else {
+        states = tokenizer.step_all(&states, byte);
+        if states.is_empty() {
             return false;
-        };
-        state = next;
-        if tokenizer
-            .matched_terminals_iter(state)
-            .any(|terminal| allowed_after.contains(terminal as usize))
-        {
+        }
+        if states.iter().any(|&state| {
+            tokenizer
+                .matched_terminals_iter(state)
+                .any(|terminal| allowed_after.contains(terminal as usize))
+        }) {
             return true;
         }
     }
 
-    !tokenizer
-        .possible_future_terminals(state)
-        .is_disjoint(allowed_after)
+    states.iter().any(|&state| {
+        !tokenizer
+            .possible_future_terminals(state)
+            .is_disjoint(allowed_after)
+    })
 }
 
 fn suffix_has_allowed_l2p_follow(
@@ -1193,31 +1159,16 @@ fn token_has_exact_active_l2p_boundary(
         return false;
     }
 
-    let mut current_states = active_start_states.to_vec();
-    let mut next_states = Vec::<u32>::new();
-    let mut seen = vec![0u32; tokenizer.num_states() as usize];
-    let mut seen_stamp = 0u32;
+    let mut current_states = active_start_states
+        .iter()
+        .flat_map(|&state| tokenizer.execute_from_state_end_only(&[], state))
+        .collect::<Vec<_>>();
+    current_states.sort_unstable();
+    current_states.dedup();
     let mut suffix_cache = HashMap::<(usize, usize), bool>::new();
 
     for split_after in 0..bytes.len() - 1 {
-        seen_stamp = seen_stamp.wrapping_add(1);
-        if seen_stamp == 0 {
-            seen.fill(0);
-            seen_stamp = 1;
-        }
-        next_states.clear();
-
-        for &state in &current_states {
-            let Some(next) = tokenizer.step(state, bytes[split_after]) else {
-                continue;
-            };
-            let slot = &mut seen[next as usize];
-            if *slot == seen_stamp {
-                continue;
-            }
-            *slot = seen_stamp;
-            next_states.push(next);
-        }
+        let next_states = tokenizer.step_all(&current_states, bytes[split_after]);
 
         if next_states.is_empty() {
             return false;
@@ -1245,7 +1196,7 @@ fn token_has_exact_active_l2p_boundary(
             }
         }
 
-        std::mem::swap(&mut current_states, &mut next_states);
+        current_states = next_states.to_vec();
     }
 
     false
@@ -1490,6 +1441,20 @@ fn tokens_have_exact_active_l2p_boundary(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     active_start_states: &[u32],
 ) -> Vec<bool> {
+    if tokenizer.has_epsilon_transitions() {
+        return tokens
+            .iter()
+            .map(|bytes| {
+                token_has_exact_active_l2p_boundary(
+                    tokenizer,
+                    bytes,
+                    active_bitset,
+                    disallowed_follows,
+                    active_start_states,
+                )
+            })
+            .collect();
+    }
     let total_started_at = std::time::Instant::now();
     let trie_started_at = std::time::Instant::now();
     let mut nodes = vec![ExactBoundaryPrefixNode::default()];
@@ -1592,7 +1557,7 @@ fn tokens_have_exact_active_l2p_boundary(
                     prefix_allowed_checks += 1;
                     suffixes_evaluated += 1;
                     let suffix_start = split_after + 1;
-                    let suffix_has_allowed_terminal = if tokenizer.has_deterministic_dispatch() {
+                    let suffix_has_allowed_terminal = if tokenizer.has_epsilon_transitions() {
                         suffix_has_allowed_l2p_follow_from_reset(
                             tokenizer,
                             &bytes[suffix_start..],
@@ -1664,20 +1629,6 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
     shared_classify_cache: Option<&SharedClassifyCache>,
 ) -> L2pVocabBoundarySplit {
     let split_started_at = std::time::Instant::now();
-    // The split is only an optimization. For epsilon tokenizers, conservatively
-    // send every vocabulary entry through the general boundary-capable builder.
-    if tokenizer.has_epsilon_transitions() && !tokenizer.has_deterministic_dispatch() {
-        let boundary_token_ids = vocab.entries.keys().copied().collect::<Vec<_>>();
-        let boundary_tokens = boundary_token_ids.len();
-        return L2pVocabBoundarySplit {
-            boundary_token_ids,
-            single_token_ids: Vec::new(),
-            adjacent_tokens: boundary_tokens,
-            boundary_tokens,
-            single_tokens: 0,
-            irrelevant_tokens: 0,
-        };
-    }
     let owned_bytesets: Option<SharedClassifyBytesets>;
     let bytesets = if let Some(cache) = shared_classify_cache {
         cache.get_or_init(|| SharedClassifyBytesets::build(tokenizer, num_terminals))
@@ -1755,9 +1706,10 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
         let active_matched_by_state = (adjacent_entries.len()
             > (tokenizer.num_states() as usize).div_ceil(16))
         .then(|| build_active_matched_by_state(bytesets, &active_bitset));
-        let viable_indices = if tokenizer.has_deterministic_dispatch() {
-            // The scalar suffix prefilter cannot represent the reset fan-out.
-            // Let the exact state-set batch classify every byte-adjacent token.
+        let viable_indices = if tokenizer.has_epsilon_transitions() {
+            // The scalar suffix prefilter cannot represent a state-set scanner
+            // configuration. Let the exact NFA checker classify every
+            // byte-adjacent token.
             (0..adjacent_entries.len()).collect::<Vec<_>>()
         } else {
             adjacent_entries

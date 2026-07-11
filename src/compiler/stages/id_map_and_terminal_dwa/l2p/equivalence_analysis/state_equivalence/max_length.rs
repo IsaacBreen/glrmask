@@ -497,6 +497,21 @@ pub(crate) fn compute_state_map(
     kbounded_tokenizer_view: Option<&TokenizerView>,
     kbounded_byte_to_class: Option<&[u8; 256]>,
 ) -> ManyToOneIdMap {
+    if tokenizer.has_epsilon_transitions() {
+        let depth = match mode {
+            MaxLengthMode::StableByteRestricted => super::nfa::RefinementDepth::Stable,
+            MaxLengthMode::KBoundedByteRestricted => {
+                super::nfa::RefinementDepth::Bounded(statistic.max_token_len)
+            }
+        };
+        return super::nfa::compute_state_map(
+            tokenizer,
+            &statistic.relevant_bytes,
+            active_groups,
+            initial_state_map,
+            depth,
+        );
+    }
     let num_states = tokenizer.num_states() as usize;
     let states: Vec<usize> = match initial_state_map {
         Some(map) => map

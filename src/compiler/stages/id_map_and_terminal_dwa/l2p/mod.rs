@@ -143,13 +143,13 @@ fn l2p_env_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Production terminal interchangeability remains opt-in. The implementation
-/// is available for profiling and strict-reference validation, but it must not
-/// affect ordinary compilation until its remaining correctness gaps are closed.
-/// Set `GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY=1` to enable it explicitly.
+/// Production terminal interchangeability is enabled by default. Recursive
+/// strict-reference rebuilds suppress it with the thread-local depth guard;
+/// `GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY=1` is the explicit
+/// diagnostic escape hatch.
 fn l2p_terminal_interchangeability_enabled() -> bool {
     TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
-        && l2p_env_enabled("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY")
+        && !l2p_env_enabled("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY")
 }
 
 fn l2p_terminal_interchangeability_enabled_for_partition(_partition_label: &str) -> bool {
@@ -365,7 +365,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     shared_ti_output_cache: Option<&SharedTiTokenizerOutputCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
-    allow_structured_epsilon_equivalence: bool,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
@@ -430,9 +429,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         ti_additional_merged_members,
         ti_raw_observations,
     ) =
-        if !tokenizer.has_epsilon_transitions()
-            && l2p_terminal_interchangeability_enabled_for_partition(partition_label)
-        {
+        if l2p_terminal_interchangeability_enabled_for_partition(partition_label) {
             let mut active = active_terminals.to_vec();
             let mut classes = singleton_partition(&active);
             // Always use the byte-level exact discovery oracle. When the global
@@ -502,11 +499,6 @@ let strict_reference = reference_terminal_expansion
         && l2p_strict_partition_matches(partition_label);
     let global_token_position_strict_reference = token_position_partition.is_some()
         && l2p_global_token_position_strict_reference_enabled()
-        && l2p_strict_partition_matches(partition_label);
-    let structured_epsilon_strict_reference = allow_structured_epsilon_equivalence
-        && partition_label == "p0"
-        && tokenizer.has_deterministic_dispatch()
-        && l2p_env_enabled("GLRMASK_L2P_STRUCTURED_EPSILON_STRICT_REFERENCE")
         && l2p_strict_partition_matches(partition_label);
     let analysis_active_terminals = terminal_partition
         .as_ref()
@@ -625,7 +617,6 @@ let strict_reference = reference_terminal_expansion
                     })
                 })
                 .flatten(),
-            allow_structured_epsilon_equivalence,
         );
 
     // Replay and transport-coordinate refinement are intentionally deferred
@@ -1156,7 +1147,6 @@ let strict_reference = reference_terminal_expansion
 
     if strict_reference
         || global_token_position_strict_reference
-        || structured_epsilon_strict_reference
     {
         // Rebuild the local artifact under the appropriate suppressed feature
         // set, then compare completed weighted terminal languages in original
@@ -1189,7 +1179,6 @@ let strict_reference = reference_terminal_expansion
                 shared_ti_output_cache,
                 flat_trans,
                 initial_state_map,
-                false,
             )
             .expect("terminal interchangeability baseline L2P build unexpectedly returned None")
         };
@@ -1205,11 +1194,10 @@ let strict_reference = reference_terminal_expansion
         let strict_compare_ms = strict_compare_started_at.elapsed().as_secs_f64() * 1000.0;
         if ti_profile_timing {
             eprintln!(
-                "[glrmask/profile][l2p_strict_reference] partition={} ti_reference={} global_token_position_reference={} structured_epsilon_reference={} baseline_build_ms={:.3} terminal_dwa_equivalence_ms={:.3} differs=false",
+                "[glrmask/profile][l2p_strict_reference] partition={} ti_reference={} global_token_position_reference={} baseline_build_ms={:.3} terminal_dwa_equivalence_ms={:.3} differs=false",
                 partition_label,
                 strict_reference,
                 global_token_position_strict_reference,
-                structured_epsilon_strict_reference,
                 strict_baseline_build_ms,
                 strict_compare_ms,
             );
@@ -1256,9 +1244,9 @@ mod ti_mre_tests {
     }
 
     #[test]
-    fn p7_and_p8_use_terminal_interchangeability_when_globally_enabled() {
+    fn p7_and_p8_use_terminal_interchangeability_by_default() {
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
-        let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+        let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
 
         assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p7"));
         assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p8"));
@@ -1267,29 +1255,26 @@ mod ti_mre_tests {
     #[test]
     fn terminal_interchangeability_policy_leaves_generic_partitions_unchanged() {
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
-        let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+        let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
 
         assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p0"));
         assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p7"));
     }
 
     #[test]
-    fn terminal_interchangeability_policy_defaults_disabled_and_honors_explicit_enable() {
+    fn terminal_interchangeability_policy_defaults_enabled_and_honors_explicit_disable() {
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
-        let original = env::var_os("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
+        let original = env::var_os("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY");
         unsafe {
-            env::remove_var("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
+            env::remove_var("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY");
         }
         let _restore = EnvVarGuard {
-            key: "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY",
+            key: "GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY",
             original,
         };
 
-        assert!(!super::l2p_terminal_interchangeability_enabled_for_partition("p0"));
-        let enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
         assert!(super::l2p_terminal_interchangeability_enabled_for_partition("p0"));
-        drop(enabled);
-        let _disabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "0");
+        let _disabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "1");
         assert!(!super::l2p_terminal_interchangeability_enabled_for_partition("p0"));
     }
 
@@ -1315,7 +1300,7 @@ nt S ::= TRUE | FALSE | NULL;
 
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
         let _structural = EnvVarGuard::set("GLRMASK_STRUCTURAL_BOUNDARY_LEXICAL_PARTITION", "1");
-        let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+        let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
         let _strict = EnvVarGuard::set(
             "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
             "1",
@@ -1343,7 +1328,7 @@ nt S ::= QUOTE IDENT;
 
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
         let _structural = EnvVarGuard::set("GLRMASK_STRUCTURAL_BOUNDARY_LEXICAL_PARTITION", "1");
-        let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+        let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
         let _strict = EnvVarGuard::set(
             "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
             "1",
@@ -1366,7 +1351,7 @@ nt S ::= QUOTE IDENT;
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
         let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
         let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
-        let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+        let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
         let _strict = EnvVarGuard::set(
             "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
             "1",
@@ -1374,6 +1359,74 @@ nt S ::= QUOTE IDENT;
 
         Constraint::from_json_schema(r#"{"enum":["red","blue"]}"#, &vocab)
             .expect("forced-all-L2P enum must match the strict TI reference");
+    }
+
+    #[test]
+    fn partitioned_epsilon_ti_matches_strict_reference() {
+        let grammar = r#"
+start S;
+lexer group a ::= A;
+lexer group b ::= B;
+lexer group c ::= C;
+t A ::= "x";
+t B ::= [xy] & [xz];
+t C ::= "z";
+nt S ::= A | B | C;
+"#;
+        let vocab = Vocab::new(
+            vec![
+                (0, b"x".to_vec()),
+                (1, b"xx".to_vec()),
+                (2, b"z".to_vec()),
+            ],
+            None,
+        );
+
+        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _adaptive = EnvVarGuard::set("GLRMASK_LEXER_ADAPTIVE", "0");
+        let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
+        let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
+        let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
+        let _strict = EnvVarGuard::set(
+            "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
+            "1",
+        );
+
+        Constraint::from_glrm_grammar(grammar, &vocab)
+            .expect("epsilon-NFA TI must match its TI-off symbolic reference");
+    }
+
+    #[test]
+    fn partitioned_epsilon_p8_global_token_position_matches_strict_reference() {
+        let grammar = r#"
+start S;
+lexer group quote ::= QUOTE;
+lexer group ident ::= IDENT;
+t QUOTE ::= "\"";
+t IDENT ::= /[A-Za-z_][A-Za-z0-9_]*/;
+nt S ::= QUOTE IDENT;
+"#;
+        let vocab = Vocab::new(
+            vec![
+                (0, b"\"A".to_vec()),
+                (1, b"\"Z".to_vec()),
+                (2, b"\"_".to_vec()),
+            ],
+            None,
+        );
+
+        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _adaptive = EnvVarGuard::set("GLRMASK_LEXER_ADAPTIVE", "0");
+        let _structural = EnvVarGuard::set("GLRMASK_STRUCTURAL_BOUNDARY_LEXICAL_PARTITION", "1");
+        let _disable_ti =
+            EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+        let _strict = EnvVarGuard::set(
+            "GLRMASK_L2P_GLOBAL_TOKEN_POSITION_STRICT_REFERENCE",
+            "1",
+        );
+
+        Constraint::from_glrm_grammar(grammar, &vocab)
+            .expect("epsilon-NFA C quotient must match its suppressed-C symbolic reference");
     }
 
     #[test]
@@ -1397,7 +1450,7 @@ nt S ::= FROM V | SPACE V SPACE CLASS;
         let vocab = Vocab::new(vec![(0, b" !".to_vec()), (1, b" _".to_vec())], None);
 
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
-        let _enabled = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+        let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
         Constraint::from_glrm_grammar(grammar, &vocab)
             .expect("TI must preserve the completed terminal-DWA language");
     }

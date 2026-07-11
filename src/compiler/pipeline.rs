@@ -1269,20 +1269,13 @@ fn launch_classify_dag_if_ready<'scope>(
         let shared_classify_cache = SharedClassifyCache::new();
         let classify_started_ms = elapsed_ms(compile_started_at.clone());
         let classify_started_at = Instant::now();
-        // Generic epsilon NFAs cannot use scalar classifier caches. The
-        // partitioned lexer is a structured deterministic dispatch, so its
-        // component-aware classifier remains valid.
-        if !tokenizer.tokenizer.has_epsilon_transitions()
-            || tokenizer.tokenizer.has_deterministic_dispatch()
-        {
-            let _terminal_path_lengths = classify_terminal_path_lengths(
-                &tokenizer.tokenizer,
-                vocab,
-                &token_path_disallowed_follows,
-                analysis.analyzed_grammar.num_terminals,
-                Some(&shared_classify_cache),
-            );
-        }
+        let _terminal_path_lengths = classify_terminal_path_lengths(
+            &tokenizer.tokenizer,
+            vocab,
+            &token_path_disallowed_follows,
+            analysis.analyzed_grammar.num_terminals,
+            Some(&shared_classify_cache),
+        );
         let classify_ms = elapsed_ms(classify_started_at);
         let classify_finished_ms = elapsed_ms(compile_started_at.clone());
 

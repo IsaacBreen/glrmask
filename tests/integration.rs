@@ -1759,7 +1759,7 @@ fn terminal_interchangeability_minimal_two_byte_counterexample_matches_baseline(
     let _lock = TI_ENV_LOCK.write().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
     let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
-    let _disable_feature = EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
+    let _disable_feature = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "1");
     let _disable_validation = EnvVarGuard::unset("GLRMASK_VALIDATE_L2P_TERMINAL_INTERCHANGEABILITY");
 
     // Minimal counterexample to label-only post-DWA reconstruction. A and B
@@ -1775,7 +1775,7 @@ fn terminal_interchangeability_minimal_two_byte_counterexample_matches_baseline(
 
     drop(_disable_feature);
     drop(_disable_validation);
-    let _enable_feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _enable_feature = EnvVarGuard::unset("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY");
     let _assert_equal = EnvVarGuard::set(
         "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
         "1",
@@ -1825,7 +1825,7 @@ fn strict_terminal_interchangeability_reference_matches_baseline_l2p_artifact() 
     let _lock = TI_ENV_LOCK.write().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
     let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
-    let _disable_feature = EnvVarGuard::unset("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY");
+    let _disable_feature = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "1");
     let _disable_validation = EnvVarGuard::unset("GLRMASK_VALIDATE_L2P_TERMINAL_INTERCHANGEABILITY");
 
     // Advancing through the `a` cycle exchanges the two terminal residuals.
@@ -1844,7 +1844,7 @@ fn strict_terminal_interchangeability_reference_matches_baseline_l2p_artifact() 
 
     drop(_disable_feature);
     drop(_disable_validation);
-    let _enable_feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _enable_feature = EnvVarGuard::unset("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY");
     let _assert_equal = EnvVarGuard::set(
         "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
         "1",
@@ -1894,7 +1894,7 @@ fn strict_terminal_interchangeability_reference_validates_one_terminal_position(
     let _lock = TI_ENV_LOCK.write().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
     let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
-    let _feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _feature = EnvVarGuard::unset("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY");
     let _assert_equal = EnvVarGuard::set(
         "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
         "1",
@@ -1913,7 +1913,7 @@ fn transported_terminal_interchangeability_with_ignore_equals_baseline_artifact(
     let _lock = TI_ENV_LOCK.write().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
     let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
-    let _feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _feature = EnvVarGuard::unset("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY");
     let _assert_equal = EnvVarGuard::set(
         "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
         "1",
@@ -1938,7 +1938,7 @@ fn three_member_terminal_interchangeability_equals_baseline_artifact() {
     let _lock = TI_ENV_LOCK.write().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
     let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
-    let _feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _feature = EnvVarGuard::unset("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY");
     let _assert_equal = EnvVarGuard::set(
         "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
         "1",
@@ -1960,7 +1960,7 @@ fn independent_terminal_interchangeability_classes_equal_baseline_artifact() {
     let _lock = TI_ENV_LOCK.write().unwrap();
     let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
     let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
-    let _feature = EnvVarGuard::set("GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+    let _feature = EnvVarGuard::unset("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY");
     let _assert_equal = EnvVarGuard::set(
         "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
         "1",

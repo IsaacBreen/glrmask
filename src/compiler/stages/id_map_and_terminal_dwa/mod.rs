@@ -220,24 +220,6 @@ pub(crate) fn build_global_max_length_state_map(
     let started_at = Instant::now();
     let num_states_u32 = tokenizer.num_states();
     let num_states = num_states_u32 as usize;
-    if tokenizer.has_epsilon_transitions() {
-        let state_ids = (0..num_states_u32).collect::<Vec<_>>();
-        let state_map =
-            ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-                state_ids.clone(),
-                state_ids,
-            );
-        if compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][global_max_length] mode=identity skipped=true reason=epsilon_nfa states={} reps={} tokens_included=0 max_token_len=0 stable_signature_cells=0 stable_signature_cell_limit={} ms={:.3}",
-                num_states,
-                state_map.representative_original_ids.len(),
-                global_max_length_stable_signature_cell_limit(),
-                started_at.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-        return state_map;
-    }
     let token_bytes: Vec<&[u8]> = vocab
         .entries
         .values()
@@ -363,19 +345,7 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
     let partition_vocab_started_at = Instant::now();
     let requested_partition_scheme =
         std::env::var("GLRMASK_PARTITION_SCHEME").unwrap_or_else(|_| "char_type".to_string());
-    // The l2p_cost scheme depends on deterministic classifier byte tables.
-    // Vocabulary partitioning affects performance only, so retain exactness by
-    // falling back to the ordinary byte-class partition for epsilon tokenizers.
-    let partition_scheme = if tokenizer.has_epsilon_transitions()
-        && matches!(
-            requested_partition_scheme.as_str(),
-            "l2p_cost" | "auto_l2p_cost"
-        )
-    {
-        "char_type"
-    } else {
-        requested_partition_scheme.as_str()
-    };
+    let partition_scheme = requested_partition_scheme.as_str();
     let sub_vocabs: Arc<[Vocab]> = match partition_scheme {
         "char_type" => build_char_type_sub_vocabs(vocab),
         "l2p_cost" => {

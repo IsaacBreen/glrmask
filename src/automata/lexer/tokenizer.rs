@@ -602,6 +602,32 @@ pub struct TokenizerResult {
 }
 
 #[cfg(test)]
+pub(crate) fn arbitrary_epsilon_l1_test_tokenizer() -> Tokenizer {
+    let mut dfa = DFA::new(7);
+    dfa.ensure_group_capacity(2);
+    dfa.add_epsilon_transition(0, 1);
+    dfa.add_epsilon_transition(1, 2);
+    dfa.add_epsilon_transition(1, 4);
+    dfa.add_transition(2, b'a', 3);
+    dfa.add_transition(4, b'a', 5);
+    dfa.add_transition(2, b'b', 6);
+
+    let mut terminal_zero = BitSet::new(2);
+    terminal_zero.set(0);
+    dfa.overwrite_state_metadata(3, terminal_zero.clone(), BitSet::new(2));
+    dfa.overwrite_state_metadata(6, terminal_zero, BitSet::new(2));
+    let mut terminal_one = BitSet::new(2);
+    terminal_one.set(1);
+    dfa.overwrite_state_metadata(5, terminal_one, BitSet::new(2));
+    dfa.recompute_possible_futures();
+
+    let tokenizer = Tokenizer::from_parts(dfa, 2, None);
+    assert!(tokenizer.has_epsilon_transitions());
+    assert!(!tokenizer.has_deterministic_dispatch());
+    tokenizer
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::automata::lexer::dfa::DFA;
