@@ -2460,14 +2460,13 @@ impl Constraint {
         let dense_complement_fast_path =
             n_set.saturating_mul(5) >= n_internal.saturating_mul(4) && n_missing <= 128;
 
-        if !all_mask.is_empty() && dense_complement_fast_path {
+        // Complement conversion seeds ALL and then clears missing-token bits.
+        // It is only an OR-equivalent conversion when `buf` is known zero;
+        // otherwise the clears can erase bits produced by another parser path.
+        if buf_zeroed && !all_mask.is_empty() && dense_complement_fast_path {
             stats.complement_path_used = true;
             // Complement-sparse path: start from all_tokens, subtract missing tokens.
-            if buf_zeroed {
-                copy_dense_buf(buf, all_mask);
-            } else {
-                or_dense_buf(buf, all_mask);
-            }
+            copy_dense_buf(buf, all_mask);
             let mut wi = 0usize;
             while wi < dense.len() {
                 if wi * 64 >= n_internal {
@@ -2539,7 +2538,7 @@ impl Constraint {
                             .copied()
                             .unwrap_or_else(|| selected_cost + self.internal_bits_buf_op_cost(wi, missing_bits, buf_len))
                             .saturating_sub(selected_cost);
-                        if group_mask.len() + missing_cost < selected_cost {
+                        if buf_zeroed && group_mask.len() + missing_cost < selected_cost {
                             stats.normal_group_complement_hits += 1;
                             if Self::prefer_dense_buf_scan(buf_len, group_mask.len())
                                 && wi + 1 < self.word_group_prefix_buf_masks.len()
@@ -2615,6 +2614,7 @@ impl<'a> ConstraintState<'a> {
 #[cfg(test)]
 mod dense_internal_token_mask_tests {
     use super::*;
+    use crate::Vocab;
 
     #[test]
     fn dense_internal_token_masks_match_reference_expansion() {
@@ -2643,5 +2643,50 @@ mod dense_internal_token_mask_tests {
         let internal_tokens = RangeSetBlaze::from_iter([63u32..=65, 190..=400]);
         let actual = Constraint::dense_words_from_internal_set_with_words(&internal_tokens, 3);
         assert_eq!(actual.as_ref(), &[1u64 << 63, 0b11, 1u64 << 62 | 1u64 << 63]);
+    }
+
+    #[test]
+    fn dense_or_preserves_bits_from_previous_paths_without_final_mapping() {
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+                (2, b"ab".to_vec()),
+                (3, b"ba".to_vec()),
+            ],
+            None,
+        );
+        let mut constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a" | "ab";
+                t B ::= "b" | "ab";
+                nt item ::= A | B;
+                nt start ::= item item? item?;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        constraint.final_mask_mapping = Default::default();
+
+        let missing_internal = constraint.original_token_to_internal[3] as usize;
+        let n_internal = constraint.internal_token_to_tokens.len();
+        let mut dense = vec![!0u64; n_internal.div_ceil(64)];
+        if let Some(last) = dense.last_mut() {
+            let valid_bits = n_internal % 64;
+            if valid_bits != 0 {
+                *last &= (1u64 << valid_bits) - 1;
+            }
+        }
+        dense[missing_internal / 64] &= !(1u64 << (missing_internal % 64));
+
+        let mut buf = vec![0u32; constraint.mask_len()];
+        buf[3 / 32] |= 1u32 << (3 % 32);
+        constraint.or_internal_dense_to_buf(&dense, &mut buf, false);
+        assert_ne!(
+            buf[3 / 32] & (1u32 << (3 % 32)),
+            0,
+            "OR conversion must not clear a token admitted by an earlier parser path"
+        );
     }
 }

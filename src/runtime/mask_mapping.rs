@@ -244,7 +244,13 @@ impl FinalMaskMapping {
         }
 
         let n_missing = n_internal - n_set;
-        if !self.all_tokens_mask.is_empty()
+        // The complement path is destructive: it seeds from ALL and then
+        // clears missing-token bits. That is only equivalent to OR-ing the
+        // selected image when the destination is known zero. With an existing
+        // partial mask, clearing a missing token can erase a bit admitted by a
+        // different parser path.
+        if buf_zeroed
+            && !self.all_tokens_mask.is_empty()
             && n_set.saturating_mul(5) >= n_internal.saturating_mul(3)
             && n_missing <= 800
         {
@@ -259,11 +265,7 @@ impl FinalMaskMapping {
                 self.or_selected_dense_fast(dense, buf, buf_zeroed);
                 return;
             }
-            if buf_zeroed {
-                copy_dense(buf, &self.all_tokens_mask);
-            } else {
-                or_dense(buf, &self.all_tokens_mask);
-            }
+            copy_dense(buf, &self.all_tokens_mask);
             self.andnot_missing_dense_fast(dense, buf);
             return;
         }
@@ -329,7 +331,10 @@ impl FinalMaskMapping {
         }
 
         let n_missing = n_internal - n_set;
-        if !self.all_tokens_mask.is_empty()
+        // Complement-and-clear is only an OR-equivalent conversion when the
+        // destination is known zero.
+        if buf_zeroed
+            && !self.all_tokens_mask.is_empty()
             && n_set.saturating_mul(5) >= n_internal.saturating_mul(3)
             && n_missing <= 800
         {
@@ -345,11 +350,7 @@ impl FinalMaskMapping {
                 return stats;
             }
             stats.complement_path_used = true;
-            if buf_zeroed {
-                copy_dense(buf, &self.all_tokens_mask);
-            } else {
-                or_dense(buf, &self.all_tokens_mask);
-            }
+            copy_dense(buf, &self.all_tokens_mask);
             self.andnot_missing_dense(dense, buf, &mut stats);
             return stats;
         }
@@ -647,7 +648,7 @@ impl FinalMaskMapping {
                 stats.normal_full_word_hits += (wi - run_start) as u64;
                 continue;
             }
-            self.or_bits(base, bits, out, stats);
+            self.or_bits(base, bits, out, buf_zeroed, stats);
             wrote = true;
             wi += 1;
         }
@@ -707,7 +708,7 @@ impl FinalMaskMapping {
                 wrote = true;
                 continue;
             }
-            self.or_bits_fast(base, bits, out);
+            self.or_bits_fast(base, bits, out, buf_zeroed);
             wrote = true;
             wi += 1;
         }
@@ -1108,9 +1109,12 @@ impl FinalMaskMapping {
         base: usize,
         mut bits: u64,
         out: &mut [u32],
+        allow_complement_clear: bool,
         stats: &mut DenseToBufProfileStats,
     ) {
-        if let Some((group_id, missing)) = self.group_complement_bits(base, bits) {
+        if allow_complement_clear
+            && let Some((group_id, missing)) = self.group_complement_bits(base, bits)
+        {
             if self.or_full_group_run(group_id, group_id + 1, out, false) {
                 stats.normal_group_complement_hits += 1;
                 stats.normal_group_complement_sparse_entries += self
@@ -1165,8 +1169,16 @@ impl FinalMaskMapping {
         }
     }
 
-    fn or_bits_fast(&self, base: usize, mut bits: u64, out: &mut [u32]) {
-        if let Some((group_id, missing)) = self.group_complement_bits(base, bits) {
+    fn or_bits_fast(
+        &self,
+        base: usize,
+        mut bits: u64,
+        out: &mut [u32],
+        allow_complement_clear: bool,
+    ) {
+        if allow_complement_clear
+            && let Some((group_id, missing)) = self.group_complement_bits(base, bits)
+        {
             self.or_full_group_run(group_id, group_id + 1, out, false);
             self.andnot_bits_fast(base, missing, out);
             return;
@@ -1373,6 +1385,28 @@ impl FinalMaskMapping {
             self.andnot_token(base + bit, out);
             bits &= bits - 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FinalMaskMapping;
+
+    #[test]
+    fn dense_or_preserves_bits_from_previous_paths() {
+        let mapping = FinalMaskMapping::new(
+            &[vec![0], vec![1], vec![2], vec![3]],
+            1,
+        );
+        let dense = [0b0111u64];
+
+        let mut reference = [1u32 << 3];
+        mapping.or_dense_to_buf(&dense, &mut reference, false);
+        assert_eq!(reference, [0b1111]);
+
+        let mut fast = [1u32 << 3];
+        mapping.or_dense_to_buf_fast(&dense, &mut fast, false);
+        assert_eq!(fast, [0b1111]);
     }
 }
 
