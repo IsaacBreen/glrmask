@@ -187,7 +187,7 @@ impl Constraint {
         })
     }
 
-    /// Load a grammar from the GLRM format (see [`crate::grammar::glrm`]).
+    /// Load a grammar from the GLRM text format.
     pub fn from_glrm_grammar(glrm: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         compile_from_source(
             glrm,
