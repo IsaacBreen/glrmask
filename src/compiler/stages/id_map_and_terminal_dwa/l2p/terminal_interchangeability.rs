@@ -689,8 +689,9 @@ impl RestrictedTopology {
             .collect::<Vec<_>>()
             .into();
         let unused_dead_representative = raw_representative_by_state
-            .first()
+            .iter()
             .copied()
+            .find(|&representative| representative != u32::MAX)
             .unwrap_or(0);
         let raw_representative_for_class: Arc<[u32]> = representative_for_class
             .iter()
@@ -698,6 +699,7 @@ impl RestrictedTopology {
                 raw_representative_by_state
                     .get(state as usize)
                     .copied()
+                    .filter(|&representative| representative != u32::MAX)
                     // The synthetic dead class has no raw scanner source. Its
                     // representative is therefore never queried, but the
                     // public transport-map shape still needs one in-range ID.
@@ -10443,6 +10445,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn quotient_projection_replaces_unrepresented_dead_class_sentinel() {
+        let topology = RestrictedTopology {
+            bytes: Vec::new(),
+            edge_offsets: vec![0, 0, 0, 0],
+            edges: Vec::new(),
+            reverse_predecessors: Arc::from([Vec::new(), Vec::new()]),
+            observed_destinations: Arc::from([false, false, false]),
+            raw_state_count: 1,
+            raw_representative_by_state: Some(Arc::from([0, u32::MAX])),
+            state_for_raw: Some(Arc::from([0])),
+            nfa_output_rows: None,
+            real_state_count: 2,
+            initial_state: 0,
+            max_outdegree: 0,
+        };
+
+        let (_, _, representatives) = topology.scanner_projection_from_internal_quotient(
+            Arc::from([0, 1]),
+            Arc::from([0, 1]),
+        );
+        assert_eq!(representatives.as_ref(), &[0, 0]);
     }
 
     #[test]
