@@ -14,6 +14,7 @@ use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguityKind};
 use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar, Quantifier};
+use crate::grammar::factoring::factor_named_grammar;
 use crate::grammar::glrm::{from_glrm, to_glrm};
 use crate::Vocab;
 
@@ -5470,59 +5471,66 @@ fn large_string_enum_at_root_uses_raw_regex() {
 }
 
 #[test]
-fn json_schema_assigns_literals_bounded_repetitions_and_patterns_to_separate_lexer_groups() {
+fn json_schema_groups_literals_and_other_but_singletons_pattern_terminals_by_origin() {
     let schema = json!({
         "type": "object",
         "properties": {
             "mode": {"type": "string", "enum": ["red", "green", "blue"]},
             "code": {"type": "string", "pattern": "^[A-Z]+$", "maxLength": 8},
             "digest": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
-            "free": {"type": "string", "pattern": "^[a-z]+$"}
+            "free": {"type": "string", "pattern": "^[a-z]+$"},
+            "id": {"type": "string", "format": "uuid"},
+            "created": {"type": "string", "format": "date-time"}
         },
-        "required": ["mode", "code", "digest", "free"],
+        "required": ["mode", "code", "digest", "free", "id", "created"],
         "additionalProperties": false
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert_eq!(
-        grammar.default_lexer_partition.as_deref(),
-        Some(super::lower::JSON_PATTERN_LEXER_PARTITION),
-    );
-    assert!(grammar
-        .lexer_literal_partitions
+    let mut grammar = schema_to_named_grammar(&schema).unwrap();
+    super::finalize_lexer_partitions(&mut grammar).unwrap();
+    assert_eq!(grammar.default_lexer_partition, None);
+    assert!(grammar.lexer_literal_partitions.values().all(|partition| {
+        partition == super::lower::JSON_LITERAL_LEXER_PARTITION
+    }));
+
+    let literal_terminals = grammar
+        .lexer_partitions
         .values()
-        .any(|partition| partition == super::lower::JSON_LITERAL_LEXER_PARTITION));
-    assert!(
-        grammar
-            .lexer_partitions
-            .values()
-            .any(|partition| partition == super::lower::JSON_BOUNDED_LEXER_PARTITION),
-        "partitions={:?}\n{}",
-        grammar.lexer_partitions,
-        to_glrm(&grammar),
-    );
+        .filter(|partition| partition.as_str() == super::lower::JSON_LITERAL_LEXER_PARTITION)
+        .count();
+    let other_terminals = grammar
+        .lexer_partitions
+        .values()
+        .filter(|partition| partition.as_str() == super::lower::JSON_OTHER_LEXER_PARTITION)
+        .count();
+    let pattern_partitions = grammar
+        .lexer_partitions
+        .values()
+        .filter(|partition| partition.starts_with("json_pattern_"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let unique_pattern_partitions = pattern_partitions
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert!(literal_terminals > 1, "partitions={:?}", grammar.lexer_partitions);
+    assert!(other_terminals > 1, "partitions={:?}", grammar.lexer_partitions);
+    assert!(pattern_partitions.len() >= 5, "partitions={:?}", grammar.lexer_partitions);
+    assert_eq!(pattern_partitions.len(), unique_pattern_partitions.len());
+    assert!(!grammar
+        .lexer_partitions
+        .values()
+        .any(|partition| partition == super::lower::JSON_PATTERN_LEXER_PARTITION));
 
     let lowered = lower(&grammar).unwrap();
     assert_eq!(lowered.lexer_partitions.len(), lowered.terminals.len());
-    let partitions = lowered
-        .lexer_partitions
-        .values()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    assert!(partitions.contains(super::lower::JSON_LITERAL_LEXER_PARTITION));
-    assert!(partitions.contains(super::lower::JSON_BOUNDED_LEXER_PARTITION));
-    assert!(partitions.contains(super::lower::JSON_PATTERN_LEXER_PARTITION));
     let tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
         &lowered,
         false,
         true,
-        false,
     );
-    assert_eq!(
-        tokenizer.initial_epsilon_branch_count(),
-        0,
-        "the three declared JSON categories should be adaptively coalesced when their product stays compact",
-    );
+    assert!(tokenizer.num_states() > 0);
 
     let dumped = to_glrm(&grammar);
     assert!(dumped.contains("@literals"), "{dumped}");
@@ -5532,13 +5540,37 @@ fn json_schema_assigns_literals_bounded_repetitions_and_patterns_to_separate_lex
         &reparsed_lowered,
         false,
         true,
-        false,
     );
-    assert_eq!(reparsed_tokenizer.initial_epsilon_branch_count(), 0);
+    assert_eq!(
+        tokenizer.initial_epsilon_branch_count(),
+        reparsed_tokenizer.initial_epsilon_branch_count(),
+    );
 }
 
 #[test]
-fn adaptive_json_lexer_coalesces_uuid_and_bounded_string_categories() {
+fn recognized_formats_are_pattern_singletons_before_adaptive_determinization() {
+    for format in ["uuid", "date-time"] {
+        let schema = json!({"type": "string", "format": format});
+        let mut grammar = schema_to_named_grammar(&schema).unwrap();
+        super::finalize_lexer_partitions(&mut grammar).unwrap();
+        let GrammarExpr::Ref(rule_name) = start_expr(&grammar) else {
+            panic!("expected format terminal for {format}: {:?}", start_expr(&grammar));
+        };
+        let partition = grammar
+            .lexer_partitions
+            .get(rule_name)
+            .unwrap_or_else(|| panic!("missing partition for {format} terminal {rule_name}"));
+        assert!(
+            partition.starts_with("json_pattern_"),
+            "format={format} terminal={rule_name} partition={partition}"
+        );
+        assert_ne!(partition, super::lower::JSON_OTHER_LEXER_PARTITION);
+        assert_ne!(partition, super::lower::JSON_LITERAL_LEXER_PARTITION);
+    }
+}
+
+#[test]
+fn adaptive_final_lexer_determinization_can_coalesce_uuid_and_bounded_string_partitions() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -5559,7 +5591,6 @@ fn adaptive_json_lexer_coalesces_uuid_and_bounded_string_categories() {
         &prepared,
         false,
         true,
-        false,
     );
     assert_eq!(
         tokenizer.initial_epsilon_branch_count(),
@@ -5567,6 +5598,34 @@ fn adaptive_json_lexer_coalesces_uuid_and_bounded_string_categories() {
         "the guarded category product should fit and eliminate the epsilon dispatch",
     );
     assert!(tokenizer.num_states() < 2_000, "states={}", tokenizer.num_states());
+}
+
+#[test]
+fn o9838_prepared_tokenizer_stays_bounded_with_pattern_singletons_and_adaptive_determinization() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../benches/data/o9838_problem_schema.json"
+    ))
+    .unwrap();
+    let named = schema_to_named_grammar(&schema).unwrap();
+    let mut factored = factor_named_grammar(named);
+    super::prepare_named_grammar(&mut factored).unwrap();
+    let lowered = lower(&factored).unwrap();
+    let prepared = prepare_grammar_transforms_only(lowered);
+    let tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
+        &prepared,
+        false,
+        true,
+    );
+
+    assert!(
+        !tokenizer.has_epsilon_transitions(),
+        "the bounded adaptive final-NFA determinization should coalesce the o9838 partition union"
+    );
+    assert!(
+        tokenizer.num_states() < 20_000,
+        "o9838 tokenizer regressed toward the former 186k-state shape: states={}",
+        tokenizer.num_states(),
+    );
 }
 
 #[test]

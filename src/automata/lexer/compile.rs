@@ -1438,37 +1438,6 @@ fn compile_single_expr_dfa(expr: &Expr) -> DFA {
     nfa.to_dfa()
 }
 
-fn compile_multi_expr_dfa_via_nfa(exprs: &[Expr]) -> DFA {
-    let mut nfa = build_regex_nfa(exprs);
-    nfa.condense_epsilon_sccs();
-    nfa.to_dfa()
-}
-
-fn should_use_shared_multi_nfa(plan: &ExclusionCompilePlan) -> bool {
-    if std::env::var_os("GLRMASK_DISABLE_SHARED_MULTI_NFA").is_some() {
-        return false;
-    }
-
-    if plan.compiled_exprs.len() != plan.visible_groups {
-        return false;
-    }
-
-    if plan.compiled_exprs.len() < 16 {
-        return false;
-    }
-
-    let Some(labels) = plan.profile_labels.as_ref() else {
-        return false;
-    };
-
-    labels
-        .iter()
-        .take(plan.visible_groups)
-        .filter(|label| label.name.starts_with("json_string_constrained"))
-        .count()
-        >= 8
-}
-
 fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
     let profile_timing = profile_detail
@@ -1482,8 +1451,7 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
         .collect();
     let group_set_ms = profile_timing
         .then(|| group_set_started_at.elapsed().as_secs_f64() * 1000.0);
-    let use_shared_multi_nfa = should_use_shared_multi_nfa(&plan);
-    let used_product_dfa = plan.compiled_exprs.len() > 1 && !use_shared_multi_nfa;
+    let used_product_dfa = plan.compiled_exprs.len() > 1;
 
     let dfa_build_started_at = Instant::now();
     let mut dfa = if plan.compiled_exprs.is_empty() {
@@ -1493,8 +1461,6 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
         DFA::new(1)
     } else if used_product_dfa {
         build_product_dfa(&plan.compiled_exprs, plan.profile_labels.as_deref())
-    } else if plan.compiled_exprs.len() > 1 {
-        compile_multi_expr_dfa_via_nfa(&plan.compiled_exprs)
     } else {
         compile_single_expr_dfa(&plan.compiled_exprs[0])
     };
@@ -1554,11 +1520,10 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     };
     if profile_detail {
         eprintln!(
-            "[glrmask/profile][tokenizer] combined groups={} visible_groups={} product_dfa={} shared_multi_nfa={} pre_minimize_states={} pre_minimize_transitions={} final_states={} final_transitions={} forced_minimized_states={}",
+            "[glrmask/profile][tokenizer] combined groups={} visible_groups={} product_dfa={} pre_minimize_states={} pre_minimize_transitions={} final_states={} final_transitions={} forced_minimized_states={}",
             plan.compiled_exprs.len(),
             plan.visible_groups,
             used_product_dfa,
-            use_shared_multi_nfa,
             pre_minimize_states,
             pre_minimize_transitions,
             final_dfa.num_states(),
@@ -1568,11 +1533,10 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     }
     if profile_timing {
         eprintln!(
-            "[glrmask/profile][tokenizer] compile_plan groups={} visible_groups={} product_dfa={} shared_multi_nfa={} group_set_ms={:.3} dfa_build_ms={:.3} metadata_ms={:.3} group_ops_ms={:.3} project_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][tokenizer] compile_plan groups={} visible_groups={} product_dfa={} group_set_ms={:.3} dfa_build_ms={:.3} metadata_ms={:.3} group_ops_ms={:.3} project_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
             plan.compiled_exprs.len(),
             plan.visible_groups,
             used_product_dfa,
-            use_shared_multi_nfa,
             group_set_ms.unwrap_or_default(),
             dfa_build_ms.unwrap_or_default(),
             metadata_ms.unwrap_or_default(),
@@ -1610,24 +1574,16 @@ pub fn build_regex_with_profile_labels(exprs: &[Expr], visible_labels: &[String]
 /// sharing a partition may be jointly determinized; terminals in different
 /// partitions can never cause a cross-partition subset/product blow-up.
 pub(crate) fn build_regex_partitioned(exprs: &[Expr], partitions: &[u32]) -> Regex {
-    Regex {
-        dfa: compile_terminal_partitions(exprs, None, partitions, None, false),
-    }
+    build_regex_partitioned_with_adaptive(exprs, partitions, adaptive_lexer_enabled())
 }
 
-pub(crate) fn build_regex_partitioned_adaptive(
+pub(crate) fn build_regex_partitioned_with_adaptive(
     exprs: &[Expr],
     partitions: &[u32],
-    adaptive_partitions: &BTreeSet<u32>,
+    adaptive: bool,
 ) -> Regex {
     Regex {
-        dfa: compile_terminal_partitions(
-            exprs,
-            None,
-            partitions,
-            Some(adaptive_partitions),
-            true,
-        ),
+        dfa: compile_terminal_partitions(exprs, None, partitions, adaptive),
     }
 }
 
@@ -1636,38 +1592,44 @@ pub(crate) fn build_regex_partitioned_with_profile_labels(
     visible_labels: &[String],
     partitions: &[u32],
 ) -> Regex {
-    Regex {
-        dfa: compile_terminal_partitions(exprs, Some(visible_labels), partitions, None, false),
-    }
+    build_regex_partitioned_with_profile_labels_and_adaptive(
+        exprs,
+        visible_labels,
+        partitions,
+        adaptive_lexer_enabled(),
+    )
 }
 
-pub(crate) fn build_regex_partitioned_with_profile_labels_adaptive(
+pub(crate) fn build_regex_partitioned_with_profile_labels_and_adaptive(
     exprs: &[Expr],
     visible_labels: &[String],
     partitions: &[u32],
-    adaptive_partitions: &BTreeSet<u32>,
+    adaptive: bool,
 ) -> Regex {
     Regex {
-        dfa: compile_terminal_partitions(
-            exprs,
-            Some(visible_labels),
-            partitions,
-            Some(adaptive_partitions),
-            true,
-        ),
+        dfa: compile_terminal_partitions(exprs, Some(visible_labels), partitions, adaptive),
     }
+}
+
+fn env_flag(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            other => panic!(
+                "invalid {name}={other:?}; expected one of 1/0, true/false, yes/no, or on/off"
+            ),
+        },
+        Err(_) => default,
+    }
+}
+
+fn adaptive_lexer_enabled() -> bool {
+    env_flag("GLRMASK_LEXER_ADAPTIVE", true)
 }
 
 fn adaptive_lexer_state_limit() -> usize {
     std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_STATES")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(8_192)
-}
-
-fn adaptive_lexer_component_state_limit() -> usize {
-    std::env::var("GLRMASK_ADAPTIVE_LEXER_COMPONENT_MAX_STATES")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|&value| value > 0)
@@ -1682,28 +1644,12 @@ fn adaptive_lexer_growth_percent() -> usize {
         .unwrap_or(100)
 }
 
-fn adaptive_lexer_max_trials_per_terminal() -> usize {
-    std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_TRIALS_PER_TERMINAL")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(1)
-}
-
-fn adaptive_lexer_max_trials_per_component() -> usize {
-    std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_TRIALS_PER_COMPONENT")
+fn adaptive_lexer_max_trials() -> usize {
+    std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_TRIALS")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|&value| value > 0)
         .unwrap_or(2)
-}
-
-fn adaptive_lexer_max_component_batches() -> usize {
-    std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_COMPONENT_BATCHES")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(4)
 }
 
 fn compile_terminal_ids(
@@ -1727,9 +1673,30 @@ fn compile_terminal_ids(
     ))
 }
 
-struct AdaptiveTerminalBatch {
+struct LexerComponent {
     terminal_ids: Vec<usize>,
     dfa: DFA,
+}
+
+fn compile_partition_components(
+    exprs: &[Expr],
+    visible_labels: Option<&[String]>,
+    partitions: &[u32],
+) -> Vec<LexerComponent> {
+    let mut grouped = BTreeMap::<u32, Vec<usize>>::new();
+    for (terminal, &partition) in partitions.iter().enumerate() {
+        grouped.entry(partition).or_default().push(terminal);
+    }
+
+    grouped
+        .into_values()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|terminal_ids| {
+            let dfa = compile_terminal_ids(exprs, visible_labels, &terminal_ids);
+            LexerComponent { terminal_ids, dfa }
+        })
+        .collect()
 }
 
 fn product_union_metadata(
@@ -1840,12 +1807,11 @@ fn try_product_union_dfas(left: &DFA, right: &DFA, state_limit: usize) -> Option
     Some(combined)
 }
 
-fn coalesce_adaptive_batches(
-    inputs: Vec<AdaptiveTerminalBatch>,
+fn adaptively_determinize_components(
+    inputs: Vec<LexerComponent>,
     max_trials: usize,
     state_limit: usize,
-    profile_level: &str,
-) -> Vec<AdaptiveTerminalBatch> {
+) -> Vec<LexerComponent> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some()
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let started_at = Instant::now();
@@ -1861,7 +1827,7 @@ fn coalesce_adaptive_batches(
         .map(|batch| batch.terminal_ids.len())
         .sum::<usize>();
 
-    let mut batches = Vec::<AdaptiveTerminalBatch>::new();
+    let mut batches = Vec::<LexerComponent>::new();
     let mut attempted_merges = 0usize;
     let mut accepted_merges = 0usize;
     let mut budget_rejections = 0usize;
@@ -1907,7 +1873,7 @@ fn coalesce_adaptive_batches(
         }
 
         if let Some((batch_index, terminal_ids, dfa)) = best {
-            batches[batch_index] = AdaptiveTerminalBatch { terminal_ids, dfa };
+            batches[batch_index] = LexerComponent { terminal_ids, dfa };
             accepted_merges += 1;
         } else {
             batches.push(input);
@@ -1921,10 +1887,9 @@ fn coalesce_adaptive_batches(
             .map(|batch| dfa_transition_count(&batch.dfa))
             .sum::<usize>();
         eprintln!(
-            "[glrmask/profile][tokenizer] adaptive_merge level={} terminals={} input_batches={} output_batches={} input_states={} output_states={} input_transitions={} output_transitions={} attempted_merges={} accepted_merges={} budget_rejections={} max_states={} max_growth_percent={} max_trials={} total_ms={:.3}",
-            profile_level,
-            terminals,
+            "[glrmask/profile][tokenizer] adaptive_determinize partitions={} terminals={} output_components={} input_states={} output_states={} input_transitions={} output_transitions={} attempted_merges={} accepted_merges={} budget_rejections={} max_states={} max_growth_percent={} max_trials={} total_ms={:.3}",
             input_batches,
+            terminals,
             batches.len(),
             input_states,
             output_states,
@@ -1941,35 +1906,6 @@ fn coalesce_adaptive_batches(
     }
 
     batches
-}
-
-fn compile_adaptive_terminal_partition(
-    exprs: &[Expr],
-    visible_labels: Option<&[String]>,
-    terminal_ids: Vec<usize>,
-) -> Vec<(Vec<usize>, DFA)> {
-    let max_trials = adaptive_lexer_max_trials_per_terminal();
-
-    let singletons = terminal_ids
-        .into_par_iter()
-        .map(|terminal| {
-            let ids = vec![terminal];
-            let dfa = compile_terminal_ids(exprs, visible_labels, &ids);
-            AdaptiveTerminalBatch {
-                terminal_ids: ids,
-                dfa,
-            }
-        })
-        .collect::<Vec<_>>();
-    coalesce_adaptive_batches(
-        singletons,
-        max_trials,
-        adaptive_lexer_state_limit(),
-        "pattern_terminals",
-    )
-        .into_iter()
-        .map(|batch| (batch.terminal_ids, batch.dfa))
-        .collect()
 }
 
 fn remap_component_groups(
@@ -2020,8 +1956,7 @@ fn compile_terminal_partitions(
     exprs: &[Expr],
     visible_labels: Option<&[String]>,
     partitions: &[u32],
-    adaptive_partitions: Option<&BTreeSet<u32>>,
-    adaptive_component_merge: bool,
+    adaptive: bool,
 ) -> DFA {
     assert_eq!(exprs.len(), partitions.len(), "one lexer partition id is required per terminal");
     if let Some(labels) = visible_labels {
@@ -2031,59 +1966,21 @@ fn compile_terminal_partitions(
         return compile_with_plan(build_exclusion_compile_plan(exprs));
     }
 
-    let mut grouped = BTreeMap::<u32, Vec<usize>>::new();
-    for (terminal, &partition) in partitions.iter().enumerate() {
-        grouped.entry(partition).or_default().push(terminal);
-    }
-    let only_partition_is_adaptive = grouped
-        .keys()
-        .next()
-        .is_some_and(|partition| adaptive_partitions.is_some_and(|set| set.contains(partition)));
-    if grouped.len() == 1 && !only_partition_is_adaptive && !adaptive_component_merge {
+    let num_partitions = partitions.iter().copied().collect::<BTreeSet<_>>().len();
+    if num_partitions == 1 {
         return compile_with_plan(build_exclusion_compile_plan_with_labels(exprs, visible_labels));
     }
 
-    let groups = grouped.into_iter().collect::<Vec<_>>();
-    let mut components: Vec<AdaptiveTerminalBatch> = groups
-        .into_par_iter()
-        .flat_map_iter(|(partition, terminal_ids)| {
-            if adaptive_partitions.is_some_and(|partitions| partitions.contains(&partition))
-                && terminal_ids.len() > 1
-            {
-                compile_adaptive_terminal_partition(exprs, visible_labels, terminal_ids)
-                    .into_iter()
-                    .map(|(terminal_ids, dfa)| AdaptiveTerminalBatch { terminal_ids, dfa })
-                    .collect::<Vec<_>>()
-            } else {
-                let component = compile_terminal_ids(exprs, visible_labels, &terminal_ids);
-                vec![AdaptiveTerminalBatch {
-                    terminal_ids,
-                    dfa: component,
-                }]
-            }
-        })
-        .collect();
+    // Every partition is compiled exactly as declared, independently of the
+    // adaptive policy. Adaptive determinization is a second, generic step over
+    // the disjoint deterministic components of the combined epsilon-NFA.
+    let mut components = compile_partition_components(exprs, visible_labels, partitions);
 
-    let max_component_batches = adaptive_lexer_max_component_batches();
-    if adaptive_component_merge
-        && components.len() > 1
-        && components.len() <= max_component_batches
-    {
-        components = coalesce_adaptive_batches(
+    if adaptive {
+        components = adaptively_determinize_components(
             components,
-            adaptive_lexer_max_trials_per_component(),
-            adaptive_lexer_component_state_limit(),
-            "compiled_components",
-        );
-    } else if adaptive_component_merge
-        && components.len() > max_component_batches
-        && (std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some())
-    {
-        eprintln!(
-            "[glrmask/profile][tokenizer] adaptive_merge level=compiled_components skipped=true input_batches={} max_component_batches={}",
-            components.len(),
-            max_component_batches,
+            adaptive_lexer_max_trials(),
+            adaptive_lexer_state_limit(),
         );
     }
 
@@ -2815,7 +2712,7 @@ mod tests {
         build_regex,
         build_regex_monolithic,
         build_regex_partitioned,
-        build_regex_partitioned_adaptive,
+        build_regex_partitioned_with_adaptive,
         try_product_union_dfas,
     };
     use super::compile_product_component_dfa_direct;
@@ -3030,7 +2927,12 @@ mod tests {
         let inputs = enumerate_inputs(b"abc ", 5);
 
         for partitions in partitionings {
-            let partitioned = build_regex_partitioned(&exprs, &partitions).into_tokenizer(
+            let partitioned = build_regex_partitioned_with_adaptive(
+                &exprs,
+                &partitions,
+                false,
+            )
+            .into_tokenizer(
                 exprs.len() as u32,
                 Some(Arc::from(exprs.clone().into_boxed_slice())),
             );
@@ -3068,15 +2970,19 @@ mod tests {
                         .collect::<Vec<_>>(),
                     _ => vec![0; expr_count],
                 };
-                let partitioned = build_regex_partitioned(&exprs, &partitions).into_tokenizer(
+                let partitioned = build_regex_partitioned_with_adaptive(
+                    &exprs,
+                    &partitions,
+                    false,
+                )
+                .into_tokenizer(
                     exprs.len() as u32,
                     Some(Arc::from(exprs.clone().into_boxed_slice())),
                 );
-                let adaptive_partitions = partitions.iter().copied().collect();
-                let adaptive = build_regex_partitioned_adaptive(
+                let adaptive = build_regex_partitioned_with_adaptive(
                     &exprs,
                     &partitions,
-                    &adaptive_partitions,
+                    true,
                 )
                 .into_tokenizer(
                     exprs.len() as u32,
@@ -3182,7 +3088,7 @@ mod tests {
     }
 
     #[test]
-    fn factors_contains_literal_choice_with_common_json_string_shell() {
+    fn factors_contains_literal_choice_with_common_quoted_string_shell() {
         let char = Expr::U8Class(U8Set::from_bytes(br#"ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789"#));
         let mk = |s: &[u8]| {
             Expr::Seq(vec![
@@ -3850,7 +3756,11 @@ mod tests {
             Expr::U8Seq(b"ab".to_vec()),
             Expr::U8Seq(b"z".to_vec()),
         ];
-        let regex = super::build_regex_partitioned(&expressions, &[7, 7, 9]);
+        let regex = super::build_regex_partitioned_with_adaptive(
+            &expressions,
+            &[7, 7, 9],
+            false,
+        );
         assert_eq!(
             regex.dfa.states()[0].epsilon_transitions.len(),
             2,
@@ -3876,7 +3786,31 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_partitioning_preserves_singleton_component_semantics() {
+    fn adaptive_policy_does_not_change_per_partition_compilation() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"b".to_vec())),
+                min: 1,
+                max: None,
+            },
+            Expr::U8Seq(b"c".to_vec()),
+        ];
+        let partitions = [7, 7, 9, 11];
+        let components = super::compile_partition_components(&expressions, None, &partitions);
+        let expected_terminal_ids = [vec![0, 1], vec![2], vec![3]];
+
+        assert_eq!(components.len(), expected_terminal_ids.len());
+        for (component, expected_ids) in components.iter().zip(expected_terminal_ids) {
+            assert_eq!(component.terminal_ids, expected_ids);
+            let expected = super::compile_terminal_ids(&expressions, None, &expected_ids);
+            assert_eq!(component.dfa, expected);
+        }
+    }
+
+    #[test]
+    fn adaptive_final_nfa_determinization_preserves_partitioned_semantics() {
         let expressions = vec![
             Expr::U8Seq(b"a".to_vec()),
             Expr::U8Seq(b"ab".to_vec()),
@@ -3886,14 +3820,19 @@ mod tests {
                 max: None,
             },
         ];
-        let singleton = build_regex_partitioned(&expressions, &[0, 1, 2]).into_tokenizer(
+        let singleton = build_regex_partitioned_with_adaptive(
+            &expressions,
+            &[0, 1, 2],
+            false,
+        )
+        .into_tokenizer(
             expressions.len() as u32,
             Some(Arc::from(expressions.clone().into_boxed_slice())),
         );
-        let adaptive = build_regex_partitioned_adaptive(
+        let adaptive = build_regex_partitioned_with_adaptive(
             &expressions,
-            &[7, 7, 7],
-            &std::collections::BTreeSet::from([7]),
+            &[0, 1, 2],
+            true,
         )
         .into_tokenizer(
             expressions.len() as u32,
@@ -3910,12 +3849,62 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_final_determinization_matches_monolithic_for_ignore_and_repeated_terminals() {
+        let expressions = vec![
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b" ".to_vec())),
+                min: 1,
+                max: None,
+            },
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                min: 1,
+                max: None,
+            },
+            Expr::U8Seq(b"b".to_vec()),
+            Expr::U8Seq(b"c".to_vec()),
+        ];
+        let monolithic = build_regex_monolithic(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.clone().into_boxed_slice())),
+        );
+        let adaptive = build_regex_partitioned_with_adaptive(
+            &expressions,
+            &[0, 1, 2, 3],
+            true,
+        )
+        .into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+
+        assert!(!adaptive.has_epsilon_transitions());
+        assert_eq!(
+            adaptive.dfa,
+            monolithic.dfa,
+            "equivalent tokenizer languages unexpectedly used different DFA structures",
+        );
+        for input in enumerate_inputs(b" abc", 6) {
+            assert_eq!(
+                tokenizer_observation(&adaptive, &input),
+                tokenizer_observation(&monolithic, &input),
+                "adaptive tokenizer differed for input {input:?}",
+            );
+        }
+    }
+
+    #[test]
     fn epsilon_partitioned_tokenizer_round_trips_through_serde() {
         let expressions = vec![
             Expr::U8Seq(b"a".to_vec()),
             Expr::U8Seq(b"ab".to_vec()),
         ];
-        let tokenizer = build_regex_partitioned(&expressions, &[0, 1]).into_tokenizer(
+        let tokenizer = build_regex_partitioned_with_adaptive(
+            &expressions,
+            &[0, 1],
+            false,
+        )
+        .into_tokenizer(
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
         );

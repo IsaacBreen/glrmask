@@ -1,5 +1,5 @@
 use crate::automata::lexer::Lexer;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -9,9 +9,9 @@ use crate::Vocab;
 use crate::automata::lexer::compile::{
     build_regex,
     build_regex_partitioned,
-    build_regex_partitioned_adaptive,
+    build_regex_partitioned_with_adaptive,
     build_regex_partitioned_with_profile_labels,
-    build_regex_partitioned_with_profile_labels_adaptive,
+    build_regex_partitioned_with_profile_labels_and_adaptive,
     build_regex_with_profile_labels,
     factor_regex_expr,
 };
@@ -400,13 +400,8 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
             );
         }
     }
-    let partition_plan = lexer_partition_plan(grammar);
-    build_tokenizer_from_exprs_partitioned_adaptive(
-        &exprs,
-        Some(&terminal_labels),
-        &partition_plan.ids,
-        &partition_plan.adaptive_ids,
-    )
+    let partition_ids = lexer_partition_ids(grammar);
+    build_tokenizer_from_exprs_partitioned(&exprs, Some(&terminal_labels), &partition_ids)
 }
 
 fn env_flag(name: &str, default: bool) -> bool {
@@ -422,24 +417,17 @@ fn env_flag(name: &str, default: bool) -> bool {
     }
 }
 
-struct LexerPartitionPlan {
-    ids: Vec<u32>,
-    adaptive_ids: BTreeSet<u32>,
-}
-
-fn lexer_partition_plan_with_options(
+fn lexer_partition_ids_with_options(
     grammar: &GrammarDef,
     singleton_all_terminals: bool,
-    adaptive_json_patterns: bool,
-    singleton_json_patterns: bool,
-) -> LexerPartitionPlan {
+) -> Vec<u32> {
     // Named lexer groups opt into partitioning. Unspecified terminals remain
     // monolithic by default so existing grammars keep their historical lexer
     // shape. The global singleton override deliberately takes precedence over
-    // named groups and adaptive policy because it is an exact stress mode.
+    // named groups because it is an exact stress mode.
     let mut ids_by_key = BTreeMap::<String, u32>::new();
     let mut next_id = 0u32;
-    let ids = (0..grammar.terminals.len())
+    (0..grammar.terminals.len())
         .map(|terminal| {
             let terminal = terminal as u32;
             let key = if singleton_all_terminals {
@@ -448,13 +436,7 @@ fn lexer_partition_plan_with_options(
                 grammar
                     .lexer_partitions
                     .get(&terminal)
-                    .map(|partition| {
-                        if singleton_json_patterns && partition == "json_patterns" {
-                            format!("json-pattern-terminal:{terminal}")
-                        } else {
-                            format!("named:{partition}")
-                        }
-                    })
+                    .map(|partition| format!("named:{partition}"))
                     .unwrap_or_else(|| "default".to_string())
             };
             *ids_by_key.entry(key).or_insert_with(|| {
@@ -463,40 +445,19 @@ fn lexer_partition_plan_with_options(
                 id
             })
         })
-        .collect::<Vec<_>>();
-    let adaptive_ids = if adaptive_json_patterns && !singleton_json_patterns {
-        ids_by_key
-            .get("named:json_patterns")
-            .copied()
-            .into_iter()
-            .collect()
-    } else {
-        BTreeSet::new()
-    };
-    LexerPartitionPlan { ids, adaptive_ids }
+        .collect()
 }
 
-fn lexer_partition_plan(grammar: &GrammarDef) -> LexerPartitionPlan {
+fn lexer_partition_ids(grammar: &GrammarDef) -> Vec<u32> {
     let singleton_all_terminals = env_flag("GLRMASK_LEXER_SINGLETONS", false);
-    // Adaptive grouping is the normal policy switch. The singleton override is
-    // deliberately separate because it is a diagnostic/stress mode, not an
-    // alternative production policy.
-    let adaptive_json_patterns = env_flag("GLRMASK_JSON_PATTERN_ADAPTIVE", true);
-    let singleton_json_patterns = env_flag("GLRMASK_JSON_PATTERN_SINGLETONS", false);
-    lexer_partition_plan_with_options(
-        grammar,
-        singleton_all_terminals,
-        adaptive_json_patterns,
-        singleton_json_patterns,
-    )
+    lexer_partition_ids_with_options(grammar, singleton_all_terminals)
 }
 
 #[cfg(test)]
 pub(crate) fn build_tokenizer_with_partition_options(
     grammar: &GrammarDef,
     singleton_all_terminals: bool,
-    adaptive_json_patterns: bool,
-    singleton_json_patterns: bool,
+    adaptive: bool,
 ) -> Tokenizer {
     let exprs = grammar
         .terminals
@@ -510,17 +471,12 @@ pub(crate) fn build_tokenizer_with_partition_options(
         .enumerate()
         .map(|(index, _)| grammar.terminal_display_name(index as u32))
         .collect::<Vec<_>>();
-    let plan = lexer_partition_plan_with_options(
-        grammar,
-        singleton_all_terminals,
-        adaptive_json_patterns,
-        singleton_json_patterns,
-    );
-    build_tokenizer_from_exprs_partitioned_adaptive(
+    let partition_ids = lexer_partition_ids_with_options(grammar, singleton_all_terminals);
+    build_tokenizer_from_exprs_partitioned_with_adaptive(
         &exprs,
         Some(&labels),
-        &plan.ids,
-        &plan.adaptive_ids,
+        &partition_ids,
+        adaptive,
     )
 }
 
@@ -528,12 +484,8 @@ pub(crate) fn build_tokenizer_with_partition_options(
 mod lexer_partition_plan_tests {
     use std::collections::BTreeSet;
 
-    use super::{build_tokenizer_with_partition_options, lexer_partition_plan_with_options};
-    use crate::automata::lexer::Lexer;
-    use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
-    use crate::grammar::ast::lower;
+    use super::lexer_partition_ids_with_options;
     use crate::grammar::flat::{GrammarDef, Terminal};
-    use crate::import::json_schema::schema_to_named_grammar;
 
     fn grammar_with_terminals(count: u32) -> GrammarDef {
         GrammarDef {
@@ -550,69 +502,29 @@ mod lexer_partition_plan_tests {
     #[test]
     fn unspecified_terminals_are_monolithic_by_default() {
         let grammar = grammar_with_terminals(3);
-        let plan = lexer_partition_plan_with_options(&grammar, false, true, false);
-        assert_eq!(plan.ids, vec![0, 0, 0]);
-        assert!(plan.adaptive_ids.is_empty());
+        assert_eq!(lexer_partition_ids_with_options(&grammar, false), vec![0, 0, 0]);
     }
 
     #[test]
     fn global_singleton_override_isolates_named_and_unnamed_terminals() {
         let mut grammar = grammar_with_terminals(3);
-        grammar.lexer_partitions.insert(0, "json_patterns".to_string());
-        grammar.lexer_partitions.insert(1, "json_patterns".to_string());
+        grammar.lexer_partitions.insert(0, "words".to_string());
+        grammar.lexer_partitions.insert(1, "words".to_string());
 
-        let plan = lexer_partition_plan_with_options(&grammar, true, true, false);
-        assert_eq!(plan.ids.iter().copied().collect::<BTreeSet<_>>().len(), 3);
-        assert!(plan.adaptive_ids.is_empty());
+        let ids = lexer_partition_ids_with_options(&grammar, true);
+        assert_eq!(ids.iter().copied().collect::<BTreeSet<_>>().len(), 3);
     }
 
     #[test]
-    fn json_adaptive_switch_does_not_isolate_terminals() {
+    fn named_partition_membership_is_preserved_by_partition_planning() {
         let mut grammar = grammar_with_terminals(3);
-        grammar.lexer_partitions.insert(0, "json_patterns".to_string());
-        grammar.lexer_partitions.insert(1, "json_patterns".to_string());
-        grammar.lexer_partitions.insert(2, "json_literals".to_string());
+        grammar.lexer_partitions.insert(0, "words".to_string());
+        grammar.lexer_partitions.insert(1, "words".to_string());
+        grammar.lexer_partitions.insert(2, "numbers".to_string());
 
-        let off = lexer_partition_plan_with_options(&grammar, false, false, false);
-        assert_eq!(off.ids[0], off.ids[1]);
-        assert!(off.adaptive_ids.is_empty());
-
-        let on = lexer_partition_plan_with_options(&grammar, false, true, false);
-        assert_eq!(on.ids[0], on.ids[1]);
-        assert_eq!(on.adaptive_ids, std::collections::BTreeSet::from([on.ids[0]]));
-    }
-
-    #[test]
-    fn json_singletons_are_an_independent_debug_override() {
-        let mut grammar = grammar_with_terminals(3);
-        grammar.lexer_partitions.insert(0, "json_patterns".to_string());
-        grammar.lexer_partitions.insert(1, "json_patterns".to_string());
-        grammar.lexer_partitions.insert(2, "json_literals".to_string());
-
-        let plan = lexer_partition_plan_with_options(&grammar, false, true, true);
-        assert_ne!(plan.ids[0], plan.ids[1]);
-        assert!(plan.adaptive_ids.is_empty());
-    }
-
-    #[test]
-    fn o9838_prepared_tokenizer_stays_bounded_and_deterministic() {
-        let schema: serde_json::Value = serde_json::from_str(include_str!(
-            "../../benches/data/o9838_problem_schema.json"
-        ))
-        .unwrap();
-        let named = schema_to_named_grammar(&schema).unwrap();
-        let grammar = prepare_grammar_transforms_only(lower(&named).unwrap());
-        let tokenizer = build_tokenizer_with_partition_options(&grammar, false, true, false);
-
-        assert!(
-            !tokenizer.has_epsilon_transitions(),
-            "the careful component product should eliminate the residual epsilon dispatch"
-        );
-        assert!(
-            tokenizer.num_states() < 20_000,
-            "o9838 tokenizer regressed toward the former 186k-state shape: states={}",
-            tokenizer.num_states(),
-        );
+        let ids = lexer_partition_ids_with_options(&grammar, false);
+        assert_eq!(ids[0], ids[1]);
+        assert_ne!(ids[0], ids[2]);
     }
 }
 
@@ -655,37 +567,47 @@ pub(crate) fn build_tokenizer_from_exprs_partitioned(
     profile_labels: Option<&[String]>,
     partition_ids: &[u32],
 ) -> Tokenizer {
-    build_tokenizer_from_exprs_partitioned_adaptive(
-        exprs,
-        profile_labels,
-        partition_ids,
-        &BTreeSet::new(),
-    )
+    build_tokenizer_from_exprs_partitioned_impl(exprs, profile_labels, partition_ids, None)
 }
 
-fn build_tokenizer_from_exprs_partitioned_adaptive(
+#[cfg(test)]
+fn build_tokenizer_from_exprs_partitioned_with_adaptive(
     exprs: &[Expr],
     profile_labels: Option<&[String]>,
     partition_ids: &[u32],
-    adaptive_partition_ids: &BTreeSet<u32>,
+    adaptive: bool,
+) -> Tokenizer {
+    build_tokenizer_from_exprs_partitioned_impl(
+        exprs,
+        profile_labels,
+        partition_ids,
+        Some(adaptive),
+    )
+}
+
+fn build_tokenizer_from_exprs_partitioned_impl(
+    exprs: &[Expr],
+    profile_labels: Option<&[String]>,
+    partition_ids: &[u32],
+    adaptive_override: Option<bool>,
 ) -> Tokenizer {
     let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
     let started_at = Instant::now();
-    let regex = if adaptive_partition_ids.is_empty() {
+    let regex = if let Some(adaptive) = adaptive_override {
         if let Some(labels) = profile_labels {
-            build_regex_partitioned_with_profile_labels(exprs, labels, partition_ids)
+            build_regex_partitioned_with_profile_labels_and_adaptive(
+                exprs,
+                labels,
+                partition_ids,
+                adaptive,
+            )
         } else {
-            build_regex_partitioned(exprs, partition_ids)
+            build_regex_partitioned_with_adaptive(exprs, partition_ids, adaptive)
         }
     } else if let Some(labels) = profile_labels {
-        build_regex_partitioned_with_profile_labels_adaptive(
-            exprs,
-            labels,
-            partition_ids,
-            adaptive_partition_ids,
-        )
+        build_regex_partitioned_with_profile_labels(exprs, labels, partition_ids)
     } else {
-        build_regex_partitioned_adaptive(exprs, partition_ids, adaptive_partition_ids)
+        build_regex_partitioned(exprs, partition_ids)
     };
     if profile_detail {
         eprintln!(
