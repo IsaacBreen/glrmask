@@ -632,6 +632,15 @@ let strict_reference = reference_terminal_expansion
     let mut ti_transport_coordinate_quotient_ms = 0.0;
 
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
+    if l2p_timing_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][l2p_stage] partition={} stage=id_map_done elapsed_ms={:.3} tsids={} internal_vocab_ids={}",
+            partition_label,
+            id_map_ms,
+            simplified_id_map.num_tsids(),
+            simplified_id_map.vocab_tokens.num_internal_ids(),
+        );
+    }
 
     // tsid_fallback is independent of the NWA build / postprocess /
     // determinize / minimize pipeline: it only feeds into the final
@@ -697,6 +706,14 @@ let strict_reference = reference_terminal_expansion
                     .collect(),
             );
             let vocab_tree_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
+            if l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_stage] partition={} stage=vocab_tree_done elapsed_ms={:.3} internal_vocab_entries={}",
+                    partition_label,
+                    vocab_tree_ms,
+                    internal_vocab_count,
+                );
+            }
 
             // ---- Step 4: Possible matches (lazy via computer) ----
             let mut pm_computer = PossibleMatchesComputer::new(tokenizer_for_build);
@@ -719,6 +736,14 @@ let strict_reference = reference_terminal_expansion
             let trie_build_started_at = Instant::now();
             let roots = seed_root_nodes(tokenizer, &mut nwa, start_state, &simplified_id_map);
             seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+            if l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_stage] partition={} stage=seed_done elapsed_ms={:.3} roots={}",
+                    partition_label,
+                    seed_ms,
+                    roots.entries.len(),
+                );
+            }
             let _build_profile = build_nwa_via_trie_walk(
                 tokenizer_for_build,
                 terminal_coloring,
@@ -733,6 +758,14 @@ let strict_reference = reference_terminal_expansion
                 representative_core_output_labels.as_deref(),
             );
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
+            if l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_stage] partition={} stage=nwa_build_done elapsed_ms={:.3} states={}",
+                    partition_label,
+                    trie_build_ms,
+                    nwa.states().len(),
+                );
+            }
 
             let always_allowed_started_at = Instant::now();
             let always_allowed = compute_always_allowed_follows(grammar);
@@ -763,10 +796,30 @@ let strict_reference = reference_terminal_expansion
             canonicalize_acyclic_nwa(&mut nwa);
             let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_canonicalize = nwa.states().len();
+            if l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_stage] partition={} stage=postprocess_done elapsed_ms={:.3} states={}",
+                    partition_label,
+                    always_allowed_ms
+                        + collapse_ms
+                        + disallowed_ms
+                        + prune_ms
+                        + canonicalize_ms,
+                    nwa_states_after_canonicalize,
+                );
+            }
 
             let determinize_started_at = Instant::now();
             let det = determinize(&nwa).expect("L2+ terminal NWA determinization failed");
             let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
+            if l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_stage] partition={} stage=determinize_done elapsed_ms={:.3} states={}",
+                    partition_label,
+                    determinize_ms,
+                    det.num_states(),
+                );
+            }
 
             let minimize_started_at = Instant::now();
             let skip_minimize = std::env::var("GLRMASK_SKIP_L2P_MINIMIZE")
@@ -777,6 +830,14 @@ let strict_reference = reference_terminal_expansion
                 .unwrap_or(false);
             let dwa = if skip_minimize { det } else { minimize_owned(det) };
             let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+            if l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_stage] partition={} stage=minimize_done elapsed_ms={:.3} states={}",
+                    partition_label,
+                    minimize_ms,
+                    dwa.num_states(),
+                );
+            }
             let dwa_stats_before_compact = dwa.stats();
 
             (

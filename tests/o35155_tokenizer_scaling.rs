@@ -94,10 +94,10 @@ fn o35155_bad_family_tokenizer_states_stay_under_current_budget() {
         minimized_tokenizer_states
     );
 
-    // This family is no longer close to the old linear budget once the current
-    // value-pattern handling is enabled. Keep a coarse regression ceiling so a
-    // new blow-up is still visible without baking in obsolete linear scaling.
-    let budget = 50_000usize;
+    // Adaptive JSON-pattern grouping keeps the known cross-pattern interference
+    // below 10k states. This is intentionally loose enough to permit harmless
+    // topology changes while preventing a return to the 20k+ shared-group DFA.
+    let budget = 10_000usize;
     for (index, &state_count) in tokenizer_states.iter().enumerate() {
         let n = index + 2;
         assert!(

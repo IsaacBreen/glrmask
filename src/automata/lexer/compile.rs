@@ -11,7 +11,7 @@ use crate::ds::{bitset::BitSet, u8set::U8Set};
 
 use super::ast::Expr;
 use super::tokenizer::Tokenizer;
-use super::dfa::DFA;
+use super::dfa::{DEAD, DFA};
 use super::nfa::NFA;
 
 type ProductStateTuple = SmallVec<[(u32, u32); 12]>;
@@ -1586,13 +1586,10 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
 }
 
 pub fn build_regex(exprs: &[Expr]) -> Regex {
-    let partitions = (0..exprs.len() as u32).collect::<Vec<_>>();
-    build_regex_partitioned(exprs, &partitions)
+    build_regex_monolithic(exprs)
 }
 
-/// Compile all expressions into one traditional deterministic lexer. This is
-/// retained for DFA-specific analyses and their unit tests. Normal tokenizer
-/// construction deliberately uses the epsilon-partitioned stress path above.
+/// Compile all expressions into one traditional deterministic lexer.
 pub(crate) fn build_regex_monolithic(exprs: &[Expr]) -> Regex {
     Regex {
         dfa: compile_with_plan(build_exclusion_compile_plan(exprs)),
@@ -1600,8 +1597,12 @@ pub(crate) fn build_regex_monolithic(exprs: &[Expr]) -> Regex {
 }
 
 pub fn build_regex_with_profile_labels(exprs: &[Expr], visible_labels: &[String]) -> Regex {
-    let partitions = (0..exprs.len() as u32).collect::<Vec<_>>();
-    build_regex_partitioned_with_profile_labels(exprs, visible_labels, &partitions)
+    Regex {
+        dfa: compile_with_plan(build_exclusion_compile_plan_with_labels(
+            exprs,
+            Some(visible_labels),
+        )),
+    }
 }
 
 /// Compile terminals in caller-selected deterministic partitions, then join
@@ -1610,7 +1611,23 @@ pub fn build_regex_with_profile_labels(exprs: &[Expr], visible_labels: &[String]
 /// partitions can never cause a cross-partition subset/product blow-up.
 pub(crate) fn build_regex_partitioned(exprs: &[Expr], partitions: &[u32]) -> Regex {
     Regex {
-        dfa: compile_terminal_partitions(exprs, None, partitions),
+        dfa: compile_terminal_partitions(exprs, None, partitions, None, false),
+    }
+}
+
+pub(crate) fn build_regex_partitioned_adaptive(
+    exprs: &[Expr],
+    partitions: &[u32],
+    adaptive_partitions: &BTreeSet<u32>,
+) -> Regex {
+    Regex {
+        dfa: compile_terminal_partitions(
+            exprs,
+            None,
+            partitions,
+            Some(adaptive_partitions),
+            true,
+        ),
     }
 }
 
@@ -1620,14 +1637,391 @@ pub(crate) fn build_regex_partitioned_with_profile_labels(
     partitions: &[u32],
 ) -> Regex {
     Regex {
-        dfa: compile_terminal_partitions(exprs, Some(visible_labels), partitions),
+        dfa: compile_terminal_partitions(exprs, Some(visible_labels), partitions, None, false),
     }
+}
+
+pub(crate) fn build_regex_partitioned_with_profile_labels_adaptive(
+    exprs: &[Expr],
+    visible_labels: &[String],
+    partitions: &[u32],
+    adaptive_partitions: &BTreeSet<u32>,
+) -> Regex {
+    Regex {
+        dfa: compile_terminal_partitions(
+            exprs,
+            Some(visible_labels),
+            partitions,
+            Some(adaptive_partitions),
+            true,
+        ),
+    }
+}
+
+fn adaptive_lexer_state_limit() -> usize {
+    std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_STATES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(8_192)
+}
+
+fn adaptive_lexer_component_state_limit() -> usize {
+    std::env::var("GLRMASK_ADAPTIVE_LEXER_COMPONENT_MAX_STATES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(32_768)
+}
+
+fn adaptive_lexer_growth_percent() -> usize {
+    std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_GROWTH_PERCENT")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(100)
+}
+
+fn adaptive_lexer_max_trials_per_terminal() -> usize {
+    std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_TRIALS_PER_TERMINAL")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(1)
+}
+
+fn adaptive_lexer_max_trials_per_component() -> usize {
+    std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_TRIALS_PER_COMPONENT")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(2)
+}
+
+fn adaptive_lexer_max_component_batches() -> usize {
+    std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_COMPONENT_BATCHES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(4)
+}
+
+fn compile_terminal_ids(
+    exprs: &[Expr],
+    visible_labels: Option<&[String]>,
+    terminal_ids: &[usize],
+) -> DFA {
+    let local_exprs = terminal_ids
+        .iter()
+        .map(|&terminal| exprs[terminal].clone())
+        .collect::<Vec<_>>();
+    let local_labels = visible_labels.map(|labels| {
+        terminal_ids
+            .iter()
+            .map(|&terminal| labels[terminal].clone())
+            .collect::<Vec<_>>()
+    });
+    compile_with_plan(build_exclusion_compile_plan_with_labels(
+        &local_exprs,
+        local_labels.as_deref(),
+    ))
+}
+
+struct AdaptiveTerminalBatch {
+    terminal_ids: Vec<usize>,
+    dfa: DFA,
+}
+
+fn product_union_metadata(
+    left: &DFA,
+    left_state: u32,
+    right: &DFA,
+    right_state: u32,
+) -> (BitSet, BitSet) {
+    let total_groups = left.num_groups() + right.num_groups();
+    let mut finalizers = BitSet::new(total_groups);
+    let mut futures = BitSet::new(total_groups);
+
+    if left_state != DEAD {
+        for group in left.finalizers(left_state).iter() {
+            finalizers.set(group);
+        }
+        for group in left.possible_future_group_ids(left_state).iter() {
+            futures.set(group);
+        }
+    }
+    if right_state != DEAD {
+        let offset = left.num_groups();
+        for group in right.finalizers(right_state).iter() {
+            finalizers.set(offset + group);
+        }
+        for group in right.possible_future_group_ids(right_state).iter() {
+            futures.set(offset + group);
+        }
+    }
+
+    (finalizers, futures)
+}
+
+/// Jointly determinize two already-deterministic lexer components. This is an
+/// incremental subset construction over a pair of component states. Unlike
+/// recompiling the source regexes for every trial, it reuses all earlier work
+/// and can stop before allocating the first state beyond `state_limit`.
+fn try_product_union_dfas(left: &DFA, right: &DFA, state_limit: usize) -> Option<DFA> {
+    assert!(state_limit > 0, "adaptive lexer state limit must be positive");
+    debug_assert!(!left.has_epsilon_transitions());
+    debug_assert!(!right.has_epsilon_transitions());
+
+    let mut combined = DFA::new(1);
+    combined.ensure_group_capacity(left.num_groups() + right.num_groups());
+    for group in 0..left.num_groups() {
+        combined.set_group_u8set(group as u32, *left.group_id_to_u8set(group as u32));
+    }
+    for group in 0..right.num_groups() {
+        combined.set_group_u8set(
+            (left.num_groups() + group) as u32,
+            *right.group_id_to_u8set(group as u32),
+        );
+    }
+
+    let start = (0u32, 0u32);
+    let (finalizers, futures) = product_union_metadata(left, start.0, right, start.1);
+    combined.overwrite_state_metadata(0, finalizers, futures);
+
+    let mut state_map = FxHashMap::<(u32, u32), u32>::default();
+    state_map.insert(start, 0);
+    let mut worklist = VecDeque::from([(0u32, start)]);
+
+    while let Some((combined_state, (left_state, right_state))) = worklist.pop_front() {
+        let mut transitions = Vec::new();
+        for byte in 0u8..=u8::MAX {
+            let left_target = if left_state == DEAD {
+                DEAD
+            } else {
+                left.states()[left_state as usize]
+                    .transitions
+                    .get(byte)
+                    .copied()
+                    .unwrap_or(DEAD)
+            };
+            let right_target = if right_state == DEAD {
+                DEAD
+            } else {
+                right.states()[right_state as usize]
+                    .transitions
+                    .get(byte)
+                    .copied()
+                    .unwrap_or(DEAD)
+            };
+            if left_target == DEAD && right_target == DEAD {
+                continue;
+            }
+
+            let key = (left_target, right_target);
+            let target = if let Some(&existing) = state_map.get(&key) {
+                existing
+            } else {
+                if combined.num_states() >= state_limit {
+                    return None;
+                }
+                let new_state = combined.add_state();
+                let (finalizers, futures) =
+                    product_union_metadata(left, left_target, right, right_target);
+                combined.overwrite_state_metadata(new_state, finalizers, futures);
+                state_map.insert(key, new_state);
+                worklist.push_back((new_state, key));
+                new_state
+            };
+            transitions.push((byte, target));
+        }
+        combined.set_transitions_from_sorted_entries(combined_state, transitions);
+    }
+
+    Some(combined)
+}
+
+fn coalesce_adaptive_batches(
+    inputs: Vec<AdaptiveTerminalBatch>,
+    max_trials: usize,
+    state_limit: usize,
+    profile_level: &str,
+) -> Vec<AdaptiveTerminalBatch> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let started_at = Instant::now();
+    let growth_percent = adaptive_lexer_growth_percent();
+    let input_states = inputs.iter().map(|batch| batch.dfa.num_states()).sum::<usize>();
+    let input_transitions = inputs
+        .iter()
+        .map(|batch| dfa_transition_count(&batch.dfa))
+        .sum::<usize>();
+    let input_batches = inputs.len();
+    let terminals = inputs
+        .iter()
+        .map(|batch| batch.terminal_ids.len())
+        .sum::<usize>();
+
+    let mut batches = Vec::<AdaptiveTerminalBatch>::new();
+    let mut attempted_merges = 0usize;
+    let mut accepted_merges = 0usize;
+    let mut budget_rejections = 0usize;
+
+    for input in inputs {
+        let mut batch_order = (0..batches.len()).collect::<Vec<_>>();
+        batch_order.sort_unstable_by_key(|&index| (batches[index].dfa.num_states(), index));
+
+        let mut best: Option<(usize, Vec<usize>, DFA)> = None;
+        for batch_index in batch_order.into_iter().take(max_trials) {
+            attempted_merges += 1;
+            let batch = &batches[batch_index];
+            let separate_states = batch
+                .dfa
+                .num_states()
+                .saturating_add(input.dfa.num_states());
+            let growth_limit = separate_states
+                .saturating_mul(growth_percent)
+                .saturating_add(99)
+                / 100;
+            let mut candidate_ids = batch.terminal_ids.clone();
+            candidate_ids.extend(input.terminal_ids.iter().copied());
+
+            let Some(candidate) =
+                try_product_union_dfas(&batch.dfa, &input.dfa, state_limit)
+            else {
+                budget_rejections += 1;
+                continue;
+            };
+            let candidate = candidate.minimize();
+            if candidate.num_states() > growth_limit {
+                budget_rejections += 1;
+                continue;
+            }
+
+            let replace = best.as_ref().is_none_or(|(_, _, best_dfa)| {
+                (candidate.num_states(), dfa_transition_count(&candidate))
+                    < (best_dfa.num_states(), dfa_transition_count(best_dfa))
+            });
+            if replace {
+                best = Some((batch_index, candidate_ids, candidate));
+            }
+        }
+
+        if let Some((batch_index, terminal_ids, dfa)) = best {
+            batches[batch_index] = AdaptiveTerminalBatch { terminal_ids, dfa };
+            accepted_merges += 1;
+        } else {
+            batches.push(input);
+        }
+    }
+
+    if profile {
+        let output_states = batches.iter().map(|batch| batch.dfa.num_states()).sum::<usize>();
+        let output_transitions = batches
+            .iter()
+            .map(|batch| dfa_transition_count(&batch.dfa))
+            .sum::<usize>();
+        eprintln!(
+            "[glrmask/profile][tokenizer] adaptive_merge level={} terminals={} input_batches={} output_batches={} input_states={} output_states={} input_transitions={} output_transitions={} attempted_merges={} accepted_merges={} budget_rejections={} max_states={} max_growth_percent={} max_trials={} total_ms={:.3}",
+            profile_level,
+            terminals,
+            input_batches,
+            batches.len(),
+            input_states,
+            output_states,
+            input_transitions,
+            output_transitions,
+            attempted_merges,
+            accepted_merges,
+            budget_rejections,
+            state_limit,
+            growth_percent,
+            max_trials,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    batches
+}
+
+fn compile_adaptive_terminal_partition(
+    exprs: &[Expr],
+    visible_labels: Option<&[String]>,
+    terminal_ids: Vec<usize>,
+) -> Vec<(Vec<usize>, DFA)> {
+    let max_trials = adaptive_lexer_max_trials_per_terminal();
+
+    let singletons = terminal_ids
+        .into_par_iter()
+        .map(|terminal| {
+            let ids = vec![terminal];
+            let dfa = compile_terminal_ids(exprs, visible_labels, &ids);
+            AdaptiveTerminalBatch {
+                terminal_ids: ids,
+                dfa,
+            }
+        })
+        .collect::<Vec<_>>();
+    coalesce_adaptive_batches(
+        singletons,
+        max_trials,
+        adaptive_lexer_state_limit(),
+        "pattern_terminals",
+    )
+        .into_iter()
+        .map(|batch| (batch.terminal_ids, batch.dfa))
+        .collect()
+}
+
+fn remap_component_groups(
+    component: &DFA,
+    terminal_ids: &[usize],
+    total_groups: usize,
+) -> DFA {
+    debug_assert_eq!(component.num_groups(), terminal_ids.len());
+    let mut remapped = DFA::new(component.num_states());
+    remapped.ensure_group_capacity(total_groups);
+
+    for (local_group, &terminal_id) in terminal_ids.iter().enumerate() {
+        remapped.set_group_u8set(
+            terminal_id as u32,
+            *component.group_id_to_u8set(local_group as u32),
+        );
+    }
+
+    for (state_index, state) in component.states().iter().enumerate() {
+        remapped.set_transitions_from_sorted_entries(
+            state_index as u32,
+            state.transitions.iter().map(|(byte, &target)| (byte, target)).collect(),
+        );
+        for &target in &state.epsilon_transitions {
+            remapped.add_epsilon_transition(state_index as u32, target);
+        }
+
+        let mut finalizers = BitSet::new(total_groups);
+        let mut futures = BitSet::new(total_groups);
+        for (local_group, &terminal_id) in terminal_ids.iter().enumerate() {
+            if state.finalizers.contains(local_group) {
+                finalizers.set(terminal_id);
+            }
+            if component
+                .possible_future_group_ids(state_index as u32)
+                .contains(local_group)
+            {
+                futures.set(terminal_id);
+            }
+        }
+        remapped.overwrite_state_metadata(state_index as u32, finalizers, futures);
+    }
+
+    remapped
 }
 
 fn compile_terminal_partitions(
     exprs: &[Expr],
     visible_labels: Option<&[String]>,
     partitions: &[u32],
+    adaptive_partitions: Option<&BTreeSet<u32>>,
+    adaptive_component_merge: bool,
 ) -> DFA {
     assert_eq!(exprs.len(), partitions.len(), "one lexer partition id is required per terminal");
     if let Some(labels) = visible_labels {
@@ -1641,42 +2035,74 @@ fn compile_terminal_partitions(
     for (terminal, &partition) in partitions.iter().enumerate() {
         grouped.entry(partition).or_default().push(terminal);
     }
-    if grouped.len() == 1 {
+    let only_partition_is_adaptive = grouped
+        .keys()
+        .next()
+        .is_some_and(|partition| adaptive_partitions.is_some_and(|set| set.contains(partition)));
+    if grouped.len() == 1 && !only_partition_is_adaptive && !adaptive_component_merge {
         return compile_with_plan(build_exclusion_compile_plan_with_labels(exprs, visible_labels));
     }
 
-    let groups = grouped.into_values().collect::<Vec<_>>();
-    let components: Vec<(Vec<usize>, DFA)> = groups
+    let groups = grouped.into_iter().collect::<Vec<_>>();
+    let mut components: Vec<AdaptiveTerminalBatch> = groups
         .into_par_iter()
-        .map(|terminal_ids| {
-            let local_exprs = terminal_ids
-                .iter()
-                .map(|&terminal| exprs[terminal].clone())
-                .collect::<Vec<_>>();
-            let local_labels = visible_labels.map(|labels| {
-                terminal_ids
-                    .iter()
-                    .map(|&terminal| labels[terminal].clone())
+        .flat_map_iter(|(partition, terminal_ids)| {
+            if adaptive_partitions.is_some_and(|partitions| partitions.contains(&partition))
+                && terminal_ids.len() > 1
+            {
+                compile_adaptive_terminal_partition(exprs, visible_labels, terminal_ids)
+                    .into_iter()
+                    .map(|(terminal_ids, dfa)| AdaptiveTerminalBatch { terminal_ids, dfa })
                     .collect::<Vec<_>>()
-            });
-            let component = compile_with_plan(build_exclusion_compile_plan_with_labels(
-                &local_exprs,
-                local_labels.as_deref(),
-            ));
-            (terminal_ids, component)
+            } else {
+                let component = compile_terminal_ids(exprs, visible_labels, &terminal_ids);
+                vec![AdaptiveTerminalBatch {
+                    terminal_ids,
+                    dfa: component,
+                }]
+            }
         })
         .collect();
+
+    let max_component_batches = adaptive_lexer_max_component_batches();
+    if adaptive_component_merge
+        && components.len() > 1
+        && components.len() <= max_component_batches
+    {
+        components = coalesce_adaptive_batches(
+            components,
+            adaptive_lexer_max_trials_per_component(),
+            adaptive_lexer_component_state_limit(),
+            "compiled_components",
+        );
+    } else if adaptive_component_merge
+        && components.len() > max_component_batches
+        && (std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some())
+    {
+        eprintln!(
+            "[glrmask/profile][tokenizer] adaptive_merge level=compiled_components skipped=true input_batches={} max_component_batches={}",
+            components.len(),
+            max_component_batches,
+        );
+    }
+
+    if let [component] = components.as_slice() {
+        return remap_component_groups(&component.dfa, &component.terminal_ids, exprs.len());
+    }
 
     let total_states = 1usize
         + components
             .iter()
-            .map(|(_, component)| component.num_states())
+            .map(|component| component.dfa.num_states())
             .sum::<usize>();
     let mut combined = DFA::new(total_states);
     combined.ensure_group_capacity(exprs.len());
 
     let mut offset = 1u32;
-    for (terminal_ids, component) in &components {
+    for batch in &components {
+        let terminal_ids = &batch.terminal_ids;
+        let component = &batch.dfa;
         debug_assert_eq!(component.num_groups(), terminal_ids.len());
         combined.add_epsilon_transition(0, offset);
 
@@ -2385,7 +2811,13 @@ fn build_regex_nfa_impl(exprs: &[Expr]) -> NFA {
 #[cfg(test)]
 mod tests {
     use super::super::Lexer;
-    use super::{build_regex, build_regex_monolithic, build_regex_partitioned};
+    use super::{
+        build_regex,
+        build_regex_monolithic,
+        build_regex_partitioned,
+        build_regex_partitioned_adaptive,
+        try_product_union_dfas,
+    };
     use super::compile_product_component_dfa_direct;
     use super::factor_regex_expr;
     use crate::automata::lexer::ast::Expr;
@@ -2640,6 +3072,16 @@ mod tests {
                     exprs.len() as u32,
                     Some(Arc::from(exprs.clone().into_boxed_slice())),
                 );
+                let adaptive_partitions = partitions.iter().copied().collect();
+                let adaptive = build_regex_partitioned_adaptive(
+                    &exprs,
+                    &partitions,
+                    &adaptive_partitions,
+                )
+                .into_tokenizer(
+                    exprs.len() as u32,
+                    Some(Arc::from(exprs.clone().into_boxed_slice())),
+                );
 
                 for prefix in &prefixes {
                     assert_eq!(
@@ -2647,10 +3089,19 @@ mod tests {
                         tokenizer_observation(&monolithic, prefix),
                         "top-level mismatch case={case} partitions={partitions:?} prefix={prefix:?} exprs={exprs:?}",
                     );
+                    assert_eq!(
+                        tokenizer_observation(&adaptive, prefix),
+                        tokenizer_observation(&monolithic, prefix),
+                        "adaptive top-level mismatch case={case} partitions={partitions:?} prefix={prefix:?} exprs={exprs:?}",
+                    );
 
                     let partitioned_roots = partitioned.execute_from_state_end_only(
                         prefix,
                         partitioned.initial_state(),
+                    );
+                    let adaptive_roots = adaptive.execute_from_state_end_only(
+                        prefix,
+                        adaptive.initial_state(),
                     );
                     let monolithic_roots = monolithic.execute_from_state_end_only(
                         prefix,
@@ -2669,6 +3120,19 @@ mod tests {
                                 suffix,
                             ),
                             "residual mismatch case={case} partitions={partitions:?} prefix={prefix:?} suffix={suffix:?} exprs={exprs:?}",
+                        );
+                        assert_eq!(
+                            execute_state_set_observation(
+                                &adaptive,
+                                &adaptive_roots,
+                                suffix,
+                            ),
+                            execute_state_set_observation(
+                                &monolithic,
+                                &monolithic_roots,
+                                suffix,
+                            ),
+                            "adaptive residual mismatch case={case} partitions={partitions:?} prefix={prefix:?} suffix={suffix:?} exprs={exprs:?}",
                         );
                     }
                 }
@@ -3340,6 +3804,19 @@ mod tests {
     }
 
     #[test]
+    fn build_regex_defaults_to_one_monolithic_dfa() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ab".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        assert!(!tokenizer.has_epsilon_transitions());
+    }
+
+    #[test]
     fn separate_terminal_partitions_preserve_multiple_live_end_states() {
         let expressions = vec![
             Expr::U8Seq(b"a".to_vec()),
@@ -3349,7 +3826,7 @@ mod tests {
                 max: None,
             },
         ];
-        let tokenizer = build_regex(&expressions).into_tokenizer(
+        let tokenizer = build_regex_partitioned(&expressions, &[0, 1]).into_tokenizer(
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
         );
@@ -3389,12 +3866,56 @@ mod tests {
     }
 
     #[test]
+    fn bounded_product_trial_stops_before_cross_pattern_blowup() {
+        let left = build_regex_monolithic(&[parse_regex(r"\w+_(\w_)?\d+", false)]).dfa;
+        let right = build_regex_monolithic(&[parse_regex(r"(\w|-){12}", false)]).dfa;
+        assert!(
+            try_product_union_dfas(&left, &right, 32).is_none(),
+            "the bounded trial unexpectedly completed within 32 product states",
+        );
+    }
+
+    #[test]
+    fn adaptive_partitioning_preserves_singleton_component_semantics() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                min: 1,
+                max: None,
+            },
+        ];
+        let singleton = build_regex_partitioned(&expressions, &[0, 1, 2]).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.clone().into_boxed_slice())),
+        );
+        let adaptive = build_regex_partitioned_adaptive(
+            &expressions,
+            &[7, 7, 7],
+            &std::collections::BTreeSet::from([7]),
+        )
+        .into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+
+        for input in enumerate_inputs(b"ab", 4) {
+            assert_eq!(
+                tokenizer_observation(&adaptive, &input),
+                tokenizer_observation(&singleton, &input),
+                "adaptive partitioning differed for input {input:?}",
+            );
+        }
+    }
+
+    #[test]
     fn epsilon_partitioned_tokenizer_round_trips_through_serde() {
         let expressions = vec![
             Expr::U8Seq(b"a".to_vec()),
             Expr::U8Seq(b"ab".to_vec()),
         ];
-        let tokenizer = build_regex(&expressions).into_tokenizer(
+        let tokenizer = build_regex_partitioned(&expressions, &[0, 1]).into_tokenizer(
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
         );

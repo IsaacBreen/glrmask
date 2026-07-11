@@ -9,6 +9,8 @@ use super::{
     swap_split_literal_terminals_test_override,
 };
 use super::string::{property_name_matches_pattern, string_value_satisfies_schema, GLRMASK_LLGUIDANCE_COMPAT_ENV};
+use crate::automata::lexer::Lexer;
+use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguityKind};
 use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar, Quantifier};
@@ -2738,6 +2740,34 @@ fn large_bounded_pattern_string_arrays_use_isolated_terminal_rule() {
         rule.name.contains("bounded_scalar_array_") && rule.is_terminal
     }), "{glrm}");
     lower(&grammar).unwrap();
+}
+
+#[test]
+fn very_large_fixed_width_pattern_array_uses_contextual_item_terminals() {
+    let schema = json!({
+        "type": "array",
+        "items": {
+            "type": "string",
+            "pattern": "^[A-Fa-f\\d]{24}$"
+        },
+        "maxItems": 1000
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("bounded_scalar_array")
+    }), "{:?}", grammar.rules);
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("contextual_array_first_item")
+    }), "{:?}", grammar.rules);
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("contextual_array_next_item")
+    }), "{:?}", grammar.rules);
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"["507f1f77bcf86cd799439011", "507f1f77bcf86cd799439012"]"#,
+    ));
 }
 
 #[test]
@@ -5482,19 +5512,61 @@ fn json_schema_assigns_literals_bounded_repetitions_and_patterns_to_separate_lex
     assert!(partitions.contains(super::lower::JSON_LITERAL_LEXER_PARTITION));
     assert!(partitions.contains(super::lower::JSON_BOUNDED_LEXER_PARTITION));
     assert!(partitions.contains(super::lower::JSON_PATTERN_LEXER_PARTITION));
-    let tokenizer = crate::compiler::pipeline::build_tokenizer(&lowered);
+    let tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
+        &lowered,
+        false,
+        true,
+        false,
+    );
     assert_eq!(
         tokenizer.initial_epsilon_branch_count(),
-        3,
-        "JSON terminals should be jointly determinized by category, not isolated one-by-one",
+        0,
+        "the three declared JSON categories should be adaptively coalesced when their product stays compact",
     );
 
     let dumped = to_glrm(&grammar);
     assert!(dumped.contains("@literals"), "{dumped}");
     let reparsed = from_glrm(&dumped).unwrap();
     let reparsed_lowered = lower(&reparsed).unwrap();
-    let reparsed_tokenizer = crate::compiler::pipeline::build_tokenizer(&reparsed_lowered);
-    assert_eq!(reparsed_tokenizer.initial_epsilon_branch_count(), 3);
+    let reparsed_tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
+        &reparsed_lowered,
+        false,
+        true,
+        false,
+    );
+    assert_eq!(reparsed_tokenizer.initial_epsilon_branch_count(), 0);
+}
+
+#[test]
+fn adaptive_json_lexer_coalesces_uuid_and_bounded_string_categories() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "format": "uuid"},
+            "created": {"type": "string", "format": "date-time"},
+            "description": {"type": "string", "maxLength": 32767},
+            "name": {"type": "string", "minLength": 1, "maxLength": 255},
+            "free": {"type": "string"}
+        },
+        "required": ["id", "created", "description", "name", "free"],
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let lowered = lower(&grammar).unwrap();
+    let prepared = prepare_grammar_transforms_only(lowered);
+    let tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
+        &prepared,
+        false,
+        true,
+        false,
+    );
+    assert_eq!(
+        tokenizer.initial_epsilon_branch_count(),
+        0,
+        "the guarded category product should fit and eliminate the epsilon dispatch",
+    );
+    assert!(tokenizer.num_states() < 2_000, "states={}", tokenizer.num_states());
 }
 
 #[test]

@@ -157,12 +157,9 @@ impl<'a> Lowerer<'a> {
         // Keep the item whole.  The generic constrained-string lowering may
         // split an unanchored pattern into parser-visible pieces, which is
         // useful for a standalone value but defeats array-level isolation.
-        let repeat_complexity = match (&string.pattern, string.max_length) {
-            (Some(pattern), Some(max_length)) => {
-                Some(pattern_max_length_complexity_score(pattern, max_length))
-            }
-            _ => None,
-        };
+        let repeat_complexity = string.pattern.as_deref().and_then(|pattern| {
+            pattern_array_repeat_complexity_score(pattern, string.max_length)
+        });
         Ok(Some((
             self.lower_constrained_string_terminal_expr_with_pattern_split(string, false)?,
             repeat_complexity,
@@ -2065,6 +2062,34 @@ fn pattern_max_length_complexity_score(pattern: &str, max_length: usize) -> usiz
     };
     let (hir, _, _) = strip_outer_anchors(hir);
     pattern_hir_length_complexity(&hir, max_length).score
+}
+
+/// Estimate the cost of repeating one constrained string inside a bounded
+/// array terminal.  The existing pattern/maxLength score captures branching
+/// and variable-repeat interactions, but a fixed-width pattern such as
+/// `[0-9a-f]{24}` has score zero even though materializing it at 1,000 array
+/// positions creates a very large DFA.  Charge at least for the finite body
+/// width plus the quotes and separator associated with each repeated item.
+fn pattern_array_repeat_complexity_score(
+    pattern: &str,
+    explicit_max_length: Option<usize>,
+) -> Option<usize> {
+    let Ok(hir) = Parser::new().parse(pattern) else {
+        return None;
+    };
+    let (hir, _, _) = strip_outer_anchors(hir);
+
+    // A zero provisional budget is sufficient to recover the intrinsic
+    // syntax bound for finite patterns.  Re-run with the effective bound so
+    // the ordinary variable-repeat score uses the correct length horizon.
+    let intrinsic = pattern_hir_length_complexity(&hir, 0);
+    let effective_max_length = explicit_max_length.or(intrinsic.max_chars)?;
+    let complexity = pattern_hir_length_complexity(&hir, effective_max_length);
+    Some(
+        complexity
+            .score
+            .saturating_add(effective_max_length.saturating_add(3)),
+    )
 }
 
 fn pattern_hir_length_complexity(hir: &Hir, max_length: usize) -> PatternLengthComplexity {
