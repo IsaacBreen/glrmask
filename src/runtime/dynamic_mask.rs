@@ -3,12 +3,13 @@
 //! This implementation intentionally does not consult the parser DWA. It walks
 //! the vocabulary byte trie while advancing the lexer and GLR parser directly.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::Lexer;
+use crate::automata::lexer::tokenizer::TokenizerStateSet;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
     advance_stacks, stack_may_advance_on, stack_may_advance_on_any, ParserGSS,
@@ -20,8 +21,6 @@ use crate::grammar::flat::TerminalID;
 use super::artifact::{Constraint, DynamicMaskStateKey, DynamicMaskTrie};
 use super::state::ConstraintState;
 
-type ExclusionMap = BTreeMap<u32, BTreeSet<TerminalID>>;
-type Exclusions = Arc<ExclusionMap>;
 type ParserStacks = LeveledGSS<u32, ()>;
 
 #[derive(Default)]
@@ -37,8 +36,19 @@ struct TraverseWork {
     node: u32,
     tokenizer_state: u32,
     gss: ParserStacks,
-    exclusions: Exclusions,
+    initial_prune_guard: InitialPruneGuard,
     continuation_filter: Option<(usize, u64)>,
+}
+
+#[derive(Clone)]
+enum InitialPruneGuard {
+    Passed,
+    Pending {
+        blocked: Arc<BTreeSet<TerminalID>>,
+        lexer_states: TokenizerStateSet,
+        actionable_states: Arc<[u32]>,
+        has_actionable_match: bool,
+    },
 }
 
 #[inline]
@@ -72,71 +82,136 @@ fn update_eos_mask(state: &ConstraintState<'_>, buf: &mut [u32]) {
     }
 }
 
-/// Dynamic masking keeps terminal restrictions in `Exclusions`. The parser
-/// table routines still use `ParserGSS`, so give their stack operations an
-/// otherwise-unused empty accumulator.
+/// Dynamic masking keeps terminal restrictions outside the parser GSS. The
+/// parser table routines still use `ParserGSS`, so give their stack operations
+/// an otherwise-unused empty accumulator.
 fn with_empty_accumulators(stacks: &ParserStacks) -> ParserGSS {
     stacks.apply(|_| TerminalsDisallowed::new())
 }
 
-/// Advance outstanding tokenizer-state-correlated exclusions through one
-/// compressed vocabulary-trie edge. A blocked match rejects the traversal only
-/// when it belongs to the active lexer branch. The same match on a parallel
-/// residual kills that residual alone. Surviving entries follow their own lexer
-/// state and keep only terminals still accessible there.
-fn advance_exclusions(
+fn terminal_is_actionable_from_states(
     constraint: &Constraint,
-    segment: &[u8],
-    active_tokenizer_state: u32,
-    exclusions: &Exclusions,
-) -> Option<Exclusions> {
-    if exclusions.is_empty() {
-        return Some(exclusions.clone());
-    }
-
-    let mut advanced = ExclusionMap::new();
-    for (&tokenizer_state, blocked) in exclusions.iter() {
-        let execution = constraint
-            .tokenizer
-            .execute_from_state_all_widths(segment, tokenizer_state);
-        if execution
-            .matches
-            .iter()
-            .any(|matched| blocked.contains(&matched.id))
-        {
-            if tokenizer_state == active_tokenizer_state {
-                return None;
-            }
-            // Restrictions are correlated with their tokenizer-state branch.
-            // A blocked match on a parallel residual kills that residual, not
-            // the independently reset/active lexer branch being traversed.
-            continue;
-        }
-
-        for &end_state in &execution.end_state {
-            let accessible = constraint.tokenizer.tokens_accessible_from_state(end_state);
-            let next_blocked = advanced.entry(end_state).or_default();
-            next_blocked.extend(
-                blocked
-                    .iter()
-                    .copied()
-                    .filter(|terminal| accessible.contains(*terminal as usize)),
-            );
-        }
-    }
-    Some(Arc::new(advanced))
+    parser_states: &[u32],
+    terminal: TerminalID,
+) -> bool {
+    parser_states
+        .iter()
+        .any(|&parser_state| constraint.table.advance_row_allows(parser_state, terminal))
 }
 
-/// Record that a terminal committed at this token boundary cannot be matched
-/// again by the parallel lexer continuation carried in `exclusions`.
-fn with_excluded_terminal(
-    exclusions: &Exclusions,
-    tokenizer_state: u32,
-    terminal: TerminalID,
-) -> Exclusions {
-    let mut next = (**exclusions).clone();
-    next.entry(tokenizer_state).or_default().insert(terminal);
-    Arc::new(next)
+impl InitialPruneGuard {
+    /// Build the token-start pruning state for one correlated tokenizer/GSS
+    /// branch. This is the incremental form of
+    /// `prune_single_initial_state_for_exec`: only restrictions attached to the
+    /// active tokenizer state participate, and parser actionability is frozen at
+    /// the token boundary before any in-token parser advance.
+    fn new(
+        constraint: &Constraint,
+        tokenizer_state: u32,
+        stacks: &ParserStacks,
+        terminals_disallowed: &TerminalsDisallowed,
+    ) -> Self {
+        let Some(blocked) = terminals_disallowed.get(&tokenizer_state) else {
+            return Self::Passed;
+        };
+        if blocked.is_empty() {
+            return Self::Passed;
+        }
+
+        let actionable_states: Vec<u32> = if let Some(parser_state) = stacks.single_top_value() {
+            vec![parser_state]
+        } else {
+            stacks.peek_values().into_vec()
+        };
+        if !blocked.iter().any(|&terminal| {
+            terminal_is_actionable_from_states(constraint, &actionable_states, terminal)
+        }) {
+            return Self::Passed;
+        }
+
+        Self::Pending {
+            blocked: Arc::new(blocked.clone()),
+            lexer_states: smallvec::smallvec![tokenizer_state],
+            actionable_states: actionable_states.into(),
+            has_actionable_match: false,
+        }
+    }
+
+    #[inline]
+    fn is_passed(&self) -> bool {
+        matches!(self, Self::Passed)
+    }
+
+    /// At a vocabulary-token leaf, commit keeps the seed branch if it saw no
+    /// actionable terminal at all, or if any actionable match was unblocked.
+    /// `Pending` can only represent the first case or the all-blocked case;
+    /// unblocked matches transition permanently to `Passed`.
+    #[inline]
+    fn allows_token_boundary(&self) -> bool {
+        match self {
+            Self::Passed => true,
+            Self::Pending {
+                has_actionable_match,
+                ..
+            } => !*has_actionable_match,
+        }
+    }
+
+    /// Advance the original token-start lexer branch through a trie segment.
+    /// Parser resets caused by terminal matches elsewhere in the dynamic walk
+    /// deliberately do not affect this guard: commit evaluates its initial
+    /// pruning predicate once, over the whole candidate token, before advancing
+    /// the parser.
+    fn advance(&self, constraint: &Constraint, segment: &[u8]) -> Option<Self> {
+        let Self::Pending {
+            blocked,
+            lexer_states,
+            actionable_states,
+            has_actionable_match,
+        } = self
+        else {
+            return Some(Self::Passed);
+        };
+
+        let mut next_states = TokenizerStateSet::new();
+        let mut saw_actionable = *has_actionable_match;
+        for &tokenizer_state in lexer_states {
+            let execution = constraint
+                .tokenizer
+                .execute_from_state_all_widths(segment, tokenizer_state);
+            for matched in &execution.matches {
+                if Some(matched.id) == constraint.ignore_terminal
+                    || !terminal_is_actionable_from_states(
+                        constraint,
+                        actionable_states,
+                        matched.id,
+                    )
+                {
+                    continue;
+                }
+                saw_actionable = true;
+                if !blocked.contains(&matched.id) {
+                    return Some(Self::Passed);
+                }
+            }
+            for end_state in execution.end_state {
+                if !next_states.contains(&end_state) {
+                    next_states.push(end_state);
+                }
+            }
+        }
+
+        if next_states.is_empty() {
+            return (!saw_actionable).then_some(Self::Passed);
+        }
+
+        Some(Self::Pending {
+            blocked: Arc::clone(blocked),
+            lexer_states: next_states,
+            actionable_states: Arc::clone(actionable_states),
+            has_actionable_match: saw_actionable,
+        })
+    }
 }
 
 fn parser_child(
@@ -262,7 +337,6 @@ fn mark_subtree_tokens(
 enum RawSelfLoopSubtree {
     CannotSkip,
     MarkAllTokens,
-    MarkCurrentNodeOnly,
 }
 
 #[inline]
@@ -282,21 +356,24 @@ fn cached_self_loop_bytes(
 /// property, the no-finalization continuation witnesses every token in the
 /// subtree without any per-token lexer or parser work.
 ///
-/// Parallel exclusion continuations can use the same shortcut only while they
-/// also remain in place. If a blocked terminal is already accepting there,
-/// every non-empty descendant would immediately match it; the token ending at
-/// the current node can still be retained.
+/// A pending token-start prune guard cannot use the shortcut because a later
+/// byte may still supply the unblocked actionable match that rescues the whole
+/// candidate token.
 fn raw_self_loop_subtree(
     constraint: &Constraint,
     trie: &DynamicMaskTrie,
     node: u32,
     tokenizer_state: u32,
     stacks: &ParserStacks,
-    exclusions: &Exclusions,
+    initial_prune_guard: &InitialPruneGuard,
     initial_tsid: u32,
     self_loop_cache: &mut FxHashMap<u32, U8Set>,
     traversal_cache: &mut DynamicTraversalCache,
 ) -> RawSelfLoopSubtree {
+    if !initial_prune_guard.is_passed() {
+        return RawSelfLoopSubtree::CannotSkip;
+    }
+
     // Work at the initial state may represent either an untouched lexer or a
     // lexer reset after an in-token terminal match. The current work item does
     // not distinguish those cases, so keep this optimization conservative.
@@ -310,20 +387,6 @@ fn raw_self_loop_subtree(
         || !token_boundary_allowed_cached(constraint, tokenizer_state, stacks, traversal_cache)
     {
         return RawSelfLoopSubtree::CannotSkip;
-    }
-
-    for (&excluded_state, blocked_terminals) in exclusions.iter() {
-        let exclusion_loops = cached_self_loop_bytes(constraint, excluded_state, self_loop_cache);
-        if !subtree_bytes.is_subset(&exclusion_loops) {
-            return RawSelfLoopSubtree::CannotSkip;
-        }
-        let matched = constraint.tokenizer.matched_terminal_bitset(excluded_state);
-        if blocked_terminals
-            .iter()
-            .any(|&terminal| matched.contains(terminal as usize))
-        {
-            return RawSelfLoopSubtree::MarkCurrentNodeOnly;
-        }
     }
 
     RawSelfLoopSubtree::MarkAllTokens
@@ -399,7 +462,13 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
     }
 
     for (&tokenizer_state, gss) in &state.state {
-        for (stacks, exclusions) in gss.partition_by_accumulator() {
+        for (stacks, terminals_disallowed) in gss.partition_by_accumulator() {
+            let initial_prune_guard = InitialPruneGuard::new(
+                state.constraint,
+                tokenizer_state,
+                &stacks,
+                &terminals_disallowed,
+            );
             if profile {
                 let loop_bytes = cached_self_loop_bytes(
                     state.constraint,
@@ -412,7 +481,11 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                     tokenizer_state,
                     tokenizer_state == initial_tsid,
                     stacks.path_count_at_most(1_000_000),
-                    exclusions.0.values().map(BTreeSet::len).sum::<usize>(),
+                    terminals_disallowed
+                        .0
+                        .values()
+                        .map(BTreeSet::len)
+                        .sum::<usize>(),
                     loop_bytes.len(),
                     token_boundary_allowed_cached(
                         state.constraint,
@@ -422,7 +495,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                     ),
                 );
             }
-            if exclusions.0.is_empty()
+            if initial_prune_guard.is_passed()
                 && let Some(partition) = vocab.cached_continuation_partition(tokenizer_state)
             {
                 let mut admitted_groups = 0u64;
@@ -455,7 +528,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                         node: 0,
                         tokenizer_state,
                         gss: stacks.clone(),
-                        exclusions: exclusions.0.clone(),
+                        initial_prune_guard: initial_prune_guard.clone(),
                         continuation_filter: Some((partition_index, required_groups)),
                     });
                     continuation_groups_traversed += required_groups.count_ones() as usize;
@@ -468,7 +541,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                 node: 0,
                 tokenizer_state,
                 gss: stacks,
-                exclusions: exclusions.0,
+                initial_prune_guard,
                 continuation_filter: None,
             });
         }
@@ -491,7 +564,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
             current.node,
             current.tokenizer_state,
             &current.gss,
-            &current.exclusions,
+            &current.initial_prune_guard,
             initial_tsid,
             &mut self_loop_cache,
             &mut traversal_cache,
@@ -514,6 +587,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
         );
         if token_is_required
             && node.token_id.is_some()
+            && current.initial_prune_guard.allows_token_boundary()
             && (current.tokenizer_state == initial_tsid
                 || token_boundary_allowed_cached(
                     state.constraint,
@@ -531,10 +605,6 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
             }
         }
 
-        if matches!(subtree_action, RawSelfLoopSubtree::MarkCurrentNodeOnly) {
-            continue;
-        }
-
         for edge in trie.children(current.node) {
             if let Some((partition_index, required_groups)) = current.continuation_filter
                 && continuation_partitions[partition_index].subtree_groups(edge.child)
@@ -545,13 +615,9 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
             }
             trie_edges += 1;
             let segment = trie.edge_bytes(edge);
-            let Some(segment_exclusions) =
-                advance_exclusions(
-                    state.constraint,
-                    segment,
-                    current.tokenizer_state,
-                    &current.exclusions,
-                )
+            let Some(segment_prune_guard) = current
+                .initial_prune_guard
+                .advance(state.constraint, segment)
             else {
                 continue;
             };
@@ -580,16 +646,12 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
 
                     let next_position = position + matched.width;
                     if next_position == segment.len() {
-                        let mut exclusions = segment_exclusions.clone();
-                        for &end_state in &execution.end_state {
-                            exclusions = with_excluded_terminal(&exclusions, end_state, matched.id);
-                        }
                         traversal.push(TraverseWork {
                             trie_index: current.trie_index,
                             node: edge.child,
                             tokenizer_state: initial_tsid,
                             gss: advanced_parser,
-                            exclusions,
+                            initial_prune_guard: segment_prune_guard.clone(),
                             continuation_filter: current.continuation_filter,
                         });
                     } else {
@@ -611,7 +673,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                         node: edge.child,
                         tokenizer_state: end_state,
                         gss: gss.clone(),
-                        exclusions: segment_exclusions.clone(),
+                        initial_prune_guard: segment_prune_guard.clone(),
                         continuation_filter: current.continuation_filter,
                     });
                 }
@@ -645,6 +707,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
 mod tests {
     use super::*;
     use crate::{Constraint, Vocab};
+    use std::collections::BTreeSet;
 
     fn token_allowed(mask: &[u32], token_id: u32) -> bool {
         let word = token_id as usize / 32;
@@ -660,6 +723,50 @@ mod tests {
 
     fn assert_dynamic_parity(state: &ConstraintState<'_>) {
         assert_eq!(state.mask(), direct_mask(state));
+    }
+
+    fn assert_dynamic_parity_on_reachable_states(
+        constraint: &Constraint,
+        max_depth: usize,
+        context: &str,
+    ) {
+        let mut frontier = vec![(constraint.start(), Vec::<u32>::new())];
+        let mut seen = BTreeSet::new();
+
+        for depth in 0..=max_depth {
+            let mut next = Vec::new();
+            for (state, path) in frontier {
+                if !seen.insert(dynamic_mask_state_key(&state)) {
+                    continue;
+                }
+
+                let static_mask = state.mask();
+                let dynamic_mask = direct_mask(&state);
+                assert_eq!(
+                    static_mask, dynamic_mask,
+                    "dynamic/static mask mismatch: {context} depth={depth} path={path:?}"
+                );
+                if depth == max_depth {
+                    continue;
+                }
+
+                for (&token_id, bytes) in constraint.token_bytes.iter() {
+                    let expected = token_allowed(&static_mask, token_id);
+                    let mut advanced = state.clone();
+                    let accepted = advanced.commit_bytes(bytes).is_ok();
+                    assert_eq!(
+                        accepted, expected,
+                        "static mask/commit mismatch during dynamic sweep: {context} depth={depth} path={path:?} token={token_id}"
+                    );
+                    if accepted {
+                        let mut next_path = path.clone();
+                        next_path.push(token_id);
+                        next.push((advanced, next_path));
+                    }
+                }
+            }
+            frontier = next;
+        }
     }
 
     #[test]
@@ -827,6 +934,132 @@ nt start ::= item item? item?;
         assert!(token_allowed(&direct_mask(&state), 0));
         assert!(token_allowed(&direct_mask(&state), 3));
         assert!(token_allowed(&direct_mask(&state), 17));
+    }
+
+    #[test]
+    fn masks_preserve_overlap_continuation_after_ignore_reset() {
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+                (2, b"ab".to_vec()),
+                (3, b" ".to_vec()),
+                (4, b" a".to_vec()),
+            ],
+            None,
+        );
+        let grammar = r#"
+start start;
+ignore WS;
+t WS ::= " "+;
+t A ::= "ab";
+t B ::= "a" | "ab";
+nt item ::= A | B;
+nt start ::= item item? item?;
+"#;
+        let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let mut state = constraint.start();
+        state.commit_token(0).unwrap();
+        state.commit_token(4).unwrap();
+
+        let static_mask = state.mask();
+        let dynamic_mask = direct_mask(&state);
+
+        let mut probe = state.clone();
+        assert!(probe.commit_bytes(b"b").is_ok());
+        assert!(
+            token_allowed(&static_mask, 1),
+            "static mask must admit b because a-ab = B WS A"
+        );
+        assert!(
+            token_allowed(&dynamic_mask, 1),
+            "dynamic mask must admit b because a-ab = B WS A"
+        );
+    }
+
+    #[test]
+    fn dynamic_mask_generated_small_language_sweep() {
+        const WORDS: [&str; 4] = ["a", "b", "ab", "ba"];
+        let vocab = Vocab::new(
+            [
+                "a", "b", "ab", "ba", " ", " a", "a ", " b", "b ", " a ", " b ",
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(id, word)| (id as u32, word.as_bytes().to_vec()))
+            .collect(),
+            None,
+        );
+        let languages = (1u32..1u32 << WORDS.len())
+            .filter(|mask| mask.count_ones() <= 2)
+            .collect::<Vec<_>>();
+        let rule = |name: &str, mask: u32| {
+            let rhs = WORDS
+                .iter()
+                .enumerate()
+                .filter_map(|(index, word)| {
+                    (mask & (1 << index) != 0).then(|| format!("\"{word}\""))
+                })
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!("t {name} ::= {rhs};\n")
+        };
+
+        for grouped in [false, true] {
+            for ignored in [false, true] {
+                let grouping = if grouped {
+                    if ignored {
+                        "lexer group ws ::= WS;\nlexer group a ::= A;\nlexer group b ::= B;\n"
+                    } else {
+                        "lexer group a ::= A;\nlexer group b ::= B;\n"
+                    }
+                } else {
+                    ""
+                };
+                let ignore = if ignored {
+                    "ignore WS;\nt WS ::= \" \"+;\n"
+                } else {
+                    ""
+                };
+
+                for &a in &languages {
+                    for &b in &languages {
+                        if grouped && a == b {
+                            continue;
+                        }
+                        let grammar = format!(
+                            "start start;\n{ignore}{grouping}{}{}nt item ::= A | B;\nnt start ::= item item? item?;\n",
+                            rule("A", a),
+                            rule("B", b),
+                        );
+                        let constraint =
+                            Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+                        let context = format!(
+                            "finite grouped={grouped} ignored={ignored} A={a:#06b} B={b:#06b}\ngrammar:\n{grammar}"
+                        );
+                        assert_dynamic_parity_on_reachable_states(&constraint, 3, &context);
+                    }
+                }
+
+                let grammar = format!(
+                    "start start;\n{ignore}{grouping}t A ::= \"a\"+;\nt B ::= \"b\"+;\nnt item ::= A | B;\nnt start ::= item item? item?;\n"
+                );
+                let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+                let context = format!(
+                    "repeat grouped={grouped} ignored={ignored}\ngrammar:\n{grammar}"
+                );
+                assert_dynamic_parity_on_reachable_states(&constraint, 4, &context);
+
+                let grammar = format!(
+                    "start start;\n{ignore}{grouping}t A ::= \"a\"+ \"b\";\nt B ::= \"a\"+;\nnt item ::= A | B;\nnt start ::= item item? item?;\n"
+                );
+                let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+                let context = format!(
+                    "delayed-overlap grouped={grouped} ignored={ignored}\ngrammar:\n{grammar}"
+                );
+                assert_dynamic_parity_on_reachable_states(&constraint, 4, &context);
+            }
+        }
     }
 
     #[test]
