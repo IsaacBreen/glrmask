@@ -55,13 +55,7 @@ pub(crate) fn dump_json_schema_grammar_glrm(schema_json: &str) -> Result<String>
         .map_err(|e| GlrMaskError::GrammarParse(format!("invalid JSON: {e}")))?;
     let named = import::json_schema::schema_to_named_grammar(&schema)?;
     let mut factored = grammar::factoring::factor_named_grammar(named);
-    if import::json_schema::simplify_grammar_enabled() {
-        grammar::named_simplify::simplify_named_grammar(&mut factored);
-    }
-    if import::json_schema::promote_literal_choices_enabled() {
-        grammar::terminal_choice_promotion::promote_choice_terminals_exact(&mut factored, false);
-    }
-    import::json_schema::assign_default_lexer_partitions(&mut factored);
+    import::json_schema::prepare_named_grammar_for_dump(&mut factored)?;
     Ok(grammar::glrm::to_glrm(&factored))
 }
 

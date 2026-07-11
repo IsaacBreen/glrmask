@@ -9,10 +9,13 @@ use super::{
     swap_split_literal_terminals_test_override,
 };
 use super::string::{property_name_matches_pattern, string_value_satisfies_schema, GLRMASK_LLGUIDANCE_COMPAT_ENV};
+use crate::automata::lexer::Lexer;
+use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguityKind};
 use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar, Quantifier};
 use crate::grammar::glrm::{from_glrm, to_glrm};
+use crate::dump_json_schema_grammar_glrm;
 use crate::Vocab;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -365,6 +368,86 @@ fn exact_subtraction_lowering_env_var_defaults_false_and_accepts_truthy_values()
         let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS", value);
         assert!(lower_exact_subtractions_enabled(), "value {value:?} should enable exact-sub lowering");
     }
+}
+
+#[test]
+fn exact_subtraction_json_schema_dump_uses_helpers_when_enabled() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lower = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS");
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "first": {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"},
+                    "b": {"type": "string"}
+                },
+                "additionalProperties": {"type": "string"}
+            },
+            "second": {
+                "type": "object",
+                "properties": {
+                    "b": {"type": "string"}
+                },
+                "patternProperties": {
+                    "^x_": {"type": "number"}
+                },
+                "additionalProperties": {"type": "string"}
+            }
+        },
+        "additionalProperties": false
+    });
+
+    let glrm = dump_json_schema_grammar_glrm(&schema.to_string()).unwrap();
+    assert!(
+        glrm.contains("JSON_STRING JSON_KEY_SEPARATOR")
+            || glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"),
+        "{glrm}"
+    );
+    assert!(glrm.contains("\"a\"") || glrm.contains("\"b\""), "{glrm}");
+}
+
+#[test]
+fn exact_subtraction_json_schema_dump_keeps_direct_subtraction_when_disabled() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _lower = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS", "0");
+    let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "first": {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"},
+                    "b": {"type": "string"}
+                },
+                "additionalProperties": {"type": "string"}
+            },
+            "second": {
+                "type": "object",
+                "properties": {
+                    "b": {"type": "string"}
+                },
+                "patternProperties": {
+                    "^x_": {"type": "number"}
+                },
+                "additionalProperties": {"type": "string"}
+            }
+        },
+        "additionalProperties": false
+    });
+
+    let glrm = dump_json_schema_grammar_glrm(&schema.to_string()).unwrap();
+    assert!(
+        glrm.contains("JSON_STRING JSON_KEY_SEPARATOR")
+            || glrm.contains("JSON_ADDITIONAL_KEY_COLON_SHARED"),
+        "{glrm}"
+    );
+    assert!(glrm.contains("\"a\"") || glrm.contains("\"b\""), "{glrm}");
+    assert!(!glrm.contains("__exact_sub_AP_SHARED_LITERAL_KEY_SET_result"), "{glrm}");
 }
 
 #[test]
@@ -5440,61 +5523,133 @@ fn large_string_enum_at_root_uses_raw_regex() {
 }
 
 #[test]
-fn json_schema_assigns_literals_bounded_repetitions_and_patterns_to_separate_lexer_groups() {
+fn json_schema_groups_literals_and_other_but_singletons_pattern_terminals_by_origin() {
     let schema = json!({
         "type": "object",
         "properties": {
             "mode": {"type": "string", "enum": ["red", "green", "blue"]},
             "code": {"type": "string", "pattern": "^[A-Z]+$", "maxLength": 8},
             "digest": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
-            "free": {"type": "string", "pattern": "^[a-z]+$"}
+            "free": {"type": "string", "pattern": "^[a-z]+$"},
+            "id": {"type": "string", "format": "uuid"},
+            "created": {"type": "string", "format": "date-time"}
         },
-        "required": ["mode", "code", "digest", "free"],
+        "required": ["mode", "code", "digest", "free", "id", "created"],
         "additionalProperties": false
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert_eq!(
-        grammar.default_lexer_partition.as_deref(),
-        Some(super::lower::JSON_PATTERN_LEXER_PARTITION),
-    );
-    assert!(grammar
-        .lexer_literal_partitions
+    let mut grammar = schema_to_named_grammar(&schema).unwrap();
+    super::finalize_lexer_partitions(&mut grammar).unwrap();
+    assert_eq!(grammar.default_lexer_partition, None);
+    assert!(grammar.lexer_literal_partitions.values().all(|partition| {
+        partition == super::lower::JSON_LITERAL_LEXER_PARTITION
+    }));
+
+    let literal_terminals = grammar
+        .lexer_partitions
         .values()
-        .any(|partition| partition == super::lower::JSON_LITERAL_LEXER_PARTITION));
-    assert!(
-        grammar
-            .lexer_partitions
-            .values()
-            .any(|partition| partition == super::lower::JSON_BOUNDED_LEXER_PARTITION),
-        "partitions={:?}\n{}",
-        grammar.lexer_partitions,
-        to_glrm(&grammar),
-    );
+        .filter(|partition| partition.as_str() == super::lower::JSON_LITERAL_LEXER_PARTITION)
+        .count();
+    let other_terminals = grammar
+        .lexer_partitions
+        .values()
+        .filter(|partition| partition.as_str() == super::lower::JSON_OTHER_LEXER_PARTITION)
+        .count();
+    let pattern_partitions = grammar
+        .lexer_partitions
+        .values()
+        .filter(|partition| partition.starts_with("json_pattern_"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let unique_pattern_partitions = pattern_partitions
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert!(literal_terminals > 1, "partitions={:?}", grammar.lexer_partitions);
+    assert!(other_terminals > 1, "partitions={:?}", grammar.lexer_partitions);
+    assert!(pattern_partitions.len() >= 5, "partitions={:?}", grammar.lexer_partitions);
+    assert_eq!(pattern_partitions.len(), unique_pattern_partitions.len());
+    assert!(!grammar
+        .lexer_partitions
+        .values()
+        .any(|partition| partition == super::lower::JSON_PATTERN_LEXER_PARTITION));
 
     let lowered = lower(&grammar).unwrap();
     assert_eq!(lowered.lexer_partitions.len(), lowered.terminals.len());
-    let partitions = lowered
-        .lexer_partitions
-        .values()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    assert!(partitions.contains(super::lower::JSON_LITERAL_LEXER_PARTITION));
-    assert!(partitions.contains(super::lower::JSON_BOUNDED_LEXER_PARTITION));
-    assert!(partitions.contains(super::lower::JSON_PATTERN_LEXER_PARTITION));
-    let tokenizer = crate::compiler::pipeline::build_tokenizer(&lowered);
-    assert_eq!(
-        tokenizer.initial_epsilon_branch_count(),
-        3,
-        "JSON terminals should be jointly determinized by category, not isolated one-by-one",
+    let tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
+        &lowered,
+        false,
+        true,
     );
+    assert!(tokenizer.num_states() > 0);
 
     let dumped = to_glrm(&grammar);
     assert!(dumped.contains("@literals"), "{dumped}");
     let reparsed = from_glrm(&dumped).unwrap();
     let reparsed_lowered = lower(&reparsed).unwrap();
-    let reparsed_tokenizer = crate::compiler::pipeline::build_tokenizer(&reparsed_lowered);
-    assert_eq!(reparsed_tokenizer.initial_epsilon_branch_count(), 3);
+    let reparsed_tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
+        &reparsed_lowered,
+        false,
+        true,
+    );
+    assert_eq!(
+        tokenizer.initial_epsilon_branch_count(),
+        reparsed_tokenizer.initial_epsilon_branch_count(),
+    );
+}
+
+#[test]
+fn recognized_formats_are_pattern_singletons_before_adaptive_determinization() {
+    for format in ["uuid", "date-time"] {
+        let schema = json!({"type": "string", "format": format});
+        let mut grammar = schema_to_named_grammar(&schema).unwrap();
+        super::finalize_lexer_partitions(&mut grammar).unwrap();
+        let GrammarExpr::Ref(rule_name) = start_expr(&grammar) else {
+            panic!("expected format terminal for {format}: {:?}", start_expr(&grammar));
+        };
+        let partition = grammar
+            .lexer_partitions
+            .get(rule_name)
+            .unwrap_or_else(|| panic!("missing partition for {format} terminal {rule_name}"));
+        assert!(
+            partition.starts_with("json_pattern_"),
+            "format={format} terminal={rule_name} partition={partition}"
+        );
+        assert_ne!(partition, super::lower::JSON_OTHER_LEXER_PARTITION);
+        assert_ne!(partition, super::lower::JSON_LITERAL_LEXER_PARTITION);
+    }
+}
+
+#[test]
+fn adaptive_final_lexer_determinization_can_coalesce_uuid_and_bounded_string_partitions() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "format": "uuid"},
+            "created": {"type": "string", "format": "date-time"},
+            "description": {"type": "string", "maxLength": 32767},
+            "name": {"type": "string", "minLength": 1, "maxLength": 255},
+            "free": {"type": "string"}
+        },
+        "required": ["id", "created", "description", "name", "free"],
+        "additionalProperties": false
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let lowered = lower(&grammar).unwrap();
+    let prepared = prepare_grammar_transforms_only(lowered);
+    let tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
+        &prepared,
+        false,
+        true,
+    );
+    assert_eq!(
+        tokenizer.initial_epsilon_branch_count(),
+        0,
+        "the guarded category product should fit and eliminate the epsilon dispatch",
+    );
+    assert!(tokenizer.num_states() < 2_000, "states={}", tokenizer.num_states());
 }
 
 #[test]

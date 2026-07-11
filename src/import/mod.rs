@@ -11,17 +11,15 @@ use crate::compiler::compile::{
     emit_compile_profile_summary,
 };
 use crate::compiler::pipeline::compile_dynamic_owned_with_table_construction;
-use crate::grammar::exact_subtraction_lowering::lower_exact_subtractions;
 use crate::grammar::factoring::factor_named_grammar;
 use crate::grammar::flat::GrammarDef;
-use crate::grammar::named_simplify::simplify_named_grammar;
-use crate::grammar::terminal_choice_promotion::promote_choice_terminals_exact;
 use crate::compiler::glr::table::GlrTableConstruction;
 use crate::runtime::Constraint;
 use crate::DynamicConstraint;
 
 type GrammarParser = fn(&str) -> crate::Result<GrammarDef>;
 type NamedGrammarParser = fn(&str) -> crate::Result<ast::NamedGrammar>;
+type NamedGrammarTransform = fn(&mut ast::NamedGrammar) -> crate::Result<()>;
 
 pub(crate) fn choice_or_single(mut options: Vec<ast::GrammarExpr>) -> ast::GrammarExpr {
     if options.len() == 1 {
@@ -60,8 +58,8 @@ fn emit_import_phase_end(name: &'static str, started_at: Option<std::time::Insta
 
 fn lower_factored_named_grammar(
     source: &str,
-    source_kind: &str,
     parse_named: NamedGrammarParser,
+    transform: Option<NamedGrammarTransform>,
 ) -> crate::Result<GrammarDef> {
     let lower_started_at = emit_import_phase_start("lower_factored_named_grammar");
     let parse_named_started_at = emit_import_phase_start("parse_named");
@@ -72,23 +70,10 @@ fn lower_factored_named_grammar(
     let mut factored = factor_named_grammar(named);
     emit_import_phase_end("factor_named_grammar", factor_started_at);
 
-    if source_kind == "json_schema" {
-        if json_schema::simplify_grammar_enabled() {
-            let simplify_started_at = emit_import_phase_start("simplify_named_grammar");
-            simplify_named_grammar(&mut factored);
-            emit_import_phase_end("simplify_named_grammar", simplify_started_at);
-        }
-        if json_schema::lower_exact_subtractions_enabled() {
-            let lower_exact_started_at = emit_import_phase_start("lower_exact_subtractions");
-            lower_exact_subtractions(&mut factored)?;
-            emit_import_phase_end("lower_exact_subtractions", lower_exact_started_at);
-        }
-        if json_schema::promote_literal_choices_enabled() {
-            let promote_started_at = emit_import_phase_start("promote_choice_terminals_exact");
-            promote_choice_terminals_exact(&mut factored, false);
-            emit_import_phase_end("promote_choice_terminals_exact", promote_started_at);
-        }
-        json_schema::assign_default_lexer_partitions(&mut factored);
+    if let Some(transform) = transform {
+        let transform_started_at = emit_import_phase_start("transform_named_grammar");
+        transform(&mut factored)?;
+        emit_import_phase_end("transform_named_grammar", transform_started_at);
     }
 
     let ast_lower_started_at = emit_import_phase_start("ast_lower");
@@ -104,11 +89,12 @@ fn compile_from_source(
     source_kind: &str,
     default_table_construction: GlrTableConstruction,
     parse: NamedGrammarParser,
+    transform: Option<NamedGrammarTransform>,
 ) -> crate::Result<Constraint> {
     let compile_from_source_started_at = emit_import_phase_start("compile_from_source");
     if compile_profile_enabled() {
         let parse_started_at = std::time::Instant::now();
-        let grammar = lower_factored_named_grammar(source, source_kind, parse)?;
+        let grammar = lower_factored_named_grammar(source, parse, transform)?;
         let import_ms = parse_started_at.elapsed().as_secs_f64() * 1000.0;
         let (constraint, profile) = compile_owned_profiled_with_table_construction(
             grammar,
@@ -120,7 +106,7 @@ fn compile_from_source(
         return Ok(constraint);
     }
 
-    let grammar = lower_factored_named_grammar(source, source_kind, parse)?;
+    let grammar = lower_factored_named_grammar(source, parse, transform)?;
     let constraint = compile_owned_with_table_construction(
         grammar,
         vocab,
@@ -133,11 +119,11 @@ fn compile_from_source(
 fn compile_dynamic_from_source(
     source: &str,
     vocab: &crate::Vocab,
-    source_kind: &str,
     default_table_construction: GlrTableConstruction,
     parse: NamedGrammarParser,
+    transform: Option<NamedGrammarTransform>,
 ) -> crate::Result<DynamicConstraint> {
-    let grammar = lower_factored_named_grammar(source, source_kind, parse)?;
+    let grammar = lower_factored_named_grammar(source, parse, transform)?;
     Ok(compile_dynamic_owned_with_table_construction(
         grammar,
         vocab,
@@ -152,8 +138,8 @@ fn compile_dynamic_from_source(
 pub fn __profile_json_schema_import(schema_json: &str) -> crate::Result<()> {
     let grammar = lower_factored_named_grammar(
         schema_json,
-        "json_schema",
         parse_json_schema_to_named,
+        Some(json_schema::prepare_named_grammar),
     )?;
     std::hint::black_box(&grammar);
     Ok(())
@@ -179,6 +165,7 @@ impl Constraint {
             "ebnf",
             GlrTableConstruction::ExperimentalCoreMerged,
             ebnf::parse_ebnf_to_named,
+            None,
         )
     }
 
@@ -189,6 +176,7 @@ impl Constraint {
             "lark",
             GlrTableConstruction::ExperimentalCoreMerged,
             lark::parse_lark_to_named,
+            None,
         )
     }
 
@@ -200,6 +188,7 @@ impl Constraint {
                 "json_schema",
                 GlrTableConstruction::LegacyRowBisim,
                 parse_json_schema_to_named,
+                Some(json_schema::prepare_named_grammar),
             )
         })
     }
@@ -212,6 +201,7 @@ impl Constraint {
             "glrm",
             GlrTableConstruction::ExperimentalCoreMerged,
             crate::grammar::glrm::from_glrm,
+            None,
         )
     }
 }
@@ -221,9 +211,9 @@ impl DynamicConstraint {
         compile_dynamic_from_source(
             ebnf,
             vocab,
-            "ebnf",
             GlrTableConstruction::ExperimentalCoreMerged,
             ebnf::parse_ebnf_to_named,
+            None,
         )
     }
 
@@ -231,9 +221,9 @@ impl DynamicConstraint {
         compile_dynamic_from_source(
             lark,
             vocab,
-            "lark",
             GlrTableConstruction::ExperimentalCoreMerged,
             lark::parse_lark_to_named,
+            None,
         )
     }
 
@@ -241,9 +231,9 @@ impl DynamicConstraint {
         compile_dynamic_from_source(
             schema,
             vocab,
-            "json_schema",
             GlrTableConstruction::LegacyRowBisim,
             parse_json_schema_to_named,
+            Some(json_schema::prepare_named_grammar),
         )
     }
 
@@ -251,9 +241,9 @@ impl DynamicConstraint {
         compile_dynamic_from_source(
             glrm,
             vocab,
-            "glrm",
             GlrTableConstruction::ExperimentalCoreMerged,
             crate::grammar::glrm::from_glrm,
+            None,
         )
     }
 }

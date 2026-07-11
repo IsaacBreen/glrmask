@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use regex::escape as regex_escape;
 use serde_json::Value;
 
+use crate::grammar::ast::resolved_named_terminal_exprs;
 use crate::grammar::expr_nfa::ExprNFA;
 use crate::grammar::named_simplify::simplify_named_grammar_expressions;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier};
@@ -44,8 +45,26 @@ pub(crate) const MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS: usize = 256;
 const STRING_ENUM_REGEX_MIN_VALUES: usize = 64;
 const STRING_ENUM_REGEX_MIN_ENCODED_BYTES: usize = 1024;
 pub(crate) const JSON_LITERAL_LEXER_PARTITION: &str = "json_literals";
-pub(crate) const JSON_BOUNDED_LEXER_PARTITION: &str = "json_bounded_repetitions";
+pub(crate) const JSON_OTHER_LEXER_PARTITION: &str = "json_other";
 pub(crate) const JSON_PATTERN_LEXER_PARTITION: &str = "json_patterns";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JsonTerminalPartitionClass {
+    Other,
+    Literal,
+    Pattern,
+}
+
+impl JsonTerminalPartitionClass {
+    pub(crate) fn merge(self, other: Self) -> Self {
+        use JsonTerminalPartitionClass::{Literal, Other, Pattern};
+        match (self, other) {
+            (Pattern, _) | (_, Pattern) => Pattern,
+            (Literal, _) | (_, Literal) => Literal,
+            (Other, Other) => Other,
+        }
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct FixedObjectShapeProfile {
@@ -116,191 +135,13 @@ pub(crate) struct Lowerer<'a> {
     pub(crate) shared_pattern_appearance_rules: BTreeMap<(String, Vec<String>), String>,
     pub(crate) fixed_object_profile: Option<FixedObjectLowerProfile>,
     pub(crate) fixed_object_nfa_templates: HashMap<FixedObjectTemplateKey, ExprNFA>,
+    pub(crate) terminal_partition_classes: BTreeMap<String, JsonTerminalPartitionClass>,
+    terminal_partition_class: JsonTerminalPartitionClass,
     definition_rules: BTreeMap<String, String>,
     definition_by_pointer: BTreeMap<String, &'a Schema>,
     pub(crate) object_variant_ref_stack: BTreeSet<String>,
     used_rule_names: BTreeSet<String>,
     next_rule_id: usize,
-}
-
-/// Recompute the JSON importer's lexer partition policy from the current named
-/// grammar. This is intentionally safe to call again after factoring or other
-/// named-grammar transforms.
-pub(crate) fn assign_default_lexer_partitions(grammar: &mut NamedGrammar) {
-    let rule_exprs = grammar
-        .rules
-        .iter()
-        .map(|rule| (rule.name.as_str(), &rule.expr))
-        .collect::<HashMap<_, _>>();
-
-    grammar.lexer_partitions.clear();
-    grammar.lexer_literal_partitions.clear();
-    grammar.default_lexer_partition = Some(JSON_PATTERN_LEXER_PARTITION.to_string());
-
-    for rule in &grammar.rules {
-        if !rule.is_terminal || rule.is_internal {
-            continue;
-        }
-        let partition = if rule.name.starts_with("json_literal_") {
-            Some(JSON_LITERAL_LEXER_PARTITION)
-        } else if rule.name.contains("bounded")
-            || expr_contains_bounded_repetition(&rule.expr, &rule_exprs, &mut BTreeSet::new())
-        {
-            Some(JSON_BOUNDED_LEXER_PARTITION)
-        } else if expr_is_finite_literal_language(
-            &rule.expr,
-            &rule_exprs,
-            &mut BTreeSet::new(),
-        ) {
-            Some(JSON_LITERAL_LEXER_PARTITION)
-        } else {
-            None
-        };
-        if let Some(partition) = partition {
-            grammar
-                .lexer_partitions
-                .insert(rule.name.clone(), partition.to_string());
-        }
-    }
-
-    for literal in grammar.emitted_anonymous_literals() {
-        grammar
-            .lexer_literal_partitions
-            .insert(literal, JSON_LITERAL_LEXER_PARTITION.to_string());
-    }
-}
-
-fn expr_contains_bounded_repetition<'a>(
-    expr: &'a GrammarExpr,
-    rules: &HashMap<&'a str, &'a GrammarExpr>,
-    visiting: &mut BTreeSet<&'a str>,
-) -> bool {
-    match expr {
-        GrammarExpr::Quantified(_, Quantifier::Range(_, Some(_))) => true,
-        GrammarExpr::Quantified(inner, _) | GrammarExpr::Grouped(inner) => {
-            expr_contains_bounded_repetition(inner, rules, visiting)
-        }
-        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => parts
-            .iter()
-            .any(|part| expr_contains_bounded_repetition(part, rules, visiting)),
-        GrammarExpr::Ref(name) => {
-            if !visiting.insert(name.as_str()) {
-                return false;
-            }
-            let result = rules
-                .get(name.as_str())
-                .is_some_and(|expr| expr_contains_bounded_repetition(expr, rules, visiting));
-            visiting.remove(name.as_str());
-            result
-        }
-        GrammarExpr::Exclude { expr, exclude } => {
-            expr_contains_bounded_repetition(expr, rules, visiting)
-                || expr_contains_bounded_repetition(exclude, rules, visiting)
-        }
-        GrammarExpr::Intersect { expr, intersect } => {
-            expr_contains_bounded_repetition(expr, rules, visiting)
-                || expr_contains_bounded_repetition(intersect, rules, visiting)
-        }
-        GrammarExpr::SeparatedSequence {
-            items, separator, ..
-        } => {
-            items.iter().any(|(item, quantifier)| {
-                matches!(quantifier, Some(Quantifier::Range(_, Some(_))))
-                    || expr_contains_bounded_repetition(item, rules, visiting)
-            }) || expr_contains_bounded_repetition(separator, rules, visiting)
-        }
-        GrammarExpr::ExprNFA(expr_nfa) => expr_nfa
-            .symbols
-            .iter()
-            .any(|symbol| expr_contains_bounded_repetition(symbol, rules, visiting)),
-        GrammarExpr::RawRegex(pattern) => raw_regex_contains_significant_bounded_repetition(pattern),
-        GrammarExpr::Epsilon
-        | GrammarExpr::Literal(_)
-        | GrammarExpr::CharClass { .. }
-        | GrammarExpr::LexerDfa(_)
-        | GrammarExpr::AnyByte => false,
-    }
-}
-
-fn expr_is_finite_literal_language<'a>(
-    expr: &'a GrammarExpr,
-    rules: &HashMap<&'a str, &'a GrammarExpr>,
-    visiting: &mut BTreeSet<&'a str>,
-) -> bool {
-    match expr {
-        GrammarExpr::Epsilon | GrammarExpr::Literal(_) => true,
-        GrammarExpr::Grouped(inner) => expr_is_finite_literal_language(inner, rules, visiting),
-        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => parts
-            .iter()
-            .all(|part| expr_is_finite_literal_language(part, rules, visiting)),
-        GrammarExpr::Quantified(inner, Quantifier::Optional)
-        | GrammarExpr::Quantified(inner, Quantifier::Range(_, Some(_))) => {
-            expr_is_finite_literal_language(inner, rules, visiting)
-        }
-        GrammarExpr::Quantified(_, _) => false,
-        GrammarExpr::Ref(name) => {
-            if !visiting.insert(name.as_str()) {
-                return false;
-            }
-            let result = rules
-                .get(name.as_str())
-                .is_some_and(|expr| expr_is_finite_literal_language(expr, rules, visiting));
-            visiting.remove(name.as_str());
-            result
-        }
-        GrammarExpr::Exclude { expr, exclude } => {
-            expr_is_finite_literal_language(expr, rules, visiting)
-                && expr_is_finite_literal_language(exclude, rules, visiting)
-        }
-        GrammarExpr::Intersect { expr, intersect } => {
-            expr_is_finite_literal_language(expr, rules, visiting)
-                && expr_is_finite_literal_language(intersect, rules, visiting)
-        }
-        GrammarExpr::RawRegex(pattern) => raw_regex_is_finite_literal_language(pattern),
-        GrammarExpr::CharClass { .. }
-        | GrammarExpr::LexerDfa(_)
-        | GrammarExpr::AnyByte
-        | GrammarExpr::SeparatedSequence { .. }
-        | GrammarExpr::ExprNFA(_) => false,
-    }
-}
-
-fn raw_regex_is_finite_literal_language(pattern: &str) -> bool {
-    let Ok(hir) = regex_syntax::Parser::new().parse(pattern) else {
-        return false;
-    };
-    fn visit(hir: &regex_syntax::hir::Hir) -> bool {
-        use regex_syntax::hir::HirKind;
-        match hir.kind() {
-            HirKind::Empty | HirKind::Literal(_) | HirKind::Look(_) => true,
-            HirKind::Capture(capture) => visit(&capture.sub),
-            HirKind::Concat(parts) | HirKind::Alternation(parts) => parts.iter().all(visit),
-            HirKind::Repetition(repetition) => repetition.max.is_some() && visit(&repetition.sub),
-            HirKind::Class(_) => false,
-        }
-    }
-    visit(&hir)
-}
-
-fn raw_regex_contains_significant_bounded_repetition(pattern: &str) -> bool {
-    let Ok(hir) = regex_syntax::Parser::new().parse(pattern) else {
-        return false;
-    };
-    fn visit(hir: &regex_syntax::hir::Hir) -> bool {
-        use regex_syntax::hir::HirKind;
-        match hir.kind() {
-            HirKind::Repetition(repetition) => {
-                let significant = repetition.max.is_some_and(|max| {
-                    max > 4 || (max > 1 && repetition.min != max)
-                });
-                significant || visit(&repetition.sub)
-            }
-            HirKind::Capture(capture) => visit(&capture.sub),
-            HirKind::Concat(parts) | HirKind::Alternation(parts) => parts.iter().any(visit),
-            HirKind::Empty | HirKind::Literal(_) | HirKind::Class(_) | HirKind::Look(_) => false,
-        }
-    }
-    visit(&hir)
 }
 
 fn quoted_repeated_char_rule_expr(char_rule: &str) -> GrammarExpr {
@@ -349,6 +190,8 @@ impl<'a> Lowerer<'a> {
                 || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some())
             .then(FixedObjectLowerProfile::default),
             fixed_object_nfa_templates: HashMap::new(),
+            terminal_partition_classes: BTreeMap::new(),
+            terminal_partition_class: JsonTerminalPartitionClass::Other,
             definition_rules: BTreeMap::new(),
             definition_by_pointer,
             object_variant_ref_stack: BTreeSet::new(),
@@ -383,6 +226,8 @@ impl<'a> Lowerer<'a> {
             shared_pattern_appearance_rules: BTreeMap::new(),
             fixed_object_profile: None,
             fixed_object_nfa_templates: HashMap::new(),
+            terminal_partition_classes: BTreeMap::new(),
+            terminal_partition_class: JsonTerminalPartitionClass::Other,
             definition_rules: BTreeMap::new(),
             definition_by_pointer: self.definition_by_pointer.clone(),
             object_variant_ref_stack: BTreeSet::new(),
@@ -397,7 +242,11 @@ impl<'a> Lowerer<'a> {
     /// Merges rules emitted by an isolated lowerer. Every isolated lowerer
     /// emits the JSON built-ins; equal definitions are coalesced, but a
     /// conflicting duplicate name is rejected rather than silently changed.
-    pub(crate) fn append_isolated_rules(&mut self, rules: Vec<NamedRule>) -> ImportResult<()> {
+    pub(crate) fn append_isolated_rules(
+        &mut self,
+        rules: Vec<NamedRule>,
+        terminal_partition_classes: BTreeMap<String, JsonTerminalPartitionClass>,
+    ) -> ImportResult<()> {
         let mut existing_by_name = HashMap::with_capacity(self.rules.len() + rules.len());
         for (index, rule) in self.rules.iter().enumerate() {
             existing_by_name.insert(rule.name.clone(), index);
@@ -416,6 +265,12 @@ impl<'a> Lowerer<'a> {
             self.used_rule_names.insert(rule.name.clone());
             existing_by_name.insert(rule.name.clone(), index);
             self.rules.push(rule);
+        }
+        for (terminal, class) in terminal_partition_classes {
+            self.terminal_partition_classes
+                .entry(terminal)
+                .and_modify(|existing| *existing = existing.merge(class))
+                .or_insert(class);
         }
         Ok(())
     }
@@ -469,7 +324,13 @@ impl<'a> Lowerer<'a> {
             default_lexer_partition: None,
         };
         simplify_named_grammar_expressions(&mut grammar);
-        assign_default_lexer_partitions(&mut grammar);
+        grammar.lexer_partitions = build_json_lexer_partition_classes(
+            &grammar,
+            &self.terminal_partition_classes,
+        )
+        .map_err(|error| SchemaImportError::new(error.to_string()))?;
+        let literals = grammar.emitted_anonymous_literals();
+        grammar.set_literal_lexer_partition(JSON_LITERAL_LEXER_PARTITION, literals);
         if let Some(simplify_started_at) = simplify_started_at {
             eprintln!(
                 "[glrmask/profile][json_schema_lower_finish] root_lower_ms={:.3} simplify_ms={:.3} rules={}",
@@ -500,7 +361,7 @@ impl<'a> Lowerer<'a> {
             GrammarExpr::RawRegex(value_string_char.to_string()),
         );
         if super::split_literal_terminals_enabled() {
-            self.add_terminal_rule(JSON_QUOTE_RULE, lit("\""));
+            self.add_literal_terminal_rule(JSON_QUOTE_RULE, lit("\""));
         }
         self.add_terminal_rule(
             JSON_STRING_RULE,
@@ -528,16 +389,16 @@ impl<'a> Lowerer<'a> {
                 GrammarExpr::RawRegex(format!(r#""(?:{})*""#, additional_key_full_string_char)),
             );
         }
-        self.add_terminal_rule(
+        self.add_literal_terminal_rule(
             JSON_ITEM_SEPARATOR_RULE,
             GrammarExpr::RawRegex(self.separator_regex(",")),
         );
-        self.add_terminal_rule(
+        self.add_literal_terminal_rule(
             JSON_KEY_SEPARATOR_RULE,
             GrammarExpr::RawRegex(self.separator_regex(":")),
         );
         if super::split_literal_terminals_enabled() {
-            self.add_terminal_rule(JSON_KEY_SUFFIX_RULE, lit("\": "));
+            self.add_literal_terminal_rule(JSON_KEY_SUFFIX_RULE, lit("\": "));
         }
         self.add_terminal_rule(
             JSON_INTEGER_RULE,
@@ -547,11 +408,11 @@ impl<'a> Lowerer<'a> {
             JSON_NUMBER_RULE,
             GrammarExpr::RawRegex(r#"-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?"#.to_string()),
         );
-        self.add_terminal_rule(
+        self.add_literal_terminal_rule(
             JSON_BOOL_RULE,
             choice(vec![lit("true"), lit("false")]),
         );
-        self.add_terminal_rule(JSON_NULL_RULE, lit("null"));
+        self.add_literal_terminal_rule(JSON_NULL_RULE, lit("null"));
 
         let array_item_tail = seq(vec![r(JSON_ITEM_SEPARATOR_RULE), r(JSON_VALUE_RULE)]);
         self.add_nonterminal_rule(
@@ -684,7 +545,7 @@ impl<'a> Lowerer<'a> {
                 .collect::<ImportResult<Vec<_>>>()?;
             if let Some(encoded_literals) = large_string_enum_regex_literals(assertions, &values)? {
                 let name = self.fresh_rule_name("json_literal_string_enum");
-                self.add_terminal_rule(
+                self.add_literal_terminal_rule(
                     &name,
                     GrammarExpr::RawRegex(string_enum_regex(&encoded_literals)),
                 );
@@ -1236,11 +1097,40 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn add_terminal_rule(&mut self, name: &str, expr: GrammarExpr) {
         self.used_rule_names.insert(name.to_string());
+        self.terminal_partition_classes
+            .entry(name.to_string())
+            .and_modify(|existing| {
+                *existing = existing.merge(self.terminal_partition_class)
+            })
+            .or_insert(self.terminal_partition_class);
         self.rules.push(NamedRule {
             name: name.to_string(),
             expr,
             is_terminal: true,
             is_internal: false,
+        });
+    }
+
+    pub(crate) fn with_terminal_partition_class<T>(
+        &mut self,
+        class: JsonTerminalPartitionClass,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = std::mem::replace(&mut self.terminal_partition_class, class);
+        let result = f(self);
+        self.terminal_partition_class = previous;
+        result
+    }
+
+    pub(crate) fn add_literal_terminal_rule(&mut self, name: &str, expr: GrammarExpr) {
+        self.with_terminal_partition_class(JsonTerminalPartitionClass::Literal, |lowerer| {
+            lowerer.add_terminal_rule(name, expr);
+        });
+    }
+
+    pub(crate) fn add_pattern_terminal_rule(&mut self, name: &str, expr: GrammarExpr) {
+        self.with_terminal_partition_class(JsonTerminalPartitionClass::Pattern, |lowerer| {
+            lowerer.add_terminal_rule(name, expr);
         });
     }
 
@@ -1263,6 +1153,55 @@ impl<'a> Lowerer<'a> {
             }
         }
     }
+}
+
+fn build_json_lexer_partition_classes(
+    grammar: &NamedGrammar,
+    terminal_partition_classes: &BTreeMap<String, JsonTerminalPartitionClass>,
+) -> crate::Result<BTreeMap<String, String>> {
+    let resolved_terminals = resolved_named_terminal_exprs(grammar)?;
+    let mut class_by_terminal_expr = HashMap::new();
+
+    // Terminal lowering deduplicates equal resolved lexer expressions to one
+    // TerminalID. Merge importer provenance on that same identity before
+    // assigning coarse JSON partitions, so generated aliases cannot place one
+    // eventual terminal in two lexer groups.
+    for rule in grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.is_terminal && !rule.is_internal)
+    {
+        let terminal_expr = resolved_terminals
+            .get(&rule.name)
+            .expect("resolved emitting JSON terminal expression");
+        let class = terminal_partition_classes
+            .get(&rule.name)
+            .copied()
+            .unwrap_or(JsonTerminalPartitionClass::Other);
+        class_by_terminal_expr
+            .entry(terminal_expr.clone())
+            .and_modify(|existing: &mut JsonTerminalPartitionClass| {
+                *existing = existing.merge(class);
+            })
+            .or_insert(class);
+    }
+
+    Ok(grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.is_terminal && !rule.is_internal)
+        .map(|rule| {
+            let terminal_expr = resolved_terminals
+                .get(&rule.name)
+                .expect("resolved emitting JSON terminal expression");
+            let partition = match class_by_terminal_expr[terminal_expr] {
+                JsonTerminalPartitionClass::Other => JSON_OTHER_LEXER_PARTITION,
+                JsonTerminalPartitionClass::Literal => JSON_LITERAL_LEXER_PARTITION,
+                JsonTerminalPartitionClass::Pattern => JSON_PATTERN_LEXER_PARTITION,
+            };
+            (rule.name.clone(), partition.to_string())
+        })
+        .collect())
 }
 
 fn json_literal_satisfies_declared_types(value: &Value, types: Option<&[SchemaType]>) -> bool {

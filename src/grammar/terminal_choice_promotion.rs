@@ -34,10 +34,14 @@ pub fn promote_choice_terminals_exact(
         .collect::<BTreeSet<_>>();
     let mut name_generator = TerminalNameGenerator::new(existing_names);
     let mut new_rules = Vec::new();
+    let mut new_lexer_partitions = Vec::new();
 
     for candidate_idx in selected.iter().copied() {
         let name = name_generator.next();
         let candidate = &collector.candidates[candidate_idx];
+        if let Some(partition) = common_literal_lexer_partition(grammar, candidate) {
+            new_lexer_partitions.push((name.clone(), partition));
+        }
         new_rules.push(NamedRule {
             name: name.clone(),
             expr: GrammarExpr::Choice(candidate.options.clone()),
@@ -54,7 +58,29 @@ pub fn promote_choice_terminals_exact(
         optimized_terminal_atoms: promoted_cost(&collector.atom_total_counts, &collector.candidates, &selected),
     };
     grammar.rules.extend(new_rules);
+    grammar.lexer_partitions.extend(new_lexer_partitions);
     stats
+}
+
+fn common_literal_lexer_partition(
+    grammar: &NamedGrammar,
+    candidate: &Candidate,
+) -> Option<String> {
+    let mut partition = None::<&str>;
+    for option in &candidate.options {
+        let GrammarExpr::Literal(bytes) = option else {
+            return None;
+        };
+        let current = grammar.lexer_literal_partitions.get(bytes)?.as_str();
+        if let Some(previous) = partition {
+            if previous != current {
+                return None;
+            }
+        } else {
+            partition = Some(current);
+        }
+    }
+    partition.map(str::to_string)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -503,6 +529,67 @@ mod tests {
                 if matches!(&options[0], GrammarExpr::Ref(name) if name.starts_with("__GLRMASK_LITERAL_CHOICE_"))
                     && matches!(&options[1], GrammarExpr::Ref(name) if name == "other")
         ));
+    }
+
+    #[test]
+    fn promoted_literal_choice_inherits_common_literal_partition() {
+        let mut grammar = NamedGrammar {
+            rules: vec![nt(
+                "start",
+                GrammarExpr::Choice(vec![lit("a"), lit("b")]),
+            )],
+            start: "start".into(),
+            ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: [
+                (b"a".to_vec(), "literals".to_string()),
+                (b"b".to_vec(), "literals".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            default_lexer_partition: None,
+        };
+
+        let stats = promote_choice_terminals_exact(&mut grammar, false);
+        assert_eq!(stats.promoted_choices, 1);
+        let generated = grammar
+            .rules
+            .iter()
+            .find(|rule| rule.is_terminal)
+            .expect("generated literal-choice terminal");
+        assert_eq!(
+            grammar.lexer_partitions.get(&generated.name).map(String::as_str),
+            Some("literals")
+        );
+    }
+
+    #[test]
+    fn promoted_literal_choice_does_not_invent_partition_for_mixed_sources() {
+        let mut grammar = NamedGrammar {
+            rules: vec![nt(
+                "start",
+                GrammarExpr::Choice(vec![lit("a"), lit("b")]),
+            )],
+            start: "start".into(),
+            ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: [
+                (b"a".to_vec(), "left".to_string()),
+                (b"b".to_vec(), "right".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            default_lexer_partition: None,
+        };
+
+        let stats = promote_choice_terminals_exact(&mut grammar, false);
+        assert_eq!(stats.promoted_choices, 1);
+        let generated = grammar
+            .rules
+            .iter()
+            .find(|rule| rule.is_terminal)
+            .expect("generated literal-choice terminal");
+        assert!(!grammar.lexer_partitions.contains_key(&generated.name));
     }
 
     #[test]

@@ -2303,6 +2303,39 @@ impl<'a> Lowerer<'a> {
     }
 }
 
+/// Resolve every externally emitting named terminal to the exact lexer-level
+/// expression used by [`lower`]. Equal values here are precisely the terminal
+/// expressions that `register_terminal_expr` deduplicates to one `TerminalID`.
+pub(crate) fn resolved_named_terminal_exprs(
+    grammar: &NamedGrammar,
+) -> Result<BTreeMap<String, Expr>, GlrMaskError> {
+    let terminal_bodies = grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.is_terminal)
+        .map(|rule| (rule.name.clone(), &rule.expr))
+        .collect::<FxHashMap<_, _>>();
+    let mut terminal_expr_cache = FxHashMap::default();
+    let mut resolved = BTreeMap::new();
+
+    for rule in grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.is_terminal && !rule.is_internal)
+    {
+        let mut visiting = HashSet::from([rule.name.clone()]);
+        let expr = grammar_expr_to_expr(
+            &rule.expr,
+            &terminal_bodies,
+            &mut terminal_expr_cache,
+            &mut visiting,
+        )?;
+        resolved.insert(rule.name.clone(), expr);
+    }
+
+    Ok(resolved)
+}
+
 /// Convert a GrammarExpr to an Expr tree, resolving terminal Ref nodes
 /// via the `terminal_bodies` map and caching results in `terminal_expr_cache`.
 fn grammar_expr_to_expr(

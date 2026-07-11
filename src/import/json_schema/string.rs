@@ -11,6 +11,7 @@ use super::error::{ImportResult, SchemaImportError};
 use super::split_literal_terminals_enabled;
 use super::lower::{
     choice, json_additional_key_string_rule, json_key_string_rule, lit, lit_bytes, never, r, seq, Lowerer,
+    JsonTerminalPartitionClass,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE, JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
     JSON_ITEM_SEPARATOR_RULE, JSON_KEY_SEPARATOR_RULE, JSON_KEY_SUFFIX_RULE, JSON_QUOTE_RULE,
@@ -32,23 +33,36 @@ impl<'a> Lowerer<'a> {
         });
         let has_recognized_format = schema.pattern.is_none()
             && recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_some();
-        if schema.pattern.is_some()
-            || has_recognized_format
-            || ((schema.min_length != 0 || schema.max_length.is_some()) && should_terminalize_length)
-        {
+        if schema.pattern.is_some() || has_recognized_format {
+            return self.with_terminal_partition_class(
+                JsonTerminalPartitionClass::Pattern,
+                |lowerer| {
+                    let name = lowerer.fresh_rule_name(if schema.max_length.is_some() {
+                        "json_string_constrained_bounded"
+                    } else {
+                        "json_string_constrained"
+                    });
+                    if schema.min_length == 0
+                        && schema.max_length.is_none()
+                        && let Some(pattern) = &schema.pattern
+                        && let Some(expr) =
+                            lowerer.lower_unanchored_pattern_string_split_expr(pattern)?
+                    {
+                        lowerer.add_nonterminal_rule(&name, expr);
+                        return Ok(r(&name));
+                    }
+                    let expr = lowerer.lower_constrained_string_terminal_expr(schema)?;
+                    lowerer.add_terminal_rule(&name, expr);
+                    Ok(r(&name))
+                },
+            );
+        }
+        if (schema.min_length != 0 || schema.max_length.is_some()) && should_terminalize_length {
             let name = self.fresh_rule_name(if schema.max_length.is_some() {
                 "json_string_constrained_bounded"
             } else {
                 "json_string_constrained"
             });
-            if schema.min_length == 0
-                && schema.max_length.is_none()
-                && let Some(pattern) = &schema.pattern
-                && let Some(expr) = self.lower_unanchored_pattern_string_split_expr(pattern)?
-            {
-                self.add_nonterminal_rule(&name, expr);
-                return Ok(r(&name));
-            }
             let expr = self.lower_constrained_string_terminal_expr(schema)?;
             self.add_terminal_rule(&name, expr);
             return Ok(r(&name));
@@ -59,7 +73,7 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn lower_inline_bounded_array_string_item_expr(
         &mut self,
         schema: &super::ast::Schema,
-    ) -> ImportResult<Option<GrammarExpr>> {
+    ) -> ImportResult<Option<(GrammarExpr, JsonTerminalPartitionClass)>> {
         let super::ast::SchemaKind::Assertions(assertions) = &schema.kind else {
             return Ok(None);
         };
@@ -95,25 +109,33 @@ impl<'a> Lowerer<'a> {
             if string.min_length != 0 || string.max_length.is_some() || string.format.is_some() {
                 return Ok(None);
             }
-            return Ok(Some(GrammarExpr::RawRegex(quoted_string_body_regex(
-                &string_pattern_as_body_regex(pattern, JsonStringContext::Value)?,
-            ))));
+            return Ok(Some((
+                GrammarExpr::RawRegex(quoted_string_body_regex(&string_pattern_as_body_regex(
+                    pattern,
+                    JsonStringContext::Value,
+                )?)),
+                JsonTerminalPartitionClass::Pattern,
+            )));
         }
 
         if let Some(format_body_regex) = recognized_string_format_body_regex_for_lowering(string.format.as_deref()) {
             if string.min_length != 0 || string.max_length.is_some() {
                 return Ok(None);
             }
-            return Ok(Some(GrammarExpr::RawRegex(quoted_string_body_regex(
-                format_body_regex,
-            ))));
+            return Ok(Some((
+                GrammarExpr::RawRegex(quoted_string_body_regex(format_body_regex)),
+                JsonTerminalPartitionClass::Pattern,
+            )));
         }
 
         if string.max_length.is_some_and(|max| self.should_split_bounded_string(string.min_length, max)) {
             return Ok(None);
         }
 
-        Ok(Some(self.lower_string_expr(string)?))
+        Ok(Some((
+            self.lower_string_expr(string)?,
+            JsonTerminalPartitionClass::Other,
+        )))
     }
 
     /// Return a constrained, explicit-string array item as a direct expression
@@ -310,7 +332,7 @@ impl<'a> Lowerer<'a> {
 
     fn add_string_pattern_body_terminal(&mut self, body_regex: String) -> GrammarExpr {
         let name = self.fresh_rule_name("json_string_pattern_body");
-        self.add_terminal_rule(&name, GrammarExpr::RawRegex(body_regex));
+        self.add_pattern_terminal_rule(&name, GrammarExpr::RawRegex(body_regex));
         r(&name)
     }
 
@@ -372,7 +394,7 @@ impl<'a> Lowerer<'a> {
     fn add_string_pattern_open_middle_terminal(&mut self, body_regex: String) -> GrammarExpr {
         let body = self.add_string_pattern_body_terminal(body_regex);
         let name = self.fresh_rule_name("json_string_pattern_open_middle");
-        self.add_terminal_rule(
+        self.add_pattern_terminal_rule(
             &name,
             seq(vec![
                 lit("\""),
@@ -386,7 +408,7 @@ impl<'a> Lowerer<'a> {
     fn add_string_pattern_open_middle_expr_terminal(&mut self, body_expr: GrammarExpr) -> GrammarExpr {
         let body = self.add_string_pattern_body_expr_terminal(body_expr);
         let name = self.fresh_rule_name("json_string_pattern_open_middle");
-        self.add_terminal_rule(
+        self.add_pattern_terminal_rule(
             &name,
             seq(vec![
                 lit("\""),
@@ -400,7 +422,7 @@ impl<'a> Lowerer<'a> {
     fn add_string_pattern_prefix_chunk_terminal(&mut self) -> GrammarExpr {
         let chunk_size = unanchored_pattern_prefix_chunk_size();
         let name = self.fresh_rule_name("json_string_pattern_prefix_chunk");
-        self.add_terminal_rule(
+        self.add_pattern_terminal_rule(
             &name,
             GrammarExpr::Quantified(Box::new(r(JSON_STRING_CHAR_RULE)), Quantifier::Range(chunk_size, Some(chunk_size))),
         );
@@ -411,7 +433,7 @@ impl<'a> Lowerer<'a> {
         let chunk_size = unanchored_pattern_prefix_chunk_size();
         let body = self.add_string_pattern_body_terminal(body_regex);
         let name = self.fresh_rule_name("json_string_pattern_middle");
-        self.add_terminal_rule(
+        self.add_pattern_terminal_rule(
             &name,
             seq(vec![
                 GrammarExpr::Quantified(Box::new(r(JSON_STRING_CHAR_RULE)), Quantifier::Range(0, Some(chunk_size.saturating_sub(1)))),
@@ -425,7 +447,7 @@ impl<'a> Lowerer<'a> {
         let chunk_size = unanchored_pattern_prefix_chunk_size();
         let body = self.add_string_pattern_body_expr_terminal(body_expr);
         let name = self.fresh_rule_name("json_string_pattern_middle");
-        self.add_terminal_rule(
+        self.add_pattern_terminal_rule(
             &name,
             seq(vec![
                 GrammarExpr::Quantified(Box::new(r(JSON_STRING_CHAR_RULE)), Quantifier::Range(0, Some(chunk_size.saturating_sub(1)))),
@@ -442,7 +464,7 @@ impl<'a> Lowerer<'a> {
             parts.push(GrammarExpr::Quantified(Box::new(r(JSON_STRING_CHAR_RULE)), Quantifier::ZeroPlus));
         }
         parts.push(lit("\""));
-        self.add_terminal_rule(&name, seq(parts));
+        self.add_pattern_terminal_rule(&name, seq(parts));
         r(&name)
     }
 
@@ -468,7 +490,7 @@ impl<'a> Lowerer<'a> {
             return expr;
         }
         let name = self.fresh_rule_name("json_string_constrained_part");
-        self.add_terminal_rule(&name, expr);
+        self.add_pattern_terminal_rule(&name, expr);
         r(&name)
     }
 
@@ -503,7 +525,7 @@ impl<'a> Lowerer<'a> {
 
     fn add_string_pattern_body_expr_terminal(&mut self, body_expr: GrammarExpr) -> GrammarExpr {
         let name = self.fresh_rule_name("json_string_pattern_body");
-        self.add_terminal_rule(&name, body_expr);
+        self.add_pattern_terminal_rule(&name, body_expr);
         r(&name)
     }
 
@@ -669,7 +691,7 @@ impl<'a> Lowerer<'a> {
     fn string_pattern_digit_char_ref(&mut self) -> GrammarExpr {
         const NAME: &str = "JSON_STRING_PATTERN_DIGIT_CHAR";
         if !self.rules.iter().any(|rule| rule.name == NAME) {
-            self.add_terminal_rule(NAME, GrammarExpr::RawRegex("[0-9]".to_string()));
+            self.add_pattern_terminal_rule(NAME, GrammarExpr::RawRegex("[0-9]".to_string()));
         }
         r(NAME)
     }
@@ -695,7 +717,7 @@ impl<'a> Lowerer<'a> {
                     },
                 ]));
             }
-            self.add_terminal_rule(NAME, choice(alternatives));
+            self.add_pattern_terminal_rule(NAME, choice(alternatives));
         }
         r(NAME)
     }
@@ -708,7 +730,7 @@ impl<'a> Lowerer<'a> {
                 expr: Box::new(r(JSON_STRING_CHAR_RULE)),
                 exclude: Box::new(whitespace),
             };
-            self.add_terminal_rule(NAME, rule_expr);
+            self.add_pattern_terminal_rule(NAME, rule_expr);
         }
         r(NAME)
     }
@@ -719,7 +741,7 @@ impl<'a> Lowerer<'a> {
             .iter()
             .any(|rule| rule.name == JSON_STRING_PATTERN_DOT_CHAR_RULE)
         {
-            self.add_terminal_rule(
+            self.add_pattern_terminal_rule(
                 JSON_STRING_PATTERN_DOT_CHAR_RULE,
                 GrammarExpr::RawRegex(
                     json_string_body_dot_regex_in_mode(
@@ -745,7 +767,7 @@ impl<'a> Lowerer<'a> {
             parts.push(GrammarExpr::Quantified(Box::new(r(JSON_STRING_CHAR_RULE)), Quantifier::ZeroPlus));
         }
         parts.push(lit("\""));
-        self.add_terminal_rule(&name, seq(parts));
+        self.add_pattern_terminal_rule(&name, seq(parts));
         r(&name)
     }
 
@@ -941,7 +963,7 @@ impl<'a> Lowerer<'a> {
             } else {
                 "json_property_string_value"
             });
-            self.add_terminal_rule(&name, expr);
+            self.add_pattern_terminal_rule(&name, expr);
             return Ok(r(&name));
         }
 
@@ -964,7 +986,10 @@ impl<'a> Lowerer<'a> {
         {
             return self.lower_string_expr(schema);
         }
-        self.lower_constrained_string_terminal_expr(schema)
+        self.with_terminal_partition_class(
+            JsonTerminalPartitionClass::Pattern,
+            |lowerer| lowerer.lower_constrained_string_terminal_expr(schema),
+        )
     }
 
     pub(crate) fn lower_string_literal(&mut self, text: &str) -> GrammarExpr {
@@ -1263,7 +1288,7 @@ impl<'a> Lowerer<'a> {
             }
         };
         let name = self.fresh_rule_name("json_pattern_key_colon");
-        self.add_terminal_rule(&name, expr);
+        self.add_pattern_terminal_rule(&name, expr);
         self.shared_ap_pattern_rules.insert(pattern.to_string(), name.clone());
         Ok(r(&name))
     }
@@ -1329,7 +1354,7 @@ impl<'a> Lowerer<'a> {
                 .map(|key| self.lower_literal_key_colon(key))
                 .collect::<Vec<_>>(),
         );
-        self.add_terminal_rule(&name, expr);
+        self.add_literal_terminal_rule(&name, expr);
         self.shared_pattern_overlap_literal_rules
             .insert(pattern.to_string(), name.clone());
         Ok(Some(r(&name)))
@@ -1706,7 +1731,7 @@ impl<'a> Lowerer<'a> {
             excluded.push(GrammarExpr::RawRegex(pattern_key_colon_regex(&pattern)?));
         }
 
-        self.add_terminal_rule(
+        self.add_pattern_terminal_rule(
             JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
             GrammarExpr::Exclude {
                 expr: Box::new(seq(vec![

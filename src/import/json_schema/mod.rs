@@ -14,19 +14,217 @@ pub(crate) mod string;
 mod tests;
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::env;
 
 use serde_json::{Map, Value};
 
 use crate::GlrMaskError;
+use crate::grammar::ast::resolved_named_terminal_exprs;
+use crate::grammar::exact_subtraction_lowering::lower_exact_subtractions;
+use crate::grammar::named_simplify::simplify_named_grammar;
+use crate::grammar::terminal_choice_promotion::promote_choice_terminals_exact;
 use crate::import::ast::NamedGrammar;
 
 use self::config::JsonSchemaConfig;
 use self::load::{load_document_with_features, scan_document_features};
 use self::lower::lower_document;
 
-pub(crate) fn assign_default_lexer_partitions(grammar: &mut NamedGrammar) {
-    lower::assign_default_lexer_partitions(grammar);
+const JSON_PATTERN_SINGLETONS_DEFAULT: bool = true;
+
+fn json_pattern_singletons_enabled() -> bool {
+    match env::var("GLRMASK_JSON_PATTERN_SINGLETONS") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            other => panic!(
+                "invalid GLRMASK_JSON_PATTERN_SINGLETONS={other:?}; expected one of 1/0, true/false, yes/no, or on/off"
+            ),
+        },
+        Err(_) => JSON_PATTERN_SINGLETONS_DEFAULT,
+    }
+}
+
+fn is_pattern_partition(partition: &str) -> bool {
+    partition == lower::JSON_PATTERN_LEXER_PARTITION
+        || partition.starts_with("json_pattern_")
+}
+
+fn partition_class(partition: Option<&str>) -> lower::JsonTerminalPartitionClass {
+    match partition {
+        Some(lower::JSON_LITERAL_LEXER_PARTITION) => {
+            lower::JsonTerminalPartitionClass::Literal
+        }
+        Some(partition) if is_pattern_partition(partition) => {
+            lower::JsonTerminalPartitionClass::Pattern
+        }
+        _ => lower::JsonTerminalPartitionClass::Other,
+    }
+}
+
+fn finalize_lexer_partitions_with_options(
+    grammar: &mut NamedGrammar,
+    pattern_singletons: bool,
+) -> crate::Result<()> {
+    let previous_partitions = std::mem::take(&mut grammar.lexer_partitions);
+    let resolved_terminals = resolved_named_terminal_exprs(grammar)?;
+    let mut pattern_partitions = HashMap::new();
+    let mut class_by_terminal_expr = HashMap::new();
+
+    // Named terminal rules are deduplicated to `TerminalID` by resolved lexer
+    // expression, not by rule name. Combine provenance on that exact identity
+    // before assigning physical partitions, otherwise two names for the same
+    // terminal language can assign one eventual TerminalID to two groups.
+    // Pattern provenance dominates because singleton isolation is specifically
+    // intended to protect pattern languages from cross-language interference;
+    // literal provenance dominates the ordinary catch-all class.
+    for rule in grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.is_terminal && !rule.is_internal)
+    {
+        let terminal_expr = resolved_terminals
+            .get(&rule.name)
+            .expect("resolved emitting JSON terminal expression");
+        let class = partition_class(previous_partitions.get(&rule.name).map(String::as_str));
+        class_by_terminal_expr
+            .entry(terminal_expr.clone())
+            .and_modify(|existing: &mut lower::JsonTerminalPartitionClass| {
+                *existing = existing.merge(class);
+            })
+            .or_insert(class);
+    }
+
+    grammar.default_lexer_partition = None;
+    for rule in grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.is_terminal && !rule.is_internal)
+    {
+        let terminal_expr = resolved_terminals
+            .get(&rule.name)
+            .expect("resolved emitting JSON terminal expression");
+        let class = class_by_terminal_expr[terminal_expr];
+        let partition = match class {
+            lower::JsonTerminalPartitionClass::Literal => {
+                lower::JSON_LITERAL_LEXER_PARTITION.to_string()
+            }
+            lower::JsonTerminalPartitionClass::Pattern if pattern_singletons => {
+                pattern_partitions
+                    .entry(terminal_expr.clone())
+                    .or_insert_with(|| format!("json_pattern_{}", rule.name))
+                    .clone()
+            }
+            lower::JsonTerminalPartitionClass::Pattern => {
+                lower::JSON_PATTERN_LEXER_PARTITION.to_string()
+            }
+            lower::JsonTerminalPartitionClass::Other => {
+                lower::JSON_OTHER_LEXER_PARTITION.to_string()
+            }
+        };
+        grammar.lexer_partitions.insert(rule.name.clone(), partition);
+    }
+    let literals = grammar.emitted_anonymous_literals();
+    grammar.set_literal_lexer_partition(lower::JSON_LITERAL_LEXER_PARTITION, literals);
+    Ok(())
+}
+
+pub(crate) fn finalize_lexer_partitions(grammar: &mut NamedGrammar) -> crate::Result<()> {
+    finalize_lexer_partitions_with_options(grammar, json_pattern_singletons_enabled())
+}
+
+pub(crate) fn prepare_named_grammar(grammar: &mut NamedGrammar) -> crate::Result<()> {
+    if simplify_grammar_enabled() {
+        simplify_named_grammar(grammar);
+    }
+    if lower_exact_subtractions_enabled() {
+        lower_exact_subtractions(grammar)?;
+    }
+    if promote_literal_choices_enabled() {
+        promote_choice_terminals_exact(grammar, false);
+    }
+    finalize_lexer_partitions(grammar)?;
+    Ok(())
+}
+
+pub(crate) fn prepare_named_grammar_for_dump(grammar: &mut NamedGrammar) -> crate::Result<()> {
+    if simplify_grammar_enabled() {
+        simplify_named_grammar(grammar);
+    }
+    if promote_literal_choices_enabled() {
+        promote_choice_terminals_exact(grammar, false);
+    }
+    finalize_lexer_partitions(grammar)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod lexer_partition_policy_tests {
+    use super::{
+        finalize_lexer_partitions_with_options,
+        lower,
+        JSON_PATTERN_SINGLETONS_DEFAULT,
+    };
+    use crate::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule};
+
+    fn terminal(name: &str, expr: GrammarExpr) -> NamedRule {
+        NamedRule {
+            name: name.to_string(),
+            expr,
+            is_terminal: true,
+            is_internal: false,
+        }
+    }
+
+    #[test]
+    fn final_pattern_singletons_follow_resolved_terminal_identity() {
+        assert!(JSON_PATTERN_SINGLETONS_DEFAULT);
+        let mut grammar = NamedGrammar {
+            rules: vec![
+                terminal("A", GrammarExpr::RawRegex("[a-z]+".to_string())),
+                terminal(
+                    "B",
+                    GrammarExpr::Grouped(Box::new(GrammarExpr::RawRegex(
+                        "[a-z]+".to_string(),
+                    ))),
+                ),
+                terminal("C", GrammarExpr::RawRegex("[0-9]+".to_string())),
+                terminal("L", GrammarExpr::Literal(b"literal".to_vec())),
+                terminal("O", GrammarExpr::RawRegex("-?[0-9]+".to_string())),
+            ],
+            start: "A".to_string(),
+            ignore: None,
+            lexer_partitions: [
+                ("A".to_string(), lower::JSON_PATTERN_LEXER_PARTITION.to_string()),
+                ("B".to_string(), lower::JSON_PATTERN_LEXER_PARTITION.to_string()),
+                ("C".to_string(), lower::JSON_PATTERN_LEXER_PARTITION.to_string()),
+                ("L".to_string(), lower::JSON_LITERAL_LEXER_PARTITION.to_string()),
+                ("O".to_string(), lower::JSON_OTHER_LEXER_PARTITION.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
+        };
+
+        finalize_lexer_partitions_with_options(&mut grammar, true).unwrap();
+        assert_eq!(grammar.lexer_partitions["A"], grammar.lexer_partitions["B"]);
+        assert_ne!(grammar.lexer_partitions["A"], grammar.lexer_partitions["C"]);
+        assert_eq!(
+            grammar.lexer_partitions["L"],
+            lower::JSON_LITERAL_LEXER_PARTITION
+        );
+        assert_eq!(grammar.lexer_partitions["O"], lower::JSON_OTHER_LEXER_PARTITION);
+
+        let singleton_partitions = grammar.lexer_partitions.clone();
+        finalize_lexer_partitions_with_options(&mut grammar, true).unwrap();
+        assert_eq!(grammar.lexer_partitions, singleton_partitions);
+
+        finalize_lexer_partitions_with_options(&mut grammar, false).unwrap();
+        assert_eq!(grammar.lexer_partitions["A"], lower::JSON_PATTERN_LEXER_PARTITION);
+        assert_eq!(grammar.lexer_partitions["B"], lower::JSON_PATTERN_LEXER_PARTITION);
+        assert_eq!(grammar.lexer_partitions["C"], lower::JSON_PATTERN_LEXER_PARTITION);
+    }
 }
 
 /// Convert a JSON Schema value into the project's named grammar AST.

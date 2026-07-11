@@ -3,7 +3,9 @@ use crate::import::ast::{GrammarExpr, Quantifier};
 
 use super::ast::{ArraySchema, SchemaKind};
 use super::error::ImportResult;
-use super::lower::{choice, lit, never, seq, Lowerer, JSON_SEPARATOR_WS_REGEX};
+use super::lower::{
+    choice, lit, never, seq, JsonTerminalPartitionClass, Lowerer, JSON_SEPARATOR_WS_REGEX,
+};
 
 impl<'a> Lowerer<'a> {
     pub(crate) fn lower_array(&mut self, schema: &ArraySchema) -> ImportResult<GrammarExpr> {
@@ -15,22 +17,36 @@ impl<'a> Lowerer<'a> {
         // lexical unit with its enclosing array punctuation. This path is
         // deliberately restricted to explicit string-only items: an untyped
         // `pattern` or `format` schema still permits non-string JSON values.
-        if schema.prefix_items.is_empty()
-            && let Some((item, repeat_complexity)) =
-                self.lower_isolated_array_string_item_expr(&schema.items)?
-        {
-            return Ok(if self.should_terminalize_whole_isolated_array(
-                repeat_complexity,
-                schema.max_items,
-            ) {
-                self.isolated_homogeneous_array_terminal(item, schema.min_items, schema.max_items)
-            } else {
-                self.contextualized_homogeneous_array_terminals(
-                    item,
-                    schema.min_items,
-                    schema.max_items,
-                )
-            });
+        if schema.prefix_items.is_empty() {
+            let isolated = self.with_terminal_partition_class(
+                JsonTerminalPartitionClass::Pattern,
+                |lowerer| -> ImportResult<Option<GrammarExpr>> {
+                    let Some((item, repeat_complexity)) =
+                        lowerer.lower_isolated_array_string_item_expr(&schema.items)?
+                    else {
+                        return Ok(None);
+                    };
+                    Ok(Some(if lowerer.should_terminalize_whole_isolated_array(
+                        repeat_complexity,
+                        schema.max_items,
+                    ) {
+                        lowerer.isolated_homogeneous_array_terminal(
+                            item,
+                            schema.min_items,
+                            schema.max_items,
+                        )
+                    } else {
+                        lowerer.contextualized_homogeneous_array_terminals(
+                            item,
+                            schema.min_items,
+                            schema.max_items,
+                        )
+                    }))
+                },
+            )?;
+            if let Some(expr) = isolated {
+                return Ok(expr);
+            }
         }
 
         if schema.prefix_items.is_empty()
@@ -42,17 +58,23 @@ impl<'a> Lowerer<'a> {
                 return Ok(self.bounded_homogeneous_array_exprnfa(item, schema.min_items, max));
             }
             if self.should_terminalize_bounded_scalar_array(max)
-                && let Some(item) = self.lower_inline_bounded_array_string_item_expr(&schema.items)?
+                && let Some((item, partition_class)) =
+                    self.lower_inline_bounded_array_string_item_expr(&schema.items)?
             {
-                return Ok(self.bounded_homogeneous_array_terminal(item, schema.min_items, max));
+                return Ok(self.with_terminal_partition_class(partition_class, |lowerer| {
+                    lowerer.bounded_homogeneous_array_terminal(item, schema.min_items, max)
+                }));
             }
         }
         if schema.prefix_items.is_empty()
             && schema.min_items == 0
             && schema.max_items.is_none()
-            && let Some(item) = self.lower_inline_bounded_array_string_item_expr(&schema.items)?
+            && let Some((item, partition_class)) =
+                self.lower_inline_bounded_array_string_item_expr(&schema.items)?
         {
-            return Ok(self.unbounded_homogeneous_array_terminal(item, 0));
+            return Ok(self.with_terminal_partition_class(partition_class, |lowerer| {
+                lowerer.unbounded_homogeneous_array_terminal(item, 0)
+            }));
         }
 
         let body = if schema.prefix_items.is_empty() {
