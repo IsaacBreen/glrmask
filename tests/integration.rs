@@ -1469,6 +1469,29 @@ fn partitioned_runtime_matches_dynamic_across_lexer_shapes() {
 }
 
 #[test]
+fn residual_terminal_continuation_survives_across_vocab_tokens() {
+    let vocab = vocab(&["a", "b", "c", "ab", "ba", "bc", "abc"]);
+    let grammar = r#"
+        start start;
+        t A ::= "a";
+        t B ::= "b" | "ba";
+        nt item ::= A | B;
+        nt start ::= item item? item?;
+    "#;
+    let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+    let mut state = constraint.start();
+
+    state.commit_token(1).unwrap(); // "b"
+    state.commit_token(3).unwrap(); // "ab"; bytes "bab" = B("ba") B("b")
+
+    let mask = state.mask();
+    assert!(
+        mask[3 / 32] & (1u32 << (3 % 32)) != 0,
+        "next token ab must be admitted: babab = B(ba) B(ba) B(b)"
+    );
+}
+
+#[test]
 fn partitioned_repeat_continuation_survives_ignore_prefixed_token() {
     let vocab = vocab(&[
         "a", "b", "c", "aa", "bb", "cc", "ab", "ac", "ba", "bc", "abc",
