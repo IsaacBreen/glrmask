@@ -1295,6 +1295,146 @@ mod tests {
         finish_test_artifact(&nwa, id_map.clone())
     }
 
+    fn artifact_accepts(
+        artifact: &LocalIdMapTerminalDwa,
+        original_state: u32,
+        original_token: u32,
+        labels: &[i32],
+    ) -> bool {
+        let internal_state = artifact.id_map.tokenizer_states.original_to_internal
+            [original_state as usize];
+        let internal_token = artifact.id_map.vocab_tokens.original_to_internal
+            [original_token as usize];
+        let mut state = artifact.dwa.start_state();
+        for &label in labels {
+            let Some((target, weight)) = artifact.dwa.states()[state as usize]
+                .transitions
+                .get(&label)
+            else {
+                return false;
+            };
+            if !weight.is_full()
+                && !weight
+                    .tokens_for_tsid(internal_state)
+                    .contains(internal_token)
+            {
+                return false;
+            }
+            state = *target;
+        }
+        artifact.dwa.states()[state as usize]
+            .final_weight
+            .as_ref()
+            .is_some_and(|weight| {
+                weight.is_full()
+                    || weight
+                        .tokens_for_tsid(internal_state)
+                        .contains(internal_token)
+            })
+    }
+
+    #[test]
+    fn residual_prefix_can_complete_terminal_at_vocab_leaf() {
+        let expressions = vec![
+            Expr::Choice(vec![
+                Expr::U8Seq(b"a".to_vec()),
+                Expr::U8Seq(b"ab".to_vec()),
+            ]),
+            Expr::Choice(vec![
+                Expr::U8Seq(b"ab".to_vec()),
+                Expr::U8Seq(b"b".to_vec()),
+                Expr::U8Seq(b"ba".to_vec()),
+            ]),
+            Expr::Choice(vec![
+                Expr::U8Seq(b"abc".to_vec()),
+                Expr::U8Seq(b"bc".to_vec()),
+                Expr::U8Seq(b"c".to_vec()),
+            ]),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let tokens = [
+            b"a".as_slice(),
+            b"b".as_slice(),
+            b"c".as_slice(),
+            b"aa".as_slice(),
+            b"bb".as_slice(),
+            b"cc".as_slice(),
+            b"ab".as_slice(),
+            b"ac".as_slice(),
+            b"ba".as_slice(),
+            b"bc".as_slice(),
+            b"abc".as_slice(),
+            b"aab".as_slice(),
+            b"abb".as_slice(),
+            b"acc".as_slice(),
+        ];
+        let tree = VocabPrefixTree::build(
+            &tokens
+                .iter()
+                .enumerate()
+                .map(|(id, bytes)| (id, bytes.to_vec()))
+                .collect::<Vec<_>>(),
+        );
+        let id_map = singleton_id_map(tokenizer.num_states(), tokens.len());
+        let artifact = build_baseline_test_artifact(&tokenizer, &tree, &id_map);
+        let residual_a = tokenizer
+            .step(tokenizer.initial_state_id(), b'a')
+            .expect("a must enter a live lexer state");
+
+        assert!(
+            artifact_accepts(&artifact, residual_a, 1, &[1]),
+            "token b from residual prefix a must complete B=ab"
+        );
+        assert!(
+            artifact_accepts(&artifact, residual_a, 9, &[2]),
+            "token bc from residual prefix a must complete C=abc"
+        );
+    }
+
+    #[test]
+    fn residual_prefix_can_complete_and_restart_within_one_vocab_token() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::Choice(vec![
+                Expr::U8Seq(b"b".to_vec()),
+                Expr::U8Seq(b"ba".to_vec()),
+            ]),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let tokens = [
+            b"a".as_slice(),
+            b"b".as_slice(),
+            b"c".as_slice(),
+            b"ab".as_slice(),
+            b"ba".as_slice(),
+            b"bc".as_slice(),
+            b"abc".as_slice(),
+        ];
+        let tree = VocabPrefixTree::build(
+            &tokens
+                .iter()
+                .enumerate()
+                .map(|(id, bytes)| (id, bytes.to_vec()))
+                .collect::<Vec<_>>(),
+        );
+        let id_map = singleton_id_map(tokenizer.num_states(), tokens.len());
+        let artifact = build_baseline_test_artifact(&tokenizer, &tree, &id_map);
+        let residual_b = tokenizer
+            .step(tokenizer.initial_state_id(), b'b')
+            .expect("b must enter a live lexer state");
+
+        assert!(
+            artifact_accepts(&artifact, residual_b, 3, &[1, 1]),
+            "token ab from residual prefix b must emit B=ba then B=b"
+        );
+    }
+
     #[test]
     fn transport_shares_one_nwa_root_per_actual_tsid() {
         // A large class makes the old reference builder allocate one root per
