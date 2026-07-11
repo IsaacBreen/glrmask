@@ -79,13 +79,15 @@ fn with_empty_accumulators(stacks: &ParserStacks) -> ParserGSS {
     stacks.apply(|_| TerminalsDisallowed::new())
 }
 
-/// Advance every outstanding exclusion through one compressed vocabulary-trie
-/// edge. If any excluded terminal matches anywhere on the edge, this traversal
-/// branch would duplicate that terminal and is rejected. Otherwise each entry
-/// follows its lexer state and keeps only terminals still accessible there.
+/// Advance outstanding tokenizer-state-correlated exclusions through one
+/// compressed vocabulary-trie edge. A blocked match rejects the traversal only
+/// when it belongs to the active lexer branch. The same match on a parallel
+/// residual kills that residual alone. Surviving entries follow their own lexer
+/// state and keep only terminals still accessible there.
 fn advance_exclusions(
     constraint: &Constraint,
     segment: &[u8],
+    active_tokenizer_state: u32,
     exclusions: &Exclusions,
 ) -> Option<Exclusions> {
     if exclusions.is_empty() {
@@ -102,7 +104,13 @@ fn advance_exclusions(
             .iter()
             .any(|matched| blocked.contains(&matched.id))
         {
-            return None;
+            if tokenizer_state == active_tokenizer_state {
+                return None;
+            }
+            // Restrictions are correlated with their tokenizer-state branch.
+            // A blocked match on a parallel residual kills that residual, not
+            // the independently reset/active lexer branch being traversed.
+            continue;
         }
 
         for &end_state in &execution.end_state {
@@ -538,7 +546,12 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
             trie_edges += 1;
             let segment = trie.edge_bytes(edge);
             let Some(segment_exclusions) =
-                advance_exclusions(state.constraint, segment, &current.exclusions)
+                advance_exclusions(
+                    state.constraint,
+                    segment,
+                    current.tokenizer_state,
+                    &current.exclusions,
+                )
             else {
                 continue;
             };
@@ -762,6 +775,58 @@ nt start ::= A B;
         state.commit_token(3).unwrap();
         assert!(state.is_finished());
         assert_dynamic_parity(&state);
+    }
+
+    #[test]
+    fn dynamic_mask_preserves_repeated_terminal_after_ignore_reset_inside_token() {
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+                (2, b"c".to_vec()),
+                (3, b"aa".to_vec()),
+                (4, b"bb".to_vec()),
+                (5, b"cc".to_vec()),
+                (6, b"ab".to_vec()),
+                (7, b"ac".to_vec()),
+                (8, b"ba".to_vec()),
+                (9, b"bc".to_vec()),
+                (10, b"abc".to_vec()),
+                (11, b"aab".to_vec()),
+                (12, b"abb".to_vec()),
+                (13, b"acc".to_vec()),
+                (14, b" ".to_vec()),
+                (15, b"  ".to_vec()),
+                (16, b" a".to_vec()),
+                (17, b"a ".to_vec()),
+                (18, b" a ".to_vec()),
+                (19, b"ab c".to_vec()),
+            ],
+            None,
+        );
+        let grammar = r#"
+start start;
+ignore WS;
+lexer group ws ::= WS;
+lexer group a ::= A;
+lexer group b ::= B;
+lexer group c ::= C;
+t WS ::= " "+;
+t A ::= "a"+;
+t B ::= "b";
+t C ::= "c";
+nt item ::= A | B | C;
+nt start ::= item item? item?;
+"#;
+        let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let mut state = constraint.start();
+        state.commit_token(0).unwrap();
+        state.commit_token(16).unwrap();
+
+        assert_dynamic_parity(&state);
+        assert!(token_allowed(&direct_mask(&state), 0));
+        assert!(token_allowed(&direct_mask(&state), 3));
+        assert!(token_allowed(&direct_mask(&state), 17));
     }
 
     #[test]
