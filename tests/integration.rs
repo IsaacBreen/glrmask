@@ -1462,6 +1462,25 @@ fn partitioned_runtime_matches_dynamic_across_lexer_shapes() {
 }
 
 #[test]
+fn monolithic_runtime_matches_dynamic_for_ignore_and_repeated_terminals() {
+    let vocab = vocab(&[
+        "a", "b", "c", "aa", "bb", "cc", "ab", "ac", "ba", "bc", "abc",
+        "aab", "abb", "acc", " ", "  ", " a", "a ", " a ", "ab c",
+    ]);
+    let grammar = r#"
+        start start;
+        ignore WS;
+        t WS ::= " "+;
+        t A ::= "a"+;
+        t B ::= "b";
+        t C ::= "c";
+        nt item ::= A | B | C;
+        nt start ::= item item? item?;
+    "#;
+    assert_partitioned_runtime_matches_dynamic(grammar, &vocab, 3);
+}
+
+#[test]
 fn partitioned_repeat_continuation_survives_ignore_prefixed_token() {
     let vocab = vocab(&[
         "a", "b", "c", "aa", "bb", "cc", "ab", "ac", "ba", "bc", "abc",

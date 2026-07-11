@@ -1,31 +1,12 @@
 //! Direct dynamic mask generation.
 //!
 //! This implementation intentionally does not consult the parser DWA. It walks
-//! the vocabulary byte trie while advancing the lexer and GLR parser directly.
+//! the compressed vocabulary trie and advances exact runtime states through the
+//! same byte-commit engine used by generation. Sharing states at trie prefixes
+//! avoids reprocessing common vocabulary prefixes while keeping lexer residual,
+//! parser ambiguity, and terminal-disallow reconciliation identical to commits.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::Arc;
-
-use crate::automata::lexer::Lexer;
-use crate::compiler::glr::accumulator::TerminalsDisallowed;
-use crate::compiler::glr::parser::{advance_stacks, stack_may_advance_on, ParserGSS};
-use crate::ds::leveled_gss::LeveledGSS;
-use crate::grammar::flat::TerminalID;
-
-use super::artifact::Constraint;
 use super::state::ConstraintState;
-
-type ExclusionMap = BTreeMap<u32, BTreeSet<TerminalID>>;
-type Exclusions = Arc<ExclusionMap>;
-type ParserStacks = LeveledGSS<u32, ()>;
-
-#[derive(Clone)]
-struct TraverseWork {
-    node: u32,
-    tokenizer_state: u32,
-    gss: ParserStacks,
-    exclusions: Exclusions,
-}
 
 #[inline]
 fn set_mask_bit(buf: &mut [u32], token_id: u32) {
@@ -51,128 +32,14 @@ fn update_eos_mask(state: &ConstraintState<'_>, buf: &mut [u32]) {
     }
 }
 
-/// Dynamic masking keeps terminal restrictions in `Exclusions`. The parser
-/// table routines still use `ParserGSS`, so give their stack operations an
-/// otherwise-unused empty accumulator.
-fn with_empty_accumulators(stacks: &ParserStacks) -> ParserGSS {
-    stacks.apply(|_| TerminalsDisallowed::new())
-}
-
-/// Advance every outstanding exclusion through one compressed vocabulary-trie
-/// edge. If any excluded terminal matches anywhere on the edge, this traversal
-/// branch would duplicate that terminal and is rejected. Otherwise each entry
-/// follows its lexer state and keeps only terminals still accessible there.
-fn advance_exclusions(
-    constraint: &Constraint,
-    segment: &[u8],
-    exclusions: &Exclusions,
-) -> Option<Exclusions> {
-    if exclusions.is_empty() {
-        return Some(exclusions.clone());
-    }
-
-    let mut advanced = ExclusionMap::new();
-    for (&tokenizer_state, blocked) in exclusions.iter() {
-        let execution = constraint
-            .tokenizer
-            .execute_from_state_all_widths(segment, tokenizer_state);
-        if execution
-            .matches
-            .iter()
-            .any(|matched| blocked.contains(&matched.id))
-        {
-            return None;
-        }
-
-        for &end_state in &execution.end_state {
-            let accessible = constraint.tokenizer.tokens_accessible_from_state(end_state);
-            let next_blocked = advanced.entry(end_state).or_default();
-            next_blocked.extend(
-                blocked
-                    .iter()
-                    .copied()
-                    .filter(|terminal| accessible.contains(*terminal as usize)),
-            );
-        }
-    }
-    Some(Arc::new(advanced))
-}
-
-/// Record that a terminal committed at this token boundary cannot be matched
-/// again by the parallel lexer continuation carried in `exclusions`.
-fn with_excluded_terminal(
-    exclusions: &Exclusions,
-    tokenizer_state: u32,
-    terminal: TerminalID,
-) -> Exclusions {
-    let mut next = (**exclusions).clone();
-    next.entry(tokenizer_state).or_default().insert(terminal);
-    Arc::new(next)
-}
-
-fn parser_child(
-    constraint: &Constraint,
-    stacks: &ParserStacks,
-    terminal: TerminalID,
-) -> Option<ParserStacks> {
-    // Ignore terminals reset the lexer but deliberately leave the parser alone.
-    if Some(terminal) == constraint.ignore_terminal {
-        return Some(stacks.clone());
-    }
-    let parser_gss = with_empty_accumulators(stacks);
-    if !stack_may_advance_on(&constraint.table, &parser_gss, terminal) {
-        return None;
-    }
-    let advanced = advance_stacks(&constraint.table, &parser_gss, terminal).apply(|_| ());
-    (!advanced.is_empty()).then_some(advanced)
-}
-
-fn token_boundary_allowed(
-    constraint: &Constraint,
-    tokenizer_state: u32,
-    stacks: &ParserStacks,
-) -> bool {
-    let parser_gss = with_empty_accumulators(stacks);
-    constraint
-        .tokenizer
-        .tokens_accessible_from_state(tokenizer_state)
-        .iter()
-        .any(|terminal| {
-            let terminal = terminal as TerminalID;
-            Some(terminal) == constraint.ignore_terminal
-                || stack_may_advance_on(&constraint.table, &parser_gss, terminal)
-        })
-}
-
 pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
     let vocab = &state.constraint.dynamic_mask_vocab;
-
     buf.fill(0);
-    let initial_tsid = state.constraint.tokenizer.initial_state();
-    let mut traversal = Vec::<TraverseWork>::new();
 
-    for (&tokenizer_state, gss) in &state.state {
-        for (stacks, exclusions) in gss.partition_by_accumulator() {
-            traversal.push(TraverseWork {
-                node: 0,
-                tokenizer_state,
-                gss: stacks,
-                exclusions: exclusions.0,
-            });
-        }
-    }
-
-    while let Some(current) = traversal.pop() {
-        let node = vocab.trie.node(current.node);
-        if node.token_id.is_some()
-            && (current.tokenizer_state == initial_tsid
-                || token_boundary_allowed(
-                    state.constraint,
-                    current.tokenizer_state,
-                    &current.gss,
-                ))
-        {
-            let canonical_token_id = node.token_id.expect("token leaf checked");
+    let mut traversal = vec![(0u32, state.clone())];
+    while let Some((node_id, current)) = traversal.pop() {
+        let node = vocab.trie.node(node_id);
+        if let Some(canonical_token_id) = node.token_id {
             let token_ids = vocab
                 .token_ids(canonical_token_id)
                 .expect("dynamic vocabulary trie node lacks token ids");
@@ -181,55 +48,13 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
             }
         }
 
-        for edge in vocab.trie.children(current.node) {
-            let segment = vocab.trie.edge_bytes(edge);
-            let Some(segment_exclusions) =
-                advance_exclusions(state.constraint, segment, &current.exclusions)
-            else {
-                continue;
-            };
-
-            let mut segment_queue = VecDeque::new();
-            segment_queue.push_back((0usize, current.tokenizer_state, current.gss.clone()));
-
-            while let Some((position, tokenizer_state, gss)) = segment_queue.pop_front() {
-                let execution = state
-                    .constraint
-                    .tokenizer
-                    .execute_from_state_all_widths(&segment[position..], tokenizer_state);
-
-                for matched in &execution.matches {
-                    debug_assert!(matched.width > 0);
-                    let Some(advanced_parser) = parser_child(state.constraint, &gss, matched.id)
-                    else {
-                        continue;
-                    };
-
-                    let next_position = position + matched.width;
-                    if next_position == segment.len() {
-                        let mut exclusions = segment_exclusions.clone();
-                        for &end_state in &execution.end_state {
-                            exclusions = with_excluded_terminal(&exclusions, end_state, matched.id);
-                        }
-                        traversal.push(TraverseWork {
-                            node: edge.child,
-                            tokenizer_state: initial_tsid,
-                            gss: advanced_parser,
-                            exclusions,
-                        });
-                    } else {
-                        segment_queue.push_back((next_position, initial_tsid, advanced_parser));
-                    }
-                }
-
-                for &end_state in &execution.end_state {
-                    traversal.push(TraverseWork {
-                        node: edge.child,
-                        tokenizer_state: end_state,
-                        gss: gss.clone(),
-                        exclusions: segment_exclusions.clone(),
-                    });
-                }
+        for edge in vocab.trie.children(node_id) {
+            let mut child_state = current.clone();
+            if child_state
+                .commit_bytes(vocab.trie.edge_bytes(edge))
+                .is_ok()
+            {
+                traversal.push((edge.child, child_state));
             }
         }
     }

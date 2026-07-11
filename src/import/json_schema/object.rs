@@ -568,14 +568,18 @@ impl<'a> Lowerer<'a> {
                         .iter()
                         .map(|(_, payload_schema)| lowerer.lower_schema(payload_schema))
                         .collect::<ImportResult<Vec<_>>>()?;
-                    Ok::<_, SchemaImportError>((expressions, lowerer.rules))
+                    Ok::<_, SchemaImportError>((
+                        expressions,
+                        lowerer.rules,
+                        lowerer.terminal_partition_classes,
+                    ))
                 })
                 .collect::<ImportResult<Vec<_>>>()?
         };
 
         let mut expressions = Vec::with_capacity(cases.len());
-        for (chunk_expressions, rules) in isolated {
-            self.append_isolated_rules(rules)?;
+        for (chunk_expressions, rules, terminal_partition_classes) in isolated {
+            self.append_isolated_rules(rules, terminal_partition_classes)?;
             expressions.extend(chunk_expressions);
         }
         Ok(expressions)
