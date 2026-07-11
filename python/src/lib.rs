@@ -452,6 +452,7 @@ impl PyConstraint {
     /// Serialize the versioned execution-only artifact consumed by
     /// `_glrmask_runtime`. Compilation remains in this main binding; the
     /// runtime binding only loads and executes this artifact.
+    #[pyo3(name = "_save_runtime_artifact")]
     fn save_runtime_artifact(&self) -> Vec<u8> {
         glrmask_runtime::RuntimeArtifact::from_runtime_payload_v2(
             self.inner.save_runtime_payload_v2(),
@@ -477,6 +478,7 @@ impl PyConstraint {
     }
 
     /// Return the final constraint-internal vocab remapping used by mask materialization.
+    #[pyo3(name = "_mask_game_mapping")]
     fn mask_game_mapping(&self) -> (Vec<Vec<u32>>, Vec<u32>) {
         (
             self.inner.mask_game_internal_to_original().to_vec(),
@@ -485,16 +487,19 @@ impl PyConstraint {
     }
 
     /// Return the number of GLR parser states.
+    #[pyo3(name = "_num_parser_states")]
     fn num_parser_states(&self) -> u32 {
         self.inner.num_parser_states()
     }
 
     /// Return display names for grammar terminals by terminal id.
+    #[pyo3(name = "_terminal_display_names")]
     fn terminal_display_names(&self) -> Vec<String> {
         self.inner.terminal_display_names().to_vec()
     }
 
     /// Return the display name for a grammar terminal id, if present.
+    #[pyo3(name = "_terminal_display_name")]
     fn terminal_display_name(&self, terminal_id: u32) -> Option<String> {
         self.inner
             .terminal_display_name(terminal_id)
@@ -567,6 +572,7 @@ impl PyConstraintState {
         Ok(())
     }
 
+    #[pyo3(name = "_fill_mask_timed_ns")]
     fn fill_mask_timed_ns(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<u64> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
             PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
@@ -577,6 +583,7 @@ impl PyConstraintState {
         Ok(self.inner.with_dependent(|_owner, state| state.fill_mask_timed_ns(buf)))
     }
 
+    #[pyo3(name = "_fill_mask_profiled")]
     fn fill_mask_profiled<'py>(
         &self,
         py: Python<'py>,
@@ -594,6 +601,7 @@ impl PyConstraintState {
         mask_profile_to_dict(py, profile)
     }
 
+    #[pyo3(name = "_mask_game_fill_mask_and_internal_ids")]
     fn mask_game_fill_mask_and_internal_ids(
         &self,
         mut bitmask: PyReadwriteArray1<i32>,
@@ -614,6 +622,7 @@ impl PyConstraintState {
             .with_dependent_mut(|_owner, state| string_result(state.commit_token(token_id)))
     }
 
+    #[pyo3(name = "_commit_token_timed_ns")]
     fn commit_token_timed_ns(&mut self, token_id: u32) -> PyResult<u64> {
         self.inner.with_dependent_mut(|_owner, state| {
             state
@@ -628,6 +637,7 @@ impl PyConstraintState {
     }
 
     /// Like commit_token but returns profiling stats as a dict.
+    #[pyo3(name = "_commit_token_profiled")]
     fn commit_token_profiled<'py>(&mut self, py: Python<'py>, token_id: u32) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let profile = self.inner.with_dependent_mut(|_owner, state| {
             state.commit_token_profiled(token_id).map_err(|e| PyValueError::new_err(e))
@@ -709,21 +719,25 @@ impl PyConstraintState {
     }
 
     /// Return total parser GSS root count across all tokenizer states.
+    #[pyo3(name = "_parser_root_count")]
     fn parser_root_count(&self) -> usize {
         self.inner.with_dependent(|_owner, state| state.parser_root_count())
     }
 
     /// Return parser path count (capped at limit).
+    #[pyo3(name = "_parser_path_count")]
     fn parser_path_count(&self, limit: usize) -> usize {
         self.inner.with_dependent(|_owner, state| state.parser_path_count(limit))
     }
 
     /// Return all flattened parser stacks for debugging.
+    #[pyo3(name = "_debug_parser_stacks")]
     fn debug_parser_stacks(&self) -> Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)> {
         self.inner.with_dependent(|_owner, state| state.debug_parser_stacks())
     }
 
     /// Per-advance profiling: returns a list of per-advance entries and final GSS stacks.
+    #[pyo3(name = "_commit_token_per_advance")]
     fn commit_token_per_advance<'py>(&mut self, py: Python<'py>, token_id: u32) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let (advances, final_stacks, commit_profile) = self.inner.with_dependent_mut(|_owner, state| {
             state.commit_token_per_advance(token_id).map_err(|e| PyValueError::new_err(e))
@@ -872,6 +886,10 @@ impl PyConstraintState {
         self.inner.with_dependent(|_owner, state| state.force())
     }
 
+    fn is_complete(&self) -> bool {
+        self.inner.with_dependent(|_owner, state| state.is_complete())
+    }
+
     fn is_finished(&self) -> bool {
         self.inner.with_dependent(|_owner, state| state.is_finished())
     }
@@ -892,25 +910,26 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compile_grammar_def_json, m)?)?;
     m.add_function(wrap_pyfunction!(dump_json_schema_grammar_glrm, m)?)?;
     m.add_function(wrap_pyfunction!(prepare_vocab_for_compile, m)?)?;
+    m.setattr("__all__", ["Vocab", "Constraint", "ConstraintState"])?;
     Ok(())
 }
 
-#[pyfunction]
+#[pyfunction(name = "_clear_stale_weights")]
 fn clear_stale_weights() {
     glrmask::Constraint::clear_stale_weights();
 }
 
-#[pyfunction]
+#[pyfunction(name = "_clear_weight_op_caches")]
 fn clear_weight_op_caches() {
     glrmask::Constraint::clear_weight_op_caches();
 }
 
-#[pyfunction]
+#[pyfunction(name = "_prepare_vocab_for_compile")]
 fn prepare_vocab_for_compile(vocab: &PyVocab) {
     vocab.inner.prepare_for_compile();
 }
 
-#[pyfunction]
+#[pyfunction(name = "_compile_grammar_def_json")]
 fn compile_grammar_def_json(grammar_def_json: &str, vocab: &PyVocab) -> PyResult<PyConstraint> {
     let constraint = glrmask::Constraint::compile_grammar_def_json(grammar_def_json, &vocab.inner)
         .map_err(|e| PyValueError::new_err(format!("{e}")))?;
@@ -921,7 +940,7 @@ fn compile_grammar_def_json(grammar_def_json: &str, vocab: &PyVocab) -> PyResult
     })
 }
 
-#[pyfunction]
+#[pyfunction(name = "_dump_json_schema_grammar_glrm")]
 fn dump_json_schema_grammar_glrm(schema_json: &str) -> PyResult<String> {
     glrmask::Constraint::dump_json_schema_grammar_glrm(schema_json)
         .map_err(|e| PyValueError::new_err(format!("{e}")))
