@@ -14,6 +14,7 @@ use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguityKind};
 use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar, Quantifier};
+use crate::grammar::factoring::factor_named_grammar;
 use crate::grammar::glrm::{from_glrm, to_glrm};
 use crate::dump_json_schema_grammar_glrm;
 use crate::Vocab;
@@ -2821,6 +2822,34 @@ fn large_bounded_pattern_string_arrays_use_isolated_terminal_rule() {
         rule.name.contains("bounded_scalar_array_") && rule.is_terminal
     }), "{glrm}");
     lower(&grammar).unwrap();
+}
+
+#[test]
+fn very_large_fixed_width_pattern_array_uses_contextual_item_terminals() {
+    let schema = json!({
+        "type": "array",
+        "items": {
+            "type": "string",
+            "pattern": "^[A-Fa-f\\d]{24}$"
+        },
+        "maxItems": 1000
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    assert!(!grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("bounded_scalar_array")
+    }), "{:?}", grammar.rules);
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("contextual_array_first_item")
+    }), "{:?}", grammar.rules);
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("contextual_array_next_item")
+    }), "{:?}", grammar.rules);
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"["507f1f77bcf86cd799439011", "507f1f77bcf86cd799439012"]"#,
+    ));
 }
 
 #[test]
@@ -5650,6 +5679,34 @@ fn adaptive_final_lexer_determinization_can_coalesce_uuid_and_bounded_string_par
         "the guarded category product should fit and eliminate the epsilon dispatch",
     );
     assert!(tokenizer.num_states() < 2_000, "states={}", tokenizer.num_states());
+}
+
+#[test]
+fn o9838_prepared_tokenizer_stays_bounded_with_pattern_singletons_and_adaptive_determinization() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../benches/data/o9838_problem_schema.json"
+    ))
+    .unwrap();
+    let named = schema_to_named_grammar(&schema).unwrap();
+    let mut factored = factor_named_grammar(named);
+    super::prepare_named_grammar(&mut factored).unwrap();
+    let lowered = lower(&factored).unwrap();
+    let prepared = prepare_grammar_transforms_only(lowered);
+    let tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
+        &prepared,
+        false,
+        true,
+    );
+
+    assert!(
+        !tokenizer.has_epsilon_transitions(),
+        "the bounded adaptive final-NFA determinization should coalesce the o9838 partition union"
+    );
+    assert!(
+        tokenizer.num_states() < 20_000,
+        "o9838 tokenizer regressed toward the former 186k-state shape: states={}",
+        tokenizer.num_states(),
+    );
 }
 
 #[test]
