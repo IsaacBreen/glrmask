@@ -315,6 +315,9 @@ impl Constraint {
             token_id: has_token.then_some(entries[0].0 as u32),
             first_child: 0,
             child_len: 0,
+            subtree_token_start: 0,
+            subtree_token_end: 0,
+            subtree_bytes: [0; 4],
         });
 
         let child_entries = if has_token { &entries[1..] } else { entries };
@@ -340,6 +343,7 @@ impl Constraint {
             Self::build_dynamic_mask_trie_children(&entries[start..], 0, 0, &mut trie);
         }
 
+        trie.finalize_subtree_metadata();
         trie
     }
 
@@ -753,6 +757,11 @@ impl Constraint {
         let primary_ms = primary_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         self.dynamic_mask_vocab = dynamic_mask_vocab;
+        let continuation_partitions_started_at = profile.then(std::time::Instant::now);
+        self.dynamic_mask_vocab
+            .prebuild_continuation_partitions(&self.tokenizer, self.mask_len());
+        let continuation_partitions_ms = continuation_partitions_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         self.internal_token_buf_masks = internal_token_buf_masks;
         self.word_group_buf_masks = Vec::new();
         let block_started_at = profile.then(std::time::Instant::now);
@@ -894,10 +903,11 @@ impl Constraint {
                 self.direct_sparse_weight_token_sets.len(),
             );
             eprintln!(
-                "[glrmask/profile][runtime_finalize] guarded_shift_ms={:.3} dynamic_mask_vocab_ms={:.3} dynamic_mask_vocab_reused={} internal_token_buf_masks_ms={:.3} tokenizer_fast_transitions_ms={:.3} dense_token_masks_ms={:.3} dwa_fast_transitions_ms={:.3} primary_ms={:.3} word_block_masks_ms={:.3} quad_block_masks_ms={:.3} byte_block_masks_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][runtime_finalize] guarded_shift_ms={:.3} dynamic_mask_vocab_ms={:.3} dynamic_mask_vocab_reused={} continuation_partitions_ms={:.3} internal_token_buf_masks_ms={:.3} tokenizer_fast_transitions_ms={:.3} dense_token_masks_ms={:.3} dwa_fast_transitions_ms={:.3} primary_ms={:.3} word_block_masks_ms={:.3} quad_block_masks_ms={:.3} byte_block_masks_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} total_ms={:.3}",
                 guarded_shift_ms,
                 dynamic_vocab_ms,
                 dynamic_vocab_reused,
+                continuation_partitions_ms,
                 internal_token_buf_masks_ms,
                 tokenizer_fast_transitions_ms,
                 dense_token_masks_ms,

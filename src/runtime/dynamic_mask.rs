@@ -3,28 +3,42 @@
 //! This implementation intentionally does not consult the parser DWA. It walks
 //! the vocabulary byte trie while advancing the lexer and GLR parser directly.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::Lexer;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
-use crate::compiler::glr::parser::{advance_stacks, stack_may_advance_on, ParserGSS};
+use crate::compiler::glr::parser::{
+    advance_stacks, stack_may_advance_on, stack_may_advance_on_any, ParserGSS,
+};
 use crate::ds::leveled_gss::LeveledGSS;
+use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
 
-use super::artifact::Constraint;
+use super::artifact::{Constraint, DynamicMaskStateKey, DynamicMaskTrie};
 use super::state::ConstraintState;
 
 type ExclusionMap = BTreeMap<u32, BTreeSet<TerminalID>>;
 type Exclusions = Arc<ExclusionMap>;
 type ParserStacks = LeveledGSS<u32, ()>;
 
+#[derive(Default)]
+struct DynamicTraversalCache {
+    boundary: FxHashMap<(u32, usize), (ParserStacks, bool)>,
+    lexer_relevant: FxHashMap<(u32, usize), (ParserStacks, bool)>,
+    parser_children: FxHashMap<(usize, TerminalID), (ParserStacks, Option<ParserStacks>)>,
+}
+
 #[derive(Clone)]
 struct TraverseWork {
+    trie_index: usize,
     node: u32,
     tokenizer_state: u32,
     gss: ParserStacks,
     exclusions: Exclusions,
+    continuation_filter: Option<(usize, u64)>,
 }
 
 #[inline]
@@ -33,6 +47,13 @@ fn set_mask_bit(buf: &mut [u32], token_id: u32) {
     let bit = token_id % 32;
     if let Some(slot) = buf.get_mut(word) {
         *slot |= 1u32 << bit;
+    }
+}
+
+#[inline]
+fn or_mask(buf: &mut [u32], mask: &[u32]) {
+    for (target, source) in buf.iter_mut().zip(mask) {
+        *target |= *source;
     }
 }
 
@@ -127,6 +148,24 @@ fn parser_child(
     (!advanced.is_empty()).then_some(advanced)
 }
 
+fn parser_child_cached(
+    constraint: &Constraint,
+    stacks: &ParserStacks,
+    terminal: TerminalID,
+    cache: &mut DynamicTraversalCache,
+) -> Option<ParserStacks> {
+    let key = (stacks.ptr_key(), terminal);
+    if let Some((cached_stacks, result)) = cache.parser_children.get(&key) {
+        debug_assert!(cached_stacks.ptr_eq(stacks));
+        return result.clone();
+    }
+    let result = parser_child(constraint, stacks, terminal);
+    cache
+        .parser_children
+        .insert(key, (stacks.clone(), result.clone()));
+    result
+}
+
 fn token_boundary_allowed(
     constraint: &Constraint,
     tokenizer_state: u32,
@@ -144,32 +183,335 @@ fn token_boundary_allowed(
         })
 }
 
+fn token_boundary_allowed_cached(
+    constraint: &Constraint,
+    tokenizer_state: u32,
+    stacks: &ParserStacks,
+    cache: &mut DynamicTraversalCache,
+) -> bool {
+    let key = (tokenizer_state, stacks.ptr_key());
+    if let Some((cached_stacks, result)) = cache.boundary.get(&key) {
+        debug_assert!(cached_stacks.ptr_eq(stacks));
+        return *result;
+    }
+    let result = token_boundary_allowed(constraint, tokenizer_state, stacks);
+    cache
+        .boundary
+        .insert(key, (stacks.clone(), result));
+    result
+}
+
+fn lexer_state_relevant_cached(
+    constraint: &Constraint,
+    tokenizer_state: u32,
+    stacks: &ParserStacks,
+    cache: &mut DynamicTraversalCache,
+) -> bool {
+    let key = (tokenizer_state, stacks.ptr_key());
+    if let Some((cached_stacks, result)) = cache.lexer_relevant.get(&key) {
+        debug_assert!(cached_stacks.ptr_eq(stacks));
+        return *result;
+    }
+
+    let accessible = constraint
+        .tokenizer
+        .tokens_accessible_from_state(tokenizer_state);
+    let matched = constraint.tokenizer.matched_terminal_bitset(tokenizer_state);
+    let ignore_relevant = constraint.ignore_terminal.is_some_and(|terminal| {
+        accessible.contains(terminal as usize) || matched.contains(terminal as usize)
+    });
+    let result = if ignore_relevant {
+        true
+    } else {
+        let parser_gss = with_empty_accumulators(stacks);
+        stack_may_advance_on_any(&constraint.table, &parser_gss, accessible)
+            || stack_may_advance_on_any(&constraint.table, &parser_gss, matched)
+    };
+    cache
+        .lexer_relevant
+        .insert(key, (stacks.clone(), result));
+    result
+}
+
+#[inline]
+fn mark_subtree_tokens(
+    constraint: &Constraint,
+    trie: &DynamicMaskTrie,
+    node: u32,
+    buf: &mut [u32],
+) {
+    for &canonical_token_id in trie.subtree_tokens(node) {
+        let token_ids = constraint
+            .dynamic_mask_vocab
+            .token_ids(canonical_token_id)
+            .expect("dynamic vocabulary trie node lacks token ids");
+        for &token_id in token_ids {
+            set_mask_bit(buf, token_id);
+        }
+    }
+}
+
+enum RawSelfLoopSubtree {
+    CannotSkip,
+    MarkAllTokens,
+    MarkCurrentNodeOnly,
+}
+
+#[inline]
+fn cached_self_loop_bytes(
+    constraint: &Constraint,
+    tokenizer_state: u32,
+    cache: &mut FxHashMap<u32, U8Set>,
+) -> U8Set {
+    *cache
+        .entry(tokenizer_state)
+        .or_insert_with(|| constraint.tokenizer.self_loop_bytes(tokenizer_state))
+}
+
+/// A raw tokenizer-state self-loop is a particularly strong residual-language
+/// certificate: consuming the byte leaves every lexer possibility exactly
+/// unchanged. If every remaining byte below a vocabulary-trie node has that
+/// property, the no-finalization continuation witnesses every token in the
+/// subtree without any per-token lexer or parser work.
+///
+/// Parallel exclusion continuations can use the same shortcut only while they
+/// also remain in place. If a blocked terminal is already accepting there,
+/// every non-empty descendant would immediately match it; the token ending at
+/// the current node can still be retained.
+fn raw_self_loop_subtree(
+    constraint: &Constraint,
+    trie: &DynamicMaskTrie,
+    node: u32,
+    tokenizer_state: u32,
+    stacks: &ParserStacks,
+    exclusions: &Exclusions,
+    initial_tsid: u32,
+    self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    traversal_cache: &mut DynamicTraversalCache,
+) -> RawSelfLoopSubtree {
+    // Work at the initial state may represent either an untouched lexer or a
+    // lexer reset after an in-token terminal match. The current work item does
+    // not distinguish those cases, so keep this optimization conservative.
+    if tokenizer_state == initial_tsid {
+        return RawSelfLoopSubtree::CannotSkip;
+    }
+
+    let subtree_bytes = U8Set::from_words(trie.subtree_bytes(node));
+    let loop_bytes = cached_self_loop_bytes(constraint, tokenizer_state, self_loop_cache);
+    if !subtree_bytes.is_subset(&loop_bytes)
+        || !token_boundary_allowed_cached(constraint, tokenizer_state, stacks, traversal_cache)
+    {
+        return RawSelfLoopSubtree::CannotSkip;
+    }
+
+    for (&excluded_state, blocked_terminals) in exclusions.iter() {
+        let exclusion_loops = cached_self_loop_bytes(constraint, excluded_state, self_loop_cache);
+        if !subtree_bytes.is_subset(&exclusion_loops) {
+            return RawSelfLoopSubtree::CannotSkip;
+        }
+        let matched = constraint.tokenizer.matched_terminal_bitset(excluded_state);
+        if blocked_terminals
+            .iter()
+            .any(|&terminal| matched.contains(terminal as usize))
+        {
+            return RawSelfLoopSubtree::MarkCurrentNodeOnly;
+        }
+    }
+
+    RawSelfLoopSubtree::MarkAllTokens
+}
+
+fn dynamic_mask_state_key(state: &ConstraintState<'_>) -> DynamicMaskStateKey {
+    state
+        .state
+        .iter()
+        .map(|(&tokenizer_state, gss)| {
+            let mut paths = gss
+                .to_stacks()
+                .into_iter()
+                .map(|(stack, exclusions)| {
+                    let exclusion_entries = exclusions
+                        .0
+                        .iter()
+                        .map(|(&excluded_state, terminals)| {
+                            (excluded_state, terminals.iter().copied().collect::<Vec<_>>())
+                        })
+                        .collect::<Vec<_>>();
+                    (stack, exclusion_entries)
+                })
+                .collect::<Vec<_>>();
+            paths.sort_unstable();
+            (tokenizer_state, paths)
+        })
+        .collect()
+}
+
 pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
     let vocab = &state.constraint.dynamic_mask_vocab;
+    let profile = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some();
+    let total_started_at = profile.then(std::time::Instant::now);
+    let key_started_at = profile.then(std::time::Instant::now);
+    let cache_key = dynamic_mask_state_key(state);
+    let key_ms = key_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+    if vocab.copy_cached_mask(&cache_key, buf) {
+        if let Some(total_started_at) = total_started_at {
+            eprintln!(
+                "[glrmask/profile][dynamic_mask] generation={} cache_hit=true key_ms={:.3} total_ms={:.3}",
+                state.generation,
+                key_ms,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return;
+    }
 
     buf.fill(0);
     let initial_tsid = state.constraint.tokenizer.initial_state();
-    let mut traversal = Vec::<TraverseWork>::new();
+    let mut traversal = Vec::<TraverseWork>::with_capacity(4096);
+    let mut segment_stack = Vec::<(usize, u32, ParserStacks)>::with_capacity(8);
+    let mut self_loop_cache = FxHashMap::<u32, U8Set>::default();
+    let mut traversal_cache = DynamicTraversalCache::default();
+    let tries = [vocab.trie.clone()];
+    let mut continuation_partitions = Vec::new();
+    let mut work_items = 0usize;
+    let mut trie_edges = 0usize;
+    let mut lexer_executions = 0usize;
+    let mut subtree_marks = 0usize;
+    let mut subtree_mark_tokens = 0usize;
+    let mut continuation_groups_admitted = 0usize;
+    let mut continuation_groups_traversed = 0usize;
+    if profile {
+        eprintln!(
+            "[glrmask/profile][dynamic_mask_config] tokenizer_states={} epsilon={} fast_transition_rows={}",
+            state.constraint.tokenizer.num_states(),
+            state.constraint.tokenizer.has_epsilon_transitions(),
+            state.constraint.tokenizer_fast_transitions.len(),
+        );
+    }
 
     for (&tokenizer_state, gss) in &state.state {
         for (stacks, exclusions) in gss.partition_by_accumulator() {
+            if profile {
+                let loop_bytes = cached_self_loop_bytes(
+                    state.constraint,
+                    tokenizer_state,
+                    &mut self_loop_cache,
+                );
+                eprintln!(
+                    "[glrmask/profile][dynamic_seed] generation={} tokenizer_state={} initial={} stack_paths={} exclusions={} loop_bytes={} boundary_allowed={}",
+                    state.generation,
+                    tokenizer_state,
+                    tokenizer_state == initial_tsid,
+                    stacks.path_count_at_most(1_000_000),
+                    exclusions.0.values().map(BTreeSet::len).sum::<usize>(),
+                    loop_bytes.len(),
+                    token_boundary_allowed_cached(
+                        state.constraint,
+                        tokenizer_state,
+                        &stacks,
+                        &mut traversal_cache,
+                    ),
+                );
+            }
+            if exclusions.0.is_empty()
+                && let Some(partition) = vocab.cached_continuation_partition(tokenizer_state)
+            {
+                let mut admitted_groups = 0u64;
+                for (group_id, group) in partition.groups.iter().enumerate() {
+                    let admitted = group.end_states.iter().any(|&end_state| {
+                        token_boundary_allowed_cached(
+                            state.constraint,
+                            end_state,
+                            &stacks,
+                            &mut traversal_cache,
+                        )
+                    });
+                    if admitted {
+                        or_mask(buf, &group.mask);
+                        admitted_groups |= 1u64 << group_id;
+                        continuation_groups_admitted += 1;
+                    }
+                }
+                let all_groups = if partition.groups.len() == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << partition.groups.len()) - 1
+                };
+                let required_groups = all_groups & !admitted_groups;
+                if required_groups != 0 {
+                    let partition_index = continuation_partitions.len();
+                    continuation_partitions.push(partition);
+                    traversal.push(TraverseWork {
+                        trie_index: 0,
+                        node: 0,
+                        tokenizer_state,
+                        gss: stacks.clone(),
+                        exclusions: exclusions.0.clone(),
+                        continuation_filter: Some((partition_index, required_groups)),
+                    });
+                    continuation_groups_traversed += required_groups.count_ones() as usize;
+                }
+                continue;
+            }
+
             traversal.push(TraverseWork {
+                trie_index: 0,
                 node: 0,
                 tokenizer_state,
                 gss: stacks,
                 exclusions: exclusions.0,
+                continuation_filter: None,
             });
         }
     }
 
     while let Some(current) = traversal.pop() {
-        let node = vocab.trie.node(current.node);
-        if node.token_id.is_some()
+        work_items += 1;
+        let trie = &tries[current.trie_index];
+        let node = trie.node(current.node);
+        if let Some((partition_index, required_groups)) = current.continuation_filter
+            && continuation_partitions[partition_index].subtree_groups(current.node)
+                & required_groups
+                == 0
+        {
+            continue;
+        }
+        let subtree_action = raw_self_loop_subtree(
+            state.constraint,
+            trie,
+            current.node,
+            current.tokenizer_state,
+            &current.gss,
+            &current.exclusions,
+            initial_tsid,
+            &mut self_loop_cache,
+            &mut traversal_cache,
+        );
+        if matches!(subtree_action, RawSelfLoopSubtree::MarkAllTokens) {
+            subtree_marks += 1;
+            subtree_mark_tokens += trie.subtree_tokens(current.node).len();
+            mark_subtree_tokens(state.constraint, trie, current.node, buf);
+            continue;
+        }
+
+        let token_is_required = current.continuation_filter.is_none_or(
+            |(partition_index, required_groups)| {
+                node.token_id
+                    .and_then(|token_id| {
+                        continuation_partitions[partition_index].token_group(token_id)
+                    })
+                    .is_some_and(|group| required_groups & (1u64 << group) != 0)
+            },
+        );
+        if token_is_required
+            && node.token_id.is_some()
             && (current.tokenizer_state == initial_tsid
-                || token_boundary_allowed(
+                || token_boundary_allowed_cached(
                     state.constraint,
                     current.tokenizer_state,
                     &current.gss,
+                    &mut traversal_cache,
                 ))
         {
             let canonical_token_id = node.token_id.expect("token leaf checked");
@@ -181,18 +523,31 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
             }
         }
 
-        for edge in vocab.trie.children(current.node) {
-            let segment = vocab.trie.edge_bytes(edge);
+        if matches!(subtree_action, RawSelfLoopSubtree::MarkCurrentNodeOnly) {
+            continue;
+        }
+
+        for edge in trie.children(current.node) {
+            if let Some((partition_index, required_groups)) = current.continuation_filter
+                && continuation_partitions[partition_index].subtree_groups(edge.child)
+                    & required_groups
+                    == 0
+            {
+                continue;
+            }
+            trie_edges += 1;
+            let segment = trie.edge_bytes(edge);
             let Some(segment_exclusions) =
                 advance_exclusions(state.constraint, segment, &current.exclusions)
             else {
                 continue;
             };
 
-            let mut segment_queue = VecDeque::new();
-            segment_queue.push_back((0usize, current.tokenizer_state, current.gss.clone()));
+            segment_stack.clear();
+            segment_stack.push((0usize, current.tokenizer_state, current.gss.clone()));
 
-            while let Some((position, tokenizer_state, gss)) = segment_queue.pop_front() {
+            while let Some((position, tokenizer_state, gss)) = segment_stack.pop() {
+                lexer_executions += 1;
                 let execution = state
                     .constraint
                     .tokenizer
@@ -200,7 +555,12 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
 
                 for matched in &execution.matches {
                     debug_assert!(matched.width > 0);
-                    let Some(advanced_parser) = parser_child(state.constraint, &gss, matched.id)
+                    let Some(advanced_parser) = parser_child_cached(
+                        state.constraint,
+                        &gss,
+                        matched.id,
+                        &mut traversal_cache,
+                    )
                     else {
                         continue;
                     };
@@ -212,22 +572,34 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                             exclusions = with_excluded_terminal(&exclusions, end_state, matched.id);
                         }
                         traversal.push(TraverseWork {
+                            trie_index: current.trie_index,
                             node: edge.child,
                             tokenizer_state: initial_tsid,
                             gss: advanced_parser,
                             exclusions,
+                            continuation_filter: current.continuation_filter,
                         });
                     } else {
-                        segment_queue.push_back((next_position, initial_tsid, advanced_parser));
+                        segment_stack.push((next_position, initial_tsid, advanced_parser));
                     }
                 }
 
                 for &end_state in &execution.end_state {
+                    if !lexer_state_relevant_cached(
+                        state.constraint,
+                        end_state,
+                        &gss,
+                        &mut traversal_cache,
+                    ) {
+                        continue;
+                    }
                     traversal.push(TraverseWork {
+                        trie_index: current.trie_index,
                         node: edge.child,
                         tokenizer_state: end_state,
                         gss: gss.clone(),
                         exclusions: segment_exclusions.clone(),
+                        continuation_filter: current.continuation_filter,
                     });
                 }
             }
@@ -235,6 +607,25 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
     }
 
     update_eos_mask(state, buf);
+    vocab.cache_mask(cache_key, buf);
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][dynamic_mask] generation={} cache_hit=false key_ms={:.3} work_items={} trie_edges={} lexer_execs={} subtree_marks={} subtree_tokens={} continuation_admitted={} continuation_traversed={} boundary_cache={} relevant_cache={} child_cache={} total_ms={:.3}",
+            state.generation,
+            key_ms,
+            work_items,
+            trie_edges,
+            lexer_executions,
+            subtree_marks,
+            subtree_mark_tokens,
+            continuation_groups_admitted,
+            continuation_groups_traversed,
+            traversal_cache.boundary.len(),
+            traversal_cache.lexer_relevant.len(),
+            traversal_cache.parser_children.len(),
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
 }
 
 #[cfg(test)]

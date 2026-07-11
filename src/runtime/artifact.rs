@@ -1,14 +1,15 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use rayon::prelude::*;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::table::GLRTable;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
+use crate::ds::u8set::U8Set;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 
@@ -39,6 +40,12 @@ pub(crate) struct DynamicMaskTrieNode {
     pub(crate) token_id: Option<u32>,
     pub(crate) first_child: u32,
     pub(crate) child_len: u32,
+    /// Canonical token ids below this node occupy one contiguous range in
+    /// `DynamicMaskTrie::subtree_tokens`.
+    pub(crate) subtree_token_start: u32,
+    pub(crate) subtree_token_end: u32,
+    /// Union of every byte on every edge strictly below this node.
+    pub(crate) subtree_bytes: [u64; 4],
 }
 
 #[derive(Debug, Clone, Default)]
@@ -53,6 +60,7 @@ pub(crate) struct DynamicMaskTrie {
     pub(crate) nodes: Vec<DynamicMaskTrieNode>,
     pub(crate) edges: Vec<DynamicMaskTrieEdge>,
     edge_bytes: Vec<u8>,
+    subtree_tokens: Vec<u32>,
 }
 
 impl DynamicMaskTrie {
@@ -61,6 +69,7 @@ impl DynamicMaskTrie {
             nodes: vec![DynamicMaskTrieNode::default()],
             edges: Vec::new(),
             edge_bytes: Vec::new(),
+            subtree_tokens: Vec::new(),
         }
     }
 
@@ -84,6 +93,18 @@ impl DynamicMaskTrie {
         &self.edge_bytes[start..end]
     }
 
+    #[inline]
+    pub(crate) fn subtree_tokens(&self, node: u32) -> &[u32] {
+        let node = self.node(node);
+        &self.subtree_tokens
+            [node.subtree_token_start as usize..node.subtree_token_end as usize]
+    }
+
+    #[inline]
+    pub(crate) fn subtree_bytes(&self, node: u32) -> [u64; 4] {
+        self.node(node).subtree_bytes
+    }
+
     pub(crate) fn push_edge_bytes(&mut self, bytes: &[u8]) -> (u32, u32) {
         let start = self.edge_bytes.len() as u32;
         self.edge_bytes.extend_from_slice(bytes);
@@ -95,12 +116,55 @@ impl DynamicMaskTrie {
         self.edge_bytes.len()
     }
 
+    fn collect_subtree_metadata(&mut self, node_id: u32) -> [u64; 4] {
+        let start = self.subtree_tokens.len() as u32;
+        if let Some(token_id) = self.nodes[node_id as usize].token_id {
+            self.subtree_tokens.push(token_id);
+        }
+
+        let first_child = self.nodes[node_id as usize].first_child as usize;
+        let child_len = self.nodes[node_id as usize].child_len as usize;
+        let mut subtree_bytes = [0u64; 4];
+        for edge_index in first_child..first_child + child_len {
+            // Copy the compact edge fields before recursing so no borrow of
+            // `self.edges` remains live across the mutable recursive call.
+            let edge = self.edges[edge_index].clone();
+            let byte_start = edge.byte_start as usize;
+            let byte_end = byte_start + edge.byte_len as usize;
+            for &byte in &self.edge_bytes[byte_start..byte_end] {
+                subtree_bytes[byte as usize >> 6] |= 1u64 << (byte & 63);
+            }
+            let child_bytes = self.collect_subtree_metadata(edge.child);
+            for (target, child) in subtree_bytes.iter_mut().zip(child_bytes) {
+                *target |= child;
+            }
+        }
+
+        let end = self.subtree_tokens.len() as u32;
+        let node = &mut self.nodes[node_id as usize];
+        node.subtree_token_start = start;
+        node.subtree_token_end = end;
+        node.subtree_bytes = subtree_bytes;
+        subtree_bytes
+    }
+
+    pub(crate) fn finalize_subtree_metadata(&mut self) {
+        self.subtree_tokens.clear();
+        self.subtree_tokens.reserve(self.nodes.len());
+        if !self.nodes.is_empty() {
+            self.collect_subtree_metadata(0);
+        }
+    }
+
     fn flatten_vocab_node(node: &VocabPrefixTreeNode, output: &mut Self) -> u32 {
         let node_id = output.nodes.len() as u32;
         output.nodes.push(DynamicMaskTrieNode {
             token_id: node.has_token().then_some(node.token_id() as u32),
             first_child: 0,
             child_len: 0,
+            subtree_token_start: 0,
+            subtree_token_end: 0,
+            subtree_bytes: [0; 4],
         });
 
         let children = node.children();
@@ -133,9 +197,11 @@ impl DynamicMaskTrie {
             nodes: Vec::new(),
             edges: Vec::new(),
             edge_bytes: Vec::new(),
+            subtree_tokens: Vec::new(),
         };
         let root = Self::flatten_vocab_node(node, &mut output);
         debug_assert_eq!(root, 0);
+        output.finalize_subtree_metadata();
         output
     }
 
@@ -169,11 +235,15 @@ impl DynamicMaskTrie {
             nodes: Vec::with_capacity(node_capacity),
             edges: Vec::with_capacity(edge_capacity),
             edge_bytes: Vec::with_capacity(byte_capacity),
+            subtree_tokens: Vec::with_capacity(node_capacity),
         };
         output.nodes.push(DynamicMaskTrieNode {
             token_id: root.has_token().then_some(root.token_id() as u32),
             first_child: 0,
             child_len: root_children.len() as u32,
+            subtree_token_start: 0,
+            subtree_token_end: 0,
+            subtree_bytes: [0; 4],
         });
         output
             .edges
@@ -203,6 +273,7 @@ impl DynamicMaskTrie {
             };
         }
 
+        output.finalize_subtree_metadata();
         output
     }
 }
@@ -225,6 +296,54 @@ pub(crate) enum DynamicMaskAliasStore {
     Packed(Arc<Vec<Option<PackedDynamicMaskTokenAliases>>>),
 }
 
+/// Whole-token no-finalization outcomes for one tokenizer residual. Tokens are
+/// grouped by the exact set of live tokenizer states reachable after consuming
+/// the token without committing a terminal. At runtime an admissible group can
+/// be ORed into the mask in one dense operation; only inadmissible groups need
+/// the full terminal-commit traversal.
+#[derive(Debug)]
+pub(crate) struct DynamicContinuationGroup {
+    pub(crate) end_states: Box<[u32]>,
+    pub(crate) mask: Box<[u32]>,
+    pub(crate) token_count: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct DynamicContinuationPartition {
+    pub(crate) groups: Box<[DynamicContinuationGroup]>,
+    token_groups: Box<[u16]>,
+    subtree_groups: Box<[u64]>,
+}
+
+impl DynamicContinuationPartition {
+    #[inline]
+    pub(crate) fn token_group(&self, token_id: u32) -> Option<usize> {
+        self.token_groups
+            .get(token_id as usize)
+            .copied()
+            .filter(|&group| group != u16::MAX)
+            .map(usize::from)
+    }
+
+    #[inline]
+    pub(crate) fn subtree_groups(&self, node: u32) -> u64 {
+        self.subtree_groups[node as usize]
+    }
+}
+
+#[derive(Debug)]
+struct DynamicMaskCacheEntry {
+    state: DynamicMaskStateKey,
+    mask: Arc<[u32]>,
+}
+
+/// Canonical semantic snapshot of a dynamic-mask residual. Flattening the GSS
+/// deliberately removes representation-only Arc identities and accumulator
+/// node organization, so equivalent residuals reached after different token
+/// commits share one exact cached mask.
+pub(crate) type DynamicMaskStateKey =
+    Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<TerminalID>)>)>)>;
+
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicMaskVocabSource {
     pub(crate) trie: Arc<VocabPrefixTree>,
@@ -238,6 +357,9 @@ pub(crate) struct DynamicMaskVocab {
     token_aliases: DynamicMaskAliasStore,
     pending_source: Option<DynamicMaskVocabSource>,
     initialized: bool,
+    continuation_partitions:
+        Arc<Mutex<FxHashMap<u32, Arc<DynamicContinuationPartition>>>>,
+    mask_cache: Arc<Mutex<Vec<DynamicMaskCacheEntry>>>,
 }
 
 impl DynamicMaskVocab {
@@ -254,6 +376,8 @@ impl DynamicMaskVocab {
             token_aliases: DynamicMaskAliasStore::Packed(Arc::new(Vec::new())),
             pending_source: Some(source),
             initialized: false,
+            continuation_partitions: Arc::new(Mutex::new(FxHashMap::default())),
+            mask_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -266,6 +390,8 @@ impl DynamicMaskVocab {
             token_aliases: DynamicMaskAliasStore::Packed(token_aliases),
             pending_source: None,
             initialized: true,
+            continuation_partitions: Arc::new(Mutex::new(FxHashMap::default())),
+            mask_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -301,6 +427,262 @@ impl DynamicMaskVocab {
             },
         }
     }
+
+    #[inline]
+    fn set_alias_bits(&self, canonical_token_id: u32, mask: &mut [u32]) -> usize {
+        let Some(token_ids) = self.token_ids(canonical_token_id) else {
+            return 0;
+        };
+        for &token_id in token_ids {
+            let word = token_id as usize / 32;
+            let bit = token_id % 32;
+            if let Some(slot) = mask.get_mut(word) {
+                *slot |= 1u32 << bit;
+            }
+        }
+        token_ids.len()
+    }
+
+    fn collect_canonical_token_entries(
+        &self,
+        node_id: u32,
+        prefix: &mut Vec<u8>,
+        entries: &mut Vec<(u32, Box<[u8]>)>,
+    ) {
+        let node = self.trie.node(node_id);
+        if let Some(token_id) = node.token_id {
+            entries.push((token_id, prefix.clone().into_boxed_slice()));
+        }
+        for edge in self.trie.children(node_id) {
+            let old_len = prefix.len();
+            prefix.extend_from_slice(self.trie.edge_bytes(edge));
+            self.collect_canonical_token_entries(edge.child, prefix, entries);
+            prefix.truncate(old_len);
+        }
+    }
+
+    fn canonical_token_entries(&self) -> Vec<(u32, Box<[u8]>)> {
+        let mut entries = Vec::with_capacity(self.trie.subtree_tokens(0).len());
+        self.collect_canonical_token_entries(0, &mut Vec::new(), &mut entries);
+        entries
+    }
+
+    fn fill_continuation_subtree_groups(
+        &self,
+        node_id: u32,
+        token_groups: &[u16],
+        subtree_groups: &mut [u64],
+    ) -> u64 {
+        let node = self.trie.node(node_id);
+        let mut groups = node
+            .token_id
+            .and_then(|token_id| token_groups.get(token_id as usize).copied())
+            .filter(|&group| group != u16::MAX)
+            .map_or(0, |group| 1u64 << group);
+        for edge in self.trie.children(node_id) {
+            groups |= self.fill_continuation_subtree_groups(
+                edge.child,
+                token_groups,
+                subtree_groups,
+            );
+        }
+        subtree_groups[node_id as usize] = groups;
+        groups
+    }
+
+    fn build_continuation_partition(
+        &self,
+        tokenizer: &Tokenizer,
+        source_state: u32,
+        mask_words: usize,
+        entries: &[(u32, Box<[u8]>)],
+    ) -> Option<DynamicContinuationPartition> {
+        let mut by_end_states = BTreeMap::<Vec<u32>, Vec<usize>>::new();
+        for (entry_index, (_, bytes)) in entries.iter().enumerate() {
+            let mut end_states = tokenizer
+                .execute_from_state_end_only(bytes, source_state)
+                .into_iter()
+                .filter(|&state| !tokenizer.is_end(state))
+                .collect::<Vec<_>>();
+            end_states.sort_unstable();
+            end_states.dedup();
+            by_end_states
+                .entry(end_states)
+                .or_default()
+                .push(entry_index);
+        }
+
+        if by_end_states.len() > 64 {
+            return None;
+        }
+
+        let max_token_id = entries
+            .iter()
+            .map(|(token_id, _)| *token_id as usize)
+            .max()
+            .unwrap_or(0);
+        let mut token_groups = vec![u16::MAX; max_token_id.saturating_add(1)];
+        let mut groups = Vec::with_capacity(by_end_states.len());
+        for (group_id, (end_states, entry_indices)) in by_end_states.into_iter().enumerate() {
+            let mut mask = vec![0u32; mask_words];
+            let mut token_count = 0usize;
+            for entry_index in entry_indices {
+                let canonical_token_id = entries[entry_index].0;
+                token_count += self.set_alias_bits(canonical_token_id, &mut mask);
+                token_groups[canonical_token_id as usize] = group_id as u16;
+            }
+            groups.push(DynamicContinuationGroup {
+                end_states: end_states.into_boxed_slice(),
+                mask: mask.into_boxed_slice(),
+                token_count,
+            });
+        }
+        let mut subtree_groups = vec![0u64; self.trie.nodes.len()];
+        if !self.trie.nodes.is_empty() {
+            self.fill_continuation_subtree_groups(0, &token_groups, &mut subtree_groups);
+        }
+        Some(DynamicContinuationPartition {
+            groups: groups.into_boxed_slice(),
+            token_groups: token_groups.into_boxed_slice(),
+            subtree_groups: subtree_groups.into_boxed_slice(),
+        })
+    }
+
+    pub(crate) fn cached_continuation_partition(
+        &self,
+        source_state: u32,
+    ) -> Option<Arc<DynamicContinuationPartition>> {
+        self.continuation_partitions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&source_state)
+            .cloned()
+    }
+
+    pub(crate) fn prebuild_continuation_partitions(
+        &self,
+        tokenizer: &Tokenizer,
+        mask_words: usize,
+    ) {
+        let mut broad_loop_states = (0..tokenizer.num_states())
+            .map(|state| (state, tokenizer.self_loop_bytes(state).len()))
+            .filter(|&(_, width)| width >= 32)
+            .collect::<Vec<_>>();
+        let Some(max_loop_width) = broad_loop_states.iter().map(|&(_, width)| width).max() else {
+            return;
+        };
+        broad_loop_states.retain(|&(_, width)| width == max_loop_width);
+        broad_loop_states.sort_unstable_by_key(|&(state, _)| state);
+
+        let broad_targets = broad_loop_states
+            .iter()
+            .map(|&(state, _)| state)
+            .collect::<FxHashSet<_>>();
+        let mut entry_sources = Vec::<(u32, usize)>::new();
+        for source_state in 0..tokenizer.num_states() {
+            if broad_targets.contains(&source_state) {
+                continue;
+            }
+            let mut covered = U8Set::empty();
+            for byte in 0..=u8::MAX {
+                let execution = tokenizer.execute_from_state_end_only(&[byte], source_state);
+                if execution
+                    .iter()
+                    .any(|end_state| broad_targets.contains(end_state))
+                {
+                    covered.insert(byte);
+                }
+            }
+            if covered.len() >= 32 {
+                entry_sources.push((source_state, covered.len()));
+            }
+        }
+        entry_sources.sort_unstable_by_key(|&(state, width)| (state, std::cmp::Reverse(width)));
+        entry_sources.truncate(1);
+
+        let mut source_states = broad_loop_states
+            .into_iter()
+            .map(|(state, _)| state)
+            .collect::<Vec<_>>();
+        source_states.extend(entry_sources.iter().map(|&(state, _)| state));
+        source_states.sort_unstable();
+        source_states.dedup();
+        source_states.truncate(4);
+
+        let profile = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some();
+        if profile {
+            eprintln!(
+                "[glrmask/profile][dynamic_continuation_prebuild] sources={:?}",
+                source_states
+            );
+        }
+        let entries = Arc::new(self.canonical_token_entries());
+        let build = |source_state: &u32| {
+            let started = profile.then(std::time::Instant::now);
+            let partition = self
+                .build_continuation_partition(tokenizer, *source_state, mask_words, &entries)
+                .map(Arc::new);
+            if let Some(started) = started {
+                if let Some(partition) = &partition {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_continuation_partition] source={} groups={} tokens={} build_ms={:.3}",
+                        source_state,
+                        partition.groups.len(),
+                        partition.groups.iter().map(|group| group.token_count).sum::<usize>(),
+                        started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+            }
+            partition.map(|partition| (*source_state, partition))
+        };
+        let built = if rayon::current_num_threads() == 1 || source_states.len() < 2 {
+            source_states.iter().filter_map(build).collect::<Vec<_>>()
+        } else {
+            source_states.par_iter().filter_map(build).collect::<Vec<_>>()
+        };
+        let mut partitions = self
+            .continuation_partitions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        partitions.extend(built);
+    }
+
+    pub(crate) fn copy_cached_mask(
+        &self,
+        state: &DynamicMaskStateKey,
+        buf: &mut [u32],
+    ) -> bool {
+        let cache = self
+            .mask_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(entry) = cache.iter().rev().find(|entry| entry.state == *state) else {
+            return false;
+        };
+        if entry.mask.len() != buf.len() {
+            return false;
+        }
+        buf.copy_from_slice(&entry.mask);
+        true
+    }
+
+    pub(crate) fn cache_mask(&self, state: DynamicMaskStateKey, mask: &[u32]) {
+        const MAX_DYNAMIC_MASK_CACHE_ENTRIES: usize = 64;
+        let mut cache = self
+            .mask_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.iter().any(|entry| entry.state == state) {
+            return;
+        }
+        if cache.len() == MAX_DYNAMIC_MASK_CACHE_ENTRIES {
+            cache.remove(0);
+        }
+        cache.push(DynamicMaskCacheEntry {
+            state,
+            mask: Arc::from(mask),
+        });
+    }
 }
 
 impl Default for DynamicMaskVocab {
@@ -310,6 +692,8 @@ impl Default for DynamicMaskVocab {
             token_aliases: DynamicMaskAliasStore::Packed(Arc::new(Vec::new())),
             pending_source: None,
             initialized: false,
+            continuation_partitions: Arc::new(Mutex::new(FxHashMap::default())),
+            mask_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
