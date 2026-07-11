@@ -11,7 +11,7 @@ use crate::ds::{bitset::BitSet, u8set::U8Set};
 
 use super::ast::Expr;
 use super::tokenizer::Tokenizer;
-use super::dfa::{DEAD, DFA};
+use super::dfa::DFA;
 use super::nfa::NFA;
 
 type ProductStateTuple = SmallVec<[(u32, u32); 12]>;
@@ -1644,14 +1644,6 @@ fn adaptive_lexer_growth_percent() -> usize {
         .unwrap_or(100)
 }
 
-fn adaptive_lexer_max_trials() -> usize {
-    std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_TRIALS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(2)
-}
-
 fn compile_terminal_ids(
     exprs: &[Expr],
     visible_labels: Option<&[String]>,
@@ -1699,30 +1691,26 @@ fn compile_partition_components(
         .collect()
 }
 
-fn product_union_metadata(
-    left: &DFA,
-    left_state: u32,
-    right: &DFA,
-    right_state: u32,
+fn lexer_component_product_metadata(
+    components: &[LexerComponent],
+    group_offsets: &[usize],
+    state_tuple: &ProductStateTuple,
+    total_groups: usize,
 ) -> (BitSet, BitSet) {
-    let total_groups = left.num_groups() + right.num_groups();
     let mut finalizers = BitSet::new(total_groups);
     let mut futures = BitSet::new(total_groups);
 
-    if left_state != DEAD {
-        for group in left.finalizers(left_state).iter() {
-            finalizers.set(group);
-        }
-        for group in left.possible_future_group_ids(left_state).iter() {
-            futures.set(group);
-        }
-    }
-    if right_state != DEAD {
-        let offset = left.num_groups();
-        for group in right.finalizers(right_state).iter() {
+    for &(component_id, component_state) in state_tuple {
+        let component_index = component_id as usize;
+        let component = &components[component_index].dfa;
+        let offset = group_offsets[component_index];
+        for group in component.finalizers(component_state).iter() {
             finalizers.set(offset + group);
         }
-        for group in right.possible_future_group_ids(right_state).iter() {
+        for group in component
+            .possible_future_group_ids(component_state)
+            .iter()
+        {
             futures.set(offset + group);
         }
     }
@@ -1730,78 +1718,214 @@ fn product_union_metadata(
     (finalizers, futures)
 }
 
-/// Jointly determinize two already-deterministic lexer components. This is an
-/// incremental subset construction over a pair of component states. Unlike
-/// recompiling the source regexes for every trial, it reuses all earlier work
-/// and can stop before allocating the first state beyond `state_limit`.
-fn try_product_union_dfas(left: &DFA, right: &DFA, state_limit: usize) -> Option<DFA> {
+fn compute_lexer_component_equivalence_classes(
+    components: &[LexerComponent],
+) -> (Vec<u8>, Vec<Vec<u8>>) {
+    let mut partitions = vec![U8Set::all()];
+    let mut seen_sets = FxHashSet::default();
+
+    for component in components {
+        for state in component.dfa.states() {
+            let mut bytes_by_target = FxHashMap::<u32, U8Set>::default();
+            for (byte, &target) in state.transitions.iter() {
+                bytes_by_target
+                    .entry(target)
+                    .and_modify(|set| {
+                        set.insert(byte);
+                    })
+                    .or_insert_with(|| U8Set::single(byte));
+            }
+            for byte_set in bytes_by_target.into_values() {
+                if seen_sets.insert(byte_set) {
+                    partitions = refine_u8_partitions(partitions, byte_set);
+                }
+            }
+        }
+    }
+
+    let mut class_map = vec![0u8; 256];
+    let mut class_members = vec![Vec::new(); partitions.len()];
+    for (class_id, partition) in partitions.iter().enumerate() {
+        for byte in partition.iter() {
+            class_map[byte as usize] = class_id as u8;
+            class_members[class_id].push(byte);
+        }
+    }
+    (class_map, class_members)
+}
+
+/// Attempt one exact determinization of the final union of independently
+/// compiled lexer partitions. The sparse product tuple contains only component
+/// states still live after the consumed bytes. Construction stops before
+/// allocating the first state beyond `state_limit`; callers can then preserve
+/// the original epsilon-NFA unchanged.
+fn try_product_union_components(
+    components: &[LexerComponent],
+    state_limit: usize,
+) -> Option<DFA> {
     assert!(state_limit > 0, "adaptive lexer state limit must be positive");
-    debug_assert!(!left.has_epsilon_transitions());
-    debug_assert!(!right.has_epsilon_transitions());
+    debug_assert!(components
+        .iter()
+        .all(|component| !component.dfa.has_epsilon_transitions()));
+
+    let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let setup_started_at = Instant::now();
+    let total_groups = components
+        .iter()
+        .map(|component| component.dfa.num_groups())
+        .sum::<usize>();
+    let mut group_offsets = Vec::with_capacity(components.len());
+    let mut group_offset = 0usize;
+    for component in components {
+        group_offsets.push(group_offset);
+        group_offset += component.dfa.num_groups();
+    }
+    let component_dead_states = components
+        .iter()
+        .map(|component| explicit_dead_sink_state(&component.dfa))
+        .collect::<Vec<_>>();
+    let (class_map, class_members) = compute_lexer_component_equivalence_classes(components);
+    let component_class_transitions = components
+        .iter()
+        .map(|component| build_product_class_transitions_for_dfa(&component.dfa, &class_map))
+        .collect::<Vec<_>>();
+    let setup_ms = setup_started_at.elapsed().as_secs_f64() * 1000.0;
+    let num_classes = class_members.len();
 
     let mut combined = DFA::new(1);
-    combined.ensure_group_capacity(left.num_groups() + right.num_groups());
-    for group in 0..left.num_groups() {
-        combined.set_group_u8set(group as u32, *left.group_id_to_u8set(group as u32));
-    }
-    for group in 0..right.num_groups() {
-        combined.set_group_u8set(
-            (left.num_groups() + group) as u32,
-            *right.group_id_to_u8set(group as u32),
-        );
+    combined.ensure_group_capacity(total_groups);
+    for (component_index, component) in components.iter().enumerate() {
+        let offset = group_offsets[component_index];
+        for local_group in 0..component.dfa.num_groups() {
+            combined.set_group_u8set(
+                (offset + local_group) as u32,
+                *component.dfa.group_id_to_u8set(local_group as u32),
+            );
+        }
     }
 
-    let start = (0u32, 0u32);
-    let (finalizers, futures) = product_union_metadata(left, start.0, right, start.1);
+    let mut start = ProductStateTuple::with_capacity(components.len());
+    for component_id in 0..components.len() {
+        start.push((component_id as u32, 0));
+    }
+    let (finalizers, futures) =
+        lexer_component_product_metadata(components, &group_offsets, &start, total_groups);
     combined.overwrite_state_metadata(0, finalizers, futures);
 
-    let mut state_map = FxHashMap::<(u32, u32), u32>::default();
-    state_map.insert(start, 0);
+    let mut state_map = FxHashMap::<ProductStateTuple, u32>::default();
+    state_map.insert(start.clone(), 0);
     let mut worklist = VecDeque::from([(0u32, start)]);
+    let mut pending_class_transitions = vec![Vec::<(u8, u32)>::new()];
+    let mut class_buffers = (0..num_classes)
+        .map(|_| ProductStateTuple::new())
+        .collect::<Vec<_>>();
+    let mut class_active = vec![false; num_classes];
+    let mut used_classes = Vec::<usize>::new();
 
-    while let Some((combined_state, (left_state, right_state))) = worklist.pop_front() {
-        let mut transitions = Vec::new();
-        for byte in 0u8..=u8::MAX {
-            let left_target = if left_state == DEAD {
-                DEAD
-            } else {
-                left.states()[left_state as usize]
-                    .transitions
-                    .get(byte)
-                    .copied()
-                    .unwrap_or(DEAD)
-            };
-            let right_target = if right_state == DEAD {
-                DEAD
-            } else {
-                right.states()[right_state as usize]
-                    .transitions
-                    .get(byte)
-                    .copied()
-                    .unwrap_or(DEAD)
-            };
-            if left_target == DEAD && right_target == DEAD {
-                continue;
+    let state_expand_started_at = Instant::now();
+    while let Some((combined_state, state_tuple)) = worklist.pop_front() {
+        for &(component_id, component_state) in &state_tuple {
+            let component_index = component_id as usize;
+            for &(class_id, target) in
+                &component_class_transitions[component_index][component_state as usize]
+            {
+                let class_index = class_id as usize;
+                if !class_active[class_index] {
+                    class_active[class_index] = true;
+                    used_classes.push(class_index);
+                }
+                if component_dead_states[component_index] == Some(target) {
+                    continue;
+                }
+                class_buffers[class_index].push((component_id, target));
             }
+        }
 
-            let key = (left_target, right_target);
-            let target = if let Some(&existing) = state_map.get(&key) {
+        let mut transitions = Vec::with_capacity(used_classes.len());
+        for &class_index in &used_classes {
+            let next_tuple = &class_buffers[class_index];
+            let target = if let Some(&existing) = state_map.get(next_tuple) {
                 existing
             } else {
                 if combined.num_states() >= state_limit {
                     return None;
                 }
                 let new_state = combined.add_state();
-                let (finalizers, futures) =
-                    product_union_metadata(left, left_target, right, right_target);
+                let (finalizers, futures) = lexer_component_product_metadata(
+                    components,
+                    &group_offsets,
+                    next_tuple,
+                    total_groups,
+                );
                 combined.overwrite_state_metadata(new_state, finalizers, futures);
-                state_map.insert(key, new_state);
-                worklist.push_back((new_state, key));
+                state_map.insert(next_tuple.clone(), new_state);
+                pending_class_transitions.push(Vec::new());
+                worklist.push_back((new_state, next_tuple.clone()));
                 new_state
             };
-            transitions.push((byte, target));
+            transitions.push((class_index as u8, target));
+            class_buffers[class_index].clear();
+            class_active[class_index] = false;
         }
-        combined.set_transitions_from_sorted_entries(combined_state, transitions);
+        used_classes.clear();
+        pending_class_transitions[combined_state as usize] = transitions;
+    }
+    let state_expand_ms = state_expand_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let byte_expand_started_at = Instant::now();
+    let expanded_transitions: Vec<crate::ds::char_transitions::CharTransitions<u32>> =
+        pending_class_transitions
+            .into_par_iter()
+            .map(|class_transitions| {
+                let byte_capacity = class_transitions
+                    .iter()
+                    .map(|(class_id, _)| class_members[*class_id as usize].len())
+                    .sum::<usize>();
+                const DENSE_BYTE_EXPANSION_THRESHOLD: usize = 96;
+                let transitions = if byte_capacity >= DENSE_BYTE_EXPANSION_THRESHOLD {
+                    let mut target_by_byte = [u32::MAX; 256];
+                    for (class_id, target) in class_transitions {
+                        for &byte in &class_members[class_id as usize] {
+                            target_by_byte[byte as usize] = target;
+                        }
+                    }
+                    target_by_byte
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(byte, target)| {
+                            (target != u32::MAX).then_some((byte as u8, target))
+                        })
+                        .collect()
+                } else {
+                    let mut transitions = Vec::with_capacity(byte_capacity);
+                    for (class_id, target) in class_transitions {
+                        for &byte in &class_members[class_id as usize] {
+                            transitions.push((byte, target));
+                        }
+                    }
+                    if transitions.len() > 1 {
+                        transitions.sort_unstable_by_key(|entry| entry.0);
+                    }
+                    transitions
+                };
+                crate::ds::char_transitions::CharTransitions::from_sorted_entries(transitions)
+            })
+            .collect();
+    for (state, transitions) in combined.states_mut().iter_mut().zip(expanded_transitions) {
+        state.transitions = transitions;
+    }
+    let byte_expand_ms = byte_expand_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if profile {
+        eprintln!(
+            "[glrmask/profile][tokenizer] adaptive_product states={} classes={} setup_ms={:.3} state_expand_ms={:.3} byte_expand_ms={:.3}",
+            combined.num_states(),
+            num_classes,
+            setup_ms,
+            state_expand_ms,
+            byte_expand_ms,
+        );
     }
 
     Some(combined)
@@ -1809,7 +1933,6 @@ fn try_product_union_dfas(left: &DFA, right: &DFA, state_limit: usize) -> Option
 
 fn adaptively_determinize_components(
     inputs: Vec<LexerComponent>,
-    max_trials: usize,
     state_limit: usize,
 ) -> Vec<LexerComponent> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some()
@@ -1827,85 +1950,47 @@ fn adaptively_determinize_components(
         .map(|batch| batch.terminal_ids.len())
         .sum::<usize>();
 
-    let mut batches = Vec::<LexerComponent>::new();
-    let mut attempted_merges = 0usize;
-    let mut accepted_merges = 0usize;
-    let mut budget_rejections = 0usize;
-
-    for input in inputs {
-        let mut batch_order = (0..batches.len()).collect::<Vec<_>>();
-        batch_order.sort_unstable_by_key(|&index| (batches[index].dfa.num_states(), index));
-
-        let mut best: Option<(usize, Vec<usize>, DFA)> = None;
-        for batch_index in batch_order.into_iter().take(max_trials) {
-            attempted_merges += 1;
-            let batch = &batches[batch_index];
-            let separate_states = batch
-                .dfa
-                .num_states()
-                .saturating_add(input.dfa.num_states());
-            let growth_limit = separate_states
-                .saturating_mul(growth_percent)
-                .saturating_add(99)
-                / 100;
-            let mut candidate_ids = batch.terminal_ids.clone();
-            candidate_ids.extend(input.terminal_ids.iter().copied());
-
-            let Some(candidate) =
-                try_product_union_dfas(&batch.dfa, &input.dfa, state_limit)
-            else {
-                budget_rejections += 1;
-                continue;
-            };
-            let candidate = candidate.minimize();
-            if candidate.num_states() > growth_limit {
-                budget_rejections += 1;
-                continue;
-            }
-
-            let replace = best.as_ref().is_none_or(|(_, _, best_dfa)| {
-                (candidate.num_states(), dfa_transition_count(&candidate))
-                    < (best_dfa.num_states(), dfa_transition_count(best_dfa))
-            });
-            if replace {
-                best = Some((batch_index, candidate_ids, candidate));
-            }
-        }
-
-        if let Some((batch_index, terminal_ids, dfa)) = best {
-            batches[batch_index] = LexerComponent { terminal_ids, dfa };
-            accepted_merges += 1;
-        } else {
-            batches.push(input);
-        }
-    }
+    let growth_limit = input_states
+        .saturating_mul(growth_percent)
+        .saturating_add(99)
+        / 100;
+    let effective_state_limit = state_limit.min(growth_limit).max(1);
+    let attempt_started_at = Instant::now();
+    let candidate = try_product_union_components(&inputs, effective_state_limit);
+    let attempt_ms = attempt_started_at.elapsed().as_secs_f64() * 1000.0;
+    let accepted = candidate.is_some();
+    let terminal_ids = inputs
+        .iter()
+        .flat_map(|component| component.terminal_ids.iter().copied())
+        .collect::<Vec<_>>();
+    let output_states = candidate
+        .as_ref()
+        .map_or(input_states, DFA::num_states);
+    let output_transitions = candidate.as_ref().map_or(input_transitions, dfa_transition_count);
 
     if profile {
-        let output_states = batches.iter().map(|batch| batch.dfa.num_states()).sum::<usize>();
-        let output_transitions = batches
-            .iter()
-            .map(|batch| dfa_transition_count(&batch.dfa))
-            .sum::<usize>();
         eprintln!(
-            "[glrmask/profile][tokenizer] adaptive_determinize partitions={} terminals={} output_components={} input_states={} output_states={} input_transitions={} output_transitions={} attempted_merges={} accepted_merges={} budget_rejections={} max_states={} max_growth_percent={} max_trials={} total_ms={:.3}",
+            "[glrmask/profile][tokenizer] adaptive_determinize partitions={} terminals={} output_components={} input_states={} output_states={} input_transitions={} output_transitions={} attempted=1 accepted={} max_states={} effective_state_limit={} max_growth_percent={} attempt_ms={:.3} total_ms={:.3}",
             input_batches,
             terminals,
-            batches.len(),
+            if accepted { 1 } else { input_batches },
             input_states,
             output_states,
             input_transitions,
             output_transitions,
-            attempted_merges,
-            accepted_merges,
-            budget_rejections,
+            accepted,
             state_limit,
+            effective_state_limit,
             growth_percent,
-            max_trials,
+            attempt_ms,
             started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
 
-    batches
+    match candidate {
+        Some(dfa) => vec![LexerComponent { terminal_ids, dfa }],
+        None => inputs,
+    }
 }
 
 fn remap_component_groups(
@@ -1977,11 +2062,8 @@ fn compile_terminal_partitions(
     let mut components = compile_partition_components(exprs, visible_labels, partitions);
 
     if adaptive {
-        components = adaptively_determinize_components(
-            components,
-            adaptive_lexer_max_trials(),
-            adaptive_lexer_state_limit(),
-        );
+        components =
+            adaptively_determinize_components(components, adaptive_lexer_state_limit());
     }
 
     if let [component] = components.as_slice() {
@@ -2712,7 +2794,7 @@ mod tests {
         build_regex,
         build_regex_monolithic,
         build_regex_partitioned_with_adaptive,
-        try_product_union_dfas,
+        try_product_union_components,
     };
     use super::compile_product_component_dfa_direct;
     use super::factor_regex_expr;
@@ -3777,10 +3859,13 @@ mod tests {
 
     #[test]
     fn bounded_product_trial_stops_before_cross_pattern_blowup() {
-        let left = build_regex_monolithic(&[parse_regex(r"\w+_(\w_)?\d+", false)]).dfa;
-        let right = build_regex_monolithic(&[parse_regex(r"(\w|-){12}", false)]).dfa;
+        let expressions = vec![
+            parse_regex(r"\w+_(\w_)?\d+", false),
+            parse_regex(r"(\w|-){12}", false),
+        ];
+        let components = super::compile_partition_components(&expressions, None, &[0, 1]);
         assert!(
-            try_product_union_dfas(&left, &right, 32).is_none(),
+            try_product_union_components(&components, 32).is_none(),
             "the bounded trial unexpectedly completed within 32 product states",
         );
     }

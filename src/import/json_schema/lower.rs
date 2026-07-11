@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use regex::escape as regex_escape;
 use serde_json::Value;
 
+use crate::grammar::ast::resolved_named_terminal_exprs;
 use crate::grammar::expr_nfa::ExprNFA;
 use crate::grammar::named_simplify::simplify_named_grammar_expressions;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier};
@@ -314,17 +315,20 @@ impl<'a> Lowerer<'a> {
         }
         let simplify_started_at = profile_enabled.then(std::time::Instant::now);
         simplify_terminal_rules(&mut self.rules);
-        let lexer_partitions =
-            build_json_lexer_partition_classes(&self.rules, &self.terminal_partition_classes);
         let mut grammar = NamedGrammar {
             rules: self.rules,
             start: "start".to_string(),
             ignore: None,
-            lexer_partitions,
+            lexer_partitions: Default::default(),
             lexer_literal_partitions: Default::default(),
             default_lexer_partition: None,
         };
         simplify_named_grammar_expressions(&mut grammar);
+        grammar.lexer_partitions = build_json_lexer_partition_classes(
+            &grammar,
+            &self.terminal_partition_classes,
+        )
+        .map_err(|error| SchemaImportError::new(error.to_string()))?;
         let literals = grammar.emitted_anonymous_literals();
         grammar.set_literal_lexer_partition(JSON_LITERAL_LEXER_PARTITION, literals);
         if let Some(simplify_started_at) = simplify_started_at {
@@ -1152,25 +1156,52 @@ impl<'a> Lowerer<'a> {
 }
 
 fn build_json_lexer_partition_classes(
-    rules: &[NamedRule],
+    grammar: &NamedGrammar,
     terminal_partition_classes: &BTreeMap<String, JsonTerminalPartitionClass>,
-) -> BTreeMap<String, String> {
-    rules
+) -> crate::Result<BTreeMap<String, String>> {
+    let resolved_terminals = resolved_named_terminal_exprs(grammar)?;
+    let mut class_by_terminal_expr = HashMap::new();
+
+    // Terminal lowering deduplicates equal resolved lexer expressions to one
+    // TerminalID. Merge importer provenance on that same identity before
+    // assigning coarse JSON partitions, so generated aliases cannot place one
+    // eventual terminal in two lexer groups.
+    for rule in grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.is_terminal && !rule.is_internal)
+    {
+        let terminal_expr = resolved_terminals
+            .get(&rule.name)
+            .expect("resolved emitting JSON terminal expression");
+        let class = terminal_partition_classes
+            .get(&rule.name)
+            .copied()
+            .unwrap_or(JsonTerminalPartitionClass::Other);
+        class_by_terminal_expr
+            .entry(terminal_expr.clone())
+            .and_modify(|existing: &mut JsonTerminalPartitionClass| {
+                *existing = existing.merge(class);
+            })
+            .or_insert(class);
+    }
+
+    Ok(grammar
+        .rules
         .iter()
         .filter(|rule| rule.is_terminal && !rule.is_internal)
         .map(|rule| {
-            let class = terminal_partition_classes
+            let terminal_expr = resolved_terminals
                 .get(&rule.name)
-                .copied()
-                .unwrap_or(JsonTerminalPartitionClass::Other);
-            let partition = match class {
+                .expect("resolved emitting JSON terminal expression");
+            let partition = match class_by_terminal_expr[terminal_expr] {
                 JsonTerminalPartitionClass::Other => JSON_OTHER_LEXER_PARTITION,
                 JsonTerminalPartitionClass::Literal => JSON_LITERAL_LEXER_PARTITION,
                 JsonTerminalPartitionClass::Pattern => JSON_PATTERN_LEXER_PARTITION,
             };
             (rule.name.clone(), partition.to_string())
         })
-        .collect()
+        .collect())
 }
 
 fn json_literal_satisfies_declared_types(value: &Value, types: Option<&[SchemaType]>) -> bool {
