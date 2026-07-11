@@ -100,8 +100,10 @@ def fill_public_sparse_words_and_internal_ids(
     original_to_internal: list[int],
 ) -> tuple[list[list[int]], list[int]]:
     """Capture production output plus the exact production internal dense mask."""
+    from cfa.adapters.glrmask_internal import object_method
+
     buf.fill(0)
-    fill_and_ids = getattr(state._constraint_state, "mask_game_fill_mask_and_internal_ids", None)
+    fill_and_ids = object_method(state._constraint_state, "mask_game_fill_mask_and_internal_ids")
     if fill_and_ids is not None:
         internal_ids = [int(x) for x in fill_and_ids(buf)]
         return sparse_words_from_buf(buf), internal_ids
@@ -254,7 +256,9 @@ def main() -> int:
             first_example = {"text": examples[0].text, "expected_valid": examples[0].expected_valid}
             problem = _problem_from_spec(spec, first_example)
             state = adapter.build(problem, vocab)
-            internal_to_original, original_to_internal = state._constraint.mask_game_mapping()
+            from cfa.adapters.glrmask_internal import mask_game_mapping
+
+            internal_to_original, original_to_internal = mask_game_mapping(state._constraint)
         except BaseException as exc:
             skipped.append({"problem": problem_id, "reason": f"build failed: {exc}"})
             continue
