@@ -459,7 +459,7 @@ fn build_internal_id_map_from_combined_result(
     }
 }
 
-fn try_analyze_equivalences_with_token_boundary_partition(
+fn try_analyze_equivalences_with_token_position_partition(
     partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -468,12 +468,12 @@ fn try_analyze_equivalences_with_token_boundary_partition(
     _shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     _shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
-    token_boundary_partition: &GlobalTokenPositionStatePartition,
+    token_position_partition: &GlobalTokenPositionStatePartition,
     effective_follows_prepare_ms: f64,
     pre_normalized_disallowed_follows: Option<&[BitSet]>,
 ) -> Option<(InternalIdMap, CombinedEquivalenceProfile)> {
     let active_groups = active_groups?;
-    let seed = token_boundary_partition.as_many_to_one();
+    let seed = token_position_partition.as_many_to_one();
     let num_states = tokenizer.num_states() as usize;
     if seed.original_to_internal.len() != num_states
         || seed.representative_original_ids.is_empty()
@@ -1225,7 +1225,7 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     shared_base_setup_ms: f64,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
-    token_boundary_partition: Option<&GlobalTokenPositionStatePartition>,
+    token_position_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
     analyze_equivalences_impl(
@@ -1242,7 +1242,7 @@ pub(crate) fn analyze_equivalences_with_group_filter(
         shared_base_setup_ms,
         flat_trans,
         initial_state_map,
-        token_boundary_partition,
+        token_position_partition,
         precomputed_raw_observations,
     )
 }
@@ -1265,7 +1265,7 @@ fn analyze_equivalences_impl(
     shared_base_setup_ms: f64,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
-    token_boundary_partition: Option<&GlobalTokenPositionStatePartition>,
+    token_position_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
     if tokenizer.has_epsilon_transitions() {
@@ -1486,8 +1486,8 @@ fn analyze_equivalences_impl(
     let effective_disallowed = token_path_disallowed_follows
         .as_ref()
         .unwrap_or(disallowed_follows);
-    if let Some(token_boundary_partition) = token_boundary_partition {
-        if let Some(result) = try_analyze_equivalences_with_token_boundary_partition(
+    if let Some(token_position_partition) = token_position_partition {
+        if let Some(result) = try_analyze_equivalences_with_token_position_partition(
             partition_label,
             tokenizer,
             vocab,
@@ -1496,7 +1496,7 @@ fn analyze_equivalences_impl(
             shared_vocab_dfa_cache,
             shared_analysis_dfa_cache,
             flat_trans,
-            token_boundary_partition,
+            token_position_partition,
             effective_follows_prepare_ms,
             pre_normalized_disallowed_follows,
         ) {
