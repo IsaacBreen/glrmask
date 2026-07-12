@@ -654,8 +654,10 @@ impl Constraint {
                 started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             let started = profile.then(std::time::Instant::now);
             let weight_token_sets = self.weight_token_set_inventory();
-            let prebuilt_weight_caches = self
-                .compute_direct_sparse_weight_token_buf_masks(&weight_token_sets.final_sets);
+            let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
+                &weight_token_sets.final_sets,
+                &internal_token_buf_masks,
+            );
             let prebuilt_weight_sparse_ms =
                 started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             let started = profile.then(std::time::Instant::now);
@@ -730,8 +732,10 @@ impl Constraint {
                         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
                     let started = profile.then(std::time::Instant::now);
                     let weight_token_sets = self.weight_token_set_inventory();
-                    let prebuilt_weight_caches = self
-                        .compute_direct_sparse_weight_token_buf_masks(&weight_token_sets.final_sets);
+                    let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
+                        &weight_token_sets.final_sets,
+                        &internal_token_buf_masks,
+                    );
                     let prebuilt_weight_sparse_ms = started
                         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
                     let started = profile.then(std::time::Instant::now);
@@ -1144,6 +1148,36 @@ impl Constraint {
         tokens.len() <= limit
     }
 
+    fn direct_sparse_runtime_cost_at_most(
+        tokens: &RangeSetBlaze<u32>,
+        internal_token_buf_masks: &[InternalTokenBufMasks],
+        buf_words: usize,
+        limit: u64,
+    ) -> bool {
+        let heavy_threshold = buf_words / 4;
+        let mut cost = 0u64;
+        for internal_token in tokens.iter() {
+            // The direct path always scans each internal token in the set. In
+            // the worst case every token is active and must also be expanded
+            // into the original-vocabulary mask. Match the production heavy
+            // token choice so this is an upper bound on the actual runtime
+            // output work, not merely on compact internal-token cardinality.
+            cost = cost.saturating_add(1);
+            if let Some(mask) = internal_token_buf_masks.get(internal_token as usize) {
+                let materialization_cost = if mask.len() > heavy_threshold {
+                    buf_words
+                } else {
+                    mask.len()
+                };
+                cost = cost.saturating_add(materialization_cost as u64);
+            }
+            if cost > limit {
+                return false;
+            }
+        }
+        true
+    }
+
     #[inline(always)]
     pub(crate) fn or_weight_token_set_to_buf_if_contained(
         &self,
@@ -1319,7 +1353,8 @@ impl Constraint {
     /// fixed work cap.
     fn compute_direct_sparse_weight_token_buf_masks(
         &self,
-        final_token_sets: &[(usize, &Arc<RangeSetBlaze<u32>>) ],
+        final_token_sets: &[(usize, &Arc<RangeSetBlaze<u32>>)],
+        internal_token_buf_masks: &[InternalTokenBufMasks],
     ) -> DirectSparseWeightBufCaches {
         let buf_words = self.mask_len();
         let direct_sparse = buf_words != 0
@@ -1347,6 +1382,12 @@ impl Constraint {
                          &(key, token_set): &(usize, &Arc<RangeSetBlaze<u32>>)| {
             if direct_sparse
                 && Self::token_set_cardinality_at_most(token_set.as_ref(), sparse_cost_limit)
+                && Self::direct_sparse_runtime_cost_at_most(
+                    token_set.as_ref(),
+                    internal_token_buf_masks,
+                    buf_words,
+                    sparse_cost_limit,
+                )
             {
                 batch.small_cardinality += 1;
                 batch.eligible.push(key);
@@ -2629,6 +2670,30 @@ impl<'a> ConstraintState<'a> {
 mod dense_internal_token_mask_tests {
     use super::*;
     use crate::Vocab;
+
+    #[test]
+    fn direct_sparse_runtime_cost_accounts_for_original_vocab_expansion() {
+        let tokens = RangeSetBlaze::from_iter([0u32..=1]);
+        let cheap_masks = vec![vec![(0, 1)], vec![(1, 1)]];
+        assert!(Constraint::direct_sparse_runtime_cost_at_most(
+            &tokens,
+            &cheap_masks,
+            128,
+            64,
+        ));
+
+        let expanded_masks = vec![
+            (0u16..40).map(|word| (word, 1)).collect(),
+            (40u16..80).map(|word| (word, 1)).collect(),
+        ];
+        assert_eq!(tokens.len(), 2, "compact internal set stays tiny");
+        assert!(!Constraint::direct_sparse_runtime_cost_at_most(
+            &tokens,
+            &expanded_masks,
+            128,
+            64,
+        ));
+    }
 
     #[test]
     fn dense_internal_token_masks_match_reference_expansion() {
