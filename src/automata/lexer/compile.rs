@@ -1439,9 +1439,16 @@ fn compile_single_expr_dfa(expr: &Expr) -> DFA {
 }
 
 fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
-    let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
+    let profile_trace = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TRACE").is_some();
+    let profile_detail = profile_trace
+        || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
     let profile_timing = profile_detail
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    // Product construction compiles many one-group component DFAs internally.
+    // Timing/detail mode should describe the enclosing lexer build, not emit a
+    // line (and take timestamps) for every nested leaf compile. Exhaustive trace
+    // mode remains available when that low-level view is explicitly requested.
+    let profile_plan = profile_trace || (profile_timing && plan.compiled_exprs.len() > 1);
     let profile_started_at = Instant::now();
     let group_set_started_at = Instant::now();
     let group_sets: Vec<U8Set> = plan
@@ -1449,7 +1456,7 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
         .iter()
         .map(|expr| expr_u8set(expr))
         .collect();
-    let group_set_ms = profile_timing
+    let group_set_ms = profile_plan
         .then(|| group_set_started_at.elapsed().as_secs_f64() * 1000.0);
     let used_product_dfa = plan.compiled_exprs.len() > 1;
 
@@ -1464,7 +1471,7 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     } else {
         compile_single_expr_dfa(&plan.compiled_exprs[0])
     };
-    let dfa_build_ms = profile_timing
+    let dfa_build_ms = profile_plan
         .then(|| dfa_build_started_at.elapsed().as_secs_f64() * 1000.0);
 
     let metadata_started_at = Instant::now();
@@ -1472,7 +1479,7 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     for (group_id, set) in group_sets.into_iter().enumerate() {
         dfa.set_group_u8set(group_id as u32, set);
     }
-    let metadata_ms = profile_timing
+    let metadata_ms = profile_plan
         .then(|| metadata_started_at.elapsed().as_secs_f64() * 1000.0);
 
     let group_ops_started_at = Instant::now();
@@ -1486,7 +1493,7 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     if group_ops_changed {
         dfa.recompute_possible_futures();
     }
-    let group_ops_ms = profile_timing
+    let group_ops_ms = profile_plan
         .then(|| group_ops_started_at.elapsed().as_secs_f64() * 1000.0);
 
     let project_started_at = Instant::now();
@@ -1495,11 +1502,11 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     } else {
         dfa
     };
-    let project_ms = profile_timing
+    let project_ms = profile_plan
         .then(|| project_started_at.elapsed().as_secs_f64() * 1000.0);
 
-    let pre_minimize_states = dfa.num_states();
-    let pre_minimize_transitions = dfa_transition_count(&dfa);
+    let pre_minimize_states = profile_plan.then(|| dfa.num_states());
+    let pre_minimize_transitions = profile_plan.then(|| dfa_transition_count(&dfa));
     let force_tokenizer_minimize = std::env::var_os("GLRMASK_FORCE_TOKENIZER_MINIMIZE").is_some();
     let minimize_started_at = Instant::now();
     let final_dfa = if used_product_dfa && !force_tokenizer_minimize {
@@ -1507,31 +1514,27 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     } else {
         dfa.minimize()
     };
-    let minimize_ms = profile_timing
+    let minimize_ms = profile_plan
         .then(|| minimize_started_at.elapsed().as_secs_f64() * 1000.0);
-    let forced_minimized_states = if profile_detail {
-        if used_product_dfa && !force_tokenizer_minimize {
-            Some(final_dfa.minimize().num_states())
+    if profile_detail && profile_plan {
+        let minimized_states = if used_product_dfa && !force_tokenizer_minimize {
+            "not_run".to_string()
         } else {
-            Some(final_dfa.num_states())
-        }
-    } else {
-        None
-    };
-    if profile_detail {
+            final_dfa.num_states().to_string()
+        };
         eprintln!(
-            "[glrmask/profile][tokenizer] combined groups={} visible_groups={} product_dfa={} pre_minimize_states={} pre_minimize_transitions={} final_states={} final_transitions={} forced_minimized_states={}",
+            "[glrmask/profile][tokenizer] combined groups={} visible_groups={} product_dfa={} pre_minimize_states={} pre_minimize_transitions={} final_states={} final_transitions={} minimized_states={}",
             plan.compiled_exprs.len(),
             plan.visible_groups,
             used_product_dfa,
-            pre_minimize_states,
-            pre_minimize_transitions,
+            pre_minimize_states.unwrap_or_default(),
+            pre_minimize_transitions.unwrap_or_default(),
             final_dfa.num_states(),
             dfa_transition_count(&final_dfa),
-            forced_minimized_states.unwrap_or(final_dfa.num_states())
+            minimized_states,
         );
     }
-    if profile_timing {
+    if profile_plan {
         eprintln!(
             "[glrmask/profile][tokenizer] compile_plan groups={} visible_groups={} product_dfa={} group_set_ms={:.3} dfa_build_ms={:.3} metadata_ms={:.3} group_ops_ms={:.3} project_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
             plan.compiled_exprs.len(),
@@ -1692,17 +1695,29 @@ fn compile_partition_components(
     visible_labels: Option<&[String]>,
     partitions: &[u32],
 ) -> Vec<LexerComponent> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let mut grouped = BTreeMap::<u32, Vec<usize>>::new();
     for (terminal, &partition) in partitions.iter().enumerate() {
         grouped.entry(partition).or_default().push(terminal);
     }
 
     grouped
-        .into_values()
+        .into_iter()
         .collect::<Vec<_>>()
         .into_par_iter()
-        .map(|terminal_ids| {
+        .map(|(partition, terminal_ids)| {
+            let started_at = Instant::now();
             let dfa = compile_terminal_ids(exprs, visible_labels, &terminal_ids);
+            if profile {
+                eprintln!(
+                    "[glrmask/profile][tokenizer] partition_compile partition={} terminals={} states={} transitions={} total_ms={:.3}",
+                    partition,
+                    terminal_ids.len(),
+                    dfa.num_states(),
+                    dfa_transition_count(&dfa),
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
             LexerComponent { terminal_ids, dfa }
         })
         .collect()
@@ -2094,6 +2109,8 @@ fn compile_terminal_partitions(
     partitions: &[u32],
     adaptive: bool,
 ) -> DFA {
+    let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let total_started_at = Instant::now();
     assert_eq!(exprs.len(), partitions.len(), "one lexer partition id is required per terminal");
     if let Some(labels) = visible_labels {
         assert_eq!(exprs.len(), labels.len(), "one profile label is required per terminal");
@@ -2110,17 +2127,22 @@ fn compile_terminal_partitions(
     // Every partition is compiled exactly as declared, independently of the
     // adaptive policy. Adaptive determinization is a second, generic step over
     // the disjoint deterministic components of the combined epsilon-NFA.
+    let partition_compile_started_at = Instant::now();
     let mut components = compile_partition_components(exprs, visible_labels, partitions);
+    let partition_compile_ms = partition_compile_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let adaptive_started_at = Instant::now();
     if adaptive {
         components =
             adaptively_determinize_components(components, adaptive_lexer_state_limit());
     }
+    let adaptive_ms = adaptive_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if let [component] = components.as_slice() {
         return remap_component_groups(&component.dfa, &component.terminal_ids, exprs.len());
     }
 
+    let combine_started_at = Instant::now();
     let total_states = 1usize
         + components
             .iter()
@@ -2171,12 +2193,27 @@ fn compile_terminal_partitions(
         }
         offset += component.num_states() as u32;
     }
+    let combine_ms = combine_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let futures_started_at = Instant::now();
     // Components are disjoint below a new epsilon-only root. Their strict
     // possible-future sets remain exact after local->global terminal remapping.
     // The root's strict futures are exactly the union of the component start
     // states' strict futures; no generic epsilon fixpoint is needed.
     combined.set_possible_future_group_ids(0, root_futures);
+    let futures_ms = futures_started_at.elapsed().as_secs_f64() * 1000.0;
+    if profile {
+        eprintln!(
+            "[glrmask/profile][tokenizer] partitioned_build terminals={} partitions={} partition_compile_ms={:.3} adaptive_ms={:.3} combine_ms={:.3} futures_ms={:.3} total_ms={:.3}",
+            exprs.len(),
+            num_partitions,
+            partition_compile_ms,
+            adaptive_ms,
+            combine_ms,
+            futures_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     combined
 }
 
@@ -2422,77 +2459,102 @@ fn compile_product_component(expr: &Expr) -> ProductComponent {
     }
 }
 
-fn compile_product_components(exprs: &[Expr]) -> (Vec<ProductComponent>, usize) {
+#[derive(Debug)]
+struct ProductComponentCompileProfile {
+    first_group_index: usize,
+    uses: usize,
+    compile_ms: f64,
+    states: usize,
+    transitions: usize,
+}
+
+fn compile_product_components_profiled(
+    exprs: &[Expr],
+    profile_detail: bool,
+) -> (
+    Vec<ProductComponent>,
+    usize,
+    Option<Vec<ProductComponentCompileProfile>>,
+) {
     let mut unique_exprs = Vec::<&Expr>::new();
+    let mut unique_first_group_indices = Vec::<usize>::new();
     let mut component_indices = Vec::with_capacity(exprs.len());
     let mut index_by_expr = FxHashMap::<&Expr, usize>::default();
 
-    for expr in exprs {
+    for (group_index, expr) in exprs.iter().enumerate() {
         let expr = unwrap_shared(expr);
         let index = if let Some(&index) = index_by_expr.get(expr) {
             index
         } else {
             let index = unique_exprs.len();
             unique_exprs.push(expr);
+            unique_first_group_indices.push(group_index);
             index_by_expr.insert(expr, index);
             index
         };
         component_indices.push(index);
     }
 
-    let unique_components: Vec<ProductComponent> = unique_exprs
+    let compiled: Vec<(ProductComponent, Option<f64>)> = unique_exprs
         .par_iter()
-        .map(|expr| compile_product_component(expr))
+        .map(|expr| {
+            if profile_detail {
+                let started_at = Instant::now();
+                let component = compile_product_component(expr);
+                (
+                    component,
+                    Some(started_at.elapsed().as_secs_f64() * 1000.0),
+                )
+            } else {
+                (compile_product_component(expr), None)
+            }
+        })
         .collect();
+    let (unique_components, compile_times): (Vec<_>, Vec<_>) = compiled.into_iter().unzip();
     let cache_hits = exprs.len() - unique_components.len();
+    let profiles = profile_detail.then(|| {
+        let mut uses = vec![0usize; unique_components.len()];
+        for &index in &component_indices {
+            uses[index] += 1;
+        }
+        unique_components
+            .iter()
+            .zip(&compile_times)
+            .enumerate()
+            .map(|(index, (component, compile_ms))| ProductComponentCompileProfile {
+                first_group_index: unique_first_group_indices[index],
+                uses: uses[index],
+                compile_ms: compile_ms.unwrap_or_default(),
+                states: component.partition_dfa().num_states(),
+                transitions: dfa_transition_count(component.partition_dfa()),
+            })
+            .collect::<Vec<_>>()
+    });
     let components = component_indices
         .into_iter()
         .map(|index| unique_components[index].clone())
         .collect();
+    (components, cache_hits, profiles)
+}
+
+fn compile_product_components(exprs: &[Expr]) -> (Vec<ProductComponent>, usize) {
+    let (components, cache_hits, _) = compile_product_components_profiled(exprs, false);
     (components, cache_hits)
 }
 
 fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentProfileLabel]>) -> DFA {
-    let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
+    let profile_trace = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TRACE").is_some();
+    let profile_detail = profile_trace
+        || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
     let profile_timing = profile_detail
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let profile_started_at = Instant::now();
     let component_compile_started_at = Instant::now();
-    let (components, component_cache_hits): (Vec<ProductComponent>, usize) = if profile_detail {
-        let mut components = Vec::with_capacity(exprs.len());
-        for (index, expr) in exprs.iter().enumerate() {
-            let component_started_at = Instant::now();
-            let component = compile_product_component(expr);
-            let states = component.partition_dfa().num_states();
-            let transitions = dfa_transition_count(component.partition_dfa());
-            let label = profile_labels
-                .and_then(|labels| labels.get(index))
-                .map(|label| {
-                    format!(
-                        " name={:?} origin={} shared={}",
-                        label.name,
-                        label.origin,
-                        label.shared
-                    )
-                })
-                .unwrap_or_else(|| format!(" expr={:?}", expr_profile_summary(expr)));
-            eprintln!(
-                "[glrmask/profile][tokenizer] product_component_compiled index={} states={} transitions={} compile_ms={:.3}{}",
-                index,
-                states,
-                transitions,
-                component_started_at.elapsed().as_secs_f64() * 1000.0,
-                label
-            );
-            components.push(component);
-        }
-        (components, 0)
-    } else {
-        compile_product_components(exprs)
-    };
+    let (components, component_cache_hits, component_profiles) =
+        compile_product_components_profiled(exprs, profile_detail);
     let component_compile_ms = profile_timing
         .then(|| component_compile_started_at.elapsed().as_secs_f64() * 1000.0);
-    if profile_timing && !profile_detail {
+    if profile_timing {
         eprintln!(
             "[glrmask/profile][tokenizer] product_component_cache groups={} unique_components={} cache_hits={}",
             exprs.len(),
@@ -2502,13 +2564,28 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
     }
     if profile_detail {
         eprintln!(
-            "[glrmask/profile][tokenizer] product_components groups={} compile_components_ms={:.3}",
+            "[glrmask/profile][tokenizer] product_components groups={} unique_components={} cache_hits={} compile_components_ms={:.3}",
             components.len(),
+            components.len() - component_cache_hits,
+            component_cache_hits,
             profile_started_at.elapsed().as_secs_f64() * 1000.0
         );
-        for (index, component) in components.iter().enumerate() {
-            let states = component.partition_dfa().num_states();
-            let transitions = dfa_transition_count(component.partition_dfa());
+        let mut ranked = component_profiles
+            .as_ref()
+            .expect("detail profiling records unique component profiles")
+            .iter()
+            .enumerate()
+            .collect::<Vec<_>>();
+        ranked.sort_unstable_by(|(_, left), (_, right)| {
+            right.compile_ms.total_cmp(&left.compile_ms)
+        });
+        let report_count = if profile_trace {
+            ranked.len()
+        } else {
+            ranked.len().min(20)
+        };
+        for (rank, (unique_index, component)) in ranked.into_iter().take(report_count).enumerate() {
+            let index = component.first_group_index;
             let label = profile_labels
                 .and_then(|labels| labels.get(index))
                 .map(|label| {
@@ -2520,20 +2597,26 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
                     )
                 })
                 .unwrap_or_else(|| format!(" expr={:?}", expr_profile_summary(&exprs[index])));
-            match component {
-                ProductComponent::Materialized(_) => {
-                    eprintln!(
-                        "[glrmask/profile][tokenizer] component index={} kind=materialized states={} transitions={}{}",
-                        index, states, transitions, label
-                    );
-                }
-                ProductComponent::VirtualBoundedRepeat { min, max, .. } => {
-                    eprintln!(
-                        "[glrmask/profile][tokenizer] component index={} kind=virtual_bounded_repeat base_states={} base_transitions={} min={} max={}{}",
-                        index, states, transitions, min, max, label
-                    );
-                }
-            }
+            eprintln!(
+                "[glrmask/profile][tokenizer/component-rank] rank={} unique_index={} first_group_index={} uses={} states={} transitions={} compile_ms={:.3}{}",
+                rank + 1,
+                unique_index,
+                index,
+                component.uses,
+                component.states,
+                component.transitions,
+                component.compile_ms,
+                label,
+            );
+        }
+        let omitted = component_profiles
+            .as_ref()
+            .map_or(0, |profiles| profiles.len().saturating_sub(report_count));
+        if omitted > 0 {
+            eprintln!(
+                "[glrmask/profile][tokenizer/component-rank] omitted={} set GLRMASK_PROFILE_TOKENIZER_TRACE=1 for exhaustive component output",
+                omitted,
+            );
         }
     }
     let num_groups = components.len();
@@ -2570,7 +2653,7 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
         .collect();
     let mut class_active = vec![false; num_classes];
     let mut used_classes = Vec::<usize>::new();
-    let mut growth_recorder = profile_detail.then(|| ProductGrowthRecorder::new(num_groups));
+    let mut growth_recorder = profile_trace.then(|| ProductGrowthRecorder::new(num_groups));
     state_map.insert(start_tuple.clone(), 0);
     if let Some(recorder) = growth_recorder.as_mut() {
         recorder.record(num_groups, &start_tuple);
@@ -2664,7 +2747,7 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
     let product_state_expand_ms = profile_timing
         .then(|| product_state_expand_started_at.elapsed().as_secs_f64() * 1000.0);
 
-    if profile_detail {
+    if profile_trace {
         if let Some(recorder) = growth_recorder.as_ref() {
             let mut states_before = 0usize;
             for (index, states_after) in recorder.prefix_counts().iter().copied().enumerate() {

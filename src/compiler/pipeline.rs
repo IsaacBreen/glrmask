@@ -363,6 +363,8 @@ pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<
 
 pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
     let profile_timing = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TRACE").is_some();
     let factor_started_at = Instant::now();
     let exprs: Vec<Expr> = grammar
         .terminals
@@ -383,25 +385,11 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
         .enumerate()
         .map(|(index, _)| grammar.terminal_display_name(index as u32))
         .collect();
-    if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some() {
+    if profile_detail {
         eprintln!(
             "[glrmask/profile][tokenizer] terminals={}",
             grammar.terminals.len()
         );
-        for (index, expr) in exprs.iter().enumerate() {
-            let started_at = Instant::now();
-            let regex = build_regex(std::slice::from_ref(expr));
-            let elapsed = elapsed_ms(started_at);
-            let name = grammar.terminal_display_name(index as u32);
-            eprintln!(
-                "[glrmask/profile][tokenizer] terminal id={} name={:?} final_states={} final_transitions={} alone_ms={:.3}",
-                index,
-                name,
-                regex.num_states(),
-                regex.num_transitions(),
-                elapsed
-            );
-        }
     }
     let partition_ids = lexer_partition_ids(grammar);
     build_tokenizer_from_exprs_partitioned(&exprs, Some(&terminal_labels), &partition_ids)
