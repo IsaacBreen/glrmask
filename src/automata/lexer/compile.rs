@@ -2239,6 +2239,37 @@ fn mark_state_accepting(dfa: &mut DFA, state_id: u32) {
 fn compile_product_component_dfa_direct(expr: &Expr) -> Option<(DFA, bool)> {
     match expr {
         Expr::Shared(inner) => compile_product_component_dfa_direct(inner),
+        Expr::U8Seq(bytes) => {
+            let mut dfa = DFA::new(bytes.len() + 1);
+            dfa.ensure_group_capacity(1);
+            dfa.set_group_u8set(0, U8Set::from_bytes(bytes));
+            for (index, &byte) in bytes.iter().enumerate() {
+                dfa.add_transition(index as u32, byte, index as u32 + 1);
+            }
+            mark_state_accepting(&mut dfa, bytes.len() as u32);
+            dfa.recompute_possible_futures();
+            Some((dfa, false))
+        }
+        Expr::U8Class(bytes) => {
+            let mut dfa = DFA::new(2);
+            dfa.ensure_group_capacity(1);
+            dfa.set_group_u8set(0, *bytes);
+            dfa.set_transitions_from_sorted_entries(
+                0,
+                bytes.iter().map(|byte| (byte, 1)).collect(),
+            );
+            mark_state_accepting(&mut dfa, 1);
+            dfa.recompute_possible_futures();
+            Some((dfa, false))
+        }
+        Expr::Epsilon => {
+            let mut dfa = DFA::new(1);
+            dfa.ensure_group_capacity(1);
+            dfa.set_group_u8set(0, U8Set::empty());
+            mark_state_accepting(&mut dfa, 0);
+            dfa.recompute_possible_futures();
+            Some((dfa, false))
+        }
         Expr::Dfa(dfa) => Some((dfa.as_ref().clone(), true)),
         Expr::Choice(_) => {
             let non_epsilon = optional_choice_non_epsilon(expr)?;
@@ -2310,9 +2341,9 @@ fn compile_product_component(expr: &Expr) -> ProductComponent {
                 };
             }
 
-            ProductComponent::Materialized(Arc::new(compile_product_component_dfa(expr)))
+            ProductComponent::Materialized(Arc::new(compile_single_expr_dfa(expr)))
         }
-        _ => ProductComponent::Materialized(Arc::new(compile_product_component_dfa(expr))),
+        _ => ProductComponent::Materialized(Arc::new(compile_single_expr_dfa(expr))),
     }
 }
 
@@ -2789,14 +2820,14 @@ fn build_regex_nfa_impl(exprs: &[Expr]) -> NFA {
 
 #[cfg(test)]
 mod tests {
-    use super::super::Lexer;
+    use super::super::{Lexer, DFA};
     use super::{
         build_regex,
         build_regex_monolithic,
         build_regex_partitioned_with_adaptive,
         try_product_union_components,
     };
-    use super::compile_product_component_dfa_direct;
+    use super::{compile_product_component_dfa, compile_product_component_dfa_direct};
     use super::factor_regex_expr;
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::regex::parse_regex;
@@ -2804,6 +2835,7 @@ mod tests {
     use crate::ds::u8set::U8Set;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     fn byte_expr(byte: u8) -> Expr {
@@ -3930,6 +3962,68 @@ mod tests {
                 tokenizer_observation(&singleton, &input),
                 "adaptive partitioning differed for input {input:?}",
             );
+        }
+    }
+
+    #[test]
+    fn direct_trivial_product_components_match_generic_compilation() {
+        let expressions = [
+            Expr::U8Seq(b"literal".to_vec()),
+            Expr::U8Seq(Vec::new()),
+            Expr::U8Class(U8Set::from_bytes(b"abc")),
+            Expr::Epsilon,
+        ];
+
+        for expr in expressions {
+            let direct = compile_product_component_dfa_direct(&expr)
+                .expect("trivial expression must have a direct DFA")
+                .0;
+            let generic = compile_product_component_dfa(&expr);
+            assert_eq!(
+                direct.group_id_to_u8set(0),
+                generic.group_id_to_u8set(0),
+                "group byte set differed for {expr:?}",
+            );
+
+            let mut inputs = vec![Vec::new()];
+            match &expr {
+                Expr::U8Seq(bytes) => {
+                    for prefix_len in 0..=bytes.len() {
+                        let prefix = bytes[..prefix_len].to_vec();
+                        inputs.push(prefix.clone());
+                        for byte in 0..=u8::MAX {
+                            let mut deviated = prefix.clone();
+                            deviated.push(byte);
+                            inputs.push(deviated);
+                        }
+                    }
+                }
+                Expr::U8Class(_) => {
+                    inputs.extend((0..=u8::MAX).map(|byte| vec![byte]));
+                    inputs.extend((0..=u8::MAX).map(|byte| vec![byte, byte]));
+                }
+                Expr::Epsilon => inputs.push(vec![0]),
+                _ => unreachable!(),
+            }
+
+            let observe = |dfa: DFA, input: &[u8]| {
+                let tokenizer = Tokenizer::from_parts(dfa, 1, None);
+                let states = tokenizer.run(input);
+                let mut matched = BTreeSet::new();
+                let mut future = BTreeSet::new();
+                for state in states {
+                    matched.extend(tokenizer.matched_terminals_iter(state));
+                    future.extend(tokenizer.possible_future_terminals_iter(state));
+                }
+                (matched, future)
+            };
+            for input in inputs {
+                assert_eq!(
+                    observe(direct.clone(), &input),
+                    observe(generic.clone(), &input),
+                    "direct DFA behavior differed for {expr:?} on {input:?}",
+                );
+            }
         }
     }
 
