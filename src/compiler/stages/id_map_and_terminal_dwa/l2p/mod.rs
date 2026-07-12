@@ -396,7 +396,11 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let (global_state_quotient, token_position_partition) =
         if l2p_global_token_position_enabled() && matches!(partition_label, "p7" | "p8") {
             match equivalence_analysis::state_equivalence::global_token_position::
-                compute_global_token_position_state_views(tokenizer, vocab)
+                compute_global_token_position_state_views(
+                    tokenizer,
+                    vocab,
+                    flat_trans.map(AsRef::as_ref),
+                )
             {
                 Some((quotient, partition, _profile)) => (Some(quotient), Some(partition)),
                 None => (None, None),
