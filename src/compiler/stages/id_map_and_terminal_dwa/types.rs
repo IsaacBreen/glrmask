@@ -39,6 +39,26 @@ impl TerminalColoring {
 pub(crate) struct TerminalDwaBuildProfile {
     pub(crate) future_terminal_additions: u64,
     pub(crate) match_transition_additions: u64,
+    pub(crate) trie_walk_ms: f64,
+    pub(crate) flush_ms: f64,
+    pub(crate) flush_leaf_ms: f64,
+    pub(crate) flush_future_ms: f64,
+    pub(crate) flush_weight_ms: f64,
+    pub(crate) trie_self_loop_ms: f64,
+    pub(crate) trie_execute_ms: f64,
+    pub(crate) trie_match_filter_ms: f64,
+    pub(crate) trie_end_state_ms: f64,
+    pub(crate) trie_match_process_ms: f64,
+    pub(crate) trie_continuation_weight_ms: f64,
+    pub(crate) trie_execute_calls: u64,
+    pub(crate) trie_execute_input_bytes: u64,
+    pub(crate) trie_matches: u64,
+    pub(crate) trie_end_states: u64,
+    pub(crate) trie_self_loop_checks: u64,
+    pub(crate) trie_self_loop_skips: u64,
+    pub(crate) trie_self_loop_source_nodes: u64,
+    pub(crate) trie_self_loop_skipped_source_nodes: u64,
+    pub(crate) trie_self_loop_cache_misses: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

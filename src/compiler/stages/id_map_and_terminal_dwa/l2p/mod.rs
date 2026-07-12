@@ -43,7 +43,9 @@ use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
 use super::grammar_helpers::compute_always_allowed_follows;
-use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhaseProfile};
+use super::types::{
+    compile_profile_enabled, TerminalColoring, TerminalDwaBuildProfile, TerminalDwaPhaseProfile,
+};
 use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
 use terminal_interchangeability::{
     active_terminals_for_partition, binary_transport_modes_from_witnesses,
@@ -645,6 +647,7 @@ let strict_reference = reference_terminal_expansion
         possible_matches_ms,
         seed_ms,
         trie_build_ms,
+        nwa_build_profile,
         always_allowed_ms,
         collapse_ms,
         disallowed_ms,
@@ -670,23 +673,24 @@ let strict_reference = reference_terminal_expansion
             // outer code will observe `early_none=true` and return.
             (
                 crate::automata::weighted_u32::dwa::DWA::new(0, 0),
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0usize,
-                0usize,
-                0usize,
-                0usize,
-                0usize,
-                0usize,
+                0.0, // vocab_tree_ms
+                0.0, // possible_matches_ms
+                0.0, // seed_ms
+                0.0, // trie_build_ms
+                TerminalDwaBuildProfile::default(),
+                0.0, // always_allowed_ms
+                0.0, // collapse_ms
+                0.0, // disallowed_ms
+                0.0, // prune_ms
+                0.0, // canonicalize_ms
+                0.0, // determinize_ms
+                0.0, // minimize_ms
+                0usize, // internal_vocab_count
+                0usize, // nwa_states_after_build
+                0usize, // nwa_states_after_collapse
+                0usize, // nwa_states_after_disallowed
+                0usize, // nwa_states_after_prune
+                0usize, // nwa_states_after_canonicalize
                 crate::automata::weighted_u32::dwa::DWA::new(0, 0).stats(),
                 true,
             )
@@ -720,7 +724,7 @@ let strict_reference = reference_terminal_expansion
             let trie_build_started_at = Instant::now();
             let roots = seed_root_nodes(tokenizer, &mut nwa, start_state, &simplified_id_map);
             seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
-            let _build_profile = build_nwa_via_trie_walk(
+            let build_profile = build_nwa_via_trie_walk(
                 tokenizer_for_build,
                 terminal_coloring,
                 use_terminal_coloring,
@@ -731,6 +735,7 @@ let strict_reference = reference_terminal_expansion
                 &full_tree.root,
                 &roots,
                 &mut pm_computer,
+                flat_trans.map(AsRef::as_ref),
                 representative_core_output_labels.as_deref(),
             );
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -786,6 +791,7 @@ let strict_reference = reference_terminal_expansion
                 possible_matches_ms,
                 seed_ms,
                 trie_build_ms,
+                build_profile,
                 always_allowed_ms,
                 collapse_ms,
                 disallowed_ms,
@@ -1067,7 +1073,7 @@ let strict_reference = reference_terminal_expansion
 
     if l2p_timing_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} internal_vocab_entries={} initial_states_considered={} max_length_skipped={} max_token_len={} token_len_gt_4={} token_len_gt_8={} token_len_gt_16={} token_len_gt_32={} token_len_gt_64={} raw_analysis_base_init_ms={:.3} analysis_view_build_ms={:.3} active_mask_filter_ms={:.3} effective_follows_normalize_ms={:.3} prepare_inputs_ms={:.3} byte_class_setup_ms={:.3} vocab_analysis_dfa_build_ms={:.3} token_dedup_ms={:.3} max_length_state_equiv_ms={:.3} vocab_equiv_ms={:.3} exact_state_equiv_ms={:.3} id_map_finalize_ms={:.3} id_map_unattributed_ms={:.3} max_length_reps={} exact_reps={} exact_rep_confirmation_used={} fast_sound_id_map_used={} max_length_reduction_pct={:.2} exact_reduction_pct={:.2} restricted_observation_state_equiv_ms={:.3} restricted_observation_reps={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} compact_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
+            "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} internal_vocab_entries={} initial_states_considered={} max_length_skipped={} max_token_len={} token_len_gt_4={} token_len_gt_8={} token_len_gt_16={} token_len_gt_32={} token_len_gt_64={} raw_analysis_base_init_ms={:.3} analysis_view_build_ms={:.3} active_mask_filter_ms={:.3} effective_follows_normalize_ms={:.3} prepare_inputs_ms={:.3} byte_class_setup_ms={:.3} vocab_analysis_dfa_build_ms={:.3} token_dedup_ms={:.3} max_length_state_equiv_ms={:.3} vocab_equiv_ms={:.3} exact_state_equiv_ms={:.3} id_map_finalize_ms={:.3} id_map_unattributed_ms={:.3} max_length_reps={} exact_reps={} exact_rep_confirmation_used={} fast_sound_id_map_used={} max_length_reduction_pct={:.2} exact_reduction_pct={:.2} restricted_observation_state_equiv_ms={:.3} restricted_observation_reps={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_trie_walk_ms={:.3} nwa_flush_ms={:.3} nwa_flush_leaf_ms={:.3} nwa_flush_future_ms={:.3} nwa_flush_weight_ms={:.3} nwa_trie_self_loop_ms={:.3} nwa_trie_execute_ms={:.3} nwa_trie_match_filter_ms={:.3} nwa_trie_end_state_ms={:.3} nwa_trie_match_process_ms={:.3} nwa_trie_continuation_weight_ms={:.3} nwa_trie_execute_calls={} nwa_trie_execute_input_bytes={} nwa_trie_matches={} nwa_trie_end_states={} nwa_trie_self_loop_checks={} nwa_trie_self_loop_skips={} nwa_trie_self_loop_source_nodes={} nwa_trie_self_loop_skipped_source_nodes={} nwa_trie_self_loop_cache_misses={} nwa_future_terminal_additions={} nwa_match_transition_additions={} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} compact_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
             partition_label,
             vocab.entries.len(),
             num_active_terminals,
@@ -1109,6 +1115,28 @@ let strict_reference = reference_terminal_expansion
             possible_matches_ms,
             seed_ms,
             trie_build_ms,
+            nwa_build_profile.trie_walk_ms,
+            nwa_build_profile.flush_ms,
+            nwa_build_profile.flush_leaf_ms,
+            nwa_build_profile.flush_future_ms,
+            nwa_build_profile.flush_weight_ms,
+            nwa_build_profile.trie_self_loop_ms,
+            nwa_build_profile.trie_execute_ms,
+            nwa_build_profile.trie_match_filter_ms,
+            nwa_build_profile.trie_end_state_ms,
+            nwa_build_profile.trie_match_process_ms,
+            nwa_build_profile.trie_continuation_weight_ms,
+            nwa_build_profile.trie_execute_calls,
+            nwa_build_profile.trie_execute_input_bytes,
+            nwa_build_profile.trie_matches,
+            nwa_build_profile.trie_end_states,
+            nwa_build_profile.trie_self_loop_checks,
+            nwa_build_profile.trie_self_loop_skips,
+            nwa_build_profile.trie_self_loop_source_nodes,
+            nwa_build_profile.trie_self_loop_skipped_source_nodes,
+            nwa_build_profile.trie_self_loop_cache_misses,
+            nwa_build_profile.future_terminal_additions,
+            nwa_build_profile.match_transition_additions,
             nwa_states_after_build,
             nwa_states_after_collapse,
             nwa_states_after_disallowed,
