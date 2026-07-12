@@ -20,7 +20,10 @@ fn contains_regex_features(expr: &GrammarExpr) -> bool {
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
         | GrammarExpr::AnyByte => true,
-        GrammarExpr::Literal(_) | GrammarExpr::Ref(_) | GrammarExpr::Epsilon => false,
+        GrammarExpr::Literal(_)
+        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::Ref(_)
+        | GrammarExpr::Epsilon => false,
         GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
             exprs.iter().any(contains_regex_features)
         }
@@ -306,6 +309,7 @@ impl ChoiceFactorer {
             | GrammarExpr::Quantified(expr, Quantifier::OnePlus)
             | GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => Self::collect_refs_impl(expr, refs),
             GrammarExpr::Literal(_)
+            | GrammarExpr::SpecialToken(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -457,6 +461,7 @@ impl ChoiceFactorer {
             | GrammarExpr::Quantified(expr, Quantifier::OnePlus)
             | GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => Self::collect_refs_static(expr, refs),
             GrammarExpr::Literal(_)
+            | GrammarExpr::SpecialToken(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)

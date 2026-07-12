@@ -82,19 +82,42 @@ impl PartitionTerminalDwas {
 pub(crate) struct TerminalDwaFamilies {
     pub(crate) l1: Option<MappedArtifact<TerminalAutomaton>>,
     pub(crate) l2p: Option<MappedArtifact<TerminalAutomaton>>,
+    pub(crate) special: Option<MappedArtifact<TerminalAutomaton>>,
 }
 
 impl TerminalDwaFamilies {
     pub(crate) fn len(&self) -> usize {
-        usize::from(self.l1.is_some()) + usize::from(self.l2p.is_some())
+        usize::from(self.l1.is_some())
+            + usize::from(self.l2p.is_some())
+            + usize::from(self.special.is_some())
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.l1.is_none() && self.l2p.is_none()
+        self.l1.is_none() && self.l2p.is_none() && self.special.is_none()
     }
 
     pub(crate) fn into_vec(self) -> Vec<MappedArtifact<TerminalAutomaton>> {
-        self.l1.into_iter().chain(self.l2p).collect()
+        self.l1
+            .into_iter()
+            .chain(self.l2p)
+            .chain(self.special)
+            .collect()
+    }
+
+    pub(crate) fn max_original_token_id(&self) -> Option<u32> {
+        [&self.l1, &self.l2p, &self.special]
+            .into_iter()
+            .filter_map(|family| family.as_ref())
+            .filter_map(|family| {
+                family
+                    .id_map()
+                    .vocab_tokens
+                    .original_to_internal
+                    .iter()
+                    .rposition(|&internal| internal != u32::MAX)
+                    .map(|token_id| token_id as u32)
+            })
+            .max()
     }
 }
 

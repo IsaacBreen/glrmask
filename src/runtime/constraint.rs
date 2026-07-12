@@ -1842,10 +1842,8 @@ impl Constraint {
     }
 
     pub fn mask_len(&self) -> usize {
-        self.token_bytes
-            .keys()
-            .max()
-            .map(|token_id| (*token_id as usize / 32) + 1)
+        self.max_original_token_id()
+            .map(|token_id| (token_id as usize / 32) + 1)
             .unwrap_or(0)
     }
 
@@ -1937,7 +1935,23 @@ impl Constraint {
     }
 
     pub(crate) fn max_original_token_id(&self) -> Option<u32> {
-        self.token_bytes.keys().next_back().copied()
+        self.token_bytes
+            .keys()
+            .next_back()
+            .copied()
+            .into_iter()
+            .chain(
+                self.special_token_terminals
+                    .iter()
+                    .map(|special| special.token_id),
+            )
+            .max()
+    }
+
+    pub(crate) fn has_special_token_id(&self, token_id: u32) -> bool {
+        self.special_token_terminals
+            .iter()
+            .any(|special| special.token_id == token_id)
     }
 
     fn build_seed_terminal_dense_masks(&self) -> SeedTerminalDenseMasks {

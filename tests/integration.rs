@@ -1263,6 +1263,272 @@ fn runtime_payload_v2_roundtrip_preserves_split_parser_overlay() {
     assert_accepts_tokens(&loaded, &[1]);
 }
 
+fn special_token_vocab() -> Vocab {
+    Vocab::new(
+        vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"SPEC".to_vec()),
+            (3, b"SPECIAL".to_vec()),
+            (7, b"SPECIAL".to_vec()),
+        ],
+        None,
+    )
+}
+
+fn assert_special_token_sequence(constraint: &Constraint) {
+    let mut state = constraint.start();
+    assert_eq!(allowed(&state.mask()), vec![0]);
+    state.commit_token(0).unwrap();
+    assert_eq!(allowed(&state.mask()), vec![7]);
+
+    let mut by_bytes = state.clone();
+    assert!(by_bytes.commit_bytes(b"SPECIAL").is_err());
+
+    state.commit_token(7).unwrap();
+    assert_eq!(allowed(&state.mask()), vec![1]);
+    state.commit_token(1).unwrap();
+    assert!(state.is_finished());
+}
+
+#[test]
+fn glrm_special_token_is_exact_token_id_not_byte_language() {
+    let constraint = with_stable_ti_env(|| {
+        Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                nt start ::= "a" @token(7) "b";
+            "#,
+            &special_token_vocab(),
+        )
+        .unwrap()
+    });
+    assert_special_token_sequence(&constraint);
+}
+
+#[test]
+fn ebnf_and_lark_accept_special_token_atoms() {
+    let vocab = special_token_vocab();
+    let ebnf = with_stable_ti_env(|| {
+        Constraint::from_ebnf(r#"start ::= "a" @token(7) "b""#, &vocab).unwrap()
+    });
+    assert_special_token_sequence(&ebnf);
+
+    let lark = with_stable_ti_env(|| {
+        Constraint::from_lark(r#"start: "a" @token(7) "b""#, &vocab).unwrap()
+    });
+    assert_special_token_sequence(&lark);
+}
+
+#[test]
+fn byte_less_special_token_extends_mask_token_space() {
+    let vocab = Vocab::new(Vec::new(), None);
+    let constraint = with_stable_ti_env(|| {
+        Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                nt start ::= @token(100);
+            "#,
+            &vocab,
+        )
+        .unwrap()
+    });
+
+    assert_eq!(constraint.mask_len(), 4);
+    let mut state = constraint.start();
+    assert_eq!(allowed(&state.mask()), vec![100]);
+    state.commit_token(100).unwrap();
+    assert!(state.is_finished());
+
+    let mut unknown = constraint.start();
+    assert!(unknown.commit_token(101).is_err());
+}
+
+#[test]
+fn grammar_def_json_supports_special_token_terminals() {
+    let grammar = serde_json::json!({
+        "rules": [{"lhs": 0, "rhs": [{"Terminal": 0}]}],
+        "start": 0,
+        "terminals": [{"SpecialToken": {"id": 0, "token_id": 100}}],
+        "nonterminal_names": {"0": "start"},
+        "terminal_names": {"0": "SPECIAL"}
+    });
+    let constraint = Constraint::compile_grammar_def_json(
+        &grammar.to_string(),
+        &Vocab::new(Vec::new(), None),
+    )
+    .unwrap();
+    assert_eq!(allowed(&constraint.start().mask()), vec![100]);
+    let mut state = constraint.start();
+    state.commit_token(100).unwrap();
+    assert!(state.is_finished());
+}
+
+#[test]
+fn special_token_static_dynamic_and_serialized_constraints_agree() {
+    let vocab = special_token_vocab();
+    let grammar = r#"
+        start start;
+        nt start ::= "a" @token(7) "b";
+    "#;
+    let constraint = with_stable_ti_env(|| {
+        Constraint::from_glrm_grammar(grammar, &vocab).unwrap()
+    });
+    let dynamic = DynamicConstraint::from_glrm_grammar(grammar, &vocab).unwrap();
+
+    let mut static_state = constraint.start();
+    let mut dynamic_state = dynamic.start();
+    assert_eq!(static_state.mask(), dynamic_state.mask());
+    static_state.commit_token(0).unwrap();
+    dynamic_state.commit_token(0).unwrap();
+    assert_eq!(static_state.mask(), dynamic_state.mask());
+    assert_eq!(allowed(&static_state.mask()), vec![7]);
+    static_state.commit_token(7).unwrap();
+    dynamic_state.commit_token(7).unwrap();
+    assert_eq!(static_state.mask(), dynamic_state.mask());
+
+    let loaded = Constraint::load(&constraint.save()).unwrap();
+    assert_special_token_sequence(&loaded);
+    let runtime_loaded = Constraint::load_runtime_payload_v3(
+        &constraint.save_runtime_payload_v3(),
+    )
+    .unwrap();
+    assert_special_token_sequence(&runtime_loaded);
+    let dynamic_loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+    let mut dynamic_loaded_state = dynamic_loaded.start();
+    dynamic_loaded_state.commit_token(0).unwrap();
+    assert_eq!(allowed(&dynamic_loaded_state.mask()), vec![7]);
+    dynamic_loaded_state.commit_token(7).unwrap();
+    dynamic_loaded_state.commit_token(1).unwrap();
+    assert!(dynamic_loaded_state.is_finished());
+}
+
+#[test]
+fn named_special_terminal_and_explicit_special_eos_are_parser_controlled() {
+    let vocab = Vocab::new(vec![(0, b"a".to_vec())], Some(100));
+    let grammar = r#"
+        start start;
+        t END ::= @token(100);
+        nt start ::= "a" END;
+    "#;
+    let constraint = with_stable_ti_env(|| {
+        Constraint::from_glrm_grammar(grammar, &vocab).unwrap()
+    });
+    let dynamic = DynamicConstraint::from_glrm_grammar(grammar, &vocab).unwrap();
+
+    let mut state = constraint.start();
+    assert_eq!(allowed(&state.mask()), vec![0]);
+    state.commit_token(0).unwrap();
+    assert!(!state.is_complete());
+    assert_eq!(allowed(&state.mask()), vec![100]);
+    state.commit_token(100).unwrap();
+    assert!(state.is_finished());
+
+    let mut dynamic_state = dynamic.start();
+    dynamic_state.commit_token(0).unwrap();
+    assert_eq!(allowed(&dynamic_state.mask()), vec![100]);
+    dynamic_state.commit_token(100).unwrap();
+    assert!(dynamic_state.is_finished());
+}
+
+#[test]
+fn special_token_commit_unions_special_and_byte_paths() {
+    let vocab = Vocab::new(
+        vec![
+            (0, b"x".to_vec()),
+            (1, b"z".to_vec()),
+            (7, b"a".to_vec()),
+        ],
+        None,
+    );
+    let grammar = r#"
+        start start;
+        nt start ::= "a" @token(7) | "x" "a" "z";
+    "#;
+    let constraint = with_stable_ti_env(|| {
+        Constraint::from_glrm_grammar(grammar, &vocab).unwrap()
+    });
+
+    let mut byte_only_at_position = constraint.start();
+    byte_only_at_position.commit_token(0).unwrap();
+    assert_eq!(allowed(&byte_only_at_position.mask()), vec![7]);
+    byte_only_at_position.commit_token(7).unwrap();
+    assert_eq!(allowed(&byte_only_at_position.mask()), vec![1]);
+    byte_only_at_position.commit_token(1).unwrap();
+    assert!(byte_only_at_position.is_finished());
+
+    let mut both_paths = constraint.start();
+    both_paths.commit_token(7).unwrap();
+    assert_eq!(allowed(&both_paths.mask()), vec![7]);
+    both_paths.commit_token(7).unwrap();
+    assert!(both_paths.is_finished());
+}
+
+#[test]
+fn special_token_commit_profiling_entry_points_preserve_semantics() {
+    let vocab = Vocab::new(vec![(0, b"a".to_vec())], None);
+    let constraint = with_stable_ti_env(|| {
+        Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                nt start ::= @token(100);
+            "#,
+            &vocab,
+        )
+        .unwrap()
+    });
+
+    let mut timed = constraint.start();
+    timed.commit_token_timed_ns(100).unwrap();
+    assert!(timed.is_finished());
+
+    let mut profiled = constraint.start();
+    profiled.commit_token_profiled(100).unwrap();
+    assert!(profiled.is_finished());
+
+    let mut per_advance = constraint.start();
+    per_advance.commit_token_per_advance(100).unwrap();
+    assert!(per_advance.is_finished());
+}
+
+#[test]
+fn special_token_cannot_be_configured_as_ignore_terminal() {
+    let error = Constraint::from_glrm_grammar(
+        r#"
+            start start;
+            ignore SPECIAL;
+            t SPECIAL ::= @token(100);
+            nt start ::= "a";
+        "#,
+        &Vocab::new(vec![(0, b"a".to_vec())], None),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("cannot be the ignore terminal"));
+}
+
+#[test]
+fn special_token_atoms_compose_in_parser_choices_and_repetition() {
+    let constraint = with_stable_ti_env(|| {
+        Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                nt start ::= (@token(100) | @token(101))+;
+            "#,
+            &Vocab::new(Vec::new(), None),
+        )
+        .unwrap()
+    });
+
+    let mut state = constraint.start();
+    assert_eq!(allowed(&state.mask()), vec![100, 101]);
+    state.commit_token(101).unwrap();
+    assert!(state.is_finished());
+    assert_eq!(allowed(&state.mask()), vec![100, 101]);
+    state.commit_token(100).unwrap();
+    state.commit_token(101).unwrap();
+    assert!(state.is_finished());
+}
+
 #[test]
 fn isolated_and_monolithic_lexer_partitions_are_end_to_end_equivalent() {
     let vocab = vocab(&[

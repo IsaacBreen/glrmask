@@ -24,7 +24,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use self_cell::self_cell;
 use std::sync::Arc;
-use glrmask::__private::{ConstraintExt as _, ConstraintStateExt as _, VocabExt as _};
+use glrmask::__private::{
+    ConstraintExt as _, ConstraintStateExt as _, DynamicConstraintExt as _, VocabExt as _,
+};
 
 // ---------------------------------------------------------------------------
 // OwnedState — `self_cell`-generated safe owner/dependent pair.
@@ -456,12 +458,13 @@ pub struct PyConstraint {
 impl PyConstraint {
     fn from_constraint_result<E: std::fmt::Display>(
         constraint: Result<glrmask::Constraint, E>,
-        vocab: &PyVocab,
+        _vocab: &PyVocab,
     ) -> PyResult<Self> {
         let constraint = constraint_result(constraint)?;
+        let max_token = constraint.max_original_token_id().unwrap_or(0);
         Ok(Self {
             inner: Arc::new(constraint),
-            max_token: vocab.inner.max_token_id(),
+            max_token,
         })
     }
 
@@ -469,8 +472,8 @@ impl PyConstraint {
     /// `_glrmask_runtime`. Compilation remains in this main binding; the
     /// runtime binding only loads and executes this artifact.
     fn save_runtime_artifact(&self) -> Vec<u8> {
-        glrmask_runtime::RuntimeArtifact::from_runtime_payload_v2(
-            self.inner.save_runtime_payload_v2(),
+        glrmask_runtime::RuntimeArtifact::from_runtime_payload_v3(
+            self.inner.save_runtime_payload_v3(),
         )
             .as_bytes()
             .to_vec()
@@ -572,12 +575,13 @@ pub struct PyDynamicConstraint {
 impl PyDynamicConstraint {
     fn from_constraint_result<E: std::fmt::Display>(
         constraint: Result<glrmask::DynamicConstraint, E>,
-        vocab: &PyVocab,
+        _vocab: &PyVocab,
     ) -> PyResult<Self> {
         let constraint = constraint_result(constraint)?;
+        let max_token = constraint.max_original_token_id().unwrap_or(0);
         Ok(Self {
             inner: Arc::new(constraint),
-            max_token: vocab.inner.max_token_id(),
+            max_token,
         })
     }
 }
@@ -1206,7 +1210,7 @@ fn prepare_vocab_for_compile(vocab: &PyVocab) {
 fn compile_grammar_def_json(grammar_def_json: &str, vocab: &PyVocab) -> PyResult<PyConstraint> {
     let constraint = glrmask::Constraint::compile_grammar_def_json(grammar_def_json, &vocab.inner)
         .map_err(|e| PyValueError::new_err(format!("{e}")))?;
-    let max_token = vocab.inner.max_token_id();
+    let max_token = constraint.max_original_token_id().unwrap_or(0);
     Ok(PyConstraint {
         inner: std::sync::Arc::new(constraint),
         max_token,

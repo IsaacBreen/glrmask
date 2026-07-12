@@ -32,6 +32,12 @@ pub(crate) type FastDwaTransitions = Vec<FxHashMap<i32, (u32, Weight)>>;
 pub(crate) type FastTokenizerTransitions = Vec<Box<[u32; 256]>>;
 pub(crate) type TemplateDfasByTerminal = Vec<Option<Arc<CommitTemplateDfas>>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SpecialTokenTerminal {
+    pub(crate) terminal_id: TerminalID,
+    pub(crate) token_id: u32,
+}
+
 /// Compact runtime-only vocabulary trie. It deliberately stores only the
 /// information dynamic mask traversal consumes: compressed byte edges, child
 /// ranges, and canonical token leaves.
@@ -1004,6 +1010,8 @@ pub struct Constraint {
     pub(crate) tokenizer: Tokenizer,
     #[serde(default)]
     pub(crate) ignore_terminal: Option<TerminalID>,
+    #[serde(default)]
+    pub(crate) special_token_terminals: Vec<SpecialTokenTerminal>,
 
     /// Runtime-only vocabulary data for direct dynamic masking.
     #[serde(skip, default)]
