@@ -10,7 +10,14 @@
 //! * `GlobalTokenPositionStatePartition` is partition C, a total safe packing
 //!   of partial partitions induced by individual token-byte positions. For
 //!   positions before a configurable tail cutoff, only states active at that
-//!   position are partitioned by exact destinations on bytes occurring there.
+//!   position are partitioned by their exact positional observation. Position
+//!   zero observes only destinations on bytes occurring there; later positions
+//!   additionally observe the current finalizer and future-finalizer sets.
+//!   Active frontiers are propagated position-wise: `A_0` is every tokenizer
+//!   state and `A_{i+1}` is obtained by stepping every state in `A_i` on every
+//!   byte in the union `B_i` of bytes occurring at vocab position `i`. This is
+//!   deliberately a per-position cross product, not a walk of individual vocab
+//!   tokens and not restricted to tokens that continue past position `i`.
 //!   States active at the cutoff or later are pairwise incompatible (the tail
 //!   identity constraint). Inactive states are wildcards, not members of an
 //!   invented "inactive" class.
@@ -24,12 +31,9 @@
 //! signature maps to one deterministic maximal extension. This gives the
 //! minimum number of raw-representative classes under that subsumption rule.
 //!
-//! "Global token-position equivalence" still does not mean "quotient of the
-//! raw byte DFA". C is not closed to a right congruence on arbitrary selected
-//! bytes and does not require equal current frozen-output rows. A byte-level
-//! labelled-transition consumer must derive or validate those stronger
-//! properties separately. In particular, C must not be handed directly to
-//! `RestrictedTopology` merely because it covers every raw state.
+//! This is a directional representative relation, not an equivalence relation:
+//! the representative extends every positional observation known for each
+//! member, but two members need not extend each other.
 
 use std::time::Instant;
 
@@ -39,22 +43,20 @@ use crate::Vocab;
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::{GlobalScannerStateQuotient, ManyToOneIdMap};
+use crate::ds::bitset::BitSet;
 
 const DEFAULT_TAIL_START_POSITION: usize = 3;
 const MIN_TAIL_START_POSITION: usize = 3;
-const MAX_TAIL_START_POSITION: usize = 5;
 
 fn configured_tail_start_position() -> usize {
     match std::env::var("GLRMASK_GLOBAL_TOKEN_POSITION_TAIL_START") {
         Ok(value) => value
             .parse::<usize>()
             .ok()
-            .filter(|&position| {
-                (MIN_TAIL_START_POSITION..=MAX_TAIL_START_POSITION).contains(&position)
-            })
+            .filter(|&position| position >= MIN_TAIL_START_POSITION)
             .unwrap_or_else(|| {
                 panic!(
-                    "GLRMASK_GLOBAL_TOKEN_POSITION_TAIL_START must be 3, 4, or 5; got {value:?}"
+                    "GLRMASK_GLOBAL_TOKEN_POSITION_TAIL_START must be at least 3; got {value:?}"
                 )
             }),
         Err(std::env::VarError::NotPresent) => DEFAULT_TAIL_START_POSITION,
@@ -114,6 +116,7 @@ impl GlobalTokenPositionStatePartition {
 
 #[derive(Debug)]
 struct PartialPositionPartition {
+    /// Zero-based byte position within a vocabulary token.
     position: usize,
     byte_count: usize,
     active_state_count: usize,
@@ -125,12 +128,8 @@ struct PartialPositionPartition {
 
 #[derive(Debug)]
 struct PositionByteSets {
-    /// Bytes occurring exactly at positions `1..tail_start`.
+    /// Bytes occurring exactly at zero-based positions `0..tail_start`.
     position_bytes: Vec<Vec<u8>>,
-    /// Bytes at each explicit position on tokens that continue to the next
-    /// position. These propagate active-state frontiers without letting a token
-    /// that ends at position `i` spuriously create position `i + 1` states.
-    continuation_bytes: Vec<Vec<u8>>,
     /// Union of bytes occurring at the tail cutoff or any later position.
     tail_bytes: Vec<u8>,
 }
@@ -140,6 +139,15 @@ struct SignatureGroup {
     signature: Vec<u32>,
     members: Vec<u32>,
     representative: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PositionObservationKey {
+    /// Position zero begins a fresh scan, so current-state outputs are not
+    /// observed there. Later positions observe both frozen output families.
+    finalizers: Option<BitSet>,
+    future_finalizers: Option<BitSet>,
+    destinations: Box<[u32]>,
 }
 
 struct NfaTokenPositionView<'a> {
@@ -210,6 +218,17 @@ impl<'a> NfaTokenPositionView<'a> {
             .any(|&state| !self.tokenizer.matched_terminal_bitset(state).is_empty())
     }
 
+    fn output_pair(&self, config: u32) -> (BitSet, BitSet) {
+        let terminal_count = self.tokenizer.matched_terminal_bitset(0).len();
+        let mut finalizers = BitSet::new(terminal_count);
+        let mut future_finalizers = BitSet::new(terminal_count);
+        for &state in self.states(config) {
+            finalizers.union_with(self.tokenizer.matched_terminal_bitset(state));
+            future_finalizers.union_with(self.tokenizer.possible_future_terminals(state));
+        }
+        (finalizers, future_finalizers)
+    }
+
 }
 
 fn destination_rows(tokenizer: &Tokenizer, bytes: &[u8]) -> Vec<Box<[u32]>> {
@@ -238,6 +257,24 @@ fn destination_rows(tokenizer: &Tokenizer, bytes: &[u8]) -> Vec<Box<[u32]>> {
         .collect()
 }
 
+fn output_rows(tokenizer: &Tokenizer) -> Vec<(BitSet, BitSet)> {
+    if !tokenizer.has_epsilon_transitions() {
+        return (0..tokenizer.num_states())
+            .map(|state| {
+                (
+                    tokenizer.matched_terminal_bitset(state).clone(),
+                    tokenizer.possible_future_terminals(state).clone(),
+                )
+            })
+            .collect();
+    }
+
+    let view = NfaTokenPositionView::new(tokenizer);
+    (0..tokenizer.num_states() as usize)
+        .map(|state| view.output_pair(view.raw_start_config(state)))
+        .collect()
+}
+
 fn selected_bytes(mask: &[bool; 256]) -> Vec<u8> {
     (0..=u8::MAX)
         .filter(|&byte| mask[byte as usize])
@@ -245,20 +282,21 @@ fn selected_bytes(mask: &[bool; 256]) -> Vec<u8> {
 }
 
 fn position_byte_sets(vocab: &Vocab, tail_start_position: usize) -> PositionByteSets {
-    assert!((MIN_TAIL_START_POSITION..=MAX_TAIL_START_POSITION).contains(&tail_start_position));
-    let explicit_positions = tail_start_position - 1;
+    assert!(tail_start_position >= MIN_TAIL_START_POSITION);
+    let max_token_length = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
+    // Position `i` describes states active after exactly `i` position-wise
+    // propagation steps. We need the boundary position after the final vocab
+    // byte as well, because positions > 0 observe current F/U even when B_i is
+    // empty. Thus a max token length L has explicit positions 0..=L when the
+    // tail cutoff does not intervene.
+    let explicit_positions = tail_start_position.min(max_token_length.saturating_add(1));
     let mut position_masks = vec![[false; 256]; explicit_positions];
-    let mut continuation_masks = vec![[false; 256]; explicit_positions];
     let mut tail_mask = [false; 256];
 
     for token in vocab.entries.values() {
         for (index, &byte) in token.iter().enumerate() {
-            let position = index + 1;
-            if position < tail_start_position {
+            if index < tail_start_position {
                 position_masks[index][byte as usize] = true;
-                if position < token.len() {
-                    continuation_masks[index][byte as usize] = true;
-                }
             } else {
                 tail_mask[byte as usize] = true;
             }
@@ -267,7 +305,6 @@ fn position_byte_sets(vocab: &Vocab, tail_start_position: usize) -> PositionByte
 
     PositionByteSets {
         position_bytes: position_masks.iter().map(selected_bytes).collect(),
-        continuation_bytes: continuation_masks.iter().map(selected_bytes).collect(),
         tail_bytes: selected_bytes(&tail_mask),
     }
 }
@@ -281,7 +318,8 @@ fn partial_position_partition(
     let state_count = tokenizer.num_states() as usize;
     assert_eq!(active_states.len(), state_count);
     let rows = destination_rows(tokenizer, bytes);
-    let mut key_to_class = FxHashMap::<Box<[u32]>, u32>::default();
+    let outputs = (position > 0).then(|| output_rows(tokenizer));
+    let mut key_to_class = FxHashMap::<PositionObservationKey, u32>::default();
     let mut class_by_state = vec![u32::MAX; state_count];
     let mut class_count = 0u32;
 
@@ -289,7 +327,18 @@ fn partial_position_partition(
         if !active_states[state] {
             continue;
         }
-        let key = rows[state].clone();
+        let (finalizers, future_finalizers) = outputs
+            .as_ref()
+            .map(|rows| {
+                let (finalizers, future_finalizers) = &rows[state];
+                (Some(finalizers.clone()), Some(future_finalizers.clone()))
+            })
+            .unwrap_or((None, None));
+        let key = PositionObservationKey {
+            finalizers,
+            future_finalizers,
+            destinations: rows[state].clone(),
+        };
         let next = class_count;
         let class = *key_to_class.entry(key).or_insert_with(|| {
             class_count += 1;
@@ -307,11 +356,13 @@ fn partial_position_partition(
     }
 }
 
-/// Advance one positional frontier by one vocabulary byte. A post-byte
+/// Advance one positional frontier through the whole position-byte set `B_i`.
+/// Every active state is crossed with every byte occurring at that vocab
+/// position; token identity and whether a token ends at this position are not
+/// tracked. A post-byte
 /// finalizer contributes both the ordinary scanner destination and the lexer
 /// reset roots, matching the two continuation branches in the terminal-NWA
-/// builder. `bytes` contains only bytes from tokens that continue to the next
-/// position.
+/// builder.
 fn advance_active_states(
     tokenizer: &Tokenizer,
     active_states: &[bool],
@@ -468,6 +519,15 @@ fn signature_restrictions(signature: &[u32], include_self: bool) -> Vec<Vec<u32>
     restrictions
 }
 
+#[inline]
+fn signature_is_restriction_of(restriction: &[u32], extension: &[u32]) -> bool {
+    debug_assert_eq!(restriction.len(), extension.len());
+    restriction
+        .iter()
+        .zip(extension)
+        .all(|(&left, &right)| left == u32::MAX || left == right)
+}
+
 fn state_partial_signature(
     state: usize,
     later_partitions: &[PartialPositionPartition],
@@ -540,27 +600,80 @@ fn pack_partial_partitions(
             });
         }
 
-        let mut strict_restrictions = FxHashSet::<Vec<u32>>::default();
-        for group in &groups {
-            strict_restrictions.extend(signature_restrictions(&group.signature, false));
-        }
-        let mut maximal_groups = groups
+        let use_enumerated_restrictions = groups
             .iter()
-            .enumerate()
-            .filter_map(|(group, data)| {
-                (!strict_restrictions.contains(&data.signature)).then_some(group)
+            .map(|group| {
+                group
+                    .signature
+                    .iter()
+                    .filter(|&&coordinate| coordinate != u32::MAX)
+                    .count()
             })
-            .collect::<Vec<_>>();
+            .max()
+            .unwrap_or(0)
+            <= 8;
+
+        let mut maximal_groups = if use_enumerated_restrictions {
+            let mut strict_restrictions = FxHashSet::<Vec<u32>>::default();
+            for group in &groups {
+                strict_restrictions.extend(signature_restrictions(&group.signature, false));
+            }
+            groups
+                .iter()
+                .enumerate()
+                .filter_map(|(group, data)| {
+                    (!strict_restrictions.contains(&data.signature)).then_some(group)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            groups
+                .iter()
+                .enumerate()
+                .filter_map(|(candidate, data)| {
+                    let has_strict_extension = groups.iter().enumerate().any(|(other, extension)| {
+                        candidate != other
+                            && signature_is_restriction_of(&data.signature, &extension.signature)
+                    });
+                    (!has_strict_extension).then_some(candidate)
+                })
+                .collect::<Vec<_>>()
+        };
         maximal_groups.sort_unstable_by_key(|&group| groups[group].representative);
 
-        let mut maximal_extension_for_restriction = FxHashMap::<Vec<u32>, usize>::default();
-        for &group in &maximal_groups {
-            for restriction in signature_restrictions(&groups[group].signature, true) {
-                maximal_extension_for_restriction
-                    .entry(restriction)
-                    .or_insert(group);
+        let maximal_extension_by_group = if use_enumerated_restrictions {
+            let mut maximal_extension_for_restriction = FxHashMap::<Vec<u32>, usize>::default();
+            for &group in &maximal_groups {
+                for restriction in signature_restrictions(&groups[group].signature, true) {
+                    maximal_extension_for_restriction
+                        .entry(restriction)
+                        .or_insert(group);
+                }
             }
-        }
+            groups
+                .iter()
+                .map(|group| {
+                    *maximal_extension_for_restriction
+                        .get(&group.signature)
+                        .expect("every partial signature must have a maximal extension")
+                })
+                .collect::<Vec<_>>()
+        } else {
+            groups
+                .iter()
+                .map(|group| {
+                    maximal_groups
+                        .iter()
+                        .copied()
+                        .find(|&maximal| {
+                            signature_is_restriction_of(
+                                &group.signature,
+                                &groups[maximal].signature,
+                            )
+                        })
+                        .expect("every partial signature must have a maximal extension")
+                })
+                .collect::<Vec<_>>()
+        };
 
         let mut class_for_maximal_group = FxHashMap::<usize, usize>::default();
         for &group in &maximal_groups {
@@ -568,10 +681,8 @@ fn pack_partial_partitions(
             class_for_maximal_group.insert(group, class);
             global_classes.push((groups[group].representative, Vec::new()));
         }
-        for group in groups {
-            let maximal_group = *maximal_extension_for_restriction
-                .get(&group.signature)
-                .expect("every partial signature must have a maximal extension");
+        for (group_index, group) in groups.into_iter().enumerate() {
+            let maximal_group = maximal_extension_by_group[group_index];
             let class = class_for_maximal_group[&maximal_group];
             global_classes[class].1.extend(group.members);
         }
@@ -669,20 +780,15 @@ fn compute_global_token_position_map_with_tail_start(
     }
     let state_count = tokenizer.num_states() as usize;
     let mut active_states = vec![true; state_count];
-    let mut partitions = Vec::with_capacity(tail_start_position - 1);
+    let mut partitions = Vec::with_capacity(byte_sets.position_bytes.len());
     for (index, bytes) in byte_sets.position_bytes.iter().enumerate() {
-        let position = index + 1;
         partitions.push(partial_position_partition(
             tokenizer,
-            position,
+            index,
             &active_states,
             bytes,
         ));
-        active_states = advance_active_states(
-            tokenizer,
-            &active_states,
-            &byte_sets.continuation_bytes[index],
-        );
+        active_states = advance_active_states(tokenizer, &active_states, bytes);
     }
     let tail_active = tail_active_states(tokenizer, &active_states, &byte_sets.tail_bytes);
     let map = pack_partial_partitions(&partitions, &tail_active);
@@ -712,11 +818,15 @@ fn compute_global_token_position_map_with_tail_start(
 
 /// Build global token-position partition C.
 ///
-/// Positions before `GLRMASK_GLOBAL_TOKEN_POSITION_TAIL_START` (default 3;
-/// allowed 3, 4, or 5) contribute partial destination partitions over only
-/// their active states. The cutoff and all later positions contribute one tail
-/// identity constraint: every pair of distinct tail-active states is forbidden
-/// from merging. Inactive states remain unconstrained at that position.
+/// Zero-based positions before `GLRMASK_GLOBAL_TOKEN_POSITION_TAIL_START`
+/// (default 3) contribute partial observation partitions over only their active
+/// states. Position zero observes exact destinations only. Later explicit
+/// positions additionally observe current finalizers and future-finalizers.
+/// The cutoff and all later positions contribute one tail identity constraint:
+/// every pair of distinct tail-active states is forbidden from merging.
+/// Inactive states remain unconstrained at that position. Any cutoff >= 3 is
+/// accepted; `usize::MAX` means every vocabulary position is explicit and the
+/// conservative tail is empty.
 pub(crate) fn compute_global_token_position_state_partition(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -729,12 +839,7 @@ pub(crate) fn compute_global_token_position_state_partition(
     .map(|(map, _)| GlobalTokenPositionStatePartition { map })
 }
 
-/// Wrap the total global token-position partition C for the pre-TI pipeline.
-///
-/// The wrapper is structurally total over raw scanner states; it does not
-/// strengthen C semantically. The positional packing has no frozen-output
-/// strengthening and no raw-byte congruence closure. A consumer requiring those
-/// stronger properties must not treat this wrapper as proof that they hold.
+/// Wrap global token-position map C for the pre-TI pipeline.
 pub(crate) fn compute_global_token_position_state_quotient(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -806,15 +911,11 @@ mod tests {
         for (index, bytes) in byte_sets.position_bytes.iter().enumerate() {
             partitions.push(partial_position_partition(
                 tokenizer,
-                index + 1,
+                index,
                 &active,
                 bytes,
             ));
-            active = advance_active_states(
-                tokenizer,
-                &active,
-                &byte_sets.continuation_bytes[index],
-            );
+            active = advance_active_states(tokenizer, &active, bytes);
         }
         let tail = tail_active_states(tokenizer, &active, &byte_sets.tail_bytes);
 
@@ -923,14 +1024,14 @@ mod tests {
     #[test]
     fn inactive_position_is_a_wildcard_not_an_inactive_class() {
         let first = PartialPositionPartition {
-            position: 1,
+            position: 0,
             byte_count: 1,
             active_state_count: 3,
             class_count: 1,
             class_by_state: vec![0, 0, 0],
         };
         let second = PartialPositionPartition {
-            position: 2,
+            position: 1,
             byte_count: 1,
             active_state_count: 2,
             class_count: 2,
@@ -947,24 +1048,134 @@ mod tests {
     }
 
     #[test]
-    fn tail_reachability_follows_terminal_reset_after_byte_two() {
+    fn later_positions_observe_current_finalizers_and_futures() {
         let tokenizer = tokenizer(vec![
-            Expr::U8Seq(b"ab".to_vec()),
-            Expr::U8Seq(b"c".to_vec()),
+            Expr::U8Seq(b"ax".to_vec()),
+            Expr::U8Seq(b"bx".to_vec()),
+            Expr::U8Seq(b"a".to_vec()),
+        ]);
+        let vocab = vocab(&[(0, b"ax")]);
+        let initial = tokenizer.initial_state_id();
+        let after_a = tokenizer.step(initial, b'a').expect("a transition");
+        let after_b = tokenizer.step(initial, b'b').expect("b transition");
+        let after_ax = tokenizer.step(after_a, b'x').expect("ax transition");
+        let after_bx = tokenizer.step(after_b, b'x').expect("bx transition");
+
+        assert_ne!(
+            tokenizer.matched_terminal_bitset(after_ax),
+            tokenizer.matched_terminal_bitset(after_bx),
+        );
+        let active = vec![true; tokenizer.num_states() as usize];
+        let position_zero = partial_position_partition(&tokenizer, 0, &active, b"x");
+        let position_one = partial_position_partition(&tokenizer, 1, &active, b"x");
+
+        assert_eq!(
+            position_zero.class_by_state[after_ax as usize],
+            position_zero.class_by_state[after_bx as usize],
+            "position zero intentionally ignores current-state outputs",
+        );
+        assert_ne!(
+            position_one.class_by_state[after_ax as usize],
+            position_one.class_by_state[after_bx as usize],
+            "later positions must preserve finalizer/future observation",
+        );
+    }
+
+    #[test]
+    fn positionwise_frontier_keeps_post_byte_finalizers_distinct() {
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"ax".to_vec()),
+            Expr::U8Seq(b"bx".to_vec()),
+            Expr::U8Seq(b"a".to_vec()),
+        ]);
+        let vocab = vocab(&[(0, b"x")]);
+        let initial = tokenizer.initial_state_id();
+        let after_a = tokenizer.step(initial, b'a').expect("a transition");
+        let after_b = tokenizer.step(initial, b'b').expect("b transition");
+        let after_ax = tokenizer.step(after_a, b'x').expect("ax transition");
+        let after_bx = tokenizer.step(after_b, b'x').expect("bx transition");
+
+        let byte_sets = position_byte_sets(&vocab, 3);
+        assert_eq!(byte_sets.position_bytes[0], b"x");
+        let active_zero = vec![true; tokenizer.num_states() as usize];
+        let active_one = advance_active_states(
+            &tokenizer,
+            &active_zero,
+            &byte_sets.position_bytes[0],
+        );
+        assert!(active_one[after_ax as usize]);
+        assert!(active_one[after_bx as usize]);
+        let position_one = partial_position_partition(
+            &tokenizer,
+            1,
+            &active_one,
+            &byte_sets.position_bytes[1],
+        );
+        assert_ne!(
+            position_one.class_by_state[after_ax as usize],
+            position_one.class_by_state[after_bx as usize],
+            "states reached through B0 must be compared at position 1 even when B1 is empty",
+        );
+
+        let c = compute_global_token_position_state_partition(&tokenizer, &vocab)
+            .expect("nonempty vocab");
+        assert_ne!(
+            c.as_many_to_one().original_to_internal[after_ax as usize],
+            c.as_many_to_one().original_to_internal[after_bx as usize],
+            "position-wise propagation on B0={{x}} makes both final states active at position 1, where their F rows differ",
+        );
+
+        let (ti_quotient, _) =
+            compute_global_token_position_state_quotient(&tokenizer, &vocab);
+        assert_ne!(
+            ti_quotient.as_many_to_one().original_to_internal[after_ax as usize],
+            ti_quotient.as_many_to_one().original_to_internal[after_bx as usize],
+            "the TI-facing C map must preserve the distinct position-1 classes",
+        );
+    }
+
+    #[test]
+    fn arbitrarily_late_tail_cutoff_uses_all_real_vocab_positions() {
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"abcdef".to_vec()),
+            Expr::U8Seq(b"abcxef".to_vec()),
             Expr::U8Seq(b"x".to_vec()),
         ]);
-        let vocab = vocab(&[(0, b"abc"), (1, b"abx")]);
+        let vocab = vocab(&[(0, b"abcdef"), (1, b"abcxef")]);
+        let (map, profile) = compute_global_token_position_map_with_tail_start(
+            &tokenizer,
+            &vocab,
+            usize::MAX,
+        )
+        .expect("nonempty vocab");
+
+        assert_eq!(profile.tail_start_position, usize::MAX);
+        assert_eq!(profile.position_byte_counts.len(), 7);
+        assert_eq!(profile.tail_byte_count, 0);
+        assert_eq!(profile.tail_active_state_count, 0);
+        assert_positional_constraints_hold(&tokenizer, &vocab, usize::MAX, &map);
+    }
+
+    #[test]
+    fn tail_reachability_follows_terminal_reset_after_byte_two() {
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"abc".to_vec()),
+            Expr::U8Seq(b"d".to_vec()),
+            Expr::U8Seq(b"x".to_vec()),
+        ]);
+        let vocab = vocab(&[(0, b"abcd"), (1, b"abcx")]);
         let bytes = position_byte_sets(&vocab, 3);
         let mut active = vec![true; tokenizer.num_states() as usize];
-        active = advance_active_states(&tokenizer, &active, &bytes.continuation_bytes[0]);
-        active = advance_active_states(&tokenizer, &active, &bytes.continuation_bytes[1]);
+        active = advance_active_states(&tokenizer, &active, &bytes.position_bytes[0]);
+        active = advance_active_states(&tokenizer, &active, &bytes.position_bytes[1]);
+        active = advance_active_states(&tokenizer, &active, &bytes.position_bytes[2]);
         let tail = tail_active_states(&tokenizer, &active, &bytes.tail_bytes);
 
         let reset = tokenizer.initial_state_id();
-        let after_c = tokenizer.step(reset, b'c').expect("reset c transition");
+        let after_d = tokenizer.step(reset, b'd').expect("reset d transition");
         let after_x = tokenizer.step(reset, b'x').expect("reset x transition");
-        assert!(tail[reset as usize], "byte-two match must add reset to A3");
-        assert!(tail[after_c as usize]);
+        assert!(tail[reset as usize], "position-two match must add reset to A3");
+        assert!(tail[after_d as usize]);
         assert!(tail[after_x as usize]);
 
         let (map, profile) =
@@ -972,7 +1183,7 @@ mod tests {
                 .expect("nonempty vocab");
         assert_eq!(profile.tail_start_position, 3);
         assert_ne!(
-            map.original_to_internal[after_c as usize],
+            map.original_to_internal[after_d as usize],
             map.original_to_internal[after_x as usize],
             "two distinct tail-active states must remain pairwise incompatible",
         );
@@ -1000,8 +1211,7 @@ mod tests {
             tail_active_counts.push(profile.tail_active_state_count);
             class_counts.push(profile.class_count);
         }
-        assert_eq!(tail_active_counts, vec![10, 9, 7]);
-        assert_eq!(class_counts, vec![11, 11, 10]);
+        assert_eq!(tail_active_counts, vec![9, 7, 5]);
         assert!(class_counts.windows(2).all(|pair| pair[1] <= pair[0]));
     }
 
