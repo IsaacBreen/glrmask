@@ -315,6 +315,107 @@ pub(crate) struct DynamicContinuationPartition {
     subtree_groups: Box<[u64]>,
 }
 
+const CONTINUATION_NFA_CONFIG_UNKNOWN: u32 = u32::MAX;
+const CONTINUATION_NFA_CONFIG_DEAD: u32 = u32::MAX - 1;
+
+struct ContinuationNfaScanCache<'tok> {
+    tokenizer: &'tok Tokenizer,
+    config_ids: FxHashMap<Vec<u32>, u32>,
+    configs: Vec<Box<[u32]>>,
+    transitions: Vec<Option<Box<[u32; 256]>>>,
+    raw_start_config: Vec<u32>,
+}
+
+impl<'tok> ContinuationNfaScanCache<'tok> {
+    fn new(tokenizer: &'tok Tokenizer) -> Self {
+        Self {
+            tokenizer,
+            config_ids: FxHashMap::default(),
+            configs: Vec::new(),
+            transitions: Vec::new(),
+            raw_start_config: vec![
+                CONTINUATION_NFA_CONFIG_UNKNOWN;
+                tokenizer.num_states() as usize
+            ],
+        }
+    }
+
+    fn intern_config(&mut self, mut states: Vec<u32>) -> u32 {
+        states.sort_unstable();
+        states.dedup();
+        if let Some(&id) = self.config_ids.get(states.as_slice()) {
+            return id;
+        }
+        let id = self.configs.len() as u32;
+        self.config_ids.insert(states.clone(), id);
+        self.configs.push(states.into_boxed_slice());
+        self.transitions.push(None);
+        id
+    }
+
+    fn config_for_raw_start(&mut self, state: u32) -> u32 {
+        let slot = state as usize;
+        let cached = self.raw_start_config[slot];
+        if cached != CONTINUATION_NFA_CONFIG_UNKNOWN {
+            return cached;
+        }
+        let closure = self
+            .tokenizer
+            .execute_from_state_end_only(&[], state)
+            .into_vec();
+        let config = self.intern_config(closure);
+        self.raw_start_config[slot] = config;
+        config
+    }
+
+    fn step_config(&mut self, config: u32, byte: u8) -> Option<u32> {
+        let config_index = config as usize;
+        if let Some(row) = self.transitions[config_index].as_ref() {
+            let cached = row[byte as usize];
+            if cached != CONTINUATION_NFA_CONFIG_UNKNOWN {
+                return (cached != CONTINUATION_NFA_CONFIG_DEAD).then_some(cached);
+            }
+        }
+
+        let direct_targets = {
+            let states = &self.configs[config_index];
+            let mut targets = Vec::<u32>::new();
+            for &state in states.iter() {
+                if let Some(target) = self.tokenizer.step(state, byte) {
+                    targets.push(target);
+                }
+            }
+            targets.sort_unstable();
+            targets.dedup();
+            targets
+        };
+
+        let target = if direct_targets.is_empty() {
+            CONTINUATION_NFA_CONFIG_DEAD
+        } else {
+            let mut closed_targets = Vec::<u32>::new();
+            for target in direct_targets {
+                let target_config = self.config_for_raw_start(target);
+                closed_targets.extend_from_slice(&self.configs[target_config as usize]);
+            }
+            self.intern_config(closed_targets)
+        };
+
+        let row = self.transitions[config_index]
+            .get_or_insert_with(|| Box::new([CONTINUATION_NFA_CONFIG_UNKNOWN; 256]));
+        row[byte as usize] = target;
+        (target != CONTINUATION_NFA_CONFIG_DEAD).then_some(target)
+    }
+
+    fn non_end_states(&self, config: u32) -> Vec<u32> {
+        self.configs[config as usize]
+            .iter()
+            .copied()
+            .filter(|&state| !self.tokenizer.is_end(state))
+            .collect()
+    }
+}
+
 impl DynamicContinuationPartition {
     #[inline]
     pub(crate) fn token_group(&self, token_id: u32) -> Option<usize> {
@@ -533,6 +634,54 @@ impl DynamicMaskVocab {
         }
     }
 
+    fn collect_nfa_continuation_groups(
+        &self,
+        scan_cache: &mut ContinuationNfaScanCache<'_>,
+        node_id: u32,
+        config: u32,
+        by_end_states: &mut BTreeMap<Vec<u32>, Vec<u32>>,
+    ) -> bool {
+        let node = self.trie.node(node_id);
+        if let Some(token_id) = node.token_id {
+            let end_states = scan_cache.non_end_states(config);
+            by_end_states.entry(end_states).or_default().push(token_id);
+            if by_end_states.len() > 64 {
+                return false;
+            }
+        }
+
+        for edge in self.trie.children(node_id) {
+            let mut next_config = config;
+            let mut blocked = false;
+            for &byte in self.trie.edge_bytes(edge) {
+                let Some(next) = scan_cache.step_config(next_config, byte) else {
+                    blocked = true;
+                    break;
+                };
+                next_config = next;
+            }
+            if blocked {
+                by_end_states
+                    .entry(Vec::new())
+                    .or_default()
+                    .extend_from_slice(self.trie.subtree_tokens(edge.child));
+                if by_end_states.len() > 64 {
+                    return false;
+                }
+            } else {
+                if !self.collect_nfa_continuation_groups(
+                    scan_cache,
+                    edge.child,
+                    next_config,
+                    by_end_states,
+                ) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     fn build_continuation_partition(
         &self,
         tokenizer: &Tokenizer,
@@ -542,18 +691,44 @@ impl DynamicMaskVocab {
     ) -> Option<DynamicContinuationPartition> {
         let mut by_end_states = BTreeMap::<Vec<u32>, Vec<u32>>::new();
         if tokenizer.has_epsilon_transitions() {
-            for (canonical_token_id, bytes) in entries {
-                let mut end_states = tokenizer
-                    .execute_from_state_end_only(bytes, source_state)
-                    .into_iter()
-                    .filter(|&state| !tokenizer.is_end(state))
-                    .collect::<Vec<_>>();
-                end_states.sort_unstable();
-                end_states.dedup();
-                by_end_states
-                    .entry(end_states)
-                    .or_default()
-                    .push(*canonical_token_id);
+            let mut scan_cache = ContinuationNfaScanCache::new(tokenizer);
+            let start_config = scan_cache.config_for_raw_start(source_state);
+            let completed = self.collect_nfa_continuation_groups(
+                &mut scan_cache,
+                0,
+                start_config,
+                &mut by_end_states,
+            );
+
+            if std::env::var_os("GLRMASK_DYNAMIC_CONTINUATION_NFA_STRICT_REFERENCE").is_some() {
+                let mut reference = BTreeMap::<Vec<u32>, Vec<u32>>::new();
+                for (canonical_token_id, bytes) in entries {
+                    let mut end_states = tokenizer
+                        .execute_from_state_end_only(bytes, source_state)
+                        .into_iter()
+                        .filter(|&state| !tokenizer.is_end(state))
+                        .collect::<Vec<_>>();
+                    end_states.sort_unstable();
+                    end_states.dedup();
+                    reference
+                        .entry(end_states)
+                        .or_default()
+                        .push(*canonical_token_id);
+                }
+                if completed {
+                    assert_eq!(
+                        by_end_states, reference,
+                        "NFA continuation trie traversal differed from scalar token replay"
+                    );
+                } else {
+                    assert!(
+                        reference.len() > 64,
+                        "NFA continuation trie traversal aborted at the group cap but scalar replay did not"
+                    );
+                }
+            }
+            if !completed {
+                return None;
             }
         } else {
             self.collect_dfa_continuation_groups(
@@ -617,6 +792,7 @@ impl DynamicMaskVocab {
         tokenizer: &Tokenizer,
         mask_words: usize,
     ) {
+        let source_discovery_started_at = std::time::Instant::now();
         let mut broad_loop_states = (0..tokenizer.num_states())
             .map(|state| (state, tokenizer.self_loop_bytes(state).len()))
             .filter(|&(_, width)| width >= 32)
@@ -631,6 +807,22 @@ impl DynamicMaskVocab {
             .iter()
             .map(|&(state, _)| state)
             .collect::<FxHashSet<_>>();
+        let epsilon_closures = tokenizer.has_epsilon_transitions().then(|| {
+            (0..tokenizer.num_states())
+                .map(|state| {
+                    tokenizer
+                        .execute_from_state_end_only(&[], state)
+                        .into_vec()
+                        .into_boxed_slice()
+                })
+                .collect::<Vec<_>>()
+        });
+        let target_closure_reaches_broad = epsilon_closures.as_ref().map(|closures| {
+            closures
+                .iter()
+                .map(|closure| closure.iter().any(|state| broad_targets.contains(state)))
+                .collect::<Vec<_>>()
+        });
         let mut entry_sources = Vec::<(u32, usize)>::new();
         let deterministic = !tokenizer.has_epsilon_transitions();
         for source_state in 0..tokenizer.num_states() {
@@ -644,14 +836,34 @@ impl DynamicMaskVocab {
                     .count()
             } else {
                 let mut covered = U8Set::empty();
-                for byte in 0..=u8::MAX {
-                    let execution = tokenizer.execute_from_state_end_only(&[byte], source_state);
-                    if execution
-                        .iter()
-                        .any(|end_state| broad_targets.contains(end_state))
-                    {
-                        covered.insert(byte);
+                let closures = epsilon_closures.as_ref().unwrap();
+                let target_reaches_broad = target_closure_reaches_broad.as_ref().unwrap();
+                for &closure_state in closures[source_state as usize].iter() {
+                    for (byte, target) in tokenizer.transitions_from(closure_state) {
+                        if target_reaches_broad[target as usize] {
+                            covered.insert(byte);
+                        }
                     }
+                }
+
+                if std::env::var_os("GLRMASK_DYNAMIC_CONTINUATION_NFA_STRICT_REFERENCE")
+                    .is_some()
+                {
+                    let mut reference = U8Set::empty();
+                    for byte in 0..=u8::MAX {
+                        let execution =
+                            tokenizer.execute_from_state_end_only(&[byte], source_state);
+                        if execution
+                            .iter()
+                            .any(|end_state| broad_targets.contains(end_state))
+                        {
+                            reference.insert(byte);
+                        }
+                    }
+                    assert_eq!(
+                        covered, reference,
+                        "NFA continuation source discovery differed from scalar reference"
+                    );
                 }
                 covered.len()
             };
@@ -674,8 +886,9 @@ impl DynamicMaskVocab {
         let profile = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some();
         if profile {
             eprintln!(
-                "[glrmask/profile][dynamic_continuation_prebuild] sources={:?}",
-                source_states
+                "[glrmask/profile][dynamic_continuation_prebuild] sources={:?} source_discovery_ms={:.3}",
+                source_states,
+                source_discovery_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
         let entries = Arc::new(self.canonical_token_entries());
@@ -691,6 +904,12 @@ impl DynamicMaskVocab {
                         source_state,
                         partition.groups.len(),
                         partition.groups.iter().map(|group| group.token_count).sum::<usize>(),
+                        started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                } else {
+                    eprintln!(
+                        "[glrmask/profile][dynamic_continuation_partition] source={} declined=true build_ms={:.3}",
+                        source_state,
                         started.elapsed().as_secs_f64() * 1000.0,
                     );
                 }
