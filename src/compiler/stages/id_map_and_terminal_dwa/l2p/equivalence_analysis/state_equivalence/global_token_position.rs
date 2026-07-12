@@ -199,6 +199,10 @@ impl<'a> NfaTokenPositionView<'a> {
         if let Some(&target) = self.transitions.get(&(config, byte)) {
             return target;
         }
+        self.step_without_cache_lookup(config, byte)
+    }
+
+    fn step_without_cache_lookup(&mut self, config: u32, byte: u8) -> u32 {
         let targets = {
             let source = &self.configs[config as usize];
             self.tokenizer.step_all(source, byte)
@@ -315,7 +319,7 @@ fn nfa_partial_position_partition_and_advance(
         };
         let mut destinations = Vec::with_capacity(bytes.len());
         for &byte in bytes {
-            let destination = view.step(source, byte);
+            let destination = view.step_without_cache_lookup(source, byte);
             destinations.push(destination);
             if destination == u32::MAX {
                 continue;
