@@ -1386,9 +1386,11 @@ fn populate_exact_boundary_prefixes<S: ExactBoundaryDeterministicScanner>(
     source_stamps: &mut Vec<u32>,
 ) {
     let num_states = scanner.num_states();
+    let use_state_major_transitions = transitions_by_byte.is_empty();
     let child_count = nodes[node].children.len();
     let frontier_is_dense = current_states.len() * 4 >= num_states;
-    let source_stamp = if nodes[node]
+    let source_stamp = if !use_state_major_transitions
+        && nodes[node]
         .children
         .iter()
         .any(|(byte, _)| {
@@ -1426,6 +1428,26 @@ fn populate_exact_boundary_prefixes<S: ExactBoundaryDeterministicScanner>(
         if next_states.capacity() < current_states.len() {
             next_states.reserve(current_states.len() - next_states.capacity());
         }
+        if use_state_major_transitions {
+            *state_stamp = state_stamp.wrapping_add(1);
+            if *state_stamp == 0 {
+                state_seen.fill(0);
+                *state_stamp = 1;
+            }
+            *states_scanned += current_states.len();
+            for &state in current_states {
+                let next = scanner.transition(state, byte);
+                if next == u32::MAX {
+                    continue;
+                }
+                let slot = &mut state_seen[next as usize];
+                if *slot == *state_stamp {
+                    continue;
+                }
+                *slot = *state_stamp;
+                next_states.push(next);
+            }
+        } else {
         let sparse_transitions = &sparse_transitions_by_byte[byte as usize];
         let reverse_transitions = &reverse_transitions_by_byte[byte as usize];
         let use_reverse_transitions = source_stamp.is_some()
@@ -1481,8 +1503,9 @@ fn populate_exact_boundary_prefixes<S: ExactBoundaryDeterministicScanner>(
                 }
                 *slot = *state_stamp;
                 next_states.push(next);
+                }
             }
-            }
+        }
         }
         *reached_states += next_states.len();
 
@@ -1823,16 +1846,13 @@ fn tokens_have_exact_active_l2p_boundary(
     view_start_states.sort_unstable();
     view_start_states.dedup();
 
-    let index_started_at = std::time::Instant::now();
-    let (view_transitions_by_byte, view_sparse_transitions_by_byte, view_reverse_transitions_by_byte) =
-        build_exact_boundary_transition_index(&dfa.transitions, dfa.states.len());
-    let index_ms = index_started_at.elapsed().as_secs_f64() * 1000.0;
+    let index_ms = 0.0;
     let batch_started_at = std::time::Instant::now();
     let result = tokens_have_exact_active_l2p_boundary_deterministic(
         &scanner,
-        &view_transitions_by_byte,
-        &view_sparse_transitions_by_byte,
-        &view_reverse_transitions_by_byte,
+        &[],
+        &[],
+        &[],
         tokens,
         active_bitset,
         disallowed_follows,
