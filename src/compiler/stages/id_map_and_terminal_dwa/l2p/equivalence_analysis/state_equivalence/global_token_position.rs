@@ -1074,7 +1074,6 @@ pub(crate) fn compute_global_token_position_state_views(
     }
     Some((quotient, partition, profile))
 }
-}
 
 /// Wrap global token-position map C for the pre-TI pipeline.
 pub(crate) fn compute_global_token_position_state_quotient(

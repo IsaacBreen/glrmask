@@ -669,38 +669,22 @@ fn try_analyze_equivalences_with_token_position_partition(
     final_state_representatives.dedup();
 
     let vocab_equiv_started_at = Instant::now();
-    let (vocab_classes, vocab_analysis_dfa_build_ms) = if partition_label == "p8" {
-        // P8's L2P vocabulary is deliberately tiny and its current exact
-        // analysis produces an identity token partition. Identity is exact in
-        // every schema, so avoid constructing a large analysis DFA merely to
-        // rediscover that no token aliases are useful on this partition.
-        (
-            (0..prepared.token_ids.len())
-                .map(|token_index| vec![token_index])
-                .collect(),
-            0.0,
-        )
-    } else {
-        let (dedup_vocab_classes, build_ms) =
-            vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
-                &tokenizer_view,
-                &dedup.representative_token_bytes,
-                &final_state_representatives,
-                effective_disallowed,
-                Some(&byte_to_class),
-                None,
-                Some(&local_vocab_dfa_cache),
-                Some(&local_analysis_dfa_cache),
-            );
-        (
-            expand_vocab_classes(
-                dedup_vocab_classes,
-                &dedup.original_to_repr,
-                dedup.representative_token_bytes.len(),
-            ),
-            build_ms,
-        )
-    };
+    let (dedup_vocab_classes, vocab_analysis_dfa_build_ms) =
+        vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
+            &tokenizer_view,
+            &dedup.representative_token_bytes,
+            &final_state_representatives,
+            effective_disallowed,
+            Some(&byte_to_class),
+            None,
+            Some(&local_vocab_dfa_cache),
+            Some(&local_analysis_dfa_cache),
+        );
+    let vocab_classes = expand_vocab_classes(
+        dedup_vocab_classes,
+        &dedup.original_to_repr,
+        dedup.representative_token_bytes.len(),
+    );
     let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let finalize_started_at = Instant::now();
