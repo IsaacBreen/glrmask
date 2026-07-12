@@ -2128,6 +2128,7 @@ fn compile_terminal_partitions(
             .sum::<usize>();
     let mut combined = DFA::new(total_states);
     combined.ensure_group_capacity(exprs.len());
+    let mut root_futures = BitSet::new(exprs.len());
 
     let mut offset = 1u32;
     for batch in &components {
@@ -2141,6 +2142,9 @@ fn compile_terminal_partitions(
                 terminal_id as u32,
                 *component.group_id_to_u8set(local_group as u32),
             );
+        }
+        for local_group in component.possible_future_group_ids(0).iter() {
+            root_futures.set(terminal_ids[local_group]);
         }
 
         for (state_index, state) in component.states().iter().enumerate() {
@@ -2157,23 +2161,22 @@ fn compile_terminal_partitions(
 
             let mut finalizers = BitSet::new(exprs.len());
             let mut futures = BitSet::new(exprs.len());
-            for (local_group, &terminal_id) in terminal_ids.iter().enumerate() {
-                if state.finalizers.contains(local_group) {
-                    finalizers.set(terminal_id);
-                }
-                if component
-                    .possible_future_group_ids(state_index as u32)
-                    .contains(local_group)
-                {
-                    futures.set(terminal_id);
-                }
+            for local_group in state.finalizers.iter() {
+                finalizers.set(terminal_ids[local_group]);
+            }
+            for local_group in component.possible_future_group_ids(state_index as u32).iter() {
+                futures.set(terminal_ids[local_group]);
             }
             combined.overwrite_state_metadata(mapped_state, finalizers, futures);
         }
         offset += component.num_states() as u32;
     }
 
-    combined.recompute_possible_futures();
+    // Components are disjoint below a new epsilon-only root. Their strict
+    // possible-future sets remain exact after local->global terminal remapping.
+    // The root's strict futures are exactly the union of the component start
+    // states' strict futures; no generic epsilon fixpoint is needed.
+    combined.set_possible_future_group_ids(0, root_futures);
     combined
 }
 
@@ -3959,6 +3962,33 @@ mod tests {
         let result = tokenizer.execute_from_state(b"a", tokenizer.initial_state());
         assert!(result.matches.iter().any(|matched| matched.id == 0));
         assert!(!result.end_state.is_empty());
+    }
+
+    #[test]
+    fn partitioned_union_transports_exact_possible_futures_without_recompute() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"b".to_vec())),
+                min: 1,
+                max: None,
+            },
+            Expr::Epsilon,
+        ];
+        let regex = build_regex_partitioned_with_adaptive(
+            &expressions,
+            &[7, 7, 9, 11],
+            false,
+        );
+        let exact = regex.dfa;
+        let mut recomputed = exact.clone();
+        recomputed.recompute_possible_futures();
+
+        assert_eq!(
+            exact, recomputed,
+            "transported component futures and epsilon-root union must match the generic fixpoint",
+        );
     }
 
     #[test]
