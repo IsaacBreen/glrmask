@@ -28,6 +28,26 @@ pub(crate) struct RelevantPowersetView {
     pub(crate) raw_start_to_view: Arc<[u32]>,
 }
 
+fn intern_mapped_target_config(
+    targets: &[u32],
+    state_map: &ManyToOneIdMap,
+    config_ids: &mut FxHashMap<Vec<u32>, u32>,
+    configs: &mut Vec<Box<[u32]>>,
+) -> u32 {
+    debug_assert!(!targets.is_empty());
+    let mut target_config = targets
+        .iter()
+        .map(|&raw_state| state_map.original_to_internal[raw_state as usize])
+        .collect::<Vec<_>>();
+    target_config.sort_unstable();
+    target_config.dedup();
+    if target_config.len() == 1 {
+        target_config[0]
+    } else {
+        intern_config(target_config, config_ids, configs)
+    }
+}
+
 impl BoundedAnalysisView {
     pub(crate) fn view_state_for_raw_start(&self, raw_state: usize) -> usize {
         let state = self.raw_start_to_view[raw_state];
@@ -102,10 +122,25 @@ pub(crate) fn build_relevant_powerset_view(
         .enumerate()
         .filter_map(|(byte, &relevant)| relevant.then_some(byte as u8))
         .collect::<Vec<_>>();
+    let closure_by_class = state_map.map(|state_map| {
+        state_map
+            .representative_original_ids
+            .iter()
+            .map(|&representative| {
+                tokenizer
+                    .execute_from_state_end_only(&[], representative)
+                    .to_vec()
+                    .into_boxed_slice()
+            })
+            .collect::<Vec<_>>()
+    });
     let mut edge_offsets = Vec::<u32>::with_capacity(configs.len() + 1);
     let mut edges = Vec::<(u8, u32)>::new();
     edge_offsets.push(0);
     if let Some(state_map) = state_map {
+        let closure_by_class = closure_by_class
+            .as_ref()
+            .expect("mapped powerset must retain representative closures");
         while let Some(state) = worklist.pop_front() {
             assert_eq!(
                 state as usize + 1,
@@ -113,33 +148,53 @@ pub(crate) fn build_relevant_powerset_view(
                 "powerset states must be processed in interning order",
             );
             let config = configs[state as usize].clone();
-            let source_states = config
-                .iter()
-                .map(|&class| state_map.representative_original_ids[class as usize])
-                .collect::<Vec<_>>();
-            for &byte in &bytes {
-                let targets = tokenizer.step_all(&source_states, byte);
-                if targets.is_empty() {
-                    continue;
+            if config.len() == 1 && closure_by_class[config[0] as usize].len() == 1 {
+                let raw_source = closure_by_class[config[0] as usize][0];
+                for (byte, raw_target) in tokenizer.transitions_from(raw_source) {
+                    if !relevant_bytes[byte as usize] {
+                        continue;
+                    }
+                    let targets = tokenizer.execute_from_state_end_only(&[], raw_target);
+                    debug_assert!(!targets.is_empty());
+                    let target = intern_mapped_target_config(
+                        &targets,
+                        state_map,
+                        &mut config_ids,
+                        &mut configs,
+                    );
+                    if queued.len() < configs.len() {
+                        queued.resize(configs.len(), false);
+                    }
+                    edges.push((byte, target));
+                    if !queued[target as usize] {
+                        queued[target as usize] = true;
+                        worklist.push_back(target);
+                    }
                 }
-                let mut target_config = targets
+            } else {
+                let source_states = config
                     .iter()
-                    .map(|&raw_state| state_map.original_to_internal[raw_state as usize])
+                    .map(|&class| state_map.representative_original_ids[class as usize])
                     .collect::<Vec<_>>();
-                target_config.sort_unstable();
-                target_config.dedup();
-                let target = if target_config.len() == 1 {
-                    target_config[0]
-                } else {
-                    intern_config(target_config, &mut config_ids, &mut configs)
-                };
-                if queued.len() < configs.len() {
-                    queued.resize(configs.len(), false);
-                }
-                edges.push((byte, target));
-                if !queued[target as usize] {
-                    queued[target as usize] = true;
-                    worklist.push_back(target);
+                for &byte in &bytes {
+                    let targets = tokenizer.step_all(&source_states, byte);
+                    if targets.is_empty() {
+                        continue;
+                    }
+                    let target = intern_mapped_target_config(
+                        &targets,
+                        state_map,
+                        &mut config_ids,
+                        &mut configs,
+                    );
+                    if queued.len() < configs.len() {
+                        queued.resize(configs.len(), false);
+                    }
+                    edges.push((byte, target));
+                    if !queued[target as usize] {
+                        queued[target as usize] = true;
+                        worklist.push_back(target);
+                    }
                 }
             }
             edge_offsets.push(edges.len() as u32);
@@ -172,21 +227,22 @@ pub(crate) fn build_relevant_powerset_view(
     }
 
     let states = if let Some(state_map) = state_map {
-        let class_states = state_map
-            .representative_original_ids
+        let closure_by_class = closure_by_class
+            .as_ref()
+            .expect("mapped powerset must retain representative closures");
+        let class_states = closure_by_class
             .iter()
-            .map(|&representative| {
-                let closure = tokenizer.execute_from_state_end_only(&[], representative);
+            .map(|closure| {
                 FlatDfaState {
                     finalizers: filtered_config_groups(
                         tokenizer,
-                        &closure,
+                        closure,
                         active_groups,
                         true,
                     ),
                     possible_future_group_ids: filtered_config_groups(
                         tokenizer,
-                        &closure,
+                        closure,
                         active_groups,
                         false,
                     ),
