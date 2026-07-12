@@ -1,15 +1,24 @@
-//! Exact global scanner-state equivalence induced by token positions.
+//! Scanner-state equivalence induced by positions within vocabulary tokens.
 //!
-//! This is the token-position partition C, built from two token-position
-//! observations:
+//! This module contains two deliberately different relations. Do not conflate
+//! them:
 //!
-//! * every first-byte destination is retained exactly (partition A); and
-//! * every state reachable at byte position three or later is singleton
-//!   (partition B).
+//! * `GlobalTokenBoundaryStatePartition` groups states by exact destinations on
+//!   every possible token-first byte. It is exact only when substituting a
+//!   state immediately before the first byte of a complete nonempty vocabulary
+//!   token.
+//! * `GlobalTokenPositionStatePartition` is partition C, the global
+//!   token-position relation. C refines the first-destination relation by
+//!   keeping every state reachable at token byte position three or later as a
+//!   singleton. It is the global state-equivalence seed intended for ordinary
+//!   equivalence analysis and token-position-aware TI discovery.
 //!
-//! It is a token-boundary relation: a state class is only entered before the
-//! first byte of a vocabulary token. It is intentionally not strengthened by
-//! frozen-output equality nor closed to a raw-byte congruence.
+//! "Global token-position equivalence" still does not mean "quotient of the
+//! raw byte DFA". C is not closed to a right congruence on arbitrary selected
+//! bytes and does not require equal current frozen-output rows. A byte-level
+//! labelled-transition consumer must derive or validate those stronger
+//! properties separately. In particular, C must not be handed directly to
+//! `RestrictedTopology` merely because it covers every raw state.
 
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -34,9 +43,12 @@ pub(crate) struct GlobalTokenPositionEquivalenceProfile {
     pub(crate) total_ms: f64,
 }
 
-/// Total raw-state partition that is exact at nonempty vocabulary-token
-/// boundaries. It is not a raw-byte DFA quotient and must not be supplied to
-/// byte-level TI directly.
+/// First-byte-only token-boundary equivalence.
+///
+/// Two states are equivalent here when every byte that can start a nonempty
+/// vocabulary token takes them to the same exact scanner state/configuration.
+/// This relation is exact for replacing the start state of a complete token
+/// scan. It is not partition C and is not a global token-position relation.
 #[derive(Debug, Clone)]
 pub(crate) struct GlobalTokenBoundaryStatePartition {
     map: ManyToOneIdMap,
@@ -49,13 +61,16 @@ impl GlobalTokenBoundaryStatePartition {
     }
 }
 
-/// The requested global token-position partition C.
+/// Global token-position partition C.
 ///
-/// A state is singleton once it can occur from the second byte onward. All
-/// remaining states are grouped by their exact destinations on every possible
-/// token-first byte. This is a token-boundary relation: it is intentionally
-/// not a raw-byte DFA quotient, because a state class is only entered before
-/// the first byte of a vocabulary token.
+/// C is the meet of the first-destination partition and the third-plus
+/// singleton refinement. Every state that can occur at byte position three or
+/// later in a vocabulary-token scan is kept exact; the remaining states may
+/// merge only when all token-first bytes have identical exact destinations.
+///
+/// This is the global token-position state relation. It is strictly stronger
+/// than `GlobalTokenBoundaryStatePartition`, but it is still not, by itself, a
+/// raw-byte right congruence or a frozen-output-preserving DFA quotient.
 #[derive(Debug, Clone)]
 pub(crate) struct GlobalTokenPositionStatePartition {
     map: ManyToOneIdMap,
@@ -207,9 +222,9 @@ fn selected_bytes(bytes: &[bool; 256]) -> Vec<u8> {
         .collect()
 }
 
-/// States that can occur immediately after a first token byte. A finalizer in
-/// this set makes the lexer initial state relevant to the second-byte frontier,
-/// exactly as specified by the token-position construction.
+/// States that can be active immediately before byte two of a vocabulary token.
+/// A finalizer on that frontier also makes the lexer reset state relevant,
+/// because scanning the remaining token suffix may restart there.
 fn second_states(
     tokenizer: &Tokenizer,
     first_bytes: &[u8],
@@ -256,9 +271,13 @@ fn second_states(
     states
 }
 
-/// States reachable at byte position three or later: one transition on a
-/// possible second token byte from a second-position state, followed by any
-/// number of ordinary lexer transitions.
+/// States that can be active at byte position three or later in a vocabulary
+/// token scan: take one possible second-byte transition from the byte-two
+/// frontier, then close over arbitrary scanner transitions.
+///
+/// Partition C keeps every such raw state singleton. This is the refinement
+/// that distinguishes global token-position C from first-byte-only boundary
+/// equivalence.
 fn third_plus_states(
     tokenizer: &Tokenizer,
     second_states: &[bool],
@@ -346,9 +365,9 @@ fn seed_partition(
 ) -> (Vec<u32>, usize) {
     let state_count = tokenizer.num_states() as usize;
     let first_destinations = first_destination_rows(tokenizer, first_bytes);
-    // Group states by their exact A∧B seed key (first-byte destinations and a
-    // position->=3 singleton marker) via a 128-bit fingerprint. Position->=3
-    // states fold their own index into the hash so they remain singletons. A
+    // Group states by the two ingredients of C: exact first-byte destinations
+    // and the third-plus singleton marker. Third-plus states fold their own
+    // index into the hash so they remain singletons. A
     // false collision between distinct keys is ~states^2/2^128 -- negligible --
     // and avoids allocating a Box<[u32]> destination key per state. Exactness
     // is backstopped by the strict-reference validator.
@@ -473,10 +492,13 @@ fn first_destination_partition(
     }
 }
 
-/// Build the exact token-boundary partition induced by the first bytes of all
-/// nonempty tokens. If two states agree here, every token begins from the same
-/// raw successor, and deterministic continuation makes the rest of that token
-/// identical byte-for-byte.
+/// Build first-byte-only token-boundary equivalence.
+///
+/// If two states agree here, every complete nonempty vocabulary token reaches
+/// the same exact scanner state/configuration after byte one and therefore has
+/// the same remaining scanner trajectory. This theorem is about substituting
+/// states at token start; it does not make the relation global across positions
+/// inside the token.
 pub(crate) fn compute_global_token_boundary_state_partition(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -491,9 +513,11 @@ pub(crate) fn compute_global_token_boundary_state_partition(
     })
 }
 
-/// Build the exact global token-position partition C from A and the set of B
-/// first-byte destination partitions. Length-one tokens contribute their first
-/// byte normally and simply contribute no second byte.
+/// Build global token-position partition C.
+///
+/// C combines exact first-byte destinations with singleton identity for every
+/// third-plus state. Length-one tokens contribute their first byte normally and
+/// simply contribute no second byte.
 pub(crate) fn compute_global_token_position_state_partition(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -533,10 +557,13 @@ fn map_from_blocks(blocks: Vec<u32>, class_count: usize) -> ManyToOneIdMap {
     }
 }
 
-/// Build the total scanner-state quotient before TI. This is exactly the
-/// requested A∧B token-position partition C: first-byte destinations plus
-/// position->=3 singletons, with no frozen-output strengthening and no
-/// raw-byte congruence closure.
+/// Wrap the total global token-position partition C for the pre-TI pipeline.
+///
+/// The wrapper is structurally total over raw scanner states; it does not
+/// strengthen C semantically. C remains first-byte destinations plus
+/// third-plus singletons, with no frozen-output strengthening and no raw-byte
+/// congruence closure. A consumer requiring those stronger properties must not
+/// treat this wrapper as proof that they hold.
 pub(crate) fn compute_global_token_position_state_quotient(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -655,6 +682,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn global_c_keeps_third_plus_states_distinct_from_boundary_equivalence() {
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"abc".to_vec()),
+            Expr::U8Seq(b"x".to_vec()),
+        ]);
+        let vocab = vocab(&[(0, b"ab")]);
+        let initial = tokenizer.initial_state_id();
+        let after_a = tokenizer.step(initial, b'a').expect("a transition");
+        let after_ab = tokenizer.step(after_a, b'b').expect("ab transition");
+        let after_abc = tokenizer.step(after_ab, b'c').expect("abc transition");
+
+        let boundary = compute_global_token_boundary_state_partition(&tokenizer, &vocab)
+            .expect("fixture token is nonempty");
+        let boundary_map = boundary.as_many_to_one();
+        assert_eq!(
+            boundary_map.original_to_internal[after_ab as usize],
+            boundary_map.original_to_internal[after_abc as usize],
+            "first-byte-only boundary equivalence should merge states with the same 'a' destination",
+        );
+
+        let global = compute_global_token_position_state_partition(&tokenizer, &vocab)
+            .expect("fixture token is nonempty");
+        let global_map = global.as_many_to_one();
+        assert_ne!(
+            global_map.original_to_internal[after_ab as usize],
+            global_map.original_to_internal[after_abc as usize],
+            "partition C must keep byte-position-three-and-later states singleton",
+        );
+        assert_eq!(
+            global_map.internal_to_originals
+                [global_map.original_to_internal[after_ab as usize] as usize]
+                .len(),
+            1,
+        );
+        assert_eq!(
+            global_map.internal_to_originals
+                [global_map.original_to_internal[after_abc as usize] as usize]
+                .len(),
+            1,
+        );
     }
 
     #[test]

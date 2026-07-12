@@ -382,10 +382,16 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     }
 
     let token_position_partition_started_at = l2p_timing_profile_enabled().then(Instant::now);
-    // Byte-valid global token-position quotient C. `compute_..._state_quotient`
-    // closes the A∧B token-position seed to a stable right congruence, which
-    // makes it sound to feed directly into the byte-level TI oracle (unlike the
-    // raw token-boundary partition, which is only exact at token boundaries).
+    // Global token-position partition C. C is stronger than first-byte-only
+    // token-boundary equivalence because third-plus states remain singleton.
+    // It is NOT a selected-byte right congruence or frozen-output-preserving
+    // byte-DFA quotient.
+    //
+    // FIXME: the current byte-level TI path below incorrectly feeds C directly
+    // to `RestrictedTopology`, whose quotient constructor requires exactly
+    // those stronger properties. Keep this distinction explicit until TI once
+    // again consumes C through a token-position-aware observer or derives a
+    // valid byte-level quotient first.
     let global_state_quotient = (l2p_global_token_position_enabled()
         && matches!(partition_label, "p7" | "p8"))
         .then(|| {

@@ -210,9 +210,12 @@ impl ManyToOneIdMap {
 /// terminal interchangeability. A `GlobalScannerStateQuotient` instead covers
 /// every raw lexer state and names one raw representative for every class.
 ///
-/// The producer establishes the global state-equivalence relation. A consumer
-/// such as TI additionally validates the observation-specific contract it
-/// needs, including frozen output equality and selected-byte congruence.
+/// The type itself encodes only total raw-state coverage and one representative
+/// per class. A producer may use it to carry a global state-equivalence
+/// relation, but the type does not encode how strong that relation is. A
+/// consumer requiring a labelled byte-DFA quotient must separately validate
+/// equal visible outputs and selected-byte right congruence. Merely wrapping
+/// token-position partition C in this type does not establish either property.
 #[derive(Debug, Clone)]
 pub(crate) struct GlobalScannerStateQuotient {
     map: ManyToOneIdMap,
