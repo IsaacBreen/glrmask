@@ -650,15 +650,21 @@ fn try_analyze_equivalences_with_token_position_partition(
             Some(seed),
         )
     };
-    let mut final_state_representatives = tokenizer_states
-        .representative_original_ids
-        .iter()
-        .map(|&state| {
-            bounded_analysis.as_ref().map_or(state as usize, |bounded| {
-                bounded.view_state_for_raw_start(state as usize)
-            })
-        })
-        .collect::<Vec<_>>();
+    let mut final_state_representatives = if bounded_analysis.is_some() {
+        // Exact refinement above is already expressed in bounded powerset-view
+        // coordinates. The composed raw quotient deliberately chooses the first
+        // raw member of each final class as its stored representative; that raw
+        // member need not itself be one of C's seeded token-start representatives.
+        // Re-projecting it into the bounded view is therefore invalid. Use the
+        // exact analysis representatives directly for the subsequent vocab pass.
+        state_representatives.clone()
+    } else {
+        tokenizer_states
+            .representative_original_ids
+            .iter()
+            .map(|&state| state as usize)
+            .collect::<Vec<_>>()
+    };
     final_state_representatives.sort_unstable();
     final_state_representatives.dedup();
 
