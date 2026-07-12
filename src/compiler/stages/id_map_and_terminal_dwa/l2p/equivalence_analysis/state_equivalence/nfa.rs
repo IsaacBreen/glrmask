@@ -37,8 +37,20 @@ pub(crate) fn build_relevant_powerset_view(
     tokenizer: &Tokenizer,
     relevant_bytes: &[bool; 256],
     active_groups: Option<&[bool]>,
+    state_map: Option<&ManyToOneIdMap>,
 ) -> RelevantPowersetView {
     let raw_state_count = tokenizer.num_states() as usize;
+    if let Some(state_map) = state_map {
+        assert_eq!(state_map.original_to_internal.len(), raw_state_count);
+        assert_eq!(
+            state_map.internal_to_originals.len(),
+            state_map.representative_original_ids.len(),
+        );
+        assert!(state_map.original_to_internal.iter().all(|&class| {
+            class != u32::MAX
+                && (class as usize) < state_map.representative_original_ids.len()
+        }));
+    }
     let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
     let mut configs = Vec::<Box<[u32]>>::new();
     let mut raw_start_to_view = vec![u32::MAX; raw_state_count];
@@ -46,10 +58,15 @@ pub(crate) fn build_relevant_powerset_view(
     let mut queued = Vec::<bool>::new();
 
     for raw_state in 0..raw_state_count {
-        let closure = tokenizer
-            .execute_from_state_end_only(&[], raw_state as u32)
-            .to_vec();
-        let state = intern_config(closure, &mut config_ids, &mut configs);
+        let config = state_map.map_or_else(
+            || {
+                tokenizer
+                    .execute_from_state_end_only(&[], raw_state as u32)
+                    .to_vec()
+            },
+            |state_map| vec![state_map.original_to_internal[raw_state]],
+        );
+        let state = intern_config(config, &mut config_ids, &mut configs);
         raw_start_to_view[raw_state] = state;
         if queued.len() < configs.len() {
             queued.resize(configs.len(), false);
@@ -64,15 +81,36 @@ pub(crate) fn build_relevant_powerset_view(
     let mut transitions = vec![u32::MAX; configs.len() * 256];
     while let Some(state) = worklist.pop_front() {
         let config = configs[state as usize].clone();
+        let source_states = state_map.map_or_else(
+            || config.to_vec(),
+            |state_map| {
+                config
+                    .iter()
+                    .map(|&class| state_map.representative_original_ids[class as usize])
+                    .collect::<Vec<_>>()
+            },
+        );
         for (byte, &relevant) in relevant_bytes.iter().enumerate() {
             if !relevant {
                 continue;
             }
-            let targets = tokenizer.step_all(&config, byte as u8);
+            let targets = tokenizer.step_all(&source_states, byte as u8);
             if targets.is_empty() {
                 continue;
             }
-            let target = intern_config(targets.to_vec(), &mut config_ids, &mut configs);
+            let target_config = state_map.map_or_else(
+                || targets.to_vec(),
+                |state_map| {
+                    let mut classes = targets
+                        .iter()
+                        .map(|&raw_state| state_map.original_to_internal[raw_state as usize])
+                        .collect::<Vec<_>>();
+                    classes.sort_unstable();
+                    classes.dedup();
+                    classes
+                },
+            );
+            let target = intern_config(target_config, &mut config_ids, &mut configs);
             if transitions.len() < configs.len() * 256 {
                 transitions.resize(configs.len() * 256, u32::MAX);
                 queued.resize(configs.len(), false);
@@ -85,18 +123,61 @@ pub(crate) fn build_relevant_powerset_view(
         }
     }
 
-    let states = configs
-        .iter()
-        .map(|config| FlatDfaState {
-            finalizers: filtered_config_groups(tokenizer, config, active_groups, true),
-            possible_future_group_ids: filtered_config_groups(
-                tokenizer,
-                config,
-                active_groups,
-                false,
-            ),
-        })
-        .collect();
+    let states = if let Some(state_map) = state_map {
+        let closure_by_class = state_map
+            .representative_original_ids
+            .iter()
+            .map(|&representative| {
+                tokenizer
+                    .execute_from_state_end_only(&[], representative)
+                    .to_vec()
+                    .into_boxed_slice()
+            })
+            .collect::<Vec<_>>();
+        configs
+            .iter()
+            .map(|config| {
+                let mut finalizers = Vec::<usize>::new();
+                let mut possible_future_group_ids = Vec::<usize>::new();
+                for &class in config.iter() {
+                    let closure = &closure_by_class[class as usize];
+                    finalizers.extend(filtered_config_groups(
+                        tokenizer,
+                        closure,
+                        active_groups,
+                        true,
+                    ));
+                    possible_future_group_ids.extend(filtered_config_groups(
+                        tokenizer,
+                        closure,
+                        active_groups,
+                        false,
+                    ));
+                }
+                finalizers.sort_unstable();
+                finalizers.dedup();
+                possible_future_group_ids.sort_unstable();
+                possible_future_group_ids.dedup();
+                FlatDfaState {
+                    finalizers,
+                    possible_future_group_ids,
+                }
+            })
+            .collect()
+    } else {
+        configs
+            .iter()
+            .map(|config| FlatDfaState {
+                finalizers: filtered_config_groups(tokenizer, config, active_groups, true),
+                possible_future_group_ids: filtered_config_groups(
+                    tokenizer,
+                    config,
+                    active_groups,
+                    false,
+                ),
+            })
+            .collect()
+    };
     RelevantPowersetView {
         dfa: FlatDfa {
             states,

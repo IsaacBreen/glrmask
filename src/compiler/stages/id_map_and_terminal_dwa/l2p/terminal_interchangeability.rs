@@ -401,7 +401,7 @@ impl RestrictedTopology {
         global_state_quotient: Option<&GlobalScannerStateQuotient>,
     ) -> Self {
         if tokenizer.has_epsilon_transitions() {
-            return Self::new_nfa(tokenizer, relevant_bytes);
+            return Self::new_nfa(tokenizer, relevant_bytes, global_state_quotient);
         }
         let bytes = (0..=255u8)
             .filter(|&byte| relevant_bytes[byte as usize])
@@ -503,8 +503,17 @@ impl RestrictedTopology {
         }
     }
 
-    fn new_nfa(tokenizer: &Tokenizer, relevant_bytes: &[bool; 256]) -> Self {
-        let view = build_relevant_powerset_view(tokenizer, relevant_bytes, None);
+    fn new_nfa(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        global_state_quotient: Option<&GlobalScannerStateQuotient>,
+    ) -> Self {
+        let view = build_relevant_powerset_view(
+            tokenizer,
+            relevant_bytes,
+            None,
+            global_state_quotient.map(GlobalScannerStateQuotient::as_many_to_one),
+        );
         let bytes = (0..=255u8)
             .filter(|&byte| relevant_bytes[byte as usize])
             .collect::<Vec<_>>();
@@ -1276,18 +1285,32 @@ impl TiDiscoveryContext {
         global_state_quotient: &GlobalScannerStateQuotient,
         shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
     ) -> Self {
+        let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let t0 = Instant::now();
         let topology = Arc::new(RestrictedTopology::new_with_global_state_quotient(
             tokenizer,
             relevant_bytes,
             global_state_quotient,
         ));
+        let t1 = Instant::now();
         let raw = Arc::new(TiRawDiscoveryData::new(
             tokenizer,
             &topology,
             shared_output_cache,
         ));
+        let t2 = Instant::now();
         let (root_output_signatures, root_observed_states) =
             root_output_signatures(&topology, &raw);
+        let t3 = Instant::now();
+        if profile {
+            eprintln!(
+                "[glrmask/profile][terminal_interchangeability] ti_context_build_c topology_ms={:.3} raw_ms={:.3} root_sig_ms={:.3} total_ms={:.3}",
+                (t1 - t0).as_secs_f64() * 1000.0,
+                (t2 - t1).as_secs_f64() * 1000.0,
+                (t3 - t2).as_secs_f64() * 1000.0,
+                (t3 - t0).as_secs_f64() * 1000.0,
+            );
+        }
         Self {
             topology,
             raw,
@@ -10505,6 +10528,66 @@ mod tests {
 
         assert_eq!(quotient.partition, raw.partition);
         assert!(quotient.maps.values().all(|map| map.len() == state_count));
+    }
+
+    #[test]
+    fn partitioned_epsilon_ti_consumes_nonidentity_global_state_coordinate() {
+        let tokenizer =
+            crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer();
+
+        let vocab = crate::Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+                (2, b"aa".to_vec()),
+                (3, b"ba".to_vec()),
+            ],
+            None,
+        );
+        let (global_state_quotient, _) = crate::compiler::stages::id_map_and_terminal_dwa::l2p::
+            equivalence_analysis::state_equivalence::global_token_position::
+            compute_global_token_position_state_quotient(&tokenizer, &vocab);
+        assert!(
+            (global_state_quotient
+                .as_many_to_one()
+                .num_internal_ids() as usize)
+                < tokenizer.num_states() as usize,
+            "the fixture must exercise a non-identity C coordinate",
+        );
+
+        let relevant_bytes = [true; 256];
+        let raw_topology = RestrictedTopology::new(&tokenizer, &relevant_bytes);
+        let c_topology = RestrictedTopology::new_with_global_state_quotient(
+            &tokenizer,
+            &relevant_bytes,
+            &global_state_quotient,
+        );
+        assert!(
+            c_topology.real_state_count < raw_topology.real_state_count,
+            "epsilon TI must build its powerset in the supplied C coordinate",
+        );
+
+        let active = [true, true];
+        let raw = discover_one_round_with_transport_witnesses(
+            &tokenizer,
+            &active,
+            &relevant_bytes,
+            None,
+        );
+        let c = discover_one_round_with_transport_witnesses_with_global_state_quotient(
+            &tokenizer,
+            &active,
+            &relevant_bytes,
+            None,
+            &global_state_quotient,
+        );
+        assert_eq!(c.partition, raw.partition);
+        assert!(
+            c.maps
+                .values()
+                .all(|map| map.len() == tokenizer.num_states() as usize),
+            "C-coordinate TI transport must remain in raw scanner coordinates",
+        );
     }
 
     #[test]
