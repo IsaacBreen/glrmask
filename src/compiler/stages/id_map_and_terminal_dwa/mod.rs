@@ -307,7 +307,12 @@ pub(crate) fn build_global_max_length_state_map(
 ///    [`partition::build_partition_id_map_and_terminal_dwa`].
 /// 3. Merges every L1-style result and every L2P result in parallel.
 /// 4. Merges the two family results into the final terminal DWA.
-pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
+pub(crate) fn build_terminal_dwa_family_lanes_with_precomputed_global_max_length<
+    L1Consumer,
+    L2pConsumer,
+    L1Output,
+    L2pOutput,
+>(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     terminal_coloring: &TerminalColoring,
@@ -318,7 +323,20 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
     flat_trans: Arc<[u32]>,
     global_max_length_state_map: &ManyToOneIdMap,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
-) -> (TerminalDwaFamilies, TerminalDwaPhaseProfile) {
+    l1_consumer: L1Consumer,
+    l2p_consumer: L2pConsumer,
+) -> (
+    TerminalDwaFamilies,
+    TerminalDwaPhaseProfile,
+    Option<L1Output>,
+    Option<L2pOutput>,
+)
+where
+    L1Consumer: FnOnce(&MappedArtifact<TerminalAutomaton>) -> L1Output + Send,
+    L2pConsumer: FnOnce(&MappedArtifact<TerminalAutomaton>) -> L2pOutput + Send,
+    L1Output: Send,
+    L2pOutput: Send,
+{
     let total_started_at = Instant::now();
     let mut profile = TerminalDwaPhaseProfile::default();
 
@@ -616,16 +634,11 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
                 representative_original_ids: Vec::new(),
             },
         };
-        return (
-            TerminalDwaFamilies {
-                l1: Some(MappedArtifact::new(
-                    TerminalAutomaton::Dwa(DWA::new(1, 0)),
-                    empty_map,
-                )),
-                l2p: None,
-            },
-            profile,
-        );
+        l1_pairs.push(LocalIdMapTerminalDwa {
+            id_map: empty_map,
+            dwa: DWA::new(1, 0),
+            profile: TerminalDwaPhaseProfile::default(),
+        });
     }
 
     let partition_result_finalize_ms =
@@ -634,61 +647,79 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
     let max_token_id = vocab.max_token_id();
 
     let did_global_merge = l1_pairs.len() > 1 || l2p_pairs.len() > 1;
-    let family_merge_started_at = Instant::now();
+    let pre_family_wall_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
     let (l1_family, l2p_family) = rayon::join(
         || {
             (!l1_pairs.is_empty()).then(|| {
+                let merge_started_at = Instant::now();
                 let family = merge::merge_id_maps_and_terminal_dwas(
                     l1_pairs,
                     num_tokenizer_states,
                     max_token_id,
                 );
+                let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
                 let profile = family.profile;
-                (
-                    MappedArtifact::new(TerminalAutomaton::Dwa(family.dwa), family.id_map),
-                    profile,
-                )
+                let family =
+                    MappedArtifact::new(TerminalAutomaton::Dwa(family.dwa), family.id_map);
+                let output = l1_consumer(&family);
+                (family, profile, output, merge_ms)
             })
         },
         || {
             (!l2p_pairs.is_empty()).then(|| {
-                if let Some((nwa, id_map, profile)) =
+                let merge_started_at = Instant::now();
+                let (family, profile) = if let Some((nwa, id_map, profile)) =
                     merge::try_merge_id_maps_and_token_deterministic_nwa(
                         &l2p_pairs,
                         num_tokenizer_states,
                         max_token_id,
                     )
                 {
-                    return (
+                    (
                         MappedArtifact::new(TerminalAutomaton::TokenDeterministicNwa(nwa), id_map),
                         profile,
+                    )
+                } else {
+                    let family = merge::merge_id_maps_and_terminal_dwas(
+                        l2p_pairs,
+                        num_tokenizer_states,
+                        max_token_id,
                     );
-                }
-                let family = merge::merge_id_maps_and_terminal_dwas(
-                    l2p_pairs,
-                    num_tokenizer_states,
-                    max_token_id,
-                );
-                let profile = family.profile;
-                (
-                    MappedArtifact::new(TerminalAutomaton::Dwa(family.dwa), family.id_map),
-                    profile,
-                )
+                    (
+                        MappedArtifact::new(
+                            TerminalAutomaton::Dwa(family.dwa),
+                            family.id_map,
+                        ),
+                        family.profile,
+                    )
+                };
+                let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
+                let output = l2p_consumer(&family);
+                (family, profile, output, merge_ms)
             })
         },
     );
-    let family_merge_wall_ms = family_merge_started_at.elapsed().as_secs_f64() * 1000.0;
-    let dominant_family_profile = [l1_family.as_ref(), l2p_family.as_ref()]
-        .into_iter()
-        .flatten()
-        .map(|(_, profile)| *profile)
-        .max_by(|left, right| left.global_merge_ms.total_cmp(&right.global_merge_ms))
-        .unwrap_or_default();
-    let terminal_families = TerminalDwaFamilies {
-        l1: l1_family.map(|(family, _)| family),
-        l2p: l2p_family.map(|(family, _)| family),
+    let l1_merge_ms = l1_family
+        .as_ref()
+        .map_or(0.0, |(_, _, _, merge_ms)| *merge_ms);
+    let l2p_merge_ms = l2p_family
+        .as_ref()
+        .map_or(0.0, |(_, _, _, merge_ms)| *merge_ms);
+    let family_merge_wall_ms = l1_merge_ms.max(l2p_merge_ms);
+    let l1_profile = l1_family.as_ref().map(|(_, profile, _, _)| *profile);
+    let l2p_profile = l2p_family.as_ref().map(|(_, profile, _, _)| *profile);
+    let dominant_family_profile = match (l1_profile, l2p_profile) {
+        (Some(left), Some(right)) => {
+            if left.global_merge_ms >= right.global_merge_ms {
+                left
+            } else {
+                right
+            }
+        }
+        (Some(profile), None) | (None, Some(profile)) => profile,
+        (None, None) => TerminalDwaPhaseProfile::default(),
     };
-    debug_assert!(!terminal_families.is_empty());
+    debug_assert!(l1_family.is_some() || l2p_family.is_some());
     let merge_ms = family_merge_wall_ms;
 
     let post_merge_bookkeeping_started_at = Instant::now();
@@ -697,7 +728,8 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
     profile.global_merge_ms = if did_global_merge { merge_ms } else { 0.0 };
     let post_merge_bookkeeping_ms =
         post_merge_bookkeeping_started_at.elapsed().as_secs_f64() * 1000.0;
-    let split_terminal_dwa_total_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
+    let split_terminal_dwa_total_ms =
+        pre_family_wall_ms + family_merge_wall_ms + post_merge_bookkeeping_ms;
     profile.split_terminal_dwa_total_ms = split_terminal_dwa_total_ms;
     let accounted_wall_ms = stage_setup_ms
         + partition_vocab_ms
@@ -753,7 +785,51 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
         );
     }
 
-    (terminal_families, profile)
+    let (l1_artifact, l1_output) = l1_family
+        .map(|(family, _, output, _)| (Some(family), Some(output)))
+        .unwrap_or((None, None));
+    let (l2p_artifact, l2p_output) = l2p_family
+        .map(|(family, _, output, _)| (Some(family), Some(output)))
+        .unwrap_or((None, None));
+    (
+        TerminalDwaFamilies {
+            l1: l1_artifact,
+            l2p: l2p_artifact,
+        },
+        profile,
+        l1_output,
+        l2p_output,
+    )
+}
+
+pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    flat_trans: Arc<[u32]>,
+    global_max_length_state_map: &ManyToOneIdMap,
+    external_classify_cache: Option<&classify::SharedClassifyCache>,
+) -> (TerminalDwaFamilies, TerminalDwaPhaseProfile) {
+    let (families, profile, _, _) =
+        build_terminal_dwa_family_lanes_with_precomputed_global_max_length(
+            tokenizer,
+            vocab,
+            terminal_coloring,
+            use_terminal_coloring,
+            ignore_terminal,
+            grammar,
+            disallowed_follows,
+            flat_trans,
+            global_max_length_state_map,
+            external_classify_cache,
+            |_| (),
+            |_| (),
+        );
+    (families, profile)
 }
 
 /// Compatibility wrapper for callers that still require one terminal

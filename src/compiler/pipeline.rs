@@ -788,6 +788,19 @@ struct TerminalDagJoinState {
     terminal_launched: bool,
 }
 
+struct ParserFamilyLaneOutput {
+    parser: MappedArtifact<DWA>,
+    family_ready_ms: f64,
+    started_ms: f64,
+    finished_ms: f64,
+}
+
+#[derive(Default)]
+struct PrebuiltParserFamilies {
+    l1: Option<ParserFamilyLaneOutput>,
+    l2p: Option<ParserFamilyLaneOutput>,
+}
+
 struct TerminalDagResult {
     tokenizer: TokenizerDagLane,
     analysis: AnalysisDagLane,
@@ -804,6 +817,7 @@ struct TerminalDagResult {
     classify_finished_ms: f64,
     terminal_dwa_started_ms: f64,
     terminal_dwa_finished_ms: f64,
+    prebuilt_parser_families: Option<PrebuiltParserFamilies>,
 }
 
 struct TemplatesDagResult {
@@ -822,6 +836,89 @@ struct ParserDagJoinState {
     terminal: Option<TerminalDagResult>,
     templates: Option<TemplatesDagResult>,
     launched: bool,
+}
+
+#[derive(Default)]
+struct ParserDagJoin {
+    state: Mutex<ParserDagJoinState>,
+}
+
+impl ParserDagJoin {
+    fn wait_for_parser_prerequisites(&self) -> (Arc<GLRTable>, Templates) {
+        loop {
+            if let Some(templates) = self
+                .state
+                .lock()
+                .expect("parser DAG join state poisoned")
+                .templates
+                .as_ref()
+            {
+                return (Arc::clone(&templates.table), templates.templates.clone());
+            }
+            if !matches!(rayon::yield_now(), Some(rayon::Yield::Executed)) {
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    fn publish_templates(&self, templates: TemplatesDagResult) {
+        let mut state = self.state.lock().expect("parser DAG join state poisoned");
+        assert!(state.templates.is_none(), "templates published twice");
+        state.templates = Some(templates);
+    }
+}
+
+#[cfg(test)]
+mod parser_dag_join_tests {
+    use super::*;
+
+    fn empty_table() -> GLRTable {
+        GLRTable {
+            action: Vec::new(),
+            goto: Vec::new(),
+            num_states: 7,
+            num_terminals: 0,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            construction: GlrTableConstruction::default(),
+            admission_policy: Default::default(),
+            advance: Vec::new(),
+            forwarded_shifts: Default::default(),
+            guarded_shift_index: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn template_wait_executes_queued_publisher_on_one_worker() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("single-worker pool");
+        pool.install(|| {
+            let join = ParserDagJoin::default();
+            let (observed_states, ()) = rayon::join(
+                || {
+                    let (table, templates) = join.wait_for_parser_prerequisites();
+                    assert!(templates.by_terminal.is_empty());
+                    table.num_states
+                },
+                || {
+                    join.publish_templates(TemplatesDagResult {
+                        table: Arc::new(empty_table()),
+                        glr_table_ms: 0.0,
+                        glr_ready_ms: 0.0,
+                        templates: Templates::default(),
+                        template_dfas_by_terminal: Vec::new(),
+                        templates_ms: 0.0,
+                        templates_started_ms: 0.0,
+                        templates_finished_ms: 0.0,
+                    });
+                },
+            );
+            assert_eq!(observed_states, 7);
+        });
+    }
 }
 
 struct CompileDagResult {
@@ -916,6 +1013,93 @@ fn build_parser_dwa_for_terminal_family(
         );
     }
     Some(MappedArtifact::new(parser_dwa, internal_ids))
+}
+
+fn build_parser_family_lane(
+    family_name: &str,
+    family: &MappedArtifact<TerminalAutomaton>,
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+    templates: Templates,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    compile_started_at: Instant,
+    family_ready_ms: f64,
+) -> ParserFamilyLaneOutput {
+    let started_ms = elapsed_ms(compile_started_at.clone());
+    let parser = build_parser_dwa_for_terminal_family(
+        family_name,
+        Some(family),
+        table,
+        grammar,
+        templates,
+        vocab,
+        !tokenizer.has_epsilon_transitions(),
+    )
+    .expect("present terminal family must produce a parser DWA");
+    let finished_ms = elapsed_ms(compile_started_at);
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_family_dag] family={} family_ready_ms={:.3} parser_started_ms={:.3} parser_finished_ms={:.3} template_wait_ms={:.3} parser_build_ms={:.3}",
+            family_name,
+            family_ready_ms,
+            started_ms,
+            finished_ms,
+            (started_ms - family_ready_ms).max(0.0),
+            (finished_ms - started_ms).max(0.0),
+        );
+    }
+    ParserFamilyLaneOutput {
+        parser,
+        family_ready_ms,
+        started_ms,
+        finished_ms,
+    }
+}
+
+fn merge_prebuilt_parser_families(
+    prebuilt: PrebuiltParserFamilies,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    compile_started_at: Instant,
+) -> (MappedParserDwa, f64, f64, f64) {
+    let mut started_ms = f64::INFINITY;
+    let mut latest_family_finished_ms: f64 = 0.0;
+    let mut parser_dwas = Vec::new();
+    for lane in prebuilt.l1.into_iter().chain(prebuilt.l2p) {
+        started_ms = started_ms.min(lane.started_ms);
+        latest_family_finished_ms = latest_family_finished_ms.max(lane.finished_ms);
+        parser_dwas.push(lane.parser);
+    }
+    assert!(
+        !parser_dwas.is_empty(),
+        "terminal families produced no parser DWAs"
+    );
+    let merge_started_at = Instant::now();
+    debug_assert!(elapsed_ms(compile_started_at.clone()) >= latest_family_finished_ms);
+    let (mapped_dwa, top_accept) =
+        crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas_with_top_accept(
+            parser_dwas,
+            tokenizer.num_states() as usize,
+            vocab.max_token_id(),
+        );
+    let merge_ms = elapsed_ms(merge_started_at);
+    let final_finished_ms = elapsed_ms(compile_started_at);
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_family_join] family_builds_finished_ms={:.3} merge_ms={:.3} final_finished_ms={:.3}",
+            latest_family_finished_ms,
+            merge_ms,
+            final_finished_ms,
+        );
+    }
+    let (dwa, id_map) = mapped_dwa.into_parts();
+    (
+        MappedArtifact::new((dwa, ParserTopAccept(top_accept)), id_map),
+        (final_finished_ms - started_ms).max(0.0),
+        started_ms,
+        final_finished_ms,
+    )
 }
 
 fn build_and_merge_parser_dwa_families(
@@ -1031,14 +1215,17 @@ fn terminal_family_joint_interned_range_count<T: WeightRefs>(
 
 fn launch_parser_dag_if_ready<'scope>(
     scope: &rayon::Scope<'scope>,
-    parser_state: &'scope Mutex<ParserDagJoinState>,
+    parser_state: &'scope ParserDagJoin,
     result: &'scope Mutex<Option<CompileDagResult>>,
     vocab: &'scope Vocab,
     dwa_pm_mode: DwaPossibleMatchesMode,
     compile_started_at: Instant,
 ) {
     let ready = {
-        let mut state = parser_state.lock().expect("parser DAG join state poisoned");
+        let mut state = parser_state
+            .state
+            .lock()
+            .expect("parser DAG join state poisoned");
         if state.launched || state.terminal.is_none() || state.templates.is_none() {
             None
         } else {
@@ -1071,6 +1258,7 @@ fn launch_parser_dag_if_ready<'scope>(
             classify_finished_ms,
             terminal_dwa_started_ms,
             terminal_dwa_finished_ms,
+            prebuilt_parser_families,
         } = terminal;
         let TemplatesDagResult {
             table,
@@ -1084,7 +1272,18 @@ fn launch_parser_dag_if_ready<'scope>(
         } = templates;
 
         let (templates, prebuilt_parser_dwa) = if dwa_pm_mode.does_terminal_reconcile() {
+            debug_assert!(prebuilt_parser_families.is_none());
             (Some(templates), None)
+        } else if let Some(prebuilt) = prebuilt_parser_families {
+            (
+                None,
+                Some(merge_prebuilt_parser_families(
+                    prebuilt,
+                    &tokenizer.tokenizer,
+                    vocab,
+                    compile_started_at.clone(),
+                )),
+            )
         } else {
             let parser_dwa_started_at = Instant::now();
             let parser_dwa_started_ms = elapsed_ms(compile_started_at.clone());
@@ -1146,7 +1345,7 @@ fn launch_parser_dag_if_ready<'scope>(
 fn launch_terminal_dag_if_ready<'scope>(
     scope: &rayon::Scope<'scope>,
     terminal_state: &'scope Mutex<TerminalDagJoinState>,
-    parser_state: &'scope Mutex<ParserDagJoinState>,
+    parser_state: &'scope ParserDagJoin,
     result: &'scope Mutex<Option<CompileDagResult>>,
     prepared_grammar: &'scope GrammarDef,
     vocab: &'scope Vocab,
@@ -1189,25 +1388,92 @@ fn launch_terminal_dag_if_ready<'scope>(
             }
         });
         let terminal_dwa_started_ms = elapsed_ms(compile_started_at.clone());
-        let (terminal_dwas, terminal_phase_profile) =
-            crate::compiler::stages::id_map_and_terminal_dwa::build_terminal_dwa_families_with_precomputed_global_max_length(
-                &tokenizer.tokenizer,
-                vocab,
-                &terminal_coloring,
-                use_terminal_coloring,
-                prepared_grammar.ignore_terminal,
-                &analysis.analyzed_grammar,
-                &analysis.disallowed_follows,
-                Arc::clone(&flat_global.flat_trans),
-                &flat_global.global_max_length_state_map,
-                Some(&classify.shared_classify_cache),
-            );
-        let terminal_dwa_finished_ms = elapsed_ms(compile_started_at.clone());
+        let (terminal_dwas, terminal_phase_profile, prebuilt_parser_families) =
+            if !dwa_pm_mode.does_terminal_reconcile() {
+                let l1_started = compile_started_at.clone();
+                let l2p_started = compile_started_at.clone();
+                let (families, profile, l1, l2p) =
+                    crate::compiler::stages::id_map_and_terminal_dwa::build_terminal_dwa_family_lanes_with_precomputed_global_max_length(
+                        &tokenizer.tokenizer,
+                        vocab,
+                        &terminal_coloring,
+                        use_terminal_coloring,
+                        prepared_grammar.ignore_terminal,
+                        &analysis.analyzed_grammar,
+                        &analysis.disallowed_follows,
+                        Arc::clone(&flat_global.flat_trans),
+                        &flat_global.global_max_length_state_map,
+                        Some(&classify.shared_classify_cache),
+                        |family| {
+                            let family_ready_ms = elapsed_ms(l1_started.clone());
+                            let (table, templates) = parser_state.wait_for_parser_prerequisites();
+                            build_parser_family_lane(
+                                "l1",
+                                family,
+                                &table,
+                                &analysis.analyzed_grammar,
+                                templates,
+                                &tokenizer.tokenizer,
+                                vocab,
+                                l1_started,
+                                family_ready_ms,
+                            )
+                        },
+                        |family| {
+                            let family_ready_ms = elapsed_ms(l2p_started.clone());
+                            let (table, templates) = parser_state.wait_for_parser_prerequisites();
+                            build_parser_family_lane(
+                                "l2p",
+                                family,
+                                &table,
+                                &analysis.analyzed_grammar,
+                                templates,
+                                &tokenizer.tokenizer,
+                                vocab,
+                                l2p_started,
+                                family_ready_ms,
+                            )
+                        },
+                    );
+                (
+                    families,
+                    profile,
+                    Some(PrebuiltParserFamilies { l1, l2p }),
+                )
+            } else {
+                let (families, profile) =
+                    crate::compiler::stages::id_map_and_terminal_dwa::build_terminal_dwa_families_with_precomputed_global_max_length(
+                        &tokenizer.tokenizer,
+                        vocab,
+                        &terminal_coloring,
+                        use_terminal_coloring,
+                        prepared_grammar.ignore_terminal,
+                        &analysis.analyzed_grammar,
+                        &analysis.disallowed_follows,
+                        Arc::clone(&flat_global.flat_trans),
+                        &flat_global.global_max_length_state_map,
+                        Some(&classify.shared_classify_cache),
+                    );
+                (families, profile, None)
+            };
+        let terminal_dwa_finished_ms = prebuilt_parser_families
+            .as_ref()
+            .and_then(|prebuilt| {
+                prebuilt
+                    .l1
+                    .as_ref()
+                    .into_iter()
+                    .chain(prebuilt.l2p.as_ref())
+                    .map(|lane| lane.family_ready_ms)
+                    .max_by(f64::total_cmp)
+            })
+            .unwrap_or_else(|| elapsed_ms(compile_started_at.clone()));
 
-        parser_state
+        let mut parser_join = parser_state
+            .state
             .lock()
-            .expect("parser DAG join state poisoned")
-            .terminal = Some(TerminalDagResult {
+            .expect("parser DAG join state poisoned");
+        parser_join.terminal = Some(TerminalDagResult {
                 tokenizer,
                 analysis,
                 ignore_terminal: prepared_grammar.ignore_terminal,
@@ -1223,7 +1489,9 @@ fn launch_terminal_dag_if_ready<'scope>(
                 classify_finished_ms: classify.finished_ms,
                 terminal_dwa_started_ms,
                 terminal_dwa_finished_ms,
+                prebuilt_parser_families,
             });
+        drop(parser_join);
         launch_parser_dag_if_ready(
             scope,
             parser_state,
@@ -1238,7 +1506,7 @@ fn launch_terminal_dag_if_ready<'scope>(
 fn launch_classify_dag_if_ready<'scope>(
     scope: &rayon::Scope<'scope>,
     terminal_state: &'scope Mutex<TerminalDagJoinState>,
-    parser_state: &'scope Mutex<ParserDagJoinState>,
+    parser_state: &'scope ParserDagJoin,
     result: &'scope Mutex<Option<CompileDagResult>>,
     prepared_grammar: &'scope GrammarDef,
     vocab: &'scope Vocab,
@@ -1331,7 +1599,7 @@ fn compile_prepared_with_profile_and_table_construction(
         let dwa_pm_mode = dwa_possible_matches_mode();
         let use_terminal_coloring = terminal_coloring_enabled();
         let terminal_state = Mutex::new(TerminalDagJoinState::default());
-        let parser_state = Mutex::new(ParserDagJoinState::default());
+        let parser_state = ParserDagJoin::default();
         let compile_dag_result = Mutex::new(None);
         let cpm_result = Mutex::new(None);
 
@@ -1536,19 +1804,16 @@ fn compile_prepared_with_profile_and_table_construction(
                                 prepared_grammar_ref.ignore_terminal,
                             );
                         let templates_finished_ms = elapsed_ms(compile_started_for_templates.clone());
-                        parser_state_ref
-                            .lock()
-                            .expect("parser DAG join state poisoned")
-                            .templates = Some(TemplatesDagResult {
-                            table: templates_table,
-                            glr_table_ms,
-                            glr_ready_ms,
+                        parser_state_ref.publish_templates(TemplatesDagResult {
+                                table: templates_table,
+                                glr_table_ms,
+                                glr_ready_ms,
                             templates,
                             template_dfas_by_terminal,
                             templates_ms,
-                            templates_started_ms,
-                            templates_finished_ms,
-                        });
+                                templates_started_ms,
+                                templates_finished_ms,
+                            });
                         launch_parser_dag_if_ready(
                             scope,
                             parser_state_ref,
