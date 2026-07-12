@@ -157,6 +157,7 @@ struct NfaTokenPositionView<'a> {
     tokenizer: &'a Tokenizer,
     config_ids: FxHashMap<Vec<u32>, u32>,
     configs: Vec<Box<[u32]>>,
+    singleton_config_ids: Vec<u32>,
     raw_start_configs: Vec<u32>,
     transitions: FxHashMap<(u32, u8), u32>,
 }
@@ -167,6 +168,7 @@ impl<'a> NfaTokenPositionView<'a> {
             tokenizer,
             config_ids: FxHashMap::default(),
             configs: Vec::new(),
+            singleton_config_ids: vec![u32::MAX; tokenizer.num_states() as usize],
             raw_start_configs: Vec::with_capacity(tokenizer.num_states() as usize),
             transitions: FxHashMap::default(),
         };
@@ -181,6 +183,17 @@ impl<'a> NfaTokenPositionView<'a> {
     }
 
     fn intern_config(&mut self, states: Vec<u32>) -> u32 {
+        if states.len() == 1 {
+            let state = states[0] as usize;
+            let existing = self.singleton_config_ids[state];
+            if existing != u32::MAX {
+                return existing;
+            }
+            let config = self.configs.len() as u32;
+            self.configs.push(states.into_boxed_slice());
+            self.singleton_config_ids[state] = config;
+            return config;
+        }
         if let Some(&config) = self.config_ids.get(&states) {
             return config;
         }
@@ -1353,6 +1366,27 @@ mod tests {
                 .collect(),
             None,
         )
+    }
+
+    #[test]
+    fn epsilon_singleton_configs_use_direct_raw_state_index() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let mut view = NfaTokenPositionView::new(&tokenizer);
+
+        for raw_state in 0..tokenizer.num_states() {
+            let closure = tokenizer.execute_from_state_end_only(&[], raw_state);
+            if closure.len() != 1 {
+                continue;
+            }
+            let state = closure[0] as usize;
+            let config = view.raw_start_config(raw_state as usize);
+            assert_eq!(view.singleton_config_ids[state], config);
+            assert_eq!(view.intern_config(vec![state as u32]), config);
+            assert!(
+                !view.config_ids.contains_key([state as u32].as_slice()),
+                "singleton configs must bypass the general vector-key interner",
+            );
+        }
     }
 
     #[test]
