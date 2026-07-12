@@ -37,7 +37,7 @@
 
 use std::time::Instant;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::Vocab;
@@ -735,6 +735,8 @@ fn pack_partial_partitions(
     partitions: &[PartialPositionPartition],
     tail_active: &[bool],
 ) -> ManyToOneIdMap {
+    let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+    let total_started_at = profile.then(Instant::now);
     let first = partitions
         .first()
         .expect("position-one partition must exist");
@@ -749,11 +751,21 @@ fn pack_partial_partitions(
     }
 
     let mut global_classes = Vec::<(u32, Vec<u32>)>::new();
+    let mut total_groups = 0usize;
+    let mut max_groups_per_block = 0usize;
+    let mut maximal_groups_total = 0usize;
+    let mut strict_restrictions_total = 0usize;
+    let mut nonmaximal_extension_scans = 0usize;
+    let mut group_ms = 0.0;
+    let mut maximal_ms = 0.0;
+    let mut extension_ms = 0.0;
+    let mut assign_ms = 0.0;
 
     for first_block in states_by_first_class {
         if first_block.is_empty() {
             continue;
         }
+        let group_started_at = profile.then(Instant::now);
         let mut signature_to_group = FxHashMap::<PositionSignature, usize>::default();
         let mut groups = Vec::<SignatureGroup>::new();
         for state in first_block {
@@ -770,6 +782,11 @@ fn pack_partial_partitions(
                 representative: state,
             });
         }
+        total_groups += groups.len();
+        max_groups_per_block = max_groups_per_block.max(groups.len());
+        if let Some(started_at) = group_started_at {
+            group_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
 
         let use_enumerated_restrictions = groups
             .iter()
@@ -784,17 +801,26 @@ fn pack_partial_partitions(
             .unwrap_or(0)
             <= 8;
 
+        let maximal_started_at = profile.then(Instant::now);
         let mut maximal_groups = if use_enumerated_restrictions {
-            let mut strict_restrictions = FxHashSet::<PositionSignature>::default();
+            // We only need to know which *existing exact signatures* are strict
+            // restrictions of another group. Do not materialize the full set of
+            // restriction keys: enumerate each extension's restrictions and mark
+            // the matching exact group directly.
+            let mut has_strict_extension = vec![false; groups.len()];
             for group in &groups {
-                strict_restrictions.extend(signature_restrictions(&group.signature, false));
+                let restrictions = signature_restrictions(&group.signature, false);
+                strict_restrictions_total += restrictions.len();
+                for restriction in restrictions {
+                    if let Some(&restricted_group) = signature_to_group.get(&restriction) {
+                        has_strict_extension[restricted_group] = true;
+                    }
+                }
             }
-            groups
-                .iter()
+            has_strict_extension
+                .into_iter()
                 .enumerate()
-                .filter_map(|(group, data)| {
-                    (!strict_restrictions.contains(&data.signature)).then_some(group)
-                })
+                .filter_map(|(group, has_extension)| (!has_extension).then_some(group))
                 .collect::<Vec<_>>()
         } else {
             groups
@@ -810,22 +836,34 @@ fn pack_partial_partitions(
                 .collect::<Vec<_>>()
         };
         maximal_groups.sort_unstable_by_key(|&group| groups[group].representative);
+        maximal_groups_total += maximal_groups.len();
+        if let Some(started_at) = maximal_started_at {
+            maximal_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
 
+        let extension_started_at = profile.then(Instant::now);
         let maximal_extension_by_group = if use_enumerated_restrictions {
-            let mut maximal_extension_for_restriction =
-                FxHashMap::<PositionSignature, usize>::default();
+            let mut is_maximal = vec![false; groups.len()];
             for &group in &maximal_groups {
-                for restriction in signature_restrictions(&groups[group].signature, true) {
-                    maximal_extension_for_restriction
-                        .entry(restriction)
-                        .or_insert(group);
-                }
+                is_maximal[group] = true;
             }
             groups
                 .iter()
-                .map(|group| {
-                    *maximal_extension_for_restriction
-                        .get(&group.signature)
+                .enumerate()
+                .map(|(group_index, group)| {
+                    if is_maximal[group_index] {
+                        return group_index;
+                    }
+                    nonmaximal_extension_scans += 1;
+                    maximal_groups
+                        .iter()
+                        .copied()
+                        .find(|&maximal| {
+                            signature_is_restriction_of(
+                                &group.signature,
+                                &groups[maximal].signature,
+                            )
+                        })
                         .expect("every partial signature must have a maximal extension")
                 })
                 .collect::<Vec<_>>()
@@ -846,7 +884,11 @@ fn pack_partial_partitions(
                 })
                 .collect::<Vec<_>>()
         };
+        if let Some(started_at) = extension_started_at {
+            extension_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
 
+        let assign_started_at = profile.then(Instant::now);
         let mut class_for_maximal_group = FxHashMap::<usize, usize>::default();
         for &group in &maximal_groups {
             let class = global_classes.len();
@@ -858,8 +900,12 @@ fn pack_partial_partitions(
             let class = class_for_maximal_group[&maximal_group];
             global_classes[class].1.extend(group.members);
         }
+        if let Some(started_at) = assign_started_at {
+            assign_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+        }
     }
 
+    let finalize_started_at = profile.then(Instant::now);
     global_classes.sort_unstable_by_key(|(representative, _)| *representative);
     let mut original_to_internal = vec![u32::MAX; state_count];
     let mut representative_original_ids = Vec::with_capacity(global_classes.len());
@@ -871,6 +917,28 @@ fn pack_partial_partitions(
             original_to_internal[state as usize] = class as u32;
         }
         internal_to_originals.push(members);
+    }
+    let finalize_ms = finalize_started_at.map_or(0.0, |started_at| {
+        started_at.elapsed().as_secs_f64() * 1000.0
+    });
+    if let Some(started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][global_token_position_pack] states={} first_classes={} later_coordinates={} groups={} max_groups_per_block={} maximal_groups={} strict_restrictions={} nonmaximal_extension_scans={} group_ms={:.3} maximal_ms={:.3} extension_ms={:.3} assign_ms={:.3} finalize_ms={:.3} total_ms={:.3}",
+            state_count,
+            first.class_count,
+            later.len() + 1,
+            total_groups,
+            max_groups_per_block,
+            maximal_groups_total,
+            strict_restrictions_total,
+            nonmaximal_extension_scans,
+            group_ms,
+            maximal_ms,
+            extension_ms,
+            assign_ms,
+            finalize_ms,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
     }
     ManyToOneIdMap {
         original_to_internal,
