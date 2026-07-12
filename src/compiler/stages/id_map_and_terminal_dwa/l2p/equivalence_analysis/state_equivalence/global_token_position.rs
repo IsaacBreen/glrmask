@@ -913,6 +913,14 @@ fn pack_partial_partitions(
         if first_block.is_empty() {
             continue;
         }
+        if first_block.len() == 1 {
+            let state = first_block[0];
+            total_groups += 1;
+            max_groups_per_block = max_groups_per_block.max(1);
+            maximal_groups_total += 1;
+            global_classes.push((state, first_block));
+            continue;
+        }
         let group_started_at = profile.then(Instant::now);
         let mut signature_to_group = FxHashMap::<PositionSignature, usize>::default();
         let mut groups = Vec::<SignatureGroup>::new();
@@ -1691,6 +1699,32 @@ mod tests {
             "the position-2-inactive state should be free to join a compatible active class",
         );
         assert_eq!(map.num_internal_ids(), 2);
+    }
+
+    #[test]
+    fn singleton_first_position_class_is_forced_to_stay_singleton() {
+        let first = PartialPositionPartition {
+            position: 0,
+            byte_count: 1,
+            active_state_count: 3,
+            class_count: 2,
+            class_by_state: vec![0, 1, 1],
+        };
+        let later = PartialPositionPartition {
+            position: 1,
+            byte_count: 1,
+            active_state_count: 1,
+            class_count: 1,
+            class_by_state: vec![u32::MAX, 0, u32::MAX],
+        };
+        let map = pack_partial_partitions(&[first, later], &[false; 3]);
+
+        let singleton_class = map.original_to_internal[0];
+        assert_eq!(map.internal_to_originals[singleton_class as usize], vec![0]);
+        assert_eq!(
+            map.representative_original_ids[singleton_class as usize],
+            0,
+        );
     }
 
     #[test]
