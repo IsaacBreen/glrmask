@@ -416,6 +416,16 @@ pub(crate) fn build_bounded_analysis_view(
     tokens: &[&[u8]],
     active_groups: Option<&[bool]>,
 ) -> BoundedAnalysisView {
+    build_bounded_analysis_view_impl(tokenizer, raw_start_states, tokens, active_groups, true)
+}
+
+fn build_bounded_analysis_view_impl(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: Option<&[bool]>,
+    factor_common_first_byte: bool,
+) -> BoundedAnalysisView {
     let raw_state_count = tokenizer.num_states() as usize;
     let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
     let mut configs = Vec::<Box<[u32]>>::new();
@@ -436,7 +446,20 @@ pub(crate) fn build_bounded_analysis_view(
 
     let mut transitions = vec![u32::MAX; configs.len() * 256];
     let mut known_transitions = vec![0u8; transitions.len()];
-    let token_trie = build_byte_trie(tokens.iter().copied());
+    let common_first_byte = factor_common_first_byte
+        .then(|| {
+            let first = tokens.first()?.first().copied()?;
+            tokens
+                .iter()
+                .all(|token| token.len() > 1 && token.first().copied() == Some(first))
+                .then_some(first)
+        })
+        .flatten();
+    let token_trie = if common_first_byte.is_some() {
+        build_byte_trie(tokens.iter().map(|token| &token[1..]))
+    } else {
+        build_byte_trie(tokens.iter().copied())
+    };
     let suffix_trie = build_byte_trie(
         tokens
             .iter()
@@ -448,6 +471,25 @@ pub(crate) fn build_bounded_analysis_view(
         .collect::<Vec<_>>();
     seeded_configs.sort_unstable();
     seeded_configs.dedup();
+    if let Some(first_byte) = common_first_byte {
+        seeded_configs = seeded_configs
+            .into_iter()
+            .filter_map(|state| {
+                let target = ensure_config_transition(
+                    tokenizer,
+                    state,
+                    first_byte,
+                    &mut configs,
+                    &mut config_ids,
+                    &mut transitions,
+                    &mut known_transitions,
+                );
+                (target != u32::MAX).then_some(target)
+            })
+            .collect();
+        seeded_configs.sort_unstable();
+        seeded_configs.dedup();
+    }
     let mut token_visited = rustc_hash::FxHashSet::<(u32, usize)>::default();
     for state in seeded_configs {
         expand_trie_from_config(
@@ -741,6 +783,73 @@ pub(crate) fn compute_state_map(
 mod tests {
     use super::*;
     use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
+
+    fn bounded_view_trace(
+        view: &BoundedAnalysisView,
+        start_state: usize,
+        token: &[u8],
+    ) -> Vec<(Vec<usize>, Vec<usize>, bool)> {
+        let dfa = view.tokenizer_view.dfa();
+        let mut state = start_state;
+        let mut trace = vec![(
+            dfa.states[state].finalizers.clone(),
+            dfa.states[state].possible_future_group_ids.clone(),
+            false,
+        )];
+        for &byte in token {
+            let target = dfa.trans(state, byte as usize);
+            if target == u32::MAX {
+                trace.push((Vec::new(), Vec::new(), true));
+                break;
+            }
+            state = target as usize;
+            trace.push((
+                dfa.states[state].finalizers.clone(),
+                dfa.states[state].possible_future_group_ids.clone(),
+                false,
+            ));
+        }
+        trace
+    }
+
+    #[test]
+    fn bounded_nfa_common_first_factorization_preserves_observed_token_trajectories() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let raw_start_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
+        let tokens = [b"aa".as_slice(), b"ab".as_slice(), b"aab".as_slice()];
+        let factored =
+            build_bounded_analysis_view_impl(&tokenizer, &raw_start_states, &tokens, None, true);
+        let reference =
+            build_bounded_analysis_view_impl(&tokenizer, &raw_start_states, &tokens, None, false);
+
+        for &raw_state in &raw_start_states {
+            let factored_start = factored.view_state_for_raw_start(raw_state);
+            let reference_start = reference.view_state_for_raw_start(raw_state);
+            for token in tokens {
+                assert_eq!(
+                    bounded_view_trace(&factored, factored_start, token),
+                    bounded_view_trace(&reference, reference_start, token),
+                );
+            }
+        }
+
+        for token in tokens {
+            for offset in 0..token.len() {
+                assert_eq!(
+                    bounded_view_trace(
+                        &factored,
+                        factored.tokenizer_view.dfa().start_state,
+                        &token[offset..],
+                    ),
+                    bounded_view_trace(
+                        &reference,
+                        reference.tokenizer_view.dfa().start_state,
+                        &token[offset..],
+                    ),
+                );
+            }
+        }
+    }
 
     #[test]
     fn set_valued_refinement_distinguishes_epsilon_successor_class_sets() {
