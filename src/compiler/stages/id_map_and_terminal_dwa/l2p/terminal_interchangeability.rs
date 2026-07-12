@@ -384,6 +384,10 @@ impl RestrictedTopology {
     /// Build a restricted topology over a global scanner-state quotient.
     /// The quotient must be a total right congruence for the selected bytes
     /// and must preserve both frozen output families.
+    ///
+    /// Global token-position partition C does not satisfy this contract merely
+    /// by being a total/global state relation: C has different token-position
+    /// semantics and requires a token-position-aware consumer.
     fn new_with_global_state_quotient(
         tokenizer: &Tokenizer,
         relevant_bytes: &[bool; 256],
