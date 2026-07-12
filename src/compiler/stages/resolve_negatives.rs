@@ -14,7 +14,7 @@ use crate::ds::weight::{ScopedWeightOpCache, Weight};
 
 type QueryKey = (u32, i32);
 type CancellationTask = (u32, u32, i32);
-type QueryWeights = Vec<Option<FxHashMap<QueryKey, Weight>>>;
+type QueryWeights = Vec<SmallQueryWeights>;
 type QueuedQueries = Vec<SmallQueuedQueries>;
 type DerivedEpsilons = Vec<Option<FxHashMap<u32, Weight>>>;
 type SubsetMemo = FxHashMap<(usize, usize), bool>;
@@ -24,6 +24,79 @@ type SubsetMemo = FxHashMap<(usize, usize), bool>;
 /// the small and large BFCL catalogs while leaving genuinely small parsers on
 /// the lower-overhead serial solver.
 const MIN_PARALLEL_FINALITY_EDGES_PER_WORKER: usize = 512;
+
+#[derive(Clone, Default)]
+enum SmallQueryWeights {
+    #[default]
+    Empty,
+    One(QueryKey, Weight),
+    Many(FxHashMap<QueryKey, Weight>),
+}
+
+impl SmallQueryWeights {
+    fn merge(&mut self, query_key: QueryKey, add: Weight) -> bool {
+        match self {
+            Self::Empty => {
+                if add.is_empty() {
+                    return false;
+                }
+                *self = Self::One(query_key, add);
+                true
+            }
+            Self::One(existing_key, existing_weight) if *existing_key == query_key => {
+                merge_weight(existing_weight, add)
+            }
+            Self::One(existing_key, existing_weight) => {
+                if add.is_empty() {
+                    return false;
+                }
+                let previous_key = *existing_key;
+                let previous_weight = existing_weight.clone();
+                let mut entries = FxHashMap::with_capacity_and_hasher(4, Default::default());
+                entries.insert(previous_key, previous_weight);
+                entries.insert(query_key, add);
+                *self = Self::Many(entries);
+                true
+            }
+            Self::Many(entries) => {
+                let entry = entries.entry(query_key).or_insert_with(Weight::empty);
+                merge_weight(entry, add)
+            }
+        }
+    }
+
+    fn get(&self, query_key: &QueryKey) -> Option<&Weight> {
+        match self {
+            Self::Empty => None,
+            Self::One(existing_key, weight) => (existing_key == query_key).then_some(weight),
+            Self::Many(entries) => entries.get(query_key),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::One(_, _) => 1,
+            Self::Many(entries) => entries.len(),
+        }
+    }
+
+    fn for_each(&self, mut f: impl FnMut(QueryKey, &Weight)) {
+        match self {
+            Self::Empty => {}
+            Self::One(query_key, weight) => f(*query_key, weight),
+            Self::Many(entries) => {
+                for (&query_key, weight) in entries {
+                    f(query_key, weight);
+                }
+            }
+        }
+    }
+}
 
 #[derive(Clone, Default)]
 enum SmallQueuedQueries {
@@ -306,11 +379,7 @@ fn record_query_weight(
     query_key: QueryKey,
     add: Weight,
 ) -> bool {
-    let entry = query_weights[state as usize]
-        .get_or_insert_with(FxHashMap::default)
-        .entry(query_key)
-        .or_insert_with(Weight::empty);
-    merge_weight(entry, add)
+    query_weights[state as usize].merge(query_key, add)
 }
 
 fn queue_query_weight(
@@ -418,23 +487,24 @@ fn extend_derived_epsilons(
         return;
     };
 
-    let Some(existing_queries) = query_weights[source_state as usize].as_ref() else {
+    let existing_queries = &query_weights[source_state as usize];
+    if existing_queries.is_empty() {
         return;
-    };
+    }
 
     let mut propagated_updates = Vec::with_capacity(existing_queries.len());
 
-    for ((upstream_source_state, upstream_label), upstream_weight) in existing_queries {
+    existing_queries.for_each(|(upstream_source_state, upstream_label), upstream_weight| {
         let propagated = intersect_or_clone_right_if_subset_cached(
             upstream_weight,
             derived_weight,
             subset_memo,
         );
         if propagated.is_empty() {
-            continue;
+            return;
         }
-        propagated_updates.push((*upstream_source_state, *upstream_label, propagated));
-    }
+        propagated_updates.push((upstream_source_state, upstream_label, propagated));
+    });
 
     for (upstream_source_state, upstream_label, propagated) in propagated_updates {
         queue_query_weight(
@@ -485,7 +555,7 @@ fn compute_cancellations_range_inner(
         return Vec::new();
     }
 
-    let mut query_weights: QueryWeights = vec![None; state_count as usize];
+    let mut query_weights: QueryWeights = vec![SmallQueryWeights::Empty; state_count as usize];
     let mut worklist = VecDeque::<CancellationTask>::new();
     let mut queued: QueuedQueries = vec![SmallQueuedQueries::Empty; state_count as usize];
     let mut derived_epsilons: DerivedEpsilons = vec![None; state_count as usize];
@@ -520,8 +590,7 @@ fn compute_cancellations_range_inner(
     while let Some((current_state, source_state, positive_label)) = worklist.pop_front() {
         queued[current_state as usize].remove(&(source_state, positive_label));
         let Some(query_weight_to_current) = query_weights[current_state as usize]
-            .as_ref()
-            .and_then(|weights| weights.get(&(source_state, positive_label)))
+            .get(&(source_state, positive_label))
             .cloned()
         else {
             continue;
