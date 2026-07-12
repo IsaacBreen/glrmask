@@ -382,10 +382,13 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     }
 
     let token_position_partition_started_at = l2p_timing_profile_enabled().then(Instant::now);
-    // Global token-position partition C. C is stronger than first-byte-only
-    // token-boundary equivalence because third-plus states remain singleton.
-    // It is NOT a selected-byte right congruence or frozen-output-preserving
-    // byte-DFA quotient.
+    // Global token-position partition C. C combines partial partitions over
+    // states active at explicit vocabulary-byte positions with pairwise
+    // identity on the collapsed suffix tail. Inactive states are wildcards. A
+    // state maps only to a maximal partial signature that extends all of that
+    // state's known positional classes, so the selected raw representative is
+    // valid everywhere the member can occur. C is NOT a selected-byte right
+    // congruence or frozen-output-preserving byte-DFA quotient.
     //
     // FIXME: the current byte-level TI path below incorrectly feeds C directly
     // to `RestrictedTopology`, whose quotient constructor requires exactly
@@ -399,8 +402,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 compute_global_token_position_state_quotient(tokenizer, vocab)
                 .0
         });
-    // The token-boundary partition is still consumed by the representative-core
-    // equivalence-analysis path below; keep computing it for that consumer.
+    // The token-position representative partition is also consumed by the
+    // representative-core equivalence-analysis path below; keep computing it
+    // for that consumer.
     let token_position_partition = (l2p_global_token_position_enabled()
         && matches!(partition_label, "p7" | "p8"))
         .then(|| {

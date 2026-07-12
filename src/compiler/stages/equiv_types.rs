@@ -202,7 +202,7 @@ impl ManyToOneIdMap {
     }
 }
 
-/// A total quotient of the complete raw scanner-state domain.
+/// A structurally total representative map over the raw scanner-state domain.
 ///
 /// This is deliberately distinct from the `ManyToOneIdMap` values threaded as
 /// `initial_state_map` through id-map analysis. An initial map is an analysis
@@ -211,19 +211,22 @@ impl ManyToOneIdMap {
 /// every raw lexer state and names one raw representative for every class.
 ///
 /// The type itself encodes only total raw-state coverage and one representative
-/// per class. A producer may use it to carry a global state-equivalence
-/// relation, but the type does not encode how strong that relation is. A
-/// consumer requiring a labelled byte-DFA quotient must separately validate
-/// equal visible outputs and selected-byte right congruence. Merely wrapping
-/// token-position partition C in this type does not establish either property.
+/// per class. Despite the historical `Quotient` name, it does not prove that
+/// class membership is symmetric equivalence: a producer may establish only a
+/// directional member-to-representative relation. Partition C, for example,
+/// uses positional subsumption and proves each member safe to replace by its
+/// chosen representative; two non-representative members need not replace one
+/// another. A consumer requiring a labelled byte-DFA quotient must separately
+/// validate equal visible outputs and selected-byte right congruence. Merely
+/// wrapping partition C in this type does not establish either property.
 #[derive(Debug, Clone)]
 pub(crate) struct GlobalScannerStateQuotient {
     map: ManyToOneIdMap,
 }
 
 impl GlobalScannerStateQuotient {
-    /// Wrap a structurally total raw-state quotient. Semantic safety for a
-    /// particular consumer remains that consumer's responsibility.
+    /// Wrap a structurally total raw-state representative map. Semantic safety
+    /// for a particular consumer remains that consumer's responsibility.
     pub(crate) fn from_total_raw_state_map(map: ManyToOneIdMap, raw_state_count: usize) -> Self {
         assert_eq!(
             map.original_to_internal.len(),
