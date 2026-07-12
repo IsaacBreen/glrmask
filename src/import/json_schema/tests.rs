@@ -1643,6 +1643,43 @@ fn recursive_array_additional_properties_schema_does_not_reproduce_all_pop1_stac
     );
 }
 
+#[test]
+fn recursive_additional_properties_anyof_lowers_and_preserves_recursive_value_choices() {
+    let schema = json!({
+        "definitions": {
+            "Node": {
+                "type": "object",
+                "properties": {
+                    "children": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "anyOf": [
+                                {"$ref": "#/definitions/Node"},
+                                {"type": "string"}
+                            ]
+                        }
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        "$ref": "#/definitions/Node"
+    });
+
+    let grammar = schema_to_named_grammar(&schema)
+        .expect("recursive additionalProperties anyOf lowers");
+    lower(&grammar).expect("recursive additionalProperties anyOf grammar lowers");
+
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"children": {"nested": {"children": {"leaf": "ok"}}}}"#,
+    ));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#"{"children": {"nested": 1}}"#,
+    ));
+}
+
 fn contains_intersect(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::Intersect { .. } => true,
