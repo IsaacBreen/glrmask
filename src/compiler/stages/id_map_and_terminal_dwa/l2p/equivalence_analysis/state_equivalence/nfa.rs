@@ -322,26 +322,47 @@ fn intern_config(
     id
 }
 
-fn inherited_classes(
+fn candidate_partition(
     num_states: usize,
     initial_state_map: Option<&ManyToOneIdMap>,
-) -> Vec<u32> {
-    let mut classes = vec![u32::MAX; num_states];
-    let mut next = initial_state_map.map_or(0, |map| map.num_internal_ids());
+) -> (Vec<Vec<u32>>, Vec<usize>, Vec<usize>) {
+    let mut members = Vec::<Vec<u32>>::new();
+    let mut representatives = Vec::<usize>::new();
+    let mut raw_to_candidate = vec![usize::MAX; num_states];
+
     if let Some(map) = initial_state_map {
-        for (state, &class) in map.original_to_internal.iter().enumerate().take(num_states) {
-            if class != u32::MAX {
-                classes[state] = class;
+        for originals in &map.internal_to_originals {
+            let mut candidate_members = Vec::with_capacity(originals.len());
+            for &raw in originals {
+                let raw = raw as usize;
+                if raw < num_states && raw_to_candidate[raw] == usize::MAX {
+                    candidate_members.push(raw as u32);
+                }
             }
+            if candidate_members.is_empty() {
+                continue;
+            }
+            let candidate = members.len();
+            let representative = candidate_members[0] as usize;
+            for &raw in &candidate_members {
+                raw_to_candidate[raw as usize] = candidate;
+            }
+            representatives.push(representative);
+            members.push(candidate_members);
         }
     }
-    for class in &mut classes {
-        if *class == u32::MAX {
-            *class = next;
-            next += 1;
+
+    for raw in 0..num_states {
+        if raw_to_candidate[raw] != usize::MAX {
+            continue;
         }
+        let candidate = members.len();
+        raw_to_candidate[raw] = candidate;
+        representatives.push(raw);
+        members.push(vec![raw as u32]);
     }
-    classes
+
+    (members, representatives, raw_to_candidate)
 }
 
 fn observation_words(
@@ -388,24 +409,36 @@ fn same_partition(left: &[u32], right: &[u32]) -> bool {
     true
 }
 
-fn build_state_map(classes: &[u32]) -> ManyToOneIdMap {
-    let mut class_to_internal = FxHashMap::<u32, u32>::default();
-    let mut original_to_internal = vec![u32::MAX; classes.len()];
-    let mut internal_to_originals = Vec::<Vec<u32>>::new();
-    let mut representative_original_ids = Vec::<u32>::new();
-    for (state, &class) in classes.iter().enumerate() {
-        let internal = if let Some(&internal) = class_to_internal.get(&class) {
-            internal
-        } else {
-            let internal = internal_to_originals.len() as u32;
-            class_to_internal.insert(class, internal);
-            internal_to_originals.push(Vec::new());
-            representative_original_ids.push(state as u32);
-            internal
-        };
-        original_to_internal[state] = internal;
-        internal_to_originals[internal as usize].push(state as u32);
+fn build_state_map(
+    candidate_members: &[Vec<u32>],
+    candidate_representatives: &[usize],
+    candidate_classes: &[u32],
+    num_states: usize,
+) -> ManyToOneIdMap {
+    let num_classes = candidate_classes
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |class| class + 1);
+    let mut original_to_internal = vec![u32::MAX; num_states];
+    let mut internal_to_originals = vec![Vec::new(); num_classes as usize];
+    let mut representative_original_ids = vec![u32::MAX; num_classes as usize];
+
+    for ((members, &representative), &class) in candidate_members
+        .iter()
+        .zip(candidate_representatives)
+        .zip(candidate_classes)
+    {
+        let bucket = &mut internal_to_originals[class as usize];
+        if bucket.is_empty() {
+            representative_original_ids[class as usize] = representative as u32;
+        }
+        for &raw in members {
+            original_to_internal[raw as usize] = class;
+            bucket.push(raw);
+        }
     }
+
     ManyToOneIdMap {
         original_to_internal,
         internal_to_originals,
@@ -429,15 +462,18 @@ pub(crate) fn compute_state_map(
         .enumerate()
         .filter_map(|(byte, &active)| active.then_some(byte as u8))
         .collect::<Vec<_>>();
-    let inherited = inherited_classes(num_states, initial_state_map);
+    let (candidate_members, candidate_representatives, raw_to_candidate) =
+        candidate_partition(num_states, initial_state_map);
+    let num_candidates = candidate_representatives.len();
 
     let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
     let mut configs = Vec::<Box<[u32]>>::new();
-    let start_configs = (0..tokenizer.num_states())
-        .map(|state| {
+    let start_configs = candidate_representatives
+        .iter()
+        .map(|&state| {
             intern_config(
                 tokenizer
-                    .execute_from_state_end_only(&[], state)
+                    .execute_from_state_end_only(&[], state as u32)
                     .to_vec(),
                 &mut config_ids,
                 &mut configs,
@@ -449,46 +485,45 @@ pub(crate) fn compute_state_map(
         .iter()
         .map(|&config| observation_words(tokenizer, &configs[config as usize], active_groups))
         .collect::<Vec<_>>();
-    let mut initial_keys = FxHashMap::<(u32, Vec<u64>), u32>::default();
-    let mut classes = vec![0u32; num_states];
-    for state in 0..num_states {
-        let key = (inherited[state], observations[state].clone());
+    let mut initial_keys = FxHashMap::<Vec<u64>, u32>::default();
+    let mut classes = vec![0u32; num_candidates];
+    for candidate in 0..num_candidates {
+        let key = observations[candidate].clone();
         let next = initial_keys.len() as u32;
-        classes[state] = *initial_keys.entry(key).or_insert(next);
+        classes[candidate] = *initial_keys.entry(key).or_insert(next);
     }
 
-    let mut target_configs = vec![u32::MAX; num_states * active_bytes.len()];
-    for state in 0..num_states {
-        let source = configs[start_configs[state] as usize].to_vec();
+    let mut target_configs = vec![u32::MAX; num_candidates * active_bytes.len()];
+    for candidate in 0..num_candidates {
+        let source = configs[start_configs[candidate] as usize].to_vec();
         for (slot, &byte) in active_bytes.iter().enumerate() {
             let target = tokenizer.step_all(&source, byte);
             if !target.is_empty() {
-                target_configs[state * active_bytes.len() + slot] =
+                target_configs[candidate * active_bytes.len() + slot] =
                     intern_config(target.to_vec(), &mut config_ids, &mut configs);
             }
         }
     }
 
     let round_limit = match depth {
-        RefinementDepth::Stable => num_states,
+        RefinementDepth::Stable => num_candidates,
         RefinementDepth::Bounded(rounds) => rounds,
     };
     for _ in 0..round_limit {
         let mut signatures = FxHashMap::<Vec<u32>, u32>::default();
-        let mut next_classes = vec![0u32; num_states];
-        for state in 0..num_states {
-            let mut signature = Vec::<u32>::with_capacity(2 + active_bytes.len() * 2);
-            signature.push(inherited[state]);
-            signature.push(classes[state]);
+        let mut next_classes = vec![0u32; num_candidates];
+        for candidate in 0..num_candidates {
+            let mut signature = Vec::<u32>::with_capacity(1 + active_bytes.len() * 2);
+            signature.push(classes[candidate]);
             for slot in 0..active_bytes.len() {
-                let config = target_configs[state * active_bytes.len() + slot];
+                let config = target_configs[candidate * active_bytes.len() + slot];
                 if config == u32::MAX {
                     signature.push(0);
                     continue;
                 }
                 let mut target_classes = configs[config as usize]
                     .iter()
-                    .map(|&target| classes[target as usize] + 1)
+                    .map(|&target| classes[raw_to_candidate[target as usize]] + 1)
                     .collect::<Vec<_>>();
                 target_classes.sort_unstable();
                 target_classes.dedup();
@@ -496,7 +531,7 @@ pub(crate) fn compute_state_map(
                 signature.extend(target_classes);
             }
             let next = signatures.len() as u32;
-            next_classes[state] = *signatures.entry(signature).or_insert(next);
+            next_classes[candidate] = *signatures.entry(signature).or_insert(next);
         }
         let stable = same_partition(&classes, &next_classes);
         classes = next_classes;
@@ -505,7 +540,12 @@ pub(crate) fn compute_state_map(
         }
     }
 
-    build_state_map(&classes)
+    build_state_map(
+        &candidate_members,
+        &candidate_representatives,
+        &classes,
+        num_states,
+    )
 }
 
 #[cfg(test)]
@@ -528,5 +568,32 @@ mod tests {
         );
         assert_ne!(map.original_to_internal[2], map.original_to_internal[4]);
         assert_ne!(map.original_to_internal[1], map.original_to_internal[2]);
+    }
+
+    #[test]
+    fn identity_input_map_does_not_block_nfa_equivalence_merges() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let relevant = [true; 256];
+        let identity = super::super::identity_state_map(tokenizer.num_states() as usize);
+        let direct = compute_state_map(
+            &tokenizer,
+            &relevant,
+            None,
+            None,
+            RefinementDepth::Stable,
+        );
+        let from_identity = compute_state_map(
+            &tokenizer,
+            &relevant,
+            None,
+            Some(&identity),
+            RefinementDepth::Stable,
+        );
+
+        assert!(direct.num_internal_ids() < tokenizer.num_states());
+        assert!(same_partition(
+            &direct.original_to_internal,
+            &from_identity.original_to_internal,
+        ));
     }
 }
