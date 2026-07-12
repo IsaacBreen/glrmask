@@ -199,8 +199,10 @@ impl<'a> NfaTokenPositionView<'a> {
         if let Some(&target) = self.transitions.get(&(config, byte)) {
             return target;
         }
-        let source = self.configs[config as usize].to_vec();
-        let targets = self.tokenizer.step_all(&source, byte);
+        let targets = {
+            let source = &self.configs[config as usize];
+            self.tokenizer.step_all(source, byte)
+        };
         let target = if targets.is_empty() {
             u32::MAX
         } else {
