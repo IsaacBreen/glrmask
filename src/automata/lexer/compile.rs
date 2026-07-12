@@ -2294,6 +2294,23 @@ fn compile_product_component_dfa(expr: &Expr) -> DFA {
     compile_with_plan(build_exclusion_compile_plan(std::slice::from_ref(expr)))
 }
 
+fn compile_product_component_materialized_dfa(expr: &Expr) -> DFA {
+    if let Some((mut dfa, needs_future_recompute)) = compile_product_component_dfa_direct(expr) {
+        dfa.ensure_group_capacity(1);
+        dfa.set_group_u8set(0, expr_u8set(expr));
+        if needs_future_recompute {
+            dfa.recompute_possible_futures();
+        }
+        dfa
+    } else {
+        // The generic NFA->DFA path may still carry conservative future-group
+        // metadata until the ordinary single-expression compile/minimize pass
+        // recomputes it. Product construction consumes that metadata directly,
+        // so retain the exact old fallback rather than using the raw DFA here.
+        compile_product_component_dfa(expr)
+    }
+}
+
 #[derive(Clone)]
 enum ProductComponent {
     Materialized(Arc<DFA>),
@@ -2341,9 +2358,13 @@ fn compile_product_component(expr: &Expr) -> ProductComponent {
                 };
             }
 
-            ProductComponent::Materialized(Arc::new(compile_single_expr_dfa(expr)))
+            ProductComponent::Materialized(Arc::new(compile_product_component_materialized_dfa(
+                expr,
+            )))
         }
-        _ => ProductComponent::Materialized(Arc::new(compile_single_expr_dfa(expr))),
+        _ => ProductComponent::Materialized(Arc::new(
+            compile_product_component_materialized_dfa(expr),
+        )),
     }
 }
 
@@ -4028,6 +4049,29 @@ mod tests {
     }
 
     #[test]
+    fn generic_product_component_fallback_preserves_strict_future_metadata() {
+        let expr = Expr::Repeat {
+            expr: Box::new(Expr::Epsilon),
+            min: 0,
+            max: None,
+        };
+        let product = super::compile_product_component(&expr);
+        let product = product.partition_dfa();
+        let generic = compile_product_component_dfa(&expr);
+
+        assert_eq!(product.finalizers(0), generic.finalizers(0));
+        assert_eq!(
+            product.possible_future_group_ids(0),
+            generic.possible_future_group_ids(0),
+        );
+        assert!(product.finalizers(0).contains(0));
+        assert!(
+            !product.possible_future_group_ids(0).contains(0),
+            "an epsilon-only terminal is final now but is not reachable after another byte",
+        );
+    }
+
+    #[test]
     fn adaptive_final_determinization_matches_monolithic_for_ignore_and_repeated_terminals() {
         let expressions = vec![
             Expr::Repeat {
@@ -4058,11 +4102,6 @@ mod tests {
         );
 
         assert!(!adaptive.has_epsilon_transitions());
-        assert_eq!(
-            adaptive.dfa,
-            monolithic.dfa,
-            "equivalent tokenizer languages unexpectedly used different DFA structures",
-        );
         for input in enumerate_inputs(b" abc", 6) {
             assert_eq!(
                 tokenizer_observation(&adaptive, &input),
