@@ -116,16 +116,27 @@ pub(crate) fn resolve_l2p_pipeline_config(
     } else {
         &[StateEquivalencePassKind::RestrictedObservation][..]
     };
-    let mut config = resolve_pipeline_config("GLRMASK_L2P_STATE_EQUIV_PASSES", default_passes);
-    // This is the coordinate-preserving replacement for L2P tokenizer
-    // simplification, so it is mandatory and always precedes every optional
-    // pass, including an environment-selected max-length pass.
-    config
+    normalize_l2p_pipeline_config(resolve_pipeline_config(
+        "GLRMASK_L2P_STATE_EQUIV_PASSES",
+        default_passes,
+    ))
+}
+
+fn normalize_l2p_pipeline_config(
+    mut config: StateEquivalencePipelineConfig,
+) -> StateEquivalencePipelineConfig {
+    // Restricted observation is optional when the caller already has an exact
+    // global seed such as partition C. When selected, keep it first so every
+    // later pass consumes its refinement; do not silently reinsert it when an
+    // explicit pass list omits it.
+    if let Some(index) = config
         .passes
-        .retain(|kind| !matches!(kind, StateEquivalencePassKind::RestrictedObservation));
-    config
-        .passes
-        .insert(0, StateEquivalencePassKind::RestrictedObservation);
+        .iter()
+        .position(|kind| matches!(kind, StateEquivalencePassKind::RestrictedObservation))
+    {
+        let restricted = config.passes.remove(index);
+        config.passes.insert(0, restricted);
+    }
     config
 }
 
@@ -276,4 +287,34 @@ fn record_max_length_profile(
         representative_count,
         skipped: false,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn l2p_pass_normalization_does_not_force_restricted_observation() {
+        let config = normalize_l2p_pipeline_config(StateEquivalencePipelineConfig {
+            passes: vec![StateEquivalencePassKind::MaxLength],
+        });
+        assert_eq!(config.passes, vec![StateEquivalencePassKind::MaxLength]);
+    }
+
+    #[test]
+    fn l2p_pass_normalization_keeps_restricted_observation_first_when_selected() {
+        let config = normalize_l2p_pipeline_config(StateEquivalencePipelineConfig {
+            passes: vec![
+                StateEquivalencePassKind::MaxLength,
+                StateEquivalencePassKind::RestrictedObservation,
+            ],
+        });
+        assert_eq!(
+            config.passes,
+            vec![
+                StateEquivalencePassKind::RestrictedObservation,
+                StateEquivalencePassKind::MaxLength,
+            ],
+        );
+    }
 }

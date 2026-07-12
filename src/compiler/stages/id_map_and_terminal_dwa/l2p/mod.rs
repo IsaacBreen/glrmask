@@ -33,7 +33,7 @@ use crate::automata::weighted::nwa::NWA;
 use crate::automata::weighted_u32::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
-use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+use crate::compiler::stages::equiv_types::{GlobalScannerStateQuotient, ManyToOneIdMap};
 use crate::compiler::stages::mapped_artifact::MappedArtifact;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa;
 use crate::ds::bitset::BitSet;
@@ -391,16 +391,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // propagation for this vocabulary partition. TI consumes exactly this
     // directional member-to-representative substitution property; members of a
     // C class need not be pairwise interchangeable as raw DFA states.
-    let global_state_quotient = (l2p_global_token_position_enabled()
-        && matches!(partition_label, "p7" | "p8"))
-        .then(|| {
-            equivalence_analysis::state_equivalence::global_token_position::
-                compute_global_token_position_state_quotient(tokenizer, vocab)
-                .0
-        });
-    // The token-position representative partition is also consumed by the
-    // representative-core equivalence-analysis path below; keep computing it
-    // for that consumer.
     let token_position_partition = (l2p_global_token_position_enabled()
         && matches!(partition_label, "p7" | "p8"))
         .then(|| {
@@ -408,6 +398,16 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 compute_global_token_position_state_partition(tokenizer, vocab)
         })
         .flatten();
+    // Build C once and share the exact same representative map between TI and
+    // id-map equivalence. Previously these two consumers independently rebuilt
+    // C, and id-map then used a separate C-only exact path that bypassed the
+    // ordinary restricted-observation pipeline.
+    let global_state_quotient = token_position_partition.as_ref().map(|partition| {
+        GlobalScannerStateQuotient::from_total_raw_state_map(
+            partition.as_many_to_one().clone(),
+            num_original_states,
+        )
+    });
     let token_position_partition_ms = token_position_partition_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
@@ -1433,6 +1433,42 @@ nt S ::= QUOTE IDENT;
 
         Constraint::from_glrm_grammar(grammar, &vocab)
             .expect("epsilon-NFA C quotient must match its suppressed-C symbolic reference");
+    }
+
+    #[test]
+    fn p8_global_token_position_seeds_id_map_without_restricted_observation() {
+        let grammar = r#"
+start S;
+lexer group quote ::= QUOTE;
+lexer group ident ::= IDENT;
+t QUOTE ::= "\"";
+t IDENT ::= /[A-Za-z_][A-Za-z0-9_]*/;
+nt S ::= QUOTE IDENT;
+"#;
+        let vocab = Vocab::new(
+            vec![
+                (0, b"\"A".to_vec()),
+                (1, b"\"Z".to_vec()),
+                (2, b"\"_".to_vec()),
+            ],
+            None,
+        );
+
+        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _adaptive = EnvVarGuard::set("GLRMASK_LEXER_ADAPTIVE", "1");
+        let _structural =
+            EnvVarGuard::set("GLRMASK_STRUCTURAL_BOUNDARY_LEXICAL_PARTITION", "1");
+        let _disable_ti =
+            EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "1");
+        let _passes = EnvVarGuard::set("GLRMASK_L2P_STATE_EQUIV_PASSES", "");
+        let _strict = EnvVarGuard::set(
+            "GLRMASK_L2P_GLOBAL_TOKEN_POSITION_STRICT_REFERENCE",
+            "1",
+        );
+
+        Constraint::from_glrm_grammar(grammar, &vocab).expect(
+            "partition C must seed exact id-map analysis when restricted observation is omitted",
+        );
     }
 
     #[test]
