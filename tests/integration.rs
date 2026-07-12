@@ -1725,7 +1725,7 @@ fn partitioned_runtime_matches_dynamic_across_lexer_shapes() {
                 lexer group a ::= A;
                 lexer group b ::= B;
                 lexer group c ::= C;
-                t WS ::= " "*;
+                t WS ::= " "+;
                 t A ::= /a(?:b|c)*/;
                 t B ::= /b+/;
                 t C ::= /c+/;

@@ -12,6 +12,7 @@
 //!
 //! start <nt-name>;
 //! [ignore <TM-NAME>;]
+//! [g <name> ::= { <grammar-body> };]
 //! [lexer group <partition-name> ::= <TM-NAME> | "literal" | @literals | *, ...;]
 //!
 //! // Nonterminal rules
@@ -23,6 +24,18 @@
 //! // Internal terminal rules (shared between other terminals)
 //! internal t TERM_NAME ::= <expr>;
 //! ```
+//!
+//! A `g` declaration defines a named subgrammar. Its body is a complete GLRM
+//! grammar scope with its own `start`, optional `ignore`, terminals, rules,
+//! lexer groups, and nested subgrammars. Definitions are strictly scope-local:
+//! a subgrammar cannot see its parent's definitions, and its private definitions
+//! are not visible to the parent. Only the declared subgrammar name is visible
+//! in the enclosing scope, where it is referenced like a nonterminal.
+//!
+//! Ignore is also scope-local. `ignore I;` admits `I*` before the first lexical
+//! atom in that grammar scope, between lexical atoms, and after the last lexical
+//! atom. It never splits a terminal match. A subgrammar with no `ignore`
+//! declaration inherits nothing from its parent.
 //!
 //! ## Expressions (used for both NT and terminal rule bodies)
 //!
@@ -48,9 +61,11 @@
 use crate::GlrMaskError;
 use crate::automata::unweighted_u32::dfa::Label;
 use crate::automata::unweighted_u32::nfa::NFA;
-use crate::grammar::ast::{GrammarExpr, Quantifier, NamedGrammar, NamedRule};
+use crate::grammar::ast::{
+    GrammarExpr, NamedGrammar, NamedRule, Quantifier, resolved_named_terminal_exprs,
+};
 use crate::grammar::expr_nfa::ExprNFA;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 // ============================================================
 // Dumper
@@ -695,6 +710,24 @@ struct GlrmParser {
     pos: usize,
 }
 
+#[derive(Debug, Clone)]
+struct ParsedSubgrammar {
+    name: String,
+    scope: ParsedGlrmScope,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedGlrmScope {
+    rules: Vec<NamedRule>,
+    subgrammars: Vec<ParsedSubgrammar>,
+    start: String,
+    ignore: Option<String>,
+    lexer_partitions: BTreeMap<String, String>,
+    lexer_literal_partitions: BTreeMap<Vec<u8>, String>,
+    default_lexer_partition: Option<String>,
+    all_literals_partition: Option<String>,
+}
+
 impl GlrmParser {
 
     fn peek(&self) -> &Tok {
@@ -731,9 +764,24 @@ impl GlrmParser {
     }
 
     fn parse_grammar(&mut self) -> Result<NamedGrammar, GlrMaskError> {
+        let scope = self.parse_scope(false, "grammar")?;
+        if scope.subgrammars.is_empty() {
+            let grammar = named_grammar_for_scope(&scope)?;
+            validate_ignore_terminal(&grammar, "grammar")?;
+            return Ok(grammar);
+        }
+        flatten_scoped_grammar(scope)
+    }
+
+    fn parse_scope(
+        &mut self,
+        stop_at_rbrace: bool,
+        scope_label: &str,
+    ) -> Result<ParsedGlrmScope, GlrMaskError> {
         let mut start: Option<String> = None;
         let mut ignore: Option<String> = None;
         let mut rules: Vec<NamedRule> = Vec::new();
+        let mut subgrammars = Vec::new();
         let mut lexer_partitions = BTreeMap::<String, String>::new();
         let mut lexer_literal_partitions = BTreeMap::<Vec<u8>, String>::new();
         let mut default_lexer_partition = None::<String>;
@@ -741,98 +789,56 @@ impl GlrmParser {
 
         loop {
             match self.peek().clone() {
+                Tok::Eof if stop_at_rbrace => {
+                    return Err(err(&format!("unterminated {scope_label}")));
+                }
                 Tok::Eof => break,
+                Tok::RBrace if stop_at_rbrace => {
+                    self.advance();
+                    break;
+                }
+                Tok::RBrace => {
+                    return Err(err("unexpected '}' at top level"));
+                }
                 Tok::Ident(ref kw) => match kw.as_str() {
                     "start" => {
                         self.advance();
                         let name = self.expect_ident()?;
                         self.consume(&Tok::Semi)?;
-                        start = Some(name);
+                        if start.replace(name).is_some() {
+                            return Err(err(&format!(
+                                "{scope_label} has more than one 'start' declaration",
+                            )));
+                        }
                     }
                     "ignore" => {
                         self.advance();
                         let name = self.expect_ident()?;
                         self.consume(&Tok::Semi)?;
-                        ignore = Some(name);
+                        if ignore.replace(name).is_some() {
+                            return Err(err(&format!(
+                                "{scope_label} has more than one 'ignore' declaration",
+                            )));
+                        }
+                    }
+                    "g" | "subgrammar" => {
+                        self.advance();
+                        let name = self.expect_ident()?;
+                        self.consume(&Tok::DeclEq)?;
+                        self.consume(&Tok::LBrace)?;
+                        let child_label = format!("subgrammar '{name}'");
+                        let scope = self.parse_scope(true, &child_label)?;
+                        self.consume(&Tok::Semi)?;
+                        subgrammars.push(ParsedSubgrammar { name, scope });
                     }
                     "lexer" => {
                         self.advance();
-                        match self.advance().clone() {
-                            Tok::Ident(ref keyword) if keyword == "group" => {}
-                            other => {
-                                return Err(err(&format!(
-                                    "expected 'group' after 'lexer', got {:?}",
-                                    other,
-                                )));
-                            }
-                        }
-                        let partition = self.expect_ident()?;
-                        self.consume(&Tok::DeclEq)?;
-                        loop {
-                            match self.advance().clone() {
-                                Tok::Ident(terminal) => {
-                                    if lexer_partitions
-                                        .insert(terminal.clone(), partition.clone())
-                                        .is_some()
-                                    {
-                                        return Err(err(&format!(
-                                            "terminal '{terminal}' is assigned to more than one lexer group",
-                                        )));
-                                    }
-                                }
-                                Tok::StringLit(literal) => {
-                                    if lexer_literal_partitions
-                                        .insert(literal.clone(), partition.clone())
-                                        .is_some()
-                                    {
-                                        return Err(err(&format!(
-                                            "literal {:?} is assigned to more than one lexer group",
-                                            String::from_utf8_lossy(&literal),
-                                        )));
-                                    }
-                                }
-                                Tok::Star => {
-                                    if default_lexer_partition
-                                        .replace(partition.clone())
-                                        .is_some()
-                                    {
-                                        return Err(err(
-                                            "the catch-all '*' is assigned to more than one lexer group",
-                                        ));
-                                    }
-                                }
-                                Tok::At => match self.advance().clone() {
-                                    Tok::Ident(selector) if selector == "literals" => {
-                                        if all_literals_partition
-                                            .replace(partition.clone())
-                                            .is_some()
-                                        {
-                                            return Err(err(
-                                                "'@literals' is assigned to more than one lexer group",
-                                            ));
-                                        }
-                                    }
-                                    other => {
-                                        return Err(err(&format!(
-                                            "expected 'literals' after '@', got {:?}",
-                                            other,
-                                        )));
-                                    }
-                                },
-                                other => {
-                                    return Err(err(&format!(
-                                        "expected terminal name, literal, or '*', got {:?}",
-                                        other,
-                                    )));
-                                }
-                            }
-                            if matches!(self.peek(), Tok::Comma) {
-                                self.advance();
-                                continue;
-                            }
-                            break;
-                        }
-                        self.consume(&Tok::Semi)?;
+                        self.parse_lexer_group(
+                            &mut lexer_partitions,
+                            &mut lexer_literal_partitions,
+                            &mut default_lexer_partition,
+                            &mut all_literals_partition,
+                        )?;
                     }
                     "nt" => {
                         self.advance();
@@ -855,30 +861,117 @@ impl GlrmParser {
                         }
                         rules.push(self.parse_rule(true, true)?);
                     }
-                    other => return Err(err(&format!("unexpected keyword '{}' at top level", other))),
+                    other => {
+                        return Err(err(&format!(
+                            "unexpected keyword '{other}' in {scope_label}",
+                        )));
+                    }
                 },
-                other => return Err(err(&format!("unexpected token {:?} at top level", other))),
+                other => {
+                    return Err(err(&format!(
+                        "unexpected token {:?} in {scope_label}",
+                        other,
+                    )));
+                }
             }
         }
 
-        let start = start.ok_or_else(|| err("grammar has no 'start' declaration"))?;
-        let mut grammar = NamedGrammar {
+        let start = start.ok_or_else(|| err(&format!("{scope_label} has no 'start' declaration")))?;
+        Ok(ParsedGlrmScope {
             rules,
+            subgrammars,
             start,
             ignore,
             lexer_partitions,
             lexer_literal_partitions,
             default_lexer_partition,
-        };
-        if let Some(partition) = all_literals_partition {
-            for literal in grammar.emitted_anonymous_literals() {
-                grammar
-                    .lexer_literal_partitions
-                    .entry(literal)
-                    .or_insert_with(|| partition.clone());
+            all_literals_partition,
+        })
+    }
+
+    fn parse_lexer_group(
+        &mut self,
+        lexer_partitions: &mut BTreeMap<String, String>,
+        lexer_literal_partitions: &mut BTreeMap<Vec<u8>, String>,
+        default_lexer_partition: &mut Option<String>,
+        all_literals_partition: &mut Option<String>,
+    ) -> Result<(), GlrMaskError> {
+        match self.advance().clone() {
+            Tok::Ident(ref keyword) if keyword == "group" => {}
+            other => {
+                return Err(err(&format!(
+                    "expected 'group' after 'lexer', got {:?}",
+                    other,
+                )));
             }
         }
-        Ok(grammar)
+        let partition = self.expect_ident()?;
+        self.consume(&Tok::DeclEq)?;
+        loop {
+            match self.advance().clone() {
+                Tok::Ident(terminal) => {
+                    if lexer_partitions
+                        .insert(terminal.clone(), partition.clone())
+                        .is_some()
+                    {
+                        return Err(err(&format!(
+                            "terminal '{terminal}' is assigned to more than one lexer group",
+                        )));
+                    }
+                }
+                Tok::StringLit(literal) => {
+                    if lexer_literal_partitions
+                        .insert(literal.clone(), partition.clone())
+                        .is_some()
+                    {
+                        return Err(err(&format!(
+                            "literal {:?} is assigned to more than one lexer group",
+                            String::from_utf8_lossy(&literal),
+                        )));
+                    }
+                }
+                Tok::Star => {
+                    if default_lexer_partition
+                        .replace(partition.clone())
+                        .is_some()
+                    {
+                        return Err(err(
+                            "the catch-all '*' is assigned to more than one lexer group",
+                        ));
+                    }
+                }
+                Tok::At => match self.advance().clone() {
+                    Tok::Ident(selector) if selector == "literals" => {
+                        if all_literals_partition
+                            .replace(partition.clone())
+                            .is_some()
+                        {
+                            return Err(err(
+                                "'@literals' is assigned to more than one lexer group",
+                            ));
+                        }
+                    }
+                    other => {
+                        return Err(err(&format!(
+                            "expected 'literals' after '@', got {:?}",
+                            other,
+                        )));
+                    }
+                },
+                other => {
+                    return Err(err(&format!(
+                        "expected terminal name, literal, or '*', got {:?}",
+                        other,
+                    )));
+                }
+            }
+            if matches!(self.peek(), Tok::Comma) {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+        self.consume(&Tok::Semi)
     }
 
     fn parse_rule(&mut self, is_terminal: bool, is_internal: bool) -> Result<NamedRule, GlrMaskError> {
@@ -1295,6 +1388,950 @@ impl GlrmParser {
             other => Err(err(&format!("unexpected token {:?} in NT expression", other))),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopedSymbolKind {
+    Nonterminal,
+    Terminal,
+    InternalTerminal,
+    Subgrammar,
+}
+
+fn named_grammar_for_scope(scope: &ParsedGlrmScope) -> Result<NamedGrammar, GlrMaskError> {
+    let mut grammar = NamedGrammar {
+        rules: scope.rules.clone(),
+        start: scope.start.clone(),
+        ignore: scope.ignore.clone(),
+        lexer_partitions: scope.lexer_partitions.clone(),
+        lexer_literal_partitions: scope.lexer_literal_partitions.clone(),
+        default_lexer_partition: scope.default_lexer_partition.clone(),
+    };
+    if let Some(partition) = scope.all_literals_partition.as_deref() {
+        for literal in grammar.emitted_anonymous_literals() {
+            grammar
+                .lexer_literal_partitions
+                .entry(literal)
+                .or_insert_with(|| partition.to_string());
+        }
+    }
+    Ok(grammar)
+}
+
+fn scope_symbol_kinds(
+    scope: &ParsedGlrmScope,
+    scope_label: &str,
+) -> Result<BTreeMap<String, ScopedSymbolKind>, GlrMaskError> {
+    let mut symbols = BTreeMap::new();
+    for rule in &scope.rules {
+        let kind = match (rule.is_terminal, rule.is_internal) {
+            (false, _) => ScopedSymbolKind::Nonterminal,
+            (true, false) => ScopedSymbolKind::Terminal,
+            (true, true) => ScopedSymbolKind::InternalTerminal,
+        };
+        if let Some(previous) = symbols.insert(rule.name.clone(), kind)
+            && previous != kind
+        {
+            return Err(err(&format!(
+                "definition '{}' has conflicting kinds in {scope_label}",
+                rule.name,
+            )));
+        }
+    }
+    for subgrammar in &scope.subgrammars {
+        if symbols
+            .insert(subgrammar.name.clone(), ScopedSymbolKind::Subgrammar)
+            .is_some()
+        {
+            return Err(err(&format!(
+                "subgrammar '{}' conflicts with another definition in {scope_label}",
+                subgrammar.name,
+            )));
+        }
+    }
+    let Some(start_kind) = symbols.get(&scope.start).copied() else {
+        return Err(err(&format!(
+            "start '{}' is not defined in {scope_label}; definitions are scope-local",
+            scope.start,
+        )));
+    };
+    if start_kind == ScopedSymbolKind::InternalTerminal {
+        return Err(err(&format!(
+            "start '{}' in {scope_label} is an internal terminal",
+            scope.start,
+        )));
+    }
+    Ok(symbols)
+}
+
+fn validate_ignore_terminal(grammar: &NamedGrammar, scope_label: &str) -> Result<(), GlrMaskError> {
+    let Some(ignore_name) = grammar.ignore.as_deref() else {
+        return Ok(());
+    };
+    let Some(rule) = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.name == ignore_name)
+    else {
+        return Err(err(&format!(
+            "ignore terminal '{ignore_name}' is not defined in {scope_label}; definitions are scope-local",
+        )));
+    };
+    if !rule.is_terminal || rule.is_internal {
+        return Err(err(&format!(
+            "ignore '{ignore_name}' in {scope_label} must name a local emitting terminal",
+        )));
+    }
+    if matches!(rule.expr, GrammarExpr::SpecialToken(_)) {
+        return Err(err(
+            "a special LLM token terminal cannot be the ignore terminal",
+        ));
+    }
+    let resolved = resolved_named_terminal_exprs(grammar)?;
+    let expr = resolved.get(ignore_name).ok_or_else(|| {
+        err(&format!(
+            "ignore terminal '{ignore_name}' could not be resolved in {scope_label}",
+        ))
+    })?;
+    if expr.is_nullable() {
+        return Err(err(&format!(
+            "ignore terminal '{ignore_name}' in {scope_label} must consume at least one byte",
+        )));
+    }
+    for rule in grammar.rules.iter().filter(|rule| !rule.is_terminal) {
+        if grammar_expr_contains_ref(&rule.expr, ignore_name) {
+            return Err(err(&format!(
+                "ignore terminal '{ignore_name}' is referenced explicitly by parser rule '{}' in {scope_label}; ignored terminals are implicit at grammar boundaries and between lexical atoms",
+                rule.name,
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn grammar_expr_contains_ref(expr: &GrammarExpr, name: &str) -> bool {
+    match expr {
+        GrammarExpr::Ref(reference) => reference == name,
+        GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+            grammar_expr_contains_ref(inner, name)
+        }
+        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+            parts.iter().any(|part| grammar_expr_contains_ref(part, name))
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            grammar_expr_contains_ref(expr, name) || grammar_expr_contains_ref(exclude, name)
+        }
+        GrammarExpr::Intersect { expr, intersect } => {
+            grammar_expr_contains_ref(expr, name) || grammar_expr_contains_ref(intersect, name)
+        }
+        GrammarExpr::SeparatedSequence { items, separator, .. } => {
+            items
+                .iter()
+                .any(|(item, _)| grammar_expr_contains_ref(item, name))
+                || grammar_expr_contains_ref(separator, name)
+        }
+        GrammarExpr::ExprNFA(expr_nfa) => expr_nfa
+            .symbols
+            .iter()
+            .any(|symbol| grammar_expr_contains_ref(symbol, name)),
+        GrammarExpr::Epsilon
+        | GrammarExpr::Literal(_)
+        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte => false,
+    }
+}
+
+struct FlattenContext {
+    next_scope_id: usize,
+    used_names: HashSet<String>,
+    used_partition_names: HashSet<String>,
+    rules: Vec<NamedRule>,
+    lexer_partitions: BTreeMap<String, String>,
+    lexer_literal_partition_constraints: Vec<(Vec<u8>, String)>,
+}
+
+impl FlattenContext {
+    fn fresh_global_name(&mut self, base: String) -> String {
+        if self.used_names.insert(base.clone()) {
+            return base;
+        }
+        for suffix in 1usize.. {
+            let candidate = format!("{base}_{suffix}");
+            if self.used_names.insert(candidate.clone()) {
+                return candidate;
+            }
+        }
+        unreachable!()
+    }
+
+    fn reserve_exact_name(&mut self, name: &str) -> Result<String, GlrMaskError> {
+        if !self.used_names.insert(name.to_string()) {
+            return Err(err(&format!("duplicate top-level definition '{name}'")));
+        }
+        Ok(name.to_string())
+    }
+
+    fn fresh_partition_name(&mut self, base: String) -> String {
+        if self.used_partition_names.insert(base.clone()) {
+            return base;
+        }
+        for suffix in 1usize.. {
+            let candidate = format!("{base}_{suffix}");
+            if self.used_partition_names.insert(candidate.clone()) {
+                return candidate;
+            }
+        }
+        unreachable!()
+    }
+}
+
+fn flatten_scoped_grammar(scope: ParsedGlrmScope) -> Result<NamedGrammar, GlrMaskError> {
+    let mut context = FlattenContext {
+        next_scope_id: 0,
+        used_names: HashSet::new(),
+        used_partition_names: HashSet::new(),
+        rules: Vec::new(),
+        lexer_partitions: BTreeMap::new(),
+        lexer_literal_partition_constraints: Vec::new(),
+    };
+    let start = flatten_scope(&scope, true, "grammar", &mut context)?;
+    let (lexer_partitions, lexer_literal_partitions) = canonicalize_flattened_lexer_partitions(
+        &context.rules,
+        &start,
+        context.lexer_partitions,
+        context.lexer_literal_partition_constraints,
+    )?;
+    Ok(NamedGrammar {
+        rules: context.rules,
+        start,
+        ignore: None,
+        lexer_partitions,
+        lexer_literal_partitions,
+        default_lexer_partition: None,
+    })
+}
+
+fn canonicalize_flattened_lexer_partitions(
+    rules: &[NamedRule],
+    start: &str,
+    lexer_partitions: BTreeMap<String, String>,
+    literal_constraints: Vec<(Vec<u8>, String)>,
+) -> Result<(BTreeMap<String, String>, BTreeMap<Vec<u8>, String>), GlrMaskError> {
+    let grammar = NamedGrammar {
+        rules: rules.to_vec(),
+        start: start.to_string(),
+        ignore: None,
+        lexer_partitions: BTreeMap::new(),
+        lexer_literal_partitions: BTreeMap::new(),
+        default_lexer_partition: None,
+    };
+    let resolved_terminals = resolved_named_terminal_exprs(&grammar)?;
+    let mut adjacency = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut connect = |left: &str, right: &str| {
+        adjacency
+            .entry(left.to_string())
+            .or_default()
+            .insert(right.to_string());
+        adjacency
+            .entry(right.to_string())
+            .or_default()
+            .insert(left.to_string());
+    };
+
+    let mut partition_by_expr = HashMap::new();
+    for (terminal, partition) in &lexer_partitions {
+        connect(partition, partition);
+        let Some(expr) = resolved_terminals.get(terminal) else {
+            continue;
+        };
+        if let Some(previous) = partition_by_expr.insert(expr.clone(), partition.clone()) {
+            connect(&previous, partition);
+        }
+    }
+
+    let mut partition_by_literal = BTreeMap::<Vec<u8>, String>::new();
+    for (literal, partition) in &literal_constraints {
+        connect(partition, partition);
+        if let Some(previous) = partition_by_literal.insert(literal.clone(), partition.clone()) {
+            connect(&previous, partition);
+        }
+    }
+
+    let mut canonical = BTreeMap::<String, String>::new();
+    let mut visited = BTreeSet::new();
+    for partition in adjacency.keys() {
+        if visited.contains(partition) {
+            continue;
+        }
+        let mut stack = vec![partition.clone()];
+        let mut component = Vec::new();
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            component.push(current.clone());
+            if let Some(neighbors) = adjacency.get(&current) {
+                stack.extend(neighbors.iter().cloned());
+            }
+        }
+        component.sort_unstable();
+        let representative = component
+            .first()
+            .expect("partition component must be non-empty")
+            .clone();
+        for member in component {
+            canonical.insert(member, representative.clone());
+        }
+    }
+
+    let lexer_partitions = lexer_partitions
+        .into_iter()
+        .map(|(terminal, partition)| {
+            let partition = canonical.get(&partition).cloned().unwrap_or(partition);
+            (terminal, partition)
+        })
+        .collect();
+    let mut lexer_literal_partitions = BTreeMap::new();
+    for (literal, partition) in literal_constraints {
+        let partition = canonical.get(&partition).cloned().unwrap_or(partition);
+        if let Some(previous) = lexer_literal_partitions.insert(literal.clone(), partition.clone()) {
+            debug_assert_eq!(previous, partition);
+        }
+    }
+    Ok((lexer_partitions, lexer_literal_partitions))
+}
+
+fn flatten_scope(
+    scope: &ParsedGlrmScope,
+    top_level: bool,
+    scope_label: &str,
+    context: &mut FlattenContext,
+) -> Result<String, GlrMaskError> {
+    let symbol_kinds = scope_symbol_kinds(scope, scope_label)?;
+    let local_grammar = named_grammar_for_scope(scope)?;
+    validate_ignore_terminal(&local_grammar, scope_label)?;
+
+    let original_emitting_terminals = symbol_kinds
+        .iter()
+        .filter_map(|(name, kind)| (*kind == ScopedSymbolKind::Terminal).then_some(name.clone()))
+        .collect::<HashSet<_>>();
+    let subgrammar_names = symbol_kinds
+        .iter()
+        .filter_map(|(name, kind)| (*kind == ScopedSymbolKind::Subgrammar).then_some(name.clone()))
+        .collect::<HashSet<_>>();
+
+    let scope_id = context.next_scope_id;
+    context.next_scope_id += 1;
+
+    let mut local_existing_names = symbol_kinds.keys().cloned().collect::<HashSet<_>>();
+    let mut working_rules = scope.rules.clone();
+    let entry_local_name = fresh_local_name(&mut local_existing_names, "__glrm_scope_entry");
+
+    let mut promoted_default_partitions = BTreeMap::<String, String>::new();
+    if let Some(default_partition) = scope.default_lexer_partition.as_deref() {
+        let mut promoter = DefaultPartitionAtomPromoter {
+            default_partition,
+            explicit_literal_partitions: &local_grammar.lexer_literal_partitions,
+            emitting_terminals: &original_emitting_terminals,
+            existing_names: &mut local_existing_names,
+            promoted: HashMap::new(),
+            generated_rules: Vec::new(),
+            generated_partitions: BTreeMap::new(),
+        };
+        for rule in working_rules.iter_mut().filter(|rule| !rule.is_terminal) {
+            rule.expr = promoter.rewrite_expr(&rule.expr)?;
+        }
+        working_rules.extend(promoter.generated_rules);
+        promoted_default_partitions = promoter.generated_partitions;
+    }
+
+    let emitting_terminals = working_rules
+        .iter()
+        .filter(|rule| rule.is_terminal && !rule.is_internal)
+        .map(|rule| rule.name.clone())
+        .collect::<HashSet<_>>();
+    let byte_emitting_terminals = working_rules
+        .iter()
+        .filter(|rule| {
+            rule.is_terminal
+                && !rule.is_internal
+                && !matches!(rule.expr, GrammarExpr::SpecialToken(_))
+        })
+        .map(|rule| rule.name.clone())
+        .collect::<HashSet<_>>();
+
+    if let Some(ignore_name) = scope.ignore.as_deref() {
+        let skip_local_name = fresh_local_name(&mut local_existing_names, "__glrm_ignore_skip");
+        working_rules.push(NamedRule {
+            name: skip_local_name.clone(),
+            expr: GrammarExpr::Choice(vec![
+                GrammarExpr::Epsilon,
+                GrammarExpr::Sequence(vec![
+                    GrammarExpr::Ref(skip_local_name.clone()),
+                    GrammarExpr::Ref(ignore_name.to_string()),
+                ]),
+            ]),
+            is_terminal: false,
+            is_internal: false,
+        });
+
+        let mut rewriter = IgnoreScopeRewriter {
+            skip_name: &skip_local_name,
+            emitting_terminals: &emitting_terminals,
+            subgrammar_names: &subgrammar_names,
+            existing_names: &mut local_existing_names,
+            wrappers: HashMap::new(),
+            generated_rules: Vec::new(),
+        };
+        for rule in working_rules.iter_mut().filter(|rule| !rule.is_terminal) {
+            if rule.name == skip_local_name {
+                continue;
+            }
+            rule.expr = rewriter.rewrite_expr(&rule.expr)?;
+        }
+        let entry_core = rewriter.rewrite_expr(&GrammarExpr::Ref(scope.start.clone()))?;
+        let entry_expr = append_trailing_skip(entry_core, &skip_local_name);
+        working_rules.extend(rewriter.generated_rules);
+        working_rules.push(NamedRule {
+            name: entry_local_name.clone(),
+            expr: entry_expr,
+            is_terminal: false,
+            is_internal: false,
+        });
+    } else {
+        working_rules.push(NamedRule {
+            name: entry_local_name.clone(),
+            expr: GrammarExpr::Ref(scope.start.clone()),
+            is_terminal: false,
+            is_internal: false,
+        });
+    }
+
+    let original_names = symbol_kinds.keys().cloned().collect::<HashSet<_>>();
+    let mut local_names = working_rules
+        .iter()
+        .map(|rule| rule.name.clone())
+        .collect::<HashSet<_>>();
+    local_names.extend(subgrammar_names.iter().cloned());
+    let mut name_map = HashMap::<String, String>::new();
+    let mut ordered_names = local_names.into_iter().collect::<Vec<_>>();
+    ordered_names.sort_unstable();
+    for local_name in ordered_names {
+        let mapped = if top_level && original_names.contains(&local_name) {
+            context.reserve_exact_name(&local_name)?
+        } else {
+            let base = if top_level {
+                local_name.clone()
+            } else {
+                format!("__glrm_subgrammar_{scope_id}_{local_name}")
+            };
+            context.fresh_global_name(base)
+        };
+        name_map.insert(local_name, mapped);
+    }
+
+    merge_scope_lexer_config(
+        scope,
+        &local_grammar,
+        &symbol_kinds,
+        &byte_emitting_terminals,
+        &promoted_default_partitions,
+        &name_map,
+        top_level,
+        scope_id,
+        scope_label,
+        context,
+    )?;
+
+    for subgrammar in &scope.subgrammars {
+        let child_label = format!("{scope_label}::{}", subgrammar.name);
+        let child_entry = flatten_scope(&subgrammar.scope, false, &child_label, context)?;
+        let alias_name = name_map
+            .get(&subgrammar.name)
+            .expect("subgrammar name must be allocated")
+            .clone();
+        context.rules.push(NamedRule {
+            name: alias_name,
+            expr: GrammarExpr::Ref(child_entry),
+            is_terminal: false,
+            is_internal: false,
+        });
+    }
+
+    for rule in working_rules {
+        let mapped_name = name_map
+            .get(&rule.name)
+            .expect("working rule name must be allocated")
+            .clone();
+        let mapped_expr = rewrite_scope_refs(&rule.expr, &name_map, scope_label)?;
+        context.rules.push(NamedRule {
+            name: mapped_name,
+            expr: mapped_expr,
+            is_terminal: rule.is_terminal,
+            is_internal: rule.is_internal,
+        });
+    }
+
+    Ok(name_map
+        .get(&entry_local_name)
+        .expect("scope entry must be allocated")
+        .clone())
+}
+
+fn merge_scope_lexer_config(
+    scope: &ParsedGlrmScope,
+    local_grammar: &NamedGrammar,
+    symbol_kinds: &BTreeMap<String, ScopedSymbolKind>,
+    emitting_terminals: &HashSet<String>,
+    promoted_default_partitions: &BTreeMap<String, String>,
+    name_map: &HashMap<String, String>,
+    top_level: bool,
+    scope_id: usize,
+    scope_label: &str,
+    context: &mut FlattenContext,
+) -> Result<(), GlrMaskError> {
+    let mut local_partition_names = local_grammar
+        .lexer_partitions
+        .values()
+        .chain(local_grammar.lexer_literal_partitions.values())
+        .chain(scope.default_lexer_partition.iter())
+        .chain(promoted_default_partitions.values())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut partition_name_map = BTreeMap::<String, String>::new();
+    for partition in std::mem::take(&mut local_partition_names) {
+        let base = if top_level {
+            partition.clone()
+        } else {
+            format!("__glrm_subgrammar_{scope_id}_lexer_{partition}")
+        };
+        partition_name_map.insert(partition, context.fresh_partition_name(base));
+    }
+    let mapped_partition = |partition: &str| {
+        partition_name_map
+            .get(partition)
+            .expect("scope-local partition must be allocated")
+            .clone()
+    };
+
+    for terminal in emitting_terminals {
+        let local_partition = local_grammar
+            .lexer_partitions
+            .get(terminal)
+            .or_else(|| promoted_default_partitions.get(terminal))
+            .or(scope.default_lexer_partition.as_ref());
+        let Some(partition) = local_partition else {
+            continue;
+        };
+        let mapped_terminal = name_map
+            .get(terminal)
+            .expect("local emitting terminal must be mapped")
+            .clone();
+        context
+            .lexer_partitions
+            .insert(mapped_terminal, mapped_partition(partition));
+    }
+
+    for (terminal, partition) in &local_grammar.lexer_partitions {
+        if symbol_kinds.get(terminal) != Some(&ScopedSymbolKind::Terminal) {
+            return Err(err(&format!(
+                "lexer group in {scope_label} references non-local or non-emitting terminal '{terminal}'",
+            )));
+        }
+        debug_assert_eq!(
+            context
+                .lexer_partitions
+                .get(name_map.get(terminal).expect("local terminal must be mapped")),
+            Some(&mapped_partition(partition)),
+        );
+    }
+
+    if scope.default_lexer_partition.is_none() {
+        for (literal, partition) in &local_grammar.lexer_literal_partitions {
+            context
+                .lexer_literal_partition_constraints
+                .push((literal.clone(), mapped_partition(partition)));
+        }
+    }
+    Ok(())
+}
+
+fn rewrite_scope_refs(
+    expr: &GrammarExpr,
+    name_map: &HashMap<String, String>,
+    scope_label: &str,
+) -> Result<GrammarExpr, GlrMaskError> {
+    Ok(match expr {
+        GrammarExpr::Ref(name) => GrammarExpr::Ref(
+            name_map
+                .get(name)
+                .cloned()
+                .ok_or_else(|| {
+                    err(&format!(
+                        "definition '{name}' is not visible in {scope_label}; definitions are scope-local",
+                    ))
+                })?,
+        ),
+        GrammarExpr::Grouped(inner) => {
+            GrammarExpr::Grouped(Box::new(rewrite_scope_refs(inner, name_map, scope_label)?))
+        }
+        GrammarExpr::Sequence(parts) => GrammarExpr::Sequence(
+            parts
+                .iter()
+                .map(|part| rewrite_scope_refs(part, name_map, scope_label))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        GrammarExpr::Choice(options) => GrammarExpr::Choice(
+            options
+                .iter()
+                .map(|option| rewrite_scope_refs(option, name_map, scope_label))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
+            expr: Box::new(rewrite_scope_refs(expr, name_map, scope_label)?),
+            exclude: Box::new(rewrite_scope_refs(exclude, name_map, scope_label)?),
+        },
+        GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+            expr: Box::new(rewrite_scope_refs(expr, name_map, scope_label)?),
+            intersect: Box::new(rewrite_scope_refs(intersect, name_map, scope_label)?),
+        },
+        GrammarExpr::Quantified(inner, quantifier) => GrammarExpr::Quantified(
+            Box::new(rewrite_scope_refs(inner, name_map, scope_label)?),
+            quantifier.clone(),
+        ),
+        GrammarExpr::SeparatedSequence {
+            items,
+            separator,
+            allow_empty,
+        } => GrammarExpr::SeparatedSequence {
+            items: items
+                .iter()
+                .map(|(item, quantifier)| {
+                    Ok((rewrite_scope_refs(item, name_map, scope_label)?, quantifier.clone()))
+                })
+                .collect::<Result<Vec<_>, GlrMaskError>>()?,
+            separator: Box::new(rewrite_scope_refs(separator, name_map, scope_label)?),
+            allow_empty: *allow_empty,
+        },
+        GrammarExpr::ExprNFA(expr_nfa) => GrammarExpr::ExprNFA(Box::new(ExprNFA::new(
+            expr_nfa.nfa.clone(),
+            expr_nfa
+                .symbols
+                .iter()
+                .map(|symbol| rewrite_scope_refs(symbol, name_map, scope_label))
+                .collect::<Result<Vec<_>, _>>()?,
+        ))),
+        GrammarExpr::Epsilon
+        | GrammarExpr::Literal(_)
+        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte => expr.clone(),
+    })
+}
+
+struct DefaultPartitionAtomPromoter<'a> {
+    default_partition: &'a str,
+    explicit_literal_partitions: &'a BTreeMap<Vec<u8>, String>,
+    emitting_terminals: &'a HashSet<String>,
+    existing_names: &'a mut HashSet<String>,
+    promoted: HashMap<GrammarExpr, String>,
+    generated_rules: Vec<NamedRule>,
+    generated_partitions: BTreeMap<String, String>,
+}
+
+impl DefaultPartitionAtomPromoter<'_> {
+    fn rewrite_expr(&mut self, expr: &GrammarExpr) -> Result<GrammarExpr, GlrMaskError> {
+        Ok(match expr {
+            GrammarExpr::Ref(_) | GrammarExpr::Epsilon => expr.clone(),
+            GrammarExpr::Literal(_)
+            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
+            | GrammarExpr::AnyByte => self.promote_atom(expr.clone()),
+            GrammarExpr::SpecialToken(_) => expr.clone(),
+            GrammarExpr::Grouped(inner) => {
+                GrammarExpr::Grouped(Box::new(self.rewrite_expr(inner)?))
+            }
+            GrammarExpr::Sequence(parts) => GrammarExpr::Sequence(
+                parts
+                    .iter()
+                    .map(|part| self.rewrite_expr(part))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            GrammarExpr::Choice(options) => GrammarExpr::Choice(
+                options
+                    .iter()
+                    .map(|option| self.rewrite_expr(option))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            GrammarExpr::Exclude { .. } | GrammarExpr::Intersect { .. }
+                if !self.contains_nonterminal_ref(expr) =>
+            {
+                self.promote_atom(expr.clone())
+            }
+            GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
+                expr: Box::new(self.rewrite_expr(expr)?),
+                exclude: Box::new(self.rewrite_expr(exclude)?),
+            },
+            GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+                expr: Box::new(self.rewrite_expr(expr)?),
+                intersect: Box::new(self.rewrite_expr(intersect)?),
+            },
+            GrammarExpr::Quantified(inner, quantifier) => GrammarExpr::Quantified(
+                Box::new(self.rewrite_expr(inner)?),
+                quantifier.clone(),
+            ),
+            GrammarExpr::SeparatedSequence {
+                items,
+                separator,
+                allow_empty,
+            } => GrammarExpr::SeparatedSequence {
+                items: items
+                    .iter()
+                    .map(|(item, quantifier)| {
+                        Ok((self.rewrite_expr(item)?, quantifier.clone()))
+                    })
+                    .collect::<Result<Vec<_>, GlrMaskError>>()?,
+                separator: Box::new(self.rewrite_expr(separator)?),
+                allow_empty: *allow_empty,
+            },
+            GrammarExpr::ExprNFA(expr_nfa) => GrammarExpr::ExprNFA(Box::new(ExprNFA::new(
+                expr_nfa.nfa.clone(),
+                expr_nfa
+                    .symbols
+                    .iter()
+                    .map(|symbol| self.rewrite_expr(symbol))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))),
+        })
+    }
+
+    fn contains_nonterminal_ref(&self, expr: &GrammarExpr) -> bool {
+        match expr {
+            GrammarExpr::Ref(name) => !self.emitting_terminals.contains(name),
+            GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+                self.contains_nonterminal_ref(inner)
+            }
+            GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+                parts.iter().any(|part| self.contains_nonterminal_ref(part))
+            }
+            GrammarExpr::Exclude { expr, exclude } => {
+                self.contains_nonterminal_ref(expr) || self.contains_nonterminal_ref(exclude)
+            }
+            GrammarExpr::Intersect { expr, intersect } => {
+                self.contains_nonterminal_ref(expr) || self.contains_nonterminal_ref(intersect)
+            }
+            GrammarExpr::SeparatedSequence { items, separator, .. } => {
+                items
+                    .iter()
+                    .any(|(item, _)| self.contains_nonterminal_ref(item))
+                    || self.contains_nonterminal_ref(separator)
+            }
+            GrammarExpr::ExprNFA(expr_nfa) => expr_nfa
+                .symbols
+                .iter()
+                .any(|symbol| self.contains_nonterminal_ref(symbol)),
+            GrammarExpr::Epsilon
+            | GrammarExpr::Literal(_)
+            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
+            | GrammarExpr::AnyByte => false,
+        }
+    }
+
+    fn promote_atom(&mut self, atom: GrammarExpr) -> GrammarExpr {
+        if let Some(name) = self.promoted.get(&atom) {
+            return GrammarExpr::Ref(name.clone());
+        }
+        let partition = match &atom {
+            GrammarExpr::Literal(bytes) => self
+                .explicit_literal_partitions
+                .get(bytes)
+                .map(String::as_str)
+                .unwrap_or(self.default_partition),
+            _ => self.default_partition,
+        };
+        let name = fresh_local_name(self.existing_names, "__glrm_lexer_atom");
+        self.generated_rules.push(NamedRule {
+            name: name.clone(),
+            expr: atom.clone(),
+            is_terminal: true,
+            is_internal: false,
+        });
+        self.generated_partitions
+            .insert(name.clone(), partition.to_string());
+        self.promoted.insert(atom, name.clone());
+        GrammarExpr::Ref(name)
+    }
+}
+
+struct IgnoreScopeRewriter<'a> {
+    skip_name: &'a str,
+    emitting_terminals: &'a HashSet<String>,
+    subgrammar_names: &'a HashSet<String>,
+    existing_names: &'a mut HashSet<String>,
+    wrappers: HashMap<GrammarExpr, String>,
+    generated_rules: Vec<NamedRule>,
+}
+
+impl IgnoreScopeRewriter<'_> {
+    fn rewrite_expr(&mut self, expr: &GrammarExpr) -> Result<GrammarExpr, GlrMaskError> {
+        Ok(match expr {
+            GrammarExpr::Ref(name)
+                if self.emitting_terminals.contains(name) || self.subgrammar_names.contains(name) =>
+            {
+                self.wrap_atom(expr.clone())
+            }
+            GrammarExpr::Ref(_) | GrammarExpr::Epsilon => expr.clone(),
+            GrammarExpr::Literal(_)
+            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
+            | GrammarExpr::AnyByte => self.wrap_atom(expr.clone()),
+            GrammarExpr::Grouped(inner) => {
+                GrammarExpr::Grouped(Box::new(self.rewrite_expr(inner)?))
+            }
+            GrammarExpr::Sequence(parts) => GrammarExpr::Sequence(
+                parts
+                    .iter()
+                    .map(|part| self.rewrite_expr(part))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            GrammarExpr::Choice(options) => GrammarExpr::Choice(
+                options
+                    .iter()
+                    .map(|option| self.rewrite_expr(option))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            GrammarExpr::Exclude { .. } | GrammarExpr::Intersect { .. }
+                if !self.contains_nonterminalish_ref(expr) =>
+            {
+                self.wrap_atom(expr.clone())
+            }
+            GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
+                expr: Box::new(self.rewrite_expr(expr)?),
+                exclude: Box::new(self.rewrite_expr(exclude)?),
+            },
+            GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+                expr: Box::new(self.rewrite_expr(expr)?),
+                intersect: Box::new(self.rewrite_expr(intersect)?),
+            },
+            GrammarExpr::Quantified(inner, quantifier) => GrammarExpr::Quantified(
+                Box::new(self.rewrite_expr(inner)?),
+                quantifier.clone(),
+            ),
+            GrammarExpr::SeparatedSequence {
+                items,
+                separator,
+                allow_empty,
+            } => GrammarExpr::SeparatedSequence {
+                items: items
+                    .iter()
+                    .map(|(item, quantifier)| {
+                        Ok((self.rewrite_expr(item)?, quantifier.clone()))
+                    })
+                    .collect::<Result<Vec<_>, GlrMaskError>>()?,
+                separator: Box::new(self.rewrite_expr(separator)?),
+                allow_empty: *allow_empty,
+            },
+            GrammarExpr::ExprNFA(expr_nfa) => GrammarExpr::ExprNFA(Box::new(ExprNFA::new(
+                expr_nfa.nfa.clone(),
+                expr_nfa
+                    .symbols
+                    .iter()
+                    .map(|symbol| self.rewrite_expr(symbol))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ))),
+        })
+    }
+
+    fn contains_nonterminalish_ref(&self, expr: &GrammarExpr) -> bool {
+        match expr {
+            GrammarExpr::Ref(name) => !self.emitting_terminals.contains(name),
+            GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+                self.contains_nonterminalish_ref(inner)
+            }
+            GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+                parts.iter().any(|part| self.contains_nonterminalish_ref(part))
+            }
+            GrammarExpr::Exclude { expr, exclude } => {
+                self.contains_nonterminalish_ref(expr)
+                    || self.contains_nonterminalish_ref(exclude)
+            }
+            GrammarExpr::Intersect { expr, intersect } => {
+                self.contains_nonterminalish_ref(expr)
+                    || self.contains_nonterminalish_ref(intersect)
+            }
+            GrammarExpr::SeparatedSequence { items, separator, .. } => {
+                items
+                    .iter()
+                    .any(|(item, _)| self.contains_nonterminalish_ref(item))
+                    || self.contains_nonterminalish_ref(separator)
+            }
+            GrammarExpr::ExprNFA(expr_nfa) => expr_nfa
+                .symbols
+                .iter()
+                .any(|symbol| self.contains_nonterminalish_ref(symbol)),
+            GrammarExpr::Epsilon
+            | GrammarExpr::Literal(_)
+            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
+            | GrammarExpr::AnyByte => false,
+        }
+    }
+
+    fn wrap_atom(&mut self, atom: GrammarExpr) -> GrammarExpr {
+        if let Some(name) = self.wrappers.get(&atom) {
+            return GrammarExpr::Ref(name.clone());
+        }
+        let name = fresh_local_name(self.existing_names, "__glrm_ignored_atom");
+        self.generated_rules.push(NamedRule {
+            name: name.clone(),
+            expr: GrammarExpr::Sequence(vec![
+                GrammarExpr::Ref(self.skip_name.to_string()),
+                atom.clone(),
+            ]),
+            is_terminal: false,
+            is_internal: false,
+        });
+        self.wrappers.insert(atom, name.clone());
+        GrammarExpr::Ref(name)
+    }
+}
+
+fn append_trailing_skip(expr: GrammarExpr, skip_name: &str) -> GrammarExpr {
+    let skip = GrammarExpr::Ref(skip_name.to_string());
+    match expr {
+        GrammarExpr::Epsilon => skip,
+        GrammarExpr::Sequence(mut parts) => {
+            parts.push(skip);
+            GrammarExpr::Sequence(parts)
+        }
+        other => GrammarExpr::Sequence(vec![other, skip]),
+    }
+}
+
+fn fresh_local_name(existing_names: &mut HashSet<String>, base: &str) -> String {
+    if existing_names.insert(base.to_string()) {
+        return base.to_string();
+    }
+    for suffix in 1usize.. {
+        let candidate = format!("{base}_{suffix}");
+        if existing_names.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!()
 }
 
 // ---- Parse a byte character class string ----------------------------------
@@ -1841,5 +2878,96 @@ nt s ::= A;
         .unwrap();
         let error = lower(&grammar).unwrap_err().to_string();
         assert!(error.contains("unknown or non-emitting terminal 'MISSING'"), "{error}");
+    }
+
+    #[test]
+    fn flattened_subgrammar_dump_reparses_to_the_same_flat_grammar() {
+        let grammar = from_glrm(
+            r#"
+start document;
+ignore WS;
+t WS ::= " "+;
+
+g inner ::= {
+    start value;
+    ignore NL;
+    t NL ::= "\n"+;
+    nt value ::= "a" "b";
+};
+
+nt document ::= "<" inner ">";
+"#,
+        )
+        .unwrap();
+        let dumped = to_glrm(&grammar);
+        let reparsed = from_glrm(&dumped).unwrap();
+        assert_eq!(
+            serde_json::to_value(lower(&grammar).unwrap()).unwrap(),
+            serde_json::to_value(lower(&reparsed).unwrap()).unwrap(),
+            "dumped flattened grammar:\n{dumped}",
+        );
+    }
+
+    #[test]
+    fn subgrammar_lexer_catch_all_is_scope_local_after_flattening() {
+        let grammar = from_glrm(
+            r#"
+start document;
+lexer group outer ::= *;
+t OUTER ::= "x";
+
+g inner ::= {
+    start value;
+    lexer group inner ::= *;
+    t INNER ::= "a";
+    nt value ::= INNER [bc];
+};
+
+nt document ::= OUTER inner;
+"#,
+        )
+        .unwrap();
+
+        assert!(grammar.default_lexer_partition.is_none());
+        assert_eq!(grammar.lexer_partitions.get("OUTER").map(String::as_str), Some("outer"));
+        for (terminal, partition) in &grammar.lexer_partitions {
+            if terminal.starts_with("__glrm_subgrammar_") {
+                assert_ne!(partition, "outer", "{terminal} inherited the outer catch-all");
+            }
+        }
+        assert!(
+            grammar
+                .lexer_partitions
+                .iter()
+                .any(|(terminal, partition)| terminal.starts_with("__glrm_subgrammar_")
+                    && partition.contains("_lexer_inner")),
+            "expected a private child lexer partition: {:?}",
+            grammar.lexer_partitions,
+        );
+    }
+
+    #[test]
+    fn identical_terminals_in_independent_catch_all_scopes_coalesce_partition_groups() {
+        let grammar = from_glrm(
+            r#"
+start document;
+lexer group outer ::= *;
+t A ::= "a";
+
+g inner ::= {
+    start value;
+    lexer group inner ::= *;
+    t A ::= "a";
+    nt value ::= A;
+};
+
+nt document ::= A inner;
+"#,
+        )
+        .unwrap();
+
+        let lowered = lower(&grammar).unwrap();
+        assert_eq!(lowered.terminals.len(), 1, "identical terminal languages should still deduplicate");
+        assert_eq!(lowered.lexer_partitions.len(), 1);
     }
 }
