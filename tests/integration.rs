@@ -1483,11 +1483,16 @@ fn special_token_commit_profiling_entry_points_preserve_semantics() {
     assert!(timed.is_finished());
 
     let mut profiled = constraint.start();
-    profiled.commit_token_profiled(100).unwrap();
+    let profile = profiled.commit_token_profiled(100).unwrap();
+    assert_eq!(profile.n_advances, 1);
+    assert!(profile.advance_ns > 0);
     assert!(profiled.is_finished());
 
     let mut per_advance = constraint.start();
-    per_advance.commit_token_per_advance(100).unwrap();
+    let (advances, _, profile) = per_advance.commit_token_per_advance(100).unwrap();
+    assert_eq!(profile.n_advances, 1);
+    assert_eq!(advances.len(), 1);
+    assert!(advances[0].match_bytes.is_empty());
     assert!(per_advance.is_finished());
 }
 

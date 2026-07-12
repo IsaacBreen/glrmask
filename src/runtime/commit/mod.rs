@@ -280,6 +280,102 @@ pub(super) fn advance_special_token_paths(
     merged
 }
 
+#[derive(Default)]
+struct SpecialTokenAdvanceProfile {
+    paths: Option<ParserGSS>,
+    prune_ns: u64,
+    may_check_ns: u64,
+    advance_ns: u64,
+    summary_ns: u64,
+    advances: Vec<AdvanceProfile>,
+}
+
+fn advance_special_token_paths_profiled(
+    constraint: &Constraint,
+    state: &BTreeMap<u32, ParserGSS>,
+    token_id: u32,
+    mut per_advance: Option<&mut Vec<PerAdvanceEntry>>,
+) -> SpecialTokenAdvanceProfile {
+    use std::time::Instant;
+
+    let initial_state = constraint.tokenizer.initial_state();
+    let Some(initial_gss) = state.get(&initial_state) else {
+        return SpecialTokenAdvanceProfile::default();
+    };
+    let mut result = SpecialTokenAdvanceProfile::default();
+
+    for special in constraint
+        .special_token_terminals
+        .iter()
+        .filter(|special| special.token_id == token_id)
+    {
+        let prune_started_at = Instant::now();
+        let pruned = prune_single_initial_state_for_terminal(
+            initial_gss.clone(),
+            initial_state,
+            special.terminal_id,
+            None,
+        );
+        result.prune_ns += prune_started_at.elapsed().as_nanos() as u64;
+        if pruned.is_empty() {
+            continue;
+        }
+
+        let may_started_at = Instant::now();
+        let may_advance = stack_may_advance_on(&constraint.table, &pruned, special.terminal_id);
+        result.may_check_ns += may_started_at.elapsed().as_nanos() as u64;
+        if !may_advance {
+            continue;
+        }
+
+        let advance_started_at = Instant::now();
+        let (advanced, advance_profile) =
+            advance_parser_stacks_profiled(constraint, &pruned, special.terminal_id);
+        result.advance_ns += advance_started_at.elapsed().as_nanos() as u64;
+        if advanced.is_empty() {
+            continue;
+        }
+
+        if let Some(entries) = per_advance.as_deref_mut() {
+            result.summary_ns += record_per_advance_entry(
+                entries,
+                initial_state,
+                special.terminal_id,
+                &pruned,
+                &advanced,
+                0,
+                0,
+                0,
+                &[],
+                advance_profile.clone(),
+            );
+        }
+        result.advances.push(advance_profile);
+        result.paths = Some(match result.paths.take() {
+            Some(existing) => existing.merge(&advanced),
+            None => advanced,
+        });
+    }
+
+    result
+}
+
+fn apply_special_token_advance_profile(
+    profile: &mut CommitProfile,
+    special: &SpecialTokenAdvanceProfile,
+) {
+    profile.prune_ns += special.prune_ns;
+    profile.advance_may_check_ns += special.may_check_ns;
+    profile.may_advance_ns += special.may_check_ns;
+    profile.advance_core_ns += special.advance_ns;
+    profile.advance_ns += special.advance_ns;
+    profile.adv_summary_ns += special.summary_ns;
+    profile.n_advances += special.advances.len() as u64;
+    for advance in &special.advances {
+        apply_advance_profile(profile, advance);
+    }
+}
+
 fn merge_special_token_paths(
     constraint: &Constraint,
     state: &mut BTreeMap<u32, ParserGSS>,
@@ -3434,9 +3530,11 @@ impl<'a> ConstraintState<'a> {
         }
         let was_in_mask = snapshot_mask_membership(self, token_id);
         let total_started_at = std::time::Instant::now();
-        let special_paths = has_special
-            .then(|| advance_special_token_paths(constraint, &self.state, token_id))
-            .flatten();
+        let special = if has_special {
+            advance_special_token_paths_profiled(constraint, &self.state, token_id, None)
+        } else {
+            SpecialTokenAdvanceProfile::default()
+        };
         let mut profile = if let Some(bytes) = bytes {
             match commit_bytes_impl_profiled(
                 constraint,
@@ -3457,7 +3555,8 @@ impl<'a> ConstraintState<'a> {
             self.state.clear();
             CommitProfile::default()
         };
-        merge_special_token_paths(constraint, &mut self.state, special_paths);
+        apply_special_token_advance_profile(&mut profile, &special);
+        merge_special_token_paths(constraint, &mut self.state, special.paths);
         profile.total_ns = total_started_at.elapsed().as_nanos() as u64;
         let result = finish_token_commit(&self.state).map(|()| profile);
         self.generation += 1;
@@ -3479,10 +3578,17 @@ impl<'a> ConstraintState<'a> {
         }
         let was_in_mask = snapshot_mask_membership(self, token_id);
         let total_started_at = std::time::Instant::now();
-        let special_paths = has_special
-            .then(|| advance_special_token_paths(constraint, &self.state, token_id))
-            .flatten();
         let mut advances = Vec::new();
+        let special = if has_special {
+            advance_special_token_paths_profiled(
+                constraint,
+                &self.state,
+                token_id,
+                Some(&mut advances),
+            )
+        } else {
+            SpecialTokenAdvanceProfile::default()
+        };
         let mut profile = if let Some(bytes) = bytes {
             match commit_bytes_impl_profiled(
                 constraint,
@@ -3504,7 +3610,8 @@ impl<'a> ConstraintState<'a> {
             self.state.clear();
             CommitProfile::default()
         };
-        merge_special_token_paths(constraint, &mut self.state, special_paths);
+        apply_special_token_advance_profile(&mut profile, &special);
+        merge_special_token_paths(constraint, &mut self.state, special.paths);
         profile.total_ns = total_started_at.elapsed().as_nanos() as u64;
         let result = finish_token_commit(&self.state)
             .map(|()| (advances, final_stacks(&self.state), profile));
