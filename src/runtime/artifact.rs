@@ -1012,6 +1012,13 @@ pub struct Constraint {
     pub(crate) ignore_terminal: Option<TerminalID>,
     #[serde(default)]
     pub(crate) special_token_terminals: Vec<SpecialTokenTerminal>,
+    /// Whether the grammar start language admits the empty string.
+    ///
+    /// The normalized GLR grammar contains no epsilon productions, so runtime
+    /// completion needs this semantic bit to recognize the untouched initial
+    /// parser stack as accepting.
+    #[serde(default)]
+    pub(crate) start_accepts_empty: bool,
 
     /// Runtime-only vocabulary data for direct dynamic masking.
     #[serde(skip, default)]

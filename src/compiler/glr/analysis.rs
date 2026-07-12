@@ -2778,6 +2778,14 @@ fn compute_nullable(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalID> {
     nullable
 }
 
+pub(crate) fn grammar_start_accepts_empty(
+    rules: &[Rule],
+    start: NonterminalID,
+) -> bool {
+    let num_nt = max_nt_id(rules).max(start) + 1;
+    compute_nullable(rules, num_nt).contains(&start)
+}
+
 fn compute_first(
     rules: &[Rule],
     num_nt: u32,

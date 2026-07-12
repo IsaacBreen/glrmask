@@ -146,3 +146,31 @@ fn runtime_artifact_preserves_special_llm_token_terminals() {
     session.commit_token(1).unwrap();
     assert!(session.is_finished());
 }
+
+#[test]
+fn current_runtime_artifact_preserves_nullable_start_completion() {
+    let eos = 7;
+    let vocab = Vocab::new(
+        vec![(0, b" ".to_vec()), (eos, b"<eos>".to_vec())],
+        Some(eos),
+    );
+    let compiled = Constraint::from_glrm_grammar(
+        r#"
+            start empty;
+            ignore WS;
+            t WS ::= " "+;
+            nt empty ::= eps;
+        "#,
+        &vocab,
+    )
+    .unwrap();
+    let artifact = RuntimeArtifact::from_runtime_payload_v4(compiled.save_runtime_payload_v4());
+    let runtime = RuntimeConstraint::from_artifact(artifact).unwrap();
+
+    let mut session = runtime.start();
+    assert!(session.is_finished());
+    assert_ne!(mask(&session, runtime.mask_len())[eos as usize / 32] & (1 << (eos % 32)), 0);
+    session.commit_token(0).unwrap();
+    assert!(session.is_finished());
+    assert_ne!(mask(&session, runtime.mask_len())[eos as usize / 32] & (1 << (eos % 32)), 0);
+}

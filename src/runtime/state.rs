@@ -2,7 +2,7 @@ use crate::automata::lexer::Lexer;
 use std::sync::Mutex;
 use std::collections::BTreeMap;
 
-use crate::compiler::glr::parser::{ParserGSS, stacks_finished};
+use crate::compiler::glr::parser::{ParserGSS, stack_is_initial, stacks_finished};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::constraint::Constraint;
@@ -108,7 +108,10 @@ impl<'a> ConstraintState<'a> {
         let Some(stack) = self.state.get(&initial_tsid) else {
             return false;
         };
-        !stack.is_empty() && stacks_finished(&self.constraint.table, stack)
+        if !stack.is_empty() && stacks_finished(&self.constraint.table, stack) {
+            return true;
+        }
+        self.constraint.start_accepts_empty && stack_is_initial(stack)
     }
 
     pub fn is_finished(&self) -> bool {

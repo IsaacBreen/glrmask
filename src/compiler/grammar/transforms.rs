@@ -7,7 +7,7 @@ use crate::automata::regex::Expr;
 use crate::automata::lexer::regex::parse_regex;
 use crate::compiler::glr::analysis::{
     eliminate_right_recursion, has_indirect_left_recursion, merge_identical_nonterminals,
-    normalize_grammar,
+    grammar_start_accepts_empty, normalize_grammar,
 };
 use crate::grammar::flat::{GrammarDef, NonterminalID, Terminal};
 use crate::grammar::flat::{Rule, Symbol, TerminalID};
@@ -812,9 +812,23 @@ fn collect_protected_nonterminals(grammar: &GrammarDef) -> BTreeSet<NonterminalI
         .collect()
 }
 
+#[derive(Debug)]
+pub(crate) struct PreparedGrammar {
+    pub(crate) grammar: GrammarDef,
+    pub(crate) start_accepts_empty: bool,
+}
+
+impl std::ops::Deref for PreparedGrammar {
+    type Target = GrammarDef;
+
+    fn deref(&self) -> &Self::Target {
+        &self.grammar
+    }
+}
+
 /// Run only the grammar transforms without building the tokenizer.
 /// The caller is responsible for calling `build_tokenizer` on the result.
-pub(crate) fn prepare_grammar_transforms_only(grammar: GrammarDef) -> GrammarDef {
+pub(crate) fn prepare_grammar_transforms_only(grammar: GrammarDef) -> PreparedGrammar {
     let profiling = compile_profile_enabled();
     let nullable_rules_before = grammar.rules.len();
     let nullable_started_at = profiling.then(Instant::now);
@@ -829,8 +843,12 @@ pub(crate) fn prepare_grammar_transforms_only(grammar: GrammarDef) -> GrammarDef
         );
     }
     let mut normalized = grammar;
-    prepare_grammar_transforms_impl(&mut normalized, &nullable_terminals, profiling);
-    std::mem::take(&mut normalized)
+    let start_accepts_empty =
+        prepare_grammar_transforms_impl(&mut normalized, &nullable_terminals, profiling);
+    PreparedGrammar {
+        grammar: std::mem::take(&mut normalized),
+        start_accepts_empty,
+    }
 }
 
 /// The shared grammar transform steps (without tokenizer build).
@@ -838,7 +856,7 @@ fn prepare_grammar_transforms_impl(
     normalized: &mut GrammarDef,
     nullable_terminals: &BTreeSet<TerminalID>,
     profiling: bool,
-) {
+) -> bool {
     let expand_rules_before = normalized.rules.len();
     let expand_started_at = profiling.then(Instant::now);
     expand_nullable_terminals(&mut normalized.rules, nullable_terminals);
@@ -851,6 +869,13 @@ fn prepare_grammar_transforms_impl(
             &format!(" nullable_terminals={}", nullable_terminals.len()),
         );
     }
+
+    // Epsilon elimination below deliberately removes all nullable parser
+    // productions. Preserve the semantic fact that the original start
+    // language admitted empty after nullable terminals have been expanded into
+    // parser-visible optional nonterminals.
+    let start_accepts_empty =
+        grammar_start_accepts_empty(&normalized.rules, normalized.start);
 
     let normalize_rules_before = normalized.rules.len();
     let normalize_started_at = profiling.then(Instant::now);
@@ -1004,6 +1029,8 @@ fn prepare_grammar_transforms_impl(
             "",
         );
     }
+
+    start_accepts_empty
 }
 
 #[cfg(test)]

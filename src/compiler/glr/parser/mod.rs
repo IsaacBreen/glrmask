@@ -2718,6 +2718,7 @@ mod tests {
         ParserGSS,
         advance_stacks,
         apply_guarded_stack_shifts_to_vstack,
+        stack_is_initial,
         stack_may_advance_on,
         stack_may_advance_on_any,
         try_advance_pop1_reduce_plus_stackshift_wave,
@@ -3145,6 +3146,30 @@ mod tests {
     }
 
     #[test]
+    fn initial_stack_predicate_is_exact() {
+        let initial = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        assert!(stack_is_initial(&initial));
+
+        let deeper = ParserGSS::from_single_stack(vec![0, 1], TerminalsDisallowed::new());
+        assert!(!stack_is_initial(&deeper));
+
+        let wrong_state = ParserGSS::from_single_stack(vec![1], TerminalsDisallowed::new());
+        assert!(!stack_is_initial(&wrong_state));
+
+        let disallowed = ParserGSS::from_single_stack(
+            vec![0],
+            TerminalsDisallowed::new().with_insert(0, 0),
+        );
+        assert!(!stack_is_initial(&disallowed));
+
+        let multiple = ParserGSS::from_stacks(&[
+            (vec![0], TerminalsDisallowed::new()),
+            (vec![0], TerminalsDisallowed::new().with_insert(0, 0)),
+        ]);
+        assert!(!stack_is_initial(&multiple));
+    }
+
+    #[test]
     fn advance_stacks_materializes_single_concrete_path_for_split() {
         let token = 0;
         let nt = 0;
@@ -3386,4 +3411,15 @@ pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
         .any(|&state| table.action(state, EOF).is_some());
 
     has_eof_action
+}
+
+/// Whether `stack` is exactly the parser's untouched initial GSS.
+///
+/// Keep this structural rather than comparing against a freshly allocated GSS:
+/// nullable-start completion is queried from mask hot paths.
+pub(crate) fn stack_is_initial(stack: &ParserGSS) -> bool {
+    stack.max_depth() == 1
+        && stack.path_count_at_most(2) == 1
+        && stack.single_exclusive_top_value() == Some(0)
+        && stack.all_accs_satisfy(|acc| acc.is_empty())
 }

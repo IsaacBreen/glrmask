@@ -114,8 +114,8 @@ Parser rules use those wrappers. The private scope entry receives one trailing `
 
 The core compiler and runtime consequently see one ordinary flat grammar with `ignore_terminal = None` whenever subgrammar flattening is used.
 
-## Known separate nullable-root issue
+## Nullable roots
 
-GLR epsilon elimination currently drops empty productions without separately preserving whether the original start language admitted epsilon. As a result, a purely nullable root such as `nt empty ::= eps;` does not report completion on an empty input, and a legacy global ignore around that root does not make an ignore-only input report finished either.
+Grammar preparation records whether the start language admits epsilon after nullable terminals have been expanded, but before parser epsilon productions are eliminated. Runtime completion uses that semantic bit only when the parser GSS is exactly the untouched initial stack.
 
-This predates subgrammars and is not caused by scoped ignore lowering. It should be fixed as a parser-correctness issue by preserving start-language nullability through normalization. The subgrammar implementation does not redefine ignore semantics around that bug.
+Consequently, `nt empty ::= eps;` is complete before any commit, legacy global ignore accepts ignore-only input around a nullable root, and a nullable subgrammar with a local ignore accepts both empty and local-ignore-only input. A partial nonempty branch does not inherit this completion: for `eps | "a" "b"`, the state after only `"a"` is not complete and EOS is not admitted.

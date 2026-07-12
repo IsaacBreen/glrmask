@@ -103,6 +103,8 @@ pub mod __private {
         fn load_runtime_payload_v2(bytes: &[u8]) -> Result<Self>;
         fn save_runtime_payload_v3(&self) -> Vec<u8>;
         fn load_runtime_payload_v3(bytes: &[u8]) -> Result<Self>;
+        fn save_runtime_payload_v4(&self) -> Vec<u8>;
+        fn load_runtime_payload_v4(bytes: &[u8]) -> Result<Self>;
         fn mask_game_internal_to_original(&self) -> &[Vec<u32>];
         fn mask_game_original_to_internal(&self) -> &[u32];
         fn num_parser_states(&self) -> u32;
@@ -170,6 +172,14 @@ pub mod __private {
 
         fn load_runtime_payload_v3(bytes: &[u8]) -> Result<Self> {
             Constraint::load_runtime_payload_v3(bytes)
+        }
+
+        fn save_runtime_payload_v4(&self) -> Vec<u8> {
+            Constraint::save_runtime_payload_v4(self)
+        }
+
+        fn load_runtime_payload_v4(bytes: &[u8]) -> Result<Self> {
+            Constraint::load_runtime_payload_v4(bytes)
         }
 
         fn mask_game_internal_to_original(&self) -> &[Vec<u32>] {

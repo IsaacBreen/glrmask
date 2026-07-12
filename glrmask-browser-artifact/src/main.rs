@@ -97,7 +97,7 @@ fn run() -> Result<(), String> {
     eprintln!("loaded {} TinyStories BPE tokens", vocab.len());
     let constraint = Constraint::compile_grammar_def_json(&story_json_grammar(), &vocab)
         .map_err(|error| error.to_string())?;
-    let artifact = RuntimeArtifact::from_runtime_payload_v2(constraint.save_runtime_payload_v2());
+    let artifact = RuntimeArtifact::from_runtime_payload_v4(constraint.save_runtime_payload_v4());
     let output = Path::new(&output);
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)

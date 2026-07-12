@@ -472,8 +472,8 @@ impl PyConstraint {
     /// `_glrmask_runtime`. Compilation remains in this main binding; the
     /// runtime binding only loads and executes this artifact.
     fn save_runtime_artifact(&self) -> Vec<u8> {
-        glrmask_runtime::RuntimeArtifact::from_runtime_payload_v3(
-            self.inner.save_runtime_payload_v3(),
+        glrmask_runtime::RuntimeArtifact::from_runtime_payload_v4(
+            self.inner.save_runtime_payload_v4(),
         )
             .as_bytes()
             .to_vec()

@@ -24,7 +24,7 @@ use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_possible_matches as cpm;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{GLRTable, GlrTableConstruction};
-use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
+use crate::compiler::grammar::transforms::{PreparedGrammar, prepare_grammar_transforms_only};
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     SharedClassifyCache,
     classify_terminal_path_lengths,
@@ -1417,7 +1417,7 @@ fn launch_classify_dag_if_ready<'scope>(
 }
 
 fn compile_prepared_with_profile(
-    prepared_grammar: GrammarDef,
+    prepared_grammar: PreparedGrammar,
     vocab: &Vocab,
 ) -> (Constraint, CompilePhaseProfile) {
     compile_prepared_with_profile_and_table_construction(
@@ -1429,7 +1429,7 @@ fn compile_prepared_with_profile(
 }
 
 fn compile_prepared_with_profile_and_table_construction(
-    prepared_grammar: GrammarDef,
+    prepared_grammar: PreparedGrammar,
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
     lexer_adaptive_override: Option<bool>,
@@ -1998,6 +1998,7 @@ fn compile_prepared_with_profile_and_table_construction(
             tokenizer,
             ignore_terminal: prepared_grammar.ignore_terminal,
             special_token_terminals,
+            start_accepts_empty: prepared_grammar.start_accepts_empty,
             dynamic_mask_vocab: DynamicMaskVocab::from_compiler_artifacts(
                 runtime_dynamic_vocab.trie,
                 runtime_dynamic_vocab.token_aliases,
@@ -2058,7 +2059,7 @@ fn compile_prepared_with_profile_and_table_construction(
     result
 }
 
-pub(crate) fn compile_prepared(prepared_grammar: GrammarDef, vocab: &Vocab) -> Constraint {
+pub(crate) fn compile_prepared(prepared_grammar: PreparedGrammar, vocab: &Vocab) -> Constraint {
     compile_prepared_with_profile(prepared_grammar, vocab).0
 }
 
@@ -2102,6 +2103,7 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
             tokenizer,
             prepared_grammar.ignore_terminal,
             collect_special_token_terminals(&prepared_grammar),
+            prepared_grammar.start_accepts_empty,
             vocab,
         )
     })
@@ -2124,7 +2126,7 @@ pub(crate) fn compile_owned_with_table_construction(
 }
 
 pub(crate) fn compile_prepared_with_table_construction(
-    prepared_grammar: GrammarDef,
+    prepared_grammar: PreparedGrammar,
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
 ) -> Constraint {
