@@ -496,18 +496,44 @@ fn try_analyze_equivalences_with_token_position_partition(
         .unwrap_or(0);
     let prepare_inputs_ms = prepare_inputs_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let seed_states = seed
+        .representative_original_ids
+        .iter()
+        .map(|&state| state as usize)
+        .collect::<Vec<_>>();
+    if seed_states.iter().any(|&state| state >= num_states) {
+        return None;
+    }
+
     let compatible_flat_trans = flat_trans.filter(|transitions| {
         transitions.len() == tokenizer.num_states() as usize * 256
     });
     let analysis_view_started_at = Instant::now();
-    let tokenizer_view = match compatible_flat_trans {
+    // C is a token-start partition, not an absolute lexer-state equivalence.
+    // For epsilon lexers, analyze its representatives as epsilon-closed scanner
+    // configurations in a bounded powerset view. These view IDs stay local to
+    // token-boundary analysis and are projected back through C before returning.
+    let bounded_analysis = tokenizer.has_epsilon_transitions().then(|| {
+        build_bounded_analysis_view(
+            tokenizer,
+            &seed_states,
+            &prepared.token_bytes,
+            Some(active_groups),
+        )
+    });
+    let raw_analysis_view = bounded_analysis.is_none().then(|| match compatible_flat_trans {
         Some(transitions) => TokenizerView::new_filtered_from_flat_trans(
             transitions,
             tokenizer,
             active_groups,
         ),
         None => TokenizerView::new_filtered(tokenizer, active_groups),
-    };
+    });
+    let tokenizer_view = bounded_analysis
+        .as_ref()
+        .map(|bounded| &bounded.tokenizer_view)
+        .or(raw_analysis_view.as_ref())
+        .expect("token-boundary analysis view must exist");
     let analysis_view_build_ms = analysis_view_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // The C-seeded state/vocab equivalence walks only ever follow the
@@ -555,22 +581,25 @@ fn try_analyze_equivalences_with_token_position_partition(
     let dedup = deduplicate_tokens_by_byte_class(&prepared.token_bytes, &byte_to_class);
     let token_dedup_ms = token_dedup_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let seed_states = seed
-        .representative_original_ids
-        .iter()
-        .map(|&state| state as usize)
-        .collect::<Vec<_>>();
-    if seed_states.iter().any(|&state| state >= num_states) {
-        return None;
-    }
-    let exact_rep_confirmation_used = seed_states.len() >= EXACT_REP_CONFIRMATION_MIN_STATES
+    let seed_analysis_states = if let Some(bounded) = bounded_analysis.as_ref() {
+        seed_states
+            .iter()
+            .map(|&raw| bounded.view_state_for_raw_start(raw))
+            .collect::<Vec<_>>()
+    } else {
+        seed_states.clone()
+    };
+    let mut query_states = seed_analysis_states.clone();
+    query_states.sort_unstable();
+    query_states.dedup();
+    let exact_rep_confirmation_used = query_states.len() >= EXACT_REP_CONFIRMATION_MIN_STATES
         && dedup.representative_token_bytes.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
     let exact_started_at = Instant::now();
     let state_representatives = if exact_rep_confirmation_used {
         state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
             &tokenizer_view,
             &dedup.representative_token_bytes,
-            &seed_states,
+            &query_states,
             &normalized_disallowed_follows,
             None,
             None,
@@ -581,23 +610,54 @@ fn try_analyze_equivalences_with_token_position_partition(
         state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
             &tokenizer_view,
             &dedup.representative_token_bytes,
-            &seed_states,
+            &query_states,
             &normalized_disallowed_follows,
             compatible_shared_base,
         )
     };
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let tokenizer_states = build_state_map_from_subset_representatives(
-        &seed_states,
-        &state_representatives,
-        num_states,
-        Some(seed),
-    );
+    let tokenizer_states = if bounded_analysis.is_some() {
+        let analysis_to_exact = query_states
+            .iter()
+            .copied()
+            .zip(state_representatives.iter().copied())
+            .collect::<BTreeMap<_, _>>();
+        let first_seed_class_for_analysis = seed_analysis_states
+            .iter()
+            .copied()
+            .enumerate()
+            .fold(
+                BTreeMap::<usize, usize>::new(),
+                |mut map, (seed_class, analysis_state)| {
+                    map.entry(analysis_state).or_insert(seed_class);
+                    map
+                },
+            );
+        let final_seed_class_representatives = seed_analysis_states
+            .iter()
+            .map(|analysis_state| {
+                let exact_analysis_state = analysis_to_exact[analysis_state];
+                first_seed_class_for_analysis[&exact_analysis_state]
+            })
+            .collect::<Vec<_>>();
+        compose_raw_quotient_state_map(seed, &final_seed_class_representatives)
+    } else {
+        build_state_map_from_subset_representatives(
+            &seed_states,
+            &state_representatives,
+            num_states,
+            Some(seed),
+        )
+    };
     let mut final_state_representatives = tokenizer_states
         .representative_original_ids
         .iter()
-        .map(|&state| state as usize)
+        .map(|&state| {
+            bounded_analysis.as_ref().map_or(state as usize, |bounded| {
+                bounded.view_state_for_raw_start(state as usize)
+            })
+        })
         .collect::<Vec<_>>();
     final_state_representatives.sort_unstable();
     final_state_representatives.dedup();
@@ -1277,6 +1337,28 @@ fn analyze_equivalences_impl(
         let effective_disallowed = token_path_disallowed_follows
             .as_ref()
             .unwrap_or(disallowed_follows);
+
+        // C is valid at LLM-token start boundaries. The C-seeded route performs
+        // only whole-token analysis, so it is sound to use before the absolute
+        // restricted-observation pipeline. Epsilon lexers use a bounded
+        // configuration view inside that route and project back to raw TSIDs.
+        if let Some(token_position_partition) = token_position_partition {
+            if let Some(result) = try_analyze_equivalences_with_token_position_partition(
+                partition_label,
+                tokenizer,
+                vocab,
+                effective_disallowed,
+                active_groups,
+                shared_vocab_dfa_cache,
+                shared_analysis_dfa_cache,
+                flat_trans,
+                token_position_partition,
+                effective_follows_prepare_ms,
+                pre_normalized_disallowed_follows,
+            ) {
+                return result;
+            }
+        }
 
         let prepare_started_at = Instant::now();
         let prepared = prepare_equivalence_inputs(tokenizer, vocab, initial_state_map);
