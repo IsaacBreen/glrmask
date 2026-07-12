@@ -33,6 +33,246 @@ type TokenizerState = u32;
 type LeafTokenIds = SmallVec<[u32; 8]>;
 type FutureTerminalColorGroups = SmallVec<[(ColorId, SmallVec<[TerminalID; 4]>); 8]>;
 
+const NFA_CONFIG_UNKNOWN: u32 = u32::MAX;
+const NFA_CONFIG_DEAD: u32 = u32::MAX - 1;
+
+/// On-demand powerset scanner used only by the trie walker for epsilon-NFA
+/// tokenizers. Configurations are canonical epsilon-closed raw-state sets.
+///
+/// The generic tokenizer executor rebuilds epsilon closures and longest-match
+/// hash maps for every `(trie segment, start state)` scan. The trie walker
+/// revisits the same scanner configurations and byte transitions heavily, so
+/// cache those exact scanner operations locally instead. Raw TSIDs remain the
+/// NWA coordinate; configuration IDs never leave this cache.
+struct NfaTrieScanCache<'tok> {
+    tokenizer: &'tok Tokenizer,
+    active_terminals: Option<Vec<bool>>,
+    config_ids: FxHashMap<Vec<u32>, u32>,
+    configs: Vec<Box<[u32]>>,
+    transitions: Vec<Option<Box<[u32; 256]>>>,
+    observations: Vec<Option<Box<[(TerminalID, u32)]>>>,
+    raw_start_config: Vec<u32>,
+    match_seen_stamp: Vec<u32>,
+    match_width: Vec<usize>,
+    match_end_states: Vec<SmallVec<[u32; 1]>>,
+    touched_terminals: Vec<TerminalID>,
+    match_stamp: u32,
+}
+
+impl<'tok> NfaTrieScanCache<'tok> {
+    fn new(tokenizer: &'tok Tokenizer, active_terminals: Option<Vec<bool>>) -> Self {
+        let terminal_count = tokenizer.num_terminals() as usize;
+        Self {
+            tokenizer,
+            active_terminals,
+            config_ids: FxHashMap::default(),
+            configs: Vec::new(),
+            transitions: Vec::new(),
+            observations: Vec::new(),
+            raw_start_config: vec![NFA_CONFIG_UNKNOWN; tokenizer.num_states() as usize],
+            match_seen_stamp: vec![0; terminal_count],
+            match_width: vec![0; terminal_count],
+            match_end_states: (0..terminal_count).map(|_| SmallVec::new()).collect(),
+            touched_terminals: Vec::new(),
+            match_stamp: 0,
+        }
+    }
+
+    fn intern_config(&mut self, mut states: Vec<u32>) -> u32 {
+        states.sort_unstable();
+        states.dedup();
+        if let Some(&id) = self.config_ids.get(states.as_slice()) {
+            return id;
+        }
+        let id = self.configs.len() as u32;
+        self.config_ids.insert(states.clone(), id);
+        self.configs.push(states.into_boxed_slice());
+        self.transitions.push(None);
+        self.observations.push(None);
+        id
+    }
+
+    fn config_for_raw_start(&mut self, state: u32) -> u32 {
+        let slot = state as usize;
+        let cached = self.raw_start_config[slot];
+        if cached != NFA_CONFIG_UNKNOWN {
+            return cached;
+        }
+        let closure = self
+            .tokenizer
+            .execute_from_state_end_only(&[], state)
+            .into_vec();
+        let config = self.intern_config(closure);
+        self.raw_start_config[slot] = config;
+        config
+    }
+
+    fn step_config(&mut self, config: u32, byte: u8) -> Option<u32> {
+        let config_index = config as usize;
+        if let Some(row) = self.transitions[config_index].as_ref() {
+            let cached = row[byte as usize];
+            if cached != NFA_CONFIG_UNKNOWN {
+                return (cached != NFA_CONFIG_DEAD).then_some(cached);
+            }
+        }
+
+        let direct_targets = {
+            let states = &self.configs[config_index];
+            let mut targets = SmallVec::<[u32; 8]>::new();
+            for &state in states.iter() {
+                if let Some(target) = self.tokenizer.step(state, byte) {
+                    targets.push(target);
+                }
+            }
+            targets.sort_unstable();
+            targets.dedup();
+            targets
+        };
+
+        let target = if direct_targets.is_empty() {
+            NFA_CONFIG_DEAD
+        } else {
+            let mut closed_targets = Vec::<u32>::new();
+            for target in direct_targets {
+                let target_config = self.config_for_raw_start(target);
+                closed_targets.extend_from_slice(&self.configs[target_config as usize]);
+            }
+            self.intern_config(closed_targets)
+        };
+
+        let row = self.transitions[config_index]
+            .get_or_insert_with(|| Box::new([NFA_CONFIG_UNKNOWN; 256]));
+        row[byte as usize] = target;
+        (target != NFA_CONFIG_DEAD).then_some(target)
+    }
+
+    fn ensure_observations(&mut self, config: u32) {
+        let config_index = config as usize;
+        if self.observations[config_index].is_some() {
+            return;
+        }
+        let mut observations = Vec::<(TerminalID, u32)>::new();
+        for &state in self.configs[config_index].iter() {
+            observations.extend(
+                self.tokenizer
+                    .matched_terminals_iter(state)
+                    .filter(|&terminal| {
+                        self.active_terminals.as_ref().is_none_or(|active| {
+                            active
+                                .get(terminal as usize)
+                                .copied()
+                                .unwrap_or(false)
+                        })
+                    })
+                    .map(|terminal| (terminal, state)),
+            );
+        }
+        self.observations[config_index] = Some(observations.into_boxed_slice());
+    }
+
+    fn execute_into(
+        &mut self,
+        input: &[u8],
+        start: u32,
+        matches: &mut Vec<TokenizerMatch>,
+    ) -> SmallVec<[u32; 1]> {
+        self.match_stamp = self.match_stamp.wrapping_add(1);
+        if self.match_stamp == 0 {
+            self.match_seen_stamp.fill(0);
+            self.match_stamp = 1;
+        }
+        let stamp = self.match_stamp;
+        self.touched_terminals.clear();
+        matches.clear();
+
+        let mut config = self.config_for_raw_start(start);
+        let mut alive = true;
+        for (index, &byte) in input.iter().enumerate() {
+            let Some(next) = self.step_config(config, byte) else {
+                alive = false;
+                break;
+            };
+            config = next;
+            self.ensure_observations(config);
+            let width = index + 1;
+
+            let observations = self.observations[config as usize]
+                .as_deref()
+                .expect("NFA configuration observations must be initialized");
+            for &(terminal, end_state) in observations {
+                let terminal_index = terminal as usize;
+                if self.match_seen_stamp[terminal_index] != stamp {
+                    self.match_seen_stamp[terminal_index] = stamp;
+                    self.match_width[terminal_index] = width;
+                    self.match_end_states[terminal_index].clear();
+                    self.match_end_states[terminal_index].push(end_state);
+                    self.touched_terminals.push(terminal);
+                    continue;
+                }
+                if width > self.match_width[terminal_index] {
+                    self.match_width[terminal_index] = width;
+                    self.match_end_states[terminal_index].clear();
+                    self.match_end_states[terminal_index].push(end_state);
+                } else if width == self.match_width[terminal_index]
+                    && !self.match_end_states[terminal_index].contains(&end_state)
+                {
+                    self.match_end_states[terminal_index].push(end_state);
+                }
+            }
+        }
+
+        for &terminal in &self.touched_terminals {
+            let terminal_index = terminal as usize;
+            let width = self.match_width[terminal_index];
+            matches.extend(
+                self.match_end_states[terminal_index]
+                    .iter()
+                    .copied()
+                    .map(|end_state| TokenizerMatch {
+                        id: terminal,
+                        width,
+                        end_state,
+                    }),
+            );
+        }
+
+        let end_states = if alive {
+            SmallVec::from_slice(&self.configs[config as usize])
+        } else {
+            SmallVec::new()
+        };
+
+        if std::env::var_os("GLRMASK_L2P_NWA_NFA_SCAN_STRICT_REFERENCE").is_some() {
+            let mut reference = self.tokenizer.execute_from_state(input, start);
+            reference.matches.retain(|matched| {
+                self.active_terminals.as_ref().is_none_or(|active| {
+                    active
+                        .get(matched.id as usize)
+                        .copied()
+                        .unwrap_or(false)
+                })
+            });
+            let mut actual_matches = matches.clone();
+            actual_matches.sort_unstable_by_key(|matched| {
+                (matched.id, matched.width, matched.end_state)
+            });
+            reference.matches.sort_unstable_by_key(|matched| {
+                (matched.id, matched.width, matched.end_state)
+            });
+            assert_eq!(
+                end_states, reference.end_state,
+                "cached NFA trie scanner end-state mismatch"
+            );
+            assert_eq!(
+                actual_matches, reference.matches,
+                "cached NFA trie scanner longest-match mismatch"
+            );
+        }
+
+        end_states
+    }
+}
+
 fn all_token_weight(internal_tsid: u32, max_token_id: u32) -> Weight {
     Weight::from_token_set_for_tsid(
         internal_tsid,
@@ -121,6 +361,7 @@ pub(crate) struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     epsilon_buffer: FxHashMap<(u32, u32), Weight>,
     pub(crate) profile: TerminalDwaBuildProfile,
     flat_transitions: Vec<Option<Box<[u32; 256]>>>,
+    nfa_scan_cache: Option<NfaTrieScanCache<'tok>>,
 }
 
 #[derive(Default)]
@@ -144,6 +385,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         active_terminals: Option<Vec<bool>>,
         num_tokenizer_states: usize,
     ) -> Self {
+        let nfa_scan_cache = tokenizer
+            .has_epsilon_transitions()
+            .then(|| NfaTrieScanCache::new(tokenizer, active_terminals.clone()));
         Self {
             tokenizer,
             terminal_coloring,
@@ -170,6 +414,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             epsilon_buffer: FxHashMap::default(),
             profile: TerminalDwaBuildProfile::default(),
             flat_transitions: vec![None; num_tokenizer_states],
+            nfa_scan_cache,
         }
     }
 
@@ -833,6 +1078,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let mut pending_by_offset = BTreeMap::<usize, NodesByTokenizerState>::new();
         pending_by_offset.insert(0, initial_nodes.clone());
 
+        // Reusable DFA longest-match buffer. The pre-epsilon lexer path used
+        // this scalar scanner and is dramatically faster than routing every
+        // compressed trie segment through the general state-set executor.
+        let mut match_map_buf = FxHashMap::<TerminalID, (usize, u32)>::default();
         let mut matches_buf: Vec<TokenizerMatch> = Vec::new();
 
         while let Some((offset, nodes_at_offset)) = pending_by_offset.pop_first() {
@@ -844,20 +1093,75 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             }
 
             for (tokenizer_state, source_nodes) in nodes_at_offset {
-                let execution = self.tokenizer.execute_from_state(
-                    &segment_bytes[offset..],
-                    tokenizer_state,
-                );
-                matches_buf.clear();
-                matches_buf.extend(execution.matches.into_iter().filter(|matched| {
-                    self.active_terminals.as_ref().map_or(true, |active| {
-                        active
-                            .get(matched.id as usize)
-                            .copied()
-                            .unwrap_or(false)
-                    })
-                }));
-                let end_states = execution.end_state;
+                let end_states = if self.tokenizer.has_epsilon_transitions() {
+                    self.nfa_scan_cache
+                        .as_mut()
+                        .expect("epsilon tokenizer must initialize NFA trie scan cache")
+                        .execute_into(
+                            &segment_bytes[offset..],
+                            tokenizer_state,
+                            &mut matches_buf,
+                        )
+                } else {
+                    match_map_buf.clear();
+                    let mut scan_state = tokenizer_state;
+                    let mut scan_alive = true;
+                    for (index, &byte) in segment_bytes[offset..].iter().enumerate() {
+                        if let Some(next) = self.fast_step(scan_state, byte) {
+                            scan_state = next;
+                            for terminal in self.tokenizer.matched_terminals_iter(scan_state) {
+                                if !self.terminal_is_active(terminal) {
+                                    continue;
+                                }
+                                match_map_buf.insert(terminal, (index + 1, scan_state));
+                            }
+                        } else {
+                            scan_alive = false;
+                            break;
+                        }
+                    }
+
+                    matches_buf.clear();
+                    matches_buf.extend(match_map_buf.iter().map(
+                        |(&id, &(width, end_state))| TokenizerMatch {
+                            id,
+                            width,
+                            end_state,
+                        },
+                    ));
+
+                    let end_states = if scan_alive {
+                        SmallVec::from_buf([scan_state])
+                    } else {
+                        SmallVec::new()
+                    };
+
+                    if std::env::var_os("GLRMASK_L2P_NWA_DFA_SCAN_STRICT_REFERENCE").is_some() {
+                        let mut reference = self
+                            .tokenizer
+                            .execute_from_state(&segment_bytes[offset..], tokenizer_state);
+                        reference
+                            .matches
+                            .retain(|matched| self.terminal_is_active(matched.id));
+                        let mut actual_matches = matches_buf.clone();
+                        actual_matches.sort_unstable_by_key(|matched| {
+                            (matched.id, matched.width, matched.end_state)
+                        });
+                        reference.matches.sort_unstable_by_key(|matched| {
+                            (matched.id, matched.width, matched.end_state)
+                        });
+                        assert_eq!(
+                            end_states, reference.end_state,
+                            "historical DFA trie scanner end-state mismatch"
+                        );
+                        assert_eq!(
+                            actual_matches, reference.matches,
+                            "historical DFA trie scanner longest-match mismatch"
+                        );
+                    }
+
+                    end_states
+                };
 
                 for &end_state in &end_states {
                     if child_node.has_token() {
