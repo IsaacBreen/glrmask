@@ -1644,6 +1644,23 @@ fn adaptive_lexer_growth_percent() -> usize {
         .unwrap_or(100)
 }
 
+fn adaptive_lexer_transition_growth_percent() -> usize {
+    std::env::var("GLRMASK_ADAPTIVE_LEXER_MAX_TRANSITION_GROWTH_PERCENT")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(600)
+}
+
+fn adaptive_transition_growth_is_acceptable(
+    input_transitions: usize,
+    output_transitions: usize,
+    growth_percent: usize,
+) -> bool {
+    output_transitions.saturating_mul(100)
+        <= input_transitions.saturating_mul(growth_percent)
+}
+
 fn compile_terminal_ids(
     exprs: &[Expr],
     visible_labels: Option<&[String]>,
@@ -1762,8 +1779,10 @@ fn compute_lexer_component_equivalence_classes(
 fn try_product_union_components(
     components: &[LexerComponent],
     state_limit: usize,
+    transition_limit: usize,
 ) -> Option<DFA> {
     assert!(state_limit > 0, "adaptive lexer state limit must be positive");
+    assert!(transition_limit > 0, "adaptive lexer transition limit must be positive");
     debug_assert!(components
         .iter()
         .all(|component| !component.dfa.has_epsilon_transitions()));
@@ -1822,6 +1841,7 @@ fn try_product_union_components(
         .collect::<Vec<_>>();
     let mut class_active = vec![false; num_classes];
     let mut used_classes = Vec::<usize>::new();
+    let mut projected_byte_transitions = 0usize;
 
     let state_expand_started_at = Instant::now();
     while let Some((combined_state, state_tuple)) = worklist.pop_front() {
@@ -1844,6 +1864,11 @@ fn try_product_union_components(
 
         let mut transitions = Vec::with_capacity(used_classes.len());
         for &class_index in &used_classes {
+            projected_byte_transitions = projected_byte_transitions
+                .saturating_add(class_members[class_index].len());
+            if projected_byte_transitions > transition_limit {
+                return None;
+            }
             let next_tuple = &class_buffers[class_index];
             let target = if let Some(&existing) = state_map.get(next_tuple) {
                 existing
@@ -1935,10 +1960,23 @@ fn adaptively_determinize_components(
     inputs: Vec<LexerComponent>,
     state_limit: usize,
 ) -> Vec<LexerComponent> {
+    adaptively_determinize_components_with_limits(
+        inputs,
+        state_limit,
+        adaptive_lexer_growth_percent(),
+        adaptive_lexer_transition_growth_percent(),
+    )
+}
+
+fn adaptively_determinize_components_with_limits(
+    inputs: Vec<LexerComponent>,
+    state_limit: usize,
+    growth_percent: usize,
+    transition_growth_percent: usize,
+) -> Vec<LexerComponent> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some()
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let started_at = Instant::now();
-    let growth_percent = adaptive_lexer_growth_percent();
     let input_states = inputs.iter().map(|batch| batch.dfa.num_states()).sum::<usize>();
     let input_transitions = inputs
         .iter()
@@ -1956,21 +1994,33 @@ fn adaptively_determinize_components(
         / 100;
     let effective_state_limit = state_limit.min(growth_limit).max(1);
     let attempt_started_at = Instant::now();
-    let candidate = try_product_union_components(&inputs, effective_state_limit);
+    let transition_limit = input_transitions
+        .saturating_mul(transition_growth_percent)
+        / 100;
+    let candidate = try_product_union_components(
+        &inputs,
+        effective_state_limit,
+        transition_limit.max(1),
+    );
     let attempt_ms = attempt_started_at.elapsed().as_secs_f64() * 1000.0;
-    let accepted = candidate.is_some();
+    let candidate_transitions = candidate.as_ref().map(dfa_transition_count);
+    let accepted = candidate_transitions.is_some_and(|output_transitions| {
+        adaptive_transition_growth_is_acceptable(
+            input_transitions,
+            output_transitions,
+            transition_growth_percent,
+        )
+    });
     let terminal_ids = inputs
         .iter()
         .flat_map(|component| component.terminal_ids.iter().copied())
         .collect::<Vec<_>>();
-    let output_states = candidate
-        .as_ref()
-        .map_or(input_states, DFA::num_states);
-    let output_transitions = candidate.as_ref().map_or(input_transitions, dfa_transition_count);
+    let output_states = candidate.as_ref().map_or(input_states, DFA::num_states);
+    let output_transitions = candidate_transitions.unwrap_or(input_transitions);
 
     if profile {
         eprintln!(
-            "[glrmask/profile][tokenizer] adaptive_determinize partitions={} terminals={} output_components={} input_states={} output_states={} input_transitions={} output_transitions={} attempted=1 accepted={} max_states={} effective_state_limit={} max_growth_percent={} attempt_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][tokenizer] adaptive_determinize partitions={} terminals={} output_components={} input_states={} output_states={} input_transitions={} output_transitions={} attempted=1 accepted={} max_states={} effective_state_limit={} max_growth_percent={} max_transition_growth_percent={} attempt_ms={:.3} total_ms={:.3}",
             input_batches,
             terminals,
             if accepted { 1 } else { input_batches },
@@ -1982,14 +2032,15 @@ fn adaptively_determinize_components(
             state_limit,
             effective_state_limit,
             growth_percent,
+            transition_growth_percent,
             attempt_ms,
             started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
 
     match candidate {
-        Some(dfa) => vec![LexerComponent { terminal_ids, dfa }],
-        None => inputs,
+        Some(dfa) if accepted => vec![LexerComponent { terminal_ids, dfa }],
+        _ => inputs,
     }
 }
 
@@ -3918,8 +3969,48 @@ mod tests {
         ];
         let components = super::compile_partition_components(&expressions, None, &[0, 1]);
         assert!(
-            try_product_union_components(&components, 32).is_none(),
+            try_product_union_components(&components, 32, usize::MAX).is_none(),
             "the bounded trial unexpectedly completed within 32 product states",
+        );
+    }
+
+    #[test]
+    fn adaptive_transition_growth_limit_is_inclusive() {
+        assert!(super::adaptive_transition_growth_is_acceptable(100, 600, 600));
+        assert!(!super::adaptive_transition_growth_is_acceptable(100, 601, 600));
+    }
+
+    #[test]
+    fn adaptive_transition_growth_rejection_keeps_partition_components() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"b".to_vec())),
+                min: 1,
+                max: None,
+            },
+        ];
+        let components = super::compile_partition_components(&expressions, None, &[0, 1, 2]);
+        let original_terminal_ids = components
+            .iter()
+            .map(|component| component.terminal_ids.clone())
+            .collect::<Vec<_>>();
+
+        let retained = super::adaptively_determinize_components_with_limits(
+            components,
+            32_768,
+            100,
+            1,
+        );
+
+        assert_eq!(retained.len(), original_terminal_ids.len());
+        assert_eq!(
+            retained
+                .iter()
+                .map(|component| component.terminal_ids.clone())
+                .collect::<Vec<_>>(),
+            original_terminal_ids,
         );
     }
 
@@ -4072,7 +4163,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_final_determinization_matches_monolithic_for_ignore_and_repeated_terminals() {
+    fn adaptive_final_representation_matches_monolithic_for_ignore_and_repeated_terminals() {
         let expressions = vec![
             Expr::Repeat {
                 expr: Box::new(Expr::U8Seq(b" ".to_vec())),
@@ -4101,7 +4192,6 @@ mod tests {
             Some(Arc::from(expressions.into_boxed_slice())),
         );
 
-        assert!(!adaptive.has_epsilon_transitions());
         for input in enumerate_inputs(b" abc", 6) {
             assert_eq!(
                 tokenizer_observation(&adaptive, &input),
