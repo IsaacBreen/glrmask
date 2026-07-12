@@ -10,7 +10,8 @@ use crate::ds::u8set::U8Set;
 use crate::Vocab;
 
 use super::l2p::equivalence_analysis::compat::FlatDfa;
-use super::l2p::equivalence_analysis::state_equivalence::nfa::build_bounded_analysis_view;
+use super::l2p::equivalence_analysis::state_equivalence::nfa::
+    build_bounded_analysis_view_from_combined_starts;
 use super::types::TerminalPathLength;
 
 /// DFA-derived byte sets for terminal classification, identical across partitions.
@@ -1830,7 +1831,7 @@ fn tokens_have_exact_active_l2p_boundary(
     let active_groups = (0..active_bitset.len())
         .map(|terminal| active_bitset.contains(terminal))
         .collect::<Vec<_>>();
-    let bounded = build_bounded_analysis_view(
+    let bounded = build_bounded_analysis_view_from_combined_starts(
         tokenizer,
         &raw_start_states,
         tokens,

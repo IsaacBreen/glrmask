@@ -341,11 +341,12 @@ fn expand_trie_from_config(
     }
 }
 
-pub(crate) fn build_bounded_analysis_view(
+fn build_bounded_analysis_view_inner(
     tokenizer: &Tokenizer,
     raw_start_states: &[usize],
     tokens: &[&[u8]],
     active_groups: Option<&[bool]>,
+    combine_start_states: bool,
 ) -> BoundedAnalysisView {
     let raw_state_count = tokenizer.num_states() as usize;
     let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
@@ -356,13 +357,29 @@ pub(crate) fn build_bounded_analysis_view(
         .execute_from_state_end_only(&[], tokenizer.initial_state_id())
         .to_vec();
     let start_state = intern_config(start_closure, &mut config_ids, &mut configs);
-    for &raw_state in raw_start_states {
-        assert!(raw_state < raw_state_count, "invalid raw NFA analysis seed");
-        let closure = tokenizer
-            .execute_from_state_end_only(&[], raw_state as u32)
-            .to_vec();
+    if combine_start_states {
+        let mut closure = Vec::<u32>::new();
+        for &raw_state in raw_start_states {
+            assert!(raw_state < raw_state_count, "invalid raw NFA analysis seed");
+            closure.extend_from_slice(
+                &tokenizer.execute_from_state_end_only(&[], raw_state as u32),
+            );
+        }
+        closure.sort_unstable();
+        closure.dedup();
         let state = intern_config(closure, &mut config_ids, &mut configs);
-        raw_start_to_view[raw_state] = state;
+        for &raw_state in raw_start_states {
+            raw_start_to_view[raw_state] = state;
+        }
+    } else {
+        for &raw_state in raw_start_states {
+            assert!(raw_state < raw_state_count, "invalid raw NFA analysis seed");
+            let closure = tokenizer
+                .execute_from_state_end_only(&[], raw_state as u32)
+                .to_vec();
+            let state = intern_config(closure, &mut config_ids, &mut configs);
+            raw_start_to_view[raw_state] = state;
+        }
     }
 
     let mut transitions = vec![u32::MAX; configs.len() * 256];
@@ -426,6 +443,36 @@ pub(crate) fn build_bounded_analysis_view(
         },
         raw_start_to_view,
     }
+}
+
+pub(crate) fn build_bounded_analysis_view(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: Option<&[bool]>,
+) -> BoundedAnalysisView {
+    build_bounded_analysis_view_inner(
+        tokenizer,
+        raw_start_states,
+        tokens,
+        active_groups,
+        false,
+    )
+}
+
+pub(crate) fn build_bounded_analysis_view_from_combined_starts(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: Option<&[bool]>,
+) -> BoundedAnalysisView {
+    build_bounded_analysis_view_inner(
+        tokenizer,
+        raw_start_states,
+        tokens,
+        active_groups,
+        true,
+    )
 }
 
 fn intern_config(
