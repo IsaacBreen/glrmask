@@ -395,7 +395,11 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         && matches!(partition_label, "p7" | "p8"))
         .then(|| {
             equivalence_analysis::state_equivalence::global_token_position::
-                compute_global_token_position_state_partition(tokenizer, vocab)
+                compute_global_token_position_state_partition_with_flat_trans(
+                    tokenizer,
+                    vocab,
+                    flat_trans.map(AsRef::as_ref),
+                )
         })
         .flatten();
     // Build C once and share the exact same representative map between TI and
