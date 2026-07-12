@@ -284,6 +284,79 @@ fn nfa_partial_position_partition(
     }
 }
 
+fn nfa_partial_position_partition_and_advance(
+    view: &mut NfaTokenPositionView<'_>,
+    position: usize,
+    active_states: &[bool],
+    bytes: &[u8],
+) -> (PartialPositionPartition, Vec<bool>) {
+    let state_count = view.tokenizer.num_states() as usize;
+    assert_eq!(active_states.len(), state_count);
+    let mut key_to_class = FxHashMap::<PositionObservationKey, u32>::default();
+    let mut class_by_state = vec![u32::MAX; state_count];
+    let mut class_count = 0u32;
+    let mut active_state_count = 0usize;
+    let mut next = vec![false; state_count];
+    let mut reset_needed = false;
+
+    for (state, &active) in active_states.iter().enumerate() {
+        if !active {
+            continue;
+        }
+        active_state_count += 1;
+        let source = view.raw_start_config(state);
+        let (finalizers, future_finalizers) = if position > 0 {
+            let (finalizers, future_finalizers) = view.output_pair(source);
+            (Some(finalizers), Some(future_finalizers))
+        } else {
+            (None, None)
+        };
+        let mut destinations = Vec::with_capacity(bytes.len());
+        for &byte in bytes {
+            let destination = view.step(source, byte);
+            destinations.push(destination);
+            if destination == u32::MAX {
+                continue;
+            }
+            reset_needed |= view.has_finalizer(destination);
+            for &target in view.states(destination) {
+                next[target as usize] = true;
+            }
+        }
+        let key = PositionObservationKey {
+            finalizers,
+            future_finalizers,
+            destinations: destinations.into_boxed_slice(),
+        };
+        let next_class = class_count;
+        let class = *key_to_class.entry(key).or_insert_with(|| {
+            class_count += 1;
+            next_class
+        });
+        class_by_state[state] = class;
+    }
+
+    if reset_needed {
+        for reset_state in view.tokenizer.deterministic_reset_states() {
+            let reset = view.raw_start_config(reset_state as usize);
+            for &state in view.states(reset) {
+                next[state as usize] = true;
+            }
+        }
+    }
+
+    (
+        PartialPositionPartition {
+            position,
+            byte_count: bytes.len(),
+            active_state_count,
+            class_count: class_count as usize,
+            class_by_state,
+        },
+        next,
+    )
+}
+
 fn nfa_advance_active_states(
     view: &mut NfaTokenPositionView<'_>,
     active_states: &[bool],
@@ -1037,27 +1110,40 @@ fn compute_global_token_position_map_with_tail_start_and_flat_trans(
     let mut advance_ms = Vec::with_capacity(byte_sets.position_bytes.len());
     for (index, bytes) in byte_sets.position_bytes.iter().enumerate() {
         let partition_started_at = profile_phases.then(Instant::now);
-        partitions.push(if let Some(view) = nfa_view.as_mut() {
-            nfa_partial_position_partition(view, index, &active_states, bytes)
-        } else {
-            partial_position_partition(tokenizer, index, &active_states, bytes)
-        });
-        partition_ms.push(
-            partition_started_at.map_or(0.0, |started_at| {
+        if let Some(view) = nfa_view.as_mut() {
+            let (partition, next_active_states) = nfa_partial_position_partition_and_advance(
+                view,
+                index,
+                &active_states,
+                bytes,
+            );
+            partitions.push(partition);
+            active_states = next_active_states;
+            partition_ms.push(partition_started_at.map_or(0.0, |started_at| {
                 started_at.elapsed().as_secs_f64() * 1000.0
-            }),
-        );
-        let advance_started_at = profile_phases.then(Instant::now);
-        active_states = if let Some(view) = nfa_view.as_mut() {
-            nfa_advance_active_states(view, &active_states, bytes)
+            }));
+            advance_ms.push(0.0);
         } else {
-            advance_active_states_with_flat_trans(tokenizer, &active_states, bytes, flat_trans)
-        };
-        advance_ms.push(
-            advance_started_at.map_or(0.0, |started_at| {
+            partitions.push(partial_position_partition(
+                tokenizer,
+                index,
+                &active_states,
+                bytes,
+            ));
+            partition_ms.push(partition_started_at.map_or(0.0, |started_at| {
                 started_at.elapsed().as_secs_f64() * 1000.0
-            }),
-        );
+            }));
+            let advance_started_at = profile_phases.then(Instant::now);
+            active_states = advance_active_states_with_flat_trans(
+                tokenizer,
+                &active_states,
+                bytes,
+                flat_trans,
+            );
+            advance_ms.push(advance_started_at.map_or(0.0, |started_at| {
+                started_at.elapsed().as_secs_f64() * 1000.0
+            }));
+        }
     }
     let tail_started_at = profile_phases.then(Instant::now);
     let tail_active = if let Some(view) = nfa_view.as_mut() {
@@ -1261,6 +1347,37 @@ mod tests {
                 .collect(),
             None,
         )
+    }
+
+    #[test]
+    fn fused_epsilon_position_observation_matches_separate_partition_and_advance() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let mut separate_view = NfaTokenPositionView::new(&tokenizer);
+        let mut fused_view = NfaTokenPositionView::new(&tokenizer);
+        let mut active = vec![true; tokenizer.num_states() as usize];
+
+        for (position, bytes) in [b"ab".as_slice(), b"a".as_slice()].into_iter().enumerate() {
+            let separate_partition =
+                nfa_partial_position_partition(&mut separate_view, position, &active, bytes);
+            let separate_next = nfa_advance_active_states(&mut separate_view, &active, bytes);
+            let (fused_partition, fused_next) = nfa_partial_position_partition_and_advance(
+                &mut fused_view,
+                position,
+                &active,
+                bytes,
+            );
+
+            assert_eq!(fused_partition.position, separate_partition.position);
+            assert_eq!(fused_partition.byte_count, separate_partition.byte_count);
+            assert_eq!(
+                fused_partition.active_state_count,
+                separate_partition.active_state_count,
+            );
+            assert_eq!(fused_partition.class_count, separate_partition.class_count);
+            assert_eq!(fused_partition.class_by_state, separate_partition.class_by_state);
+            assert_eq!(fused_next, separate_next);
+            active = separate_next;
+        }
     }
 
     fn assert_positional_constraints_hold(
