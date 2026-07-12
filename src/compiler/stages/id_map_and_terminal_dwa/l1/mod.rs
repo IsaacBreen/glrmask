@@ -879,23 +879,21 @@ fn build_l1_generic_nfa_terminal_dwa(
             if end_states.is_empty() {
                 continue;
             }
-            let mut matched = Vec::<u32>::new();
+            let mut active_signature = Vec::<u32>::new();
             for &state in &end_states {
-                matched.extend(tokenizer.matched_terminals_iter(state));
+                active_signature.extend(collect_active_terminal_signature(
+                    tokenizer,
+                    state,
+                    active_terminals,
+                ));
             }
-            matched.sort_unstable();
-            matched.dedup();
-            for terminal in matched {
-                if active_terminals
-                    .get(terminal as usize)
-                    .copied()
-                    .unwrap_or(false)
-                {
-                    token_ids_by_terminal
-                        .entry(terminal)
-                        .or_default()
-                        .push(internal_token_id as u32);
-                }
+            active_signature.sort_unstable();
+            active_signature.dedup();
+            for terminal in active_signature {
+                token_ids_by_terminal
+                    .entry(terminal)
+                    .or_default()
+                    .push(internal_token_id as u32);
             }
         }
 
@@ -4259,13 +4257,14 @@ mod generic_nfa_tests {
     use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
 
     #[test]
-    fn generic_epsilon_l1_weights_match_exact_state_set_execution() {
+    fn generic_epsilon_l1_weights_match_exact_active_state_set_signatures() {
         let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
         let vocab = Vocab::new(
             vec![
-                (0, b"a".to_vec()),
-                (1, b"b".to_vec()),
-                (2, b"aa".to_vec()),
+                (0, b"".to_vec()),
+                (1, b"a".to_vec()),
+                (2, b"b".to_vec()),
+                (3, b"aa".to_vec()),
             ],
             None,
         );
@@ -4290,9 +4289,8 @@ mod generic_nfa_tests {
                 let end_states = tokenizer.execute_from_state_end_only(bytes, raw_state);
                 for terminal in 0..2u32 {
                     let expected = end_states.iter().any(|&state| {
-                        tokenizer
-                            .matched_terminals_iter(state)
-                            .any(|matched| matched == terminal)
+                        collect_active_terminal_signature(&tokenizer, state, &active)
+                            .contains(&terminal)
                     });
                     let actual = dwa
                         .eval_word(&[terminal as i32])
