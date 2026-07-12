@@ -28,6 +28,29 @@ pub(crate) struct RelevantPowersetView {
     pub(crate) raw_start_to_view: Arc<[u32]>,
 }
 
+enum RepresentativeClosure {
+    Singleton(u32),
+    Multi(Box<[u32]>),
+}
+
+impl RepresentativeClosure {
+    #[inline]
+    fn singleton(&self) -> Option<u32> {
+        match self {
+            Self::Singleton(state) => Some(*state),
+            Self::Multi(_) => None,
+        }
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[u32] {
+        match self {
+            Self::Singleton(state) => std::slice::from_ref(state),
+            Self::Multi(states) => states,
+        }
+    }
+}
+
 fn intern_mapped_target_config(
     targets: &[u32],
     state_map: &ManyToOneIdMap,
@@ -127,10 +150,12 @@ pub(crate) fn build_relevant_powerset_view(
             .representative_original_ids
             .iter()
             .map(|&representative| {
-                tokenizer
-                    .execute_from_state_end_only(&[], representative)
-                    .to_vec()
-                    .into_boxed_slice()
+                let closure = tokenizer.execute_from_state_end_only(&[], representative);
+                if closure.len() == 1 {
+                    RepresentativeClosure::Singleton(closure[0])
+                } else {
+                    RepresentativeClosure::Multi(closure.to_vec().into_boxed_slice())
+                }
             })
             .collect::<Vec<_>>()
     });
@@ -148,8 +173,9 @@ pub(crate) fn build_relevant_powerset_view(
                 "powerset states must be processed in interning order",
             );
             let config = configs[state as usize].clone();
-            if config.len() == 1 && closure_by_class[config[0] as usize].len() == 1 {
-                let raw_source = closure_by_class[config[0] as usize][0];
+            if config.len() == 1
+                && let Some(raw_source) = closure_by_class[config[0] as usize].singleton()
+            {
                 for (byte, raw_target) in tokenizer.transitions_from(raw_source) {
                     if !relevant_bytes[byte as usize] {
                         continue;
@@ -236,13 +262,13 @@ pub(crate) fn build_relevant_powerset_view(
                 FlatDfaState {
                     finalizers: filtered_config_groups(
                         tokenizer,
-                        closure,
+                        closure.as_slice(),
                         active_groups,
                         true,
                     ),
                     possible_future_group_ids: filtered_config_groups(
                         tokenizer,
-                        closure,
+                        closure.as_slice(),
                         active_groups,
                         false,
                     ),
