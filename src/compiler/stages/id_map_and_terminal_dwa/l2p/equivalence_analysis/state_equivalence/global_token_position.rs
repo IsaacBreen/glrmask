@@ -225,7 +225,13 @@ impl<'a> NfaTokenPositionView<'a> {
         } else {
             self.intern_config(targets.to_vec())
         };
-        self.transitions.insert((config, byte), target);
+        // Positional C observation is overwhelmingly sparse: most selected-byte
+        // probes are dead and the hot path deliberately does not consult this
+        // cache before probing. Retain only live destinations for later tail
+        // reuse. A dead edge is exact to recompute if it is queried again.
+        if target != u32::MAX {
+            self.transitions.insert((config, byte), target);
+        }
         target
     }
 
@@ -1437,6 +1443,47 @@ mod tests {
                 "singleton configs must bypass the general vector-key interner",
             );
         }
+    }
+
+    #[test]
+    fn epsilon_c_transition_cache_retains_only_live_destinations() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let mut view = NfaTokenPositionView::new(&tokenizer);
+        let mut dead_probe = None;
+        let mut live_probe = None;
+
+        for raw_state in 0..tokenizer.num_states() as usize {
+            let config = view.raw_start_config(raw_state);
+            for byte in 0..=u8::MAX {
+                let live = !tokenizer.step_all(view.states(config), byte).is_empty();
+                if live {
+                    live_probe.get_or_insert((config, byte));
+                } else {
+                    dead_probe.get_or_insert((config, byte));
+                }
+                if dead_probe.is_some() && live_probe.is_some() {
+                    break;
+                }
+            }
+            if dead_probe.is_some() && live_probe.is_some() {
+                break;
+            }
+        }
+
+        let (dead_config, dead_byte) = dead_probe.expect("fixture must contain a dead byte edge");
+        assert_eq!(
+            view.step_without_cache_lookup(dead_config, dead_byte),
+            u32::MAX
+        );
+        assert!(!view.transitions.contains_key(&(dead_config, dead_byte)));
+
+        let (live_config, live_byte) = live_probe.expect("fixture must contain a live byte edge");
+        let live_target = view.step_without_cache_lookup(live_config, live_byte);
+        assert_ne!(live_target, u32::MAX);
+        assert_eq!(
+            view.transitions.get(&(live_config, live_byte)),
+            Some(&live_target)
+        );
     }
 
     #[test]
