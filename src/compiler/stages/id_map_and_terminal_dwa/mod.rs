@@ -27,7 +27,7 @@ use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
 use classify::classify_vocab_char_type;
-use grammar_helpers::ignore_transparent_disallowed_follows;
+use grammar_helpers::{compute_always_allowed_follows, ignore_transparent_disallowed_follows};
 use l2p::equivalence_analysis::state_equivalence::{
     resolve_global_pipeline_config, run_state_equivalence_pipeline, StateEquivalenceScope,
 };
@@ -512,6 +512,10 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
     let shared_original_vocab_analysis_dfa_cache =
         l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache::default();
     let shared_transition_cache = OnceLock::new();
+    // Grammar-wide and identical for every L2P vocabulary partition. Compute
+    // once before parallel partition construction rather than repeating the
+    // same FIRST/FOLLOW occurrence traversal in each partition.
+    let always_allowed_follows = compute_always_allowed_follows(grammar);
     let shared_ti_output_cache = shared_classify_cache
         .get()
         .and_then(l2p::SharedTiTokenizerOutputCache::new_with_classify_bytesets)
@@ -533,6 +537,7 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
             use_terminal_coloring,
             ignore_terminal,
             grammar,
+            &always_allowed_follows,
             disallowed_follows,
             &token_path_disallowed_follows,
             &normalized_token_path_disallowed_follows,

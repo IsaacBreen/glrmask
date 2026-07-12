@@ -42,7 +42,6 @@ use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
-use super::grammar_helpers::compute_always_allowed_follows;
 use super::types::{
     compile_profile_enabled, TerminalColoring, TerminalDwaBuildProfile, TerminalDwaPhaseProfile,
 };
@@ -356,6 +355,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     use_terminal_coloring: bool,
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
+    always_allowed_follows: &[Vec<TerminalID>],
     active_terminals: &[bool],
     disallowed_follows: &BTreeMap<u32, BitSet>,
     token_path_disallowed_follows: Option<&BTreeMap<u32, BitSet>>,
@@ -740,13 +740,15 @@ let strict_reference = reference_terminal_expansion
             );
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
-            let always_allowed_started_at = Instant::now();
-            let always_allowed = compute_always_allowed_follows(grammar);
-            let always_allowed_ms = always_allowed_started_at.elapsed().as_secs_f64() * 1000.0;
+            let always_allowed_ms = 0.0;
             let nwa_states_after_build = nwa.states().len();
 
             let collapse_started_at = Instant::now();
-            collapse_always_allowed(&mut nwa, &always_allowed, grammar.num_terminals as usize);
+            collapse_always_allowed(
+                &mut nwa,
+                always_allowed_follows,
+                grammar.num_terminals as usize,
+            );
             let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_collapse = nwa.states().len();
 
@@ -1202,6 +1204,7 @@ let strict_reference = reference_terminal_expansion
                 use_terminal_coloring,
                 ignore_terminal,
                 grammar,
+                always_allowed_follows,
                 active_terminals,
                 disallowed_follows,
                 token_path_disallowed_follows,
