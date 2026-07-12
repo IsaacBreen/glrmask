@@ -1316,15 +1316,54 @@ fn analyze_equivalences_impl(
     let token_len_stats = token_length_stats(&prepared.token_bytes);
     let prepare_inputs_ms = prepare_inputs_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let mut relevant_bytes = [false; 256];
+    for token in &prepared.token_bytes {
+        for &byte in *token {
+            relevant_bytes[byte as usize] = true;
+        }
+    }
+
+    // C has already reduced the state domain before any local token walk. A
+    // full 256-column byte-class scan of the 18k-state raw view is therefore
+    // pure setup overhead on p7/p8. Build a partition-local base that observes
+    // only bytes present in this vocabulary. Exact state/vocab analysis never
+    // steps an irrelevant byte, so collapsing the unused columns is exact.
+    // Keep both caches local: the stage-wide caches may contain the full byte
+    // partition and AnalysisDfaCacheKey deliberately does not encode a byte
+    // class map.
+    let local_vocab_dfa_cache = token_position_partition
+        .is_some()
+        .then(vocab_equivalence_analysis::SharedVocabDfaCache::new);
+    let local_analysis_dfa_cache = token_position_partition
+        .is_some()
+        .then(vocab_equivalence_analysis::SharedVocabAnalysisDfaCache::default);
+    let equivalence_vocab_dfa_cache = local_vocab_dfa_cache
+        .as_ref()
+        .or(shared_vocab_dfa_cache);
+    let equivalence_analysis_dfa_cache = local_analysis_dfa_cache
+        .as_ref()
+        .or(shared_analysis_dfa_cache);
+
     let raw_analysis_base_started_at = Instant::now();
-    if let Some(cache) = shared_vocab_dfa_cache {
-        cache.get_or_init(|| vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa(tokenizer_view.dfa()));
+    if let Some(cache) = equivalence_vocab_dfa_cache {
+        cache.get_or_init(|| {
+            if token_position_partition.is_some() {
+                vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa_relevant(
+                    tokenizer_view.dfa(),
+                    &relevant_bytes,
+                )
+            } else {
+                vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa(
+                    tokenizer_view.dfa(),
+                )
+            }
+        });
     }
     let raw_analysis_base_init_ms = shared_base_setup_ms
         + raw_analysis_base_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let byte_class_setup_started_at = Instant::now();
-    let compatible_cache = shared_vocab_dfa_cache
+    let compatible_cache = equivalence_vocab_dfa_cache
         .and_then(|cache| cache.get())
         .filter(|base| base.is_compatible_with_dfa(tokenizer_view.dfa()));
     let byte_to_class = compatible_cache
@@ -1341,12 +1380,6 @@ fn analyze_equivalences_impl(
         .map(|token| token.len())
         .max()
         .unwrap_or(0);
-    let mut relevant_bytes = [false; 256];
-    for token in &dedup.representative_token_bytes {
-        for &byte in *token {
-            relevant_bytes[byte as usize] = true;
-        }
-    }
     let direct_token_bytes: usize = dedup
         .representative_token_bytes
         .iter()
@@ -1466,8 +1499,8 @@ fn analyze_equivalences_impl(
             effective_disallowed,
             Some(&byte_to_class),
             if uses_analysis_quotient { None } else { active_groups },
-            if uses_analysis_quotient { None } else { shared_vocab_dfa_cache },
-            if uses_analysis_quotient { None } else { shared_analysis_dfa_cache },
+            if uses_analysis_quotient { None } else { equivalence_vocab_dfa_cache },
+            if uses_analysis_quotient { None } else { equivalence_analysis_dfa_cache },
         );
     let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
