@@ -142,7 +142,16 @@ struct SignatureGroup {
     representative: u32,
 }
 
+#[derive(Debug)]
+struct PackedSignatureGroup {
+    signature: u64,
+    members: Vec<u32>,
+    representative: u32,
+}
+
 type PositionSignature = SmallVec<[u32; 4]>;
+
+const PACKED_SIGNATURE_WILDCARD: u16 = u16::MAX;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PositionObservationKey {
@@ -864,6 +873,75 @@ fn state_partial_signature(
     signature
 }
 
+fn packed_state_partial_signature(
+    state: usize,
+    later_partitions: &[PartialPositionPartition],
+    tail_active: &[bool],
+) -> u64 {
+    debug_assert!(later_partitions.len() < 4);
+    debug_assert!(state < PACKED_SIGNATURE_WILDCARD as usize);
+    let mut signature = u64::MAX;
+    for (coordinate, partition) in later_partitions.iter().enumerate() {
+        let value = partition.class_by_state[state];
+        let packed = if value == u32::MAX {
+            PACKED_SIGNATURE_WILDCARD
+        } else {
+            debug_assert!(value < PACKED_SIGNATURE_WILDCARD as u32);
+            value as u16
+        };
+        let shift = coordinate * 16;
+        signature = (signature & !(0xffffu64 << shift)) | ((packed as u64) << shift);
+    }
+    let tail_coordinate = later_partitions.len();
+    let tail_value = if tail_active[state] {
+        state as u16
+    } else {
+        PACKED_SIGNATURE_WILDCARD
+    };
+    let shift = tail_coordinate * 16;
+    (signature & !(0xffffu64 << shift)) | ((tail_value as u64) << shift)
+}
+
+#[inline]
+fn packed_signature_lane(signature: u64, coordinate: usize) -> u16 {
+    ((signature >> (coordinate * 16)) & 0xffff) as u16
+}
+
+fn for_each_packed_signature_restriction(
+    signature: u64,
+    include_self: bool,
+    mut visit: impl FnMut(u64),
+) {
+    let mut known_coordinates = SmallVec::<[usize; 4]>::new();
+    for coordinate in 0..4 {
+        if packed_signature_lane(signature, coordinate) != PACKED_SIGNATURE_WILDCARD {
+            known_coordinates.push(coordinate);
+        }
+    }
+    let restriction_count = 1usize << known_coordinates.len();
+    let first_drop_mask = usize::from(!include_self);
+    for drop_mask in first_drop_mask..restriction_count {
+        let mut restricted = signature;
+        for (bit, &coordinate) in known_coordinates.iter().enumerate() {
+            if (drop_mask & (1usize << bit)) != 0 {
+                let shift = coordinate * 16;
+                restricted =
+                    (restricted & !(0xffffu64 << shift)) | (0xffffu64 << shift);
+            }
+        }
+        visit(restricted);
+    }
+}
+
+#[inline]
+fn packed_signature_is_restriction_of(restriction: u64, extension: u64) -> bool {
+    (0..4).all(|coordinate| {
+        let left = packed_signature_lane(restriction, coordinate);
+        left == PACKED_SIGNATURE_WILDCARD
+            || left == packed_signature_lane(extension, coordinate)
+    })
+}
+
 /// Complete the partial positional constraints by raw-representative
 /// subsumption.
 ///
@@ -883,6 +961,14 @@ fn pack_partial_partitions(
     partitions: &[PartialPositionPartition],
     tail_active: &[bool],
 ) -> ManyToOneIdMap {
+    pack_partial_partitions_impl(partitions, tail_active, true)
+}
+
+fn pack_partial_partitions_impl(
+    partitions: &[PartialPositionPartition],
+    tail_active: &[bool],
+    enable_packed_signatures: bool,
+) -> ManyToOneIdMap {
     let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
     let total_started_at = profile.then(Instant::now);
     let first = partitions
@@ -893,6 +979,12 @@ fn pack_partial_partitions(
     assert!(first.class_by_state.iter().all(|&class| class != u32::MAX));
 
     let later = &partitions[1..];
+    let use_packed_signatures = enable_packed_signatures
+        && later.len() < 4
+        && state_count < PACKED_SIGNATURE_WILDCARD as usize
+        && later
+            .iter()
+            .all(|partition| partition.class_count < PACKED_SIGNATURE_WILDCARD as usize);
     let mut states_by_first_class = vec![Vec::<u32>::new(); first.class_count];
     for (state, &class) in first.class_by_state.iter().enumerate() {
         states_by_first_class[class as usize].push(state as u32);
@@ -919,6 +1011,103 @@ fn pack_partial_partitions(
             max_groups_per_block = max_groups_per_block.max(1);
             maximal_groups_total += 1;
             global_classes.push((state, first_block));
+            continue;
+        }
+        if use_packed_signatures {
+            let group_started_at = profile.then(Instant::now);
+            let mut signature_to_group = FxHashMap::<u64, usize>::default();
+            let mut groups = Vec::<PackedSignatureGroup>::new();
+            for state in first_block {
+                let signature =
+                    packed_state_partial_signature(state as usize, later, tail_active);
+                if let Some(&group) = signature_to_group.get(&signature) {
+                    groups[group].members.push(state);
+                    continue;
+                }
+                let group = groups.len();
+                signature_to_group.insert(signature, group);
+                groups.push(PackedSignatureGroup {
+                    signature,
+                    members: vec![state],
+                    representative: state,
+                });
+            }
+            total_groups += groups.len();
+            max_groups_per_block = max_groups_per_block.max(groups.len());
+            if let Some(started_at) = group_started_at {
+                group_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+            }
+
+            let maximal_started_at = profile.then(Instant::now);
+            let mut has_strict_extension = vec![false; groups.len()];
+            for group in &groups {
+                for_each_packed_signature_restriction(
+                    group.signature,
+                    false,
+                    |restriction| {
+                        strict_restrictions_total += 1;
+                        if let Some(&restricted_group) = signature_to_group.get(&restriction) {
+                            has_strict_extension[restricted_group] = true;
+                        }
+                    },
+                );
+            }
+            let mut maximal_groups = has_strict_extension
+                .into_iter()
+                .enumerate()
+                .filter_map(|(group, has_extension)| (!has_extension).then_some(group))
+                .collect::<Vec<_>>();
+            maximal_groups.sort_unstable_by_key(|&group| groups[group].representative);
+            maximal_groups_total += maximal_groups.len();
+            if let Some(started_at) = maximal_started_at {
+                maximal_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+            }
+
+            let extension_started_at = profile.then(Instant::now);
+            let mut is_maximal = vec![false; groups.len()];
+            for &group in &maximal_groups {
+                is_maximal[group] = true;
+            }
+            let maximal_extension_by_group = groups
+                .iter()
+                .enumerate()
+                .map(|(group_index, group)| {
+                    if is_maximal[group_index] {
+                        return group_index;
+                    }
+                    nonmaximal_extension_scans += 1;
+                    maximal_groups
+                        .iter()
+                        .copied()
+                        .find(|&maximal| {
+                            packed_signature_is_restriction_of(
+                                group.signature,
+                                groups[maximal].signature,
+                            )
+                        })
+                        .expect("every partial signature must have a maximal extension")
+                })
+                .collect::<Vec<_>>();
+            if let Some(started_at) = extension_started_at {
+                extension_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+            }
+
+            let assign_started_at = profile.then(Instant::now);
+            let mut class_for_maximal_group = vec![usize::MAX; groups.len()];
+            for &group in &maximal_groups {
+                let class = global_classes.len();
+                class_for_maximal_group[group] = class;
+                global_classes.push((groups[group].representative, Vec::new()));
+            }
+            for (group_index, group) in groups.into_iter().enumerate() {
+                let maximal_group = maximal_extension_by_group[group_index];
+                let class = class_for_maximal_group[maximal_group];
+                debug_assert_ne!(class, usize::MAX);
+                global_classes[class].1.extend(group.members);
+            }
+            if let Some(started_at) = assign_started_at {
+                assign_ms += started_at.elapsed().as_secs_f64() * 1000.0;
+            }
             continue;
         }
         let group_started_at = profile.then(Instant::now);
@@ -1724,6 +1913,43 @@ mod tests {
         assert_eq!(
             map.representative_original_ids[singleton_class as usize],
             0,
+        );
+    }
+
+    #[test]
+    fn packed_partial_signatures_match_generic_partition_c_packing() {
+        let first = PartialPositionPartition {
+            position: 0,
+            byte_count: 1,
+            active_state_count: 6,
+            class_count: 3,
+            class_by_state: vec![0, 1, 1, 1, 1, 2],
+        };
+        let second = PartialPositionPartition {
+            position: 1,
+            byte_count: 2,
+            active_state_count: 4,
+            class_count: 2,
+            class_by_state: vec![u32::MAX, 0, u32::MAX, 1, 0, u32::MAX],
+        };
+        let third = PartialPositionPartition {
+            position: 2,
+            byte_count: 1,
+            active_state_count: 3,
+            class_count: 2,
+            class_by_state: vec![u32::MAX, 0, 1, u32::MAX, u32::MAX, u32::MAX],
+        };
+        let partitions = [first, second, third];
+        let tail = [false, false, false, true, false, false];
+
+        let packed = pack_partial_partitions_impl(&partitions, &tail, true);
+        let generic = pack_partial_partitions_impl(&partitions, &tail, false);
+
+        assert_eq!(packed.original_to_internal, generic.original_to_internal);
+        assert_eq!(packed.internal_to_originals, generic.internal_to_originals);
+        assert_eq!(
+            packed.representative_original_ids,
+            generic.representative_original_ids,
         );
     }
 
