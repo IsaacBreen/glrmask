@@ -7218,7 +7218,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 let value = value.trim();
                 value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
             })
-            .unwrap_or(false);
+            .unwrap_or(true);
         let mut petal_batch_groups = 0usize;
         let mut petal_batch_members = 0usize;
         let mut petal_batch_grouping_ns = 0u64;
