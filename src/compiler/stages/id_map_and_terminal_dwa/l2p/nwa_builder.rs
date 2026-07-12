@@ -362,6 +362,9 @@ pub(crate) struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     pub(crate) profile: TerminalDwaBuildProfile,
     flat_transitions: Vec<Option<Box<[u32; 256]>>>,
     nfa_scan_cache: Option<NfaTrieScanCache<'tok>>,
+    shared_flat_transitions: Option<&'tok [u32]>,
+    self_loop_subtree_skip_enabled: bool,
+    profile_timing: bool,
 }
 
 #[derive(Default)]
@@ -384,6 +387,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         terminal_path_lengths: Option<Vec<TerminalPathLength>>,
         active_terminals: Option<Vec<bool>>,
         num_tokenizer_states: usize,
+        shared_flat_transitions: Option<&'tok [u32]>,
     ) -> Self {
         let nfa_scan_cache = tokenizer
             .has_epsilon_transitions()
@@ -415,6 +419,13 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             profile: TerminalDwaBuildProfile::default(),
             flat_transitions: vec![None; num_tokenizer_states],
             nfa_scan_cache,
+            shared_flat_transitions: shared_flat_transitions
+                .filter(|transitions| transitions.len() == num_tokenizer_states * 256),
+            self_loop_subtree_skip_enabled: std::env::var_os(
+                "GLRMASK_ENABLE_L2P_SELF_LOOP_SUBTREE_SKIP",
+            )
+            .is_some(),
+            profile_timing: std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some(),
         }
     }
 
@@ -735,11 +746,29 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         {
             return false;
         }
+        self.profile.trie_self_loop_checks += 1;
+        if let Some(flat_transitions) = self.shared_flat_transitions {
+            let base = tokenizer_state as usize * 256;
+            let can_skip = U8Set::from_words(*node.subtree_bytes())
+                .iter()
+                .all(|byte| flat_transitions[base + byte as usize] == tokenizer_state);
+            if can_skip {
+                self.profile.trie_self_loop_skips += 1;
+            }
+            return can_skip;
+        }
+        if !self.self_loop_bytes.contains_key(&tokenizer_state) {
+            self.profile.trie_self_loop_cache_misses += 1;
+        }
         let self_loop_bytes = self
             .self_loop_bytes
             .entry(tokenizer_state)
             .or_insert_with(|| self.tokenizer.self_loop_bytes(tokenizer_state));
-        U8Set::from_words(*node.subtree_bytes()).is_subset(self_loop_bytes)
+        let can_skip = U8Set::from_words(*node.subtree_bytes()).is_subset(self_loop_bytes);
+        if can_skip {
+            self.profile.trie_self_loop_skips += 1;
+        }
+        can_skip
     }
 
     fn emit_self_loop_leaf_only_subtree(
@@ -915,7 +944,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             }
         }
         let flush_weight_ms = flush_weight_start.elapsed().as_secs_f64() * 1000.0;
-
+        self.profile.flush_leaf_ms = flush_leaf_ms;
+        self.profile.flush_future_ms = flush_future_ms;
+        self.profile.flush_weight_ms = flush_weight_ms;
     }
 
     /// Fast NWA construction for L1-only grammars (all terminals have path
@@ -1036,14 +1067,31 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         node: &VocabPrefixTreeNode,
         assoc_by_state: &NodesByTokenizerState,
     ) {
+        if !self.self_loop_subtree_skip_enabled {
+            for (segment_bytes, child_node) in node.iter_children() {
+                let next_level_nodes =
+                    self.process_child_segment(segment_bytes, child_node, assoc_by_state);
+                if !next_level_nodes.is_empty() {
+                    self.build_from_trie(child_node, &next_level_nodes);
+                }
+            }
+            return;
+        }
+
+        let self_loop_started_at = self.profile_timing.then(std::time::Instant::now);
         let mut recursive_nodes = NodesByTokenizerState::new();
         let mut self_loop_only_nodes = NodesByTokenizerState::new();
         for (tokenizer_state, source_nodes) in assoc_by_state.iter() {
+            self.profile.trie_self_loop_source_nodes += source_nodes.len() as u64;
             if self.can_skip_self_loop_subtree(node, tokenizer_state) {
+                self.profile.trie_self_loop_skipped_source_nodes += source_nodes.len() as u64;
                 self_loop_only_nodes.merge(tokenizer_state, source_nodes);
             } else {
                 recursive_nodes.merge(tokenizer_state, source_nodes);
             }
+        }
+        if let Some(started_at) = self_loop_started_at {
+            self.profile.trie_self_loop_ms += started_at.elapsed().as_secs_f64() * 1000.0;
         }
 
         if !self_loop_only_nodes.is_empty() {
@@ -1093,12 +1141,14 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             }
 
             for (tokenizer_state, source_nodes) in nodes_at_offset {
+                let remaining = &segment_bytes[offset..];
+                let execute_started_at = self.profile_timing.then(std::time::Instant::now);
                 let end_states = if self.tokenizer.has_epsilon_transitions() {
                     self.nfa_scan_cache
                         .as_mut()
                         .expect("epsilon tokenizer must initialize NFA trie scan cache")
                         .execute_into(
-                            &segment_bytes[offset..],
+                            remaining,
                             tokenizer_state,
                             &mut matches_buf,
                         )
@@ -1139,7 +1189,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     if std::env::var_os("GLRMASK_L2P_NWA_DFA_SCAN_STRICT_REFERENCE").is_some() {
                         let mut reference = self
                             .tokenizer
-                            .execute_from_state(&segment_bytes[offset..], tokenizer_state);
+                            .execute_from_state(remaining, tokenizer_state);
                         reference
                             .matches
                             .retain(|matched| self.terminal_is_active(matched.id));
@@ -1162,7 +1212,15 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
                     end_states
                 };
+                if let Some(started_at) = execute_started_at {
+                    self.profile.trie_execute_ms +=
+                        started_at.elapsed().as_secs_f64() * 1000.0;
+                    self.profile.trie_execute_calls += 1;
+                    self.profile.trie_execute_input_bytes += remaining.len() as u64;
+                    self.profile.trie_matches += matches_buf.len() as u64;
+                }
 
+                let end_state_started_at = self.profile_timing.then(std::time::Instant::now);
                 for &end_state in &end_states {
                     if child_node.has_token() {
                         self.add_future_leaf_token_from_sources(
@@ -1174,7 +1232,13 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
                     next_level_nodes.merge(end_state, &source_nodes);
                 }
+                if let Some(started_at) = end_state_started_at {
+                    self.profile.trie_end_state_ms +=
+                        started_at.elapsed().as_secs_f64() * 1000.0;
+                    self.profile.trie_end_states += end_states.len() as u64;
+                }
 
+                let match_process_started_at = self.profile_timing.then(std::time::Instant::now);
                 for matched in &matches_buf {
                     let next_offset = offset + matched.width;
 
@@ -1204,13 +1268,20 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         }
                     }
 
-                    let Some(continuation_weight) = self.continuation_weight_for_match(
+                    let continuation_weight_started_at =
+                        self.profile_timing.then(std::time::Instant::now);
+                    let continuation_weight = self.continuation_weight_for_match(
                         child_node,
                         leaf_token_id,
                         matched.id,
                         Some(matched.end_state),
                         next_offset == segment_bytes.len(),
-                    ) else {
+                    );
+                    if let Some(started_at) = continuation_weight_started_at {
+                        self.profile.trie_continuation_weight_ms +=
+                            started_at.elapsed().as_secs_f64() * 1000.0;
+                    }
+                    let Some(continuation_weight) = continuation_weight else {
                         continue;
                     };
                     if continuation_weight.is_empty() {
@@ -1234,6 +1305,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         destination,
                         &continuation_weight,
                     );
+                }
+                if let Some(started_at) = match_process_started_at {
+                    self.profile.trie_match_process_ms +=
+                        started_at.elapsed().as_secs_f64() * 1000.0;
                 }
             }
         }
@@ -1323,6 +1398,7 @@ pub(crate) fn build_nwa_via_trie_walk<'a>(
     vocab_tree_root: &VocabPrefixTreeNode,
     roots: &NodesByTokenizerState,
     possible_matches: &mut PossibleMatchesComputer<'a>,
+    shared_flat_transitions: Option<&'a [u32]>,
     active_terminals: Option<&[bool]>,
 ) -> TerminalDwaBuildProfile {
     let num_tokenizer_states = tokenizer.num_states() as usize;
@@ -1345,14 +1421,17 @@ pub(crate) fn build_nwa_via_trie_walk<'a>(
         None,
         active_terminals.map(|a| a.to_vec()),
         num_tokenizer_states,
+        shared_flat_transitions,
     );
     let trie_start = std::time::Instant::now();
     builder.build_from_trie(vocab_tree_root, roots);
     let trie_ms = trie_start.elapsed().as_secs_f64() * 1000.0;
+    builder.profile.trie_walk_ms = trie_ms;
 
     let flush_start = std::time::Instant::now();
     builder.flush_transition_buffer();
     let flush_ms = flush_start.elapsed().as_secs_f64() * 1000.0;
+    builder.profile.flush_ms = flush_ms;
 
     let profile = builder.profile;
     // Drop builder to release the mutable borrow on nwa before reading nwa.states.
@@ -1378,6 +1457,7 @@ mod tests {
     use crate::compiler::stages::id_map_and_terminal_dwa::types::{
         LocalIdMapTerminalDwa, TerminalDwaPhaseProfile,
     };
+    use crate::compiler::stages::id_map_and_terminal_dwa::l2p::terminal_dwa_equivalence::compare as compare_terminal_dwa;
     use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 
     fn one_terminal_tokenizer() -> Tokenizer {
@@ -1410,6 +1490,7 @@ mod tests {
             None,
             None,
             tokenizer.num_states() as usize,
+            None,
         );
         builder.add_match_from_sources(
             &[initial_source, later_source],
@@ -1548,6 +1629,15 @@ mod tests {
         tree: &VocabPrefixTree,
         id_map: &InternalIdMap,
     ) -> LocalIdMapTerminalDwa {
+        build_baseline_test_artifact_with_self_loop_skip(tokenizer, tree, id_map, false)
+    }
+
+    fn build_baseline_test_artifact_with_self_loop_skip(
+        tokenizer: &Tokenizer,
+        tree: &VocabPrefixTree,
+        id_map: &InternalIdMap,
+        self_loop_subtree_skip_enabled: bool,
+    ) -> LocalIdMapTerminalDwa {
         let mut possible_matches = PossibleMatchesComputer::new(tokenizer);
         let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
         let leaf = nwa.add_state();
@@ -1555,20 +1645,72 @@ mod tests {
         let start = nwa.add_state();
         nwa.start_states_mut().push(start);
         let roots = seed_root_nodes(tokenizer, &mut nwa, start, id_map);
-        build_nwa_via_trie_walk(
+        let mut initial_source_states = vec![false; nwa.states().len()];
+        for (_, source_nodes) in roots.iter() {
+            for &source in source_nodes {
+                initial_source_states[source as usize] = true;
+            }
+        }
+        let mut builder = TerminalNwaBuilder::new(
             tokenizer,
-            &TerminalColoring::identity(tokenizer.num_terminals() as usize),
+            TerminalColoring::identity(tokenizer.num_terminals() as usize),
+            &mut possible_matches,
+            &mut nwa,
+            id_map.num_tsids(),
+            leaf,
+            None,
+            initial_source_states,
             false,
             None,
-            &mut nwa,
-            leaf,
-            id_map.num_tsids(),
-            &tree.root,
-            &roots,
-            &mut possible_matches,
+            None,
+            tokenizer.num_states() as usize,
             None,
         );
+        builder.self_loop_subtree_skip_enabled = self_loop_subtree_skip_enabled;
+        builder.build_from_trie(&tree.root, &roots);
+        builder.flush_transition_buffer();
+        drop(builder);
         finish_test_artifact(&nwa, id_map.clone())
+    }
+
+    #[test]
+    fn self_loop_subtree_skip_matches_exact_recursive_walk() {
+        let expressions = vec![
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 1,
+                max: None,
+            },
+            Expr::U8Seq(b"ac".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let tree = VocabPrefixTree::build(&[
+            (0, b"aa".to_vec()),
+            (1, b"ab".to_vec()),
+            (2, b"aba".to_vec()),
+            (3, b"abb".to_vec()),
+            (4, b"ac".to_vec()),
+        ]);
+        let id_map = singleton_id_map(tokenizer.num_states(), 5);
+
+        let exact = build_baseline_test_artifact_with_self_loop_skip(
+            &tokenizer,
+            &tree,
+            &id_map,
+            false,
+        );
+        let skipped = build_baseline_test_artifact_with_self_loop_skip(
+            &tokenizer,
+            &tree,
+            &id_map,
+            true,
+        );
+
+        compare_terminal_dwa(&exact, &skipped)
+            .expect("self-loop subtree skip must preserve the exact terminal artifact language");
     }
 
     fn build_transport_test_artifact(
@@ -2852,6 +2994,7 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
         None,
         None,
         tokenizer.num_states() as usize,
+        None,
     );
     let mut builder = TransportNwaBuilder {
         base,

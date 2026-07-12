@@ -2579,6 +2579,10 @@ const COMPACT_DFA_MIN_WORK: usize = 10_000_000;
 const INPUT_VIEW_COMPACT_MIN_STATES: usize = 512;
 const INPUT_VIEW_COMPACT_MAX_RATIO: f64 = 0.85;
 const INPUT_VIEW_COMPACT_MAX_TOKENS: usize = 16;
+const SINGLETON_PROBE_MAX_TOKENS: usize = 64;
+const SINGLETON_PROBE_STATES: usize = 16;
+const PRE_DFA_SINGLETON_PROBE_MIN_INITIAL_STATES: usize = 64;
+const PRE_DFA_SINGLETON_PROBE_MIN_WORK: usize = 8_192;
 
 /// Restrict a tokenizer view to exactly the states reachable from the state
 /// representatives and lexer start along bytes that appear in `strings`.
@@ -2680,6 +2684,269 @@ fn compact_tokenizer_view_for_tokens<S: AsRef<[u8]>>(
         compact_initial,
         compact_to_original,
     ))
+}
+
+fn raw_states_by_transition_diversity<S: AsRef<[u8]>>(
+    tokenizer: &TokenizerView,
+    initial_states: &[usize],
+    strings: &[S],
+) -> Vec<usize> {
+    let mut relevant_bytes = U8Set::empty();
+    for string in strings {
+        for &byte in string.as_ref() {
+            relevant_bytes.insert(byte);
+        }
+    }
+    let source = tokenizer.dfa();
+    let mut ranked = initial_states
+        .iter()
+        .copied()
+        .map(|state| {
+            let mut targets = SmallVec::<[u32; 64]>::new();
+            for byte in relevant_bytes.iter() {
+                let target = source.trans(state, byte as usize);
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
+            }
+            (state, targets.len())
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_unstable_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    ranked.into_iter().map(|(state, _)| state).collect()
+}
+
+/// Build exactly the finite scanner subgraph observed by `token_signature` for
+/// `initial_states` and `strings`.
+///
+/// Whole-token execution starts at each witness state. Match continuations are
+/// summarized by `run_suffix`, which restarts from the tokenizer start at a
+/// suffix position of the same token. No other byte sequence is observed by
+/// the signature algorithm, so arbitrary closure under the union of token
+/// bytes would add irrelevant cross-product states.
+fn finite_token_probe_view<S: AsRef<[u8]>>(
+    tokenizer: &TokenizerView,
+    initial_states: &[usize],
+    strings: &[S],
+) -> (TokenizerView, Vec<usize>) {
+    let source = tokenizer.dfa();
+    let mut reached = vec![false; source.states.len()];
+    let mut compact_to_original = Vec::new();
+    let visit = |state: usize, reached: &mut [bool], compact_to_original: &mut Vec<usize>| {
+        if !reached[state] {
+            reached[state] = true;
+            compact_to_original.push(state);
+        }
+    };
+
+    visit(source.start_state, &mut reached, &mut compact_to_original);
+    for &initial in initial_states {
+        visit(initial, &mut reached, &mut compact_to_original);
+        for string in strings {
+            let mut state = initial;
+            for &byte in string.as_ref() {
+                let target = source.trans(state, byte as usize);
+                if target == NONE {
+                    break;
+                }
+                state = target as usize;
+                visit(state, &mut reached, &mut compact_to_original);
+            }
+        }
+    }
+    for string in strings {
+        let bytes = string.as_ref();
+        for suffix_start in 0..bytes.len() {
+            let mut state = source.start_state;
+            for &byte in &bytes[suffix_start..] {
+                let target = source.trans(state, byte as usize);
+                if target == NONE {
+                    break;
+                }
+                state = target as usize;
+                visit(state, &mut reached, &mut compact_to_original);
+            }
+        }
+    }
+
+    compact_to_original.sort_unstable();
+    let mut original_to_compact = vec![NONE; source.states.len()];
+    for (compact, &original) in compact_to_original.iter().enumerate() {
+        original_to_compact[original] = compact as u32;
+    }
+
+    let mut queried_edges = vec![U8Set::empty(); source.states.len()];
+    for &initial in initial_states {
+        for string in strings {
+            let mut state = initial;
+            for &byte in string.as_ref() {
+                queried_edges[state].insert(byte);
+                let target = source.trans(state, byte as usize);
+                if target == NONE {
+                    break;
+                }
+                state = target as usize;
+            }
+        }
+    }
+    for string in strings {
+        let bytes = string.as_ref();
+        for suffix_start in 0..bytes.len() {
+            let mut state = source.start_state;
+            for &byte in &bytes[suffix_start..] {
+                queried_edges[state].insert(byte);
+                let target = source.trans(state, byte as usize);
+                if target == NONE {
+                    break;
+                }
+                state = target as usize;
+            }
+        }
+    }
+
+    let mut transitions = vec![NONE; compact_to_original.len() * 256];
+    let states = compact_to_original
+        .iter()
+        .enumerate()
+        .map(|(compact, &original)| {
+            let base = compact * 256;
+            for byte in queried_edges[original].iter() {
+                let target = source.trans(original, byte as usize);
+                if target != NONE {
+                    let mapped = original_to_compact[target as usize];
+                    debug_assert_ne!(mapped, NONE, "queried token trajectory target omitted");
+                    transitions[base + byte as usize] = mapped;
+                }
+            }
+            source.states[original].clone()
+        })
+        .collect();
+    let compact_initial = initial_states
+        .iter()
+        .map(|&state| original_to_compact[state] as usize)
+        .collect();
+    let start_state = original_to_compact[source.start_state] as usize;
+
+    (
+        TokenizerView {
+            flat_dfa: FlatDfa {
+                states,
+                start_state,
+                transitions: Arc::from(transitions),
+            },
+        },
+        compact_initial,
+    )
+}
+
+fn token_signatures_for_states<S: AsRef<[u8]>>(
+    dfa: &Dfa,
+    strings: &[S],
+    states: &[usize],
+) -> Vec<u64> {
+    let state_group_size = vocab_state_group_size(states.len(), dfa.num_groups);
+    let mut scratch = Scratch::new(states.len(), dfa.num_groups);
+    strings
+        .iter()
+        .map(|token| {
+            token_signature(
+                dfa,
+                token.as_ref(),
+                states,
+                state_group_size,
+                &mut scratch,
+                false,
+            )
+        })
+        .collect()
+}
+
+fn token_signatures_are_pairwise_distinct<S: AsRef<[u8]>>(
+    dfa: &Dfa,
+    strings: &[S],
+    states: &[usize],
+) -> bool {
+    let mut seen = HashMap::<u64, usize>::with_capacity(strings.len());
+    token_signatures_for_states(dfa, strings, states)
+        .into_iter()
+        .enumerate()
+        .all(|(token_idx, signature)| seen.insert(signature, token_idx).is_none())
+}
+
+/// Try to prove identity before constructing the full analysis DFA. A subset of
+/// initial states is a sound distinguishing witness: adding states can only
+/// refine token classes, never merge two signatures that already differ.
+fn try_pre_dfa_singleton_identity_probe<S: AsRef<[u8]>>(
+    tokenizer: &TokenizerView,
+    strings: &[S],
+    initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    active_groups: Option<&[bool]>,
+    profiling: bool,
+) -> Option<(VocabEquivalenceResult, f64)> {
+    if strings.is_empty()
+        || strings.len() > SINGLETON_PROBE_MAX_TOKENS
+        || initial_states.len() < PRE_DFA_SINGLETON_PROBE_MIN_INITIAL_STATES
+        || initial_states.len().saturating_mul(strings.len())
+            < PRE_DFA_SINGLETON_PROBE_MIN_WORK
+        || tokenizer.dfa().states.len() < INPUT_VIEW_COMPACT_MIN_STATES
+    {
+        return None;
+    }
+
+    let started_at = Instant::now();
+    let state_order_started_at = profiling.then(Instant::now);
+    let mut probe_states = raw_states_by_transition_diversity(tokenizer, initial_states, strings);
+    probe_states.truncate(SINGLETON_PROBE_STATES);
+    let state_order_ms = state_order_started_at
+        .map_or(0.0, |started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+
+    let view_started_at = profiling.then(Instant::now);
+    let (probe_view, probe_initial) = finite_token_probe_view(tokenizer, &probe_states, strings);
+    let view_ms = view_started_at
+        .map_or(0.0, |started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+
+    let build_started_at = Instant::now();
+    let probe_dfa = build_dfa_with_group_filter(
+        &probe_view,
+        disallowed_follows,
+        None,
+        active_groups,
+        None,
+    );
+    let build_dfa_ms = build_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let signature_started_at = profiling.then(Instant::now);
+    let distinct =
+        token_signatures_are_pairwise_distinct(&probe_dfa, strings, &probe_initial);
+    let signature_ms = signature_started_at
+        .map_or(0.0, |started_at| started_at.elapsed().as_secs_f64() * 1000.0);
+
+    if profiling {
+        eprintln!(
+            "[glrmask/profile][vocab_identity_probe] strings={} probe_states={} finite_states={} distinct={} state_order_ms={:.3} view_ms={:.3} build_dfa_ms={:.3} signature_ms={:.3} total_ms={:.3}",
+            strings.len(),
+            probe_states.len(),
+            probe_view.dfa().states.len(),
+            distinct,
+            state_order_ms,
+            view_ms,
+            build_dfa_ms,
+            signature_ms,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    if !distinct {
+        return None;
+    }
+
+    Some(((0..strings.len()).map(|token| vec![token]).collect(), build_dfa_ms))
 }
 
 /// Build a compact DFA containing only states reachable from `initial_states`
@@ -2833,6 +3100,16 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     };
 
     let total_started_at = profiling.then(Instant::now);
+    if let Some(identity) = try_pre_dfa_singleton_identity_probe(
+        tokenizer,
+        strings,
+        initial_states,
+        disallowed_follows,
+        active_groups,
+        profiling,
+    ) {
+        return identity;
+    }
     let build_dfa_started_at = Instant::now();
     let input_compacted = if shared_analysis_dfa_cache.is_none()
         && shared_cache.is_none()
@@ -2975,13 +3252,29 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     let mut single_thread_scratch = single_threaded.then(|| Scratch::new(batch_size, num_groups));
     let mut single_thread_trie = single_threaded.then(TrieWalkState::new);
 
-    for (_batch_index, batch_start) in (0..num_initial_states).step_by(batch_size).enumerate() {
+    // Small vocabularies often become provably singleton after observing only a
+    // handful of high-diversity states. Start with a tiny witness batch, then
+    // fall back to the normal large batches for any classes that remain
+    // unresolved. A distinction found in the probe is permanent under further
+    // refinement, so reaching `active_indices.is_empty()` is an exact identity
+    // certificate, not a heuristic early exit.
+    let use_singleton_probe = num_tokens <= SINGLETON_PROBE_MAX_TOKENS
+        && num_initial_states > SINGLETON_PROBE_STATES
+        && batch_size > SINGLETON_PROBE_STATES;
+    let mut batch_start = 0usize;
+    let mut batch_index = 0usize;
+    while batch_start < num_initial_states {
         if active_indices.is_empty() {
             break;
         }
         batches += 1;
 
-        let batch_end = (batch_start + batch_size).min(num_initial_states);
+        let current_batch_size = if batch_index == 0 && use_singleton_probe {
+            SINGLETON_PROBE_STATES
+        } else {
+            batch_size
+        };
+        let batch_end = (batch_start + current_batch_size).min(num_initial_states);
         let batch = &ordered_states[batch_start..batch_end];
         let state_group_size = vocab_state_group_size(batch.len(), num_groups);
         let use_trie_walk = active_indices.len() >= TRIE_WALK_MIN_TOKENS
@@ -3122,6 +3415,8 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
         }
         active_indices = new_active;
         refinement_ms += elapsed_ms(refinement_started_at);
+        batch_start = batch_end;
+        batch_index += 1;
     }
 
     let final_groups_started_at = profiling.then(Instant::now);
@@ -3298,6 +3593,43 @@ mod shared_base_tests {
         transitions.resize(target_state_count * 256, u32::MAX);
         dfa.transitions = Arc::from(transitions);
         dfa
+    }
+
+    #[test]
+    fn finite_token_probe_view_preserves_exact_witness_signatures() {
+        let view = TokenizerView {
+            flat_dfa: padded_sample_dfa(),
+        };
+        let tokens: Vec<&[u8]> = vec![b"a", b"b", b"aa", b"ba"];
+        let initial_states = vec![0usize, 1, 2];
+        let disallowed = BTreeMap::<u32, BitSet>::new();
+        let full = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
+        let (probe_view, probe_initial) =
+            finite_token_probe_view(&view, &initial_states, &tokens);
+        let probe =
+            build_dfa_with_group_filter(&probe_view, &disallowed, None, None, None);
+
+        assert_eq!(
+            token_signatures_for_states(&probe, &tokens, &probe_initial),
+            token_signatures_for_states(&full, &tokens, &initial_states),
+        );
+    }
+
+    #[test]
+    fn singleton_identity_probe_requires_pairwise_distinct_signatures() {
+        let view = TokenizerView { flat_dfa: sample_dfa() };
+        let disallowed = BTreeMap::<u32, BitSet>::new();
+        let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
+        let states = vec![0usize, 1, 2];
+        let distinct: Vec<&[u8]> = vec![b"a", b"b"];
+        let collided: Vec<&[u8]> = vec![b"a", b"a"];
+
+        assert!(token_signatures_are_pairwise_distinct(
+            &dfa, &distinct, &states,
+        ));
+        assert!(!token_signatures_are_pairwise_distinct(
+            &dfa, &collided, &states,
+        ));
     }
 
     #[test]
