@@ -391,23 +391,19 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // propagation for this vocabulary partition. TI consumes exactly this
     // directional member-to-representative substitution property; members of a
     // C class need not be pairwise interchangeable as raw DFA states.
-    let global_state_quotient = (l2p_global_token_position_enabled()
-        && matches!(partition_label, "p7" | "p8"))
-        .then(|| {
-            equivalence_analysis::state_equivalence::global_token_position::
-                compute_global_token_position_state_quotient(tokenizer, vocab)
-                .0
-        });
-    // The token-position representative partition is also consumed by the
-    // representative-core equivalence-analysis path below; keep computing it
-    // for that consumer.
-    let token_position_partition = (l2p_global_token_position_enabled()
-        && matches!(partition_label, "p7" | "p8"))
-        .then(|| {
-            equivalence_analysis::state_equivalence::global_token_position::
-                compute_global_token_position_state_partition(tokenizer, vocab)
-        })
-        .flatten();
+    // The pre-TI quotient and representative-core token-position partition are
+    // two wrappers over the same C map. Build the positional analysis once.
+    let (global_state_quotient, token_position_partition) =
+        if l2p_global_token_position_enabled() && matches!(partition_label, "p7" | "p8") {
+            match equivalence_analysis::state_equivalence::global_token_position::
+                compute_global_token_position_state_views(tokenizer, vocab)
+            {
+                Some((quotient, partition, _profile)) => (Some(quotient), Some(partition)),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
     let token_position_partition_ms = token_position_partition_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);

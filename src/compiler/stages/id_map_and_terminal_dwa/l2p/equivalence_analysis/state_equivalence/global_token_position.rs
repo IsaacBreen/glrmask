@@ -839,6 +839,47 @@ pub(crate) fn compute_global_token_position_state_partition(
     .map(|(map, _)| GlobalTokenPositionStatePartition { map })
 }
 
+/// Build both production views of partition C from one positional analysis.
+///
+/// The quotient and token-position partition wrap the same total raw-state map.
+/// Consumers that need both must use this entry point rather than independently
+/// rebuilding C through the two legacy wrappers below.
+pub(crate) fn compute_global_token_position_state_views(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+) -> Option<(
+    GlobalScannerStateQuotient,
+    GlobalTokenPositionStatePartition,
+    GlobalTokenPositionEquivalenceProfile,
+)> {
+    let started_at = Instant::now();
+    let state_count = tokenizer.num_states() as usize;
+    let (map, mut profile) = compute_global_token_position_map_with_tail_start(
+        tokenizer,
+        vocab,
+        configured_tail_start_position(),
+    )?;
+    let partition = GlobalTokenPositionStatePartition { map: map.clone() };
+    let quotient = GlobalScannerStateQuotient::from_total_raw_state_map(map, state_count);
+    profile.total_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+        eprintln!(
+            "[glrmask/profile][global_token_position_quotient] raw_states={} tail_start={} position_bytes={:?} position_active_states={:?} position_classes={:?} tail_bytes={} tail_active_states={} classes={} build_ms={:.3} total_ms={:.3}",
+            state_count,
+            profile.tail_start_position,
+            profile.position_byte_counts,
+            profile.position_active_state_counts,
+            profile.position_class_counts,
+            profile.tail_byte_count,
+            profile.tail_active_state_count,
+            profile.class_count,
+            profile.build_ms,
+            profile.total_ms,
+        );
+    }
+    Some((quotient, partition, profile))
+}
+
 /// Wrap global token-position map C for the pre-TI pipeline.
 pub(crate) fn compute_global_token_position_state_quotient(
     tokenizer: &Tokenizer,
