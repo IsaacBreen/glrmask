@@ -7,6 +7,7 @@ use regex_syntax::Parser;
 use crate::import::ast::{GrammarExpr, Quantifier};
 
 use super::ast::StringSchema;
+use super::config::QuoteMerge;
 use super::error::{ImportResult, SchemaImportError};
 use super::split_literal_terminals_enabled;
 use super::lower::{
@@ -27,6 +28,36 @@ fn encoded_json_key_regex(encoded: &str) -> String {
 }
 
 impl<'a> Lowerer<'a> {
+    fn literal_quote_expr(&self) -> GrammarExpr {
+        if split_literal_terminals_enabled() {
+            r(JSON_QUOTE_RULE)
+        } else {
+            lit("\"")
+        }
+    }
+
+    fn quoted_literal_parts(&self, encoded: &[u8], merging: QuoteMerge) -> Vec<GrammarExpr> {
+        debug_assert!(
+            encoded.len() >= 2
+                && encoded.first() == Some(&b'"')
+                && encoded.last() == Some(&b'"')
+        );
+
+        let mut parts = Vec::with_capacity(3);
+        if !merging.merge_open {
+            parts.push(self.literal_quote_expr());
+        }
+        let start = usize::from(!merging.merge_open);
+        let end = encoded.len() - usize::from(!merging.merge_close);
+        if start < end {
+            parts.push(lit_bytes(encoded[start..end].to_vec()));
+        }
+        if !merging.merge_close {
+            parts.push(self.literal_quote_expr());
+        }
+        parts
+    }
+
     pub(crate) fn lower_string(&mut self, schema: &StringSchema) -> ImportResult<GrammarExpr> {
         let should_terminalize_length = schema.max_length.is_none_or(|max_length| {
             !self.should_split_bounded_string(schema.min_length, max_length)
@@ -991,22 +1022,10 @@ impl<'a> Lowerer<'a> {
 
     pub(crate) fn lower_string_literal(&mut self, text: &str) -> GrammarExpr {
         let encoded = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
-        if !split_literal_terminals_enabled() {
-            let body_and_close = encoded
-                .strip_prefix('"')
-                .expect("serde_json string encoding starts with a quote");
-            return seq(vec![lit("\""), lit_bytes(body_and_close.as_bytes().to_vec())]);
-        }
-
-        let bytes = encoded.as_bytes();
-        debug_assert!(bytes.len() >= 2 && bytes.first() == Some(&b'"') && bytes.last() == Some(&b'"'));
-
-        let mut parts = vec![r(JSON_QUOTE_RULE)];
-        if bytes.len() > 2 {
-            parts.push(lit_bytes(bytes[1..bytes.len() - 1].to_vec()));
-        }
-        parts.push(r(JSON_QUOTE_RULE));
-        seq(parts)
+        seq(self.quoted_literal_parts(
+            encoded.as_bytes(),
+            self.config.value_merging.literal,
+        ))
     }
 
     fn literal_key_colon_parts(&self, prefix: &[u8], key: &str) -> Vec<GrammarExpr> {
@@ -1020,11 +1039,20 @@ impl<'a> Lowerer<'a> {
         } else if !prefix.is_empty() {
             parts.push(lit_bytes(prefix.to_vec()));
         }
-        parts.push(r(JSON_QUOTE_RULE));
-        if bytes.len() > 2 {
-            parts.push(lit_bytes(bytes[1..bytes.len() - 1].to_vec()));
+        let merging = self.config.key_merging.literal;
+        if !merging.merge_open {
+            parts.push(r(JSON_QUOTE_RULE));
         }
-        parts.push(r(JSON_KEY_SUFFIX_RULE));
+        let start = usize::from(!merging.merge_open);
+        let end = bytes.len() - usize::from(!merging.merge_close);
+        if start < end {
+            parts.push(lit_bytes(bytes[start..end].to_vec()));
+        }
+        if merging.merge_close {
+            parts.push(r(JSON_KEY_SEPARATOR_RULE));
+        } else {
+            parts.push(r(JSON_KEY_SUFFIX_RULE));
+        }
         parts
     }
 

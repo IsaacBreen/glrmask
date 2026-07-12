@@ -255,13 +255,11 @@ fn start_expr(grammar: &NamedGrammar) -> &GrammarExpr {
 
 fn assert_glrm_has_split_literal_key(glrm: &str, key: &str) {
     assert!(
-        glrm.lines()
-            .any(|line| line.contains(&format!("JSON_QUOTE \"{key}\" JSON_KEY_SUFFIX"))),
+        glrm.lines().any(|line| {
+            line.contains(&format!("\\\"{key}\\\""))
+                && line.contains("JSON_KEY_SEPARATOR")
+        }),
         "{glrm}"
-    );
-    assert!(
-        !glrm.contains(&format!("\\\"{key}\\\": ")),
-        "literal key {key:?} was fused back into one terminal:\n{glrm}"
     );
 }
 
@@ -278,6 +276,7 @@ const SPLIT_LITERAL_TERMINALS_TEST_EXPECTED_ENV: &str =
 
 #[test]
 fn literal_terminal_splitting_env_toggle() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     if env::var_os(SPLIT_LITERAL_TERMINALS_TEST_CHILD_ENV).is_none() {
         for (setting, expected) in [
             (None, false),
@@ -336,9 +335,8 @@ fn literal_terminal_splitting_env_toggle() {
         assert!(!object_grammar.rules.iter().any(|rule| {
             rule.is_terminal && rule.name.starts_with("json_property_string_value")
         }), "{:?}", object_grammar.rules);
-        assert!(contains_ref_named(string_const_expr, "JSON_QUOTE"), "{string_const_expr:?}");
-        assert!(contains_literal_bytes(string_const_expr, b"ready"), "{string_const_expr:?}");
-        assert!(!contains_literal_bytes(string_const_expr, b"ready\""), "{string_const_expr:?}");
+        assert!(!contains_ref_named(string_const_expr, "JSON_QUOTE"), "{string_const_expr:?}");
+        assert!(contains_literal_bytes(string_const_expr, b"\"ready\""), "{string_const_expr:?}");
     } else {
         assert!(!object_glrm.contains("JSON_QUOTE"), "{object_glrm}");
         assert!(!object_glrm.contains("JSON_KEY_SUFFIX"), "{object_glrm}");
@@ -346,7 +344,7 @@ fn literal_terminal_splitting_env_toggle() {
             rule.is_terminal && rule.name.starts_with("json_property_string_value")
         }), "{:?}", object_grammar.rules);
         assert!(!contains_ref_named(string_const_expr, "JSON_QUOTE"), "{string_const_expr:?}");
-        assert!(contains_literal_bytes(string_const_expr, b"ready\""), "{string_const_expr:?}");
+        assert!(contains_literal_bytes(string_const_expr, b"\"ready\""), "{string_const_expr:?}");
     }
 
     lower(&object_grammar).unwrap();
@@ -2142,7 +2140,7 @@ fn object_property_array_opener_keeps_literal_key_boundaries() {
     assert_glrm_has_split_literal_key(&glrm, "items");
     assert!(
         glrm.lines().any(|line| {
-            line.contains("JSON_QUOTE \"items\" JSON_KEY_SUFFIX \"[\"")
+            line.contains("\"\\\"items\\\"\" JSON_KEY_SEPARATOR \"[\"")
         }),
         "{glrm}"
     );
@@ -2188,7 +2186,7 @@ fn object_property_nullable_string_value_keeps_literal_key_boundaries() {
     assert_glrm_has_split_literal_key(&glrm, "name");
     assert!(
         glrm.lines().any(|line| {
-            line.contains("JSON_QUOTE \"name\" JSON_KEY_SUFFIX")
+            line.contains("\"\\\"name\\\"\" JSON_KEY_SEPARATOR")
                 && line.contains("\"null\"")
         }),
         "{glrm}"
@@ -2391,7 +2389,7 @@ fn object_property_null_value_keeps_literal_key_boundaries() {
     assert_glrm_has_split_literal_key(&glrm, "name");
     assert!(
         glrm.lines().any(|line| {
-            line.contains("JSON_QUOTE \"name\" JSON_KEY_SUFFIX \"null\"")
+            line.contains("\"\\\"name\\\"\" JSON_KEY_SEPARATOR \"null\"")
         }),
         "{glrm}"
     );
@@ -3083,11 +3081,10 @@ fn prefix_items_lower_with_no_tail() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let expr = start_expr(&grammar);
-    assert!(contains_literal_bytes(expr, b"\""), "{expr:?}");
-    assert!(contains_literal_bytes(expr, b"a\""), "{expr:?}");
-    assert!(contains_literal_bytes(expr, b"b\""), "{expr:?}");
-    assert!(!contains_literal_bytes(expr, b"\"a\""), "{expr:?}");
-    assert!(!contains_literal_bytes(expr, b"\"b\""), "{expr:?}");
+    assert!(contains_literal_bytes(expr, b"\"a\""), "{expr:?}");
+    assert!(contains_literal_bytes(expr, b"\"b\""), "{expr:?}");
+    assert!(!contains_literal_bytes(expr, b"a\""), "{expr:?}");
+    assert!(!contains_literal_bytes(expr, b"b\""), "{expr:?}");
     lower(&grammar).unwrap();
 }
 
@@ -3105,9 +3102,8 @@ fn legacy_tuple_items_use_additional_items_tail() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let expr = start_expr(&grammar);
-    assert!(contains_literal_bytes(expr, b"\""), "{expr:?}");
-    assert!(contains_literal_bytes(expr, b"head\""), "{expr:?}");
-    assert!(!contains_literal_bytes(expr, b"\"head\""), "{expr:?}");
+    assert!(contains_literal_bytes(expr, b"\"head\""), "{expr:?}");
+    assert!(!contains_literal_bytes(expr, b"head\""), "{expr:?}");
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("JSON_INTEGER") || glrm.contains("JSON_NUMBER"), "{glrm}");
     lower(&grammar).unwrap();
@@ -5493,22 +5489,52 @@ fn enum_and_const_lower_to_exact_json_literals() {
     let glrm = to_glrm(&grammar);
     assert!(glrm.contains("\"null\""), "{glrm}");
     assert!(glrm.contains("\"true\""), "{glrm}");
-    assert!(glrm.contains("JSON_QUOTE \"ready\" JSON_QUOTE"), "{glrm}");
+    assert!(glrm.contains("\"\\\"ready\\\"\""), "{glrm}");
     assert!(glrm.contains("\"7\""), "{glrm}");
 }
 
 #[test]
-fn string_const_keeps_both_quotes_separate_from_literal_body() {
+fn string_const_merges_quotes_into_literal_terminal_by_default() {
     enable_split_literal_terminals_for_test!();
     let schema = json!({"const": "ready"});
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let expr = start_expr(&grammar);
 
-    assert!(contains_ref_named(expr, "JSON_QUOTE"), "{expr:?}");
-    assert!(contains_literal_bytes(expr, b"ready"), "{expr:?}");
-    assert!(!contains_literal_bytes(expr, b"ready\""), "{expr:?}");
-    assert!(!contains_literal_bytes(expr, b"\"ready\""), "{expr:?}");
+    assert!(!contains_ref_named(expr, "JSON_QUOTE"), "{expr:?}");
+    assert!(contains_literal_bytes(expr, b"\"ready\""), "{expr:?}");
     lower(&grammar).unwrap();
+}
+
+#[test]
+fn literal_quote_merge_env_overrides_remain_effective() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    enable_split_literal_terminals_for_test!();
+    let _value_open = EnvVarGuard::set(
+        "GLRMASK_JSON_SCHEMA_LITERAL_VALUE_MERGE_OPEN",
+        "0",
+    );
+    let _key_open = EnvVarGuard::set(
+        "GLRMASK_JSON_SCHEMA_LITERAL_KEY_MERGE_OPEN",
+        "0",
+    );
+
+    let string_const = schema_to_named_grammar(&json!({"const": "ready"})).unwrap();
+    let string_expr = start_expr(&string_const);
+    assert!(contains_ref_named(string_expr, "JSON_QUOTE"), "{string_expr:?}");
+    assert!(contains_literal_bytes(string_expr, b"ready\""), "{string_expr:?}");
+
+    let object = schema_to_named_grammar(&json!({
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+        "additionalProperties": false
+    }))
+    .unwrap();
+    let glrm = to_glrm(&object);
+    assert!(
+        glrm.contains("JSON_QUOTE \"name\\\"\" JSON_KEY_SEPARATOR"),
+        "{glrm}"
+    );
 }
 
 #[test]

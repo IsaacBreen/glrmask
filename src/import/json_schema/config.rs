@@ -38,6 +38,7 @@ pub(crate) struct ObjectMergeConfig {
 impl Default for JsonSchemaConfig {
     fn default() -> Self {
         let split_open_merge_close = QuoteMerge { merge_open: false, merge_close: true };
+        let merge_both_quotes = QuoteMerge { merge_open: true, merge_close: true };
         let merge_open_split_close = QuoteMerge { merge_open: true, merge_close: false };
         Self {
             llguidance_compat: false,
@@ -58,12 +59,12 @@ impl Default for JsonSchemaConfig {
             pattern_max_length_complexity_limit: 8_000,
             value_merging: MergeFamily {
                 generic: split_open_merge_close,
-                literal: split_open_merge_close,
+                literal: merge_both_quotes,
                 pattern: merge_open_split_close,
             },
             key_merging: MergeFamily {
                 generic: split_open_merge_close,
-                literal: split_open_merge_close,
+                literal: merge_both_quotes,
                 pattern: split_open_merge_close,
             },
             object_merging: ObjectMergeConfig { closed_objects: false, open_objects: false },
