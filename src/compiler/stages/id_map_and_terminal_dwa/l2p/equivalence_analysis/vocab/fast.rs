@@ -2975,13 +2975,31 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     let mut single_thread_scratch = single_threaded.then(|| Scratch::new(batch_size, num_groups));
     let mut single_thread_trie = single_threaded.then(TrieWalkState::new);
 
-    for (_batch_index, batch_start) in (0..num_initial_states).step_by(batch_size).enumerate() {
+    // Small vocabularies often become provably singleton after observing only a
+    // handful of high-diversity states. Start with a tiny witness batch, then
+    // fall back to the normal large batches for any classes that remain
+    // unresolved. A distinction found in the probe is permanent under further
+    // refinement, so reaching `active_indices.is_empty()` is an exact identity
+    // certificate, not a heuristic early exit.
+    const SINGLETON_PROBE_MAX_TOKENS: usize = 64;
+    const SINGLETON_PROBE_STATES: usize = 16;
+    let use_singleton_probe = num_tokens <= SINGLETON_PROBE_MAX_TOKENS
+        && num_initial_states > SINGLETON_PROBE_STATES
+        && batch_size > SINGLETON_PROBE_STATES;
+    let mut batch_start = 0usize;
+    let mut batch_index = 0usize;
+    while batch_start < num_initial_states {
         if active_indices.is_empty() {
             break;
         }
         batches += 1;
 
-        let batch_end = (batch_start + batch_size).min(num_initial_states);
+        let current_batch_size = if batch_index == 0 && use_singleton_probe {
+            SINGLETON_PROBE_STATES
+        } else {
+            batch_size
+        };
+        let batch_end = (batch_start + current_batch_size).min(num_initial_states);
         let batch = &ordered_states[batch_start..batch_end];
         let state_group_size = vocab_state_group_size(batch.len(), num_groups);
         let use_trie_walk = active_indices.len() >= TRIE_WALK_MIN_TOKENS
@@ -3122,6 +3140,8 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
         }
         active_indices = new_active;
         refinement_ms += elapsed_ms(refinement_started_at);
+        batch_start = batch_end;
+        batch_index += 1;
     }
 
     let final_groups_started_at = profiling.then(Instant::now);
