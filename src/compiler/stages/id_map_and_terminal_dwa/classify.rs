@@ -9,6 +9,8 @@ use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::Vocab;
 
+use super::l2p::equivalence_analysis::compat::FlatDfa;
+use super::l2p::equivalence_analysis::state_equivalence::nfa::build_bounded_analysis_view;
 use super::types::TerminalPathLength;
 
 /// DFA-derived byte sets for terminal classification, identical across partitions.
@@ -1202,6 +1204,136 @@ fn token_has_exact_active_l2p_boundary(
     false
 }
 
+trait ExactBoundaryDeterministicScanner {
+    fn num_states(&self) -> usize;
+    fn start_state(&self) -> u32;
+    fn transition(&self, state: u32, byte: u8) -> u32;
+    fn has_finalizers(&self, state: u32) -> bool;
+    fn for_each_finalizer(&self, state: u32, visit: impl FnMut(usize));
+    fn finalizers_intersect(&self, state: u32, terminals: &BitSet) -> bool;
+    fn futures_intersect(&self, state: u32, terminals: &BitSet) -> bool;
+}
+
+struct RawExactBoundaryScanner<'a> {
+    tokenizer: &'a Tokenizer,
+    flat_trans: &'a [u32],
+}
+
+impl ExactBoundaryDeterministicScanner for RawExactBoundaryScanner<'_> {
+    #[inline]
+    fn num_states(&self) -> usize {
+        self.tokenizer.num_states() as usize
+    }
+
+    #[inline]
+    fn start_state(&self) -> u32 {
+        self.tokenizer.initial_state_id()
+    }
+
+    #[inline]
+    fn transition(&self, state: u32, byte: u8) -> u32 {
+        self.flat_trans[state as usize * 256 + byte as usize]
+    }
+
+    #[inline]
+    fn has_finalizers(&self, state: u32) -> bool {
+        !self.tokenizer.matched_terminal_bitset(state).is_empty()
+    }
+
+    #[inline]
+    fn for_each_finalizer(&self, state: u32, mut visit: impl FnMut(usize)) {
+        for terminal in self.tokenizer.matched_terminals_iter(state) {
+            visit(terminal as usize);
+        }
+    }
+
+    #[inline]
+    fn finalizers_intersect(&self, state: u32, terminals: &BitSet) -> bool {
+        !self.tokenizer.matched_terminal_bitset(state).is_disjoint(terminals)
+    }
+
+    #[inline]
+    fn futures_intersect(&self, state: u32, terminals: &BitSet) -> bool {
+        !self.tokenizer.possible_future_terminals(state).is_disjoint(terminals)
+    }
+}
+
+struct FlatExactBoundaryScanner<'a> {
+    dfa: &'a FlatDfa,
+}
+
+impl ExactBoundaryDeterministicScanner for FlatExactBoundaryScanner<'_> {
+    #[inline]
+    fn num_states(&self) -> usize {
+        self.dfa.states.len()
+    }
+
+    #[inline]
+    fn start_state(&self) -> u32 {
+        self.dfa.start_state as u32
+    }
+
+    #[inline]
+    fn transition(&self, state: u32, byte: u8) -> u32 {
+        self.dfa.trans(state as usize, byte as usize)
+    }
+
+    #[inline]
+    fn has_finalizers(&self, state: u32) -> bool {
+        !self.dfa.states[state as usize].finalizers.is_empty()
+    }
+
+    #[inline]
+    fn for_each_finalizer(&self, state: u32, mut visit: impl FnMut(usize)) {
+        for &terminal in &self.dfa.states[state as usize].finalizers {
+            visit(terminal);
+        }
+    }
+
+    #[inline]
+    fn finalizers_intersect(&self, state: u32, terminals: &BitSet) -> bool {
+        self.dfa.states[state as usize]
+            .finalizers
+            .iter()
+            .any(|&terminal| terminals.contains(terminal))
+    }
+
+    #[inline]
+    fn futures_intersect(&self, state: u32, terminals: &BitSet) -> bool {
+        self.dfa.states[state as usize]
+            .possible_future_group_ids
+            .iter()
+            .any(|&terminal| terminals.contains(terminal))
+    }
+}
+
+fn build_exact_boundary_transition_index(
+    state_major_transitions: &[u32],
+    num_states: usize,
+) -> (Vec<u32>, Vec<Vec<(u32, u32)>>, Vec<ReverseByteTransitions>) {
+    assert_eq!(state_major_transitions.len(), num_states * 256);
+    let mut transitions_by_byte = vec![u32::MAX; num_states * 256];
+    let mut sparse_transitions_by_byte = vec![Vec::<(u32, u32)>::new(); 256];
+    for state in 0..num_states {
+        let state_base = state * 256;
+        for byte in 0..256usize {
+            let target = state_major_transitions[state_base + byte];
+            if target == u32::MAX {
+                continue;
+            }
+            transitions_by_byte[byte * num_states + state] = target;
+            sparse_transitions_by_byte[byte].push((state as u32, target));
+        }
+    }
+    let reverse_transitions_by_byte =
+        build_reverse_transitions_by_byte(&sparse_transitions_by_byte, num_states);
+    (
+        transitions_by_byte,
+        sparse_transitions_by_byte,
+        reverse_transitions_by_byte,
+    )
+}
+
 #[derive(Default)]
 struct ExactBoundaryPrefixNode {
     children: Vec<(u8, usize)>,
@@ -1227,8 +1359,8 @@ fn insert_exact_boundary_prefix(
     child
 }
 
-fn populate_exact_boundary_prefixes(
-    tokenizer: &Tokenizer,
+fn populate_exact_boundary_prefixes<S: ExactBoundaryDeterministicScanner>(
+    scanner: &S,
     transitions_by_byte: &[u32],
     sparse_transitions_by_byte: &[Vec<(u32, u32)>],
     reverse_transitions_by_byte: &[ReverseByteTransitions],
@@ -1246,7 +1378,6 @@ fn populate_exact_boundary_prefixes(
     states_scanned: &mut usize,
     reached_states: &mut usize,
     finalizer_terminals_scanned: &mut usize,
-    has_matched_terminal_by_state: &[u8],
     allowed_class_by_terminal: &[Option<usize>],
     allowed_follow_classes: &[BitSet],
     matched_classes: &mut Vec<usize>,
@@ -1254,8 +1385,9 @@ fn populate_exact_boundary_prefixes(
     source_seen_by_depth: &mut Vec<Vec<u32>>,
     source_stamps: &mut Vec<u32>,
 ) {
+    let num_states = scanner.num_states();
     let child_count = nodes[node].children.len();
-    let frontier_is_dense = current_states.len() * 4 >= tokenizer.num_states() as usize;
+    let frontier_is_dense = current_states.len() * 4 >= num_states;
     let source_stamp = if nodes[node]
         .children
         .iter()
@@ -1267,9 +1399,7 @@ fn populate_exact_boundary_prefixes(
         })
     {
         if source_seen_by_depth.len() <= depth {
-            source_seen_by_depth.resize_with(depth + 1, || {
-                vec![0u32; tokenizer.num_states() as usize]
-            });
+            source_seen_by_depth.resize_with(depth + 1, || vec![0u32; num_states]);
             source_stamps.resize(depth + 1, 0);
         }
         let source_seen = &mut source_seen_by_depth[depth];
@@ -1339,8 +1469,7 @@ fn populate_exact_boundary_prefixes(
             } else {
             *states_scanned += current_states.len();
             let transition_column =
-                &transitions_by_byte[byte as usize * tokenizer.num_states() as usize
-                    ..(byte as usize + 1) * tokenizer.num_states() as usize];
+                &transitions_by_byte[byte as usize * num_states..(byte as usize + 1) * num_states];
             for &state in current_states {
                 let next = transition_column[state as usize];
                 if next == u32::MAX {
@@ -1369,16 +1498,15 @@ fn populate_exact_boundary_prefixes(
         }
         matched_classes.clear();
         for &state in &next_states {
-            if has_matched_terminal_by_state[state as usize] == 0 {
+            if !scanner.has_finalizers(state) {
                 continue;
             }
-            for terminal in tokenizer.matched_terminals_iter(state) {
+            scanner.for_each_finalizer(state, |terminal| {
                 *finalizer_terminals_scanned += 1;
-                let terminal = terminal as usize;
                 if !active_bitset.contains(terminal)
                     || terminal_seen[terminal] == *terminal_stamp
                 {
-                    continue;
+                    return;
                 }
                 terminal_seen[terminal] = *terminal_stamp;
                 if let Some(class) = allowed_class_by_terminal[terminal] {
@@ -1387,7 +1515,7 @@ fn populate_exact_boundary_prefixes(
                         matched_classes.push(class);
                     }
                 }
-            }
+            });
         }
         let mut allowed_follow_terminals = None;
         for &class in matched_classes.iter() {
@@ -1399,7 +1527,7 @@ fn populate_exact_boundary_prefixes(
 
         if !next_states.is_empty() {
             populate_exact_boundary_prefixes(
-                tokenizer,
+                scanner,
                 transitions_by_byte,
                 sparse_transitions_by_byte,
                 reverse_transitions_by_byte,
@@ -1417,7 +1545,6 @@ fn populate_exact_boundary_prefixes(
                 states_scanned,
                 reached_states,
                 finalizer_terminals_scanned,
-                has_matched_terminal_by_state,
                 allowed_class_by_terminal,
                 allowed_follow_classes,
                 matched_classes,
@@ -1431,30 +1558,43 @@ fn populate_exact_boundary_prefixes(
     }
 }
 
-fn tokens_have_exact_active_l2p_boundary(
-    tokenizer: &Tokenizer,
-    bytesets: &SharedClassifyBytesets,
-    flat_trans: &[u32],
+fn suffix_has_allowed_l2p_follow_deterministic<S: ExactBoundaryDeterministicScanner>(
+    scanner: &S,
+    suffix: &[u8],
+    allowed: &BitSet,
+) -> bool {
+    let mut state = scanner.start_state();
+    let mut consumed_suffix = true;
+    for &byte in suffix {
+        if !scanner.futures_intersect(state, allowed) {
+            consumed_suffix = false;
+            break;
+        }
+        let next = scanner.transition(state, byte);
+        if next == u32::MAX {
+            consumed_suffix = false;
+            break;
+        }
+        state = next;
+        if scanner.finalizers_intersect(state, allowed) {
+            return true;
+        }
+    }
+    consumed_suffix && scanner.futures_intersect(state, allowed)
+}
+
+fn tokens_have_exact_active_l2p_boundary_deterministic<
+    S: ExactBoundaryDeterministicScanner,
+>(
+    scanner: &S,
     transitions_by_byte: &[u32],
+    sparse_transitions_by_byte: &[Vec<(u32, u32)>],
+    reverse_transitions_by_byte: &[ReverseByteTransitions],
     tokens: &[&[u8]],
     active_bitset: &BitSet,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     active_start_states: &[u32],
 ) -> Vec<bool> {
-    if tokenizer.has_epsilon_transitions() {
-        return tokens
-            .iter()
-            .map(|bytes| {
-                token_has_exact_active_l2p_boundary(
-                    tokenizer,
-                    bytes,
-                    active_bitset,
-                    disallowed_follows,
-                    active_start_states,
-                )
-            })
-            .collect();
-    }
     let total_started_at = std::time::Instant::now();
     let trie_started_at = std::time::Instant::now();
     let mut nodes = vec![ExactBoundaryPrefixNode::default()];
@@ -1476,7 +1616,7 @@ fn tokens_have_exact_active_l2p_boundary(
     let trie_ms = trie_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let populate_started_at = std::time::Instant::now();
-    let mut state_seen = vec![0u32; tokenizer.num_states() as usize];
+    let mut state_seen = vec![0u32; scanner.num_states()];
     let mut terminal_seen = vec![0u32; active_bitset.len()];
     let mut state_stamp = 0u32;
     let mut terminal_stamp = 0u32;
@@ -1510,10 +1650,10 @@ fn tokens_have_exact_active_l2p_boundary(
     let mut source_seen_by_depth = Vec::<Vec<u32>>::new();
     let mut source_stamps = Vec::<u32>::new();
     populate_exact_boundary_prefixes(
-        tokenizer,
+        scanner,
         transitions_by_byte,
-        &bytesets.sparse_transitions_by_byte,
-        &bytesets.reverse_transitions_by_byte,
+        sparse_transitions_by_byte,
+        reverse_transitions_by_byte,
         active_bitset,
         &mut nodes,
         0,
@@ -1528,7 +1668,6 @@ fn tokens_have_exact_active_l2p_boundary(
         &mut states_scanned,
         &mut reached_states,
         &mut finalizer_terminals_scanned,
-        &bytesets.has_matched_terminal_by_state,
         &allowed_class_by_terminal,
         &allowed_follow_classes,
         &mut matched_classes,
@@ -1557,41 +1696,12 @@ fn tokens_have_exact_active_l2p_boundary(
                     prefix_allowed_checks += 1;
                     suffixes_evaluated += 1;
                     let suffix_start = split_after + 1;
-                    let suffix_has_allowed_terminal = if tokenizer.has_epsilon_transitions() {
-                        suffix_has_allowed_l2p_follow_from_reset(
-                            tokenizer,
+                    let suffix_has_allowed_terminal =
+                        suffix_has_allowed_l2p_follow_deterministic(
+                            scanner,
                             &bytes[suffix_start..],
                             allowed,
-                        )
-                    } else {
-                        let mut state = tokenizer.initial_state_id();
-                        let mut consumed_suffix = true;
-                        let mut matched = false;
-                        for &byte in &bytes[suffix_start..] {
-                            if tokenizer.possible_future_terminals(state).is_disjoint(allowed) {
-                                consumed_suffix = false;
-                                break;
-                            }
-                            let next = flat_trans[state as usize * 256 + byte as usize];
-                            if next == u32::MAX {
-                                consumed_suffix = false;
-                                break;
-                            }
-                            state = next;
-                            if tokenizer
-                                .matched_terminals_iter(state)
-                                .any(|terminal| allowed.contains(terminal as usize))
-                            {
-                                matched = true;
-                                break;
-                            }
-                        }
-                        matched
-                            || consumed_suffix
-                                && !tokenizer
-                                    .possible_future_terminals(state)
-                                    .is_disjoint(allowed)
-                    };
+                        );
                     suffixes_with_terminals += usize::from(suffix_has_allowed_terminal);
                     suffix_has_allowed_terminal
                 })
@@ -1600,8 +1710,10 @@ fn tokens_have_exact_active_l2p_boundary(
     let evaluate_ms = evaluate_started_at.elapsed().as_secs_f64() * 1000.0;
     if super::types::compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][exact_boundary_batch] tokens={} nodes={} follow_classes={} states_scanned={} reached_states={} finalizer_terminals_scanned={} prefix_allowed_checks={} suffixes_evaluated={} suffixes_with_terminals={} trie_ms={:.3} populate_ms={:.3} evaluate_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][exact_boundary_batch] tokens={} scanner_states={} start_states={} nodes={} follow_classes={} states_scanned={} reached_states={} finalizer_terminals_scanned={} prefix_allowed_checks={} suffixes_evaluated={} suffixes_with_terminals={} trie_ms={:.3} populate_ms={:.3} evaluate_ms={:.3} total_ms={:.3}",
             tokens.len(),
+            scanner.num_states(),
+            active_start_states.len(),
             nodes.len(),
             allowed_follow_classes.len(),
             states_scanned,
@@ -1614,6 +1726,140 @@ fn tokens_have_exact_active_l2p_boundary(
             populate_ms,
             evaluate_ms,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    result
+}
+
+fn assert_exact_boundary_batch_matches_scalar_reference(
+    tokenizer: &Tokenizer,
+    tokens: &[&[u8]],
+    active_bitset: &BitSet,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    active_start_states: &[u32],
+    result: &[bool],
+) {
+    if std::env::var_os("GLRMASK_EXACT_L2P_BOUNDARY_STRICT_REFERENCE").is_none() {
+        return;
+    }
+    let reference = tokens
+        .iter()
+        .map(|bytes| {
+            token_has_exact_active_l2p_boundary(
+                tokenizer,
+                bytes,
+                active_bitset,
+                disallowed_follows,
+                active_start_states,
+            )
+        })
+        .collect::<Vec<_>>();
+    if let Some(index) = result
+        .iter()
+        .zip(&reference)
+        .position(|(fast, reference)| fast != reference)
+    {
+        panic!(
+            "exact L2P boundary batch differed from scalar reference at token index {index}: bytes={:?} fast={} reference={}",
+            tokens[index], result[index], reference[index]
+        );
+    }
+}
+
+fn tokens_have_exact_active_l2p_boundary(
+    tokenizer: &Tokenizer,
+    bytesets: &SharedClassifyBytesets,
+    flat_trans: &[u32],
+    transitions_by_byte: &[u32],
+    tokens: &[&[u8]],
+    active_bitset: &BitSet,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    active_start_states: &[u32],
+) -> Vec<bool> {
+    if !tokenizer.has_epsilon_transitions() {
+        let scanner = RawExactBoundaryScanner { tokenizer, flat_trans };
+        let result = tokens_have_exact_active_l2p_boundary_deterministic(
+            &scanner,
+            transitions_by_byte,
+            &bytesets.sparse_transitions_by_byte,
+            &bytesets.reverse_transitions_by_byte,
+            tokens,
+            active_bitset,
+            disallowed_follows,
+            active_start_states,
+        );
+        assert_exact_boundary_batch_matches_scalar_reference(
+            tokenizer,
+            tokens,
+            active_bitset,
+            disallowed_follows,
+            active_start_states,
+            &result,
+        );
+        return result;
+    }
+
+    let view_started_at = std::time::Instant::now();
+    let raw_start_states = active_start_states
+        .iter()
+        .map(|&state| state as usize)
+        .collect::<Vec<_>>();
+    let active_groups = (0..active_bitset.len())
+        .map(|terminal| active_bitset.contains(terminal))
+        .collect::<Vec<_>>();
+    let bounded = build_bounded_analysis_view(
+        tokenizer,
+        &raw_start_states,
+        tokens,
+        Some(&active_groups),
+    );
+    let view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
+    let dfa = bounded.tokenizer_view.dfa();
+    let scanner = FlatExactBoundaryScanner { dfa };
+    let mut view_start_states = raw_start_states
+        .iter()
+        .map(|&raw_state| bounded.view_state_for_raw_start(raw_state) as u32)
+        .collect::<Vec<_>>();
+    view_start_states.sort_unstable();
+    view_start_states.dedup();
+
+    let index_started_at = std::time::Instant::now();
+    let (view_transitions_by_byte, view_sparse_transitions_by_byte, view_reverse_transitions_by_byte) =
+        build_exact_boundary_transition_index(&dfa.transitions, dfa.states.len());
+    let index_ms = index_started_at.elapsed().as_secs_f64() * 1000.0;
+    let batch_started_at = std::time::Instant::now();
+    let result = tokens_have_exact_active_l2p_boundary_deterministic(
+        &scanner,
+        &view_transitions_by_byte,
+        &view_sparse_transitions_by_byte,
+        &view_reverse_transitions_by_byte,
+        tokens,
+        active_bitset,
+        disallowed_follows,
+        &view_start_states,
+    );
+    let batch_ms = batch_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    assert_exact_boundary_batch_matches_scalar_reference(
+        tokenizer,
+        tokens,
+        active_bitset,
+        disallowed_follows,
+        active_start_states,
+        &result,
+    );
+
+    if super::types::compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][exact_boundary_nfa_batch] raw_states={} raw_start_states={} view_states={} view_start_states={} view_build_ms={:.3} transition_index_ms={:.3} batch_ms={:.3} total_ms={:.3}",
+            tokenizer.num_states(),
+            active_start_states.len(),
+            dfa.states.len(),
+            view_start_states.len(),
+            view_build_ms,
+            index_ms,
+            batch_ms,
+            view_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
     result
@@ -2092,7 +2338,7 @@ pub(crate) fn partition_vocab_by_l2p_cost(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::sync::{Arc, Mutex};
 
     use super::{
@@ -2104,7 +2350,8 @@ mod tests {
         suffix_has_allowed_l2p_follow_from_reset, ExactL2pBoundaryFilterMode,
         SharedClassifyBytesets,
         TokenL2pRouteHint, state_future_intersects_words,
-        token_has_active_l2p_boundary_words, token_l2p_route_hint,
+        token_has_active_l2p_boundary_words, token_has_exact_active_l2p_boundary,
+        token_l2p_route_hint, tokens_have_exact_active_l2p_boundary,
     };
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::compile::{
@@ -2210,6 +2457,63 @@ mod tests {
             b"a",
             &allowed,
         ));
+    }
+
+    #[test]
+    fn epsilon_nfa_exact_boundary_batch_matches_scalar_state_set_execution() {
+        let expressions = vec![
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"cd".to_vec()),
+        ];
+        let tokenizer = build_regex_partitioned_with_adaptive(&expressions, &[0, 1], false)
+            .into_tokenizer(
+                expressions.len() as u32,
+                Some(Arc::from(expressions.into_boxed_slice())),
+            );
+        assert!(tokenizer.has_epsilon_transitions());
+
+        let bytesets = SharedClassifyBytesets::build(&tokenizer, tokenizer.num_terminals());
+        let flat_trans = build_flat_transition_table(&tokenizer);
+        let mut active = BitSet::new(tokenizer.num_terminals() as usize);
+        for terminal in 0..tokenizer.num_terminals() as usize {
+            active.set(terminal);
+        }
+        let disallowed = BTreeMap::new();
+        let active_start_states = (0..tokenizer.num_states()).collect::<Vec<_>>();
+        let tokens = [
+            b"abcd".as_slice(),
+            b"abce".as_slice(),
+            b"abab".as_slice(),
+            b"cdab".as_slice(),
+            b"zzzz".as_slice(),
+        ];
+
+        let batch = tokens_have_exact_active_l2p_boundary(
+            &tokenizer,
+            &bytesets,
+            &flat_trans,
+            &bytesets.transitions_by_byte,
+            &tokens,
+            &active,
+            &disallowed,
+            &active_start_states,
+        );
+        let scalar = tokens
+            .iter()
+            .map(|bytes| {
+                token_has_exact_active_l2p_boundary(
+                    &tokenizer,
+                    bytes,
+                    &active,
+                    &disallowed,
+                    &active_start_states,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(batch, scalar);
+        assert!(batch.iter().any(|&boundary| boundary));
+        assert!(batch.iter().any(|&boundary| !boundary));
     }
 
     #[test]
