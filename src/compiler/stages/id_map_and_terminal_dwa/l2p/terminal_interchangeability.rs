@@ -514,32 +514,22 @@ impl RestrictedTopology {
             None,
             global_state_quotient.map(GlobalScannerStateQuotient::as_many_to_one),
         );
-        let bytes = (0..=255u8)
-            .filter(|&byte| relevant_bytes[byte as usize])
-            .collect::<Vec<_>>();
         let raw_state_count = tokenizer.num_states() as usize;
-        let real_state_count = view.dfa.states.len();
-        let mut edge_offsets = Vec::with_capacity(real_state_count + 2);
-        let mut edges = Vec::<(u8, u32)>::new();
+        let real_state_count = view.states.len();
+        let mut edge_offsets = view.edge_offsets;
         let mut reverse_predecessors = vec![Vec::<u32>::new(); real_state_count];
         let mut observed_destinations = vec![false; real_state_count + 1];
         let mut max_outdegree = 0usize;
-        edge_offsets.push(0);
         for state in 0..real_state_count {
-            let start = edges.len();
-            for &byte in &bytes {
-                let target = view.dfa.trans(state, byte as usize);
-                if target == u32::MAX {
-                    continue;
-                }
-                edges.push((byte, target));
+            let start = edge_offsets[state] as usize;
+            let end = edge_offsets[state + 1] as usize;
+            for &(_, target) in &view.edges[start..end] {
                 reverse_predecessors[target as usize].push(state as u32);
                 observed_destinations[target as usize] = true;
             }
-            max_outdegree = max_outdegree.max(edges.len() - start);
-            edge_offsets.push(edges.len() as u32);
+            max_outdegree = max_outdegree.max(end - start);
         }
-        edge_offsets.push(edges.len() as u32);
+        edge_offsets.push(view.edges.len() as u32);
 
         let mut raw_representative_by_state = vec![u32::MAX; real_state_count];
         for (raw_state, &state) in view.raw_start_to_view.iter().enumerate() {
@@ -549,7 +539,6 @@ impl RestrictedTopology {
             }
         }
         let finalizers = view
-            .dfa
             .states
             .iter()
             .map(|state| {
@@ -562,7 +551,6 @@ impl RestrictedTopology {
             })
             .collect::<Vec<_>>();
         let future = view
-            .dfa
             .states
             .iter()
             .map(|state| {
@@ -576,9 +564,9 @@ impl RestrictedTopology {
             .collect::<Vec<_>>();
 
         Self {
-            bytes,
+            bytes: view.bytes,
             edge_offsets,
-            edges,
+            edges: view.edges,
             reverse_predecessors: reverse_predecessors.into(),
             observed_destinations: observed_destinations.into(),
             raw_state_count,
@@ -586,7 +574,7 @@ impl RestrictedTopology {
             state_for_raw: Some(Arc::clone(&view.raw_start_to_view)),
             nfa_output_rows: Some((finalizers.into(), future.into())),
             real_state_count,
-            initial_state: view.dfa.start_state,
+            initial_state: view.start_state,
             max_outdegree,
         }
     }

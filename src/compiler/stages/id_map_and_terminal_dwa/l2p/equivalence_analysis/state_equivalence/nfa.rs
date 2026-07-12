@@ -20,9 +20,12 @@ pub(crate) struct BoundedAnalysisView {
 }
 
 pub(crate) struct RelevantPowersetView {
-    pub(crate) dfa: FlatDfa,
+    pub(crate) states: Vec<FlatDfaState>,
+    pub(crate) start_state: usize,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) edge_offsets: Vec<u32>,
+    pub(crate) edges: Vec<(u8, u32)>,
     pub(crate) raw_start_to_view: Arc<[u32]>,
-    pub(crate) configurations: Arc<[Box<[u32]>]>,
 }
 
 impl BoundedAnalysisView {
@@ -94,19 +97,28 @@ pub(crate) fn build_relevant_powerset_view(
         };
 
     let start_state = raw_start_to_view[tokenizer.initial_state_id() as usize] as usize;
-    let mut transitions = vec![u32::MAX; configs.len() * 256];
+    let bytes = relevant_bytes
+        .iter()
+        .enumerate()
+        .filter_map(|(byte, &relevant)| relevant.then_some(byte as u8))
+        .collect::<Vec<_>>();
+    let mut edge_offsets = Vec::<u32>::with_capacity(configs.len() + 1);
+    let mut edges = Vec::<(u8, u32)>::new();
+    edge_offsets.push(0);
     if let Some(state_map) = state_map {
         while let Some(state) = worklist.pop_front() {
+            assert_eq!(
+                state as usize + 1,
+                edge_offsets.len(),
+                "powerset states must be processed in interning order",
+            );
             let config = configs[state as usize].clone();
             let source_states = config
                 .iter()
                 .map(|&class| state_map.representative_original_ids[class as usize])
                 .collect::<Vec<_>>();
-            for (byte, &relevant) in relevant_bytes.iter().enumerate() {
-                if !relevant {
-                    continue;
-                }
-                let targets = tokenizer.step_all(&source_states, byte as u8);
+            for &byte in &bytes {
+                let targets = tokenizer.step_all(&source_states, byte);
                 if targets.is_empty() {
                     continue;
                 }
@@ -121,39 +133,41 @@ pub(crate) fn build_relevant_powerset_view(
                 } else {
                     intern_config(target_config, &mut config_ids, &mut configs)
                 };
-                if transitions.len() < configs.len() * 256 {
-                    transitions.resize(configs.len() * 256, u32::MAX);
+                if queued.len() < configs.len() {
                     queued.resize(configs.len(), false);
                 }
-                transitions[state as usize * 256 + byte] = target;
+                edges.push((byte, target));
                 if !queued[target as usize] {
                     queued[target as usize] = true;
                     worklist.push_back(target);
                 }
             }
+            edge_offsets.push(edges.len() as u32);
         }
     } else {
         while let Some(state) = worklist.pop_front() {
+            assert_eq!(
+                state as usize + 1,
+                edge_offsets.len(),
+                "powerset states must be processed in interning order",
+            );
             let config = configs[state as usize].clone();
-            for (byte, &relevant) in relevant_bytes.iter().enumerate() {
-                if !relevant {
-                    continue;
-                }
-                let targets = tokenizer.step_all(&config, byte as u8);
+            for &byte in &bytes {
+                let targets = tokenizer.step_all(&config, byte);
                 if targets.is_empty() {
                     continue;
                 }
                 let target = intern_config(targets.to_vec(), &mut config_ids, &mut configs);
-                if transitions.len() < configs.len() * 256 {
-                    transitions.resize(configs.len() * 256, u32::MAX);
+                if queued.len() < configs.len() {
                     queued.resize(configs.len(), false);
                 }
-                transitions[state as usize * 256 + byte] = target;
+                edges.push((byte, target));
                 if !queued[target as usize] {
                     queued[target as usize] = true;
                     worklist.push_back(target);
                 }
             }
+            edge_offsets.push(edges.len() as u32);
         }
     }
 
@@ -218,13 +232,12 @@ pub(crate) fn build_relevant_powerset_view(
             .collect()
     };
     RelevantPowersetView {
-        dfa: FlatDfa {
-            states,
-            start_state,
-            transitions: Arc::from(transitions),
-        },
+        states,
+        start_state,
+        bytes,
+        edge_offsets,
+        edges,
         raw_start_to_view: Arc::from(raw_start_to_view),
-        configurations: Arc::from(configs),
     }
 }
 
