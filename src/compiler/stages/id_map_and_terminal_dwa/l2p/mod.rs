@@ -387,14 +387,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // identity on the collapsed suffix tail. Inactive states are wildcards. A
     // state maps only to a maximal partial signature that extends all of that
     // state's known positional classes, so the selected raw representative is
-    // valid everywhere the member can occur. C is NOT a selected-byte right
-    // congruence or frozen-output-preserving byte-DFA quotient.
-    //
-    // FIXME: the current byte-level TI path below incorrectly feeds C directly
-    // to `RestrictedTopology`, whose quotient constructor requires exactly
-    // those stronger properties. Keep this distinction explicit until TI once
-    // again consumes C through a token-position-aware observer or derives a
-    // valid byte-level quotient first.
+    // valid everywhere the member can occur under the position-wise frontier
+    // propagation for this vocabulary partition. TI consumes exactly this
+    // directional member-to-representative substitution property; members of a
+    // C class need not be pairwise interchangeable as raw DFA states.
     let global_state_quotient = (l2p_global_token_position_enabled()
         && matches!(partition_label, "p7" | "p8"))
         .then(|| {

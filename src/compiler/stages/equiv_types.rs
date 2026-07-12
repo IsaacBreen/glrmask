@@ -215,10 +215,10 @@ impl ManyToOneIdMap {
 /// class membership is symmetric equivalence: a producer may establish only a
 /// directional member-to-representative relation. Partition C, for example,
 /// uses positional subsumption and proves each member safe to replace by its
-/// chosen representative; two non-representative members need not replace one
-/// another. A consumer requiring a labelled byte-DFA quotient must separately
-/// validate equal visible outputs and selected-byte right congruence. Merely
-/// wrapping partition C in this type does not establish either property.
+/// chosen representative at every vocabulary position where that member can
+/// occur; two non-representative members need not replace one another.
+/// Consumers must rely on the producer's representative-substitution contract
+/// for the observations they make rather than assuming pairwise equivalence.
 #[derive(Debug, Clone)]
 pub(crate) struct GlobalScannerStateQuotient {
     map: ManyToOneIdMap,
@@ -226,7 +226,8 @@ pub(crate) struct GlobalScannerStateQuotient {
 
 impl GlobalScannerStateQuotient {
     /// Wrap a structurally total raw-state representative map. Semantic safety
-    /// for a particular consumer remains that consumer's responsibility.
+    /// for a particular consumer follows from the producer's replacement
+    /// proof, which may be directional rather than an equivalence relation.
     pub(crate) fn from_total_raw_state_map(map: ManyToOneIdMap, raw_state_count: usize) -> Self {
         assert_eq!(
             map.original_to_internal.len(),

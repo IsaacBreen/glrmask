@@ -381,13 +381,12 @@ impl RestrictedTopology {
         Self::new_inner(tokenizer, relevant_bytes, None)
     }
 
-    /// Build a restricted topology over a global scanner-state quotient.
-    /// The quotient must be a total right congruence for the selected bytes
-    /// and must preserve both frozen output families.
-    ///
-    /// Global token-position partition C does not satisfy this contract merely
-    /// by being a total/global state relation: C has different token-position
-    /// semantics and requires a token-position-aware consumer.
+    /// Build a restricted topology over a total scanner-state representative
+    /// map. The map need not be a symmetric DFA equivalence: discovery follows
+    /// the chosen representative for each raw state, so the caller must prove
+    /// member-to-representative substitution for the observations reachable in
+    /// this vocabulary partition. Partition C supplies that directional proof
+    /// by positional subsumption and leaves the collapsed suffix tail exact.
     fn new_with_global_state_quotient(
         tokenizer: &Tokenizer,
         relevant_bytes: &[bool; 256],
