@@ -1201,11 +1201,14 @@ fn analyze_equivalences_impl(
         let tokenizer_states =
             compose_raw_quotient_state_map(&tokenizer_states, &final_preclass_representatives);
 
-        let mut final_view_states = tokenizer_states
-            .representative_original_ids
-            .iter()
-            .map(|&raw| bounded.view_state_for_raw_start(raw as usize))
-            .collect::<Vec<_>>();
+        // `compose_raw_quotient_state_map` chooses the first raw member of an
+        // exact class as the public representative. That raw state need not be
+        // one of the preclass representatives used to seed the bounded NFA
+        // view. Vocab equivalence only needs one already-proven exact behavior
+        // representative per final class, so stay in the bounded-view
+        // coordinate here instead of round-tripping through an arbitrary raw
+        // member.
+        let mut final_view_states = query_representatives.clone();
         final_view_states.sort_unstable();
         final_view_states.dedup();
 
