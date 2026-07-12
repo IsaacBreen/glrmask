@@ -1105,7 +1105,10 @@ fn analyze_equivalences_impl(
             max_token_len,
             active_byte_count,
         );
-        let pipeline_config = resolve_l2p_pipeline_config(!max_length_skipped);
+        let pipeline_config = resolve_l2p_pipeline_config(
+            !max_length_skipped,
+            token_position_partition.is_none(),
+        );
         let (tokenizer_states, pipeline_profile) = run_state_equivalence_pipeline(
             tokenizer,
             vocab,
@@ -1395,7 +1398,10 @@ fn analyze_equivalences_impl(
         max_token_len,
         active_byte_count,
     );
-    let pipeline_config = resolve_l2p_pipeline_config(!max_length_skipped);
+    let pipeline_config = resolve_l2p_pipeline_config(
+        !max_length_skipped,
+        token_position_partition.is_none(),
+    );
     let (pre_state_map, pipeline_profile) = run_state_equivalence_pipeline(
         tokenizer,
         vocab,

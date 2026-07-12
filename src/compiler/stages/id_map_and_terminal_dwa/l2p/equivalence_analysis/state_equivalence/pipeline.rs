@@ -107,14 +107,19 @@ pub(crate) fn resolve_global_pipeline_config(
 
 pub(crate) fn resolve_l2p_pipeline_config(
     default_include_max_length: bool,
+    default_include_restricted_observation: bool,
 ) -> StateEquivalencePipelineConfig {
-    let default_passes = if default_include_max_length {
-        &[
+    let default_passes = match (
+        default_include_restricted_observation,
+        default_include_max_length,
+    ) {
+        (true, true) => &[
             StateEquivalencePassKind::RestrictedObservation,
             StateEquivalencePassKind::MaxLength,
-        ][..]
-    } else {
-        &[StateEquivalencePassKind::RestrictedObservation][..]
+        ][..],
+        (true, false) => &[StateEquivalencePassKind::RestrictedObservation][..],
+        (false, true) => &[StateEquivalencePassKind::MaxLength][..],
+        (false, false) => &[][..],
     };
     normalize_l2p_pipeline_config(resolve_pipeline_config(
         "GLRMASK_L2P_STATE_EQUIV_PASSES",
